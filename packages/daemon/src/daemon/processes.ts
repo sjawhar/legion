@@ -12,7 +12,7 @@ import {
   sanitizeToken,
 } from "@legion/contracts";
 import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
-import type { CommandRunnerOptions } from "../state/fetch";
+import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { createCancellableSleep } from "./cancellable-sleep";
@@ -80,7 +80,12 @@ export interface ProcessManagerDeps {
   run(
     cmd: string[],
     options?: CommandRunnerOptions
-  ): Promise<{ stdout: string; stderr?: string; exitCode: number }>;
+  ): Promise<{
+    stdout: string;
+    stderr?: string;
+    exitCode: number;
+    timedOut?: CommandResult["timedOut"];
+  }>;
   natsPublish(subject: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
@@ -258,6 +263,17 @@ export class ProcessManager {
    * from retiring or resurrecting a root after shutdown has begun draining. */
   private disposed = false;
   private promotionSweep?: { attempted: Set<IssueKey>; inFlight: number };
+  /** Boot's launch hold. False from construction: no path that opens a tmux pane (`admit`,
+   * `advancePromotionSweep`, `resurrect`, `ensureController`, and — through
+   * `WorkerAdmission`'s own gate — `spawnWorker`/`resumeWorker`) launches anything until
+   * `enableLaunches()` runs, once the daemon's boot probes have passed. A spawn requested while
+   * the hold is on queues through the ordinary admission queue and answers `queued`; a
+   * resurrection or controller launch is remembered and replayed by `replayHeldRecoveries()`.
+   * Paths that only stop or kill panes, or talk to a pane that survived the restart, are not
+   * gated: the hold is about opening panes. */
+  private launchesEnabled = false;
+  private readonly heldResurrects = new Set<IssueKey>();
+  private heldControllerRequest = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
   /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
@@ -354,11 +370,36 @@ export class ProcessManager {
     });
   }
 
-  /** The only way worker-queue promotion is ever allowed to actually launch or prompt
-   * something. Call once, after the daemon's HTTP `api` is assigned, before the first explicit
-   * `reconcileWorkerAdmission()` -- see `WorkerAdmission`'s own doc comment for why. */
-  enableWorkerPromotion(): void {
+  /** Releases boot's launch hold: the only way any pane-opening path (root admission and
+   * promotion, worker launch and promotion, resurrection, the controller) is ever allowed to
+   * actually open a pane. Call once, after the daemon's boot probes have passed and its HTTP
+   * `api` is assigned, before `reconcileAdmission()`/`reconcileWorkerAdmission()`/
+   * `replayHeldRecoveries()` -- see `launchesEnabled` and `WorkerAdmission`'s own doc comment. */
+  enableLaunches(): void {
+    this.launchesEnabled = true;
     this.workerAdmission.enableWorkerPromotion();
+  }
+
+  /** Replays every resurrection and controller launch that `resurrect`/`ensureController`
+   * held while `launchesEnabled` was false. Each replay's failure is logged and does not stop
+   * the others; call once, right after `enableLaunches()` and the boot reconciles. */
+  async replayHeldRecoveries(): Promise<void> {
+    const trees = [...this.heldResurrects];
+    this.heldResurrects.clear();
+    for (const tree of trees) {
+      try {
+        await this.resurrect(tree);
+      } catch (error) {
+        console.error(`[legion] held resurrection of ${tree} failed:`, error);
+      }
+    }
+    if (!this.heldControllerRequest) return;
+    this.heldControllerRequest = false;
+    try {
+      await this.ensureController();
+    } catch (error) {
+      console.error("[legion] held controller launch failed:", error);
+    }
   }
 
   /** Cancels the armed boot watchdog for `token`, if any — a no-op if none is armed, or if
@@ -413,7 +454,9 @@ export class ProcessManager {
       return "queued";
     }
 
-    if (admission.active.length >= admission.cap) {
+    // While boot's launch hold is on, the cap is treated as full: the tree queues exactly as it
+    // would behind a full cap, and `reconcileAdmission()` promotes it once the hold releases.
+    if (admission.active.length >= admission.cap || !this.launchesEnabled) {
       tree.status = "queued";
       admission.queue.push(issue);
       void this.persist();
@@ -785,7 +828,13 @@ export class ProcessManager {
    * to kill a live worker — so the claim is left exactly as is, with its conservative
    * "unknown"-counts-as-running `runState`. A boot that survives this reconnect without its
    * ready path confirmed gets its watchdog re-armed: the in-memory `WorkerBootWatchdog` registry
-   * does not survive a restart, so without this it would never be probed again. */
+   * does not survive a restart, so without this it would never be probed again.
+   *
+   * Every claim is reconciled in isolation: a throw while handling one (a capability revoke
+   * failing, a tmux call rejecting) is logged as `failed to reconcile worker <token>` and leaves
+   * that claim exactly where the throw found it — its locator still recorded, so it still counts
+   * as running and a later probe can retry it — while every other claim's reconcile still runs
+   * and is awaited before boot continues. */
   async reconnectWorkers(): Promise<void> {
     const claims = Object.entries(this.deps.state.roles).filter(
       (entry): entry is [string, WorkerRoleClaim & { locator: WorkerLocator }] =>
@@ -793,64 +842,75 @@ export class ProcessManager {
     );
     await Promise.all(
       claims.map(async ([token, claim]) => {
-        // Captured once, immutably, before any await: a concurrent respawn replacing this
-        // claim's locator mid-probe (e.g. a dead-socket `spawnWorker` decision finishing while
-        // this exact connect is still in flight) must never be mistaken for the locator this
-        // call is actually probing — `retireUnconfirmedBoot`'s/`markWorkerDeadLocked`'s own
-        // pane-id identity check only protects against retiring the WRONG locator if this one
-        // is passed correctly.
-        const probedLocator = claim.locator;
-        const parsed = parseRoleToken(this.deps.state.project, token);
-        let treeKey: IssueKey | undefined;
-        let role: LegionRole | undefined;
-        if (parsed && !("controller" in parsed)) {
-          role = parsed.role;
-          treeKey = this.rootForIssue(parsed.issue);
-        }
-        const probe = await probeWorkerSocket(
-          (socketPath) => this.workerClient(token, socketPath),
-          probedLocator.socketPath,
-          this.workerRpcTimeoutMs
-        );
-        if (!probe.client) {
-          console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
-          if (claim.readyConfirmedAt !== undefined) {
-            await this.markWorkerDead(token, probedLocator);
-          } else {
-            await this.retireUnconfirmedBoot(
-              token,
-              probedLocator,
-              claim.generation,
-              this.deriveRetryContext(token, claim.issue)
-            );
-          }
-          return;
-        }
-        // `probeWorkerSocket`'s `get_state` call seeds `runState` from the response's
-        // `isStreaming` field on this same client: a worker that was already idle before this
-        // restart is not left stuck at the conservative "unknown" default (counted as running)
-        // forever, since nothing else will ever observe an `agent_start`/`agent_end` frame to
-        // correct it if it never runs another turn. A `get_state` failure only means the shim
-        // is busy answering this one request — never a reason to treat a connected worker as
-        // dead.
-        if (!probe.stateAnswered) {
-          console.error(
-            `[legion] worker ${token} reconnected but get_state failed (treating as busy, not dead):`,
-            probe.stateError
-          );
-        }
-        if (claim.readyConfirmedAt === undefined && treeKey && role) {
-          this.bootWatchdog.arm(
-            treeKey,
-            claim.issue,
-            role,
-            token,
-            claim.locator,
-            claim.generation ?? 1
-          );
+        try {
+          await this.reconnectWorker(token, claim);
+        } catch (error) {
+          console.error(`[legion] failed to reconcile worker ${token}:`, error);
         }
       })
     );
+  }
+
+  private async reconnectWorker(
+    token: string,
+    claim: WorkerRoleClaim & { locator: WorkerLocator }
+  ): Promise<void> {
+    // Captured once, immutably, before any await: a concurrent respawn replacing this
+    // claim's locator mid-probe (e.g. a dead-socket `spawnWorker` decision finishing while
+    // this exact connect is still in flight) must never be mistaken for the locator this
+    // call is actually probing — `retireUnconfirmedBoot`'s/`markWorkerDeadLocked`'s own
+    // pane-id identity check only protects against retiring the WRONG locator if this one
+    // is passed correctly.
+    const probedLocator = claim.locator;
+    const parsed = parseRoleToken(this.deps.state.project, token);
+    let treeKey: IssueKey | undefined;
+    let role: LegionRole | undefined;
+    if (parsed && !("controller" in parsed)) {
+      role = parsed.role;
+      treeKey = this.rootForIssue(parsed.issue);
+    }
+    const probe = await probeWorkerSocket(
+      (socketPath) => this.workerClient(token, socketPath),
+      probedLocator.socketPath,
+      this.workerRpcTimeoutMs
+    );
+    if (!probe.client) {
+      console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
+      if (claim.readyConfirmedAt !== undefined) {
+        await this.markWorkerDead(token, probedLocator);
+      } else {
+        await this.retireUnconfirmedBoot(
+          token,
+          probedLocator,
+          claim.generation,
+          this.deriveRetryContext(token, claim.issue)
+        );
+      }
+      return;
+    }
+    // `probeWorkerSocket`'s `get_state` call seeds `runState` from the response's
+    // `isStreaming` field on this same client: a worker that was already idle before this
+    // restart is not left stuck at the conservative "unknown" default (counted as running)
+    // forever, since nothing else will ever observe an `agent_start`/`agent_end` frame to
+    // correct it if it never runs another turn. A `get_state` failure only means the shim
+    // is busy answering this one request — never a reason to treat a connected worker as
+    // dead.
+    if (!probe.stateAnswered) {
+      console.error(
+        `[legion] worker ${token} reconnected but get_state failed (treating as busy, not dead):`,
+        probe.stateError
+      );
+    }
+    if (claim.readyConfirmedAt === undefined && treeKey && role) {
+      this.bootWatchdog.arm(
+        treeKey,
+        claim.issue,
+        role,
+        token,
+        claim.locator,
+        claim.generation ?? 1
+      );
+    }
   }
 
   /** Re-arms the root registration deadline for every active tree with a recorded locator that
@@ -863,13 +923,19 @@ export class ProcessManager {
    * deadline's expiry is what actually decides dead-vs-alive-but-unconfirmed, exactly as it does
    * for a tree that armed normally through `spawnTree`. An already-confirmed active tree (or one
    * with no locator at all -- nothing was ever launched, or `reconcileAdmission`'s own orphan
-   * check already demoted it) is left untouched. */
+   * check already demoted it) is left untouched. Each tree is armed in isolation, exactly like
+   * `reconnectWorkers`' claims: a throw while arming one is logged with its key and the rest
+   * are still armed. */
   reconnectRoots(): void {
     for (const tree of Object.values(this.deps.state.trees)) {
       if (tree.status !== "active" || !tree.locator || tree.readyConfirmedAt !== undefined) {
         continue;
       }
-      this.armRootRegistrationDeadline(tree.root, tree.generation);
+      try {
+        this.armRootRegistrationDeadline(tree.root, tree.generation);
+      } catch (error) {
+        console.error(`[legion] failed to reconcile root ${tree.root}:`, error);
+      }
     }
   }
 
@@ -911,9 +977,9 @@ export class ProcessManager {
    * locator-clear and the queue-push are one durable transition), never launched directly here:
    * a direct `launchWorker`
    * call would bypass the running-worker cap, the reservation, and the per-role launch lock —
-   * over-admission, or a second pane racing a concurrent same-role spawn — and would also
-   * dereference `api` before it exists when this runs from `reconnectWorkers` at boot (before
-   * `enableWorkerPromotion()`). The whole decision runs under `mutateClaim(token)`, serialized
+   * over-admission, or a second pane racing a concurrent same-role spawn — and would also open a
+   * pane during boot's launch hold when this runs from `reconnectWorkers` (before
+   * `enableLaunches()`). The whole decision runs under `mutateClaim(token)`, serialized
    * against every other admission/retirement decision for this token (`spawnWorker`,
    * `handleWorkerStarted` via `mutateLiveRoleClaim`) — and re-validates the claim it was handed
    * against the current one before touching anything, since the caller may have captured it,
@@ -1404,6 +1470,12 @@ export class ProcessManager {
       return;
     }
     this.cancelControllerRegistrationDeadline();
+    if (!this.launchesEnabled) {
+      // Spawning the controller opens a pane. Held for `replayHeldRecoveries()`.
+      this.heldControllerRequest = true;
+      console.error("[legion] controller launch held until the OMP probe passes");
+      return;
+    }
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
         const controllerSecret = await this.deps.mintControllerCapability();
@@ -1734,6 +1806,12 @@ export class ProcessManager {
   }
 
   async resurrect(treeKey: IssueKey): Promise<void> {
+    if (!this.launchesEnabled) {
+      // A resurrection opens a pane. Held for `replayHeldRecoveries()` once boot's probes pass.
+      this.heldResurrects.add(treeKey);
+      console.error(`[legion] resurrection of ${treeKey} held until the OMP probe passes`);
+      return;
+    }
     const current = this.resurrecting.get(treeKey);
     if (current) return current;
 
@@ -1903,7 +1981,9 @@ export class ProcessManager {
     const sweep = this.promotionSweep;
     if (!sweep) return;
     const admission = this.deps.state.admission;
-    if (admission.active.length >= admission.cap) {
+    // Boot's launch hold counts as a full cap: queued trees stay queued until `enableLaunches()`
+    // and the `reconcileAdmission()` that follows it.
+    if (admission.active.length >= admission.cap || !this.launchesEnabled) {
       if (sweep.inFlight === 0) this.promotionSweep = undefined;
       await this.persist();
       return;
@@ -2028,6 +2108,7 @@ export class ProcessManager {
       stateDir: this.deps.config.stateDir,
       provisioningToken: async () => await this.deps.provisioningToken(owner),
       credentialHelper: this.deps.credentialHelper,
+      commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
       run: async (command, options) => {
         const result = await this.deps.run(command, options);
         return { ...result, stderr: result.stderr ?? "" };

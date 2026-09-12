@@ -1,9 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
+import { controllerToken, type DaemonStateResponse, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -240,6 +240,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
@@ -411,6 +412,182 @@ describe("startDaemon", () => {
       expect(state.admission.active).toEqual([issue]);
       expect(state.trees[issue]?.status).toBe("active");
     } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds the API and loads state while the OMP probe is still timing out, launches nothing during the hold, and promotes the queued root and worker once it passes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    // The API port must be known before `startDaemon` resolves: reserve one and hand it over.
+    const reserved = Bun.listen<undefined>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {} },
+    });
+    const port = reserved.port;
+    reserved.stop(true);
+    const daemonConfig = { ...config(stateDir), port };
+    const issue = "WIDGETS-42";
+    const testerToken = roleToken(daemonConfig.project, issue, "tester");
+    const resumeSessionFile = path.join(stateDir, "workers", "queued-tester.session.json");
+    await mkdir(path.dirname(resumeSessionFile), { recursive: true });
+    await writeFile(resumeSessionFile, "{}", "utf8");
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[issue] = { key: issue, title: "Queued at boot", status: "todo", children: [] };
+    state.trees[issue] = { root: issue, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(issue);
+    state.roles[testerToken] = {
+      issue,
+      role: "tester",
+      pendingAssignment: "verify #41",
+      resumeSessionFile,
+    };
+    state.workerAdmission.queue.push(testerToken);
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    let loadedState = false;
+    let probeAttempts = 0;
+    const sleeps: number[] = [];
+    const commands: string[][] = [];
+    let started = false;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    const paneOpens = () =>
+      commands.filter(
+        (command) =>
+          command[0]?.endsWith("/tmux") &&
+          (command[3] === "new-window" || command[3] === "split-window")
+      );
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const starting = startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => {
+            loadedState = true;
+            return state;
+          },
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            commands.push(command);
+            if (command[0] === "sh") {
+              probeAttempts += 1;
+              // The first two pi.agents probes hang past their budget and are killed.
+              if (probeAttempts <= 2) {
+                return {
+                  stdout: "",
+                  stderr: "",
+                  exitCode: 143,
+                  timedOut: { limitMs: 300_000, elapsedMs: 300_200 },
+                };
+              }
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
+              return { stdout: "@42 %1 4242", stderr: "", exitCode: 0 };
+            }
+            if (command[0]?.endsWith("/tmux") && command[3] === "split-window") {
+              return { stdout: "%2 4243", stderr: "", exitCode: 0 };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          sleep: (ms) => {
+            sleeps.push(ms);
+            // The same injected `sleep` backs the ProcessManager's registration deadlines and
+            // boot watchdog once panes open; those must not fire mid-test (an instantly-elapsed
+            // deadline would retire the panes this test asserts on), so only the probe's two
+            // backoffs resolve.
+            if (sleeps.length > 2) return new Promise<void>(() => {});
+            if (sleeps.length === 2) return Promise.resolve();
+            return (async () => {
+              // The probe is waiting out its first backoff. Boot must have carried on without it:
+              // the API answers (with the loaded state), yet no pane has opened and `startDaemon`
+              // has not resolved. Every step between the probe's first attempt and the API bind is
+              // a fake dependency resolving in a microtask, so the bind has happened by the time a
+              // refused connection (one event-loop turn) comes back; the retry is a bounded safety
+              // net awaiting the real accept, never a timed wait.
+              let response: Response | undefined;
+              for (let attempt = 0; attempt < 100 && response === undefined; attempt += 1) {
+                response = await fetch(`http://127.0.0.1:${port}/legion/v1/state`).catch(
+                  () => undefined
+                );
+              }
+              if (!response) throw new Error("the API never came up during the probe hold");
+              expect(response.status).toBe(200);
+              const body = (await response.json()) as DaemonStateResponse;
+              expect(body.admission.queue).toEqual([issue]);
+              expect(body.trees[issue]?.status).toBe("queued");
+              expect(body.roles[testerToken]?.locator).toBeUndefined();
+              expect(loadedState).toBeTrue();
+              expect(paneOpens()).toEqual([]);
+              expect(started).toBeFalse();
+            })();
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          readPluginManifest: async () => validLegionPluginManifest,
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      void starting.then((handle) => {
+        started = true;
+        daemon = handle;
+      });
+      daemon = await starting;
+
+      // The injected `sleep` is shared with the ProcessManager (registration deadlines arm after
+      // a spawn): the probe's two backoffs are the sleeps that precede any launch.
+      expect(sleeps.slice(0, 2)).toEqual([10_000, 20_000]);
+      const logged = errorSpy.mock.calls.map((call) => String(call[0]));
+      expect(logged).toContainEqual(
+        expect.stringMatching(
+          /OMP pi\.agents probe failed transiently \(attempt 1\); retrying in 10s: command timed out after 300 s \(ran 300\.2 s\)/
+        )
+      );
+      expect(logged).toContainEqual(
+        expect.stringMatching(
+          /OMP pi\.agents probe failed transiently \(attempt 2\); retrying in 20s/
+        )
+      );
+      expect(state.admission.active).toEqual([issue]);
+      expect(state.trees[issue]?.status).toBe("active");
+      expect(state.workerAdmission.queue).toEqual([]);
+      expect(paneOpens().map((command) => command[3])).toEqual(["new-window", "split-window"]);
+      const workerLaunch = paneOpens()[1]?.at(-1) ?? "";
+      expect(workerLaunch).toContain(`--resume=${resumeSessionFile}`);
+    } finally {
+      errorSpy.mockRestore();
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
@@ -1216,48 +1393,35 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("rejects an OMP invocation without pi.agents before accepting daemon work", async () => {
+  it("refuses to serve an OMP invocation without pi.agents: exits after closing the API and NATS it had opened", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = {
       ...config(stateDir),
       ompInvocation: "omp-without-agents",
     };
     let loadedState = false;
-    let natsCreated = false;
+    const nats = new FakeNats();
     let probeCommand: string[] | undefined;
+    const options = daemonTestDependencies(nats, [], () => {});
 
     try {
       await expect(
         startDaemon(daemonConfig, {
           deps: {
+            ...options.deps,
             runner: async (command) => {
-              probeCommand = command;
+              if (command[0] === "sh") probeCommand = command;
               return {
                 stdout: "",
                 stderr: "LEGION_OMP_AGENTS_MISSING\n",
                 exitCode: 0,
               };
             },
-            dispatchClient: fakeDispatchClient(),
-            resolveDaemonEnvironment: async () => daemonEnvironment,
-            tokenManager: {
-              getToken: async () => ({
-                token: "test-token",
-                expiresAt: "2099-01-01T00:00:00.000Z",
-                gitIdentity: {
-                  name: "legion-implementer[bot]",
-                  email: "1+legion-implementer[bot]@users.noreply.github.com",
-                },
-              }),
-            },
             loadState: async () => {
               loadedState = true;
               return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
             },
-            createNatsTransport: async () => {
-              natsCreated = true;
-              throw new Error("NATS must not start after a failed OMP capability probe");
-            },
+            saveState: async () => {},
           },
         })
       ).rejects.toThrow("does not expose pi.agents");
@@ -1272,8 +1436,12 @@ describe("startDaemon", () => {
       ]);
       expect(probeCommand?.[2]).toStartWith("exec ");
       expect(probeCommand?.at(-1)).toContain("legion-omp-probe-");
-      expect(loadedState).toBeFalse();
-      expect(natsCreated).toBeFalse();
+      // Boot carried on while the probe ran, then the definitive negative tore it all down.
+      expect(loadedState).toBeTrue();
+      expect(nats.closed).toBeTrue();
+      // The instance lock was released: a second start with a passing OMP works.
+      const daemon = await startDaemon(config(stateDir), daemonDeps(config(stateDir)));
+      await daemon.stop();
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
@@ -1330,37 +1498,23 @@ describe("startDaemon", () => {
           now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         },
       });
-      // Two transient failures → two backoff sleeps, then the pass; the plugin probe adds one more
-      // sh call that passes first time.
-      expect(sleeps).toEqual([5_000, 15_000]);
+      // Two transient failures → two backoff sleeps (10 s doubling), then the pass; the plugin
+      // probe adds one more sh call that passes first time.
+      expect(sleeps).toEqual([10_000, 20_000]);
       expect(attempts).toBe(4);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("does not retry a definitive pi.agents negative, and gives up after the last transient retry", async () => {
+  it("does not retry a definitive pi.agents negative", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
+    // Boot opens NATS and the API while the probe runs; a definitive negative closes them again.
     const baseDeps = {
+      ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
       loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
       saveState: async () => {},
-      createNatsTransport: async () => {
-        throw new Error("NATS must not start after a failed OMP capability probe");
-      },
-      resolveDaemonEnvironment: async () => daemonEnvironment,
-      dispatchClient: fakeDispatchClient(),
-      readPluginManifest: async () => validLegionPluginManifest,
-      tokenManager: {
-        getToken: async () => ({
-          token: "test-token",
-          expiresAt: "2099-01-01T00:00:00.000Z",
-          gitIdentity: {
-            name: "legion-implement[bot]",
-            email: "1+legion-implement[bot]@users.noreply.github.com",
-          },
-        }),
-      },
     };
     try {
       // Definitive: the probe extension loaded and reported no pi.agents. One attempt, no sleep.
@@ -1407,27 +1561,85 @@ describe("startDaemon", () => {
       ).rejects.toThrow("does not expose pi.agents: secrets: ANTHROPIC_API_KEY: access denied");
       expect(prefixAttempts).toBe(1);
       expect(prefixSleeps).toEqual([]);
-
-      // Transient forever (marker present, OMP keeps dying): every retry is used, then fatal.
-      let transientAttempts = 0;
-      const transientSleeps: number[] = [];
-      await expect(
-        startDaemon(daemonConfig, {
-          deps: {
-            ...baseDeps,
-            runner: async () => {
-              transientAttempts += 1;
-              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 137 };
-            },
-            sleep: async (ms) => {
-              transientSleeps.push(ms);
-            },
-          },
-        })
-      ).rejects.toThrow("does not expose pi.agents");
-      expect(transientAttempts).toBe(6);
-      expect(transientSleeps).toEqual([5_000, 15_000, 45_000, 90_000, 180_000]);
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("keeps retrying a probe the runner killed past the old bound, with the backoff capped at five minutes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          runner: async (command, options) => {
+            if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+            attempts += 1;
+            expect(options?.timeoutMs).toBe(300_000);
+            // The first seven pi.agents probes never finish: the runner kills each at its budget.
+            if (attempts <= 7) {
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 143,
+                timedOut: { limitMs: 300_000, elapsedMs: 300_200 },
+              };
+            }
+            return {
+              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          readPluginManifest: async () => validLegionPluginManifest,
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      // Seven kills → seven sleeps, doubling from 10 s and capped at 300 s; the eighth pi.agents
+      // attempt passes and the plugin probe adds one more sh call.
+      expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]);
+      expect(attempts).toBe(9);
+      const logged = errorSpy.mock.calls.map((call) => String(call[0]));
+      expect(logged).toContainEqual(
+        expect.stringMatching(
+          /OMP pi\.agents probe failed transiently \(attempt 1\); retrying in 10s: command timed out after 300 s \(ran 300\.2 s\)/
+        )
+      );
+      expect(logged).toContainEqual(
+        expect.stringMatching(/attempt 7\); retrying in 300s: command timed out/)
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
@@ -1493,21 +1705,25 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("rejects an installed pi-legion-envoy that omp does not actually load (disabled or unregistered) before accepting daemon work", async () => {
+  it("refuses to serve an installed pi-legion-envoy that omp does not actually load (disabled or unregistered): exits after closing the API and NATS it had opened", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     let loadedState = false;
-    let natsCreated = false;
+    const nats = new FakeNats();
     let capturedManifestPath: string | undefined;
     let shProbeCalls = 0;
     let probeCommand: string[] | undefined;
+    const options = daemonTestDependencies(nats, [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemonTestDependencies did not supply a runner");
 
     try {
       await expect(
         startDaemon(daemonConfig, {
           deps: {
-            runner: async (command) => {
-              if (command[0] !== "sh") throw new Error(`Unexpected command: ${command.join(" ")}`);
+            ...options.deps,
+            runner: async (command, runnerOptions) => {
+              if (command[0] !== "sh") return baseRunner(command, runnerOptions);
               shProbeCalls += 1;
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
@@ -1522,30 +1738,15 @@ describe("startDaemon", () => {
               probeCommand = command;
               return { stdout: "", stderr: "LEGION_PLUGIN_LOADED=no\n", exitCode: 0 };
             },
-            dispatchClient: fakeDispatchClient(),
-            resolveDaemonEnvironment: async () => daemonEnvironment,
             readPluginManifest: async (manifestPath) => {
               capturedManifestPath = manifestPath;
               return JSON.stringify({ version: "0.8.5", omp: { extensions: ["dist/legion.js"] } });
-            },
-            tokenManager: {
-              getToken: async () => ({
-                token: "test-token",
-                expiresAt: "2099-01-01T00:00:00.000Z",
-                gitIdentity: {
-                  name: "legion-implementer[bot]",
-                  email: "1+legion-implementer[bot]@users.noreply.github.com",
-                },
-              }),
             },
             loadState: async () => {
               loadedState = true;
               return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
             },
-            createNatsTransport: async () => {
-              natsCreated = true;
-              throw new Error("NATS must not start after a failed plugin load check");
-            },
+            saveState: async () => {},
           },
         })
       ).rejects.toThrow(
@@ -1562,8 +1763,9 @@ describe("startDaemon", () => {
       expect(capturedManifestPath).toBe(
         path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")
       );
-      expect(loadedState).toBeFalse();
-      expect(natsCreated).toBeFalse();
+      // Boot carried on while the probes ran, then the definitive negative tore it all down.
+      expect(loadedState).toBeTrue();
+      expect(nats.closed).toBeTrue();
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
@@ -1576,16 +1778,19 @@ describe("startDaemon", () => {
       ompLaunchPrefix: ["secrets", "ANTHROPIC_API_KEY", "--"],
     };
     let shProbeCalls = 0;
+    const nats = new FakeNats();
+    const options = daemonTestDependencies(nats, [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemonTestDependencies did not supply a runner");
 
     try {
       let caughtError: unknown;
       try {
         await startDaemon(daemonConfig, {
           deps: {
-            runner: async (command) => {
-              if (command[0] !== "sh") {
-                throw new Error(`Unexpected command: ${command.join(" ")}`);
-              }
+            ...options.deps,
+            runner: async (command, runnerOptions) => {
+              if (command[0] !== "sh") return baseRunner(command, runnerOptions);
               shProbeCalls += 1;
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
@@ -1604,28 +1809,15 @@ describe("startDaemon", () => {
                 exitCode: 1,
               };
             },
-            dispatchClient: fakeDispatchClient(),
-            resolveDaemonEnvironment: async () => daemonEnvironment,
-            readPluginManifest: async () => validLegionPluginManifest,
-            tokenManager: {
-              getToken: async () => ({
-                token: "test-token",
-                expiresAt: "2099-01-01T00:00:00.000Z",
-                gitIdentity: {
-                  name: "legion-implementer[bot]",
-                  email: "1+legion-implementer[bot]@users.noreply.github.com",
-                },
-              }),
-            },
             loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
-            createNatsTransport: async () => {
-              throw new Error("NATS must not start after a failed plugin load check");
-            },
+            saveState: async () => {},
           },
         });
       } catch (error) {
         caughtError = error;
       }
+      // The daemon had opened NATS and the API while the probe ran; the refusal closed them.
+      expect(nats.closed).toBeTrue();
 
       expect(caughtError).toBeInstanceOf(Error);
       const message = (caughtError as Error).message;

@@ -457,6 +457,62 @@ describe("daemon config", () => {
     expect(withoutEither.workerRpcTimeoutSeconds).toBe(5);
   });
 
+  it("resolves slowCommandTimeoutSeconds: YAML beats env, env beats the 300 default", () => {
+    const file = loadConfigFromFile(
+      [
+        "project: acme/7",
+        "envoy_url: http://listener:9020",
+        "dispatch_project: ACME",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "repos:",
+        "  - acme/widgets",
+        "slow_command_timeout_seconds: 900",
+        "gates:",
+        "  design: off",
+      ].join("\n"),
+      "/tmp/legion-config"
+    );
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+
+    const fromYaml = resolveDaemonConfig({ configFile: file });
+    expect(fromYaml.config.slowCommandTimeoutSeconds).toBe(900);
+
+    const fileBeatsEnv = resolveDaemonConfig({
+      configFile: file,
+      env: { LEGION_SLOW_COMMAND_TIMEOUT_SECONDS: "120" },
+    });
+    expect(fileBeatsEnv.config.slowCommandTimeoutSeconds).toBe(900);
+
+    const { config: fromEnvOnly } = resolveDaemonConfig({
+      env: { ...requiredEnv, LEGION_SLOW_COMMAND_TIMEOUT_SECONDS: "120" },
+      cliOverrides,
+    });
+    expect(fromEnvOnly.slowCommandTimeoutSeconds).toBe(120);
+
+    const { config: withoutEither } = resolveDaemonConfig({ env: requiredEnv, cliOverrides });
+    expect(withoutEither.slowCommandTimeoutSeconds).toBe(300);
+  });
+
+  it("refuses a slow_command_timeout_seconds that is not a positive integer, naming the key", () => {
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_SLOW_COMMAND_TIMEOUT_SECONDS: "0" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("LEGION_SLOW_COMMAND_TIMEOUT_SECONDS");
+    expect(() =>
+      loadConfigFromFile(
+        "project: acme/7\nslow_command_timeout_seconds: -5\n",
+        "/tmp/legion-config"
+      )
+    ).toThrow("slow_command_timeout_seconds");
+  });
+
   it("resolves workerStreamPort: YAML beats env, env beats the port + 1 default", () => {
     const cliOverrides = {
       githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },

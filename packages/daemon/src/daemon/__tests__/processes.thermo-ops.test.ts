@@ -32,6 +32,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},
@@ -85,7 +86,10 @@ function manager(
     now: () => now,
     dispatchClient: fakeDispatchClient(),
   };
-  return { manager: new ProcessManager(deps), state, commands };
+  const processManager = new ProcessManager(deps);
+  // Models a booted daemon: the boot probes have passed and the launch hold is released.
+  processManager.enableLaunches();
+  return { manager: processManager, state, commands };
 }
 
 it("marks each daemon-created tmux window with its Legion owner", async () => {

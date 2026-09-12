@@ -178,6 +178,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},
@@ -242,7 +243,7 @@ function manager(
       readProcessCmdline?: (pid: number) => Promise<string>;
     }
   > = {},
-  { skipEnablePromotion = false }: { skipEnablePromotion?: boolean } = {}
+  { skipEnableLaunches = false }: { skipEnableLaunches?: boolean } = {}
 ): {
   manager: ProcessManager;
   state: LegionState;
@@ -348,8 +349,8 @@ function manager(
   liveManagers.push(processManager);
   // Every existing test exercises worker-queue promotion as already "booted" (index.ts calls
   // this immediately after `api` is assigned) — only the dedicated boot-ordering test passes
-  // `skipEnablePromotion` to exercise the gate itself.
-  if (!skipEnablePromotion) processManager.enableWorkerPromotion();
+  // `skipEnableLaunches` to exercise the gate itself.
+  if (!skipEnableLaunches) processManager.enableLaunches();
   return {
     manager: processManager,
     state,
@@ -374,7 +375,7 @@ async function workerCapFixture(
   overrides: Partial<
     ProcessManagerDeps & { readProcessCmdline?: (pid: number) => Promise<string> }
   > = {},
-  { skipEnablePromotion = false }: { skipEnablePromotion?: boolean } = {}
+  { skipEnableLaunches = false }: { skipEnableLaunches?: boolean } = {}
 ) {
   const stateDir = await temporaryDir();
   const state = newLegionState("omp", 1);
@@ -388,7 +389,7 @@ async function workerCapFixture(
   } = manager(
     state,
     { config: config(stateDir, { workerCap }), ...overrides },
-    { skipEnablePromotion }
+    { skipEnableLaunches }
   );
   return { processes, state, managedState, commands, publications, controlRequests, stateDir };
 }
@@ -484,6 +485,7 @@ describe("ProcessManager", () => {
         | {
             readonly cwd?: string;
             readonly env?: Readonly<Record<string, string>>;
+            readonly timeoutMs?: number;
           }
         | undefined;
     }> = [];
@@ -637,9 +639,11 @@ describe("ProcessManager", () => {
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
     ]);
+    // Every provisioning command carries the configured slow budget (300 s), not the runner's
+    // generic default.
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
-      opts: { cwd: workspace },
+      opts: { cwd: workspace, timeoutMs: 300_000 },
     });
     expect(workspaceCalls).toContainEqual({
       command: ["jj", "git", "fetch", "-R", repo],
@@ -649,6 +653,7 @@ describe("ProcessManager", () => {
           GIT_TERMINAL_PROMPT: "0",
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
         },
+        timeoutMs: 300_000,
       },
     });
   });
@@ -6969,6 +6974,113 @@ describe("ProcessManager", () => {
     });
   });
 
+  it("queues a root admitted and a worker spawned while launches are held, and launches both once enableLaunches() runs", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+      publications,
+    } = manager(
+      state,
+      { config: config(stateDir, { workerCap: 2 }) },
+      { skipEnableLaunches: true }
+    );
+    const testerToken = roleToken("omp", root, "tester");
+    const paneOpens = () =>
+      commands.filter(
+        (command) =>
+          command[0] === "tmux" && (command[3] === "new-window" || command[3] === "split-window")
+      );
+
+    expect(processes.admit(root)).toBe("queued");
+    expect(managedState.admission.queue).toEqual([root]);
+    expect(managedState.admission.active).toEqual([]);
+    expect(managedState.trees[root]?.status).toBe("queued");
+
+    const spawned = await processes.spawnWorker(root, root, "tester", "verify #41");
+    expect(spawned).toEqual({ status: "queued", roleToken: testerToken });
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    expect(publications).toContainEqual({
+      subject: roleTopic(roleToken("omp", root, "architect")),
+      json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
+    });
+    expect(paneOpens()).toEqual([]);
+
+    processes.enableLaunches();
+    await processes.reconcileAdmission();
+    await processes.reconcileWorkerAdmission();
+
+    expect(managedState.admission.active).toEqual([root]);
+    expect(managedState.trees[root]).toMatchObject({ status: "active" });
+    expect(managedState.trees[root]?.locator).toBeDefined();
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const testerClaim = managedState.roles[testerToken];
+    if (!testerClaim || !("issue" in testerClaim)) throw new Error("tester claim missing");
+    expect(testerClaim.locator).toBeDefined();
+    expect(paneOpens().map((command) => command[3])).toEqual(["new-window", "split-window"]);
+    expect(publications).toContainEqual({
+      subject: roleTopic(roleToken("omp", root, "architect")),
+      json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
+    });
+  });
+
+  it("holds a resurrection and a controller launch requested during the hold, and replays both after enableLaunches()", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    let windows = 0;
+    const { manager: processes, state: managedState } = manager(
+      state,
+      {
+        config: config(stateDir),
+        run: async (command) => {
+          if (command[3] === "list-windows") return { stdout: "", exitCode: 1 };
+          if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+          if (command[3] === "new-window") {
+            windows += 1;
+            return { stdout: `@${windows} %${windows} ${12345 + windows}\n`, exitCode: 0 };
+          }
+          // Nothing recorded is alive: the root's pane is dead, no controller pane exists.
+          if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+          return { stdout: "", exitCode: 0 };
+        },
+      },
+      { skipEnableLaunches: true }
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processes.resurrect(root);
+      await processes.ensureController();
+      expect(windows).toBe(0);
+      expect(managedState.controllerLocator).toBeUndefined();
+      const logged = errorSpy.mock.calls.map((call) => String(call[0]));
+      expect(logged).toContainEqual(
+        expect.stringContaining(`resurrection of ${root} held until the OMP probe passes`)
+      );
+      expect(logged).toContainEqual(
+        expect.stringContaining("controller launch held until the OMP probe passes")
+      );
+
+      processes.enableLaunches();
+      await processes.replayHeldRecoveries();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(windows).toBe(2);
+    expect(managedState.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    expect(managedState.trees[root]?.locator?.tmuxWindowId).toBe("@1");
+    expect(managedState.controllerLocator?.tmuxWindowId).toBe("@2");
+  });
+
   it("promotes the queued worker once the running one goes idle, publishing worker-started", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -7291,7 +7403,7 @@ describe("ProcessManager", () => {
     ).toBeFalse();
   });
 
-  it("mints nothing for a queued worker when an idle reconnect fires onIdle before enableWorkerPromotion, then promotes it once enabled", async () => {
+  it("mints nothing for a queued worker when an idle reconnect fires onIdle before enableLaunches, then promotes it once enabled", async () => {
     const idleToken = roleToken("omp", root, "planner");
     const queuedToken = roleToken("omp", root, "tester");
     let mintCalls = 0;
@@ -7315,7 +7427,7 @@ describe("ProcessManager", () => {
           return "worker-boot-token";
         },
       },
-      { skipEnablePromotion: true }
+      { skipEnableLaunches: true }
     );
     state.roles[idleToken] = {
       issue: root,
@@ -7345,7 +7457,7 @@ describe("ProcessManager", () => {
     expect(mintCalls).toBe(0);
     expect(managedState.workerAdmission.queue).toEqual([queuedToken]);
 
-    processes.enableWorkerPromotion();
+    processes.enableLaunches();
     await processes.reconcileWorkerAdmission();
 
     // Now that the gate is open, the exact same queued assignment promotes normally.
@@ -8864,8 +8976,8 @@ describe("ProcessManager", () => {
       },
     };
     const commands: string[][] = [];
-    // `skipEnablePromotion` models exactly what `reconnectWorkers` runs under in production: the
-    // daemon calls it before `api` exists, hence before `enableWorkerPromotion()`.
+    // `skipEnableLaunches` models exactly what `reconnectWorkers` runs under in production: the
+    // daemon calls it during boot, before `enableLaunches()` releases the launch hold.
     const { manager: processes, state: managedState } = manager(
       state,
       {
@@ -8887,7 +8999,7 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         },
       },
-      { skipEnablePromotion: true }
+      { skipEnableLaunches: true }
     );
 
     await processes.reconnectWorkers();
@@ -8908,7 +9020,7 @@ describe("ProcessManager", () => {
 
     // Only once promotion is enabled (the post-`api`-assignment boot step) does the queued
     // retry actually launch, through the normal cap-aware, role-locked drain.
-    processes.enableWorkerPromotion();
+    processes.enableLaunches();
     commands.length = 0;
     await processes.reconcileWorkerAdmission();
 
@@ -8917,6 +9029,121 @@ describe("ProcessManager", () => {
     const launchedClaim = managedState.roles[token];
     if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("claim disappeared");
     expect(launchedClaim.locator).toBeDefined();
+  });
+
+  it("a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while every other claim is reconciled", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const roles = ["planner", "tester", "reviewer"] as const;
+    const tokens = roles.map((role) => roleToken("omp", root, role));
+    roles.forEach((role, index) => {
+      state.roles[tokens[index] as string] = {
+        issue: root,
+        role,
+        generation: 1,
+        sessionId: `ses-${index + 1}`,
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: `%${index + 1}`,
+          socketPath: `/state/workers/${role}.sock`,
+          ompSessionFile: `/state/sessions/${role}.json`,
+        },
+      };
+    });
+    const commands: string[][] = [];
+    const failure = new TypeError("api.revokeSessionCapability is not a function");
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      revokeSessionCapability: (sessionId) => {
+        if (sessionId === "ses-2") throw failure;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes")
+          return { stdout: "", exitCode: 1 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let isolationLogs: unknown[][];
+    try {
+      await processes.reconnectWorkers();
+      isolationLogs = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("failed to reconcile worker")
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    const killed = commands
+      .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+      .map((command) => command.at(-1));
+    expect(killed.sort()).toEqual(["%1", "%3"]);
+    for (const index of [0, 2]) {
+      const claim = managedState.roles[tokens[index] as string];
+      if (!claim || !("issue" in claim)) throw new Error(`claim ${index + 1} disappeared`);
+      expect(claim.locator).toBeUndefined();
+      expect(claim.resumeSessionFile).toBe(`/state/sessions/${roles[index]}.json`);
+    }
+    const untouched = managedState.roles[tokens[1] as string];
+    if (!untouched || !("issue" in untouched)) throw new Error("claim 2 disappeared");
+    expect(untouched.locator?.tmuxPaneId).toBe("%2");
+    expect(untouched.resumeSessionFile).toBeUndefined();
+    expect(isolationLogs).toEqual([
+      [expect.stringContaining(`failed to reconcile worker ${tokens[1]}`), failure],
+    ]);
+  });
+
+  it("a throw while re-arming one root's registration deadline is logged with its tree and leaves the other roots armed", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 3);
+    const roots = ["LEGION-41", "LEGION-42", "LEGION-43"] as const;
+    for (const key of roots) {
+      state.issues[key] = { key, title: key, status: "in_progress", children: [] };
+      state.trees[key] = {
+        root: key,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+        locator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: `@${key.slice(-2)}`,
+          tmuxPaneId: `%${key.slice(-2)}`,
+          socketPath: `/state/workers/${key}.sock`,
+        },
+      };
+      state.admission.active.push(key);
+    }
+    let sleeps = 0;
+    const failure = new Error("timer registry exploded");
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      sleep: () => {
+        sleeps += 1;
+        if (sleeps === 2) throw failure;
+        return new Promise<void>(() => {});
+      },
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let isolationLogs: unknown[][];
+    try {
+      expect(() => processes.reconnectRoots()).not.toThrow();
+      isolationLogs = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("failed to reconcile root")
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(sleeps).toBe(3);
+    expect(isolationLogs).toEqual([
+      [expect.stringContaining("failed to reconcile root LEGION-42"), failure],
+    ]);
   });
 
   it("persists a retirement's queue-push in the same save as its locator-clear, so a reload after a crash mid-drain still finds the token queued", async () => {
@@ -8965,7 +9192,7 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         },
       },
-      { skipEnablePromotion: true }
+      { skipEnableLaunches: true }
     );
 
     await processes.reconnectWorkers();
@@ -8992,7 +9219,7 @@ describe("ProcessManager", () => {
         return { stdout: "", exitCode: 0 };
       },
     });
-    reloadedProcesses.enableWorkerPromotion();
+    reloadedProcesses.enableLaunches();
     await reloadedProcesses.reconcileWorkerAdmission();
 
     expect(relaunchCommands.some((command) => command[3] === "new-window")).toBeTrue();
@@ -9056,7 +9283,7 @@ describe("ProcessManager", () => {
         return { stdout: "", exitCode: 0 };
       },
     });
-    processes.enableWorkerPromotion();
+    processes.enableLaunches();
 
     // Races a runtime retirement decision (as `reconnectWorkers`, the boot watchdog, and
     // `onWorkerClientClosed` all funnel through `retireUnconfirmedBoot`) against a concurrent
@@ -9128,7 +9355,7 @@ describe("ProcessManager", () => {
         return { stdout: "", exitCode: 0 };
       },
     });
-    processes.enableWorkerPromotion();
+    processes.enableLaunches();
 
     // Models `workerReady`'s atomic confirmation state change. Called with no preceding await,
     // its `mutateClaim` registration lands on the per-token queue essentially immediately —
