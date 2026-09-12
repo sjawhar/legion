@@ -28,6 +28,7 @@ import {
 import { createCancellableSleep } from "./cancellable-sleep";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
+import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
 import {
   createDaemonRunner,
@@ -259,6 +260,19 @@ async function startDaemonLocked(
   if (config.dispatchToken !== undefined) {
     await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
   }
+  // The operator's deployment instructions, read and validated exactly once and re-materialized
+  // under `<state_dir>` for every pane to `$(cat)` — see `deployment-instructions.ts`. Refuses
+  // startup on a missing/unreadable/blank file (naming the resolved path) before the OMP probes
+  // below are even started and before state is read: a deployment misconfigured this way must
+  // never spawn a probe process or touch its state file.
+  const deploymentInstructionsFile =
+    config.instructionsPath === undefined
+      ? undefined
+      : await materializeDeploymentInstructions(
+          config.instructionsPath,
+          config.stateDir,
+          config.legionId
+        );
   // The plugin contract check is a local manifest read — no OMP spawn, no runner — so host load
   // cannot make it transient: a skewed plugin is a definitive refusal, made here before any state
   // is loaded or NATS/the API opened, exactly as before. Only the two OMP probes below are
@@ -381,6 +395,7 @@ async function startDaemonLocked(
     dispatchClient: deps.dispatchClient,
     now: deps.now,
     sleep: deps.sleep,
+    deploymentInstructionsFile,
   });
 
   // Awaited (not fire-and-forget): reconnectWorkers is the source of truth
