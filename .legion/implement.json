@@ -1,0 +1,104 @@
+{
+  "issue": "LEGION-29",
+  "spec": "dispatch://LEGION-29/artifact/spec (version 2)",
+  "plan": "docs/plans/2026-09-12-heartbeat-role-reassertion.md (.legion/plan.json)",
+  "architectRulings": "R1 accepted (regain hook also fires with reason \"reregistered\" on the first healthy heartbeat after a registry outage); R2 and R3 as written.",
+  "summary": "envoy.ts: reassertRole runs after every successful heartbeat registerSession() — GET /v1/roles/<role>; soft POST /v1/roles/set only when the listener does not name this session (no previous_session_id); 409 drops the local claim (claimedRoleTopic = undefined only, no appendEntry), warns once via ui.notify, ends re-assertion; a landed soft claim (\"reclaimed\") or the first healthy tick after an outage (\"reregistered\") fires onEnvoyRoleRegained(role, reason) on the LEGION_ROLE_CLAIM_BRIDGE slot. legion.ts registers the hook: controller → daemon.controllerReady({secret, sessionId}) again; root architect → processReady again with generation(process.env) via callReadyWithRetry/roleDaemon(); phase worker → nothing (pinned by test). No Go, daemon, package.json, or plugin-pin change.",
+  "commits": [
+    {
+      "change": "royysusq",
+      "commit": "89139201be80",
+      "title": "test(pi-envoy): the extension suites start from a clean launch environment and biome-clean"
+    },
+    {
+      "change": "ynxvrswz",
+      "commit": "2fe173e3497b",
+      "title": "fix(pi-envoy): the registration heartbeat re-asserts a held role the listener lost"
+    },
+    {
+      "change": "rmxnnmxs",
+      "commit": "4c348aa275a0",
+      "title": "test(pi-envoy): the first healthy heartbeat after a registry outage reports a regain"
+    },
+    {
+      "change": "kwuqokqq",
+      "commit": "12d5f1bdaf5f",
+      "title": "fix(pi-envoy): a controller that regains its Envoy role re-runs controller/ready"
+    },
+    {
+      "change": "vmxkyvrm",
+      "commit": "61769b3ed19e",
+      "title": "fix(pi-envoy): a root architect that regains its Envoy role re-runs process/ready"
+    },
+    {
+      "change": "koquvpvq",
+      "commit": "4bbcbdfad2e8",
+      "title": "docs(pi-envoy): heartbeat role re-assertion and the 409 rule"
+    }
+  ],
+  "filesChanged": [
+    "packages/pi-envoy/extensions/envoy.ts",
+    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/extensions/legion.ts",
+    "packages/pi-envoy/extensions/legion.test.ts",
+    "packages/pi-envoy/AGENTS.md",
+    "skills/legion-controller/SKILL.md"
+  ],
+  "interfaces": {
+    "envoy.ts exports": "export type RoleRegainReason = \"reclaimed\" | \"reregistered\"; export function onEnvoyRoleRegained(listener: (role: string, reason: RoleRegainReason) => Promise<void>): void — role is the bare token; last registration wins (single bridge slot like claim).",
+    "legion.ts log lines (tester greps)": [
+      "[legion] re-ran controller/ready after role <token> was <reason>",
+      "[legion] re-ran process/ready after role <token> was <reason>",
+      "[legion] ready call after role <token> was <reason> failed; the next regain or boot retries it: <error>"
+    ],
+    "envoy.ts notify on 409": "envoy: role <role> is now held by session <holder>; this session no longer holds it"
+  },
+  "testsAdded": {
+    "envoy.test.ts": [
+      "a heartbeat tick re-asserts a held role the listener no longer holds, softly and without a transcript entry",
+      "heartbeat ticks while this session is the live holder issue no claim and append no transcript entry",
+      "a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role",
+      "the first healthy heartbeat after a registry outage fires the regain hook even though the claim survived",
+      "(modified) a role claim keeps the existing registration fresh — mock now answers GET /v1/roles/legion-controller"
+    ],
+    "legion.test.ts": [
+      "a controller that regains its role re-runs controller/ready so held notices drain",
+      "a root architect that regains its role re-runs process/ready so the overseer catch-up replays",
+      "a phase worker that regains its role re-runs nothing: the daemon's own no-holder recovery prompts its catch-up"
+    ],
+    "redGreen": "Task 1's three tests failed with `onEnvoyRoleRegained is not a function` before the change; Task 2's test was proven to fail (hook never fires, 5 s timeout) with `afterOutage` neutralized and pass with it; Task 3's and Task 4's root test failed on a single ready call before their branch; the worker no-op test passed before and after (it pins the no-op)."
+  },
+  "gates": {
+    "command": "cd packages/pi-envoy && bunx biome check extensions/ src/ && bunx tsc --noEmit && bun test",
+    "biome": "Checked 19 files. No fixes applied. exit 0",
+    "tsc": "exit 0",
+    "bunTest": "144 pass, 0 fail, 446 expect() calls across 6 files"
+  },
+  "deviationsFromPlan": [
+    "Extra first commit (royysusq): the pi-envoy suites were not hermetic to a Legion pane's environment. envoy.test.ts cleared DISPATCH_URL/DISPATCH_TOKEN but not DISPATCH_TOKEN_FILE (which the daemon exports into every pane), so 3 Dispatch-tool tests failed here; legion.test.ts inherited the pane's LEGION_TREE/ROLE/ISSUE and 9 tests failed with 'Legion session has both controller and tree launch markers'. Fix: envoy.test.ts beforeEach/afterEach also clear/restore DISPATCH_TOKEN_FILE; legion.test.ts gains a beforeEach that deletes every key in its existing environmentKeys list (afterEach already restores them). Both suites pass 75/75 and 49/49 from inside this pane now; the tester's pane will behave the same.",
+    "Same commit: three envoy.test.ts sites were already unformatted on main (lines ~1191, ~2398, ~2416 at main); biome check for the package cannot pass without formatting them, so `biome check --write` output for those sites is folded into royysusq rather than a feature commit. envoy.ts's own formatting fix was folded into ynxvrswz (Task 1).",
+    "Commits were made with `jj commit -m ... <paths>` (path-scoped) instead of `jj describe && jj new`, to keep the workspace's untracked-by-plan `.omp/config.yml` (an empty file written into the workspace at worker boot, not part of the repo) out of every commit.",
+    "legion.test.ts phase-worker test: the plan's `(body as { soft?: boolean }).soft === true` was written as an `in`/`typeof` guard on the unknown body (repo rule ts-no-inline-cast-access); behaviour identical."
+  ],
+  "testerNotes": {
+    "runbook": "docs/plans/2026-09-12-heartbeat-role-reassertion.md Part C — Acceptance 1 (real omp session, `--no-extensions -e $WS/packages/pi-envoy/extensions/envoy.ts`, OMP_PROFILE unset, ENVOY_HEARTBEAT_MS=10000, role smoke-legion-29; remove claim via POST /v1/interests/unsubscribe; re-held ≤30 s; rival-claim negative control; transcript envoy-role-claim count unchanged) and Acceptance 6 (precondition grep in envoy-listener container; docker restart; GET /v1/roles/legion-<project>-controller ≤120 s; controllerPendingNotices 0; legion state roles diff empty; the optional 130 s stop needs the architect's explicit go-ahead).",
+    "unitGates": "cd $WS/packages/pi-envoy && bun test extensions/envoy.test.ts extensions/legion.test.ts  (from any shell, including a Legion pane — the suites now scrub the inherited launch env) and cd $WS/packages/envoy && go test ./cmd/listener/ ./internal/store/ (Acceptance 7; listener untouched).",
+    "grepLines": "controller regain: `[legion] re-ran controller/ready after role legion-<project>-controller was reregistered|reclaimed`; root: `[legion] re-ran process/ready after role <token> was ...`; 409 notify: `envoy: role <role> is now held by session <holder>; this session no longer holds it`.",
+    "eventSequence": "tick → POST /v1/interests/subscribe → GET /v1/roles/<role> → (only if holder != self) POST /v1/roles/set {session_id, role, soft:true} → on landed claim or first tick after outage → hook → controller/ready or process/ready. A GET non-404 error propagates to the heartbeat's warn-once path (`envoy: registry heartbeat failed (...)`) and retries next tick."
+  },
+  "outOfScope": [
+    "No Go/listener change; no daemon change; legion.minPluginVersion unchanged (no package.json touched).",
+    "ENVOY_IMAGE_TAG rollout of PR #958 to envoy-listener — architect/operator item.",
+    "Plugin pin bumps for ~/.omp/plugins and ~/.omp/profiles/legion/plugins — the fix reaches Legion panes only when the `legion` profile's pin moves."
+  ],
+  "pr": {
+    "number": 970,
+    "url": "https://github.com/sjawhar/legion/pull/970",
+    "openedAtHead": "4735e56ca0360b8265f9384c3e3f923006f59c19",
+    "base": "main",
+    "branch": "legion/LEGION-29"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T13:48:36.430Z"
+}
