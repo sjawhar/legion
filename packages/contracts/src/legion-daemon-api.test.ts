@@ -76,12 +76,17 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
         generation: 1,
         launchFailures: 0,
         readyConfirmedAt: 1700000000000,
-        locator: { tmuxSession: "legion-acme", tmuxWindowId: "@1", tmuxPaneId: "%1" },
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-acme",
+          tmuxWindowId: "@1",
+          tmuxPaneId: "%1",
+        },
       },
     },
     admission: { cap: 2, active: ["WIDGETS-1"], queue: [] },
     gates: { "WIDGETS-1": { designAskId: "ask-1", designApproved: "ask-1" } },
-    controllerLocator: { tmuxSession: "legion-acme", tmuxWindowId: "@0" },
+    controllerLocator: { runtime: "tmux", tmuxSession: "legion-acme", tmuxWindowId: "@0" },
     roles: {
       "legion:acme:controller": { role: "controller", sessionId: "ses_controller" },
       "legion:acme:WIDGETS-1:implementer": {
@@ -91,7 +96,12 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
         sessionId: "ses_implementer",
         readyConfirmedAt: 1700000000000,
         launchFailures: 0,
-        locator: { tmuxSession: "legion-acme", tmuxWindowId: "@2", tmuxPaneId: "%2" },
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-acme",
+          tmuxWindowId: "@2",
+          tmuxPaneId: "%2",
+        },
       },
     },
     controllerPendingNotices: 0,

@@ -39,8 +39,14 @@ import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
 import { loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
-import { daemonCredentialHelper, ProcessManager, type ProcessManagerDeps } from "./processes";
+import {
+  daemonCredentialHelper,
+  locatorsForIssue,
+  ProcessManager,
+  type ProcessManagerDeps,
+} from "./processes";
 import { runResync } from "./resync";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { connectWorkerRpc } from "./worker-rpc";
 import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
@@ -54,7 +60,7 @@ interface DaemonDependencies {
   acquireInstanceLock(stateDir: string): Promise<InstanceLock>;
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
-  readProcessCmdline?: ProcessManagerDeps["readProcessCmdline"];
+  readProcessCmdline?: TmuxRuntimeDeps["readProcessCmdline"];
   readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   dispatchClient: DispatchClient;
@@ -68,7 +74,7 @@ interface DaemonDependencies {
   setInterval(callback: () => void, delayMs: number): unknown;
   clearInterval(timer: unknown): void;
   onSignal(signal: NodeJS.Signals, listener: () => void): void;
-  connectWorkerRpc: ProcessManagerDeps["connectWorkerRpc"];
+  connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
   sleep?: ProcessManagerDeps["sleep"];
   exit(code: number): void;
   now(): number;
@@ -272,10 +278,23 @@ async function startDaemonLocked(
   const nats = await deps.createNatsTransport(config);
   let api: LegionApi;
 
+  const runtime = new TmuxRuntime({
+    tmux: { run: runner, socket: `legion-${config.project}` },
+    project: config.project,
+    stateDir: config.stateDir,
+    connectWorkerRpc: deps.connectWorkerRpc,
+    workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
+    now: deps.now,
+    sleep: deps.sleep,
+    readProcessCmdline: deps.readProcessCmdline,
+    issueLocators: (issue) => locatorsForIssue(state, issue),
+    persist: save,
+  });
   const processManager = new ProcessManager({
     state,
     saveState: save,
     config,
+    runtime,
     ompInvocation: environment.ompInvocation,
     panePath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
@@ -287,11 +306,9 @@ async function startDaemonLocked(
     mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
       api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
     revokeSessionCapability: (sessionId) => api.revokeSessionCapability(sessionId),
-    connectWorkerRpc: deps.connectWorkerRpc,
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
-    readProcessCmdline: deps.readProcessCmdline,
     workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
@@ -514,8 +531,8 @@ async function startDaemonLocked(
         });
       }
     }
-    void processManager.reconcileTmuxWindows().catch((error) => {
-      console.error(`[legion] tmux reconciliation failed:`, error);
+    void processManager.reconcileOrphans().catch((error) => {
+      console.error("[legion] orphan reconciliation failed:", error);
     });
     // A below-threshold launch failure rotates its head to the tail (see
     // `promoteQueuedWorker`) instead of blocking the queue, but nothing else retries a queue

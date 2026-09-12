@@ -22,6 +22,7 @@ import {
 import {
   addressingFragment,
   type ControlDirective,
+  locatorsForIssue,
   ProcessManager,
   type ProcessManagerDeps,
   StopFailed,
@@ -29,8 +30,10 @@ import {
 } from "../processes";
 import type { Effect } from "../reducers";
 import { runResync } from "../resync";
-import type { WorkerRpcClient } from "../worker-rpc";
+import type { Locator, TmuxLocator } from "../runtime";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeWorkerRpcClient } from "./fake-runtime";
 
 const root = "LEGION-42";
 const child = "LEGION-43";
@@ -84,77 +87,6 @@ async function temporaryDir(): Promise<string> {
   return directory;
 }
 
-type FakeWorkerRpcClient = WorkerRpcClient & {
-  prompts: string[];
-  negotiated: boolean;
-  getStateCalls: number;
-  getStateImpl?: () => Promise<Record<string, unknown>>;
-  idleFireCount: number;
-  emitRunState(state: "running" | "idle"): void;
-  /** Sets `runState` directly, bypassing the idle trigger entirely — models a real client's
-   * post-rejection restore (an undo, never a transition; see `WorkerRpcClient.prompt`'s doc
-   * comment), as opposed to `emitRunState`, which fires `onIdle` on a genuine idle transition. */
-  setRunStateSilently(state: "unknown" | "running" | "idle"): void;
-};
-function fakeWorkerRpcClient(): FakeWorkerRpcClient {
-  const closed = Promise.withResolvers<void>();
-  let idleCallback: (() => void) | undefined;
-  let runState: "unknown" | "running" | "idle" = "unknown";
-  const client = {
-    closed: closed.promise,
-    get runState() {
-      return runState;
-    },
-    prompts: [] as string[],
-    negotiated: false,
-    getStateCalls: 0,
-    getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
-    idleFireCount: 0,
-    async negotiate() {
-      client.negotiated = true;
-    },
-    async prompt(message: string) {
-      runState = "running";
-      client.prompts.push(message);
-    },
-    async getState() {
-      client.getStateCalls += 1;
-      return client.getStateImpl ? client.getStateImpl() : {};
-    },
-    shutdown() {
-      // Mirrors the real shim: the frame alone never closes the socket — the shim closes it only
-      // once OMP actually exits, asynchronously relative to receiving the frame. Deferred by a
-      // microtask (never synchronous) so a test asserting the graceful path is decided by real
-      // promise ordering against `stopProcess`'s timeout race, not by `closed` already having
-      // settled before that race was even built.
-      queueMicrotask(() => client.close());
-    },
-    close() {
-      const wasIdle = runState === "idle";
-      runState = "idle";
-      closed.resolve();
-      if (!wasIdle) {
-        client.idleFireCount += 1;
-        idleCallback?.();
-      }
-    },
-    onIdle(callback: () => void) {
-      idleCallback = callback;
-    },
-    emitRunState(state: "running" | "idle") {
-      const wasIdle = runState === "idle";
-      runState = state;
-      if (state === "idle" && !wasIdle) {
-        client.idleFireCount += 1;
-        idleCallback?.();
-      }
-    },
-    setRunStateSilently(state: "unknown" | "running" | "idle") {
-      runState = state;
-    },
-  };
-  return client;
-}
 function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   return {
     project: "omp",
@@ -184,6 +116,19 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     stateDir,
     ...overrides,
   };
+}
+
+/** The tmux locator `tree()` recorded for `issue`, narrowed for tests that extend or read it. */
+function recordedTmuxLocator(state: LegionState, issue: IssueKey = root): TmuxLocator {
+  const locator = state.trees[issue]?.locator;
+  if (locator?.runtime !== "tmux") throw new Error(`${issue} has no recorded tmux locator`);
+  return locator;
+}
+
+/** A locator's tmux fields, for expectations that read them; a locator of another runtime
+ * (never spawned by these tests) reads as undefined and fails the expectation loudly. */
+function tmuxFields(locator: Locator | undefined): TmuxLocator | undefined {
+  return locator?.runtime === "tmux" ? locator : undefined;
 }
 
 function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
@@ -236,13 +181,15 @@ function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: 
   return { stdout: `${target.startsWith("%") ? target : "%1"} ${pid}\n`, exitCode: 0 };
 }
 
+/** Runtime-side overrides `manager()` threads into its `TmuxRuntime` rather than `ProcessManager`. */
+type RuntimeOverrides = {
+  connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
+  readProcessCmdline: (pid: number) => Promise<string>;
+};
+
 function manager(
   state = newLegionState("omp", 1),
-  options: Partial<
-    ProcessManagerDeps & {
-      readProcessCmdline?: (pid: number) => Promise<string>;
-    }
-  > = {},
+  options: Partial<ProcessManagerDeps & RuntimeOverrides> = {},
   { skipEnablePromotion = false }: { skipEnablePromotion?: boolean } = {}
 ): {
   manager: ProcessManager;
@@ -256,7 +203,7 @@ function manager(
   const publications: Array<{ subject: string; json: string }> = [];
   const controlRequests: Array<{ subject: string; json: string }> = [];
   const revokedSessions: string[] = [];
-  const { run: requestedRun, ...overrides } = options;
+  const { run: requestedRun, connectWorkerRpc, readProcessCmdline, ...overrides } = options;
   let launchedAnyWindow = false;
   const commandRunner =
     requestedRun ??
@@ -285,7 +232,7 @@ function manager(
       }
       return { stdout: "", exitCode: 0 };
     });
-  const deps: ProcessManagerDeps = {
+  const deps: Omit<ProcessManagerDeps, "runtime"> = {
     state,
     saveState: async () => {},
     config: config("/state"),
@@ -297,11 +244,9 @@ function manager(
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    connectWorkerRpc: async () => fakeWorkerRpcClient(),
     provisioningToken: async () => "daemon-installation-token",
     statPrompt: async () => {},
     ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
-    readProcessCmdline: async () => "omp\0",
     panePath: "/full/bin:/usr/bin",
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
@@ -345,7 +290,19 @@ function manager(
       return result;
     },
   };
-  const processManager = new ProcessManager(deps);
+  const runtime = new TmuxRuntime({
+    tmux: { run: deps.run, socket: "legion-omp" },
+    project: "omp",
+    stateDir: deps.config.stateDir,
+    connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
+    workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
+    now: deps.now,
+    sleep: deps.sleep,
+    readProcessCmdline: readProcessCmdline ?? (async () => "omp\0"),
+    issueLocators: (issue) => locatorsForIssue(state, issue),
+    persist: deps.saveState,
+  });
+  const processManager = new ProcessManager({ ...deps, runtime });
   liveManagers.push(processManager);
   // Every existing test exercises worker-queue promotion as already "booted" (index.ts calls
   // this immediately after `api` is assigned) — only the dedicated boot-ordering test passes
@@ -372,9 +329,7 @@ function manager(
  * `processes`; `overrides` merges into (and can replace) any of `manager()`'s own deps. */
 async function workerCapFixture(
   workerCap: number,
-  overrides: Partial<
-    ProcessManagerDeps & { readProcessCmdline?: (pid: number) => Promise<string> }
-  > = {},
+  overrides: Partial<ProcessManagerDeps & RuntimeOverrides> = {},
   { skipEnablePromotion = false }: { skipEnablePromotion?: boolean } = {}
 ) {
   const stateDir = await temporaryDir();
@@ -724,7 +679,7 @@ describe("ProcessManager", () => {
 
     await processes.ensureController();
     await processes.spawnRoot(root);
-    await processes.reconcileTmuxWindows();
+    await processes.reconcileOrphans();
 
     const tmuxCommands = commands.filter((command) => command[0] === "tmux");
     expect(tmuxCommands.length).toBeGreaterThan(0);
@@ -1430,9 +1385,7 @@ describe("ProcessManager", () => {
   it("rejects a live pane whose process command is not OMP", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    const locator = state.trees[root]?.locator;
-    if (!locator) throw new Error("test root is missing a locator");
-    locator.tmuxWindowId = "@314";
+    recordedTmuxLocator(state).tmuxWindowId = "@314";
     const { manager: processes } = manager(state, {
       readProcessCmdline: async () => "bash\0",
       run: liveRun,
@@ -1469,7 +1422,7 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.reconcileTmuxWindows();
+    await processes.reconcileOrphans();
 
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-window", "-t", "@99"]);
     expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-window", "-t", "@100"]);
@@ -2065,20 +2018,20 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("kills the just-spawned window before propagating a saveState failure after a successful spawn, without rolling back the launch or requeuing it as a failure", async () => {
+  it("kills the just-spawned pane before propagating a saveState failure after a successful spawn, without rolling back the launch or requeuing it as a failure", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.admission.active.push(root);
     state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
     state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
-    const killedWindows: string[] = [];
+    const killedPanes: string[] = [];
     const { manager: processes } = manager(state, {
       config: config(stateDir),
       run: async (command) => {
         if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") return { stdout: "@42 %1 4242\n", exitCode: 0 };
-        if (command[3] === "kill-window") {
-          killedWindows.push(command[5] ?? "");
+        if (command[3] === "kill-pane") {
+          killedPanes.push(command[5] ?? "");
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
@@ -2088,15 +2041,16 @@ describe("ProcessManager", () => {
       },
     });
 
-    // The spawn itself (tmux window, locator, generation) already
+    // The spawn itself (tmux pane, locator, generation) already
     // succeeded before this save runs — only persisting that fact failed.
     // Treating this like a launch failure would roll back the tracked
-    // locator and requeue the tree while a real window keeps running, so
-    // instead the window is killed directly and the failure propagates
-    // distinctly (see `SpawnPersistenceFailure`).
+    // locator and requeue the tree while a real process keeps running, so
+    // instead exactly that pane is killed (never its whole window, which a
+    // resurrected root can share with live sibling worker panes) and the
+    // failure propagates distinctly (see `SpawnPersistenceFailure`).
     await expect(processes.spawnRoot(root)).rejects.toThrow("disk full");
 
-    expect(killedWindows).toEqual(["@42"]);
+    expect(killedPanes).toEqual(["%1"]);
     expect(state.trees[root]).toMatchObject({
       generation: 1,
       status: "active",
@@ -2380,9 +2334,8 @@ describe("ProcessManager", () => {
   it("gracefully stops the root and every worker under the tree via their own shim sockets before removing their claims", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2453,9 +2406,8 @@ describe("ProcessManager", () => {
     // leg must be skipped unconditionally.
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2509,9 +2461,8 @@ describe("ProcessManager", () => {
   it("kills only a timed-out worker's own pane on a tree close, leaving a sibling that closed gracefully untouched", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2647,9 +2598,8 @@ describe("ProcessManager", () => {
   it("tolerates killing a pane tmux already reaped without logging it as a failure", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2685,9 +2635,8 @@ describe("ProcessManager", () => {
   it("is idempotent: a second concurrent closeTree call awaits the same in-flight close instead of stopping each locator twice", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2735,9 +2684,8 @@ describe("ProcessManager", () => {
     // `shutdown()`, before its own `closed` promise ever resolves.
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2785,9 +2733,8 @@ describe("ProcessManager", () => {
     const stateFile = path.join(stateDir, "state.json");
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2846,9 +2793,8 @@ describe("ProcessManager", () => {
   it("treats a socket error while waiting for a graceful close as unconfirmed, falling through to the kill instead of a false success", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
-    if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = {
-      ...state.trees[root].locator,
+      ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
       socketPath: "/state/workers/architect.sock",
     };
@@ -2989,7 +2935,7 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     // The failed-to-stop claim's own locator is untouched -- it is the only durable handle left
     // on a pane that might still be alive.
-    expect(claim.locator?.tmuxPaneId).toBe("%7");
+    expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%7");
   });
 
   it("revokes the root architect's and every worker's session capability when closing a tree", async () => {
@@ -3872,7 +3818,7 @@ describe("ProcessManager", () => {
     await flushEventLoopUntil(
       () =>
         managedState.controllerLocator !== undefined &&
-        managedState.controllerLocator.tmuxWindowId !== staleLocator.tmuxWindowId,
+        tmuxFields(managedState.controllerLocator)?.tmuxWindowId !== staleLocator.tmuxWindowId,
       20_000
     );
 
@@ -3986,7 +3932,9 @@ describe("ProcessManager", () => {
       true
     );
     expect(windowCount).toBe(2);
-    expect(managedState.controllerLocator?.tmuxWindowId).not.toBe(firstLocator?.tmuxWindowId);
+    expect(tmuxFields(managedState.controllerLocator)?.tmuxWindowId).not.toBe(
+      tmuxFields(firstLocator)?.tmuxWindowId
+    );
   });
 
   it("a stale registration-deadline expiry no-ops once a newer locator has replaced the one it observed", async () => {
@@ -4045,7 +3993,7 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     const freshLocator = managedState.controllerLocator;
     expect(freshLocator).toBeDefined();
-    expect(freshLocator?.tmuxWindowId).not.toBe(staleLocator.tmuxWindowId);
+    expect(tmuxFields(freshLocator)?.tmuxWindowId).not.toBe(staleLocator.tmuxWindowId);
     panesAlive = true;
 
     // The stale wait's own timer finally fires, late -- it must recognize itself as superseded
@@ -5361,8 +5309,7 @@ describe("ProcessManager", () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.trees[root].locator = {
-      ...state.trees[root].locator,
-      runtime: "tmux",
+      ...recordedTmuxLocator(state),
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       socketPath: "/state/workers/sjawhar__legion-42-architect.sock",
@@ -5603,7 +5550,7 @@ describe("ProcessManager", () => {
       try {
         await processes.spawnRoot(root);
         expect(await processes.probe(root)).toBe("alive");
-        const firstWindowId = state.trees[root]?.locator?.tmuxWindowId;
+        const firstWindowId = tmuxFields(state.trees[root]?.locator)?.tmuxWindowId;
         if (!firstWindowId) throw new Error("live root is missing its tmux window id");
         await commandRunner(["tmux", "-L", session, "kill-pane", "-t", firstWindowId]);
         expect(await processes.probe(root)).toBe("dead");
@@ -5869,8 +5816,8 @@ describe("ProcessManager", () => {
     if (!plannerClaim || !("issue" in plannerClaim) || !testerClaim || !("issue" in testerClaim)) {
       throw new Error("both worker claims must be recorded");
     }
-    expect(plannerClaim.locator?.tmuxWindowId).toBe("@99");
-    expect(testerClaim.locator?.tmuxWindowId).toBe("@99");
+    expect(tmuxFields(plannerClaim.locator)?.tmuxWindowId).toBe("@99");
+    expect(tmuxFields(testerClaim.locator)?.tmuxWindowId).toBe("@99");
   });
 
   it("retires its own just-opened pane and reports TreeClosingError, not a launch failure, when the tree starts closing while the pane was opening", async () => {
@@ -6093,7 +6040,7 @@ describe("ProcessManager", () => {
     const token = roleToken("omp", child, "tester");
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("claim was discarded on StopFailed");
-    expect(claim.locator?.tmuxPaneId).toBe("%201");
+    expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%201");
     // This claim never existed before this launch, so freshClaim's carry-over
     // (`claim?.launchFailures ?? 0`) has nothing to carry and starts at 0 — never reset by a
     // mere relaunch; only accumulated across retries and cleared by /worker/started.
@@ -6267,7 +6214,7 @@ describe("ProcessManager", () => {
     for (const token of [plannerToken, implementerToken]) {
       const claim = managedState.roles[token];
       if (!claim || !("issue" in claim)) throw new Error(`${token} claim disappeared`);
-      expect(claim.locator?.tmuxWindowId).toBe("@99");
+      expect(tmuxFields(claim.locator)?.tmuxWindowId).toBe("@99");
     }
 
     await processes.spawnWorker(root, root, "reviewer", "review #41");
@@ -6558,7 +6505,11 @@ describe("ProcessManager", () => {
         // during the planner's own earlier resume `saveState` call. `%301` is the pane id only
         // the fresh promoted-relaunch's split-window mock reports, so this fires exactly once,
         // after the actual promotion lands.
-        if (testerClaim && "issue" in testerClaim && testerClaim.locator?.tmuxPaneId === "%301") {
+        if (
+          testerClaim &&
+          "issue" in testerClaim &&
+          tmuxFields(testerClaim.locator)?.tmuxPaneId === "%301"
+        ) {
           resolvePromoted?.();
         }
       },
@@ -9160,7 +9111,7 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("claim disappeared");
     expect(claim.locator).toBeDefined();
-    expect(claim.locator?.tmuxPaneId).toBe("%50");
+    expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%50");
     expect(claim.pendingAssignment).toBe("task2");
     expect(claim.resumeSessionFile ?? claim.locator?.ompSessionFile).toBe(resumeFile);
     // Whichever race order wins, the decision still funnels through `launchWorker`'s
@@ -9220,7 +9171,7 @@ describe("ProcessManager", () => {
           !("issue" in current) ||
           !current.locator ||
           current.generation !== capturedGeneration ||
-          current.locator.tmuxPaneId !== capturedPaneId
+          tmuxFields(current.locator)?.tmuxPaneId !== capturedPaneId
         ) {
           throw new Error("Stale worker generation");
         }
@@ -9247,7 +9198,7 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("claim disappeared");
     expect(claim.sessionId).toBe("ses_confirmed");
-    expect(claim.locator?.tmuxPaneId).toBe("%9");
+    expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%9");
     expect(claim.generation).toBe(3);
     expect(claim.launchFailures).toBeUndefined();
     expect(commands.some((command) => command[3] === "kill-pane")).toBeFalse();
@@ -9303,7 +9254,7 @@ describe("ProcessManager", () => {
           !("issue" in current) ||
           !current.locator ||
           current.generation !== capturedGeneration ||
-          current.locator.tmuxPaneId !== capturedPaneId
+          tmuxFields(current.locator)?.tmuxPaneId !== capturedPaneId
         ) {
           throw new Error("Stale worker generation");
         }
@@ -9464,7 +9415,7 @@ describe("ProcessManager", () => {
     const launchedClaim = managedState.roles[token];
     if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("tester claim disappeared");
     expect(launchedClaim.locator).toBeDefined();
-    expect(launchedClaim.locator?.tmuxPaneId).toBe("%301");
+    expect(tmuxFields(launchedClaim.locator)?.tmuxPaneId).toBe("%301");
     expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
   });
 
@@ -9712,8 +9663,8 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
-    if (state.trees[root]?.locator) state.trees[root].locator.tmuxPaneId = "%42";
-    const recordedPaneId = state.trees[root]?.locator?.tmuxPaneId;
+    recordedTmuxLocator(state).tmuxPaneId = "%42";
+    const recordedPaneId = tmuxFields(state.trees[root]?.locator)?.tmuxPaneId;
     if (!recordedPaneId) throw new Error("test root tree is missing its own recorded pane id");
     const commands: string[][] = [];
     const { manager: processes } = manager(state, {
@@ -9746,7 +9697,7 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.reconcileTmuxWindows(0);
+    await processes.reconcileOrphans(0);
 
     const killedPanes = commands
       .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
@@ -9761,8 +9712,7 @@ describe("ProcessManager", () => {
     // `tree()`'s default now carries a `tmuxPaneId` (needed by the graceful-stop tests
     // elsewhere in this file) -- reconstructed without it here to restore the pre-backfill
     // state this exemption protects.
-    const rootLocator = state.trees[root]?.locator;
-    if (!rootLocator) throw new Error("test setup expects tree() to have recorded a root locator");
+    const rootLocator = recordedTmuxLocator(state);
     const { tmuxPaneId: _rootPaneId, ...rootLocatorWithoutPaneId } = rootLocator;
     const rootTree = state.trees[root];
     if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
@@ -9820,7 +9770,7 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.reconcileTmuxWindows(0);
+    await processes.reconcileOrphans(0);
 
     const killedPanes = commands
       .filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
@@ -9836,8 +9786,7 @@ describe("ProcessManager", () => {
     // elsewhere in this file) -- reconstructed without it here to restore the pre-backfill
     // state this test exercises (see the exemption test above for the same invariant asserted
     // directly).
-    const rootLocator = state.trees[root]?.locator;
-    if (!rootLocator) throw new Error("test setup expects tree() to have recorded a root locator");
+    const rootLocator = recordedTmuxLocator(state);
     const { tmuxPaneId: _rootPaneId, ...rootLocatorWithoutPaneId } = rootLocator;
     const rootTree = state.trees[root];
     if (!rootTree) throw new Error("test setup expects tree() to have recorded a root tree");
@@ -9879,7 +9828,7 @@ describe("ProcessManager", () => {
     });
 
     expect(await processes.probe(root)).toBe("alive");
-    expect(state.trees[root]?.locator?.tmuxPaneId).toBe("%42");
+    expect(tmuxFields(state.trees[root]?.locator)?.tmuxPaneId).toBe("%42");
 
     await processes.ensureController();
     expect(state.controllerLocator?.tmuxPaneId).toBe("%43");

@@ -16,7 +16,8 @@ import { roleToken } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import type { DaemonConfig } from "../config";
 import { newLegionState } from "../legion-state";
-import { ProcessManager, type ProcessManagerDeps } from "../processes";
+import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
 
 const SESSION = "legion-smoke-T8Shutdown";
@@ -176,31 +177,51 @@ function config(
   };
 }
 
+/** Builds `ProcessManager` deps over a real `TmuxRuntime` on the fixture's private server. `run`
+ * and `connectWorkerRpc` default to the real thing; a test that needs a fake supplies its own. */
 function processManagerDeps(
   cfg: DaemonConfig,
   state: ReturnType<typeof newLegionState>,
-  commands?: string[][]
+  commands?: string[][],
+  overrides: {
+    run?: ProcessManagerDeps["run"];
+    connectWorkerRpc?: TmuxRuntimeDeps["connectWorkerRpc"];
+  } = {}
 ): ProcessManagerDeps {
-  return {
-    state,
-    saveState: async () => {},
-    config: cfg,
-    ompInvocation: cfg.ompInvocation,
-    panePath: process.env.PATH ?? "",
-    credentialHelper: "!true",
-    run: commands
+  const runner: ProcessManagerDeps["run"] =
+    overrides.run ??
+    (commands
       ? async (command, options) => {
           commands.push(command);
           return run(command, options);
         }
-      : run,
+      : run);
+  const runtime = new TmuxRuntime({
+    tmux: { run: runner, socket: `legion-${state.project}` },
+    project: state.project,
+    stateDir: cfg.stateDir,
+    connectWorkerRpc:
+      overrides.connectWorkerRpc ??
+      ((socketPath) => import("../worker-rpc").then((m) => m.connectWorkerRpc(socketPath))),
+    workerRpcTimeoutMs: () => cfg.workerRpcTimeoutSeconds * 1000,
+    now: () => Date.now(),
+    issueLocators: (issue) => locatorsForIssue(state, issue),
+    persist: async () => {},
+  });
+  return {
+    state,
+    saveState: async () => {},
+    config: cfg,
+    runtime,
+    ompInvocation: cfg.ompInvocation,
+    panePath: process.env.PATH ?? "",
+    credentialHelper: "!true",
+    run: runner,
     natsPublish: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    connectWorkerRpc: (socketPath) =>
-      import("../worker-rpc").then((m) => m.connectWorkerRpc(socketPath)),
     provisioningToken: async () => "installation-token",
     workerCatchup: {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
@@ -283,11 +304,10 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     const reachedLease = Promise.withResolvers<void>();
     const leaseGate = Promise.withResolvers<void>();
     const cfg = config(stateDir, 0, { treeStopTimeoutSeconds: 5 });
-    const deps: ProcessManagerDeps = {
-      ...processManagerDeps(cfg, state),
+    const deps = processManagerDeps(cfg, state, undefined, {
       run: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
       connectWorkerRpc: async () => fakeClient,
-    };
+    });
     const processes = new ProcessManager(deps);
     let daemon: LegionApi | undefined;
     try {

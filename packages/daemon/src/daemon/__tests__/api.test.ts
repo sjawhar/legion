@@ -709,6 +709,7 @@ describe("Legion HTTP API", () => {
         launchFailures: 0,
         readyConfirmedAt: now,
         locator: {
+          runtime: "tmux",
           tmuxSession: "legion-omp",
           tmuxWindowId: "@1",
           tmuxPaneId: "%1",
@@ -716,9 +717,19 @@ describe("Legion HTTP API", () => {
         },
       },
     });
+    // The tree locator projection is exact: the runtime discriminant and session file come
+    // through, the shim `socketPath` the fixture carries never does.
+    expect((body.trees as Record<string, { locator: unknown }>)[root]?.locator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+      ompSessionFile: "/tmp/root.jsonl",
+    });
     expect(body.admission).toEqual({ cap: 2, active: [], queue: [] });
     expect(body.gates).toEqual({ [root]: { designAskId: "ask-1", designApproved: "ask-1" } });
     expect(body.controllerLocator).toEqual({
+      runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
@@ -733,6 +744,7 @@ describe("Legion HTTP API", () => {
         readyConfirmedAt: now,
         launchFailures: 1,
         locator: {
+          runtime: "tmux",
           tmuxSession: "legion-omp",
           tmuxWindowId: "@2",
           tmuxPaneId: "%2",

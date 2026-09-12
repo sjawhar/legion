@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -730,6 +731,34 @@ describe("TmuxRuntime", () => {
     expect(harness.server.commands.filter((c) => c[3]?.startsWith("kill-"))).toEqual([
       tmuxArgv("kill-window", "-t", "@90"),
     ]);
+  });
+});
+
+describe("ProcessManager stays runtime-agnostic", () => {
+  const source = readFileSync(path.resolve(import.meta.dir, "../processes.ts"), "utf8");
+
+  it.each([
+    "tmux.",
+    "prepareSocket",
+    "writePaneSecret",
+    "launchShimmedProcess",
+    "workerClient(",
+    "recordedWindowId",
+    "rewriteIssueWindowId",
+    "probedWindowId",
+    "reconcileTmuxWindows",
+  ])("processes.ts never references %s", (symbol) => {
+    expect(source.split(symbol).length - 1).toBe(0);
+  });
+
+  it("processes.ts never branches on locator.runtime", () => {
+    expect(/locator\.runtime|runtime ===/.test(source)).toBe(false);
+  });
+
+  it("processes.ts imports no tmux or secret-writing module", () => {
+    expect(source).not.toMatch(
+      /from "\.\/tmux"|writeSecretFile|connectWorkerRpc|readProcessCmdline/
+    );
   });
 });
 

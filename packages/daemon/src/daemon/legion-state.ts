@@ -3,7 +3,7 @@ import path from "node:path";
 import { assertLegionProjectToken, type IssueKey, isLegionProjectToken } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
-import type { TmuxLocator } from "./runtime";
+import type { Locator } from "./runtime";
 
 /** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
 export type UpdateSource = "webhook" | "resync";
@@ -62,7 +62,7 @@ export interface IssueNode {
 export interface TreeState {
   root: IssueKey;
   generation: number;
-  locator?: TmuxLocator;
+  locator?: Locator;
   status: "queued" | "active" | "lingering" | "dead" | "launch-failed" | "closed";
   lingerUntil?: string;
   launchFailures: number;
@@ -108,7 +108,7 @@ export interface WorkerRoleClaim {
    * `sessionId` is intentionally established earlier by `/worker/started` for capability auth. */
   readyConfirmedAt?: number;
   agentId?: string;
-  locator?: TmuxLocator;
+  locator?: Locator;
   generation?: number;
   pendingAssignment?: string;
   launchFailures?: number;
@@ -154,7 +154,7 @@ export interface LegionState {
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
-  controllerLocator?: TmuxLocator;
+  controllerLocator?: Locator;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;

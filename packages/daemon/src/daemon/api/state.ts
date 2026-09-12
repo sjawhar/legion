@@ -1,8 +1,41 @@
 import type { DaemonStateResponse } from "@legion/contracts";
 import type { ControllerRoleClaim, LegionState, RoleClaim, WorkerRoleClaim } from "../legion-state";
+import type { Locator } from "../runtime";
 
 function isWorkerRoleClaim(claim: RoleClaim): claim is WorkerRoleClaim {
   return "issue" in claim;
+}
+
+/** The projected shape of one locator: its runtime discriminant and the runtime's own
+ * addressing fields, never a `socketPath`; `ompSessionFile` only for a tree locator
+ * (`withSession`). Exhaustive over `Locator["runtime"]` — this is the one place outside the
+ * runtimes themselves that reads runtime-specific fields, purely to redact them. */
+function redactLocator<WithSession extends boolean>(
+  locator: Locator,
+  withSession: WithSession
+): WithSession extends true
+  ? NonNullable<DaemonStateResponse["trees"][string]["locator"]>
+  : NonNullable<DaemonStateResponse["controllerLocator"]> {
+  const session = withSession ? { ompSessionFile: locator.ompSessionFile } : {};
+  switch (locator.runtime) {
+    case "tmux":
+      return {
+        runtime: locator.runtime,
+        tmuxSession: locator.tmuxSession,
+        tmuxWindowId: locator.tmuxWindowId,
+        tmuxPaneId: locator.tmuxPaneId,
+        ...session,
+      };
+    case "kubernetes":
+      return {
+        runtime: locator.runtime,
+        namespace: locator.namespace,
+        podName: locator.podName,
+        podUid: locator.podUid,
+        pvcName: locator.pvcName,
+        ...session,
+      };
+  }
 }
 
 function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
@@ -17,11 +50,7 @@ function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
     sessionId: claim.sessionId,
     readyConfirmedAt: claim.readyConfirmedAt,
     launchFailures: claim.launchFailures,
-    locator: claim.locator && {
-      tmuxSession: claim.locator.tmuxSession,
-      tmuxWindowId: claim.locator.tmuxWindowId,
-      tmuxPaneId: claim.locator.tmuxPaneId,
-    },
+    locator: claim.locator && redactLocator(claim.locator, false),
   };
 }
 
@@ -52,12 +81,7 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
       generation: tree.generation,
       launchFailures: tree.launchFailures,
       readyConfirmedAt: tree.readyConfirmedAt,
-      locator: tree.locator && {
-        tmuxSession: tree.locator.tmuxSession,
-        tmuxWindowId: tree.locator.tmuxWindowId,
-        tmuxPaneId: tree.locator.tmuxPaneId,
-        ompSessionFile: tree.locator.ompSessionFile,
-      },
+      locator: tree.locator && redactLocator(tree.locator, true),
     };
   }
 
@@ -82,11 +106,7 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
       queue: [...state.admission.queue],
     },
     gates,
-    controllerLocator: state.controllerLocator && {
-      tmuxSession: state.controllerLocator.tmuxSession,
-      tmuxWindowId: state.controllerLocator.tmuxWindowId,
-      tmuxPaneId: state.controllerLocator.tmuxPaneId,
-    },
+    controllerLocator: state.controllerLocator && redactLocator(state.controllerLocator, false),
     roles,
     controllerPendingNotices: state.controllerPendingNotices.length,
     pendingStatusWrites: Object.keys(state.pendingStatusWrites),
