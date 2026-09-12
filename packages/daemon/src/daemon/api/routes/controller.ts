@@ -20,13 +20,19 @@ export async function handleControllerReady(
     role: "controller",
     sessionId,
   };
+  // Rule: the file recorded on `controllerLocator` is always the daemon pane's own transcript.
+  // The extension reports one only from that pane's own lifecycle (its session start, or a
+  // session switch typed into it); the `/legion-claim-controller` takeover from a hand-started
+  // session omits it, so a takeover claim moves the role and session id here but leaves the
+  // pane's recorded file untouched — a dead pane is never resumed into an operator's live
+  // transcript. An older plugin that omits the field likewise leaves the recorded file alone.
+  // With no recorded pane at all the file is logged and dropped: the daemon never invents a
+  // locator (plan decision D2).
   const ompSessionFile = body.ompSessionFile;
   if (typeof ompSessionFile === "string" && ompSessionFile.length > 0) {
     if (ctx.deps.state.controllerLocator) {
       ctx.deps.state.controllerLocator.ompSessionFile = ompSessionFile;
     } else {
-      // A `/legion-claim-controller` from a hand-started session has no daemon pane to resume
-      // into; the daemon must not invent a locator for it.
       console.warn(
         "[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it"
       );

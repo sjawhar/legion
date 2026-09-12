@@ -283,7 +283,22 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
-  const claimController = async (context: CommandContext | SessionContext): Promise<void> => {
+  /**
+   * Claims the controller role for the context's session and posts `/controller/ready`. The
+   * transcript the daemon records on its controller locator — and later `--resume`s into a fresh
+   * pane — must be the daemon pane's own, so `reportTranscript` is true only from that pane's own
+   * lifecycle (its session start, and a session switch typed into it). The
+   * `/legion-claim-controller` takeover from a hand-started session passes false: it takes the
+   * role and the daemon's recorded session id, but leaves the pane's recorded file untouched, so a
+   * dead pane is never resumed into an operator's live transcript. A missing transcript on the
+   * pane path is a boot failure, exactly as it is for a root architect. The regain re-run below
+   * omits the transcript on purpose: the daemon keeps a recorded file when a later claim omits
+   * the field, and a takeover session must never become the pane's resume target.
+   */
+  const claimController = async (
+    context: CommandContext | SessionContext,
+    options: { readonly reportTranscript: boolean }
+  ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const daemon = createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
     const secret = controllerCapability ?? requiredControllerCapability(process.env);
@@ -291,11 +306,14 @@ export default function legionExtension(pi: PiApi): void {
     const { project } = await daemon.state();
     const token = controllerToken(project);
     await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
-    // The daemon resumes this transcript (`--resume`) when it respawns a dead controller pane, so
-    // the conversation Sami is having in the TUI survives. A missing transcript is a boot failure,
-    // exactly as it is for a root architect.
-    const { sessionFile } = await persistedTranscript(context);
-    await daemon.controllerReady({ secret, sessionId: sessionID, ompSessionFile: sessionFile });
+    const ompSessionFile = options.reportTranscript
+      ? (await persistedTranscript(context)).sessionFile
+      : undefined;
+    await daemon.controllerReady({
+      secret,
+      sessionId: sessionID,
+      ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+    });
     controllerSessionID = sessionID;
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
@@ -303,6 +321,23 @@ export default function legionExtension(pi: PiApi): void {
         daemon.controllerReady({ secret, sessionId: sessionID })
       );
     });
+  };
+
+  /** `/new`, `/resume`, or `/fork` typed into the controller pane replaces the session id and its
+   * transcript. Re-claim so the Envoy role, the daemon's recorded session id, the transcript the
+   * daemon would resume, and the `controllerSessionID` that keeps `bash` wrapped all follow the
+   * new session; otherwise the merge queue is stranded until the pane dies. A failed re-claim is
+   * reported to the operator sitting at the pane rather than thrown out of the handler. */
+  const reclaimControllerAfterSessionChange = async (context: SessionContext): Promise<void> => {
+    if (classifySession(process.env).kind !== "controller") return;
+    try {
+      await claimController(context, { reportTranscript: true });
+    } catch (error) {
+      context.ui.notify(
+        `legion: re-claiming the controller for this session failed (${messageFor(error)}); controller wakes and merges will not reach this session until it succeeds`,
+        "warning"
+      );
+    }
   };
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -568,7 +603,7 @@ export default function legionExtension(pi: PiApi): void {
       case "controller": {
         const sessionID = context.sessionManager.getSessionId();
         if (controllerSessionID === undefined || controllerSessionID === sessionID) {
-          await claimController(context);
+          await claimController(context, { reportTranscript: true });
         }
         return;
       }
@@ -587,6 +622,12 @@ export default function legionExtension(pi: PiApi): void {
         return;
     }
   });
+
+  // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
+  // navigation carries no reason, and every one of them can leave the pane on a new session id.
+  pi.on("session_switch", (_event, context) => reclaimControllerAfterSessionChange(context));
+  pi.on("session_branch", (_event, context) => reclaimControllerAfterSessionChange(context));
+  pi.on("session_tree", (_event, context) => reclaimControllerAfterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
@@ -663,8 +704,7 @@ export default function legionExtension(pi: PiApi): void {
     if (active === undefined) {
       // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
       // authenticated by the controller capability) and is wrapped exactly like a worker. The
-      // client is recovery-less on purpose: a controller 403 is a wrong secret to surface, never
-      // a worker session to "recover".
+      // client is recovery-less: no recovery token exists for the controller.
       if (
         controllerSessionID !== undefined &&
         controllerSessionID === sessionID &&
@@ -758,6 +798,8 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-claim-controller", {
     description: "Claim the Legion controller role and register daemon authority for this session",
-    handler: async (_args, context) => claimController(context),
+    // An interactive takeover: the role and the recorded session id move to this session, the
+    // daemon pane's recorded transcript does not (see `claimController`).
+    handler: async (_args, context) => claimController(context, { reportTranscript: false }),
   });
 }

@@ -744,13 +744,11 @@ describe("Legion OMP extension", () => {
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
+      // The takeover command moves the role and session id but never reports a transcript: the
+      // daemon pane's recorded file must stay the pane's own.
       {
         path: "/legion/v1/controller/ready",
-        body: {
-          secret: "controller-secret",
-          sessionId: "ses_interactive",
-          ompSessionFile: "/tmp/session.jsonl",
-        },
+        body: { secret: "controller-secret", sessionId: "ses_interactive" },
       },
     ]);
   });
@@ -1102,11 +1100,7 @@ describe("Legion OMP extension", () => {
       {
         method: "POST",
         path: "/legion/v1/controller/ready",
-        body: {
-          secret: "controller-capability",
-          sessionId: "ses_interactive",
-          ompSessionFile: "/tmp/session.jsonl",
-        },
+        body: { secret: "controller-capability", sessionId: "ses_interactive" },
       },
     ]);
   });
@@ -1570,11 +1564,7 @@ describe("Legion OMP extension", () => {
       },
       {
         path: "/legion/v1/controller/ready",
-        body: {
-          secret: "file-controller-secret",
-          sessionId: "ses_interactive",
-          ompSessionFile: "/tmp/session.jsonl",
-        },
+        body: { secret: "file-controller-secret", sessionId: "ses_interactive" },
       },
     ]);
   });
@@ -2043,8 +2033,94 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: 'POST /legion/v1/grants failed with 403: {"error":"Invalid controller capability"}',
     });
-    // A controller 403 is surfaced as-is: the recovery-less client never tries /worker-session.
-    expect(requests.some((request) => request.path === "/legion/v1/worker-session")).toBe(false);
+  });
+  test("re-claims the controller and re-reports its transcript when a session switch typed into the pane changes the session id, keeping bash wrapped", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({
+          grantId: `grant-for-${body?.sessionId}`,
+          expiresAt: "2099-01-01T00:00:00Z",
+        });
+      }
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const sessionSwitch = fixture.handlers.get("session_switch");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || sessionSwitch === undefined || toolCall === undefined) {
+      throw new Error("controller lifecycle handlers were not registered");
+    }
+    await sessionStart({}, sessionContext("ses_pane_first", "/tmp/first.jsonl"));
+
+    // Sami types /new into the pane: OMP moves it to a fresh session id and transcript.
+    const switched = sessionContext("ses_pane_second", "/tmp/second.jsonl");
+    await sessionSwitch({ reason: "new" }, switched);
+
+    expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
+      {
+        path: "/legion/v1/controller/ready",
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_pane_first",
+          ompSessionFile: "/tmp/first.jsonl",
+        },
+      },
+      {
+        path: "/legion/v1/controller/ready",
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_pane_second",
+          ompSessionFile: "/tmp/second.jsonl",
+        },
+      },
+    ]);
+    expect(requests.filter((request) => request.path === "/v1/roles/set").at(-1)).toEqual({
+      path: "/v1/roles/set",
+      body: { session_id: "ses_pane_second", role: "legion-omp-controller" },
+    });
+
+    const result = await toolCall(
+      { toolName: "bash", toolCallId: "call-after-switch", input: { command: "legion state" } },
+      switched
+    );
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("input" in result) ||
+      typeof result.input !== "object" ||
+      result.input === null ||
+      !("command" in result.input) ||
+      typeof result.input.command !== "string"
+    ) {
+      throw new Error("the switched controller session's shell was not rewritten with a grant");
+    }
+    expect(result.input.command.split("\n")[0]).toBe(
+      "export LEGION_GRANT='grant-for-ses_pane_second'"
+    );
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/grants",
+      body: { sessionId: "ses_pane_second", secret: "controller-secret" },
+    });
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
