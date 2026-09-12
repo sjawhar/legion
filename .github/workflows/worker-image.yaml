@@ -1,0 +1,205 @@
+name: Worker Image
+
+on:
+  workflow_call:
+    inputs:
+      cli_version:
+        description: Version the `cli` job released in this run (empty when it released nothing)
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: The cli-v* release to append the image digest to (empty when cli_version is empty)
+        type: string
+        required: false
+        default: ""
+  # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
+  workflow_dispatch:
+    inputs:
+      cli_version:
+        description: Optional CLI version to also tag the image with (main only)
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: Optional cli-v* release to append the digest to (main only)
+        type: string
+        required: false
+        default: ""
+  # Pre-merge iteration: a pull request against main that touches the image files builds its head and
+  # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
+  # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
+  # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
+  # a PR head with no image check (LEGION-23 tester round 1).
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - packages/daemon/docker/**
+      - packages/daemon/src/daemon/omp-pin.ts
+      - .github/workflows/worker-image.yaml
+
+# Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
+# takes no fork PRs).
+permissions:
+  contents: write # gh release edit
+  packages: write # ghcr.io push
+  id-token: write # solely for the optional ECR mirror's aws-actions/configure-aws-credentials OIDC
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
+    # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
+    # Two pushes to one PR serialize on the PR number; other events serialize on the ref.
+    concurrency:
+      group: worker-image-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/sjawhar/legion-worker
+      # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
+      # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
+      BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.BUILT_SHA }}
+
+      - name: Compute tags
+        id: meta
+        env:
+          CLI_VERSION: ${{ inputs.cli_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          short="${BUILT_SHA::12}"
+          tags="${IMAGE}:sha-${short}"
+          tag_release="false"
+          version_label="sha-$short"
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$CLI_VERSION" ]; then
+            tags="${tags}"$'\n'"${IMAGE}:${CLI_VERSION}"
+            version_label="$CLI_VERSION"
+            [ -n "$RELEASE_TAG" ] && tag_release="true"
+          fi
+          {
+            echo "built_sha=$BUILT_SHA"
+            echo "short=$short"
+            echo "tag_release=$tag_release"
+            echo "version_label=$version_label"
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/daemon/docker/worker.Dockerfile
+          # The OMP fork release ships linux-x64 (and darwin-arm64) only.
+          platforms: linux/amd64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          test -n "$DIGEST"
+          {
+            echo "### Worker image"
+            echo
+            echo "\`${IMAGE}@${DIGEST}\`"
+            echo
+            echo "Tags:"
+            # shellcheck disable=SC2016 # literal backticks and a sed `$` anchor, no expansion wanted
+            printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
+            echo
+            echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Append digest to the CLI release
+        if: steps.meta.outputs.tag_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          if grep -q "$DIGEST" body.md; then
+            echo "Release $RELEASE_TAG already lists $DIGEST"
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+          printf '\n\n## Worker image\n\n`%s@%s`\n' "$IMAGE" "$DIGEST" >> body.md
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
+
+      - name: Decide ECR mirror
+        id: ecr
+        env:
+          AWS_ECR_PUBLISH_ROLE_ARN: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          # main only, before the variable checks: the publish role trusts refs/heads/main alone, so a PR
+          # or non-main dispatch run would fail AssumeRole after the GHCR push — and would mirror a sha-
+          # image nobody pins. Repository variables are visible to same-repo pull_request runs.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "ECR mirror skipped: not a main run" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          missing=""
+          [ -n "$AWS_ECR_PUBLISH_ROLE_ARN" ] || missing="$missing AWS_ECR_PUBLISH_ROLE_ARN"
+          [ -n "$AWS_ECR_REGISTRY" ] || missing="$missing AWS_ECR_REGISTRY"
+          [ -n "$AWS_REGION" ] || missing="$missing AWS_REGION"
+          if [ -n "$missing" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            for v in $missing; do echo "ECR mirror skipped: $v unset" >> "$GITHUB_STEP_SUMMARY"; done
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.ecr.outputs.enabled == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Mirror to ECR
+        if: steps.ecr.outputs.enabled == 'true'
+        env:
+          ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          # Manifest copy by digest (agent-c's mechanism); the GHCR digest stays authoritative.
+          printf '%s\n' "$TAGS" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create --tag "${ECR_REGISTRY}/legion-worker:${tag##*:}" "${IMAGE}@${DIGEST}"
+          done
+          echo "Mirrored to \`${ECR_REGISTRY}/legion-worker\` with the same tags; the GHCR digest \`${DIGEST}\` remains authoritative." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ECR mirror failure note
+        if: failure() && steps.ecr.outputs.enabled == 'true' && steps.build.outcome == 'success'
+        run: |
+          echo "ECR mirror failed after the GHCR push succeeded. The GHCR digest above is authoritative; retry the mirror by re-running the failed jobs (\`gh run rerun ${GITHUB_RUN_ID} --failed --repo ${GITHUB_REPOSITORY}\`) or pushing the branch again." >> "$GITHUB_STEP_SUMMARY"

@@ -11,7 +11,6 @@ readonly listener_port="${ENVOY_PORT:-19020}"
 readonly smoke_dispatch_project="LEGSMOKE"
 readonly daemon_port="${LEGION_DAEMON_PORT:-19370}"
 readonly nats_url="nats://127.0.0.1:${nats_port}"
-readonly omp_pin="github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934"
 LEGION_IMPLEMENT_APP_ID="${LEGION_IMPLEMENT_APP_ID:-3202636}"
 readonly LEGION_IMPLEMENT_APP_ID
 LEGION_REVIEW_APP_ID="${LEGION_REVIEW_APP_ID:-3202653}"
@@ -30,6 +29,10 @@ fail() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
+
+omp_pin="$(bun "${repo_root}/packages/daemon/src/daemon/omp-pin.ts")" \
+  || fail "could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)"
+readonly omp_pin
 
 require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"

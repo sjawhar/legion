@@ -173,7 +173,7 @@ function shellPath(value: string): string {
  * *inside* the pane process rather than carried by the daemon itself — the daemon never exports
  * provider keys to its own environment or to a pane's tmux `-e` argv. Each prefix element is
  * shell-quoted independently. Used for every OMP invocation the daemon builds: spawned
- * root/worker/controller panes (`processes.ts`) and the startup capability probes (`index.ts`) —
+ * root/worker/controller panes (`processes.ts`) and the startup capability probes (`boot-probes.ts`) —
  * one launch path, never duplicated. */
 export function withOmpLaunchPrefix(
   launchPrefix: readonly string[],
