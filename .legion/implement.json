@@ -212,5 +212,26 @@
       }
     },
     "notForThisRound": "`.legion/` deletion stays for the next, separate round (architect ruling); reviewer's local review.json commit (95d9b139, now rebased) rides along in this push as instructed"
+  },
+  "registryFix": {
+    "round": "3b (architect ruling on the rebase-round finding: rides in this PR as its own commit, since the PR hold makes a separate PR an indefinite deferral)",
+    "codeHead": "535ddb6ee80866aa80fef396cae19a3aba1fcf3a",
+    "onTopOf": "20b7bc67 (rebase-round code head) + the two rebase-round handoff commits",
+    "change": "legions-registry.ts withRegistryLock: mkdir(path.dirname(filePath), {recursive: true}) before the O_CREAT|O_EXCL open of legions.json.lock; the now-redundant mkdir in writeRegistry (only ever called under the lock, at its two call sites) removed",
+    "test": "legions-registry.test.ts 'creates the registry directory on first use and serializes concurrent writers into it': registry path under a nonexistent parent, two concurrent writeLegionEntry calls for different projects -> the file exists, both entries read back, a follow-up removeLegionEntry proceeds (lock released). Fails pre-fix with the same ENOENT (observed: 1 pass 1 fail), passes post-fix (2 pass). The existing suite had no serialization case, so this one covers both",
+    "verification": {
+      "unit": "bun test packages/daemon/src/daemon/__tests__/legions-registry.test.ts -> 2 pass, 0 fail",
+      "reproduction": {
+        "script": "/tmp/legion21-smoke/boot-check.sh with EXPECT=enoent|ok (fresh XDG_STATE_HOME: no legion/ dir pre-created), scratch state_dir /tmp/legion21-smoke/bootcheck/state, port 19380, own NATS 14224",
+        "preFix_20b7bc67": "mode: enoent - daemon logged `legion daemon listening on 127.0.0.1:19380` and `legion worker stream listening on 127.0.0.1:19381`, then exited 1 with `ENOENT: no such file or directory, open '.../xdg-state/legion/legions.json.lock'` at withRegistryLock (legions-registry.ts:90); xdg-state/legion never created",
+        "postFix_535ddb6e": "mode: ok - same fresh dir: both listening lines (daemon.log lines 1-2), ss shows 127.0.0.1:19380 and :19381 LISTEN on the daemon pid, GET /legion/v1/state served (v24, 0 trees), xdg-state/legion/legions.json created with {\"sjawhar/24\": {port: 19380, pid: <daemon>, startedAt: 2026-09-12T18:37:53Z}}, no tmux server forked, zero error lines, clean SIGTERM stop, ports/container released"
+      },
+      "tsc": "packages/daemon 0",
+      "biome": "packages/daemon/src: Checked 143 files, No fixes applied",
+      "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 932 pass, 0 skip, 0 fail, 56 files (931 + 1 new case)",
+      "tmuxServers": "no legion-omp / scratch server left; answering servers: default, l12rig (another agent's, appeared during this round), legion-sjawhar16 (LEGION-16 rig), legion-sjawharlegion (dogfood)",
+      "ci": "pending at handoff-write time; links recorded in the follow-up handoff commit and the PR body"
+    },
+    "untouched": "worker-rpc.ts, worker-stream-listener.ts, cli/worker-shim.ts, dogfood daemon, ~/.omp/profiles/legion; .legion/ kept"
   }
 }
