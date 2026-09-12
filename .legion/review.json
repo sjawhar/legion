@@ -1,0 +1,113 @@
+{
+  "spec": "dispatch://LEGION-11/spec (version 6; Acceptance 1-4, Design 1-5, Errors, Rejected)",
+  "reviewedHead": "672a69909571e13ed710108feb6ccd839bdd6805",
+  "codeHead": "70e0adf42d20 (docs(daemon) comment sweep; fix commit 4ed969ed8136)",
+  "base": "main abaf08175c9b (merge-base); main@origin had moved to 94146572 at review time — read-only `git merge-tree` of the head against it: no conflicts",
+  "verdict": "REQUEST_CHANGES",
+  "review": {
+    "id": 5189538006,
+    "url": "https://github.com/sjawhar/legion/pull/955#pullrequestreview-5189538006",
+    "state": "CHANGES_REQUESTED",
+    "submittedAt": "2026-09-13T04:31:19Z",
+    "commitId": "672a69909571e13ed710108feb6ccd839bdd6805"
+  },
+  "summaryForArchitect": "The executable change (index.ts block move) is correct and fully verified; nothing in code needs to change. Two blocking items are documentation/description only: (1) docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven.md:40-41 still prescribes the old boot order as '## The pattern' (missed by the sweep; not in the diff, so it is in the review body, not an inline thread); (2) the PR body misdescribes the head in four places (What-moved/Closure-audit name `enableWorkerPromotion()` and 'immediately before' it; Files lists worker-admission.ts and processes.ts which are no longer in the diff; CI line cites 36b0b8c5 not 672a6990; E2E cites round-1 evidence at f5cf98f5 instead of the tester's round-3 run at this code head). Seven non-blocking nits are inline threads. Recommended sequencing: one implementer push with the two-line doc fix + the nits it chooses + the PR body corrections, tester re-checks the docs-only diff, I review that head; then the .legion/ deletion push and I approve that head by SHA.",
+  "blocking": [
+    {
+      "id": "B1",
+      "file": "docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven.md",
+      "lines": "40-41",
+      "thread": "review body (file not in the diff; GitHub allows no inline thread)",
+      "finding": "'## The pattern' code block lists `NATS, ProcessManager, reconnectWorkers, pruneSecretFiles, event pump, pending-controller-notice drain/spawn, API bind, worker stream` — the pre-fix order this PR removes. Spec Design 5 / architect ruling: no comment or doc states the old order. Fix: `NATS, ProcessManager, event pump, API bind, worker stream, reconnectWorkers, pruneSecretFiles, pending-controller-notice drain/spawn`."
+    },
+    {
+      "id": "B2",
+      "file": "PR #955 body",
+      "thread": "review body",
+      "finding": "Stale after four rebases: (a) 'What moved' says 'immediately before `enableWorkerPromotion()`' — at the head the blocks run after the API + worker-stream listener and before the `stop` definition and the launch hold; the switch is `enableLaunches()` and runs after the hold; same stale name in 'Closure audit'. (b) 'Files' lists comment-only edits in worker-admission.ts and processes.ts — neither is in the diff (byte-equal to main after rebase4). (c) 'CI' cites run 34734617753 at 36b0b8c5; head 672a6990's run is 34736919459 (green). (d) 'E2E' cites round-1 evidence at f5cf98f5 and 'fails on current main (7add4d03)'; the tester's round 3 re-ran the hand check at this code head (main leg abaf0817, #980 prefix) — cite that."
+    }
+  ],
+  "nits": [
+    {
+      "file": "packages/daemon/src/daemon/index.ts",
+      "line": 551,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728485",
+      "note": "'Runs after api because ensureController mints…' is not the operative reason: the launch hold is on here, ensureController returns at its hold check (processes.ts:1419-1423) before the mint (1427); mint happens in replayHeldRecoveries() after the hold. Delete or reword."
+    },
+    {
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "line": 7729,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728486",
+      "note": "says `enableWorkerPromotion()`; index.ts calls `enableLaunches()` (which delegates). Say enableLaunches()."
+    },
+    {
+      "file": "packages/daemon/src/daemon/__tests__/index.test.ts",
+      "line": 845,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728489",
+      "note": "title's 'capability revoked through the live api' is unobservable (fresh in-memory CapabilityService at boot); suggest 'retirement dereferences the live api without throwing, …'."
+    },
+    {
+      "file": "packages/daemon/src/daemon/__tests__/index.test.ts",
+      "line": 912,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728490",
+      "note": "string filter looks for pre-#980 'worker reconnection failed'; add 'failed to reconcile worker' to match Acceptance 1 wording (TypeError clause already catches the regression)."
+    },
+    {
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 55,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728491",
+      "note": "drop 'LEGION-11; ' (history in a current-behaviour doc); keep the cross-reference."
+    },
+    {
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 68,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728492",
+      "note": "two bullets both titled 'Boot ordering in `startDaemonLocked`' (55 and 68) plus the index.ts comment restate the same invariant; fold into 55 or give 68 a distinct lead."
+    },
+    {
+      "file": "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md",
+      "line": 95,
+      "url": "https://github.com/sjawhar/legion/pull/955#discussion_r3998728493",
+      "note": "'Fixed by LEGION-11' bullet sits under '## Open edges (recorded, not fixed here)'; move a pointer to Related or delete."
+    },
+    {
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 130,
+      "url": "review body (line unchanged, no inline thread)",
+      "note": "pre-existing: says PANE_GONE_STDERR lives in processes.ts; it is in runtime-tmux.ts since #962. One word; the PR already edits this file."
+    }
+  ],
+  "verified": {
+    "bootOrderAtHead": "index.ts: probes start 279 (not awaited) → loadState 297 → NATS 341 → new TmuxRuntime 349 → new ProcessManager 361 → startEventPump 426 → api = startLegionApi( 489 → startWorkerStreamListener 502 → reconnectWorkers 533 → pruneSecretFiles 538 → controllerPendingNotices drain/ensureController 554 → const stop 580 → await probes 654 → enableLaunches() 674 → reconnectRoots 679 → reconcileAdmission 680 → reconcileWorkerAdmission 681 → replayHeldRecoveries 685.",
+    "noTopLevelAwait": "Scanned lines 361-532: every `await` is inside a closure (provisioningToken 378, emitOverseerCatchup 387-388, onUndeliverable 397/404, onProbe 418, emitResync 433/456, onControllerReady 480-481); zero at function top level before the moved block.",
+    "closures": "mintControllerCapability/mintBootToken/mintWorkerBootToken/revokeSessionCapability (index.ts:372-376) reachable only via HTTP handlers, NATS/timer callbacks, promotion gated by the launch hold, or the moved block; ProcessManager constructor (processes.ts:309-352) and startEventPump invoke none synchronously; api.revokeSessionCapability = auth.deleteCapability (api.ts:292), synchronous, in-memory.",
+    "placementBeforeHold": "Confirmed correct against main: index.ts:267-272 (#980) says 'state load, NATS, the API bind, and the worker reconnect all proceed while a probe is still retrying'; #980's AGENTS.md boot-ordering bullet also lists reconnectWorkers before the hold. Placing it after the hold would delay the worker probe behind the OMP probes — a behaviour change outside the spec.",
+    "concurrencyAtNewPosition": "API + NATS pump live during reconnectWorkers; every retirement re-validates under mutateClaim(token) with sameProcess identity (markWorkerDeadLocked processes.ts:778-788; retireUnconfirmedBoot 974-1032); no pane can open under the hold; unprobed claim counts as running. Traced spawn_worker/closeTree//controller/ready interleavings (thermonuclear-deep-review): none breaks.",
+    "regressionTest": {
+      "redOnMain": "git archive of main abaf0817 (index.ts byte-equal to main) + PR's index.test.ts only, bun install --frozen-lockfile, named test: 0 pass / 1 fail — `[legion] failed to reconcile worker legion-acme1-widgets-42-tester:` + `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')`. Rig: /tmp/legion11-review/main-red.",
+      "greenAtHead": "bun test packages/daemon/src/daemon/__tests__/index.test.ts -t 'retires a ready-confirmed worker' → 1 pass, 0 fail, 9 expect() calls.",
+      "contract": "Boots through real closures; asserts kill-pane once for %7, locator cleared with resumeSessionFile + sessionId kept, GET /legion/v1/state agrees, secret file ENOENT; log filter on instanceof TypeError so #980's new prefix is not pinned. kill-pane argv index and 'can't find pane' stderr match tmux.ts/runtime-tmux.ts PANE_GONE_STDERR."
+    },
+    "gates": {
+      "install": "bun install --frozen-lockfile → no changes",
+      "biome": "bunx biome check packages/daemon/src → exit 0",
+      "tsc": "cd packages/daemon && bunx tsc --noEmit → exit 0",
+      "bunTest": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon → 979 pass, 5 skip, 0 fail, 3957 expect() calls, 984 tests across 57 files"
+    },
+    "ci": "Tests run 34736919459 (https://github.com/sjawhar/legion/actions/runs/34736919459), pull_request, success at 672a69909571e13ed710108feb6ccd839bdd6805: pr-title, lint, typecheck, test all pass (gh pr checks). No `pr-checks-result` check exists on this repo; the Tests workflow's four jobs are the required set.",
+    "threads": "0 review threads and 0 reviews before mine; my review added 7 inline threads (all nits).",
+    "mergeability": "GitHub reported mergeable UNKNOWN (recomputing after main moved to 94146572 during the review); read-only `git merge-tree --write-tree 672a6990 <main@origin>` exit 0 → no conflicts.",
+    "e2e": "Tester round 3 artifacts inspected on disk: /tmp/legion11-smoke/main/ (SRC=/home/ubuntu/legion-ws-RunDaemon at abaf0817): daemon.log lines 29/36 `failed to reconcile worker …` + TypeError, state.json keeps locator, secrets/legion-sjawhar11-legsmoke-11-tester present (16 bytes, 0600). /tmp/legion11-smoke/branch/ (SRC=this workspace, code head 70e0adf4): daemon.log has only `failed to reconnect worker … ENOENT` (line 1) + `promotion trigger ignored: not yet enabled (still booting)`, state.json has no locator and keeps resumeSessionFile, secrets/ holds only dispatch-token. Matches .legion/test.json round3.",
+    "commentSweep": "grep over packages/daemon/src/daemon, docs/solutions: no remaining 'before `api`' / 'needs no `api` reference' statement; the only prescriptive old-order text is B1. AGENTS.md edit to #980's bullet is minimal and true (diffed old vs new word-by-word).",
+    "prBodyThermo": "Filled the **Thermo** line at 672a6990 via `legion gh -- pr edit 955 --body-file`; no other body line changed by me."
+  },
+  "thermo": {
+    "deepReview": "no blocking findings; 2 non-blocking (test title over-claim; LEGION-11 id in AGENTS.md:55)",
+    "codeQuality": "no blocking findings; 6 non-blocking (index.ts:550-551 reason; AGENTS.md duplicate bullets; launch-hold doc old order — promoted to B1; processes.test.ts:7729 identifier; refcounted doc heading; test title)"
+  },
+  "constraintsHonoured": "Production daemon (legion-sjawharlegion, port 13370) never restarted/stopped/reconfigured — it was down twice during this review on its own (04:09Z–04:11:51Z and ~04:20Z–04:25Z), which blocked bash grant minting; I waited via a port watcher. No new PR. No code edits. .omp/config.yml not committed.",
+  "nextRound": "Re-review the head that fixes B1 + B2 (and any nits folded in): confirm the docs-only diff, refreshed body, CI at that head; then, when the .legion/ deletion head lands, approve that exact SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T04:33:19.446Z"
+}
