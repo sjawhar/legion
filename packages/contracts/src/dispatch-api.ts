@@ -64,6 +64,7 @@ export interface Issue {
   readonly number: number;
   readonly title: string;
   readonly status: string;
+  readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
   readonly external_links: ExternalLink[];
@@ -77,7 +78,7 @@ export interface Issue {
 }
 
 export interface IssueSummary
-  extends Pick<Issue, "key" | "title" | "status" | "parent" | "updated_at" | "last_seq"> {
+  extends Pick<Issue, "key" | "title" | "status" | "rank" | "parent" | "updated_at" | "last_seq"> {
   readonly labels?: string[];
   readonly open_asks: number;
 }
@@ -546,9 +547,15 @@ export interface CreateIssueInput {
   readonly actor?: Actor;
 }
 
+export interface IssueRankInput {
+  readonly before?: string;
+  readonly after?: string;
+}
+
 export interface UpdateIssueInput {
   readonly title?: string;
   readonly status?: string;
+  readonly rank?: IssueRankInput;
   readonly labels?: string[];
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
@@ -713,6 +720,7 @@ export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
   status: z.string().optional(),
+  rank: z.string().optional(),
   route: z.string().nullish(),
 });
 

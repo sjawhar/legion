@@ -80,8 +80,8 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 		t.Fatalf("create test project: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into issues (key, project_key, number, title, created_by)
-		values ('DOC-1', 'DOC', 1, 'Document', '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('DOC-1', 'DOC', 1, 'Document', '{"kind":"user","id":"alice"}', 'U')
 		on conflict (key) do nothing
 	`); err != nil {
 		t.Fatalf("create test issue: %v", err)

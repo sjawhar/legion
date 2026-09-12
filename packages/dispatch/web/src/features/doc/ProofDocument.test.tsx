@@ -238,6 +238,7 @@ test("ProofDocument sets a hover title and navigates in-app for a dispatch:// li
     project: "CORE",
     route: null,
     status: "testing",
+    rank: "U",
     title: "Ship the release",
     open_asks: [],
     updated_at: "2026-09-09T00:00:00Z",

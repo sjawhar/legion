@@ -65,6 +65,8 @@ exactly one owner to every owner-scoped tool: `issue` for an issue, or `project`
 [References](#references) for the resulting ref shape). On first use, an external issue reference creates its native issue in the
 project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
 
+Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys rather than writing a priority value.
+
 Architects create newly tracked child work with:
 ```ts
 dispatch_issue({ project, title, parent?, external?, spec?, force? })

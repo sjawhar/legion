@@ -891,8 +891,8 @@ func seedIssue(t *testing.T, database *store.Store, key string, route *string) {
 		t.Fatalf("create project: %v", err)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
-		insert into issues (key, project_key, number, title, route, created_by)
-		values ($1, 'TT', 1, 'Test issue', $2, '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, route, created_by, rank)
+		values ($1, 'TT', 1, 'Test issue', $2, '{"kind":"user","id":"alice"}', 'U')
 	`, key, route); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}

@@ -44,8 +44,8 @@ func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 		t.Fatalf("seed project: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
-		insert into issues (key, project_key, number, title, created_by)
-		values ('PP-1', 'PP', 1, 'Issue', '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('PP-1', 'PP', 1, 'Issue', '{"kind":"user","id":"alice"}', 'U')
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
@@ -111,8 +111,8 @@ func TestAppendRejectsEventWithoutExactlyOneOwner(t *testing.T) {
 		t.Fatalf("seed project: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
-		insert into issues (key, project_key, number, title, created_by)
-		values ('PP-1', 'PP', 1, 'Issue', '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('PP-1', 'PP', 1, 'Issue', '{"kind":"user","id":"alice"}', 'U')
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}

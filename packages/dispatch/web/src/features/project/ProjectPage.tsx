@@ -1,20 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
+
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
+  borderDefault,
   dangerText,
   linkHoverText,
   linkText,
+  surfaceMutedBg,
+  surfaceMutedStrongBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { DocumentList } from "./DocumentList";
+import { IssueBoard } from "./IssueBoard";
 import { IssueList } from "./IssueList";
 
 type ProjectTab = "issues" | "documents";
@@ -24,9 +31,34 @@ const tabs: readonly TabDefinition<ProjectTab>[] = [
   { id: "documents", label: "Documents" },
 ];
 
+type IssueView = "list" | "board";
+
+function issueViewStorageKey(login: string): string {
+  return `dispatch.project.issue-view:${login}`;
+}
+
 export function ProjectPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
+  const whoAmI = useQuery({
+    queryKey: ["whoami"],
+    queryFn: () => api.whoAmI(),
+  });
+  const login = whoAmI.data?.login;
+  const [issueView, setIssueView] = useState<IssueView>(() =>
+    login !== undefined && window.localStorage.getItem(issueViewStorageKey(login)) === "board"
+      ? "board"
+      : "list"
+  );
+  useEffect(() => {
+    if (login === undefined) {
+      return;
+    }
+    setIssueView(
+      window.localStorage.getItem(issueViewStorageKey(login)) === "board" ? "board" : "list"
+    );
+  }, [login]);
+
   const route = parseProjectPath(location.pathname, location.search);
   const projects = useQuery({
     queryKey: ["projects"],
@@ -87,7 +119,36 @@ export function ProjectPage(): ReactNode {
         id="project-issues-panel"
         role="tabpanel"
       >
-        {activeTab === "issues" ? <IssueList project={route.project} /> : null}
+        {activeTab === "issues" ? (
+          <>
+            <fieldset className={`mb-4 inline-flex rounded-xl border p-1 ${borderDefault}`}>
+              <legend className="sr-only">Issue view</legend>
+              {(["list", "board"] as const).map((view) => (
+                <button
+                  aria-pressed={issueView === view}
+                  className={`min-h-11 rounded-lg px-3 text-sm font-medium ${
+                    issueView === view ? surfaceMutedStrongBg : surfaceMutedBg
+                  } ${textSecondaryOnCanvas}`}
+                  key={view}
+                  onClick={() => {
+                    setIssueView(view);
+                    if (login !== undefined) {
+                      window.localStorage.setItem(issueViewStorageKey(login), view);
+                    }
+                  }}
+                  type="button"
+                >
+                  {view === "list" ? "List" : "Board"}
+                </button>
+              ))}
+            </fieldset>
+            {issueView === "list" ? (
+              <IssueList project={route.project} />
+            ) : (
+              <IssueBoard project={route.project} />
+            )}
+          </>
+        ) : null}
       </div>
       <div
         aria-hidden={activeTab !== "documents"}

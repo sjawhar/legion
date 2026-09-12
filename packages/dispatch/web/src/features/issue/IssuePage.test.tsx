@@ -40,6 +40,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
 };
