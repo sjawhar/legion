@@ -213,13 +213,20 @@ export type EnvoyClient = {
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const apiToken = process.env["ENVOY_TOKEN"];
 
   const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let response: Response;
       try {
-        response = await config.fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        const headers = new Headers(init.headers);
+        if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
+        response = await config.fetch(url, {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
       } catch (error) {
         if (attempt === 0) {
           await waitForRetry();

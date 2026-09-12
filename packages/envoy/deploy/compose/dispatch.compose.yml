@@ -47,6 +47,7 @@ services:
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
       DISPATCH_NATS_DISABLED: ${DISPATCH_NATS_DISABLED:-}
       ENVOY_URL: ${ENVOY_URL:-http://127.0.0.1:9020}
+      ENVOY_TOKEN: ${ENVOY_TOKEN:-}
       # Optional boot seed for mappings absent from the dashboard. Stored
       # repository mappings are authoritative; DISPATCH_DEFAULT_PROJECT catches
       # external repositories with no stored mapping.
@@ -100,6 +101,7 @@ services:
       DISPATCH_IDENTITY: header:X-Dispatch-User
       DISPATCH_NATS_DISABLED: "1"
       DISPATCH_TEST_HOOKS: "1"
+      ENVOY_TOKEN: ${ENVOY_TOKEN:-}
   pg-backup:
     image: eeshugerman/postgres-backup-s3@sha256:cfcaa57732c13d0724312a2eea1ad3e385f5ed049de3c626d1ef28ecc13cdddb
     network_mode: host

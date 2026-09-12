@@ -80,6 +80,8 @@ events to the right session.
 `{"error":"<message>","expected":["field"]}`. `expected` appears when the
 caller must provide a field.
 
+When `ENVOY_API_TOKEN` is set, `/v1` requires its matching bearer token, and a non-loopback listener refuses to start without it unless `ENVOY_API_ALLOW_UNAUTHENTICATED=1` is the temporary Fargate transition flag.
+
 ## Topic shapes
 
 - GitHub repository topics start with `notifications.github.<owner>.<repo>`.

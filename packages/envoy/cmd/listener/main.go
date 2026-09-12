@@ -255,6 +255,15 @@ func main() {
 		log.Fatal(err)
 	}
 	logger := logging.New(cfg.MachineID)
+	apiToken := os.Getenv("ENVOY_API_TOKEN")
+	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED")); err != nil {
+		log.Fatal(err)
+	}
+	if apiToken == "" {
+		logger.Info("listener API auth: disabled (ENVOY_API_TOKEN)")
+	} else {
+		logger.Info("listener API auth: enabled (ENVOY_API_TOKEN)")
+	}
 
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
@@ -404,7 +413,7 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := readinessGate(func() bool { return deps.Load() != nil }, v1)
+	v1Handler := apiAuth(apiToken, readinessGate(func() bool { return deps.Load() != nil }, v1))
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 

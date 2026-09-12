@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -41,16 +42,24 @@ type Session struct {
 // Client reads live session metadata from the Envoy listener.
 type Client struct {
 	baseURL    string
+	apiToken   string
 	httpClient *http.Client
 }
 
 // New returns a client for an Envoy listener's HTTP control API.
 func New(baseURL string) *Client {
 	return &Client{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
+		baseURL:  strings.TrimSuffix(baseURL, "/"),
+		apiToken: os.Getenv("ENVOY_TOKEN"),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+	}
+}
+
+func (c *Client) authorize(request *http.Request) {
+	if c.apiToken != "" {
+		request.Header.Set("Authorization", "Bearer "+c.apiToken)
 	}
 }
 
@@ -60,6 +69,7 @@ func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: build GET /v1/sessions request: %v", ErrUnavailable, err)
 	}
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: GET /v1/sessions: %v", ErrUnavailable, err)
@@ -95,6 +105,7 @@ func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: build GET /v1/interests/ request: %v", ErrUnavailable, err)
 	}
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: GET /v1/interests/: %v", ErrUnavailable, err)
@@ -128,6 +139,7 @@ func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, erro
 	if err != nil {
 		return Interest{}, fmt.Errorf("%w: build GET /v1/interests/%s request: %v", ErrUnavailable, sessionID, err)
 	}
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s: %v", ErrUnavailable, sessionID, err)
@@ -167,6 +179,7 @@ func (c *Client) Unsubscribe(ctx context.Context, sessionID string, topics []str
 		return nil, fmt.Errorf("%w: build POST /v1/interests/unsubscribe request: %v", ErrUnavailable, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: POST /v1/interests/unsubscribe: %v", ErrUnavailable, err)

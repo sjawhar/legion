@@ -57,6 +57,9 @@ func TestSmoke(t *testing.T) {
 			"ENVOY_LISTEN_HOST": "0.0.0.0",
 			"ENVOY_MACHINE_ID":  "smoke-test",
 			"PORT":              "9020",
+			// A non-loopback bind refuses to start without a token; the smoke
+			// exercises the same bearer path a deployed listener requires.
+			"ENVOY_API_TOKEN": smokeAPIToken,
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
 		testcontainers.WithWaitStrategy(
@@ -136,8 +139,20 @@ func TestSmoke(t *testing.T) {
 		}
 	})
 
-	t.Run("sessions", func(t *testing.T) {
+	t.Run("sessions_require_bearer", func(t *testing.T) {
 		resp, err := http.Get(baseURL + "/v1/sessions")
+		if err != nil {
+			t.Fatalf("GET /v1/sessions: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /v1/sessions without a bearer: got %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("sessions", func(t *testing.T) {
+		resp, err := apiRequest(http.MethodGet, baseURL+"/v1/sessions", "")
 		if err != nil {
 			t.Fatalf("GET /v1/sessions: %v", err)
 		}
@@ -150,11 +165,7 @@ func TestSmoke(t *testing.T) {
 
 	t.Run("subscribe_and_verify", func(t *testing.T) {
 		subBody := `{"session_id":"ses_smoke_test","topics":["notifications.test.smoke"],"port":8080}`
-		resp, err := http.Post(
-			baseURL+"/v1/interests/subscribe",
-			"application/json",
-			strings.NewReader(subBody),
-		)
+		resp, err := apiRequest(http.MethodPost, baseURL+"/v1/interests/subscribe", subBody)
 		if err != nil {
 			t.Fatalf("POST /v1/interests/subscribe: %v", err)
 		}
@@ -164,7 +175,7 @@ func TestSmoke(t *testing.T) {
 			t.Errorf("POST /v1/interests/subscribe: got %d, want %d", resp.StatusCode, http.StatusOK)
 		}
 
-		sessResp, err := http.Get(baseURL + "/v1/sessions")
+		sessResp, err := apiRequest(http.MethodGet, baseURL+"/v1/sessions", "")
 		if err != nil {
 			t.Fatalf("GET /v1/sessions: %v", err)
 		}
@@ -179,4 +190,19 @@ func TestSmoke(t *testing.T) {
 			t.Error("registered session not visible in /v1/sessions")
 		}
 	})
+}
+
+const smokeAPIToken = "smoke-api-token"
+
+// apiRequest calls a /v1 route with the listener's bearer; body is JSON when non-empty.
+func apiRequest(method, url, body string) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+smokeAPIToken)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return http.DefaultClient.Do(req)
 }
