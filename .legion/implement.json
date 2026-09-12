@@ -7,7 +7,7 @@
     "base": "main",
     "headSha": "5cfc35fa8c90989d2c569fae09126568baaae61f"
   },
-  "rebasedOnto": "main@origin e7a284f2 (after LEGION-18 #953 merged as d07086e1 and LEGION-22 #967 merged as 5c5c3013; LEGION-21 #962 still open, so state stays v24 and no tmux-runtime recipe was needed)",
+  "rebasedOnto": "main@origin 9fa17a3c (after LEGION-21 #962 merged as d7ada4c0; earlier e7a284f2 after LEGION-18/22, fd4fce51 after LEGION-29). LEGION-12 #974 still open.",
   "commits": [
     {
       "change": "uvwstwxz",
@@ -543,7 +543,7 @@
     }
   },
   "fifthPass": {
-    "completedAt": "2026-09-12T21:50:52.215492+00:00",
+    "completedAt": "2026-09-12T22:36:08.342640+00:00",
     "review": "reviewer round 3 at head 665f4b1b (session 01a09624-3c98-7000-b194-fc1294ffbd20): COMMENT, no blocker; four should-fixes R3-S1..S4 and seven batched items R3-N1..N7, landed before the cleanup head per the architect. Tester round 4 at 665f4b1b: PASS on every criterion incl. the live sandbox merge.",
     "reviewedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
     "startedFrom": "e588e4e6c005f87907f1fef843920a0bc4ba6c0c (665f4b1b + reviewer round-3 review.json 97d55ebf + tester round-4 test.json e588e4e6)",
@@ -600,6 +600,28 @@
       "constraint A: jj diff main@origin..@ -- skills/legion-worker/SKILL.md \u2192 exactly one hunk @@ -260,10 +260,14 @@",
       "no Go changed",
       "live GitHub under the pane's gh: rules/branches/main and branches/main on sjawhar/legion and sjawhar/legion-smoke; branches/main/protection[/required_status_checks] 403 on both; pr checks --json exit codes on #961 (pending\u21920), #962 (fail+pending\u21920), text mode #961 \u2192 exit 8; skipping buckets on #974"
-    ]
+    ],
+    "thirdRebase": {
+      "trigger": "LEGION-21 #962 (runtime boundary: ProcessManager drives an injected Runtime; tmux is one implementation) merged as d7ada4c0 at 22:00:34Z, after this pass's first push; GitHub reported #961 CONFLICTING. Performed per testerNotes.rebaseRecipeIfLegion21LandsFirst.",
+      "onto": "main@origin 9fa17a3c (chore: release pi-envoy v1.14.0)",
+      "conflictsResolvedPerCommit": [
+        "T1 contracts (uvwstwxz): kept main's runtime-discriminated stateLocator/stateTreeLocator; controllerLocator is a stateTreeLocator (carries ompSessionFile); LEGION_DAEMON_API_VERSION 1 -> 2 and packages/pi-envoy/package.json legion.daemonApiVersion 1 -> 2 in the same commit; leak-row tests kept from both sides.",
+        "T2 state (rvtpurym): controllerLocator?: Locator (shared union) instead of a separate controller schema; our socketPath strip is migrateV24State (v24 -> v25); LegionStateSchema literal and newLegionState at 25; main's v23->v24 tag test now lands at 25 with the controller's socket stripped; api/state.ts redactLocator(controllerLocator, true) carries the session file.",
+        "T3 processes (ozxuqqyn): spawnController builds the interactive inner command (resume argument, no --mode rpc) and calls runtime.spawn('controller'); the returned locator gets ompSessionFile spread on; TmuxRuntime.spawnController opens the window bare (cd <dir> && <inner>; secret file + _FILE env; no prepareSocket; no socketPath) \u2014 runtime-tmux.ts is now in the diff; markControllerReady and its three tests removed (the route records the file); runtime.contract.test's controller spawn test asserts the bare command and the absent socket.",
+        "corrective (a)/(b) (wxmtmoqs): controllerAlive = runtime.probe, pure (unknown still refuses); mint inside spawnController after the resume decision; retire path dead->resurrect / alive->kill first; stopProcess doc and TmuxRuntime.stop doc name the socketless controller locator.",
+        "round-2 (a) (vvmnrnso): hold before mint, no deletes before runtime.spawn, atomic claim delete + locator swap after; tests tagged runtime: 'tmux' with union narrowing.",
+        "fifth pass (ymmzutsv): hold comment on the runtime path.",
+        "detached windows (ryqvtqqq): main's exact-argv runtime.contract tests gained the '-d' our tmux.openWindow adds (squashed into that commit).",
+        "docs(daemon) new head commit: AGENTS.md upgrade note says state v25 + daemon API contract 2 and the plugin release requirement; runtime-tmux row names the shimless controller window."
+      ],
+      "pluginContract": "LEGION_DAEMON_API_VERSION = 2 (packages/contracts/src/legion-daemon-api.ts) and legion.daemonApiVersion = 2 (packages/pi-envoy/package.json). A daemon built from this branch refuses to boot against an installed @sjawhar/pi-legion-envoy that speaks contract 1; the plugin must be released from this branch's commit first. Stated in the PR body's opening paragraph.",
+      "verificationAtRebasedHead": [
+        "packages/daemon: biome clean; tsc 0; bun test 948 pass, 5 skip, 0 fail (953 across 57 files \u2014 main's runtime.contract.test.ts included)",
+        "packages/contracts: tsc 0; biome clean; 99 pass",
+        "packages/pi-envoy: tsc 0; biome clean; 159 pass",
+        "grep pr-queue empty; constraint A one hunk @@ -260,10 +260,14 @@ vs main@origin 9fa17a3c; zero conflicted commits"
+      ],
+      "tmuxRecipeNote": "processes.test.ts's controller tests still drive TmuxRuntime through the injected tmux run callback, so they moved over unchanged apart from runtime: 'tmux' tags on locator literals and union narrowing on tmuxPaneId reads."
+    }
   }
 }
