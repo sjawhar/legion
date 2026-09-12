@@ -46,6 +46,8 @@ export function eventDescription(event: Event): string {
       return "Child status changed";
     case "subscription.removed":
       return `Unsubscribed ${event.payload.session_id}`;
+    case "block.repaired":
+      return `Repaired block ${event.payload.block_id}`;
   }
   return event satisfies never;
 }

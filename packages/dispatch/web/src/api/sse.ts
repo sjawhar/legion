@@ -30,6 +30,7 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.edited": true,
   "ask.answered": true,
   "ask.resolved": true,
+  "block.repaired": true,
   "comment.created": true,
   "comment.resolved": true,
   "comment.reopened": true,
@@ -172,6 +173,10 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     ) {
       keys.push(["ask-thread", event.payload.id]);
     }
+    return keys;
+  }
+  if (event.type === "block.repaired") {
+    keys.push(["asks", event.issue_key], ["projects"]);
     return keys;
   }
 

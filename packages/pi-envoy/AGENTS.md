@@ -45,6 +45,10 @@ payload names renders it and drops the matching local NATS subscription
 subscriber ignores it.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 
+`dispatch_doc_edit` may retype an identified paragraph into any schema-declared typed block with
+`{ op: "retype", block, type, attributes }`. A question about a document is written as an `ask`
+block through that tool or a `:::ask` directive, not as an issue-level `dispatch_ask`.
+
 ## Where to look
 
 | Task | Location | Notes |

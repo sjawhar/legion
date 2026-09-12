@@ -40,6 +40,121 @@ func newTestService(t *testing.T) (*Service, string) {
 	return service, artifactID
 }
 
+func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	const askMarkdown = ":::ask{#ask-block multiple=\"false\" state=\"open\" urgency=\"high\"}\nWhich transport should we expose?\n\n- REST: Matches the existing platform\n- gRPC: Adds streaming\n:::\n"
+	seedServiceText(t, service, artifactID, askMarkdown)
+
+	service.settleRoom(artifactID, 0)
+	var askID, question, urgency, state, blockID string
+	var multiple bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select id::text, question, urgency, state, block_id, multiple
+		from asks where block_artifact_id = $1
+	`, artifactID).Scan(&askID, &question, &urgency, &state, &blockID, &multiple); err != nil {
+		t.Fatalf("read indexed ask: %v", err)
+	}
+	if blockID != "ask-block" || question != "Which transport should we expose?" ||
+		urgency != "high" || multiple || state != "open" {
+		t.Fatalf("indexed ask = block=%q question=%q urgency=%q multiple=%t state=%q",
+			blockID, question, urgency, multiple, state)
+	}
+
+	editLiveTree(t, service, artifactID, func(*pmdoc.Node) *pmdoc.Node {
+		return &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
+			Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: "replacement"},
+			Children: []*pmdoc.Node{{Type: "text", Text: "No decision remains."}},
+		}}}
+	})
+	stateForDelete := service.room(artifactID)
+	stateForDelete.mu.Lock()
+	deleteGeneration := stateForDelete.gen
+	stateForDelete.mu.Unlock()
+	service.settleRoom(artifactID, deleteGeneration)
+	var resolutionKind string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state, resolution->>'kind' from asks where id = $1
+	`, askID).Scan(&state, &resolutionKind); err != nil {
+		t.Fatalf("read retracted ask: %v", err)
+	}
+	if state != "resolved" || resolutionKind != "retracted" {
+		t.Fatalf("retracted ask state=%q resolution=%q", state, resolutionKind)
+	}
+
+	editLiveTree(t, service, artifactID, func(*pmdoc.Node) *pmdoc.Node {
+		restored, err := pmdoc.Parse(askMarkdown)
+		if err != nil {
+			t.Fatalf("parse restored ask: %v", err)
+		}
+		return restored
+	})
+	stateForRestore := service.room(artifactID)
+	stateForRestore.mu.Lock()
+	restoreGeneration := stateForRestore.gen
+	stateForRestore.mu.Unlock()
+	service.settleRoom(artifactID, restoreGeneration)
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state from asks where id = $1
+	`, askID).Scan(&state); err != nil {
+		t.Fatalf("read restored ask: %v", err)
+	}
+	if state != "open" {
+		t.Fatalf("restored ask state=%q, want open", state)
+	}
+}
+
+func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
+	service.settleRoom(artifactID, 0)
+	var askID string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select id::text from asks where block_artifact_id = $1
+	`, artifactID).Scan(&askID); err != nil {
+		t.Fatalf("read indexed ask: %v", err)
+	}
+	answer := model.AskAnswer{User: "alice", Selected: []string{}, At: time.Now().UTC()}
+	answerJSON, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatalf("encode answer: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update asks set state = 'answered', answer = $2 where id = $1
+	`, askID, answerJSON); err != nil {
+		t.Fatalf("answer indexed ask: %v", err)
+	}
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Attrs["state"] = "open"
+		return tree
+	})
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+	waitForDocumentText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\""+answer.At.Format(time.RFC3339Nano)+"\" selected=\"[]\"}\nShip it?\n:::\n")
+	var repaired int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from events where type = 'block.repaired' and payload->>'block_id' = 'ask-block'
+	`).Scan(&repaired); err != nil {
+		t.Fatalf("count repairs: %v", err)
+	}
+	if repaired != 1 {
+		t.Fatalf("repair events = %d, want one", repaired)
+	}
+	service.settleRoom(artifactID, generation)
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from events where type = 'block.repaired' and payload->>'block_id' = 'ask-block'
+	`).Scan(&repaired); err != nil {
+		t.Fatalf("count idempotent repairs: %v", err)
+	}
+	if repaired != 1 {
+		t.Fatalf("repair events after repeat = %d, want one", repaired)
+	}
+}
+
 func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
@@ -730,6 +845,39 @@ func TestSettleRetriesTransientVersionWriteFailure(t *testing.T) {
 	if versions != 2 {
 		t.Fatalf("versions after transient settlement failure = %d, want 2 after retry", versions)
 	}
+}
+
+func TestSettleFailsRoomAfterPersistentVersionWriteFailure(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 10 * time.Millisecond
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		create function dispatch_test_fail_every_settlement() returns trigger language plpgsql as $$
+		begin
+			if new.number = 2 then
+				raise exception 'persistent settlement write failure';
+			end if;
+			return new;
+		end;
+		$$
+	`); err != nil {
+		t.Fatalf("create persistent settlement failure function: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		create trigger dispatch_test_fail_every_settlement
+		before insert on artifact_versions for each row
+		execute function dispatch_test_fail_every_settlement()
+	`); err != nil {
+		t.Fatalf("create persistent settlement failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = service.store.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_fail_every_settlement on artifact_versions`)
+		_, _ = service.store.Pool.Exec(context.Background(), `drop function if exists dispatch_test_fail_every_settlement()`)
+	})
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("change document before persistent settlement failure: %v", err)
+	}
+	waitForRoomFailure(t, service, artifactID)
 }
 
 func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {

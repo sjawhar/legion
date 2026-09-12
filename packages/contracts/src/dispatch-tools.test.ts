@@ -178,6 +178,23 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("accepts a document retype operation with typed attributes", () => {
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        issue: "DSP-1",
+        artifact: "spec",
+        ops: [
+          {
+            op: "retype",
+            block: "b-123",
+            type: "ask",
+            attributes: { multiple: false, urgency: "high" },
+          },
+        ],
+      }).success
+    ).toBe(true);
+  });
+
   test("requires exactly one artifact upload source", () => {
     const schema = schemaFor("dispatch_artifact");
     const shared = { issue: "DSP-1", name: "spec.md" };

@@ -29,7 +29,7 @@ export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list
 export interface BlockAttributeSchema {
   readonly kind: BlockAttributeKind;
   readonly choices?: readonly string[];
-  readonly default: string | boolean | readonly string[];
+  readonly default?: string | boolean | readonly string[];
   readonly server?: boolean;
 }
 
@@ -197,6 +197,10 @@ export interface Ask {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
+  /** The source typed block; null for asks created outside a document. */
+  readonly block_id?: string | null;
+  /** The document that contains a typed ask block. */
+  readonly block_artifact?: AskBlockArtifact;
   readonly author: Actor;
   /** `approval` asks are opened by an approval request; their options are fixed
    *  (`Approve`, `Request changes`) and their answer writes a document review. */
@@ -218,6 +222,12 @@ export interface Ask {
    *  A human reply on an open ask means the asker owes the next turn (a clarification). */
   readonly last_reply?: AskLastReply | null;
   readonly edited_at: string | null;
+}
+
+export interface AskBlockArtifact {
+  readonly id: string;
+  readonly slug: string;
+  readonly primary: boolean;
 }
 
 export interface AskLastReply {
@@ -484,6 +494,12 @@ export interface ArtifactReviewEventPayload {
   readonly ask_id: string | null;
 }
 
+/** A server-owned typed-block attribute was restored from its indexed row. */
+export interface BlockRepairedEventPayload {
+  readonly block_id: string;
+  readonly version: number;
+  readonly disturbed_by: Actor;
+}
 export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
@@ -542,6 +558,10 @@ export type DispatchEvent =
       readonly payload: Ask & { readonly state: "resolved"; readonly resolution: AskResolution };
     })
   | (DispatchEventBase & {
+      readonly type: "block.repaired";
+      readonly payload: BlockRepairedEventPayload;
+    })
+  | (DispatchEventBase & {
       readonly type: "comment.created";
       readonly payload: CommentEventPayload;
     })
@@ -597,6 +617,9 @@ export interface EditOp {
   readonly markdown?: string;
   readonly after?: string;
   readonly before?: string;
+  readonly block?: string;
+  readonly type?: string;
+  readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
 export interface AuthenticatedUser {

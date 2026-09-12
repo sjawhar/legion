@@ -214,14 +214,22 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 		}
 		return fmt.Errorf("must be one of %s, got %q", strings.Join(attr.Choices, ", "), text)
 	case "string[]":
-		items, ok := value.([]string)
-		if !ok {
-			return fmt.Errorf("must be a string array, got %T", value)
-		}
-		for _, item := range items {
-			if item == "" {
-				return fmt.Errorf("must not contain an empty string")
+		switch items := value.(type) {
+		case []string:
+			for _, item := range items {
+				if item == "" {
+					return fmt.Errorf("must not contain an empty string")
+				}
 			}
+		case []any:
+			for _, item := range items {
+				text, ok := item.(string)
+				if !ok || text == "" {
+					return fmt.Errorf("must be a string array")
+				}
+			}
+		default:
+			return fmt.Errorf("must be a string array, got %T", value)
 		}
 	}
 	return nil
@@ -278,11 +286,19 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 	for name := range typ.Attributes {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	sort.SliceStable(names, func(left, right int) bool {
+		if n.Type != "ask" {
+			return names[left] < names[right]
+		}
+		return askAttributeRank(names[left]) < askAttributeRank(names[right])
+	})
 	for _, name := range names {
 		definition := typ.Attributes[name]
-		value, ok := n.Attrs[name]
-		if !ok {
+		value, present := n.Attrs[name]
+		if !present || (value == nil && definition.Default == nil) {
+			if definition.Default == nil {
+				continue
+			}
 			return "", fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
 		}
 		var encoded string
@@ -300,7 +316,7 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 			}
 			encoded = strconv.FormatBool(flag)
 		case "string[]":
-			items, ok := value.([]string)
+			items, ok := stringSlice(value)
 			if !ok {
 				return "", fmt.Errorf("%w: typed block %q attribute %q must be a string array", ErrSchema, n.Type, name)
 			}
@@ -312,9 +328,56 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 		default:
 			return "", fmt.Errorf("%w: typed block %q attribute %q has unknown kind %q", ErrSchema, n.Type, name, definition.Kind)
 		}
-		parts = append(parts, name+"="+strconv.Quote(encoded))
+		parts = append(parts, name+"="+strconv.Quote(escapeDirectiveAttribute(encoded)))
 	}
 	return strings.Join(parts, " "), nil
+}
+
+func escapeDirectiveAttribute(value string) string {
+	value = strings.ReplaceAll(value, "&", "&amp;")
+	value = strings.ReplaceAll(value, "\"", "&#x22;")
+	value = strings.ReplaceAll(value, "<", "&lt;")
+	return strings.ReplaceAll(value, ">", "&gt;")
+}
+
+func stringSlice(value any) ([]string, bool) {
+	switch items := value.(type) {
+	case []string:
+		return items, true
+	case []any:
+		out := make([]string, len(items))
+		for index, item := range items {
+			var ok bool
+			out[index], ok = item.(string)
+			if !ok {
+				return nil, false
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func askAttributeRank(name string) int {
+	switch name {
+	case "urgency":
+		return 0
+	case "multiple":
+		return 1
+	case "state":
+		return 2
+	case "answered_by":
+		return 3
+	case "answered_at":
+		return 4
+	case "selected":
+		return 5
+	case "answer":
+		return 6
+	default:
+		return 7
+	}
 }
 func cloneSchemaValue(value any) any {
 	switch current := value.(type) {

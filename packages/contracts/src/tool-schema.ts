@@ -11,6 +11,7 @@ export interface SchemaApi<E extends SchemaNode<E>> {
   boolean(): E;
   enum(values: readonly [string, ...string[]]): E;
   array(item: E, opts?: { min?: number; max?: number }): E;
+  unknown(): E;
   object(shape: Record<string, E>, opts?: { strict?: boolean }): E;
   refineObject(
     shape: Record<string, E>,
@@ -39,6 +40,7 @@ interface ZodApi {
   boolean(): ZodNode;
   enum(values: readonly [string, ...string[]]): ZodNode;
   array(item: ZodNode): ZodNode;
+  unknown(): ZodNode;
   object(shape: Record<string, ZodNode>): ZodObjectNode;
 }
 
@@ -61,6 +63,7 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
     },
     boolean: () => api.boolean(),
     enum: (values) => api.enum(values),
+    unknown: () => api.unknown(),
     array: (item, opts = {}) => {
       let schema = api.array(item as ZodNode);
       if (opts.min !== undefined) schema = schema.min(opts.min);

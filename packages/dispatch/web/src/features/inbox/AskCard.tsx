@@ -44,7 +44,7 @@ import {
 } from "../../theme/classes";
 import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
 import { AskThread, type AskThreadQuery } from "./AskThread";
@@ -78,6 +78,29 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   low: "Low",
   med: "Medium",
 };
+
+function AskBlockLink({ ask }: { ask: Ask }): ReactNode {
+  if (ask.block_id === undefined || ask.block_id === null || ask.block_artifact === undefined) {
+    return null;
+  }
+  const fragment = `#b-${encodeURIComponent(ask.block_id)}`;
+  if (ask.issue_key !== null) {
+    const route = ask.block_artifact.primary
+      ? buildIssuePath({ key: ask.issue_key, kind: "spec" })
+      : buildIssuePath({ key: ask.issue_key, kind: "artifact", slug: ask.block_artifact.slug });
+    return <Link to={`${route}${fragment}`}>Open in document</Link>;
+  }
+  if (ask.document !== undefined) {
+    return (
+      <Link
+        to={`${buildProjectPath({ kind: "document", project: ask.document.project, slug: ask.document.slug })}${fragment}`}
+      >
+        Open in document
+      </Link>
+    );
+  }
+  return null;
+}
 
 function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
   if (ask.edited_at === null) {
@@ -490,6 +513,13 @@ export function AskCard({
           </blockquote>
         )}
         <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
+        {ask.block_id === undefined ||
+        ask.block_id === null ||
+        ask.block_artifact === undefined ? null : (
+          <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
+            <AskBlockLink ask={ask} />
+          </p>
+        )}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             {ask.kind === "approval" ? (

@@ -16,6 +16,44 @@
           "default": ""
         }
       }
+    },
+    {
+      "name": "ask",
+      "content": "paragraph+ bullet_list?",
+      "render": "host",
+      "attributes": {
+        "urgency": {
+          "kind": "enum",
+          "choices": ["low", "med", "high", "blocking"],
+          "default": "med"
+        },
+        "multiple": {
+          "kind": "bool",
+          "default": false
+        },
+        "state": {
+          "kind": "enum",
+          "choices": ["open", "answered", "resolved"],
+          "default": "open",
+          "server": true
+        },
+        "answered_by": {
+          "kind": "actor",
+          "server": true
+        },
+        "answered_at": {
+          "kind": "timestamp",
+          "server": true
+        },
+        "selected": {
+          "kind": "string[]",
+          "server": true
+        },
+        "answer": {
+          "kind": "string",
+          "server": true
+        }
+      }
     }
   ]
 }

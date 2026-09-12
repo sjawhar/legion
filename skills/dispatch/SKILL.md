@@ -199,13 +199,16 @@ exact `EditOp` shape:
 
 ```ts
 type EditOp = {
-  op: "replace" | "delete" | "insert";
+  op: "replace" | "delete" | "insert" | "retype";
   find?: string;
   with?: string;
   occurrence?: number;
   markdown?: string;
   after?: string;
   before?: string;
+  block?: string;
+  type?: string;
+  attributes?: Record<string, unknown>;
 };
 ```
 
@@ -221,6 +224,9 @@ and deleting a cell's quoted text removes only that text.
 
 Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated target; re-read a missing or ambiguous target before
 retrying. Pass `summary` to name the version when recording a decision.
+`retype` turns the paragraph with `block` into the named typed `type` in place. It keeps the
+block id and uses `attributes` for client-owned typed attributes. Use it when an existing
+paragraph is the question that should become a decision.
 
 ## Typed blocks
 
@@ -235,6 +241,19 @@ quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::
 `::name` directives, or text `:name` directives; those strings are literal when quoted inside a code
 block. Do not set attributes the schema marks `server: true`; the server ignores them and reasserts
 its authoritative value at settlement.
+
+Questions about a document must be `ask` blocks, never an `Open questions` prose section. An ask
+body is one or more question paragraphs followed by an optional bullet list of options, where each
+item is `Label: description`. For example:
+
+```md
+:::ask{urgency="high" multiple="false"}
+Should we ship the migration?
+
+- Ship: Release the verified change.
+- Hold: Wait for another review.
+:::
+```
 
 ## Comments and suggestions
 

@@ -80,6 +80,27 @@ function renderCard(node: ReactNode) {
   return { queryClient, view };
 }
 
+test("AskCard links a non-primary block ask to its owning artifact", async () => {
+  const input = ask({
+    block_artifact: { id: "artifact-design", primary: false, slug: "design-notes" },
+    block_id: "decision-1",
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={emptyThread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const link = await view.findByRole("link", { name: "Open in document" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-notes#b-decision-1");
+  } finally {
+    view.unmount();
+  }
+});
+
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.

@@ -28,7 +28,7 @@ func TestBlockSchemaRouteServesEmbeddedSchema(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &schema); err != nil {
 		t.Fatalf("decode schema response: %v", err)
 	}
-	if schema.Version != 1 || len(schema.Types) != 1 || schema.Types[0].Name != "callout" {
-		t.Fatalf("schema = %#v, want version 1 callout type", schema)
+	if schema.Version != 1 || len(schema.Types) != 2 || schema.Types[0].Name != "callout" || schema.Types[1].Name != "ask" {
+		t.Fatalf("schema = %#v, want version 1 callout and ask types", schema)
 	}
 }

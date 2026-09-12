@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -59,6 +61,14 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 	var updates [][]byte
 	var mutateErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		// ygo re-panics callback failures after unregistering its update observer; that
+		// unregister needs the same document mutex and masks the originating failure.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				mutateErr = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
+				slog.Error("dispatch: document mutation panicked", "room", artifactID, "error", mutateErr)
+			}
+		}()
 		var unsubscribe func()
 		if joinedTransaction {
 			unsubscribe = doc.OnUpdate(func(update []byte, _ any) {
@@ -382,6 +392,43 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return 0, fmt.Errorf("apply live document operations: %w", err)
 	}
 	return len(ops), nil
+}
+
+// SetBlockAttributes applies server-owned typed-block state through the
+// transactional live-document mutation path.
+func (s *Service) SetBlockAttributes(
+	ctx context.Context,
+	artifactID, blockID string,
+	attributes map[string]any,
+	actor model.Actor,
+) error {
+	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		tree, err := treeOf(doc)
+		if err != nil {
+			return false, err
+		}
+		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(attributes))
+		if err != nil {
+			return false, err
+		}
+		if next.EqualWithBlockIDs(tree) {
+			return false, nil
+		}
+		s.recordActor(artifactID, actor)
+		var updateErr error
+		transact(func(transaction *crdt.Transaction) {
+			updateErr = pmdoc.Update(transaction, fragment, next)
+		})
+		if updateErr != nil {
+			return false, updateErr
+		}
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("set live block attributes: %w", err)
+	}
+	return nil
 }
 
 // NamedVersion records the live text as a deliberately named immutable version.

@@ -73,7 +73,7 @@ func loadSpliceFixtures(t *testing.T) []spliceFixture {
 func TestFixturesAreWithinSchema(t *testing.T) {
 	fixtures := loadFixtures(t)
 	wantNames := []string{
-		"bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
+		"ask-answered", "ask", "bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
 		"code", "emphasis", "empty", "escapes", "explicit-url-space", "explicit-url-title",
 		"footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
 		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",
