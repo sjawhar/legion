@@ -29,6 +29,13 @@ DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
 DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
+The origin humans open in the browser is the OAuth callback origin: the server builds
+`<dispatch.serverUrl>/auth/callback` from `dispatch.serverUrl` in the mounted `envoy.json`, and
+the GitHub App must list exactly that URL. On Sami's devbox that is `http://sami-agents:8766`
+(recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
+stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
+every deploy and rolls back on a mismatch.
+
 Never bind `0.0.0.0`: that exposes the OAuth endpoints and session cookies on
 every interface.
 
