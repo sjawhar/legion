@@ -170,6 +170,60 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	}
 }
 
+// BlockForMark returns the stable block that contains a persisted inline mark's
+// full range. A mark spanning top-level siblings has no block identity.
+func (s *Service) BlockForMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error) {
+	var blockID string
+	var markErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			markErr = err
+			return
+		}
+		r, _, found := pmdoc.FindMark(tree, string(kind), id)
+		if !found {
+			markErr = ErrAnchorMissing
+			return
+		}
+		blockID, markErr = pmdoc.BlockIDForRange(tree, r)
+	})
+	if markErr != nil {
+		return "", markErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return "", err
+	}
+	return blockID, nil
+}
+
+// BlockForQuote returns the stable block that contains the one matching quote.
+// A quote spanning top-level siblings has no block identity.
+func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
+	var blockID string
+	var quoteErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			quoteErr = err
+			return
+		}
+		r, err := pmdoc.FindQuote(tree, quote, nil, nil)
+		if err != nil {
+			quoteErr = err
+			return
+		}
+		blockID, quoteErr = pmdoc.BlockIDForRange(tree, r)
+	})
+	if quoteErr != nil {
+		return "", quoteErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return "", err
+	}
+	return blockID, nil
+}
+
 // SuggestionKind returns the kind recorded on a verified browser or server suggestion mark.
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
 	var kind string

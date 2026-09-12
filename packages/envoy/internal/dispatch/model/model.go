@@ -37,11 +37,12 @@ type AgentToken struct {
 
 // Anchor identifies a document mark at a particular named version.
 type Anchor struct {
-	ArtifactID string `json:"artifact_id"`
-	MarkID     string `json:"mark_id"`
-	Version    int    `json:"version"`
-	Quote      string `json:"quote"`
-	Orphaned   bool   `json:"orphaned"`
+	ArtifactID string  `json:"artifact_id"`
+	BlockID    *string `json:"block_id"`
+	MarkID     string  `json:"mark_id"`
+	Version    int     `json:"version"`
+	Quote      string  `json:"quote"`
+	Orphaned   bool    `json:"orphaned"`
 }
 
 // AnchorInput selects document text by quote or identifies a browser-owned mark.
@@ -225,10 +226,17 @@ type ArtifactReviewEventPayload struct {
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown.
 type ArtifactBlock struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	From int    `json:"from"`
-	To   int    `json:"to"`
+	ID         string          `json:"id"`
+	Type       string          `json:"type"`
+	From       int             `json:"from"`
+	To         int             `json:"to"`
+	References BlockReferences `json:"references"`
+}
+
+// BlockReferences counts rows whose inline anchor is pinned to a document block.
+type BlockReferences struct {
+	Comments int `json:"comments"`
+	Asks     int `json:"asks"`
 }
 
 // Version is an immutable artifact version.

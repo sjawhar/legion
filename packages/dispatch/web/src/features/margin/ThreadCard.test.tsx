@@ -24,6 +24,7 @@ function comment(
   return {
     anchor: {
       artifact_id: "artifact-1",
+      block_id: null,
       mark_id: "mark-1",
       orphaned: false,
       quote: "selected text",

@@ -133,6 +133,20 @@ function CommentBody({
   );
 }
 
+function pulseBlock(blockId: string): void {
+  const escaped =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(blockId)
+      : blockId.replace(/["\\]/g, "\\$&");
+  const block = document.querySelector<HTMLElement>(`[data-block-id="${escaped}"]`);
+  if (block === null) {
+    return;
+  }
+  block.scrollIntoView({ behavior: "smooth", block: "center" });
+  block.classList.add("dispatch-mark-pulse");
+  window.setTimeout(() => block.classList.remove("dispatch-mark-pulse"), 1200);
+}
+
 export function ThreadCard({
   actionError,
   artifactSlug,
@@ -193,6 +207,12 @@ export function ThreadCard({
           expanded || hovered ? `${selectedCardBorder} ${selectedCardBg}` : card
         } ${className ?? ""}`}
         data-hovered={hovered ? "true" : undefined}
+        data-anchor-block={thread.anchor?.block_id ?? undefined}
+        onClickCapture={() => {
+          if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+            pulseBlock(thread.anchor.block_id);
+          }
+        }}
         onKeyDown={(event) => {
           if (
             event.target !== event.currentTarget ||
@@ -209,6 +229,9 @@ export function ThreadCard({
             event.target.closest("a, button, input, label, select, textarea") !== null
           ) {
             return;
+          }
+          if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+            pulseBlock(thread.anchor.block_id);
           }
           event.stopPropagation();
           onSelect?.();
@@ -325,7 +348,12 @@ export function ThreadCard({
           <button
             aria-expanded={false}
             className={`block w-full text-left ${textPrimaryOnSurface}`}
-            onClick={onToggle}
+            onClick={() => {
+              if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+                pulseBlock(thread.anchor.block_id);
+              }
+              onToggle();
+            }}
             type="button"
           >
             <p className="line-clamp-2">

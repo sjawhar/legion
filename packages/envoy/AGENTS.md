@@ -40,6 +40,13 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document.
 
+Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
+of the lowest block containing the complete quote. A quote that spans top-level siblings stays
+unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range and
+`{comments, asks}` reference counts. The server resolves the block when it creates a quote or
+browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchors only when their
+cached quote has one current match.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive

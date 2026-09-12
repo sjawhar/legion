@@ -111,7 +111,7 @@ export const dispatchToolSpecs = [
       "Open a durable, answerable decision or human to-do on an issue or project document. Do not use it for a status update or discussion; " +
       "use dispatch_message instead. Use kind: action for a to-do a human must complete; it has fixed Done / Can't answers. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
-      `reference — it must be answerable from its own text and anchor alone, never "see above". Question is at most 800 ` +
+      'reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most 800 ' +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -206,7 +206,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch_suggest instead. Body is at most 2,000 characters. ${OWNER_REFERENCE}`,
+      `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),

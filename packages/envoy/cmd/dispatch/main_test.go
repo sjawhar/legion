@@ -302,6 +302,15 @@ func TestWriteBlockIDBackfillReportLabelsDocumentErrors(t *testing.T) {
 	}
 }
 
+func TestWriteAnchorBlockBackfillReport(t *testing.T) {
+	var output bytes.Buffer
+	writeAnchorBlockBackfillReport(&output, docs.AnchorBlockBackfill{Asks: 2, Comments: 3, Skipped: 1})
+	const want = "backfill-anchor-blocks: asks=2 comments=3 skipped=1\n"
+	if got := output.String(); got != want {
+		t.Fatalf("anchor block backfill output = %q, want %q", got, want)
+	}
+}
+
 func TestParseAllowedLoginsLowerCasesAndTrimsEntries(t *testing.T) {
 	logins := parseAllowedLogins(" sjawhar, Xodarap ,,")
 	if len(logins) != 2 {
