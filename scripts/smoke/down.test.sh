@@ -10,11 +10,15 @@ readonly fake_bin="${temporary_dir}/bin"
 readonly smoke_dir="${temporary_dir}/smoke"
 readonly output_file="${temporary_dir}/output"
 bridge_pid=""
+forward_pgid=""
 
 cleanup() {
   if [[ -n "$bridge_pid" ]]; then
     kill "$bridge_pid" 2>/dev/null || true
     wait "$bridge_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$forward_pgid" ]]; then
+    kill -- "-$forward_pgid" 2>/dev/null || true
   fi
   rm -rf "$temporary_dir"
 }
@@ -85,5 +89,57 @@ PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$dow
   exit 1
 }
 
+# forward mode teardown: a recorded `gh webhook forward` process group and its GitHub hook
+# record. `gh webhook forward` itself needs a user-authenticated gh identity agents do not have,
+# so this stand-in is the only proof the rig has that forward-mode teardown works. The stand-in
+# reports its own pid from inside the new session: reading /proc/$!/stat right after `setsid &`
+# races the setsid() call and could record this harness's own process group, which down.sh would
+# then kill -- so the harness also refuses to continue unless that pid is its own group leader.
+forward_pid_file="${temporary_dir}/forward.pid"
+setsid bash -c 'printf "%s\n" "$$" >"$1"; exec sleep 300' _ "$forward_pid_file" &
+for ((attempt = 1; attempt <= 100; attempt += 1)); do
+  [[ -s "$forward_pid_file" ]] && break
+  sleep 0.05
+done
+[[ -s "$forward_pid_file" ]] || {
+  printf 'fixture error: the forwarder stand-in never reported its pid\n' >&2
+  exit 1
+}
+forward_pgid="$(<"$forward_pid_file")"
+[[ "$(awk '{print $5}' "/proc/${forward_pgid}/stat")" == "$forward_pgid" ]] || {
+  printf 'fixture error: forwarder stand-in %s is not its own process-group leader\n' "$forward_pgid" >&2
+  forward_pgid=""
+  exit 1
+}
+printf '%s\n' "$forward_pgid" >"${smoke_dir}/webhook-forward.pid"
+awk '{print $22}' "/proc/${forward_pgid}/stat" >"${smoke_dir}/webhook-forward.start"
+printf 'repos/example-org/legion-smoke/hooks/7\n' >"${smoke_dir}/webhook-forward.hook"
+gh_log="${temporary_dir}/gh.log"
+cat >"${fake_bin}/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${gh_log}"
+EOF
+chmod +x "${fake_bin}/gh"
+
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" bash "$down_script" >"$output_file" 2>&1
+if kill -0 -- "-$forward_pgid" 2>/dev/null; then
+  printf 'expected down.sh to kill the recorded webhook-forward process group\n' >&2
+  exit 1
+fi
+forward_pgid=""
+[[ ! -e "${smoke_dir}/webhook-forward.pid" && ! -e "${smoke_dir}/webhook-forward.start" && ! -e "${smoke_dir}/webhook-forward.hook" ]] || {
+  printf 'expected down.sh to remove the webhook-forward pid, start, and hook records\n' >&2
+  exit 1
+}
+grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
+  printf 'expected down.sh to delete the recorded forwarder hook through gh api; gh log:\n%s\n' "$(cat "$gh_log" 2>/dev/null)" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
 printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'
+printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\n'
