@@ -240,5 +240,123 @@
       "nothingCreated": "no Depot/GitHub/AWS object created; no image built anywhere"
     },
     "grantWorkaround": "the tester's two-call pattern (test.json findingsForArchitect[2]) was used for jj git push and legion gh: one bash call mints (its first injected grant is visible in the call), the next call hardcodes that grant after the injected preamble within the 60 s TTL. The earlier DEBUG-trap approach did not survive the shell that this round runs in."
+  },
+  "reviewRound1": {
+    "review": "https://github.com/sjawhar/legion/pull/966#pullrequestreview-5186297796 (CHANGES_REQUESTED at 6d48a78e; .legion/review.json committed by the reviewer at c1b02739 and carried by this push)",
+    "spec": "dispatch://LEGION-23/spec version 9 (Acceptance 3 ECR main-only; Design row: no `secrets:`, job-level permissions; Errors: `gh run rerun <run-id> --failed`, `ECR mirror skipped: not a main run`; two new Rejected rows)",
+    "base": "main@origin 7add4d03 unchanged (LEGION-21 / #962 not landed) — no rebase; no conflict surface exercised",
+    "commits": [
+      {
+        "sha": "c212fe936df3",
+        "subject": "ci(worker-image): mirror to ECR on main only; drop secrets inherit; rerun --failed remedies",
+        "files": [
+          ".github/workflows/worker-image.yaml",
+          ".github/workflows/release.yaml",
+          "docs/kubernetes.md"
+        ]
+      },
+      {
+        "sha": "a9510e8f08cd",
+        "subject": "chore(docker): natives download precedes probe-image; ProbeImageCommandDeps",
+        "files": [
+          "packages/daemon/docker/worker.Dockerfile",
+          "packages/daemon/src/cli/index.ts"
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "id": "R1-B1",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080077",
+        "commit": "c212fe93",
+        "change": "'Decide ECR mirror' tests `GITHUB_REF != refs/heads/main` before the variable checks → enabled=false + summary `ECR mirror skipped: not a main run`; per-variable lines unchanged after it. docs/kubernetes.md ECR section: 'on `main` runs only', both summary lines named. Shell simulation of the meta + ecr steps extended to five shapes: pull_request with all AWS vars set → skipped, not a main run; main+released with vars → enabled=true; main with no vars → three per-variable lines; main with one var unset → one line; non-main dispatch with vars → skipped, not a main run."
+      },
+      {
+        "id": "R1-N1",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080079",
+        "commit": "a9510e8f",
+        "change": "Dockerfile last-RUN comment: the ~345 MB natives download happens in step 1 (`omp plugin install`, OMP's first run in the image); step 1 must precede `legion probe-image` because defaultRunner (state/fetch.ts) kills any single omp invocation after 30 s — a download inside the first probe would read as a definitive 'does not expose pi.agents'."
+      },
+      {
+        "id": "R1-N2",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080082",
+        "commit": "c212fe93",
+        "change": "Depot failure remedy and ECR mirror failure note say `gh run rerun ${GITHUB_RUN_ID} --failed --repo …` with the reason; docs/kubernetes.md prerequisites and ECR lines say `gh run rerun <run-id> --failed`."
+      },
+      {
+        "id": "R1-N3",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080083",
+        "commit": "c212fe93",
+        "change": "release.yaml: `secrets: inherit` deleted from worker_image (comment records why); `packages: write` moved from the top-level permissions to `jobs.worker_image.permissions` = {contents: write, packages: write, id-token: write}; top-level back to {contents: write, id-token: write}."
+      },
+      {
+        "id": "R1-N4",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080085",
+        "commit": "c212fe93",
+        "change": "docs: 'Two build prerequisites' with two bullets; GHCR visibility moved to its own post-first-push sentence."
+      },
+      {
+        "id": "R1-N5",
+        "thread": "https://github.com/sjawhar/legion/pull/966#discussion_r3996080086",
+        "commit": "c212fe93",
+        "change": "docs image section: mount writable volumes below the profile directory, never at /home/legion — names the plugin link + lock and the natives a HOME volume would shadow."
+      },
+      {
+        "id": "R1-W docs/kubernetes.md:24",
+        "commit": "c212fe93",
+        "change": "'has no linux/arm64 build'"
+      },
+      {
+        "id": "R1-W docs/kubernetes.md:31-32",
+        "commit": "c212fe93",
+        "change": "LEGION-25 probe pod marked '(LEGION-25, planned) is to run'"
+      },
+      {
+        "id": "R1-W worker-image.yaml:95",
+        "commit": "c212fe93",
+        "change": "version_label set inside the same `main` + non-empty cli_version branch as the version tag; sha-<short> otherwise (simulated: non-main dispatch with cli_version=0.9.0 → version_label=sha-…)"
+      },
+      {
+        "id": "R1-W cli/index.ts:64",
+        "commit": "a9510e8f",
+        "change": "ProbeImageDeps → ProbeImageCommandDeps (file-private; both uses updated)"
+      },
+      {
+        "id": "R1-W worker.Dockerfile:93 / workflow labels",
+        "commit": "c212fe93",
+        "change": "workflow `labels:` drops org.opencontainers.image.source (the Dockerfile LABEL stays, per convention); revision and version kept"
+      },
+      {
+        "id": "R1-W release.yaml:16-19",
+        "commit": "c212fe93",
+        "change": "see R1-N3 — packages: write lives on jobs.worker_image.permissions"
+      },
+      {
+        "id": "R1-W PR body",
+        "commit": "(PR edit)",
+        "change": "spec pointer → v9; CI line → Tests 34691746389 + Worker Image 34691746456 at a9510e8f; Threads section lists each thread with its fixing commit"
+      },
+      {
+        "id": "R1-W processes.ts:176",
+        "commit": "deferred",
+        "change": "NOT changed this round: main@origin still lacks LEGION-21's merge (#962 in retro), whose refactor owns processes.ts. Fix the withOmpLaunchPrefix doc comment ('probes live in index.ts' → boot-probes.ts) on the .legion/ cleanup push if #962 has landed by then; otherwise it is a one-line follow-up for LEGION-21's successor."
+      }
+    ],
+    "threadReplies": "one reply per thread with the fixing commit and the legion footer (r3996101099, r3996101166, r3996101236, r3996101301, r3996101368, r3996101446); threads left unresolved for the reviewer",
+    "checks": [
+      "actionlint .github/workflows/worker-image.yaml .github/workflows/release.yaml → clean",
+      "hadolint --ignore DL3008 --ignore DL3003 (published container) on worker.Dockerfile → clean",
+      "packages/daemon: bunx biome check src/ → 139 files clean; bunx tsc --noEmit → ok; bun test src/cli/__tests__/index.test.ts src/daemon/__tests__/index.test.ts src/daemon/__tests__/image-ref.test.ts (env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE) → 42 pass, 0 fail",
+      "yaml parse of release.yaml: top permissions {contents, id-token}; worker_image {permissions: {contents, packages, id-token}, secrets: null}"
+    ],
+    "run": {
+      "runId": 34691746456,
+      "url": "https://github.com/sjawhar/legion/actions/runs/34691746456",
+      "event": "pull_request",
+      "headSha": "a9510e8f08cd",
+      "checkout": "HEAD is now at a9510e8 chore(docker): natives download precedes probe-image; ProbeImageCommandDeps",
+      "outcome": "failure at step 3 'Require the Depot project variable' — ::error::Repository variable DEPOT_PROJECT_ID is unset … (expected; nothing created on Depot/GitHub/AWS; no image built)",
+      "tests": "Tests run 34691746389 success at a9510e8f"
+    }
   }
 }
