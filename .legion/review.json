@@ -1,0 +1,62 @@
+{
+  "issue": "LEGION-21",
+  "pr": {
+    "number": 962,
+    "url": "https://github.com/sjawhar/legion/pull/962",
+    "branch": "legion/LEGION-21",
+    "base": "main"
+  },
+  "verdict": "APPROVE",
+  "review": {
+    "id": 5186267139,
+    "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186267139",
+    "state": "APPROVED",
+    "submittedAt": "2026-09-12T11:18:15Z"
+  },
+  "reviewedSha": {
+    "prHead": "fba7a78d3b5ff36d52c8210d67ec22e45d92ee4a",
+    "code": "c498c8fb196a5acb7f2b1fcdf09f5663bf05882b",
+    "note": "7eacb0f7 and fba7a78d add only .legion/*.json on top of c498c8fb; merge base main 7add4d03"
+  },
+  "blockingItems": [],
+  "blockingItemCount": 0,
+  "verifiedOnGitHub": {
+    "statusCheckRollup": "SUCCESS at fba7a78d (Tests: pr-title/lint/typecheck/test; Legion Envoy and Contracts: changes/contracts/envoy-plugin/envoy-client/pi-envoy/dispatch/claude-envoy-bridge/envoy-go)",
+    "testerStatus": "legion/tester SUCCESS (targetUrl https://github.com/sjawhar/legion/actions/runs/34687346348)",
+    "reviewThreads": "0 total",
+    "command": "legion gh -- pr view 962 --json statusCheckRollup,...; legion gh -- api graphql reviewThreads/statusCheckRollup at 11:1xZ"
+  },
+  "thermo": {
+    "head": "c498c8fb",
+    "deepReview": "no blocking findings (4 non-blocking: daemon_url env inheritance; worker locator schema loosened; plugin-first deploy order; probe backfill persists via save without prune)",
+    "codeQuality": "no blocking findings (15 non-blocking: F1 persist-without-prune, F2 innerCommand duplication, F3 secret lifetime/delivery split, F4 grep gate is old-name pinning, F5 no ProcessManager test over FakeRuntime, F6 locatorHandles wire format (spec-fixed), F7 probeWorker wrapper (LEGION-22 file), F8 controllerAlive unknown policy, F9 worker locator strictness, F10 manifestReadCount pin, F11 residual pane vocabulary, F12 stale comments, F13 runtime-tmux setup duplication, F14 runtime.ts export nits, F15 negated optional-chain assertion)"
+  },
+  "judgements": {
+    "1_pureRefactorFidelity": "PASS - stop-path ordering (cached race+eviction in ProcessManager.stopProcess; TmuxRuntime.stop dials only its own connection), window sharing (locatorsForIssue tree-first then state.roles order; in-place tmuxWindowId rewrite), secret delivery (0600 file by role token, *_FILE appended after spec.env), probe backfill+persist, orphan sweep decoding of %/@/@win/*, three LEGION_DAEMON_URL sites -> config.daemonUrl. Only tmux-observable behaviour change: kill-pane reap on spawnRoot persist failure. Other deltas are plan-listed deviations (controller -e order, socket-less legacy locator logs, paneSecretFiles.add before write, backfill persist = save w/o prune).",
+    "2_interfaceFidelity": "PASS - runtime.ts = root spec s1 + accepted SpawnSpec.issue?; ProcessManager holds runtime: Runtime, reads only ompSessionFile and sameProcess identity; grep gate not beatable by renaming alone (import gate catches ./tmux; union type forces narrowing) though evadable by `in`-narrowing/casts/re-export - noted non-blocking.",
+    "3_architectRulings": "PASS - SpawnSpec.issue?, kill-pane reap, probe throws on unknown, forced files, task 8 contract gate (version 1 both sides, equality at boot, strict !==, message names path/package/contract|none/required/fix, missing/unreadable refuses, AGENTS.md:130 minPluginVersion replaced with bump rule); release.yaml jq preserves the legion key.",
+    "4_state": "PASS - version 24, migrateV23State tags tree/worker/controller locators, strict discriminatedUnion rejects untagged, .v23.bak via existing block, chain test v17->v24. LEGION-16 #961 also targets v24: whichever lands second renumbers.",
+    "5_config": "PASS - exact messages per spec Errors; resolveValue cli>yaml>env>default (YAML daemon_url beats LEGION_DAEMON_URL); bind checked post-resolution; daemon_url normalized; kubernetes throw in startDaemon before acquireInstanceLock and resolveDaemonEnvironment.",
+    "6_tests": "PASS - shared contract cases behavioural for both harnesses; FakeRuntime honest; corrective fix (state.project for socket/project) is fidelity not drift; default-window live test guards non-vacuous (tester proved failure with wrong socket); watchdog rewrite loses no teeth; no re-pins merely to pass (manifestReadCount 0->1 noted as wiring pin).",
+    "7_docs": "PASS - daemon AGENTS.md Files rows, DaemonConfig bullet, contract-gate paragraph accurate; PR body deploy note present with verbatim refusal string; Thermo line updated by reviewer."
+  },
+  "nonBlocking": [
+    "daemon_url env key == per-pane LEGION_DAEMON_URL (spec-accepted, documented); consider rejecting an env-sourced daemon_url whose port != port under runtime: tmux when LEGION-25 defines in-cluster URL semantics",
+    "controllerAlive deletes controllerLocator on unknown while probe throws; make it throw when LEGION-24 lands a producer",
+    "worker locator tmuxPaneId/socketPath now optional (plan deviation 5); a zod refine would restore loud load-time failure; sameProcess edge cases for pane-less records",
+    "grep gate: add /tmuxPaneId|tmuxWindowId|tmuxSession|socketPath|podName|podUid|TmuxLocator|K8sLocator|runtime-tmux/ over processes.ts (satisfied today); add one ProcessManager lifecycle test over FakeRuntime",
+    "secret-file lifetime in manager vs delivery in runtime: <stateDir>/secrets/<token> is an implicit shared contract; LEGION-24 architect to decide whether lifetime moves into Runtime",
+    "index.test.ts manifestReadCount pin is wiring",
+    "stale comments: tmux.ts:50, worker-rpc.ts:398 (LEGION-22 file), api/routes/workers.ts:284, processes.test.ts:1075,1153,2548-2551,6830,8864; residual pane vocabulary panePath/paneSecretFiles/holdPaneSecret/removeTreeWindow",
+    "duplication: stat/resume/innerCommand block in spawnTree+launchWorker; spawnIssueProcess/spawnController setup lines"
+  ],
+  "prBody": {
+    "thermoLineUpdated": true,
+    "threads": "0 resolved, 0 unresolved (unchanged)"
+  },
+  "next": "Architect sends the implementer back to push the .legion/ deletion; reviewer re-reviews that head by name. Reviewer pushed nothing (no contents permission; architect's order); this handoff commit rides along on the implementer's next push.",
+  "artifacts": "/tmp/legion21-review/{processes.old.ts,processes.diff,other.diff,tests.diff,review-body.md,pr-body.orig.md,pr-body.new.md}; thermo transcripts history://ThermoDeep, history://ThermoQuality",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T11:19:41.745Z"
+}
