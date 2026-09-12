@@ -24,6 +24,8 @@ related_issues:
   - "sjawhar/legion#952"
   - "LEGION-29"
   - "sjawhar/legion#970"
+  - "LEGION-13"
+  - "sjawhar/legion#978"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
@@ -44,9 +46,10 @@ Things every phase worker on `sjawhar/legion` hits in a worker pane or on the sm
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
 from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
 `packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again; the §1 attribution
-finding and the `packages/pi-envoy` note in §2 are from LEGION-29. None is part of any
-issue's scope; §1 is filed as LEGION-12 (a rig bug in the pi-envoy extension's tool-call hook) and §7 as LEGION-29.
-Until they are fixed, these are the workarounds.
+finding and the `packages/pi-envoy` note in §2 are from LEGION-29; the §2 environment-argument paragraph is from
+LEGION-13 (sjawhar/legion#978). None was part of the scope of the issue whose workers hit it; §1 is filed as LEGION-12
+(a rig bug in the pi-envoy extension's tool-call hook), §7 as LEGION-29, and §2's check-config leak was fixed by
+LEGION-13. Until the rest are fixed, these are the workarounds.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
 
@@ -144,8 +147,9 @@ Every Legion pane carries `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` without `DISP
 `ENVOY_*` families, so a test that reaches `process.env` through a helper with no env seam fails wherever the pane's
 env differs from CI's. `legion start --check-config` takes its environment as an argument
 (`cmdCheckConfig(project, configPath, env)` in `src/cli/index.ts`; the citty `start`/`restart` handlers are the only
-callers that pass `process.env`), and its tests hand it `{ PATH, HOME }`. Prefer that seam whenever the code under
-test can take one; the pane's shape is then irrelevant to the suite.
+callers that pass `process.env`), and its tests hand it `{ PATH, HOME }`. LEGION-13 (sjawhar/legion#978) introduced
+that argument; before it, `loadStartConfig` hardcoded `process.env` and the test failed in every pane. Prefer that seam
+whenever the code under test can take one; the pane's shape is then irrelevant to the suite.
 
 The same leak hit `packages/pi-envoy`, whose extension entry points read `process.env` themselves, on LEGION-29
 (fixed in sjawhar/legion#970): `envoy.test.ts` cleared `DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which

@@ -123,6 +123,6 @@ before implementation costs the planner one extra hour and saves every later pha
 - `docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md`: the unit-test half
   of the same discipline, proving the pre-fix failure mechanically and recording which assertion
   failed.
-- `docs/solutions/legion/worker-pane-shell-gotchas.md`: the pane environment facts (the
-  `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE` prefix for `bun test`, the stacked-grant
-  workaround) a tester needs before running any of the above.
+- `docs/solutions/legion/worker-pane-shell-gotchas.md`: the pane environment facts (the daemon CLI
+  test file injects its own environment, so `bun test` runs from `packages/daemon` with no prefix;
+  the stacked-grant workaround) a tester needs before running any of the above.
