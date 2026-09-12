@@ -46,7 +46,7 @@
     }
   ],
   "deviations_from_plan": [
-    "The plan's 'untouched' tests snapshot the seeded locator as `{ ...worker.claim().locator }`; that spreads an optional and tsc rejects it against `toEqual(WorkerLocator | undefined)`. Replaced with `structuredClone(worker.claim().locator)` in the five tests — same assertion (deep-equal against a snapshot, so an in-place mutation or a cleared locator both fail), correct type.",
+    "The plan's 'untouched' tests snapshot the seeded locator as `{ ...worker.claim().locator }`; that spreads an optional and tsc rejects it against `toEqual(WorkerLocator | undefined)`. Replaced with `structuredClone(worker.claim().locator)` in the five tests \u2014 same assertion (deep-equal against a snapshot, so an in-place mutation or a cleared locator both fail), correct type.",
     "Biome reformatted three files after the commits (config.ts's if-condition onto one line; wrapping in config.test.ts and processes.test.ts); squashed into the owning step's commit per Step 6 (`jj squash --into`).",
     "No other deviation. The connectAttempts() === 2 assertion in Step 2 test 1 held as the plan reasoned: onWorkerClientClosed runs before stopProcess evicts the client from the cache (it was registered first on client.closed), finds the locator still set and confirmed, spends its one reconnect probe (refused), and its markWorkerDead queues behind retireIdleWorker's critical section, where markWorkerDeadLocked's pane-id re-check returns early."
   ],
@@ -88,21 +88,49 @@
     }
   },
   "acceptance_to_tests": {
-    "1": "processes.test.ts: retires … (x3), untouched-under-window, re-prompted, active-phase, pendingAssignment, 0-disables",
-    "2": "processes.test.ts: resumes a retired worker with --resume … (+ existing resume tests)",
-    "3": "processes.test.ts: does not count a retired claim … toward the running-worker cap",
-    "4": "processes.test.ts: never retires an idle sub-architect …; the root has no worker claim",
+    "1": "processes.test.ts: retires \u2026 (x3), untouched-under-window, re-prompted, active-phase, pendingAssignment, 0-disables",
+    "2": "processes.test.ts: resumes a retired worker with --resume \u2026 (+ existing resume tests)",
+    "3": "processes.test.ts: does not count a retired claim \u2026 toward the running-worker cap",
+    "4": "processes.test.ts: never retires an idle sub-architect \u2026; the root has no worker claim",
     "5": "config.test.ts: two tests",
-    "6": "PENDING — tester, post-merge daemon restart from main (architect-timed); PR body E2E line says so",
+    "6": "PENDING \u2014 tester, post-merge daemon restart from main (architect-timed); PR body E2E line says so",
     "7": "reading the four changed documents; grep for the struck claims returns nothing"
   },
   "for_the_tester": [
-    "Criterion 6 is the only unverified criterion. The live daemon is sjawhar/legion (port 13370), supervised outside any Legion pane; plan Step 5 has the exact rebase/restart/rollback notes. Record `pgrep -fc 'omp --mode rpc'` before the restart and one idle window (600 s) after, plus the daemon's `[legion] retiring idle worker …` lines, in the PR body's E2E line with a negative control (a worker whose role is the issue's active phase, or a sub-architect, stays resident).",
+    "Criterion 6 is the only unverified criterion. The live daemon is sjawhar/legion (port 13370), supervised outside any Legion pane; plan Step 5 has the exact rebase/restart/rollback notes. Record `pgrep -fc 'omp --mode rpc'` before the restart and one idle window (600 s) after, plus the daemon's `[legion] retiring idle worker \u2026` lines, in the PR body's E2E line with a negative control (a worker whose role is the issue's active phase, or a sub-architect, stays resident).",
     "Every other criterion's regression lock is listed under tests above; the PR body table maps them.",
     "Operational: only the first of several stacked `export LEGION_GRANT=` blocks in a bash call redeems (LEGION-12). The planner's recorder workaround in .legion/messages/20260912191117-f0d8c84c-plan-to-implement.json worked for every push and legion gh call here."
   ],
   "base_note": "main advanced 12 commits past this branch's merge-base (d07086e1) while implementing; none of those commits touch a file this branch changes (checked with comm over the two diff summaries). Not rebased: the plan does not call for it and the merge queue's standing rule is no rebases unless GitHub reports CONFLICTING.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T19:33:03.646Z"
+  "completed": "2026-09-12T19:33:03.646Z",
+  "corrective_round_1": {
+    "trigger": "tester verdict FAIL on criterion 1 (.legion/test.json criteria.1, head tested 13468c968adb): a worker whose idle-retire clock expired as a no-op while it was phases[issue].phase is never re-armed when phases[issue] later moves to another role; only its own idle transition arms a clock and an already-idle worker never transitions again. Rig: reviewer idle 8.7 min, not the active phase for 5.7 min, no clock pending.",
+    "spec": "Dispatch primary document of LEGION-30 version 6 records the fix in Design and in the New-since-we-talked timer bullet.",
+    "fix": "retireIdleWorker: the predicate order is now disposed -> client identity/idle -> claim/locator/confirmation -> architect -> tree closing/closed -> (pendingAssignment !== undefined || phases[issue] names this role and is not completed). A decline on exactly that last disjunction calls armIdleRetire(token, client) inside the same mutateClaim callback (no await between the top-of-callback identity/idle/disposed checks and the re-arm, so they still hold and it cannot interleave with a prompt) and returns; every other decline returns without re-arming. The tree-gone check moved ahead of the re-arm decision so a closing/closed tree never re-arms (closeTree owns that stop). Both doc comments (armIdleRetire: two arm sites; retireIdleWorker: the re-arm paragraph naming the two conditions and why no other decline re-arms) updated in the file's style.",
+    "tests": {
+      "new": [
+        "re-arms the clock when expiry declines because the role is the active phase, and retires within one further window once phases[issue] moves to another role (the tester's reproduction, role reviewer: fire -> untouched + exactly one new 600_000 wait; phases[root] = planner; fire -> one shutdown, no kill-pane, resumeSessionFile set, launchFailures/promptFailures undefined, zero publications, zero clocks left pending)",
+        "re-arms the clock when expiry declines because a pendingAssignment is queued, and retires within one further window once it is cleared"
+      ],
+      "extended": [
+        "leaves a worker re-prompted inside the idle window untouched ...: asserts zero 600_000 waits pending right after the stale fire, before the emitRunState(idle) that arms the fresh one (a running decline does not re-arm)",
+        "never retires an idle sub-architect ...: asserts zero 600_000 waits pending after the fire (an architect decline does not re-arm)"
+      ],
+      "red_green": "red at a564342e: both new tests fail `expect(received).toHaveLength(expected) / Expected length: 1 / Received length: 0` at the re-armed assertion; the two extended negative tests already pass (nothing re-armed before the fix either). green after the fix: 25 pass / 0 fail under the idle-retire filter; processes.test.ts 203 pass / 3 skip / 0 fail (206 tests); from packages/daemon once: bunx biome check src/ clean, bunx tsc --noEmit clean, bun test 882 pass / 5 skip / 0 fail across 56 files."
+    },
+    "commit": {
+      "message": "fix(daemon): re-arm the idle-retire clock when expiry declines for a reason that changes while idle (LEGION-30)",
+      "sha": "95f0f339fec1403da4cd973ba60f6457d3e4a350",
+      "files": [
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts"
+      ],
+      "note": "Carved by path; .omp/config.yml stayed in the working copy (jj diff --from main --to legion/LEGION-30 --summary listed no .omp/ before the push). Not rebased: GitHub reports MERGEABLE, no conflict.",
+      "identity_anomaly": "95f0f339's committer is legion-reviewer[bot] (author legion-implementer[bot], Omp-Session trailer correct). Cause, with evidence: the jj user identity every Legion worker commits with is a REPO-scoped config (~/.config/jj/repos/834789e1326b209850cb/config.toml) on the one shared main repo that every issue workspace is a `jj workspace` of (the op log interleaves LEGION-13/-16/-21/-27/-28/-30 operations; the file's mtime 21:11:56 is a rewrite by another tree's provisioning, not this session's). Whichever role was most recently provisioned anywhere flips the identity for every concurrent commit in every workspace; at 21:07:37 it held reviewer. The handoff commit created by that `jj commit` inherited a reviewer AUTHOR and was corrected before push with `jj metaedit --author 'legion-implementer[bot] <271566630+legion-implementer[bot]@users.noreply.github.com>'` (the exact identity the daemon supplies for this phase; jj `--config user.*` pinned for the command). 95f0f339 was left as pushed: its author and trailer are right, CI is green at it, and a describe-rewrite would move the head under the tester/reviewer for a committer field nothing keys off. Escalated to the architect as a daemon defect (per-role identity must be per-process -- JJ_USER/JJ_EMAIL or a per-workspace config -- not written into the shared repo config); not this PR's scope."
+    },
+    "pr_body_edits": "Summary processes.ts bullet (corrective-round sentence), criterion-1 row (the two new tests, the tester's finding, fixed at 95f0f339), Red -> green section (corrective-round entry with the red and green output), CI line (runs 34719073750 / 34719073749 at 95f0f339, earlier heads listed), and a pointer appended to the tester's Defect-found paragraph under E2E so 'blocks merge' reads as fixed.",
+    "for_the_tester": "Re-run the rig ordering from test.json for_the_implementer: spawn A so it is the active phase, let its clock expire (declines and re-arms), spawn/resume B so /worker/started re-writes phases[issue]=B, expect A retired within one further window (one 'retiring idle worker' line for A, no kill-pane, no worker-died). The unit twin is the first new test above."
+  }
 }
