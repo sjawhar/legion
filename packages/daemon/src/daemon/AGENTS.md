@@ -134,7 +134,11 @@ headless `worker-shim` controller process is still alive in its pane and still p
 it, no interactive pane, no merge grants. After the upgrade, kill that pane once
 (`tmux -L legion-<project> kill-pane -t <controllerLocator.tmuxPaneId>`, the pane id from
 `legion state --json`); the next controller wake respawns the interactive one. No recorded
-`ompSessionFile` exists for a pre-v24 controller, so that first respawn starts fresh.
+`ompSessionFile` exists for a pre-v24 controller, so that first respawn starts fresh. **After
+deploying a skill change:** a controller session that predates it keeps the skill text it read
+at its own start in context until `/new` — its refusals stay correct, only the vocabulary lags
+(a gate name, a message shape) — so type `/new` into the controller pane, or kill the pane so
+the resumed session re-reads the skill.
 
 Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. Both this probe and the plugin-load probe below run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 

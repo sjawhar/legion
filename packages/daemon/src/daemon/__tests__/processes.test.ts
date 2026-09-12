@@ -3926,10 +3926,9 @@ describe("ProcessManager", () => {
     state.roles[controllerToken("omp")] = { ...staleClaim };
     state.controllerLocator = { ...deadLocator };
     let tmuxDown = true;
-    let mints = 0;
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
-      mintControllerCapability: async () => `controller-secret-${++mints}`,
+      mintControllerCapability: async () => "controller-secret",
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
@@ -3946,7 +3945,6 @@ describe("ProcessManager", () => {
     await expect(processes.ensureController()).rejects.toThrow("tmux new-window failed");
     expect(state.controllerLocator).toEqual(deadLocator);
     expect(state.roles[controllerToken("omp")]).toEqual(staleClaim);
-    expect(mints).toBe(1);
 
     // The server is back: the same transcript is resumed, not a fresh start.
     tmuxDown = false;

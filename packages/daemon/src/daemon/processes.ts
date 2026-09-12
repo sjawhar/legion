@@ -2490,9 +2490,10 @@ export class ProcessManager {
     // Interactive: no `--mode rpc`. The tmux runtime opens this command in the pane directly, with
     // no `legion worker-shim` and no socket (see `TmuxRuntime.spawnController`).
     const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
-    // Held from before the mint's own persist until the locator is in state (or the launch
-    // failed) — see `holdProcessSecret`. Taken first so no await in between leaves the
-    // controller's secret file covered by neither a locator nor a hold.
+    // Taken before the first write (the mint's own persist), released once the locator is in
+    // state or the launch has failed — see `holdProcessSecret`. On a respawn the dead
+    // incarnation's locator also covers the file until the swap below; on a fresh start the hold
+    // alone does.
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const controllerSecret = await this.deps.mintControllerCapability();
