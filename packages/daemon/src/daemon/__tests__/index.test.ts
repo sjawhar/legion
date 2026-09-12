@@ -842,7 +842,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("retires a ready-confirmed worker whose shim socket is dead at boot: capability revoked through the live api, locator cleared, secret file removed", async () => {
+  it("retires a ready-confirmed worker whose shim socket is dead at boot: retirement dereferences the live api without throwing, pane killed once, locator cleared, secret file removed", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const issue = "WIDGETS-42";
@@ -902,14 +902,16 @@ describe("startDaemon", () => {
         },
       });
 
-      // The whole retirement ran: no reconnect-wide failure and no TypeError anywhere in the boot
-      // log. (`[legion] failed to reconnect worker …: ECONNREFUSED` is the expected per-worker
-      // verdict line and is not a failure.)
+      // The whole retirement ran: no per-claim reconcile failure, no reconnect-wide failure, and
+      // no TypeError anywhere in the boot log. (`[legion] failed to reconnect worker …:
+      // ECONNREFUSED` is the expected per-worker verdict line and is not a failure.)
       const failures = errorLogs.filter((args) =>
         args.some(
           (arg) =>
             arg instanceof TypeError ||
-            (typeof arg === "string" && arg.includes("worker reconnection failed"))
+            (typeof arg === "string" &&
+              (arg.includes("failed to reconcile worker") ||
+                arg.includes("worker reconnection failed")))
         )
       );
       expect(failures).toEqual([]);

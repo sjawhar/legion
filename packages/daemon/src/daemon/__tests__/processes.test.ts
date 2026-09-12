@@ -7726,7 +7726,7 @@ describe("ProcessManager", () => {
           // Simulates the real worker-rpc client's get_state response seeding runState from
           // isStreaming: false — synchronously fires the registered onIdle callback (exactly
           // like a real boot-time reconnect probe would) while still inside reconnectWorkers,
-          // before enableWorkerPromotion() is called in the real boot sequence.
+          // before enableLaunches() is called in the real boot sequence.
           client.getStateImpl = async () => {
             client.emitRunState("idle");
             return { isStreaming: false };

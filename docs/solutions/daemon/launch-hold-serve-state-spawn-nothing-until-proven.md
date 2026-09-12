@@ -37,8 +37,8 @@ The resolution is a single boot gate on *pane-opening*, not on serving.
 environment, runner, Dispatch token file
 verifyLegionPluginContract()          ← synchronous: a manifest read, never load-sensitive
 probes = (async () => { pi.agents; plugin-load })();  probes.catch(() => {})   ← STARTED, not awaited
-tokenManager, state load, gate-off handling, NATS, ProcessManager, reconnectWorkers,
-pruneSecretFiles, event pump, pending-controller-notice drain/spawn, API bind, worker stream
+tokenManager, state load, gate-off handling, NATS, ProcessManager, event pump, API bind,
+worker stream, reconnectWorkers, pruneSecretFiles, pending-controller-notice drain/spawn
 await probes                          ← THE HOLD: the last point before the first pane could open
 enableLaunches() → reconnectRoots() → reconcileAdmission() → reconcileWorkerAdmission()
 → replayHeldRecoveries() → timers → signal handlers

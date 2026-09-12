@@ -547,10 +547,9 @@ async function startDaemonLocked(
   // `/controller/ready` call drains these same notices through the ordinary path once it's
   // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
   // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
-  // boot depends on either finishing. Runs after `api` is assigned because `ensureController`
-  // mints the controller capability through it. Boot's launch hold is still on here, so
-  // `ensureController` records the request instead of opening a pane; `replayHeldRecoveries()`
-  // below the hold spawns it once the probes pass.
+  // boot depends on either finishing. Kept with the manager's other boot calls, after `api`.
+  // Boot's launch hold is still on here, so `ensureController` records the request instead of
+  // opening a pane; `replayHeldRecoveries()` below the hold spawns it once the probes pass.
   if (state.controllerPendingNotices.length > 0) {
     if (state.roles[controllerToken(state.project)]) {
       void eventPump.drainControllerNotices().catch((error) => {
