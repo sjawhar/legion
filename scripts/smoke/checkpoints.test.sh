@@ -304,6 +304,54 @@ printf 'PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingre
 bare_temporary_dir="$(mktemp -d)"
 bare_smoke_dir="${bare_temporary_dir}/smoke"
 mkdir -p "$bare_smoke_dir"
+# No recorded mode and no SMOKE_WEBHOOK_MODE: the script stops naming the missing file and the
+# remedy, before any gating decision or Dispatch request -- it never guesses a mode.
+curl_calls_before="$(wc -l <"$curl_log")"
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$bare_smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  env -u SMOKE_WEBHOOK_MODE bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 1 to stop when no webhook mode was recorded or exported\n' >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 1 && "$(<"$output_file")" == *"CHECKPOINT 1 FAILED: no recorded webhook mode at ${bare_smoke_dir}/webhook-mode; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|none"* && "$(<"$output_file")" != *'SKIPPED-BLOCKED'* ]] || {
+  printf 'expected the no-recorded-mode message and exit 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+}
+[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+  printf 'expected the no-recorded-mode stop to make no Dispatch request\n' >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+}
+# An explicit export stands in for the missing record: none gates checkpoint 1 exactly as a
+# recorded none would.
+if PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$bare_smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  SMOKE_WEBHOOK_MODE=none bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected an exported none mode to block checkpoint 1\n' >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: '*'requires Dispatch issue-event ingress'* ]] || {
+  printf 'expected the exported none mode to gate checkpoint 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  rm -rf "$bare_temporary_dir"
+  exit 1
+}
+printf 'PASS: stops naming the missing webhook-mode record and the remedy instead of guessing a mode; an exported SMOKE_WEBHOOK_MODE stands in for it\n'
+
 printf 'envoy\n' >"${bare_smoke_dir}/webhook-mode"
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$bare_smoke_dir" \
