@@ -467,6 +467,9 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Summary string       `json:"summary"`
 		Actor   *model.Actor `json:"actor"`
@@ -537,6 +540,9 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Ops     []model.EditOp `json:"ops"`
 		Summary string         `json:"summary"`

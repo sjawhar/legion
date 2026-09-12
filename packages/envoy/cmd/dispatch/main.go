@@ -33,6 +33,8 @@ import (
 const (
 	defaultListenAddr = ":8766"
 	shutdownTimout    = 5 * time.Second
+	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 2 * time.Minute
 )
 
 type bootConfig struct {
@@ -136,10 +138,15 @@ func main() {
 	}
 
 	users := store.NewPgUserStore(database.Pool)
+	sessions := store.NewPgSessionStore(database.Pool)
 
 	var requestIdentity identity.Identity
 	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{SigningKey: signingKey, AllowedLogins: boot.AllowedLogins}
+		requestIdentity = identity.CookieIdentity{
+			SigningKey:    signingKey,
+			AllowedLogins: boot.AllowedLogins,
+			Sessions:      sessions,
+		}
 	} else {
 		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
 		requestIdentity = identity.HeaderIdentity{
@@ -161,6 +168,7 @@ func main() {
 		SigningKey: signingKey,
 		WebDistDir: webDistDir,
 		Users:      users,
+		Sessions:   sessions,
 		Identity:   requestIdentity,
 
 		AllowedLogins:  boot.AllowedLogins,
@@ -199,8 +207,11 @@ func main() {
 		os.Exit(1)
 	}
 	server := &http.Server{
-		Addr:    listenAddr,
-		Handler: handler,
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		// WriteTimeout remains zero because the event stream is long-lived.
 	}
 
 	go func() {

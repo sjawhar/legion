@@ -26,18 +26,29 @@ type Identity interface {
 type CookieIdentity struct {
 	SigningKey    string
 	AllowedLogins map[string]struct{}
+	Sessions      auth.SessionStore
 }
 
 // Login returns the valid session login or ErrNoIdentity.
 func (i CookieIdentity) Login(r *http.Request) (string, error) {
-	login := auth.SessionLogin(r, i.SigningKey)
-	if login == "" {
+	session, ok := auth.SessionFromRequest(r, i.SigningKey)
+	if !ok {
 		return "", ErrNoIdentity
 	}
-	if _, allowed := i.AllowedLogins[strings.ToLower(login)]; !allowed {
+	if i.Sessions == nil {
+		return "", ErrNoIdentity
+	}
+	generation, found, err := i.Sessions.CurrentSessionGeneration(r.Context(), session.Login)
+	if err != nil {
+		return "", err
+	}
+	if !found || generation != session.Generation {
+		return "", ErrNoIdentity
+	}
+	if _, allowed := i.AllowedLogins[strings.ToLower(session.Login)]; !allowed {
 		return "", ErrLoginNotAllowed
 	}
-	return login, nil
+	return session.Login, nil
 }
 
 // HeaderIdentity resolves the trusted proxy header and enforces the login

@@ -150,6 +150,9 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Project  string       `json:"project"`
 		Title    string       `json:"title"`

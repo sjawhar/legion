@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 
@@ -96,12 +97,24 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if room == "" {
 		room = path.Base(r.URL.Path)
 	}
+	if _, err := s.requestActor(r); err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := uuid.Parse(room); err != nil {
+		http.Error(w, "document not found", http.StatusNotFound)
+		return
+	}
+	if _, err := s.issueOpen(r.Context(), room); err != nil {
+		http.Error(w, "document not found", http.StatusNotFound)
+		return
+	}
 	if err := s.awaitRoomRecovery(r.Context(), room); err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if _, err := s.requestActor(r); err != nil {
-		s.srv.ServeHTTP(w, r)
+	if !s.canOpenRoom(room) || !s.canAddConnection() {
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	if s.srv.GetDoc(room) == nil {
@@ -126,6 +139,9 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	room := r.PathValue("room")
 	if room == "" {
 		room = path.Base(r.URL.Path)
+	}
+	if !s.canAddConnection() {
+		return websocket.ConnectionConfig{}, false
 	}
 	if s.roomFailure(room) != nil {
 		return websocket.ConnectionConfig{}, false

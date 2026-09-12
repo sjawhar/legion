@@ -100,8 +100,9 @@ export interface DispatchConfigResolution {
  * `DISPATCH_URL` overrides the file URL. The token resolves from `DISPATCH_TOKEN_FILE` (trimmed
  * file contents — how the Legion daemon delivers it to a pane), then `DISPATCH_TOKEN`, then
  * `dispatch.token`; a set `DISPATCH_TOKEN_FILE` that cannot be read or is blank disables Dispatch
- * with that failure as `error` and never falls back. Dispatch tools are available only when both
- * a URL and a bearer token resolve.
+ * with that failure as `error` and never falls back. A repository `dispatch.serverUrl` is trusted
+ * only with the `dispatch.token` declared beside it, so it cannot redirect a user-level credential.
+ * Dispatch tools are available only when both URL and bearer token resolve.
  */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
@@ -123,10 +124,30 @@ export function resolveDispatchConfig(
     }
   }
 
-  const merged: DispatchSettings = {
-    ...(userFile.kind === "valid" ? userFile.settings : null),
-    ...(repoFile.kind === "valid" ? repoFile.settings : null),
-  };
+  const userSettings = userFile.kind === "valid" ? userFile.settings : null;
+  const repoSettings = repoFile.kind === "valid" ? repoFile.settings : null;
+  const merged: DispatchSettings = { ...userSettings, ...repoSettings };
+  const repoURL = repoSettings?.serverUrl;
+
+  // Repository configuration is controlled by the repository author. It may
+  // provide its own endpoint and credential, but must never redirect a
+  // credential inherited from the user's config or process environment.
+  if (explicitUrl === undefined && merged.enabled === true && repoURL !== undefined) {
+    const token = repoSettings?.token ?? null;
+    if (!token) {
+      return {
+        enabled: false,
+        url: null,
+        token: null,
+        error:
+          "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN",
+      };
+    }
+    const url = parsedDispatchUrl(repoURL, "repository dispatch.serverUrl");
+    if (url.error !== null) return { enabled: false, url: null, token: null, error: url.error };
+    return { enabled: true, url: url.url, token, error: null };
+  }
+
   const rawUrl =
     explicitUrl !== undefined
       ? { value: explicitUrl, source: "DISPATCH_URL" }

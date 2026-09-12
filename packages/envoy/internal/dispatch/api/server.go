@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -400,10 +401,27 @@ func len16(value string) int {
 	return length
 }
 
+const maxJSONRequestBytes int64 = 1 << 20
+
+type maxBytesDiscarder struct{}
+
+func (maxBytesDiscarder) Header() http.Header             { return nil }
+func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
+func (maxBytesDiscarder) WriteHeader(int)                 {}
+
 func decodeJSON(r *http.Request, value any) error {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
+		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
+	}
+	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
+		var maxBytes *http.MaxBytesError
+		if errors.As(err, &maxBytes) {
+			return errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
+		}
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}
 	if decoder.More() {

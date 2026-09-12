@@ -29,6 +29,11 @@ var (
 	ErrServiceUnavailable = errors.New("document service unavailable")
 )
 
+const (
+	maxLiveRooms       = 1_000
+	maxRoomConnections = 1_000
+)
+
 // Deps configures the live document service.
 type Deps struct {
 	Store             *store.Store
@@ -549,7 +554,11 @@ func (s *Service) failRoom(room string, cause error) {
 }
 
 func (s *Service) roomFailure(room string) error {
-	state := s.room(room)
+	value, ok := s.rooms.Load(room)
+	if !ok {
+		return nil
+	}
+	state := value.(*roomState)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.failed == nil {
@@ -570,9 +579,14 @@ func (s *Service) roomFailed(room string) bool {
 }
 
 // awaitRoomRecovery waits for a failed room's forced eviction. Its next caller
-// then reloads the persisted document into a new room state.
+// then reloads the persisted document into a new room state. A room without
+// state has nothing to recover, so this lookup must not allocate one.
 func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
-	state := s.room(room)
+	value, ok := s.rooms.Load(room)
+	if !ok {
+		return nil
+	}
+	state := value.(*roomState)
 	state.mu.Lock()
 	failure := state.failed
 	done := state.failedDone
@@ -600,7 +614,7 @@ func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error
 	if err := s.store.Pool.QueryRow(ctx, `
 		select coalesce(i.closed_at is null, true)
 		from artifacts a left join issues i on i.key = a.issue_key
-		where a.id = $1
+		where a.id = $1 and a.kind = 'doc'
 	`, artifactID).Scan(&open); err != nil {
 		return false, fmt.Errorf("check document issue: %w", err)
 	}
@@ -615,6 +629,30 @@ func (s *Service) room(name string) *roomState {
 		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
 	})
 	return value.(*roomState)
+}
+
+func (s *Service) canOpenRoom(room string) bool {
+	if _, exists := s.rooms.Load(room); exists {
+		return true
+	}
+	count := 0
+	s.rooms.Range(func(_, _ any) bool {
+		count++
+		return count < maxLiveRooms
+	})
+	return count < maxLiveRooms
+}
+
+func (s *Service) canAddConnection() bool {
+	count := 0
+	s.rooms.Range(func(_, value any) bool {
+		state := value.(*roomState)
+		state.mu.Lock()
+		count += len(state.connected)
+		state.mu.Unlock()
+		return count < maxRoomConnections
+	})
+	return count < maxRoomConnections
 }
 
 var _ API = (*Service)(nil)

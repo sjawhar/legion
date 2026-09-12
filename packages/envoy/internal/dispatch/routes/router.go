@@ -7,6 +7,7 @@ package routes
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,11 +15,13 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -36,12 +39,14 @@ type AppContext struct {
 	SigningKey     string
 	WebDistDir     string
 	Users          auth.UserStore
+	Sessions       auth.SessionStore
 	Identity       identity.Identity
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
 	RepoProjects   string
 	DefaultProject string
+	ServerURL      string
 	HTTPClient     auth.HTTPClient
 	apiDeps        api.Deps
 	app            *auth.AppConfig // nil ⇒ not configured
@@ -56,6 +61,7 @@ type AppContextOptions struct {
 	SigningKey       string
 	WebDistDir       string
 	Users            auth.UserStore
+	Sessions         auth.SessionStore
 	Identity         identity.Identity
 	AllowedLogins    map[string]struct{}
 	Store            *store.Store
@@ -101,12 +107,14 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
 		Users:          opts.Users,
+		Sessions:       opts.Sessions,
 		Identity:       opts.Identity,
 		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
 		AgentToken:     opts.AgentToken,
 		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
+		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
 		apiDeps:        apiDeps,
 		app:            opts.App,
 		appSource:      opts.AppSource,
@@ -124,6 +132,8 @@ func (ctx *AppContext) App() *auth.AppConfig {
 const (
 	pendingStateTTL  = 10 * time.Minute
 	maxPendingStates = 1000
+	oauthStateCookie = "dispatch_oauth_state"
+	oauthStateMaxAge = 10 * 60
 )
 
 type router struct {
@@ -134,6 +144,7 @@ type router struct {
 
 type pendingState struct {
 	next      string
+	nonce     string
 	expiresAt time.Time
 }
 
@@ -150,7 +161,7 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("GET /healthz", r.healthz)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
-	return mux
+	return r.enforceCookieOrigin(mux)
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -166,12 +177,18 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "state")
 		return
 	}
+	nonce, err := randomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
+		return
+	}
 	next := sanitizeNext(req.URL.Query().Get("next"))
-	if !r.putPendingState(state, next) {
+	if !r.putPendingState(state, nonce, next) {
 		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
 		return
 	}
-	redirectURI := callbackURL(req)
+	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge))
+	redirectURI := callbackURL(r.ctx.ServerURL, req)
 	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
 	http.Redirect(w, req, target, http.StatusFound)
 }
@@ -187,12 +204,18 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	http.SetCookie(w, oauthStateCookieFor("", -1))
 	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(req), r.ctx.HTTPClient)
+	cookie, err := req.Cookie(oauthStateCookie)
+	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(pending.nonce)) != 1 {
+		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
+		return
+	}
+	tokens, err := auth.ExchangeCode(req.Context(), app.ClientID, app.ClientSecret, code, callbackURL(r.ctx.ServerURL, req), r.ctx.HTTPClient)
 	if err != nil {
 		slog.Warn("dispatch: oauth code exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "code exchange failed: "+err.Error())
@@ -208,14 +231,29 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
 	}
-	w.Header().Set("Set-Cookie", auth.IssueSessionCookie(user.Login, r.ctx.SigningKey))
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), user.Login)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "login", user.Login, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return
+		}
+	}
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(user.Login, generation, r.ctx.SigningKey))
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
-
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	login, ok := r.login(w, req)
 	if !ok {
 		return
+	}
+	if r.ctx.Sessions != nil {
+		if err := r.ctx.Sessions.RevokeSessions(req.Context(), login); err != nil {
+			slog.Warn("dispatch: revoke sessions failed", "login", login, "error", err)
+			writeError(w, http.StatusInternalServerError, "revoke session")
+			return
+		}
 	}
 	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
 		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
@@ -417,29 +455,70 @@ func contentType(path string) string {
 
 // ───── helpers ──────────────────────────────────────────────────────────────
 
-// callbackURL reconstructs the public origin from the incoming request and
-// appends /auth/callback. Must match the App's configured callback URL on
-// github.com — that's why we always recompute from req rather than store it
-// in app.json (operator can move the deployment without re-bootstrapping).
-func callbackURL(req *http.Request) string {
+// callbackURL uses Dispatch's configured canonical public origin whenever it
+// is available. A backend request's Host and TLS state are used only for
+// unconfigured local deployments; forwarded headers are deliberately ignored.
+func callbackURL(serverURL string, req *http.Request) string {
+	return publicOrigin(serverURL, req) + "/auth/callback"
+}
+
+func publicOrigin(serverURL string, req *http.Request) string {
+	if parsed, err := url.Parse(serverURL); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+	}
 	scheme := "http"
 	if req.TLS != nil {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://%s/auth/callback", scheme, req.Host)
+	return fmt.Sprintf("%s://%s", scheme, req.Host)
+}
+
+func (r *router) enforceCookieOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if !unsafeMethod(req.Method) || strings.TrimSpace(req.Header.Get("Authorization")) != "" || !auth.HasSessionCookie(req) {
+			next.ServeHTTP(w, req)
+			return
+		}
+		if origin := req.Header.Get("Origin"); origin != "" && origin == publicOrigin(r.ctx.ServerURL, req) {
+			next.ServeHTTP(w, req)
+			return
+		}
+		if req.Header.Get("Origin") == "" && req.Header.Get("Sec-Fetch-Site") == "same-origin" {
+			next.ServeHTTP(w, req)
+			return
+		}
+		writeError(w, http.StatusForbidden, "invalid request origin")
+	})
+}
+
+func unsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 // sanitizeNext restricts post-login redirect targets to local paths. An
 // open-redirect bug here would let a phishing site bounce victims back to
 // their own page after passing through our domain.
 func sanitizeNext(raw string) string {
-	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+	if raw == "" || strings.Contains(raw, "\\") || strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return "/"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
+		return "/"
+	}
+	path, err := url.PathUnescape(parsed.EscapedPath())
+	if err != nil || strings.Contains(path, "\\") || strings.IndexFunc(path, unicode.IsControl) >= 0 {
 		return "/"
 	}
 	return raw
 }
 
-func (r *router) putPendingState(token, next string) bool {
+func (r *router) putPendingState(token, nonce, next string) bool {
 	now := time.Now()
 	r.pendingMu.Lock()
 	defer r.pendingMu.Unlock()
@@ -451,7 +530,7 @@ func (r *router) putPendingState(token, next string) bool {
 	if len(r.pendingStates) >= maxPendingStates {
 		return false
 	}
-	r.pendingStates[token] = pendingState{next: next, expiresAt: now.Add(pendingStateTTL)}
+	r.pendingStates[token] = pendingState{next: next, nonce: nonce, expiresAt: now.Add(pendingStateTTL)}
 	return true
 }
 
@@ -464,6 +543,18 @@ func (r *router) takePendingState(token string) (pendingState, bool) {
 	}
 	delete(r.pendingStates, token)
 	return pending, pending.expiresAt.After(time.Now())
+}
+
+func oauthStateCookieFor(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     oauthStateCookie,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   os.Getenv("DISPATCH_INSECURE_COOKIE") == "",
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge,
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

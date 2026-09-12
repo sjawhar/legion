@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -198,5 +199,26 @@ func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	}
 	if response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated websocket response = %#v, want HTTP 401", response)
+	}
+}
+
+func TestUnauthenticatedDocumentRequestsDoNotAllocateRooms(t *testing.T) {
+	service, _ := newTestService(t)
+
+	for number := range 1000 {
+		response := httptest.NewRecorder()
+		service.ServeHTTP(response, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/ws/doc/random-%d", number), nil))
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d status = %d, want %d", number, response.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rooms := 0
+	service.rooms.Range(func(_, _ any) bool {
+		rooms++
+		return true
+	})
+	if rooms != 0 {
+		t.Fatalf("unauthenticated requests left %d room states, want 0", rooms)
 	}
 }
