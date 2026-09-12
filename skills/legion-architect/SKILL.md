@@ -105,9 +105,10 @@ idea what the fuck you're talking about."
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake
 shows `design-approved` on the root. On a deployment whose design gate is off
 (`gates.design: off` in its `legion.yaml`), the daemon satisfies the gate as you register it
-and `design-approved` arrives immediately — proceed; the ask remains open on Dispatch as the
-record and needs no answer. Approval covers the entire tree: later waves, re-scopes, and
-integration-failure children do not repeat this sequence.
+and `design-approved` arrives immediately — proceed. The daemon then closes the ask on Dispatch
+(you will see `ask.resolved` for it); that is expected and needs nothing from you. Approval
+covers the entire tree: later waves, re-scopes, and integration-failure children do not repeat
+this sequence.
 
 ## 2. Children in flight
 

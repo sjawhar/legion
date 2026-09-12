@@ -9,8 +9,8 @@ import type { DurableMessageControl } from "../nats-transport";
 
 /** A `DispatchClient` double for tests that need one wired (every `LegionApiDeps`,
  * `ProcessManagerDeps`, and `RunResyncDeps` requires one) but do not assert on Dispatch writes
- * themselves — `listIssues` returns empty, `setStatus` is a no-op spy, `getIssue` throws unless a
- * scenario overrides it. */
+ * themselves — `listIssues` returns empty, `setStatus` and `resolveAsk` are no-op spies, `getIssue`
+ * throws unless a scenario overrides it. */
 export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): DispatchClient {
   return {
     listIssues: async () => [],
@@ -18,6 +18,7 @@ export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): Dis
       throw new Error(`fakeDispatchClient.getIssue not stubbed for ${key}`);
     },
     setStatus: async () => {},
+    resolveAsk: async () => {},
     ...overrides,
   };
 }

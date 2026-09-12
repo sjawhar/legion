@@ -110,8 +110,9 @@ human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispat
 **Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
 option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or
 `off`). With `off`, the daemon satisfies the gate the moment the architect registers it
-(`designApproved: "gate-off"`) and sends the same `design-approved` wake a human answer would, so
-no one has to click; the ask stays on Dispatch as a record. Whether a human must approve a pull
+(`designApproved: "gate-off"`), sends the same `design-approved` wake a human answer would, and
+closes the ask on Dispatch (`resolved`, with a reason the dashboard shows), so no one has to click
+and nothing waits in a human's inbox. Whether a human must approve a pull
 request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
 neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
 its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never

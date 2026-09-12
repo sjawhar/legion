@@ -416,7 +416,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("with gates.design off, boot approves every registered gate a human never answered and wakes its architect", async () => {
+  it("with gates.design off, boot approves every registered gate a human never answered, wakes its architect, and closes its ask", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), gates: { design: "off" as const } };
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
@@ -437,6 +437,7 @@ describe("startDaemon", () => {
     state.gates["WIDGETS-4"] = { designAskId: "ask-on-closed-tree" };
     let saved = 0;
     const published: Array<{ topic: string; payload: string }> = [];
+    const resolvedAsks: string[] = [];
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
       daemon = await startDaemon(daemonConfig, {
@@ -461,7 +462,11 @@ describe("startDaemon", () => {
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
           },
-          dispatchClient: fakeDispatchClient(),
+          dispatchClient: fakeDispatchClient({
+            resolveAsk: async (id) => {
+              resolvedAsks.push(id);
+            },
+          }),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -498,6 +503,9 @@ describe("startDaemon", () => {
           payload: JSON.stringify({ type: "design-approved" }),
         },
       ]);
+      // Only the gate the daemon itself approved: a human-answered ask is already closed on
+      // Dispatch, a closed tree has nobody waiting, and an unregistered gate has no ask.
+      expect(resolvedAsks).toEqual(["ask-unanswered"]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

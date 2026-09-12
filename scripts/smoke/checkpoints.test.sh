@@ -15,7 +15,7 @@ trap 'rm -rf "$temporary_dir"' EXIT
 
 mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
 printf 'none\n' >"${smoke_dir}/webhook-mode"
-printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design"}}}' >"${smoke_dir}/daemon/state.json"
+printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design","designApproved":"gate-off"}}}' >"${smoke_dir}/daemon/state.json"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
 # it at all, standing in for a concurrent rig's own root sharing the same LEGSMOKE project. The
 # recorded root-issue file below must make every checkpoint below target LEGSMOKE-1 regardless --
@@ -28,8 +28,8 @@ cat >"${fake_bin}/curl" <<'EOF'
 request="$*"
 printf '%s\n' "$request" >>"$CURL_LOG"
 case "$request" in
-  *"/api/v1/issues/LEGSMOKE-1/asks?state=open"*)
-    printf '%s' '[{"id":"ask-design","state":"open","options":[{"label":"Approve"}]}]'
+  *"/api/v1/issues/LEGSMOKE-1/asks?state=all"*)
+    printf '%s' '[{"id":"ask-design","state":"resolved","options":[{"label":"Approve"}]}]'
     ;;
   *"/api/v1/issues/LEGSMOKE-1/artifacts"*)
     printf '%s' '[{"name":"spec.md","primary":true,"versions":[{"number":1}]}]'
@@ -142,7 +142,7 @@ PATH="${fake_bin}:${PATH}" \
   cat "$output_file" >&2
   exit 1
 }
-grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/asks?state=open' "$curl_log"
+grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/asks?state=all' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/artifacts' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1' "$curl_log"
 

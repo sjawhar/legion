@@ -288,7 +288,7 @@ state_dir: ${smoke_dir}/daemon
 omp_invocation: mise x ${omp_pin} -- omp
 ${omp_launch_prefix_yaml}
 gates:
-  design: root-issues
+  design: off
 github_apps:
   implement:
     app_id: "${LEGION_IMPLEMENT_APP_ID}"
@@ -300,10 +300,12 @@ EOF
 }
 
 # Creates this exercise's Dispatch root issue in the shared LEGSMOKE project and records its key
-# at `${smoke_dir}/root-issue` -- the daemon's own "root-issues" design gate then discovers it as
-# a parentless issue, and checkpoints.sh's `smoke_root_issue` reads this exact file to name the
-# right root instead of guessing "the first parentless issue" in a project other concurrent
-# rigs also share. Idempotent across a rerun against the same SMOKE_DIR: a rig that already
+# at `${smoke_dir}/root-issue` -- the daemon discovers it as a parentless issue, and
+# checkpoints.sh's `smoke_root_issue` reads this exact file to name the right root instead of
+# guessing "the first parentless issue" in a project other concurrent rigs also share. The rig's
+# daemon runs with `gates.design: off` (write_daemon_config): a smoke exercise must run end to
+# end with nobody answering a design-gate ask, and the daemon closes the one the architect opens.
+# Idempotent across a rerun against the same SMOKE_DIR: a rig that already
 # recorded a root issue reuses it rather than creating a second one.
 ensure_root_issue() {
   local root_file="${smoke_dir}/root-issue"
