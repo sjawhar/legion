@@ -575,6 +575,139 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# Garrett reply");
   });
 
+  test("dispatch_request_approval opens the approval ask for the issue spec and reports its version", async () => {
+    const posts: Array<{ path: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
+        posts.push({ path: target.pathname, body: JSON.parse(String(init?.body)) });
+        return response({
+          ask: { id: "ask-9", issue_key: "DSP-42", artifact_id: null, kind: "approval" },
+          artifact_id: "artifact-42",
+          version: 3,
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_request_approval",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(posts).toHaveLength(1);
+    expect((posts[0]?.body as { actor: { kind: string } }).actor.kind).toBe("session");
+    expect(result.text).toContain("spec.md at version 3");
+    expect(result.text).toContain("ask ask-9");
+    expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
+    expect(result.details?.topic).toBe("notifications.dispatch.issue.DSP-42.>");
+  });
+
+  test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
+        return response({
+          ask: null,
+          artifact_id: "artifact-42",
+          version: 3,
+          approval: {
+            state: "approved",
+            latest_version: 3,
+            version: 3,
+            by: { kind: "user", id: "sjawhar" },
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_request_approval",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("already approved at version 3 by sjawhar");
+    expect(result.text).not.toContain("ask ");
+    expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
+    expect(result.details?.topic).toBeUndefined();
+  });
+
+  test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            {
+              id: "artifact-42",
+              slug: "spec",
+              name: "spec.md",
+              primary: true,
+              approval: {
+                state: "stale",
+                latest_version: 4,
+                version: 2,
+                by: { kind: "user", id: "sjawhar" },
+              },
+            },
+          ],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Spec", version: 4 });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again"
+    );
+  });
+
   test("resolves a project artifact by its filename when the slug route 404s", async () => {
     const paths: string[] = [];
     const artifact = {

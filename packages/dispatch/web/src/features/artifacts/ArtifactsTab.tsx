@@ -15,6 +15,7 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ApprovalChip } from "../doc/ApprovalChip";
 import { buildIssuePath, buildProjectPath, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl } from "./ArtifactHeader";
@@ -171,6 +172,7 @@ function ArtifactRow({
           Primary
         </span>
       ) : null}
+      <ApprovalChip artifact={artifact} />
       {latestVersion === undefined ? null : (
         <a
           className={`shrink-0 text-sm font-medium underline ${linkText} ${linkHoverText}`}

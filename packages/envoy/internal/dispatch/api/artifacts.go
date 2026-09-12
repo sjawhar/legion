@@ -657,12 +657,17 @@ func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) 
 	if artifacts == nil {
 		artifacts = []model.Artifact{}
 	}
+	pointers := make([]*model.Artifact, len(artifacts))
 	for index := range artifacts {
 		versions, err := s.loadVersions(ctx, q, artifacts[index].ID)
 		if err != nil {
 			return nil, err
 		}
 		artifacts[index].Versions = versions
+		pointers[index] = &artifacts[index]
+	}
+	if err := s.attachApprovals(ctx, q, pointers); err != nil {
+		return nil, err
 	}
 	return artifacts, nil
 }
@@ -721,6 +726,9 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 		return model.Artifact{}, err
 	}
 	artifact.Versions = versions
+	if err := s.attachApproval(ctx, q, &artifact); err != nil {
+		return model.Artifact{}, err
+	}
 	return artifact, nil
 }
 

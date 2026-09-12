@@ -66,6 +66,7 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
       edited_by: { id: "session-1", kind: "session" },
       id: "ask-1",
       issue_key: "CORE-1",
+      kind: "question",
       multiple: false,
       opened_event_id: 1,
       options: [],

@@ -154,6 +154,49 @@ type Artifact struct {
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Versions  []Version `json:"versions"`
+	// Approval is the document's approval as of its latest version, derived from
+	// version-pinned reviews and any open approval ask; nil for non-documents.
+	Approval *ArtifactApproval `json:"approval,omitempty"`
+}
+
+// ArtifactReview is one human review of a document, pinned to the version it was
+// given on: an approval, or a request for changes with a reason.
+type ArtifactReview struct {
+	ID         string    `json:"id"`
+	ArtifactID string    `json:"artifact_id"`
+	Version    int       `json:"version"`
+	State      string    `json:"state"`
+	Actor      Actor     `json:"actor"`
+	Reason     *string   `json:"reason"`
+	AskID      *string   `json:"ask_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ArtifactApproval is a document's approval state as of its latest version:
+// draft (never reviewed or requested), awaiting (an approval ask is open),
+// approved (approved at the latest version), stale (approved at an older
+// version), or changes_requested (the latest review asks for changes).
+type ArtifactApproval struct {
+	State         string  `json:"state"`
+	LatestVersion int     `json:"latest_version"`
+	Version       *int    `json:"version,omitempty"`
+	By            *Actor  `json:"by,omitempty"`
+	At            *string `json:"at,omitempty"`
+	Reason        *string `json:"reason,omitempty"`
+	AskID         *string `json:"ask_id,omitempty"`
+	RequestedBy   *Actor  `json:"requested_by,omitempty"`
+}
+
+// ArtifactReviewEventPayload is the payload of artifact.approved and
+// artifact.changes_requested: the review pinned to its version, and the approval
+// ask it answered (nil when given from the document header with no request open).
+type ArtifactReviewEventPayload struct {
+	ArtifactID string  `json:"artifact_id"`
+	Name       string  `json:"name"`
+	Version    int     `json:"version"`
+	Actor      Actor   `json:"actor"`
+	Reason     *string `json:"reason"`
+	AskID      *string `json:"ask_id"`
 }
 
 // Version is an immutable artifact version.
@@ -170,10 +213,13 @@ type Version struct {
 
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
-	ID            string         `json:"id"`
-	IssueKey      *string        `json:"issue_key"`
-	ArtifactID    *string        `json:"artifact_id"`
-	Author        Actor          `json:"author"`
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key"`
+	ArtifactID *string `json:"artifact_id"`
+	Author     Actor   `json:"author"`
+	// Kind is "question" for an ordinary ask and "approval" for one opened by an
+	// approval request, whose options are fixed and whose answer writes a review.
+	Kind          string         `json:"kind"`
 	Question      string         `json:"question"`
 	Options       []AskOption    `json:"options"`
 	Multiple      bool           `json:"multiple"`
@@ -185,6 +231,16 @@ type Ask struct {
 	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
 	EditedAt      *string        `json:"edited_at"`
+	// Approval names the document an approval ask is about; nil for questions.
+	Approval *AskApproval `json:"approval,omitempty"`
+}
+
+// AskApproval is the document an approval ask asks about, at the version the
+// request was made for.
+type AskApproval struct {
+	ArtifactID string `json:"artifact_id"`
+	Name       string `json:"name"`
+	Version    int    `json:"version"`
 }
 
 // AskEditPrevious is the mutable content of an ask before an edit.

@@ -272,6 +272,7 @@ test("a document owner loads asks and comments from the artifact routes, hides p
       edited_at: null,
       id: "ask-1",
       issue_key: null,
+      kind: "question",
       multiple: false,
       opened_event_id: 1,
       options: [],

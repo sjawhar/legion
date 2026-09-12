@@ -104,6 +104,10 @@ export function activityDescription(event: Event): string {
       return `resolved a comment on ${event.payload.artifact_name}`;
     case "comment.reopened":
       return `reopened a comment on ${event.payload.artifact_name}`;
+    case "artifact.approved":
+      return `approved ${event.payload.name} v${event.payload.version}`;
+    case "artifact.changes_requested":
+      return `requested changes on ${event.payload.name} v${event.payload.version}`;
     case "comment.edited":
       return `edited a comment on ${event.payload.artifact_name}`;
     case "suggestion.accepted":

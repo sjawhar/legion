@@ -379,6 +379,9 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.getArtifactText("artifact-1");
   await api.getArtifactVersion("artifact-1", 3);
   await api.createArtifactVersion("artifact-1", { summary: "Save" });
+  await api.listArtifactReviews("artifact-1");
+  await api.createArtifactReview("artifact-1", { state: "approved" });
+  await api.requestArtifactApproval("artifact-1");
   await api.getMyState();
   await api.putIssueState("CORE-1", { pinned: true });
   await api.whoAmI();
@@ -409,6 +412,9 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/v1/artifacts/artifact-1/text"],
     ["GET", "/api/v1/artifacts/artifact-1/versions/3"],
     ["POST", "/api/v1/artifacts/artifact-1/versions"],
+    ["GET", "/api/v1/artifacts/artifact-1/reviews"],
+    ["POST", "/api/v1/artifacts/artifact-1/reviews"],
+    ["POST", "/api/v1/artifacts/artifact-1/approval-requests"],
     ["GET", "/api/v1/me/state"],
     ["PUT", "/api/v1/me/issues/CORE-1/state"],
     ["GET", "/auth/whoami"],

@@ -317,6 +317,25 @@ export const dispatchToolSpecs = [
     validation: documentOwnerValidation(true),
   },
   {
+    name: "dispatch_request_approval",
+    description:
+      "Ask a human to approve a document at its current version - the exception path for a spec " +
+      "that departs from what was settled or proposes children, not a step for every issue. Opens an " +
+      "approval ask (Approve / Request changes) in the human's Inbox; the answer pins a review to the " +
+      "document version and arrives as artifact.approved or artifact.changes_requested. A later edit " +
+      "makes an approval stale; request again for the new version. Idempotent while a request is open. " +
+      OWNER_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE).optional(),
+      project: z.string().describe("Project key owning the document.").optional(),
+      artifact: z
+        .string()
+        .describe("Artifact slug or id; primary document by default for an issue.")
+        .optional(),
+    }),
+    validation: documentOwnerValidation(true),
+  },
+  {
     name: "dispatch_artifact",
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +

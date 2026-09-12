@@ -101,6 +101,36 @@ export interface Artifact {
   readonly created_at: string;
   readonly versions: Version[];
   readonly referenced_by?: ReferencedBy[];
+  /** Document approval, derived from version-pinned reviews; absent for non-document artifacts. */
+  readonly approval?: ArtifactApproval;
+}
+
+export type ArtifactReviewState = "approved" | "changes_requested";
+
+/** One human review of a document, pinned to the version it was given on. */
+export interface ArtifactReview {
+  readonly id: string;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly state: ArtifactReviewState;
+  readonly actor: Actor;
+  readonly reason: string | null;
+  readonly ask_id: string | null;
+  readonly created_at: string;
+}
+
+/** The document's approval as of its latest version: `draft` has never been reviewed or
+ *  requested; `awaiting` has an open approval ask; `approved` is approved at the latest version;
+ *  `stale` is approved at an older version; `changes_requested` carries the reviewer's reason. */
+export interface ArtifactApproval {
+  readonly state: "draft" | "awaiting" | "approved" | "stale" | "changes_requested";
+  readonly latest_version: number;
+  readonly version?: number;
+  readonly by?: Actor;
+  readonly at?: string;
+  readonly reason?: string | null;
+  readonly ask_id?: string | null;
+  readonly requested_by?: Actor;
 }
 
 export interface Version {
@@ -119,6 +149,9 @@ export interface Ask {
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
   readonly author: Actor;
+  /** `approval` asks are opened by an approval request; their options are fixed
+   *  (`Approve`, `Request changes`) and their answer writes a document review. */
+  readonly kind: "question" | "approval";
   readonly question: string;
   readonly options: AskOption[];
   readonly multiple: boolean;
@@ -343,6 +376,18 @@ export interface ArtifactVersionEventPayload {
   readonly diff?: string;
 }
 
+/** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
+ *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
+ *  approval ask the review answered, null when given from the document header. */
+export interface ArtifactReviewEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly actor: Actor;
+  readonly reason: string | null;
+  readonly ask_id: string | null;
+}
+
 export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
@@ -381,6 +426,14 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.approved";
+      readonly payload: ArtifactReviewEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.changes_requested";
+      readonly payload: ArtifactReviewEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
   | (DispatchEventBase & {
@@ -653,6 +706,15 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
+});
+
+export const ArtifactReviewEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  version: z.number().int().optional(),
+  actor: z.object({ kind: z.string(), id: z.string() }).passthrough().optional(),
+  reason: z.string().nullish(),
+  ask_id: z.string().nullish(),
 });
 
 const askEventPayloadFields = {

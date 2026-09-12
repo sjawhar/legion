@@ -53,6 +53,7 @@ const baseAsk: Ask = {
   edited_at: null,
   id: "ask-1",
   issue_key: "CORE-1",
+  kind: "question",
   opened_event_id: 2,
   multiple: false,
   options: [{ label: "Ship" }, { label: "Hold" }],

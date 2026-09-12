@@ -35,7 +35,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select a.id::text, a.issue_key, a.artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
-		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at,
+		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at, a.kind, a.approval,
 		       i.key, i.title, ar.project_key, ar.slug, ar.name,
 		       lr.author, lr.created_at
 		from asks a
@@ -61,13 +61,13 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	asks := []inboxAsk{}
 	for rows.Next() {
 		var ask inboxAsk
-		var author, options, anchor, answer, resolution []byte
+		var author, options, anchor, answer, resolution, approval []byte
 		var issueKey, issueTitle, documentProject, documentSlug, documentName *string
 		var editedAt, lastReplyAt *time.Time
 		var lastReplyAuthor []byte
 		if err := rows.Scan(
 			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt,
+			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
 			&issueKey, &issueTitle, &documentProject, &documentSlug, &documentName,
 			&lastReplyAuthor, &lastReplyAt,
 		); err != nil {
@@ -77,6 +77,14 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		if err := decodeInboxAsk(&ask.Ask, author, options, anchor, answer, resolution); err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		if len(approval) > 0 {
+			var value model.AskApproval
+			if err := json.Unmarshal(approval, &value); err != nil {
+				s.writeHandlerError(w, fmt.Errorf("decode inbox ask approval: %w", err))
+				return
+			}
+			ask.Approval = &value
 		}
 		ask.EditedAt = askTimestampPtr(editedAt)
 		if lastReplyAt != nil {

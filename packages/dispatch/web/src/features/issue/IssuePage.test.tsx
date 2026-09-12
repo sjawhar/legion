@@ -63,6 +63,7 @@ const openIssueAsk: Ask = {
   edited_at: null,
   id: "ask-open",
   issue_key: "CORE-1",
+  kind: "question",
   multiple: false,
   opened_event_id: 1,
   options: [],
