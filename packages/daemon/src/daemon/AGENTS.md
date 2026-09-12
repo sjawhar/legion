@@ -30,7 +30,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `events.ts` | Routes raw webhook envelopes through pure reducers and executes effects; the core-NATS role lanes propagate a publish failure straight to the caller (nothing is held for redelivery — a missed wake is recovered by resuming the worker/controller with a state-derived catch-up, never a replay), while the durable JetStream lane dispatches every effect and saves before acking, going fatal (not nak) on any failure past the reducer. A 404 no-holder recovery (`onUndeliverable`) runs only after that save commits, best-effort, so the durable transaction stays a single state mutation. A second durable consumer reads the whole `notifications.dispatch.issue.>` topic — it carries every Dispatch event regardless of `notify` (the human-wake flag, which the daemon ignores) — decoding and validating each inner Event (`id`/`seq`/`notify`/`issue_key`/`type`/payload, and a subject/payload key match) before any reducer runs, so a malformed message is poison (termed and logged, never fatal) rather than a reducer failure. The reducers (`reducers.ts`) never parse a raw GitHub webhook body: every GitHub-sourced payload they read is Envoy's normalized flat shape (`kind: "pr" \| "review" \| "comment"`, string-valued fields — see `githubPayload` in `packages/envoy/internal/contracts/normalize.go`). |
 | `processes.ts` | `ProcessManager`: admission, root/worker/controller spawning, worker exception recovery, resurrection, linger, and orphan reconciliation — every runtime operation (spawn, probe, connect, stop, sweep) goes through the injected `Runtime`; it never reads a runtime-specific locator field or branches on `locator.runtime`. |
 | `runtime.ts` | The runtime boundary: `Runtime`, `SpawnSpec`, the `Locator` union (`TmuxLocator` \| kubernetes `K8sLocator`), and the helpers both sides share (`sameProcess`, `locatorHandles`, `awaitShutdown`, `boundedWait`, `probeWorker`). `ProcessManager` holds one injected `Runtime` and never reads a runtime-specific locator field. |
-| `runtime-tmux.ts` | `TmuxRuntime`: window/pane/socket/secret-file delivery over the private tmux server — one window per issue, panes split in; the window-sharing state lives here, not in the interface. `reconcileOrphans` is its `@legion_owner` window/pane sweep. |
+| `runtime-tmux.ts` | `TmuxRuntime`: window/pane/socket/secret-file delivery over the private tmux server — one window per issue, panes split in; the window-sharing state lives here, not in the interface. The controller's own window runs its inner command bare (an interactive OMP session: no `legion worker-shim`, no socket, so its locator has no `socketPath` and `stop` goes straight to the pane kill). `reconcileOrphans` is its `@legion_owner` window/pane sweep. |
 | `worker-boot-watchdog.ts` | Watches a freshly-launched worker's boot against `worker_boot_timeout_seconds`, probing liveness before ever retiring an unconfirmed boot — never a hard SLA, an observation interval that re-arms on any sign of life. |
 | `worker-admission.ts` | Owns the running-worker cap: the admission decision, the FIFO queue, the reservation set covering a decision-to-effect gap, and the promotion drain — `processes.ts` calls into it for every admission decision instead of holding this logic itself. |
 | `api.ts` | Localhost extension/controller write surface and session-bound credential grants. |
@@ -128,13 +128,16 @@ first boot rather than hold its running-worker slot until some later launch fork
 `tmux kill-session -t legion-<project>` on the default server once, start the new daemon;
 `reconnectWorkers` finds every recorded socket dead and roots resurrect (`--resume`) onto the
 private server. No migration code. **Upgrading a live box to the interactive controller (state
-v24):** the migration strips the controller locator's `socketPath`, but the previous daemon's
-headless `worker-shim` controller process is still alive in its pane and still passes
-`controllerAlive` (its command line contains `omp`), so the daemon keeps it — no socket to reach
-it, no interactive pane, no merge grants. After the upgrade, kill that pane once
+v25, daemon API contract 2):** the migration strips the controller locator's `socketPath`, but
+the previous daemon's headless `worker-shim` controller process is still alive in its pane and
+still passes `controllerAlive` (its command line contains `omp`), so the daemon keeps it — no
+socket to reach it, no interactive pane, no merge grants. After the upgrade, kill that pane once
 (`tmux -L legion-<project> kill-pane -t <controllerLocator.tmuxPaneId>`, the pane id from
 `legion state --json`); the next controller wake respawns the interactive one. No recorded
-`ompSessionFile` exists for a pre-v24 controller, so that first respawn starts fresh. **After
+`ompSessionFile` exists for a pre-v25 controller, so that first respawn starts fresh. The
+installed `@sjawhar/pi-legion-envoy` must be the release whose `legion.daemonApiVersion` is 2
+(`/controller/ready` carries the session file, `/grants` has the controller form, `/gh-token`
+and `/git-credential` carry merge intent) or the daemon refuses to boot against it. **After
 deploying a skill change:** a controller session that predates it keeps the skill text it read
 at its own start in context until `/new` — its refusals stay correct, only the vocabulary lags
 (a gate name, a message shape) — so type `/new` into the controller pane, or kill the pane so
