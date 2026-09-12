@@ -81,7 +81,6 @@ const issueStatuses = [
   "testing",
   "needs_review",
   "retro",
-  "done",
 ];
 
 function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
@@ -258,6 +257,8 @@ function IssueHeader({
   });
   const drafts = useIssueDrafts(issue, updateIssue);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
+  const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
+  const selectableStatuses = issue.status === "done" ? [...issueStatuses, "done"] : issueStatuses;
   const staleOpenAsk = issue.open_asks.find(
     (ask) => Date.parse(ask.created_at) < Date.now() - 60 * 60 * 1000
   );
@@ -316,6 +317,23 @@ function IssueHeader({
 
   return (
     <header className={`mb-3 border-b pb-3 ${borderDefault}`}>
+      {isClosed ? (
+        <div
+          className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+        >
+          <span>This issue is closed.</span>
+          <button
+            aria-label="Reopen issue"
+            className={`min-h-11 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+            disabled={updateIssue.isPending}
+            onClick={() => drafts.requestStatusSubmit("backlog")}
+            title="Reopen into Backlog"
+            type="button"
+          >
+            {pendingStatus === "backlog" ? "Reopening…" : "Reopen"}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <p className={`shrink-0 text-sm font-semibold ${linkText}`}>{issue.key}</p>
         {editingTitle ? (
@@ -373,17 +391,28 @@ function IssueHeader({
           Status
           <select
             className={`rounded px-2 py-1 font-normal disabled:cursor-not-allowed ${inputClasses(false)} ${surfaceMutedDisabledBg} ${secondaryButtonDisabledText}`}
-            disabled={updateIssue.isPending}
+            disabled={isClosed || updateIssue.isPending}
             onChange={(event) => drafts.requestStatusSubmit(event.target.value)}
             value={issue.status}
           >
-            {issueStatuses.map((status) => (
+            {selectableStatuses.map((status) => (
               <option key={status} value={status}>
                 {status}
               </option>
             ))}
           </select>
         </label>
+        {isClosed ? null : (
+          <button
+            aria-label="Close issue"
+            className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+            disabled={updateIssue.isPending}
+            onClick={() => drafts.requestStatusSubmit("done")}
+            type="button"
+          >
+            {pendingStatus === "done" ? "Closing…" : "Close issue"}
+          </button>
+        )}
         {waitingOn === null ? null : (
           <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
             Waiting on {waitingOn}
@@ -506,7 +535,11 @@ function IssueHeader({
       )}
       {statusSaving ? (
         <span className={`mt-1 block text-xs ${textMutedOnCanvas}`} role="status">
-          Saving…
+          {pendingStatus === "done"
+            ? "Closing…"
+            : pendingStatus === "backlog" && isClosed
+              ? "Reopening…"
+              : "Saving…"}
         </span>
       ) : null}
       <IssueLabels
@@ -714,13 +747,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
 
   return (
     <section>
-      {isClosed ? (
-        <p
-          className={`mb-4 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
-        >
-          This issue is closed.
-        </p>
-      ) : null}
       <IssueHeader
         documentArtifact={primaryArtifact}
         isClosed={isClosed}

@@ -8,7 +8,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project board persists card reordering and explains daemon-owned columns", async ({
+test("project board persists reordering, lets humans close and reopen, and explains daemon-owned columns", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -100,13 +100,11 @@ test("project board persists card reordering and explains daemon-owned columns",
 
     if (testInfo.project.name === "chromium") {
       const thirdHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
-      const todoColumn = page.getByRole("region", { name: "Todo" });
       const thirdBox = await thirdHandle.boundingBox();
-      const todoBox = await todoColumn.boundingBox();
-      if (thirdBox === null || todoBox === null) {
-        throw new Error("board column is not visible for status drag");
+      if (thirdBox === null) {
+        throw new Error("board card is not visible for close drag");
       }
-      const statusPatch = page.waitForResponse(
+      const closePatch = page.waitForResponse(
         (response) =>
           response.request().method() === "PATCH" &&
           new URL(response.url()).pathname === `/api/v1/issues/${third.key}`
@@ -114,14 +112,55 @@ test("project board persists card reordering and explains daemon-owned columns",
 
       await page.mouse.move(thirdBox.x + thirdBox.width / 2, thirdBox.y + thirdBox.height / 2);
       await page.mouse.down();
-      await page.mouse.move(todoBox.x + todoBox.width / 2, todoBox.y + todoBox.height / 2, {
+      await page.mouse.move(thirdBox.x + thirdBox.width / 2 + 10, thirdBox.y + thirdBox.height / 2);
+      const doneColumn = page.getByRole("region", { name: "Done" });
+      await doneColumn.scrollIntoViewIfNeeded();
+      const doneBox = await doneColumn.boundingBox();
+      if (doneBox === null) {
+        throw new Error("board column is not visible for close drop");
+      }
+      await page.mouse.move(doneBox.x + doneBox.width / 2, doneBox.y + doneBox.height / 2, {
         steps: 24,
       });
       await page.mouse.up();
-      expect((await statusPatch).status()).toBe(200);
-      await expect(todoColumn.getByRole("article")).toHaveText(/Third card/);
+      expect((await closePatch).status()).toBe(200);
+      await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
       await page.reload();
-      await expect(todoColumn.getByRole("article")).toHaveText(/Third card/);
+      await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
+
+      await doneColumn.scrollIntoViewIfNeeded();
+      const closeHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
+      const closeBox = await closeHandle.boundingBox();
+      if (closeBox === null) {
+        throw new Error("board card is not visible for reopen drag");
+      }
+      const reopenPatch = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          new URL(response.url()).pathname === `/api/v1/issues/${third.key}`
+      );
+
+      await page.mouse.move(closeBox.x + closeBox.width / 2, closeBox.y + closeBox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(closeBox.x + closeBox.width / 2 + 10, closeBox.y + closeBox.height / 2);
+      const backlogColumn = page.getByRole("region", { name: "Backlog" });
+      await backlogColumn.scrollIntoViewIfNeeded();
+      const backlogBox = await backlogColumn.boundingBox();
+      if (backlogBox === null) {
+        throw new Error("board column is not visible for reopen drop");
+      }
+      await page.mouse.move(
+        backlogBox.x + backlogBox.width / 2,
+        backlogBox.y + backlogBox.height / 2,
+        {
+          steps: 24,
+        }
+      );
+      await page.mouse.up();
+      expect((await reopenPatch).status()).toBe(200);
+      await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
+      await page.reload();
+      await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
     }
 
     if (testInfo.project.name === "iphone") {

@@ -105,9 +105,10 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 **Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon owns every
-`in_progress`/`testing`/`needs_review`/`retro`/`done` write via `DispatchClient.setStatus`, and a
-human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch dashboard or
-`legion status <issue> <status>`.
+`in_progress`/`testing`/`needs_review`/`retro` write via `DispatchClient.setStatus`, and a human
+or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch dashboard or
+`legion status <issue> <status>`. A human can also close an issue into `done` and reopen it into
+`backlog` from the Dispatch dashboard.
 
 **Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
 option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or

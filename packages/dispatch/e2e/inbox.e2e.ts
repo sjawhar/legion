@@ -192,7 +192,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   const inboxPage = await inboxContext.newPage();
   await inboxPage.goto("/");
   await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(2);
-  await alicePage.getByLabel("Status").selectOption("done");
+  await alicePage.getByRole("button", { name: "Close issue" }).click();
   await expect
     .poll(() => getIssue(firstIssue.key))
     .toMatchObject({
