@@ -221,12 +221,24 @@ const TmuxLocatorSchema = z
     ompSessionFile: z.string().optional(),
   })
   .strict();
+const K8sLocatorSchema = z
+  .object({
+    runtime: z.literal("kubernetes"),
+    namespace: z.string().min(1),
+    podName: z.string().min(1),
+    podUid: z.string().min(1),
+    pvcName: z.string().min(1),
+    ompSessionFile: z.string().optional(),
+  })
+  .strict();
+/** Every persisted locator names the runtime that owns its process (`runtime.ts`'s `Locator`). */
+const LocatorSchema = z.discriminatedUnion("runtime", [TmuxLocatorSchema, K8sLocatorSchema]);
 
 const TreeStateSchema = z
   .object({
     root: IssueKeySchema,
     generation: z.number().int().nonnegative(),
-    locator: TmuxLocatorSchema.optional(),
+    locator: LocatorSchema.optional(),
     status: z.enum(["queued", "active", "lingering", "dead", "launch-failed", "closed"]),
     lingerUntil: z.string().optional(),
     launchFailures: z.number().int().nonnegative(),
@@ -273,7 +285,7 @@ const WorkerRoleClaimSchema = z
     sessionId: z.string().optional(),
     readyConfirmedAt: z.number().int().nonnegative().optional(),
     agentId: z.string().optional(),
-    locator: TmuxLocatorSchema.optional(),
+    locator: LocatorSchema.optional(),
     generation: z.number().int().nonnegative().optional(),
     pendingAssignment: z.string().optional(),
     launchFailures: z.number().int().nonnegative().optional(),
@@ -318,7 +330,7 @@ const LegionStateSchema = z
     }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
-    controllerLocator: TmuxLocatorSchema.optional(),
+    controllerLocator: LocatorSchema.optional(),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),

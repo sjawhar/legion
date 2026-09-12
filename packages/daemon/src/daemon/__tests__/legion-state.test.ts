@@ -807,6 +807,33 @@ describe("legion state", () => {
     expect(await readFile(`${file}.v23.bak`, "utf8")).toBe(raw);
   });
 
+  it("round-trips a kubernetes locator and rejects one missing a required field", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-k8s-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    current.roles[testerToken] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      locator: {
+        runtime: "kubernetes",
+        namespace: "legion",
+        podName: "legion-legion-42-tester-g1",
+        podUid: "8f0c8d2e-4c1a-4e6b-9c7a-0d1e2f3a4b5c",
+        pvcName: "legion-legion-42",
+        ompSessionFile: "/legion/sessions/tester/session.jsonl",
+      },
+    };
+    await saveState(file, current);
+    expect(await loadState(file, initialState)).toEqual(current);
+
+    const raw = JSON.parse(JSON.stringify(current));
+    delete raw.roles[testerToken].locator.podUid;
+    await writeFile(file, JSON.stringify(raw), "utf8");
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+  });
+
   it("rejects a v24 locator that carries no runtime discriminant", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-untagged-"));
     const file = path.join(tempDir, "state.json");
