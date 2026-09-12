@@ -165,7 +165,8 @@
     "annotation": "Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19).",
     "summaryLine": "**Worker image not built** — repository variable `DEPOT_PROJECT_ID` is unset. (written to GITHUB_STEP_SUMMARY; visible on the run page when signed in — step summaries are not exposed by the REST API)",
     "prEffect": "the run's `build` job is a failing check on the PR head (Envoy ci-settled-red failing=[build] at 7da0801e); PR #966 stays red until the prerequisites exist and the branch is re-pushed or the run re-run",
-    "nothingCreated": "no Depot project, trust relationship, DEPOT_PROJECT_ID, DEPOT_TOKEN, ECR repository, or IAM role was created; reported to the LEGION-23 architect via envoy_publish (message 0dec1fd5d1a6ef6cdf87f5fae0a3d696)"
+    "nothingCreated": "no Depot project, trust relationship, DEPOT_PROJECT_ID, DEPOT_TOKEN, ECR repository, or IAM role was created; reported to the LEGION-23 architect via envoy_publish (message 0dec1fd5d1a6ef6cdf87f5fae0a3d696)",
+    "supersededBy": "correctionRound1.run (the push-trigger run 34687034827 is attached to 7da0801e only; the pull_request run 34688909353 is attached to the current head)"
   },
   "unverifiedUntilDepotPrerequisitesExist": {
     "prerequisites": [
@@ -173,13 +174,13 @@
       "Depot GitHub OIDC trust relationship admitting sjawhar/legion on that project (Depot dashboard)",
       "GHCR package legion-worker public after its first push (package settings, no API)"
     ],
-    "howToRetry": "re-push legion/LEGION-23 (or `gh run rerun 34687034827 --repo sjawhar/legion`); a successful run writes `ghcr.io/sjawhar/legion-worker@sha256:…` and the tag list to the job summary",
+    "howToRetry": "push any commit to the PR (or `gh run rerun <run-id> --repo sjawhar/legion`); the pull_request trigger re-evaluates the whole PR diff, so every head of PR #966 runs Worker Image; a successful run writes `ghcr.io/sjawhar/legion-worker@sha256:…` and the tag list to the job summary",
     "checks": [
       "spec acceptance 1: `docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:<digest> -c 'omp --version && legion --help && jj --version && git --version && gh --version && bun --version && id -u'` exits 0 (id -u = 1000)",
       "spec acceptance 2: `docker run --rm --entrypoint legion <digest> probe-image` → `probe-image: OK (/opt/omp/bin/omp)`, exit 0; negative control `docker run --rm --entrypoint legion -e LEGION_OMP_PATH=/nonexistent <digest> probe-image` → exit 1",
       "image layout: `docker run --rm --entrypoint sh <digest> -c 'readlink ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy && ls ~/.omp/natives'` → /opt/legion/pi-legion-envoy and 18.1.15",
       "placeholder entrypoint: `docker run --rm <digest> --help` prints worker-shim usage, exit 0",
-      "spec acceptance 3 success path: branch run publishes `:sha-<12>` only (no version tag, no release edit); summary carries the digest and `ECR mirror skipped: <var> unset` for each of AWS_ECR_PUBLISH_ROLE_ARN, AWS_ECR_REGISTRY, AWS_REGION; Depot `lint: true` passes on the Dockerfile",
+      "spec acceptance 3 success path: a PR run builds the PR head and publishes `:sha-<12 of the PR head>` only (no version tag, no release edit); summary carries the digest and `ECR mirror skipped: <var> unset` for each of AWS_ECR_PUBLISH_ROLE_ARN, AWS_ECR_REGISTRY, AWS_REGION; Depot `lint: true` passes on the Dockerfile; the image's org.opencontainers.image.revision label equals the PR head sha",
       "spec acceptance 3 release-body append: only observable on the first main run after merge where `cli` releases a version (release_tag non-empty) — `gh release view cli-v<version> --json body -q .body` shows '## Worker image' with the digest",
       "the Depot-trust-relationship failure path (step `depot/setup-action` failing with the remedy summary) — only reachable once DEPOT_PROJECT_ID is set but the trust relationship is still missing",
       "anonymous pull: `docker logout ghcr.io && docker pull <digest>` (GHCR visibility)",
@@ -207,5 +208,37 @@
   "cleanup": "throwaway artifacts removed: /tmp/legion23-dryrun-* trees, /tmp/legion23-dryrun.sh, /tmp/l23-base; `.omp/` (an empty config.yml OMP created in the workspace) is excluded via the worktree's git info/exclude so it never enters a commit",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T10:01:19.185Z"
+  "completed": "2026-09-12T10:01:19.185Z",
+  "correctionRound1": {
+    "trigger": "tester round 1 (.legion/test.json findingsForArchitect[1]): the `push` trigger's `paths` are evaluated against the pushed commits only, so the handoff-only commit 4214c77e (and later the tester's 7c6f20f6) left PR #966's head with no Worker Image check — the failing build (the honest red until root decision 3 lands) no longer guarded the merge. Spec bumped to dispatch://LEGION-23/spec version 7 (Acceptance 3, the worker-image.yaml Design row, and a new Rejected row for the push trigger).",
+    "commit": {
+      "sha": "48f57335b8b284c8e87ab7cd6d657d20ef63134e",
+      "subject": "ci(worker-image): build on pull_request so the check follows every PR head"
+    },
+    "changes": [
+      ".github/workflows/worker-image.yaml: the `push` trigger is replaced by `pull_request` (branches: [main]; types: [opened, synchronize, reopened]; the same three paths: packages/daemon/docker/**, packages/daemon/src/daemon/omp-pin.ts, .github/workflows/worker-image.yaml). GitHub evaluates pull_request paths against the whole PR diff, so every head of a PR touching the image gets the check.",
+      ".github/workflows/worker-image.yaml: job env `BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}` — the PR head on pull_request (github.sha is the ephemeral merge commit there), the triggering commit on workflow_call/workflow_dispatch. actions/checkout takes `ref: ${{ env.BUILT_SHA }}`; `Compute tags` derives `short` from BUILT_SHA and emits a `built_sha` output; the OCI `org.opencontainers.image.revision` label uses that output instead of github.sha.",
+      ".github/workflows/worker-image.yaml: concurrency group `worker-image-${{ github.event.pull_request.number || github.ref }}` so two pushes to one PR serialize on the PR number; workflow_call/dispatch keep the ref key.",
+      ".github/workflows/worker-image.yaml: comments updated (pre-merge trigger rationale; permissions note that same-repo pull_request runs get id-token/packages/contents write — a fork PR would get a read-only token and this repo takes no fork PRs). Version tag / release edit remain gated on GITHUB_REF == refs/heads/main with a non-empty cli_version, so a PR run publishes sha- only.",
+      "docs/kubernetes.md: trigger (2) is now 'every head of a pull request against main whose diff touches …', with the push-vs-pull_request rationale, the same-repo permissions note, and the tag line clarifying sha- names the built commit (the PR head). Iteration text: 'pushing the PR branch'.",
+      "packages/daemon/docker/worker.Dockerfile: header comment's trigger description corrected from 'on a branch push touching this file' to 'on every head of a pull request against main that touches the image files' (comment only; the architect scoped the change to the workflow plus trigger docs — this comment is trigger documentation and would otherwise be false).",
+      "release.yaml unchanged. main had not moved (main@origin ~ ancestors(branch) empty), so no rebase."
+    ],
+    "staticProof": [
+      "actionlint .github/workflows/worker-image.yaml .github/workflows/release.yaml → clean",
+      "hadolint --ignore DL3008 --ignore DL3003 (published container) on worker.Dockerfile → clean",
+      "Compute tags shell simulated offline with the step's exact script for four event shapes: pull_request (BUILT_SHA=PR head, GITHUB_REF=refs/pull/966/merge, no inputs) → sha- only, tag_release=false; workflow_call on main with cli 0.9.0 → sha- + 0.9.0, tag_release=true; workflow_call on main with cli skipped → sha- only; workflow_dispatch on a non-main ref with a version → sha- only, tag_release=false"
+    ],
+    "run": {
+      "runId": 34688909353,
+      "url": "https://github.com/sjawhar/legion/actions/runs/34688909353",
+      "event": "pull_request",
+      "prNumber": 966,
+      "headSha": "48f57335b8b284c8e87ab7cd6d657d20ef63134e",
+      "checkout": "HEAD is now at 48f5733 ci(worker-image): build on pull_request so the check follows every PR head (the PR head, not the refs/pull/966/merge commit)",
+      "outcome": "failure at step 3 'Require the Depot project variable' — ::error::Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19). Steps 4+ skipped. Envoy published ci-settled-red failing=[build] at 48f57335 — the failing check is attached to the PR head, which is the desired outcome until Sami sets the variable.",
+      "nothingCreated": "no Depot/GitHub/AWS object created; no image built anywhere"
+    },
+    "grantWorkaround": "the tester's two-call pattern (test.json findingsForArchitect[2]) was used for jj git push and legion gh: one bash call mints (its first injected grant is visible in the call), the next call hardcodes that grant after the injected preamble within the 60 s TTL. The earlier DEBUG-trap approach did not survive the shell that this round runs in."
+  }
 }
