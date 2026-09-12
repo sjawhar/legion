@@ -293,7 +293,226 @@
     },
     "artifacts": "/tmp/legion11-smoke/round2/ and /tmp/legion11-smoke/branch/ (round-2 branch leg), /tmp/legion11-smoke/branch-round1/ (round-1 branch leg)"
   },
+  "round2Completed": "2026-09-13T02:08:36.338Z",
+  "round3": {
+    "trigger": "Full round at the head produced by rebase3 (#962 LEGION-21 runtime boundary, #973 LEGION-30) and rebase4 (#980 launch hold) — implement.json sections rebase3/rebase4; spec version 6.",
+    "head": "36b0b8c5d93004529fe803d4c63ae12866b39b11 (implement: record rebase4 onto main; .legion/-only)",
+    "codeHead": "70e0adf42d20 docs(daemon) comment sweep; fix commit 4ed969ed",
+    "base": "main@origin abaf08175c9b90b3888cb10b24852e55b0bbdfee (chore: release pi-envoy v1.17.3) — the branch's merge-base and current main; contains #980 (4fb45e9b)",
+    "verdict": "PASS on all five lines",
+    "line1_changedLineAudit": {
+      "verdict": "PASS — implementer's claim confirmed",
+      "tested": "jj diff --from 8f6fad36 --to 66bcbb6b --git (rounds 1–2)",
+      "rebased": "jj diff --from main@origin(abaf0817) --to 70e0adf4 --git",
+      "method": "^[+-] lines excluding +++/--- headers, compared per file as multisets; each differing line classified as executable, comment (`//`, `*`, `/*`), or doc (.md/.json). Script output: round3/changed-line-audit.json.",
+      "counts": "1074 tested vs 1022 rebased +/- lines; 9 files tested vs 7 rebased (processes.ts and worker-admission.ts dropped out).",
+      "perFile": {
+        ".legion/plan.json": {
+          "tested_lines": 66,
+          "rebased_lines": 66,
+          "only_in_tested": 0,
+          "only_in_rebased": 0,
+          "kinds": {}
+        },
+        "docs/plans/2026-09-12-reconnect-workers-after-api.md": {
+          "tested_lines": 747,
+          "rebased_lines": 747,
+          "only_in_tested": 0,
+          "only_in_rebased": 0,
+          "kinds": {}
+        },
+        "docs/solutions/daemon/refcounted-hold-guards-a-derived-prune.md": {
+          "tested_lines": 7,
+          "rebased_lines": 7,
+          "only_in_tested": 1,
+          "only_in_rebased": 1,
+          "kinds": {
+            "doc": 2
+          }
+        },
+        "packages/daemon/src/daemon/AGENTS.md": {
+          "tested_lines": 1,
+          "rebased_lines": 3,
+          "only_in_tested": 1,
+          "only_in_rebased": 3,
+          "kinds": {
+            "doc": 4
+          }
+        },
+        "packages/daemon/src/daemon/__tests__/index.test.ts": {
+          "tested_lines": 100,
+          "rebased_lines": 97,
+          "only_in_tested": 4,
+          "only_in_rebased": 1,
+          "kinds": {
+            "EXEC": 5
+          }
+        },
+        "packages/daemon/src/daemon/__tests__/processes.test.ts": {
+          "tested_lines": 13,
+          "rebased_lines": 11,
+          "only_in_tested": 4,
+          "only_in_rebased": 2,
+          "kinds": {
+            "comment": 6
+          }
+        },
+        "packages/daemon/src/daemon/index.ts": {
+          "tested_lines": 87,
+          "rebased_lines": 91,
+          "only_in_tested": 10,
+          "only_in_rebased": 14,
+          "kinds": {
+            "comment": 24
+          }
+        },
+        "packages/daemon/src/daemon/processes.ts": {
+          "tested_lines": 35,
+          "rebased_lines": 0,
+          "only_in_tested": 35,
+          "only_in_rebased": 0,
+          "kinds": {
+            "comment": 35
+          }
+        },
+        "packages/daemon/src/daemon/worker-admission.ts": {
+          "tested_lines": 18,
+          "rebased_lines": 0,
+          "only_in_tested": 18,
+          "only_in_rebased": 0,
+          "kinds": {
+            "comment": 18
+          }
+        }
+      },
+      "executableDifferences": [
+        "index.test.ts: the two import hunks (`spyOn` from bun:test; `type DaemonStateResponse` from @legion/contracts) no longer appear — main@origin's file already has both imports (lines 1 and 8), verified by reading it.",
+        "index.test.ts: one added line `        runtime: \"tmux\",` in the seeded worker's locator (line 862 at head) — the #962 Locator-union tag. This is the only executable line the change gained."
+      ],
+      "indexTsExecutableLinesIdentical": true,
+      "everythingElse": "index.ts: 24 differing lines, all `//` comment text (enableWorkerPromotion→enableLaunches wording, launch-hold sentences, main's edits at the removed positions). processes.test.ts: 6 comment lines. processes.ts (35) and worker-admission.ts (18): all comment lines, now absent because the files equal main. AGENTS.md (4) and the retro doc (2): doc text.",
+      "bootOrderRead": "index.ts at head: `const probes = (async…)()` L279 (started, not awaited) → await loadState L297 → await createNatsTransport L341 → new TmuxRuntime L349 → new ProcessManager L361 → startEventPump L426 → `api = startLegionApi(` L489 → startWorkerStreamListener L502 (sync, bind failure api.stop()+throw) → moved block: comment L515, `await processManager.reconnectWorkers()` L533, `await pruneSecretFiles()` L538, pending-controller-notice drain/ensureController L554 → `let stopped` L566 → `const stop` L580 → `await probes` L654 (launch hold) → enableLaunches() L674 → reconnectRoots L679 → reconcileAdmission L680 → reconcileWorkerAdmission L681 → replayHeldRecoveries L685.",
+      "noTopLevelAwait": "awk over lines 361–532: every `await` is inside a closure (indent ≥4); zero at function top level (indent 2). Listed in round3/await-scan.txt.",
+      "droppedFilesEqualMain": "processes.ts and worker-admission.ts at head are byte-equal to main@origin (cmp). Main's current comments: retireUnconfirmedBoot says `reconnectWorkers' restart-time probe` with no before-api clause; workerPromotionEnabled says `called from ProcessManager.enableLaunches() after the daemon's boot probes pass and its HTTP api is assigned`; enqueueForRetry says `reconnectWorkers, run during boot's launch hold`. None states the reconnect runs before the API exists. A grep for `before \\`api\\``/`needs no \\`api\\`` across packages/daemon/src and docs/solutions finds only the intentional historical note in the LEGION-6 retro doc."
+    },
+    "line2_regressionTest": {
+      "verdict": "PASS",
+      "green": {
+        "named": " 1 pass;  31 filtered out;  0 fail; Ran 1 test across 1 file. [1232.00ms]",
+        "wholeFile": "[legion] failed to connect controller shim socket on ready: 1208 |       const secondOptions = daemonTestDependencies(secondNats, publications, () => {});; [legion] controller launch held until the OMP probe passes; [legion] OMP pi.agents probe failed transiently (attempt 1); retrying in 10s: LEGION_OMP_AGENTS=available; [legion] OMP pi.agents probe failed transiently (attempt 2); retrying in 20s: LEGION_OMP_AGENTS=available; [legion] durable message processing failed on notifications.github.acme.widgets.mention event_id=mention-1 (stream_seq=1 delivery_seq=1): listener down; [legion] event drain failed: Event pump processing failed;  32 pass;  0 fail; Ran 32 tests across 1 file. [2.53s]"
+      },
+      "red": {
+        "method": "git archive of main@origin abaf0817 into /tmp/legion11-smoke/main-red-r3 (index.ts byte-equal to main), only packages/daemon/src/daemon/__tests__/index.test.ts replaced by the code head's copy (byte-equal to the workspace's), bun install --frozen-lockfile, then the named test.",
+        "result": "912 |             (typeof arg === \"string\" && arg.includes(\"worker reconnection failed\"))\n+     \"[legion] failed to reconcile worker legion-acme1-widgets-42-tester:\",\n+     [TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')],\n(fail) startDaemon > retires a ready-confirmed worker whose shim socket is dead at boot: capability revoked through the live api, locator cleared, secret file removed [108.38ms]\n 0 pass\n 1 fail\nRan 1 test across 1 file. [1.78s]"
+      },
+      "note": "The failure now surfaces under #980's per-claim prefix `[legion] failed to reconcile worker legion-acme1-widgets-42-tester:` followed by the same TypeError; the test's `instanceof TypeError` filter catches it, matching spec v6's acceptance wording."
+    },
+    "line3_gatesAndCi": {
+      "verdict": "PASS",
+      "install": "bun install --frozen-lockfile -> Checked 598 installs across 696 packages (no changes)",
+      "biome": "bunx biome check packages/daemon/src -> exit 0",
+      "tsc": "cd packages/daemon && bunx tsc --noEmit -> exit 0",
+      "bunTest": {
+        "command": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test packages/daemon",
+        "result": "[legion] failed to PATCH Dispatch status=testing for LEGION-7 (recorded for resync retry): unavailable\n[legion] skipped stale resync CI result sjawhar/legion#7\n[legion] skipped stale resync CI result acme/widgets#7\n[legion] failed to connect controller shim socket on ready: 1208 |       const secondOptions = daemonTestDependencies(secondNats, publications, () => {});\n[legion] controller launch held until the OMP probe passes\n[legion] OMP pi.agents probe failed transiently (attempt 1); retrying in 10s: LEGION_OMP_AGENTS=available\n[legion] OMP pi.agents probe failed transiently (attempt 2); retrying in 20s: LEGION_OMP_AGENTS=available\n[legion] durable message processing failed on notifications.github.acme.widgets.mention event_id=mention-1 (stream_seq=1 delivery_seq=1): listener down\n[legion] event drain failed: Event pump processing failed\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 973 |       await writeFile(path.join(dir, name), `secret-${name}`);\n[legion] failed to retire and resurrect an unconfirmed root for LEGION-42: 75 |   if (expectWindow && (!windowId || !/^@\\d+$/.test(windowId))) {\n[legion] failed to retire stale root process for LEGION-42: {\n} 2786 |       options = { skipGraceful: true };\n[legion] failed to PATCH Dispatch status=in_progress for LEGION-42 (recorded for resync retry): Dispatch unavailable\n[legion] failed to PATCH Dispatch status=done for LEGION-42 (recorded for resync retry): Dispatch unavailable\n[legion] failed to spawn LEGION-44: 134 |         `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`\n139 |     throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);\nerror: tmux new-window failed (exit 1): window creation failed\n[legion] failed to spawn LEGION-43: 134 |         `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`\n139 |     throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);\nerror: tmux new-window failed (exit 1): window creation failed\n[legion] failed to spawn LEGION-42: 134 |         `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`\n139 |     throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);\nerror: tmux new-window failed (exit 1): window creation failed\n[legion] failed to spawn LEGION-42: 75 |   if (expectWindow && (!windowId || !/^@\\d+$/.test(windowId))) {\n[legion] failed to spawn LEGION-42: 75 |   if (expectWindow && (!windowId || !/^@\\d+$/.test(windowId))) {\n[legion] failed to resume worker LEGION-43/implementer: 3339 |       connectWorkerRpc: async () => {\n[legion] worker legion-omp-legion-43-implementer reconnected but get_state failed (treating as busy, not dead): 3641 |     let getStateCalls = 0;\n[legion] worker legion-omp-legion-43-implementer reconnected but get_state failed (treating as busy, not dead): 3641 |     let getStateCalls = 0;\n[legion] worker legion-omp-legion-43-implementer reconnected but get_state failed (treating as busy, not dead): 3641 |     let getStateCalls = 0;\n[legion] failed to retire an alive-but-unconfirmed root process for LEGION-42; leaving it in place rather than orphaning it: 2786 |       options = { skipGraceful: true };\n[legion] failed to stop a stuck controller process; leaving it in place rather than orphaning it: 2786 |       options = { skipGraceful: true };\n[legion] worker legion-omp-legion-42-tester reconnected but get_state failed (treating as busy, not dead): 6314 |     };\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 6716 |       commands,\n[legion] failed to promote queued worker legion-omp-legion-42-tester: 75 |   if (expectWindow && (!windowId || !/^@\\d+$/.test(windowId))) {\n[legion] failed to promote queued worker legion-omp-legion-42-tester: 75 |   if (expectWindow && (!windowId || !/^@\\d+$/.test(windowId))) {\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 7555 |   it(\"leaves a queued idle-resume assignment intact and stops draining when the promotion prompt itself rejects\", async () => {\n7560 |       throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] worker legion-omp-legion-42-tester reconnected but get_state failed (treating as busy, not dead): 7684 |         socketPath: \"/state/workers/tester.sock\",\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 7863 |       // A reconnect attempt for the STALE locator's socket that hangs until the test releases\n7864 |       // it, then fails — confirming (stale) death only after a newer launch has already\n[legion] failed to promote queued worker legion-omp-legion-42-planner: 2128 |       ) {\n2131 |       // Same-agent invariant: a recorded session that has gone missing is a launch failure, never\n[legion] failed to promote queued worker legion-omp-legion-42-planner: 2128 |       ) {\n2131 |       // Same-agent invariant: a recorded session that has gone missing is a launch failure, never\n[legion] failed to promote queued worker legion-omp-legion-42-planner: 2128 |       ) {\n2131 |       // Same-agent invariant: a recorded session that has gone missing is a launch failure, never\n[legion] failed to promote queued worker legion-omp-legion-42-tester: 2583 |         releaseSecret();\n[legion] failed to promote queued worker legion-omp-legion-42-tester: 2480 |     // caller of launchWorker, direct or promoted, so a launch queued behind a since-closing (or\n[legion] failed to persist legion-omp-legion-42-tester's phase/pendingAssignment after a successful prompt (worker is already working regardless): 8887 |         saveStateCalls += 1;\n8888 |         // Both the original persist and its one retry fail here — mirroring launchWorker's\n8889 |         // post-locator-write save handling (see the \"treats a saveState failure after a\n8891 |         // is already working), so this must never surface as a failure to the caller.\n[legion] retry-persist for legion-omp-legion-42-tester also failed; in-memory claim remains authoritative: 8887 |         saveStateCalls += 1;\n8888 |         // Both the original persist and its one retry fail here — mirroring launchWorker's\n8889 |         // post-locator-write save handling (see the \"treats a saveState failure after a\n8891 |         // is already working), so this must never surface as a failure to the caller.\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 9371 |         socketPath: \"/state/workers/dead-tester.sock\",\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 9409 |         socketPath: \"/state/workers/dead-tester.sock\",\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 9510 |     };\n[legion] failed to reconnect worker legion-omp-legion-42-tester: 9572 |         // A respawn completes and replaces this claim's locator with a fresh pane id while the\n9574 |         // probe starting and its failure being handled.\n[legion] failed to reconnect worker legion-omp-legion-43-implementer: 9630 |     const { manager: processes, state: managedState } = manager(\n[legion] failed to reconnect worker legion-omp-legion-43-implementer: 9833 |         // The real save/load round trip, exactly as `index.ts` wires it — this test's whole\n[legion] failed to reconnect worker legion-omp-legion-42-implementer: 9908 |       // to a real timer (`createCancellableSleep`'s `setTimeout`) for its 100ms connect-retry\n[legion] failed to reconnect worker legion-omp-legion-42-implementer:  9998 |     const capturedPaneId = \"%9\";\n[legion] failed to reconnect worker legion-omp-legion-42-implementer: 10081 |     const capturedPaneId = \"%9\";\n[legion] failed to connect controller shim socket on ready: 10144 |       tmuxPaneId: \"%1\",\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 10164 |       // Mirrors the real worker-rpc.ts fix: an ordinary rejection restores runState silently —\n10169 |       throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 10208 |     client.prompt = async (message: string) => {\n10213 |       throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 10208 |     client.prompt = async (message: string) => {\n10213 |       throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 10208 |     client.prompt = async (message: string) => {\n10213 |       throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] failed to prompt queued worker legion-omp-legion-42-tester: 10281 |       client.prompts.push(message);\n10286 |         throw new Error(\"shim write failed\");\nerror: shim write failed\n[legion] failed to promote queued worker legion-omp-legion-42-planner: 2128 |       ) {\n2131 |       // Same-agent invariant: a recorded session that has gone missing is a launch failure, never\n[legion] failed to promote queued worker legion-omp-legion-42-tester: 2128 |       ) {\n2131 |       // Same-agent invariant: a recorded session that has gone missing is a launch failure, never\n[legion] failed to persist legion-omp-legion-42-planner's locator after a successful launch (process is live regardless): 10460 |       saveState: async () => {\n[legion] retry-persist for legion-omp-legion-42-planner also failed; in-memory claim remains authoritative: 10465 |           throw new Error(\"disk full\");\n10467 |         // The one retry `launchWorker`'s own catch attempts also fails here, proving the\n 979 pass\n 5 skip\n 0 fail\nRan 984 tests across 57 files. [38.50s]",
+        "loadAvgAtStart": "177.93"
+      },
+      "ciChecks": "lint\tpass\t10s\thttps://github.com/sjawhar/legion/actions/runs/34734806363/job/103664190482\t\npr-title\tpass\t5s\thttps://github.com/sjawhar/legion/actions/runs/34734806363/job/103664190546\t\ntest\tpass\t49s\thttps://github.com/sjawhar/legion/actions/runs/34734806363/job/103664190535\t\ntypecheck\tpass\t18s\thttps://github.com/sjawhar/legion/actions/runs/34734806363/job/103664190542",
+      "ciRun": "https://github.com/sjawhar/legion/actions/runs/34734806363 — Tests, pull_request, success, headSha 36b0b8c5 (verified with gh run view). The PR body cites run 34734617753, also success at 36b0b8c5 (two triggers for the same push).",
+      "mergeability": {
+        "baseRefName": "main",
+        "headRefOid": "36b0b8c5d93004529fe803d4c63ae12866b39b11",
+        "mergeStateStatus": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "state": "OPEN"
+      },
+      "mergeabilityNote": "mergeable MERGEABLE; mergeStateStatus BLOCKED is branch protection awaiting a review, not a conflict. main@origin re-fetched after the checks: still abaf0817."
+    },
+    "line4_scratchDaemon": {
+      "verdict": "PASS",
+      "rig": "/tmp/legion11-smoke/rig.sh <main|branch> <SRC>: project sjawhar/11, port 19373 (worker stream 19374), NATS legion11-nats nats:2.10 -js on 127.0.0.1:14225, tmux -L legion-sjawhar11, DISPATCH_TOKEN from the daemon-delivered 0600 file (never printed), App keys via `secrets … --`. Round-1/2 run dirs archived beside it.",
+      "seedAdaptation": "seed-state.ts gained `runtime: \"tmux\"` in the seeded locator: without it main's loadState now refuses the state file (`Invalid Legion state: Invalid input`, the #962 discriminated Locator union; migrateV23State back-fills only pre-v23 files, and the seed writes the current version). Same one-line adaptation the PR's regression test needed. The first main attempt crashed on exactly that and was discarded (its log also showed one `OMP pi.agents probe failed transiently … (ran 0.8 s)` line — the probe subprocess killed by the crash teardown, not a real timeout).",
+      "mainLeg": {
+        "source": "/home/ubuntu/legion-ws-RunDaemon (read-only), jj log -r @- = abaf0817 chore: release pi-envoy v1.17.3 [skip ci] (== main@origin, contains #980); @ = b1d2cedf 'daemon run checkout: main' (empty)",
+        "logLines": "1:[legion] failed to reconnect worker legion-sjawhar11-legsmoke-11-tester: 417 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */\n29:[legion] failed to reconcile worker legion-sjawhar11-legsmoke-11-tester: 371 |     natsRequest: (subject, data) => nats.request(subject, data),\n36:TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')",
+        "typeErrorStack": "revokeSessionCapability (index.ts:376) ← revokeRoleClaim (processes.ts:2728) ← retireWorkerLocator (processes.ts:2824) ← markWorkerDeadLocked (processes.ts:783)",
+        "logExcerpt": "[legion] failed to reconnect worker legion-sjawhar11-legsmoke-11-tester: 417 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */\n[legion] failed to reconcile worker legion-sjawhar11-legsmoke-11-tester: 371 |     natsRequest: (subject, data) => nats.request(subject, data),\nTypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')\n[legion] durable consumer legion-sjawhar11-github on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found\n[legion] durable consumer legion-LEGSMOKE-dispatch on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found\n[legion] durable consumer legion-sjawhar11-github on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found\n[legion] durable consumer legion-LEGSMOKE-dispatch on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found\n[legion] durable consumer legion-sjawhar11-github on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found\n[legion] durable consumer legion-LEGSMOKE-dispatch on ENVOY_NOTIFICATIONS stopped unexpectedly; restarting: NatsError: stream not found",
+        "legionState": {
+          "role": "tester",
+          "issue": "LEGSMOKE-11",
+          "generation": 1,
+          "sessionId": "ses_dead_tester",
+          "readyConfirmedAt": 1789271831856,
+          "locator": {
+            "runtime": "tmux",
+            "tmuxSession": "legion-sjawhar11",
+            "tmuxWindowId": "@1",
+            "tmuxPaneId": "%1"
+          }
+        },
+        "stateJson": {
+          "issue": "LEGSMOKE-11",
+          "role": "tester",
+          "generation": 1,
+          "sessionId": "ses_dead_tester",
+          "readyConfirmedAt": 1789271831856,
+          "locator": {
+            "runtime": "tmux",
+            "tmuxSession": "legion-sjawhar11",
+            "tmuxWindowId": "@1",
+            "tmuxPaneId": "%1",
+            "socketPath": "/tmp/legion11-smoke/main/daemon/workers/dead-tester.sock",
+            "ompSessionFile": "/tmp/legion11-smoke/main/daemon/workers/dead-tester.session.json"
+          }
+        },
+        "secretFile": "-rw------- 16 /tmp/legion11-smoke/main/daemon/secrets/legion-sjawhar11-legsmoke-11-tester",
+        "observation": "Bug reproduced on main with #980: `[legion] failed to reconcile worker …:` + TypeError (per-claim isolation logged it and left the claim as found); locator retained in legion state and state.json; secret file retained (0600, 16 bytes). Boot continued: `legion daemon listening` / `worker stream listening` printed after the launch hold passed."
+      },
+      "branchLeg": {
+        "source": "$LEGION_WORKSPACE at @- = 36b0b8c5 (code head 70e0adf4)",
+        "logLines": "1:[legion] failed to reconnect worker legion-sjawhar11-legsmoke-11-tester: 417 |  * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */",
+        "bootMarkers": "17:      at probeWorkerSocket (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-11/packages/daemon/src/daemon/worker-rpc.ts:463:20)\n31:[legion] worker-queue promotion trigger ignored: not yet enabled (still booting)\n34:legion daemon listening on 127.0.0.1:19373\n35:legion worker stream listening on 127.0.0.1:19374",
+        "legionState": {
+          "role": "tester",
+          "issue": "LEGSMOKE-11",
+          "generation": 1,
+          "sessionId": "ses_dead_tester",
+          "readyConfirmedAt": 1789271899431
+        },
+        "stateJson": {
+          "issue": "LEGSMOKE-11",
+          "role": "tester",
+          "sessionId": "ses_dead_tester",
+          "readyConfirmedAt": 1789271899431,
+          "generation": 1,
+          "resumeSessionFile": "/tmp/legion11-smoke/branch/daemon/workers/dead-tester.session.json"
+        },
+        "secretFile": "stat: cannot stat '/tmp/legion11-smoke/branch/daemon/secrets/legion-sjawhar11-legsmoke-11-tester': No such file or directory (os error 2)",
+        "secretsDirAfter": "only dispatch-token remains",
+        "observation": "Exactly one line about the seeded worker (`failed to reconnect worker … Failed to connect ENOENT` from reconnectWorkers), no TypeError, no `failed to reconcile worker`, no `worker reconnection failed`; legion state shows the role with sessionId/readyConfirmedAt and no locator; state.json has no locator and keeps resumeSessionFile; secret file gone.",
+        "launchHoldBehaviour": "The retirement's promotion trigger (markWorkerDead → promoteWorkerQueue) logged `worker-queue promotion trigger ignored: not yet enabled (still booting)` — held by the gate. No ensureController request arose: the seeded state has no controllerPendingNotices, so that block is a no-op in this scenario (the code comment at the moved block says a request would be recorded, not spawned). No pane opened at any point: the scratch tmux server showed only the `keepalive` window before, during, and after the hold released (`legion daemon listening` is printed only after `await probes` passed)."
+      },
+      "productionUntouched": {
+        "daemon": "legion-sjawharlegion pid 2510989 on 127.0.0.1:13370 before and after; never stopped, restarted, or reconfigured.",
+        "tmuxPanes": "tmux -L legion-sjawharlegion list-panes -a stable fields: 44 before, 44 after; two lines differ — `@26.%208` (window legion-33) gone and `@21.%211` (window legion-28, a fresh LEGION-28 reviewer worker-shim, pid 1795899) new — production's own worker retire/spawn during my ~5-minute window. I ran only `list-panes`/`list-windows` against that server.",
+        "docker": "only legion11-nats created and removed."
+      },
+      "teardown": "both scratch daemons stopped (exit 0), tmux -L legion-sjawhar11 kill-server + stale socket removed, docker rm -f legion11-nats; ports 19373/19374/14225 free."
+    },
+    "line5_prBody": {
+      "verdict": "PASS",
+      "method": "Live body diffed against round 1's saved copy /tmp/legion11-smoke/pr955-body-remote.md.",
+      "result": "Only two lines differ (plus GitHub's trailing newlines). CI line names run 34734617753 at 36b0b8c5 (verified success at that head) and run 34734366745 at 7596ffc4. The E2E line's addendum now reads: evidence gathered at f5cf98f5 before conflict-only rebases; 'Since then the change's executable lines are unchanged; three things in the tested files did change, each forced by what landed on main': the `runtime: \"tmux\"` line, the renamed `enableLaunches()`/launch-hold comment wording, and two dropped comment-only edits. The round-2 sentence claiming the added/removed lines were identical is gone. Not edited by me.",
+      "artifacts": [
+        "/tmp/legion11-smoke/round3/pr955-body-now.md"
+      ]
+    },
+    "artifacts": "/tmp/legion11-smoke/round3/, /tmp/legion11-smoke/main/ and /tmp/legion11-smoke/branch/ (round-3 legs), /tmp/legion11-smoke/main-red-r3/ (main archive + PR test file)",
+    "notes": [
+      "Shared-repo event during this round: jj printed `Abandoned 1 commits … Concurrent modification detected, resolving automatically` while I ran a read-only `jj file show`; the op log shows another workspace (LEGION-54) splitting a commit at that moment. My chain (@- = 36b0b8c5) was unaffected."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T02:08:36.338Z"
+  "completed": "2026-09-13T04:01:51.458Z"
 }
