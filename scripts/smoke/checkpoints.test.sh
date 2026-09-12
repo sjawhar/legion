@@ -199,18 +199,44 @@ fi
 }
 printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\n'
 
+# Every GitHub-fed checkpoint under none: exit 3, the GitHub-ingress reason, and no Dispatch
+# request. The mode gate runs before each checkpoint's own require_env, so none of the SMOKE_*
+# inputs those checkpoints normally need is required here.
+curl_calls_before="$(wc -l <"$curl_log")"
+for blocked_checkpoint in 5 6 7 9 10 11; do
+  if PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    bash "$checkpoints_script" "$blocked_checkpoint" >"$output_file" 2>&1; then
+    printf 'expected none mode to block checkpoint %s\n' "$blocked_checkpoint" >&2
+    exit 1
+  else
+    status=$?
+  fi
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: "*'requires live GitHub webhook ingress'* ]] || {
+    printf 'expected exit 3 and the GitHub-ingress reason for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
+    exit 1
+  }
+done
+[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+  printf 'expected a GitHub-blocked checkpoint to make no Dispatch request\n' >&2
+  exit 1
+}
+# Checkpoint 8 is not gated by the mode: under none it reaches its own branch-protection gate
+# and reports that reason, never either ingress reason.
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
   SMOKE_PROJECT="example-org/24" \
-  bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
-  printf 'expected none mode to block the live PR checkpoint\n' >&2
+  env -u SMOKE_BRANCH_PROTECTION bash "$checkpoints_script" 8 >"$output_file" 2>&1; then
+  printf 'expected checkpoint 8 to be blocked by its branch-protection gate\n' >&2
   exit 1
 else
   status=$?
 fi
-[[ "$status" == 3 && "$(<"$output_file")" == *'requires live GitHub webhook ingress'* ]] || {
-  cat "$output_file" >&2
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 8 SKIPPED-BLOCKED: SMOKE_BRANCH_PROTECTION=1 requires branch protection/ruleset availability'* && "$(<"$output_file")" != *'ingress'* ]] || {
+  printf 'expected checkpoint 8 under none to report only its branch-protection reason; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
   exit 1
 }
 
@@ -229,7 +255,7 @@ fi
   cat "$output_file" >&2
   exit 1
 }
-printf 'PASS: none mode blocks GitHub-fed checkpoints 5-7 and 9-11 with the GitHub-ingress reason; envoy lets checkpoint 5 reach its own PR check\n'
+printf 'PASS: none mode blocks GitHub-fed checkpoints 5-7 and 9-11 with the GitHub-ingress reason and leaves checkpoint 8 to its branch-protection gate; envoy lets checkpoint 5 reach its own PR check\n'
 
 # forward mode: `gh webhook forward` relays GitHub events only, so 1-4 and 12 are blocked with the
 # same Dispatch-ingress reason (naming forward as the recorded mode), while 5 passes the mode gate
