@@ -49,7 +49,10 @@ interface Waiter {
  * must be `{"type":"hello","bootToken"}`; the token is resolved through the same lookup
  * `/worker/started` uses, the daemon answers `{"type":"hello_ack"}`, and the socket becomes a
  * `WorkerRpcClient` keyed by the claim's role token. Rejections close the connection, log one
- * `worker-stream: rejected hello (<reason>)` line, and change no state.
+ * `worker-stream: rejected hello (<reason>)` line, and change no state. A connection that has not
+ * completed its hello within `rpcTimeoutMs` of opening is rejected the same way (`hello timeout`):
+ * the byte bound alone never fires on silence, and an idle or dripping pre-hello connection would
+ * otherwise hold its fd and buffer forever.
  */
 export function startWorkerStreamListener(
   options: WorkerStreamListenerOptions
@@ -101,12 +104,20 @@ export function startWorkerStreamListener(
 
   const helloReader = (socket: WorkerRpcSocket): WorkerRpcSocketHandlers => {
     let pending: Buffer = Buffer.alloc(0);
+    // One deadline per connection, armed the moment it opens and cleared on every way out of
+    // the hello phase: registration, rejection, or the peer closing first.
+    let deadline: unknown;
+    const fail = (reason: string): void => {
+      clearTimer(deadline);
+      reject(socket, reason);
+    };
+    deadline = setTimer(() => fail("hello timeout"), options.rpcTimeoutMs);
     return {
       data(chunk) {
         pending = pending.byteLength === 0 ? chunk : Buffer.concat([pending, chunk]);
         const newline = pending.indexOf(0x0a);
         if (newline === -1) {
-          if (pending.byteLength > MAX_HELLO_BYTES) reject(socket, "hello too long");
+          if (pending.byteLength > MAX_HELLO_BYTES) fail("hello too long");
           return;
         }
         const line = pending.subarray(0, newline).toString("utf8").trim();
@@ -116,7 +127,7 @@ export function startWorkerStreamListener(
         try {
           parsed = JSON.parse(line);
         } catch {
-          reject(socket, "not json");
+          fail("not json");
           return;
         }
         const frame =
@@ -130,27 +141,32 @@ export function startWorkerStreamListener(
           typeof bootToken !== "string" ||
           bootToken.length === 0
         ) {
-          reject(socket, "malformed hello");
+          fail("malformed hello");
           return;
         }
         const resolved = options.resolveBootToken(bootToken);
         if (!resolved) {
-          reject(socket, "unknown boot token");
+          fail("unknown boot token");
           return;
         }
         if (resolved.boot && resolved.boot.generation !== resolved.claim.generation) {
-          reject(socket, "stale worker generation");
+          fail("stale worker generation");
           return;
         }
         if (registrations.has(resolved.token)) {
-          reject(socket, "already bound to a live stream");
+          fail("already bound to a live stream");
           return;
         }
+        clearTimer(deadline);
         register(socket, resolved.token, remainder);
       },
       drain() {},
-      close() {},
-      error() {},
+      close() {
+        clearTimer(deadline);
+      },
+      error() {
+        clearTimer(deadline);
+      },
     };
   };
 

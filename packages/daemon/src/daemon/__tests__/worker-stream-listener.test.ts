@@ -177,23 +177,34 @@ describe("WorkerStreamListener", () => {
     expect(logs).toEqual([]);
   });
 
-  it("awaitRegistration rejects on its own fake-clock timeout and clears the timer when the hello lands first", async () => {
+  /** An injectable clock: every armed timer is recorded (never fires on its own) and every
+   * clear is recorded, so a test drives expiry by hand and can assert what was cancelled. */
+  function fakeClock() {
     const timers: Array<{ callback: () => void; delayMs: number }> = [];
     const cleared: unknown[] = [];
-    const { listener } = start(undefined, {
-      setTimeout: (callback, delayMs) => {
-        const timer = { callback, delayMs };
-        timers.push(timer);
-        return timer;
+    return {
+      timers,
+      cleared,
+      options: {
+        setTimeout: (callback: () => void, delayMs: number) => {
+          const timer = { callback, delayMs };
+          timers.push(timer);
+          return timer;
+        },
+        clearTimeout: (timer: unknown) => {
+          cleared.push(timer);
+        },
       },
-      clearTimeout: (timer) => {
-        cleared.push(timer);
-      },
-    });
+    };
+  }
+
+  it("awaitRegistration rejects on its own fake-clock timeout and clears the timer when the hello lands first", async () => {
+    const clock = fakeClock();
+    const { listener } = start(undefined, clock.options);
     const late = listener.awaitRegistration("legion-acme-LEGION-9-planner", 30_000);
-    expect(timers).toHaveLength(1);
-    expect(timers[0]?.delayMs).toBe(30_000);
-    timers[0]?.callback();
+    expect(clock.timers).toHaveLength(1);
+    expect(clock.timers[0]?.delayMs).toBe(30_000);
+    clock.timers[0]?.callback();
     await expect(late).rejects.toThrow(
       "worker stream for legion-acme-LEGION-9-planner did not register within 30000ms"
     );
@@ -202,7 +213,33 @@ describe("WorkerStreamListener", () => {
     const shim = await dial(listener.port);
     shim.write(hello("tok-1"));
     await expect(inTime).resolves.toBeDefined();
-    expect(cleared).toEqual([timers[1]]);
+    // The connection's own hello deadline (armed in `open`, after the waiter's timer) is cleared
+    // first, then the waiter's timer as it settles.
+    expect(clock.timers).toHaveLength(3);
+    expect(clock.timers[2]?.delayMs).toBe(2_000);
+    expect(clock.cleared).toEqual([clock.timers[2], clock.timers[1]]);
+  });
+
+  it("rejects a connection whose hello deadline fires before any line, and clears the deadline once a hello lands first", async () => {
+    const clock = fakeClock();
+    const { listener, logs } = start(undefined, clock.options);
+    const idle = await dial(listener.port);
+    // The deadline is armed in the listener's own `open` turn, not the dialer's.
+    await waitFor(() => clock.timers.length === 1);
+    expect(clock.timers[0]?.delayMs).toBe(2_000); // rpcTimeoutMs; no separate setting
+    clock.timers[0]?.callback();
+    await idle.closed;
+    expect(logs).toEqual(["worker-stream: rejected hello (hello timeout)"]);
+    expect(listener.registrations.size).toBe(0);
+    expect(idle.lines).toEqual([]);
+
+    const prompt = await dial(listener.port);
+    await waitFor(() => clock.timers.length === 2);
+    prompt.write(hello("tok-1"));
+    await listener.awaitRegistration(CLAIM_TOKEN, 5_000);
+    expect(clock.cleared).toContain(clock.timers[1]);
+    expect(logs).toHaveLength(1); // no late rejection of the registered stream
+    expect(listener.registrations.size).toBe(1);
   });
 
   it("close() rejects pending waiters, closes registered streams, and refuses later dials", async () => {

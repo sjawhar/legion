@@ -654,6 +654,8 @@ async function startDaemonLocked(
       port: config.workerStreamPort,
       rpcTimeoutMs: config.workerRpcTimeoutSeconds * 1000,
       resolveBootToken: api.resolveWorkerBootToken,
+      setTimeout: deps.setTimeout,
+      clearTimeout: deps.clearTimeout,
     });
   } catch (error) {
     api.stop();
