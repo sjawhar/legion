@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, and a daemon outage blocking every bash call"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, and a daemon outage blocking every bash call"
 category: legion
 tags:
   - legion
@@ -27,7 +27,6 @@ related_issues:
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
-  - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
   - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
@@ -41,7 +40,7 @@ symptoms:
 
 # Worker-Pane Shell Gotchas
 
-Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
+Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1 and 3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
 from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
 `packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again; the §1 attribution
@@ -139,19 +138,18 @@ again), then `pickgrant && jj git push …` / `pickgrant && legion gh -- …` / 
 It needs no `grant_release` bookkeeping and self-heals if a later grant is the live one. Observed 1 → 10 stacked
 blocks over one implementer session; the first block redeemed every time.
 
-## 2. The pane's `DISPATCH_URL` fails one pre-existing CLI test (fixed in #967)
+## 2. `bun test` in a pane: inject the env the code reads, and run it from `packages/daemon`
 
-Every Legion pane carries `DISPATCH_URL` (and `DISPATCH_TOKEN_FILE`) but not `DISPATCH_TOKEN`.
-`src/cli/__tests__/index.test.ts` › `legion start --check-config > validates github_apps.<role>.private_key_command
-without executing it` read `process.env` rather than an isolated env, so `resolveDaemonConfig` refused
-(`dispatch_url is set but DISPATCH_TOKEN is not`) and the test failed in every pane while staying green in CI.
-sjawhar/legion#967 (`wxzknkyk`) made that `describe` scrub `LEGION_*`/`DISPATCH_*`/`ENVOY_*` around its cases, so
-`bun test packages/daemon` runs clean from a pane on branches that include it. On older branches the workaround is
-still `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, and say so in the handoff. The general rule stands: a CLI
-test that reaches `process.env` through a helper with no env seam will fail wherever the pane's env differs from CI's.
+Every Legion pane carries `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` without `DISPATCH_TOKEN`, plus the `LEGION_*` and
+`ENVOY_*` families, so a test that reaches `process.env` through a helper with no env seam fails wherever the pane's
+env differs from CI's. `legion start --check-config` takes its environment as an argument
+(`cmdCheckConfig(project, configPath, env)` in `src/cli/index.ts`; the citty `start`/`restart` handlers are the only
+callers that pass `process.env`), and its tests hand it `{ PATH, HOME }`. Prefer that seam whenever the code under
+test can take one; the pane's shape is then irrelevant to the suite.
 
-The same leak hit `packages/pi-envoy` on LEGION-29 (fixed in sjawhar/legion#970): `envoy.test.ts` cleared
-`DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which `resolveDispatchConfig` reads *ahead* of the token (see
+The same leak hit `packages/pi-envoy`, whose extension entry points read `process.env` themselves, on LEGION-29
+(fixed in sjawhar/legion#970): `envoy.test.ts` cleared `DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which
+`resolveDispatchConfig` reads *ahead* of the token (see
 [secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)), so three Dispatch-tool
 tests registered real tools against the fixture's stub zod; `legion.test.ts` inherited the pane's
 `LEGION_TREE`/`LEGION_ROLE`/`LEGION_ISSUE` markers, so nine tests died on `Legion session has both controller and
