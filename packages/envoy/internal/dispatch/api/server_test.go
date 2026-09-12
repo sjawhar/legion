@@ -348,8 +348,8 @@ func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
 			text := decodeBody[struct {
 				Markdown string `json:"markdown"`
 			}](t, textResponse)
-			if !strings.HasPrefix(text.Markdown, "## Decisions needed") {
-				t.Fatalf("primary document = %q, want it to start with Decisions needed", text.Markdown)
+			if !strings.HasPrefix(text.Markdown, "## Summary") {
+				t.Fatalf("primary document = %q, want it to start with Summary", text.Markdown)
 			}
 		})
 	}

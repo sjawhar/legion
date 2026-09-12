@@ -44,6 +44,10 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
   relevant Dispatch issue. A stale or duplicate wake may cost a read, never a wrong action.
 - **Controller state is disposable.** Do not reconstruct or preserve local controller
   bookkeeping between turns.
+- **Write for a human.** Every `dispatch_comment`, `dispatch_message`, and `dispatch_ask` you
+  post follows the dispatch skill's "Writing for the human" rules: plain sentences, every
+  identifier expanded on first use, no coined shorthand. A triage note that reads like a log
+  line is not a triage note.
 
 ## Wake routing table
 
