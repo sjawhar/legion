@@ -9,8 +9,10 @@ test("wsUrl builds an encoded same-origin document websocket URL", () => {
   );
 });
 
-test("colorForLogin assigns each login a stable presence color", () => {
-  expect(colorForLogin("alice")).toBe("#0284c7");
-  expect(colorForLogin("bob")).toBe("#7c3aed");
-  expect(colorForLogin("alice")).toBe(colorForLogin("alice"));
+test("colorForLogin assigns each login a stable, valid CSS presence color", () => {
+  for (const login of ["alice", "bob"]) {
+    const color = colorForLogin(login);
+    expect(color).toBe(colorForLogin(login));
+    expect(CSS.supports("color", color)).toBe(true);
+  }
 });

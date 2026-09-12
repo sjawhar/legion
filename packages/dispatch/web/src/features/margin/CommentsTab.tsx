@@ -9,6 +9,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
+import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { ThreadList } from "./ThreadList";
@@ -74,7 +75,7 @@ function AskCardItem({
       <AskCard ask={ask} artifactSlug={artifactSlug} />
       {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        {new Date(ask.created_at).toLocaleString()}
+        <Timestamp at={ask.created_at} />
       </p>
     </div>
   );

@@ -2,7 +2,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import type { MarkPlacement } from "../margin/useMarginItems";
 
-export const recordMarkTypes = ["proofComment", "proofSuggestion", "dispatchAsk"] as const;
+const recordMarkTypes = ["proofComment", "proofSuggestion", "dispatchAsk"] as const;
 
 type SelectionBarKind = "comment" | "suggest" | "ask";
 
