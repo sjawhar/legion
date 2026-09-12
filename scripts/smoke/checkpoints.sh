@@ -57,12 +57,17 @@ dispatch_children() {
   local project="${root%%-*}"
   dispatch_request "issues?project=${project}&parent=${root}"
 }
+# The mode up.sh recorded for this rig, or an explicit export for a scratch directory up.sh never
+# populated. Never a guess: forward now gates checkpoints 1-4 and 12, so a guessed mode would block
+# them on a fact nobody recorded and send the operator after a setting that does not exist.
 stored_webhook_mode() {
   local mode_file="${smoke_dir}/webhook-mode"
   if [[ -r "$mode_file" ]]; then
     printf '%s\n' "$(<"$mode_file")"
+  elif [[ -n "${SMOKE_WEBHOOK_MODE:-}" ]]; then
+    printf '%s\n' "$SMOKE_WEBHOOK_MODE"
   else
-    printf '%s\n' "${SMOKE_WEBHOOK_MODE:-forward}"
+    fail "no recorded webhook mode at ${mode_file}; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|none"
   fi
 }
 
