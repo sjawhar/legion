@@ -8,16 +8,16 @@
   },
   "verdict": "APPROVE",
   "review": {
-    "id": 5186420236,
-    "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5186420236",
+    "id": 5187832548,
+    "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5187832548",
     "state": "APPROVED",
-    "submittedAt": "2026-09-12T12:32:18Z"
+    "submittedAt": "2026-09-12T20:07:22Z"
   },
   "reviewedSha": {
-    "prHead": "27fb3cc85724edbfee7bd93ec35f50354d3570ab",
-    "code": "85a842437180d6ec800b516bb2238fff544be445",
-    "base": "7add4d03087e (main, unchanged)",
-    "note": "7141adf6 and 27fb3cc8 add only .legion/*.json on top of 85a84243"
+    "prHead": "780b138ebbdeee787d7ae463fd98fb8129144a06",
+    "code": "042de1f6fc5b5f365d92aa7c0ea3c22676ed1b54",
+    "base": "d458b7fe1506 (main, chore: release cli v1.3.1; descendant of #966 3a22761f and #967 5c5c3013)",
+    "note": "a115b720, dd26b764, 248c85fa, 780b138e add only .legion/*.json on top of 042de1f6"
   },
   "blockingItems": [],
   "blockingItemCount": 0,
@@ -120,7 +120,51 @@
     "blockingItemCount": 0,
     "note": "round-1 detail preserved in the top-level fields (judgements, thermo, nonBlocking); every nonBlocking item there was assigned as hardening G1-G8 and is closed by round 2"
   },
+  "round3": {
+    "round": 3,
+    "trigger": "merge-candidate review after the rebase round (implement.json rebaseRound + secondRebase: onto main d458b7fe with #967 LEGION-22 and #966 LEGION-23; spec v6 seam) and the registry fix (registryFix, own commit 042de1f6); architect asked for the delta 85a84243..042de1f6 restricted to what this PR authored",
+    "verdict": "APPROVE",
+    "review": {
+      "id": 5187832548,
+      "url": "https://github.com/sjawhar/legion/pull/962#pullrequestreview-5187832548",
+      "state": "APPROVED",
+      "submittedAt": "2026-09-12T20:07:22Z"
+    },
+    "reviewedSha": {
+      "prHead": "780b138ebbdeee787d7ae463fd98fb8129144a06",
+      "code": "042de1f6fc5b5f365d92aa7c0ea3c22676ed1b54",
+      "base": "d458b7fe1506 (main, chore: release cli v1.3.1; descendant of #966 3a22761f and #967 5c5c3013)",
+      "note": "a115b720, dd26b764, 248c85fa, 780b138e add only .legion/*.json on top of 042de1f6"
+    },
+    "blockingItems": [],
+    "blockingItemCount": 0,
+    "verifiedOnGitHub": {
+      "testerStatus": "legion/tester SUCCESS on 042de1f6, 248c85fa, 780b138e",
+      "ciBySha": "dd26b764: Tests 34713611965 + 34714205151, Envoy+Contracts 34713611969 SUCCESS; 248c85fa: Tests 34714218934, Envoy+Contracts 34714218897 SUCCESS; 780b138e: Tests 34715570419 + 34715638056 SUCCESS, Envoy+Contracts 34715570525 in_progress at 20:0xZ (commit is .legion/test.json only)",
+      "threads": "0",
+      "mergeState": "MERGEABLE / BLOCKED (awaiting review) at 20:0xZ",
+      "legion16": "#961 OPEN, mergedAt null, head 665f4b1b -> version 24 / migrateV23State stand"
+    },
+    "method": "authored diff at both heads (7add4d03..85a84243 vs d458b7fe..042de1f6) normalized and attributed hunk-by-hunk: differing files = index.ts (-85/+48), boot-probes.ts (+83), api/routes/workers.ts (3 lines), __tests__/index.test.ts (+21), AGENTS.md (2 paragraphs), legions-registry.ts (+22), legions-registry.test.ts (+37); processes.ts/runtime.ts/runtime-tmux.ts/legion-state.ts/config.ts/worker-boot-watchdog.ts/api/state.ts/contracts/pi-envoy authored hunks byte-identical (processes.ts 85a84243..042de1f6 = one comment word; config.ts delta == main's own #967/#966 change)",
+    "items": {
+      "1_conflicts": "PASS - workers.ts: main's resolveWorkerClaim + our capturedLocator/sameProcess (d458b7fe..042de1f6 on the file = our import, two identity lines, two comment edits); index.test.ts: #967 daemonDeps (1934) + worker-stream tests (1940, 1966) then our kubernetes test (1990); gate cases (1662/1731/1780) still assert loadProbeRan/loadedState/natsCreated false; index.ts import block {daemonCredentialHelper, locatorsForIssue, ProcessManager, type ProcessManagerDeps} + three probes from ./boot-probes; AGENTS.md load-probe paragraph (134) then contract-gate paragraph (136, boot-probes.ts); both Files-row sets",
+      "2_contractGate": "PASS - verifyLegionPluginContract exported from boot-probes.ts, body byte-identical (same messages); legionPluginManifestPath module-private (handoff said exported; private is correct - only in-file callers); index.ts:228-241 agents -> contract -> load, before getToken/loadState",
+      "3_seam": "PASS - index.ts:477/488 hostname: config.bind; :644/:645 listening on ${config.bind}; deferral sentence gone; occupied-port test binds daemonConfig.bind and asserts `worker_stream_port <port> on ${daemonConfig.bind} is unavailable`",
+      "4_registryFix": "PASS - withRegistryLock mkdirs before O_CREAT|O_EXCL; writeRegistry mkdir removed, its only callers (58, 66) under the lock; test: concurrent writers under nonexistent parent -> file exists, both entries read back, removeLegionEntry proceeds; fails pre-fix per handoff",
+      "5_untouched": "PASS - worker-rpc.ts, worker-stream-listener.ts, cli/worker-shim.ts: d458b7fe..042de1f6 empty; pi-envoy package.json 1.9.0 keeps legion.daemonApiVersion 1; state v24 at all five sites",
+      "6_prBody": "PASS - Scope has Also fixes (042de1f6), Rebase onto #967 (seam + both conflicts), Second rebase (onto d458b7fe after #966); sharpened deploy note under Verification (every released pi-envoy lacks the field; install a post-merge release into ~/.omp/profiles/legion before the dogfood daemon restarts), backed by the tester's 1.11.1 negative control; Scope-level note still quotes the 1.3.0-era capture (same action)"
+    },
+    "fidelity": "no tmux runtime behaviour changed: tester's normalized argv trace at 042de1f6 == rounds 2/3 for all four spawn kinds; bind sites bind the same address under tmux (validated 127.0.0.1); registry fix removes a fresh-XDG crash, same lock/atomic rename",
+    "outsideScope": [
+      "legion probe-image (#966, LEGION-23) runs agents + load probes but not the contract gate; a same-checkout image cannot fail it and startDaemon runs it anyway - if LEGION-25's one-shot boot-probe pod (root spec s4) uses probe-image as its command, the gate belongs in that subcommand too -> LEGION-25"
+    ],
+    "prBody": {
+      "thermoLineUpdated": "set for 780b138e (naming all three APPROVE reviews)"
+    },
+    "next": "implementer pushes only the .legion/ deletion; reviewer approves that head by name; then retro and the merger. This handoff commit rides on that push (reviewer cannot push).",
+    "artifacts": "/tmp/legion21-review/r3/{authored.old.diff,authored.new.diff,old.norm,new.norm,interdiff.txt,interdiff.by-file.json,attribute.py,review-body.md,pr-body.orig.md,pr-body.new.md,pr.json}"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T12:34:51.691Z"
+  "completed": "2026-09-12T20:08:18.979Z"
 }
