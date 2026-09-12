@@ -10,12 +10,15 @@ import {
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
+  type DispatchDelivery,
   inboundTimestamp,
   renderInbound,
   senderLabel,
-  type DispatchDelivery,
 } from "@legion/envoy-client/delivery";
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import {
+  type DispatchConfigResolution,
+  resolveDispatchConfig,
+} from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import {
   dispatchSubscriptionTopic,
@@ -166,10 +169,22 @@ const SKILLS_DIRECTORY = resolveSkillsDirectory();
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   const defaults = envoyDefaultsFromEnvironment(process.env);
-  // One loader for the shared envoy.json contract: the dispatch tool is
-  // registered only where it names a service, and an invalid file is reported
-  // at session start, not silently treated as off.
+  // One loader for the shared envoy.json contract: the dispatch tools are
+  // registered only where the file names a service at load, and an invalid file
+  // is reported at session start, not silently treated as off. The URL and
+  // token themselves are re-read on every call (`currentDispatchConfig`) so a
+  // Dispatch that moved - a new dispatch.serverUrl in envoy.json - takes effect
+  // without /reload-plugins; a file that has since broken fails the call with
+  // its own error instead of quietly using the stale endpoint.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
+  const currentDispatchConfig = (): DispatchConfigResolution => {
+    const fresh = resolveDispatchConfig(process.env, { cwd: process.cwd() });
+    if (fresh.error !== null) throw new Error(`dispatch config: ${fresh.error}`);
+    if (!fresh.enabled || fresh.url === null || fresh.token === null) {
+      throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
+    }
+    return fresh;
+  };
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
   const dedupeKeys = new Set<string>();
@@ -207,13 +222,11 @@ export default function envoyExtension(pi: PiApi): void {
     delivery: DispatchDelivery,
     result: { readonly body?: string; readonly error?: string }
   ): Promise<void> => {
-    if (!dispatchConfig.enabled || dispatchConfig.url === null || dispatchConfig.token === null) {
-      throw new Error("Dispatch reply endpoint is not configured");
-    }
-    const response = await fetch(`${dispatchConfig.url}/api/v1/messages/${delivery.messageID}/reply`, {
+    const config = currentDispatchConfig();
+    const response = await fetch(`${config.url}/api/v1/messages/${delivery.messageID}/reply`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${dispatchConfig.token}`,
+        Authorization: `Bearer ${config.token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -260,7 +273,9 @@ export default function envoyExtension(pi: PiApi): void {
             error: "Invalid Dispatch targeted delivery frame",
           });
         } else if (rendered.malformedDelivery === true) {
-          console.warn("[envoy] dropping malformed Dispatch targeted delivery without a reply address");
+          console.warn(
+            "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
+          );
         } else if (rendered.delivery?.mode === "btw") {
           if (pi.askEphemeral === undefined) {
             await postDispatchReply(rendered.delivery, {
@@ -284,7 +299,10 @@ export default function envoyExtension(pi: PiApi): void {
           );
         }
       } catch (error) {
-        console.warn(`[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`, error);
+        console.warn(
+          `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
+          error
+        );
         throw error;
       }
       if (dedupeKey !== undefined) {
@@ -880,7 +898,7 @@ export default function envoyExtension(pi: PiApi): void {
               host: "omp",
               sessionId: context.sessionManager.getSessionId(),
               sessionTitle: context.sessionManager.getSessionName?.(),
-              config: dispatchConfig,
+              config: currentDispatchConfig(),
               env: process.env,
             });
             return toolSuccess(result.text, result.details);
