@@ -1,0 +1,42 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/omp-pin.ts"
+  ],
+  "pr": 983,
+  "prUrl": "https://github.com/sjawhar/legion/pull/983",
+  "implementationCommit": "1a57753cae7e98578ebd33ff9ffb0755ac184102",
+  "summary": "OMP_FORK_PIN moved from github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 to github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 (tag commit dec271b0, history includes 0e57a6ca). DEFAULT_OMP_INVOCATION, scripts/smoke/up.sh and the worker image derive from it; nothing else changed.",
+  "proofs": {
+    "1_tagAncestry": "git merge-base --is-ancestor 0e57a6ca v18.1.18-sami.20260912-104423 -> ancestor; git tag --points-at -> v18.1.18-sami.20260912-104423 at dec271b0991180c0e36e6bdfa96f8f90159ae040 (fork checkout /home/ubuntu/oh-my-pi, read-only)",
+    "2_pinPrints": "bun packages/daemon/src/daemon/omp-pin.ts -> github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423; mise x <pin> -- omp --version -> omp/18.1.18",
+    "3a_probeImage": "env -u LEGION_* -u DISPATCH_* -u ENVOY_* OMP_PROFILE=legion bun packages/daemon/src/cli/index.ts probe-image --omp /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp -> probe-image: OK",
+    "3b_headlessSurvival": "Repro at /tmp/legion-32-repro (repro-extension.mjs + drive.ts): omp --mode rpc --no-session --no-extensions -e repro-extension.mjs; frames negotiate_protocol, abort (sets autoResumeSuppressed at idle), then the extension's pi.sendMessage({...},{deliverAs:'aside',triggerTurn:true}) from a timer outside any prompt scope. Old pin: '[Unhandled Rejection] Error: send did not invoke the agent', exit 1. New pin: no crash string, get_state answered afterwards, alive until killed.",
+    "3c_workerImage": "worker-image.yaml run 34720622086 triggered by the omp-pin.ts change; its last step runs legion probe-image on the same pin",
+    "4_oldStringSearch": "grep -rn 18.1.15-sami.20260908-220934 (excluding .jj/.git/node_modules) -> only scripts/smoke/README.md:73, which LEGION-10's PR #957 rewrites; scripts/smoke/ deliberately untouched per the LEGION-10 architect",
+    "5_deploymentConfig": "/home/ubuntu/.config/legion/sjawhar-legion/legion.yaml omp_invocation: \"mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 -- omp\" equals the new default; deletable once this lands"
+  },
+  "checks": {
+    "biome": "bunx biome check packages/daemon/src/ -> exit 0",
+    "tsc": "cd packages/daemon && bunx tsc --noEmit -> exit 0",
+    "bunTest": "bun test packages/daemon -> 872 pass, 5 skip, 0 fail (877 tests, 56 files)"
+  },
+  "trickyParts": [
+    "The no-turn trigger needs no model call: the RPC `abort` command runs session.abort({reason: USER_INTERRUPT_LABEL}) even at idle, which sets #advisors.autoResumeSuppressed; an idle deliverAs:'aside' send then folds into context and sendCustomMessage resolves false, so the invokingTask rejects outside any prompt scope.",
+    "`shutdown` is a frame legion worker-shim consumes, not an OMP RPC command; sent straight to omp it answers 'Unknown command: shutdown'. The repro driver kills the process after that, hence exit 143 on the surviving build.",
+    "The daemon-provisioned empty .omp/config.yml in the workspace is not committed: the implementation commit was split out by path and the bookmark set to it explicitly.",
+    "The private tmux server legion-sjawharlegion still carries a stale LEGION_OMP_PATH (hand-built 18.1.15 binary) in its global environment from an earlier daemon generation; nothing the daemon spawns reads it and every running omp --mode rpc is the 18.1.18 mise install. Operator note in the PR body, not a code change."
+  ],
+  "deviations": [
+    "No test asserts the pin string (rejected in the spec).",
+    "scripts/smoke/README.md still names the old version at line 73; left to LEGION-10's PR #957 at that architect's request."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "requiredSkillsRead": [
+    "legion-worker",
+    "fork-work"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T21:41:21.943Z"
+}
