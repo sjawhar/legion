@@ -206,5 +206,179 @@
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T07:18:50.190Z"
+  "completed": "2026-09-12T07:18:50.190Z",
+  "correctivePass": {
+    "reviewedHead": "0f3edc92af045598cf47c342cca85c6b9bc74bea",
+    "review": "https://github.com/sjawhar/legion/pull/961#pullrequestreview-5186969879 (REQUEST_CHANGES, 14 inline threads)",
+    "newHead": "the commit carrying this file (implement: record corrective-pass handoff); the last fix commit beneath it is bc84d57b4972",
+    "rebaseStatus": {
+      "legion21_pr962": "OPEN, not merged at 2026-09-12T15:50Z (legion gh -- pr view 962 --json state,mergedAt). No rebase performed; testerNotes.rebaseRecipeIfLegion21LandsFirst stands unchanged.",
+      "legion18_pr953": "OPEN, not merged at 15:50Z (legion gh -- pr list --head legion/LEGION-18). No rebase performed. Constraint A re-verified: jj diff from main@origin on skills/legion-worker/SKILL.md is one hunk (-225,10 +225,14), the merger bullet only.",
+      "mainAtCorrectivePass": "7add4d03087e (chore: release pi-envoy v1.5.0); nothing under packages/ or skills/ this branch touches moved since the review, so no rebase."
+    },
+    "findingsToCommits": [
+      {
+        "thread": 3996688353,
+        "finding": "B1 verification gate unpassable",
+        "commit": "bc84d57b4972",
+        "what": "Controller skill gate matches the worker skill's Verification template field by field at the approved sha; READY becomes the two-sha shape (architect addition, see readyShapeChange)."
+      },
+      {
+        "thread": 3996688356,
+        "finding": "B2 transcript lost at deadline probe",
+        "commit": "d6c74c4e500e",
+        "what": "controllerAlive is a pure probe; spawnController resolves the resume decision, then clears the locator and mints; deadline callback resurrects a dead pane at once. Two tests (dead-before-ready + deadline; stuck-alive killed then resumed)."
+      },
+      {
+        "thread": 3996688358,
+        "finding": "(a) takeover overwrites pane transcript",
+        "commit": "df3f417b62a3",
+        "what": "claimController takes explicit reportTranscript; session_start/switch pass true, /legion-claim-controller passes false. Rule stated at api/routes/controller.ts. Three extension tests updated."
+      },
+      {
+        "thread": 3996688363,
+        "finding": "(b) /new /resume /fork strands the merge queue",
+        "commit": "df3f417b62a3",
+        "what": "session_switch/session_branch/session_tree re-run claimController for a controller process; new test switches the session and asserts re-claim, re-ready with the new file, and wrapped bash."
+      },
+      {
+        "thread": 3996688364,
+        "finding": "(c) one-shot refusal, lying log, AGENTS.md untrue",
+        "commit": "d6c74c4e500e + b97d64b7ae2c",
+        "what": "Refuses every time (D1 kept per architect): locator and capability untouched on refusal; test asserts two refusals, unchanged locator, zero mints. AGENTS.md bullet describes the real behaviour (no counter, never escalates)."
+      },
+      {
+        "thread": 3996688368,
+        "finding": "(d) gh commands need the PR URL",
+        "commit": "bc84d57b4972",
+        "what": "Every gh command in the Merge queue section takes <pr url> or --repo from it; verified from /tmp under gh 2.98.0 in a Legion pane."
+      },
+      {
+        "thread": 3996688369,
+        "finding": "(e) required checks",
+        "commit": "bc84d57b4972",
+        "what": "gh pr checks <pr url> --required --json name,state,bucket; green = every bucket pass; verified against #961 from /tmp (returned lint/typecheck/test only)."
+      },
+      {
+        "thread": 3996688372,
+        "finding": "(f) hand-formatted tokens",
+        "commit": "bc84d57b4972",
+        "what": "Controller reads the architect's and merger's tokens from the roles keys of legion state --json; templates removed; explains the lower-casing."
+      },
+      {
+        "thread": 3996688375,
+        "finding": "(g) takeover env incomplete",
+        "commit": "bc84d57b4972",
+        "what": "Takeover instructions list LEGION_STATE_DIR, explain the wrapped shell, and warn against LEGION_CONTROLLER=1."
+      },
+      {
+        "thread": 3996688378,
+        "finding": "(h) READY shape in worker/architect skills",
+        "commit": "bc84d57b4972",
+        "what": "Two-sha shape defined once in roles/merger.md, mirrored in the worker bullet, architect 6.4, controller skill, smoke README."
+      },
+      {
+        "thread": 3996688384,
+        "finding": "api.test gap",
+        "commit": "7d6f2fb65a53",
+        "what": "Valid ready without ompSessionFile after one is recorded keeps the file and moves the role claim."
+      },
+      {
+        "thread": 3996688388,
+        "finding": "(i) set_status tool -> CLI",
+        "commit": "bc84d57b4972",
+        "what": "All seven legion({op:\"set_status\"}) calls become legion status <KEY> <status>; caveat paragraph lines 12-15 untouched for LEGION-18."
+      },
+      {
+        "thread": 3996688391,
+        "finding": "(ii) upgrade note",
+        "commit": "b97d64b7ae2c",
+        "what": "Runbook step: kill the surviving headless controller pane once after the v24 upgrade."
+      },
+      {
+        "thread": 3996688393,
+        "finding": "batched nits 1-7",
+        "commit": "7d6f2fb65a53 (1,2,5), d6c74c4e500e (3), df3f417b62a3 (4), de5a130e9375 (6,7)",
+        "what": "All seven addressed; Fast-follow stays none."
+      }
+    ],
+    "readyShapeChange": {
+      "from": "READY #<n> at <sha> for <KEY> (<pr url>)",
+      "to": "READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)",
+      "why": "Architect (relayed from LEGION-18's architect, 15:59Z): retro commits docs/solutions/ after the reviewer approves, so the merger's current head is the approved head plus the retro commit; the merger never 'confirms the approved head still equals the current head'. Controller gates: head == current sha; approval + Verification block checked at approved sha; compare/<approved>...<current> must be identical/ahead with only docs/solutions/ paths, else failed gate 'head moved beyond retro'.",
+      "definedIn": "packages/pi-envoy/roles/merger.md; mirrored verbatim in skills/legion-worker/SKILL.md (merger bullet), skills/legion-architect/SKILL.md step 6.4, skills/legion-controller/SKILL.md Merge queue, scripts/smoke/README.md.",
+      "testerImpact": "The tester's READY payloads for A5(iii)/(iv) must use the two-sha shape; for a PR with no retro commit both shas are equal."
+    },
+    "deviationsFromReviewSuggestions": [
+      {
+        "thread": 3996688358,
+        "deviation": "Did not use the reviewer's `\"setInterval\" in context` discriminator between session start and the slash command; used an explicit `reportTranscript` parameter instead.",
+        "reason": "OMP's real ExtensionCommandContext extends ExtensionContext (packages/coding-agent/src/extensibility/extensions/types.ts in the oh-my-pi fork), so a slash-command context carries setInterval at runtime and the shape test would not have separated the two paths."
+      },
+      {
+        "thread": 3996688364,
+        "deviation": "Kept plan decision D1 (refuse on a missing transcript) rather than the reviewer's preferred loud fresh start.",
+        "reason": "The architect's corrective-pass instruction chose D1: 'same-agent invariant: a recorded-but-missing file refuses, every time, with one honest log'. The refusal now leaves the locator and capability untouched so it holds every time; the AGENTS.md sentence says the controller has no launch-failure counter and never escalates."
+      },
+      {
+        "thread": 3996688356,
+        "deviation": "The deadline callback now resurrects a pane found already dead instead of returning.",
+        "reason": "The architect's test requirement ('whose registration deadline fires must be respawned with --resume=<that file>') needs the respawn at the deadline, not at some later wake; with the pure probe nothing else would trigger it."
+      },
+      {
+        "thread": 3996688393,
+        "deviation": "Nit 1: kept the 403-status branch but added the reason-text match on MERGE_AUTHORITY_REFUSED (shared constant) rather than matching text alone.",
+        "reason": "Status plus reason is strictly narrower; an expired grant on a merge invocation now falls through to the plain redemption failure as the reviewer wanted."
+      }
+    ],
+    "verificationCommandsRun": [
+      {
+        "command": "cd packages/daemon && bunx biome check --error-on-warnings src/",
+        "outcome": "Checked 135 files. No fixes applied."
+      },
+      {
+        "command": "cd packages/daemon && bunx tsc --noEmit",
+        "outcome": "exit 0"
+      },
+      {
+        "command": "cd packages/contracts && bunx tsc --noEmit && bunx biome check src/",
+        "outcome": "exit 0; Checked 18 files. No fixes applied."
+      },
+      {
+        "command": "cd packages/pi-envoy && bunx tsc --noEmit && bunx biome lint extensions/ src/",
+        "outcome": "exit 0; Checked 19 files. No fixes applied."
+      },
+      {
+        "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+        "outcome": "822 pass, 5 skip, 0 fail across 53 files (one earlier partial run flaked 'admits only up to the configured global cap...' at its 5000 ms cap under load; passed 2/2 in isolation; the full run was clean)"
+      },
+      {
+        "command": "cd packages/contracts && bun test",
+        "outcome": "93 pass, 0 fail"
+      },
+      {
+        "command": "cd packages/pi-envoy && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+        "outcome": "139 pass, 0 fail"
+      },
+      {
+        "command": "cd packages/envoy && (cd internal/dispatch/pmdoc/gen && bun install --frozen-lockfile) && go list ./... | grep -v /integration | xargs go test -count=1",
+        "outcome": "every package ok, GOTEST_EXIT=0 (no NATS-testcontainer flakes this run)"
+      },
+      {
+        "command": "grep -rn pr-queue skills packages docs --exclude-dir=plans",
+        "outcome": "prints nothing (exit 1)"
+      },
+      {
+        "command": "jj diff --git --from main@origin -- skills/legion-worker/SKILL.md",
+        "outcome": "one hunk -225,10 +225,14: the merger bullet only (constraint A)"
+      },
+      {
+        "command": "from /tmp: legion gh -- pr view <url> --json ...; pr checks <url> --required --json name,state,bucket; api graphql (reviewThreads); api repos/.../compare/<a>...<b>",
+        "outcome": "all four answered from a non-checkout directory under gh 2.98.0 before being written into the controller skill"
+      }
+    ],
+    "pullRequestHold": "Sami's hold on new pull requests (relayed 13:17Z) respected: no new PR opened; every fix pushed to the existing legion/LEGION-16 branch of PR #961. The reviewer's .legion/review.json commit 2a109026 rode along on the push.",
+    "threadReplies": "Fourteen replies posted, one per thread, plain English, none resolved (the reviewer resolves on re-review): reply ids 3996849553, 3996849620, 3996849679, 3996849734, 3996850083, 3996850132, 3996850173, 3996850225, 3996850272, 3996850554, 3996850626, 3996850660, 3996850707, 3996850739.",
+    "completedAt": "2026-09-12T16:32:31.457460Z"
+  }
 }
