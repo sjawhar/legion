@@ -28,8 +28,9 @@ export interface DaemonConfig {
    * until the Kubernetes runtime lands). */
   runtime: RuntimeName;
   /** The daemon API URL every spawned process is told (`LEGION_DAEMON_URL`), normalized with no
-   * trailing slash. Defaults to `http://127.0.0.1:<port>` under tmux; required under kubernetes,
-   * where a pod cannot reach the daemon's loopback. */
+   * trailing slash. Under tmux it is always `http://127.0.0.1:<port>` — the default, and the only
+   * accepted value (anything else is an inherited outer pane's `LEGION_DAEMON_URL`); required
+   * under kubernetes, where a pod cannot reach the daemon's loopback. */
   daemonUrl: string;
   /** The API listen address. `127.0.0.1` unless `runtime` is kubernetes, where the in-cluster
    * daemon must be reachable by its pods. */
@@ -714,16 +715,19 @@ export function resolveDaemonConfig(
     "tmux"
   );
   // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
-  // daemon started from inside a pane inherits the OUTER daemon's URL from its environment: a
-  // file/cli `daemon_url` (which `resolveValue` ranks above env) is how such a daemon keeps its
-  // own processes registering with itself. The loopback default needs the resolved port, so it
-  // is applied here rather than passed through `resolveValue`.
+  // daemon started from inside a pane inherits the OUTER daemon's URL from its environment and
+  // would tell its own processes to register there. Under tmux the only correct value is the
+  // daemon's own loopback address, so anything else is refused outright — a file/cli
+  // `daemon_url` equal to the default (the smoke rig writes one) is the documented way to pin
+  // it. The loopback default needs the resolved port, so it is applied here rather than passed
+  // through `resolveValue`.
   const daemonUrl = resolveValue(
     opts.cliOverrides?.daemonUrl,
     fileString(fields, "daemonUrl"),
     env.LEGION_DAEMON_URL,
     undefined
   );
+  const loopbackDaemonUrl = `http://127.0.0.1:${port.value}`;
   let resolvedDaemonUrl: string;
   if (daemonUrl.value === undefined) {
     if (runtime.value === "kubernetes") {
@@ -731,10 +735,15 @@ export function resolveDaemonConfig(
         "daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)"
       );
     }
-    resolvedDaemonUrl = `http://127.0.0.1:${port.value}`;
+    resolvedDaemonUrl = loopbackDaemonUrl;
   } else {
     const field = daemonUrl.source === "env" ? "LEGION_DAEMON_URL" : "daemon_url";
     resolvedDaemonUrl = normalizeBaseUrl(validateUrl(daemonUrl.value, field), field);
+  }
+  if (runtime.value === "tmux" && resolvedDaemonUrl !== loopbackDaemonUrl) {
+    throw new Error(
+      `daemon_url must be ${loopbackDaemonUrl} when runtime is tmux (got ${resolvedDaemonUrl}; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`
+    );
   }
   const bind = resolveValue(
     opts.cliOverrides?.bind,

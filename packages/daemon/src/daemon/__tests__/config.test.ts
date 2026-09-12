@@ -826,7 +826,7 @@ describe("daemon config", () => {
         })
       ).toThrow("LEGION_DAEMON_URL must be a valid URL");
       const { config } = resolveDaemonConfig({
-        configFile: yaml("daemon_url: http://h:1/"),
+        configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0", "daemon_url: http://h:1/"),
         env: requiredEnv,
         cliOverrides: overrides,
       });
@@ -853,18 +853,67 @@ describe("daemon config", () => {
       expect(() => yaml('bind: ""')).toThrow("bind must not be empty");
     });
 
-    it("lets a YAML daemon_url beat LEGION_DAEMON_URL, so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
+    it("under tmux, rejects any daemon_url but the loopback default, naming the source of an inherited value", () => {
+      const refusal = (got: string, port = 13370) =>
+        `daemon_url must be http://127.0.0.1:${port} when runtime is tmux (got ${got}; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`;
+      // An env-sourced value on another port: exactly what a daemon started inside a Legion pane
+      // inherits from the outer daemon.
+      expect(() =>
+        resolveDaemonConfig({
+          env: {
+            ...requiredEnv,
+            LEGION_DAEMON_URL: "http://127.0.0.1:13370",
+            LEGION_DAEMON_PORT: "14100",
+          },
+          cliOverrides: overrides,
+        })
+      ).toThrow(refusal("http://127.0.0.1:13370", 14100));
+      // A YAML value on another port, or another host, is just as wrong under tmux.
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("daemon_url: http://127.0.0.1:14100"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow(refusal("http://127.0.0.1:14100"));
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("port: 14100", "daemon_url: http://legion-daemon:14100"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow(refusal("http://legion-daemon:14100", 14100));
+      // The default, and an explicit value equal to it from either source, are accepted — the
+      // smoke rig writes `daemon_url: http://127.0.0.1:${daemon_port}` into its legion.yaml.
+      expect(
+        resolveDaemonConfig({ env: requiredEnv, cliOverrides: overrides }).config.daemonUrl
+      ).toBe("http://127.0.0.1:13370");
+      expect(
+        resolveDaemonConfig({
+          configFile: yaml("port: 19370", "daemon_url: http://127.0.0.1:19370/"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        }).config.daemonUrl
+      ).toBe("http://127.0.0.1:19370");
+      expect(
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
+          cliOverrides: overrides,
+        }).config.daemonUrl
+      ).toBe("http://127.0.0.1:13370");
+    });
+
+    it("lets a YAML daemon_url beat LEGION_DAEMON_URL (kubernetes, where the value is free), so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
       const { config } = resolveDaemonConfig({
-        configFile: yaml("daemon_url: http://127.0.0.1:14100"),
+        configFile: yaml(
+          "runtime: kubernetes",
+          "bind: 0.0.0.0",
+          "daemon_url: http://legion-daemon.legion.svc:13370"
+        ),
         env: { ...requiredEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
         cliOverrides: overrides,
       });
-      expect(config.daemonUrl).toBe("http://127.0.0.1:14100");
-      const { config: fromEnv } = resolveDaemonConfig({
-        env: { ...requiredEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
-        cliOverrides: overrides,
-      });
-      expect(fromEnv.daemonUrl).toBe("http://127.0.0.1:13370");
+      expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
     });
 
     it("recognizes the three keys in the YAML loader shape", () => {
