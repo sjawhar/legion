@@ -103,9 +103,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v23 state with a valid project and admission capacity", () => {
+  it("initializes empty v24 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 23,
+      version: 24,
       project: "omp",
       issues: {},
       trees: {},
@@ -471,7 +471,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, and v23", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, and v24", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -485,7 +485,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(23);
+    expect(migrated.version).toBe(24);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -574,7 +574,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v23), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v24), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -603,7 +603,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(23);
+    expect(migrated.version).toBe(24);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -658,7 +658,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(23);
+      expect(migrated.version).toBe(24);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -726,7 +726,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(23);
+      expect(migrated.version).toBe(24);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -758,6 +758,52 @@ describe("legion state", () => {
     );
 
     expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v23 state to v24 unchanged, leaving a pre-identity locator without panePid/paneStartTicks and backing up the v23 bytes", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v23-"));
+    const file = path.join(tempDir, "state.json");
+    // stateWithTree()'s tree locator has no tmuxPaneId and no identity: exactly a locator
+    // persisted before this field existed. It must load as-is (never cleared, never backfilled).
+    const current = stateWithTree();
+    const original = JSON.stringify({ ...current, version: 23 });
+    await writeFile(file, original, "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+    expect(await readFile(`${file}.v23.bak`, "utf8")).toBe(original);
+  });
+
+  it("persists and reloads panePid/paneStartTicks on tree, worker, and controller locators", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-identity-"));
+    const file = path.join(tempDir, "state.json");
+    const state = stateWithTree();
+    const tree = state.trees[issue];
+    if (!tree?.locator) throw new Error("fixture tree is missing a locator");
+    tree.locator = { ...tree.locator, tmuxPaneId: "%0", panePid: 4242, paneStartTicks: 1234567 };
+    state.roles[roleToken(initialState.project, issue, "tester")] = {
+      issue,
+      role: "tester",
+      locator: {
+        tmuxSession: "legion-omp-project",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        panePid: 4243,
+        paneStartTicks: 1234570,
+      },
+    };
+    state.controllerLocator = {
+      tmuxSession: "legion-omp-project",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%1",
+      socketPath: "/state/workers/controller.sock",
+      panePid: 4244,
+      paneStartTicks: 1234580,
+    };
+
+    await saveState(file, state);
+
+    expect(await loadState(file, initialState)).toEqual(state);
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {
