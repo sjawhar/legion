@@ -307,8 +307,9 @@ export class TmuxRuntime implements Runtime {
    * `client.closed` is a confirmed graceful close and skips the kill; a socket error while
    * waiting is NOT proof the process exited (a reset proves nothing about the pane), so it is
    * treated exactly like a timeout — fall through to `client.close()` and the kill-pane attempt.
-   * A dead/unreachable shim, or `skipGraceful` (the caller already confirmed nothing live is
-   * there to ask), also skip straight to the kill. Every real locator carries a pane id (`spawn`
+   * A dead/unreachable shim, a locator with no socket at all (the controller's interactive pane),
+   * or `skipGraceful` (the caller already confirmed nothing live is there to ask) also skip
+   * straight to the kill. Every real locator carries a pane id (`spawn`
    * always records one); a locator without one is a corrupt or legacy record, not a case to
    * silently degrade for. Throws `ProcessStopFailed` for any `kill-pane` failure other than the
    * pane having already been reaped on its own (`"can't find pane"`) or the private server itself

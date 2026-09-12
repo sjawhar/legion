@@ -3730,19 +3730,22 @@ describe("ProcessManager", () => {
     });
   });
 
-  it("ensureController refuses a fresh controller when the recorded session file is missing", async () => {
+  it("ensureController refuses a controller whose recorded session file is missing, every time, without dropping the locator or rotating the capability", async () => {
     const stateDir = await temporaryDir();
     const missingFile = path.join(stateDir, "gone.jsonl");
     const state = newLegionState("omp", 1);
-    state.controllerLocator = {
-      runtime: "tmux",
+    const deadLocator = {
+      runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%1",
       ompSessionFile: missingFile,
     };
+    state.controllerLocator = { ...deadLocator };
+    let mints = 0;
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
+      mintControllerCapability: async () => `controller-secret-${++mints}`,
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
@@ -3750,11 +3753,86 @@ describe("ProcessManager", () => {
         return { stdout: "", exitCode: 0 };
       },
     });
+    const refusal = `Refusing to start ${controllerToken("omp")} fresh while resurrecting the controller: recorded OMP session file is missing: ${missingFile}`;
 
-    await expect(processes.ensureController()).rejects.toThrow(
-      `Refusing to start ${controllerToken("omp")} fresh while resurrecting the controller: recorded OMP session file is missing: ${missingFile}`
-    );
+    await expect(processes.ensureController()).rejects.toThrow(refusal);
+    // The same-agent invariant holds on the next call too: the recorded file was not dropped
+    // by the failed attempt, so this is a second honest refusal, not a silent fresh start.
+    await expect(processes.ensureController()).rejects.toThrow(refusal);
+
     expect(commands.some((command) => command[3] === "new-window")).toBe(false);
+    expect(state.controllerLocator).toEqual(deadLocator);
+    expect(mints).toBe(0);
+  });
+
+  it("resurrects a controller whose pane died before /controller/ready with its recorded session file once the registration deadline fires", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "controller-session.jsonl");
+    await writeFile(sessionFile, "", "utf8");
+    const state = newLegionState("omp", 1);
+    const bootingLocator = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      ompSessionFile: sessionFile,
+    };
+    state.controllerLocator = { ...bootingLocator };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    let paneAlive = true;
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      // Only the first armed deadline (for the booting pane) is under this test's control; the
+      // fresh pane's own deadline must stay pending or it would elapse at once and retire it.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1];
+          if (target === bootingLocator.tmuxPaneId && !paneAlive) {
+            return { stdout: "", exitCode: 1 };
+          }
+          return livePanes(command);
+        }
+        if (command[3] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Alive but unclaimed: arms the registration deadline.
+    await processes.ensureController();
+    // The pane hangs past the deadline and then exits on its own, never having claimed.
+    paneAlive = false;
+    sleepGate.resolve();
+    await flushEventLoopUntil(
+      () =>
+        managedState.controllerLocator?.runtime === "tmux" &&
+        managedState.controllerLocator.tmuxWindowId === "@44",
+      20_000
+    );
+
+    // Nothing to kill (already dead), no fresh start: the recorded transcript is resumed.
+    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
+      false
+    );
+    const newWindow = commands.find((command) => command[3] === "new-window");
+    expect(newWindow?.at(-1)).toContain(`--resume=${sessionFile}`);
+    expect(managedState.controllerLocator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@44",
+      tmuxPaneId: "%3",
+      ompSessionFile: sessionFile,
+    });
   });
 
   it("mints a fresh controller capability only for each controller window spawn", async () => {
