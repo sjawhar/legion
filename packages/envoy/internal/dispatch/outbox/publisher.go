@@ -4,10 +4,13 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -19,6 +22,9 @@ import (
 const (
 	batchSize           = 100
 	retryInterval       = 5 * time.Second
+	retryBaseDelay      = time.Second
+	retryMaxDelay       = 5 * time.Minute
+	deadLetterAttempts  = 10
 	compactInterval     = 24 * time.Hour
 	compactKeep         = 500
 	documentTopicPrefix = "notifications.dispatch.document."
@@ -45,8 +51,8 @@ type Deps struct {
 // periodically so a dropped in-process notification cannot strand an event. It
 // returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
-	events, cancel := deps.Broker.Subscribe()
-	defer cancel()
+	events, unsubscribe := deps.Broker.Subscribe()
+	defer func() { unsubscribe() }()
 
 	scan(ctx, deps)
 	retry := time.NewTicker(retryInterval)
@@ -58,7 +64,12 @@ func Run(ctx context.Context, deps Deps) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-events:
+		case _, open := <-events:
+			if !open {
+				unsubscribe()
+				events, unsubscribe = deps.Broker.Subscribe()
+				continue
+			}
 			scan(ctx, deps)
 		case <-retry.C:
 			scan(ctx, deps)
@@ -72,12 +83,12 @@ func Run(ctx context.Context, deps Deps) {
 
 func scan(ctx context.Context, deps Deps) {
 	for {
-		count, retryLater, err := scanBatch(ctx, deps)
+		count, blocked, err := scanBatch(ctx, deps)
 		if err != nil {
 			slog.Error("dispatch outbox: scan", "error", err)
 			return
 		}
-		if count < batchSize || retryLater {
+		if count < batchSize || blocked {
 			return
 		}
 	}
@@ -86,12 +97,13 @@ func scan(ctx context.Context, deps Deps) {
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq,
-		       e.type, e.actor, e.notify, e.created_at, e.payload, coalesce(ar.slug, ''), coalesce(i.route, ai.route)
+		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
+		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
 		from events e
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
 		left join issues ai on ai.key = ar.issue_key
-		where e.published_at is null
+		where e.published_at is null and (e.next_attempt_at is null or e.next_attempt_at <= now())
 		order by e.id
 		limit $1
 	`, batchSize)
@@ -101,13 +113,15 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	defer rows.Close()
 
 	count := 0
-	retryLater := false
+	blocked := false
 	for rows.Next() {
 		count++
 		var event model.Event
 		var actor, payload []byte
 		var slug string
 		var route *string
+		var attempts int
+		var destinations []string
 		if err := rows.Scan(
 			&event.ID,
 			&event.IssueKey,
@@ -119,42 +133,83 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 			&event.Notify,
 			&event.CreatedAt,
 			&payload,
+			&attempts,
+			&destinations,
 			&slug,
 			&route,
 		); err != nil {
 			slog.Error("dispatch outbox: read event", "error", err)
-			retryLater = true
+			blocked = true
 			continue
 		}
 		if err := json.Unmarshal(actor, &event.Actor); err != nil {
 			slog.Error("dispatch outbox: decode event actor", "event_id", event.ID, "error", err)
-			retryLater = true
+			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
+				blocked = true
+			}
 			continue
 		}
 		if err := json.Unmarshal(payload, &event.Payload); err != nil {
 			slog.Error("dispatch outbox: decode event payload", "event_id", event.ID, "error", err)
-			retryLater = true
+			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
+				blocked = true
+			}
 			continue
 		}
-		if err := publish(ctx, deps, event, slug, route); err != nil {
+		if err := publish(ctx, deps, event, slug, route, publishedDestinationSet(destinations)); err != nil {
 			slog.Error("dispatch outbox: publish event", "event_id", event.ID, "error", err)
-			retryLater = true
+			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
+				blocked = true
+			}
 			continue
 		}
 		if _, err := deps.Store.Pool.Exec(ctx, `
-			update events set published_at = now() where id = $1 and published_at is null
+			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
 		`, event.ID); err != nil {
 			slog.Error("dispatch outbox: mark event published", "event_id", event.ID, "error", err)
-			retryLater = true
+			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
+			}
+			blocked = true
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return count, retryLater, fmt.Errorf("iterate unpublished events: %w", err)
+		return count, blocked, fmt.Errorf("iterate unpublished events: %w", err)
 	}
-	return count, retryLater, nil
+	return count, blocked, nil
 }
 
-func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string) error {
+func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
+	attempts++
+	if attempts == deadLetterAttempts {
+		slog.Error("dispatch outbox: event reached dead-letter threshold", "event_id", eventID, "attempts", attempts)
+	}
+	_, err := deps.Store.Pool.Exec(ctx, `
+		update events
+		set attempt_count = $2, next_attempt_at = $3
+		where id = $1 and published_at is null
+	`, eventID, attempts, time.Now().Add(retryDelay(attempts)))
+	if err != nil {
+		return fmt.Errorf("schedule event retry: %w", err)
+	}
+	return nil
+}
+
+func retryDelay(attempts int) time.Duration {
+	delay := retryBaseDelay
+	for attempt := 1; attempt < attempts && delay < retryMaxDelay; attempt++ {
+		delay *= 2
+	}
+	if delay > retryMaxDelay {
+		return retryMaxDelay
+	}
+	return delay
+}
+
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
 	item, err := envelope(event, slug)
 	if err != nil {
 		return err
@@ -162,12 +217,14 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := item.Validate(); err != nil {
 		return fmt.Errorf("validate envelope: %w", err)
 	}
-	if err := deps.Publisher.Publish(item); err != nil {
+	if err := publishDestination(ctx, deps, event.ID, item, delivered); err != nil {
 		return err
 	}
 	if event.Notify {
-		publishRoute(deps.Publisher, item, route)
-		if err := publishAuthorRoutes(ctx, deps, item, event); err != nil {
+		if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
+			return err
+		}
+		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
 			return err
 		}
 	}
@@ -180,19 +237,11 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 // project document (which has no route at all). Without this, the agent that asked the
 // question, started the thread, or is the thread's own root author never learns about the
 // human's reply, resolution, reopening, or edit.
-//
-// A failed publish is logged and swallowed for every event type except
-// subscription.removed, where the author route IS the feature (the removed
-// session has no other way to learn it was unsubscribed): that failure is
-// returned so publish leaves published_at null and the next scan retries the
-// row (the issue-topic publish above is idempotent on its retained subject,
-// so a duplicate there on retry is harmless). This asymmetry is pre-existing
-// for ask/comment/message author routes, not introduced here.
-func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope, event model.Event) error {
+func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
 	seen := map[string]bool{}
 	var targets []model.Actor
-	consider := func(author model.Actor, ok bool) {
-		if !ok || author.Kind != "session" || seen[author.ID] {
+	consider := func(author model.Actor, found bool) {
+		if !found || author.Kind != "session" || seen[author.ID] {
 			return
 		}
 		if event.Actor.Kind == author.Kind && event.Actor.ID == author.ID {
@@ -200,6 +249,13 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 		}
 		seen[author.ID] = true
 		targets = append(targets, author)
+	}
+	considerLoaded := func(author model.Actor, found bool, err error) error {
+		if err != nil {
+			return err
+		}
+		consider(author, found)
+		return nil
 	}
 
 	var askID, replyTo, commentID, messageReplyTo string
@@ -223,57 +279,70 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, item contracts.Envelope
 	}
 
 	if askID != "" {
-		consider(loadAskAuthor(ctx, deps, askID))
+		if err := considerLoaded(loadAskAuthor(ctx, deps, askID)); err != nil {
+			return err
+		}
 	}
 	if replyTo != "" {
 		// The root is what humans reply under; the parent (reply_to's own target) is
 		// usually the same comment today since a reply must target a thread root, but
 		// walking to the true root keeps this correct if nesting is ever allowed.
-		consider(loadRootCommentAuthor(ctx, deps, replyTo))
-		consider(loadCommentAuthor(ctx, deps, replyTo))
+		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, replyTo)); err != nil {
+			return err
+		}
+		if err := considerLoaded(loadCommentAuthor(ctx, deps, replyTo)); err != nil {
+			return err
+		}
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
-		consider(loadRootCommentAuthor(ctx, deps, commentID))
+		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
+			return err
+		}
 	}
 	if messageReplyTo != "" {
-		consider(loadMessageAuthor(ctx, deps, messageReplyTo))
+		if err := considerLoaded(loadMessageAuthor(ctx, deps, messageReplyTo)); err != nil {
+			return err
+		}
 	}
 
 	for _, author := range targets {
 		routed := item
 		routed.Topic = contracts.AgentTopicPrefix + author.ID
-		if err := deps.Publisher.Publish(routed); err != nil {
-			if event.Type == "subscription.removed" {
-				return fmt.Errorf("publish subscription.removed author route: %w", err)
-			}
-			slog.Error("dispatch outbox: publish author route", "session_id", author.ID, "error", err)
+		if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
+			return fmt.Errorf("publish author route to %q: %w", author.ID, err)
 		}
 	}
 	return nil
 }
 
-func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, bool) {
+func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, bool, error) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `select author from asks where id = $1`, askID).Scan(&authorJSON); err != nil {
-		slog.Error("dispatch outbox: load ask author", "ask_id", askID, "error", err)
-		return model.Actor{}, false
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Actor{}, false, nil
+		}
+		return model.Actor{}, false, fmt.Errorf("load ask author %q: %w", askID, err)
 	}
 	return decodeAuthor(authorJSON, "ask", askID)
 }
 
-func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool) {
+func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool, error) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `select author from messages where id = $1`, messageID).Scan(&authorJSON); err != nil {
-		slog.Error("dispatch outbox: load message author", "message_id", messageID, "error", err)
-		return model.Actor{}, false
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Actor{}, false, nil
+		}
+		return model.Actor{}, false, fmt.Errorf("load message author %q: %w", messageID, err)
 	}
 	return decodeAuthor(authorJSON, "message", messageID)
 }
 
-func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
+func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool, error) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `select author from comments where id = $1`, commentID).Scan(&authorJSON); err != nil {
-		slog.Error("dispatch outbox: load comment author", "comment_id", commentID, "error", err)
-		return model.Actor{}, false
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Actor{}, false, nil
+		}
+		return model.Actor{}, false, fmt.Errorf("load comment author %q: %w", commentID, err)
 	}
 	return decodeAuthor(authorJSON, "comment", commentID)
 }
@@ -281,8 +350,8 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 // loadRootCommentAuthor walks a comment's reply_to chain up to its thread root - the comment
 // humans reply under - and returns that root's author. comments.reply_to has no acyclicity
 // constraint, so the walk unions on the visited row and stops at maxCommentThreadDepth: a
-// cycle then finds no reply_to-is-null row and this reports no root, rather than spinning.
-func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool) {
+// cycle then finds no reply_to-is-null row and reports no root rather than spinning.
+func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool, error) {
 	var authorJSON []byte
 	if err := deps.Store.Pool.QueryRow(ctx, `
 		with recursive chain as (
@@ -294,29 +363,55 @@ func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (mo
 		)
 		select author from chain where reply_to is null limit 1
 	`, commentID, maxCommentThreadDepth).Scan(&authorJSON); err != nil {
-		slog.Error("dispatch outbox: load root comment author", "comment_id", commentID, "error", err)
-		return model.Actor{}, false
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Actor{}, false, nil
+		}
+		return model.Actor{}, false, fmt.Errorf("load root comment author %q: %w", commentID, err)
 	}
 	return decodeAuthor(authorJSON, "comment", commentID)
 }
 
-func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool) {
+func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
 	var author model.Actor
 	if err := json.Unmarshal(raw, &author); err != nil {
-		slog.Error("dispatch outbox: decode author", "kind", kind, "id", id, "error", err)
-		return model.Actor{}, false
+		return model.Actor{}, false, fmt.Errorf("decode %s author %q: %w", kind, id, err)
 	}
-	return author, true
+	return author, true, nil
 }
 
-func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {
+func publishedDestinationSet(subjects []string) map[string]struct{} {
+	delivered := make(map[string]struct{}, len(subjects))
+	for _, subject := range subjects {
+		delivered[subject] = struct{}{}
+	}
+	return delivered
+}
+
+func publishDestination(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}) error {
+	if _, ok := delivered[item.Topic]; ok {
+		return nil
+	}
+	if err := deps.Publisher.Publish(item); err != nil {
+		return err
+	}
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		update events
+		set published_destinations = array_append(published_destinations, $2)
+		where id = $1 and published_at is null and not ($2 = any(published_destinations))
+	`, eventID, item.Topic); err != nil {
+		return fmt.Errorf("record published destination %q: %w", item.Topic, err)
+	}
+	delivered[item.Topic] = struct{}{}
+	return nil
+}
+
+func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}, route *string) error {
 	if route == nil || *route == "" {
-		return
+		return nil
 	}
 	parsed, err := model.ParseRoute(*route)
 	if err != nil {
-		slog.Error("dispatch outbox: parse route", "event_id", item.EventID, "route", *route, "error", err)
-		return
+		return fmt.Errorf("parse route %q: %w", *route, err)
 	}
 	switch parsed.Kind {
 	case "role":
@@ -324,12 +419,12 @@ func publishRoute(publisher Publisher, item contracts.Envelope, route *string) {
 	case "session":
 		item.Topic = contracts.AgentTopicPrefix + parsed.ID
 	default:
-		slog.Error("dispatch outbox: unsupported route", "event_id", item.EventID, "route", *route)
-		return
+		return fmt.Errorf("unsupported route %q", *route)
 	}
-	if err := publisher.Publish(item); err != nil {
-		slog.Error("dispatch outbox: publish route", "event_id", item.EventID, "route", *route, "error", err)
+	if err := publishDestination(ctx, deps, eventID, item, delivered); err != nil {
+		return fmt.Errorf("publish route %q: %w", *route, err)
 	}
+	return nil
 }
 
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {

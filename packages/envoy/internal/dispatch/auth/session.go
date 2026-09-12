@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -67,9 +68,9 @@ func sign(payload, key string) string {
 
 // IssueSessionCookie returns a Set-Cookie header value for a 30-day session.
 // When env DISPATCH_INSECURE_COOKIE is unset, the Secure flag is added.
-func IssueSessionCookie(login, signingKey string) string {
+func IssueSessionCookie(login string, generation int64, signingKey string) string {
 	expiry := time.Now().Add(time.Duration(sessionMaxAgeSeconds) * time.Second).UnixMilli()
-	payload := fmt.Sprintf("%s.%d", login, expiry)
+	payload := fmt.Sprintf("%s.%d.%d", login, generation, expiry)
 	value := fmt.Sprintf("%s.%s", payload, sign(payload, signingKey))
 	attrs := []string{
 		fmt.Sprintf("%s=%s", sessionCookieName, value),
@@ -100,41 +101,87 @@ func ClearSessionCookie() string {
 	return strings.Join(attrs, "; ")
 }
 
+// Session is the signed browser session identity and its server-revocable
+// generation.
+type Session struct {
+	Login      string
+	Generation int64
+}
+
 // VerifySessionCookie validates the dsession cookie value. Returns the login on
 // success, or empty string if invalid/expired.
 func VerifySessionCookie(value, signingKey string) string {
-	parts := strings.Split(value, ".")
-	if len(parts) != 3 {
+	session, ok := VerifySession(value, signingKey)
+	if !ok {
 		return ""
 	}
-	login, expiryStr, signature := parts[0], parts[1], parts[2]
+	return session.Login
+}
+
+// VerifySession validates the dsession cookie value and returns its signed
+// session generation on success.
+func VerifySession(value, signingKey string) (Session, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 4 {
+		return Session{}, false
+	}
+	login, generationText, expiryStr, signature := parts[0], parts[1], parts[2], parts[3]
 	if login == "" {
-		return ""
+		return Session{}, false
+	}
+	generation, err := strconv.ParseInt(generationText, 10, 64)
+	if err != nil || generation < 0 {
+		return Session{}, false
 	}
 	expiry, err := strconv.ParseInt(expiryStr, 10, 64)
 	if err != nil || expiry <= time.Now().UnixMilli() {
-		return ""
+		return Session{}, false
 	}
-	expected := sign(fmt.Sprintf("%s.%s", login, expiryStr), signingKey)
+	payload := fmt.Sprintf("%s.%s.%s", login, generationText, expiryStr)
+	expected := sign(payload, signingKey)
 	// Constant-time compare on the raw hex strings; both come from hex.EncodeToString.
 	sigBytes, err := hex.DecodeString(signature)
 	if err != nil {
-		return ""
+		return Session{}, false
 	}
 	expectedBytes, err := hex.DecodeString(expected)
 	if err != nil || !hmac.Equal(sigBytes, expectedBytes) {
-		return ""
+		return Session{}, false
 	}
-	return login
+	return Session{Login: login, Generation: generation}, true
+}
+
+// SessionFromRequest returns the valid signed session identity. Identity
+// implementations verify the generation against their server-side store.
+func SessionFromRequest(r *http.Request, signingKey string) (Session, bool) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		return Session{}, false
+	}
+	return VerifySession(cookie.Value, signingKey)
+}
+
+// SessionStore persists the generation that makes signed browser sessions
+// revocable. Login ensures a row; authentication reads only.
+type SessionStore interface {
+	EnsureSession(ctx context.Context, login string) (int64, error)
+	CurrentSessionGeneration(ctx context.Context, login string) (generation int64, found bool, err error)
+	RevokeSessions(ctx context.Context, login string) error
 }
 
 // SessionLogin returns the valid session login or an empty string when the
 // request has no valid session. Identity implementations map the empty result
 // to the shared authorization error response.
 func SessionLogin(r *http.Request, signingKey string) string {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err != nil || cookie.Value == "" {
+	session, ok := SessionFromRequest(r, signingKey)
+	if !ok {
 		return ""
 	}
-	return VerifySessionCookie(cookie.Value, signingKey)
+	return session.Login
+}
+
+// HasSessionCookie reports whether a request selected cookie authentication.
+func HasSessionCookie(r *http.Request) bool {
+	cookie, err := r.Cookie(sessionCookieName)
+	return err == nil && cookie.Value != ""
 }

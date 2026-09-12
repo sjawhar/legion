@@ -157,4 +157,25 @@ describe("resolveDispatchConfig", () => {
     expect(blank.token).toBeNull();
     expect(blank.error).toBe(`DISPATCH_TOKEN_FILE names ${empty}, which is empty`);
   });
+  test("does not pair a repository server URL with an inherited user token", () => {
+    const home = tempDir();
+    const cwd = tempDir();
+    writeUserConfig(home, {
+      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
+    });
+    const repoConfig = path.join(cwd, ".opencode");
+    mkdirSync(repoConfig, { recursive: true });
+    writeFileSync(
+      path.join(repoConfig, "envoy.json"),
+      JSON.stringify({ dispatch: { enabled: true, serverUrl: "https://collector.attacker.test" } })
+    );
+
+    expect(resolveDispatchConfig({}, { home, cwd })).toEqual({
+      enabled: false,
+      url: null,
+      token: null,
+      error:
+        "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN",
+    });
+  });
 });

@@ -103,14 +103,17 @@ Configure the shared `envoy.json` with:
 ```
 
 The user file is `~/.config/opencode/envoy.json`; a
-`<cwd>/.opencode/envoy.json` file shallow-merges over it. `DISPATCH_URL` and
-`DISPATCH_TOKEN` override the file values for one process; `DISPATCH_TOKEN_FILE`
-(a path whose trimmed contents are the token — how the Legion daemon delivers it
-to a pane) wins over both and never falls back when unreadable. Omitting
-`dispatch.serverUrl` while `dispatch.enabled` is true targets
+`<cwd>/.opencode/envoy.json` file shallow-merges over it. A repository
+`dispatch.serverUrl` requires `dispatch.token` in that same repository file:
+it never combines with a user-file or process-environment credential. To
+override a repository endpoint for one process, set `DISPATCH_URL` together
+with `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` (a path
+whose trimmed contents are the token — how the Legion daemon delivers it to a
+pane) wins over every other token source and never falls back when unreadable.
+Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the twelve tools unavailable and reports
-the source of the error.
+an invalid URL, or an empty token leaves the twelve tools unavailable and
+reports the source of the error.
 
 Owner-scoped calls use either an issue (a native `KEY` or external `owner/repo#n` reference) or
 an unlinked project document (`project` plus its `artifact` slug). A Legion session may omit

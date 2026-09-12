@@ -20,14 +20,16 @@ The thirteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispat
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, and `dispatch_search` — register only when the shared
 configuration resolves a URL and bearer token. Set
 `dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
-`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`; `DISPATCH_URL`
-and `DISPATCH_TOKEN` override those settings; `DISPATCH_TOKEN_FILE` (a path whose
-trimmed contents are the token — how the Legion daemon delivers it to a pane) wins
-over both and never falls back when unreadable. A human mints a personal token in
-Dispatch Settings → Agent tokens, then supplies it through `dispatch.token` or
-`DISPATCH_TOKEN`; the server attributes that session's writes to the minting human.
-`DISPATCH_AGENT_TOKEN` is the shared devbox fallback, not a token to configure for
-an individual agent. A successful mutation returns `details.topic`, and the `tool_result` hook subscribes to that exact retained
+`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
+`dispatch.serverUrl` can use only `dispatch.token` from that same repository
+file; override its endpoint only with `DISPATCH_URL` plus `DISPATCH_TOKEN` or
+`DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` is a path whose trimmed contents
+are the token — how the Legion daemon delivers it to a pane — and never falls
+back when unreadable. A human mints a personal token in Dispatch Settings → Agent
+tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the server
+attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
+the shared devbox fallback, not a token to configure for an individual agent. A
+successful mutation returns `details.topic`, and the `tool_result` hook subscribes to that exact retained
 Dispatch topic — a new subscription also tells the model (`pi.sendMessage`
 with `deliverAs: "steer"`, the same channel `deliver` uses for inbound
 envelopes, since the host does not let a `tool_result` handler amend what the
