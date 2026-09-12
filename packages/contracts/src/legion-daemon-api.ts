@@ -11,7 +11,7 @@ import { LEGION_ROLES } from "./legion-roles";
  * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
  * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
  */
-export const LEGION_DAEMON_API_VERSION = 1;
+export const LEGION_DAEMON_API_VERSION = 2;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -44,11 +44,12 @@ const controllerIssue = z.strictObject({
 const TREE_STATUSES = ["queued", "active", "lingering", "dead", "launch-failed", "closed"] as const;
 
 // `/legion/v1/state`'s redaction contract: every schema below is a `strictObject` so an
-// accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a raw `socketPath`) fails
-// `validateContractResponse`'s parse instead of silently reaching the wire — the controller and
-// any other reader of this endpoint get only what they need to triage, never a capability. A
-// locator is discriminated by the `runtime` that owns the process (the daemon's `Locator` union):
-// a tmux window/pane, or a Kubernetes pod.
+// accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a worker's raw
+// `socketPath`) fails `validateContractResponse`'s parse instead of silently reaching the wire —
+// the controller and any other reader of this endpoint get only what they need to triage, never
+// a capability. A locator is discriminated by the `runtime` that owns the process (the daemon's
+// `Locator` union): a tmux window/pane, or a Kubernetes pod. The controller's own locator has no
+// socket at all: it is an interactive OMP pane.
 const stateTmuxLocator = z.strictObject({
   runtime: z.literal("tmux"),
   tmuxSession: nonEmptyString,
@@ -104,7 +105,9 @@ export const LegionDaemonApi = {
   State: {
     // Redacted projection of durable `LegionState` for `GET /legion/v1/state` — never a
     // `*Hash`/`*Secret`/`*Token` field, a `spawnCapabilities`/grant record, or a `socketPath`
-    // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above).
+    // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above; the
+    // controller locator is a `stateTreeLocator` because its OMP session file is what
+    // `ensureController` resumes).
     response: z.strictObject({
       project: nonEmptyString,
       version: z.number().int(),
@@ -116,14 +119,18 @@ export const LegionDaemonApi = {
         queue: z.array(nonEmptyString),
       }),
       gates: z.record(z.string(), stateGate),
-      controllerLocator: stateLocator.optional(),
+      controllerLocator: stateTreeLocator.optional(),
       roles: z.record(z.string(), stateRole),
       controllerPendingNotices: z.number().int().nonnegative(),
       pendingStatusWrites: z.array(nonEmptyString),
     }),
   },
   ControllerReady: {
-    request: z.strictObject({ secret: nonEmptyString, sessionId: nonEmptyString }),
+    request: z.strictObject({
+      secret: nonEmptyString,
+      sessionId: nonEmptyString,
+      ompSessionFile: nonEmptyString.optional(),
+    }),
     response: z.object({}),
   },
   ProcessStarted: {
@@ -244,17 +251,24 @@ export const LegionDaemonApi = {
     request: architectCapability.extend({ issue: nonEmptyString, askId: nonEmptyString }),
     response: z.object({}),
   },
+  // Both `tree` and `issue` select a session-capability grant for a phase worker or root
+  // architect; neither selects the controller-capability grant (`secret` is then the controller
+  // secret) and mints `role: "controller"`. Exactly one of `tree` or `issue` is invalid (the
+  // handler 400s).
   Grant: {
     request: z.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
       sessionId: nonEmptyString,
       secret: nonEmptyString,
+      tree: nonEmptyString.optional(),
+      issue: nonEmptyString.optional(),
     }),
     response: z.object({ grantId: nonEmptyString, expiresAt: nonEmptyString }),
   },
+  // `merge: true` declares merge intent (`legion gh -- pr merge`); the daemon honours it only for
+  // a controller grant and answers 403 for every phase-worker grant. Bound to both `/gh-token`
+  // and `/git-credential`.
   GitHubToken: {
-    request: z.strictObject({ grantId: nonEmptyString }),
+    request: z.strictObject({ grantId: nonEmptyString, merge: z.literal(true).optional() }),
     response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
   },
 } as const;
