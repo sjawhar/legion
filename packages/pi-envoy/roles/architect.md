@@ -57,9 +57,10 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 | Product, scope, or human decision | Answer from tree context, or ask Sami directly through `dispatch_ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
-Before merge, message the implementer's live session (idle since it completed its phase) with
-`envoy_publish` to its role token and name the `legion-retro` skill. Retro
-is mandatory after review passes and runs before the merger publishes `READY`.
+Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming the
+`legion-retro` skill). A finished worker is retired by the daemon after `worker_idle_retire_seconds` and
+resumed from its session file by `spawn_worker`; an `envoy_publish` to a retired role's topic is rejected
+(no live holder). Retro is mandatory after review passes and runs before the merger publishes `READY`.
 
 ## Completion
 
