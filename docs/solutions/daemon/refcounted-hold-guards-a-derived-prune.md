@@ -92,9 +92,10 @@ is a defect, not a style choice.
   placement. Unreachable in the documented ordering; self-heals via the registration deadline
   (403 at `/process/started` → retire → `launchFailures++` → resurrect). A stale-at-lane-entry
   guard is the architect's call.
-- Pre-existing on `main`: `index.ts` runs `reconnectWorkers` before `api` is assigned, so
-  `markWorkerDead → revokeRoleClaim → api.revokeSessionCapability` throws for a confirmed-dead
-  worker at boot. Needs its own issue.
+- Was pre-existing on `main`: `index.ts` ran `reconnectWorkers` before `api` was assigned, so
+  `markWorkerDead → revokeRoleClaim → api.revokeSessionCapability` threw for a confirmed-dead
+  worker at boot. Fixed by LEGION-11 (`reconnectWorkers` now runs after `api`, before
+  `enableWorkerPromotion()`).
 
 ## Related
 
