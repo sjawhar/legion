@@ -379,7 +379,275 @@
     ],
     "reportedToArchitect": "envoy_publish to notifications.role.legion-sjawharlegion-legion-16-architect (see round2Report id in the transcript); legion handoff complete not attempted (active phase is the tester's; the architect said it would 409)."
   },
+  "round3": {
+    "reviewedHead": "665f4b1be75516dabd285578d2b9c85256e8f129",
+    "headComposition": "rebased twice: onto e7a284f2 (after #953 LEGION-18, #967 LEGION-22) then onto fd4fce51 (after #970 LEGION-29, #952, #965, #972); round-two fixes 61b272c5, 98bc069b, 99cd806e, 08320c32; implementer handoff 155b4a71; bridge fix 5ca28946; gate-2 free-plan rule 73dbb617; pr-queue fixture 1011b0e2; handoff 665f4b1b. Merge base fd4fce51; main since then d59417f7 (one Dispatch-only change + release bumps; only packages/pi-envoy/AGENTS.md overlaps, one added line).",
+    "review": {
+      "id": 5188068237,
+      "url": "https://github.com/sjawhar/legion/pull/961#pullrequestreview-5188068237",
+      "event": "COMMENT",
+      "inlineComments": 5,
+      "why_comment_not_approve": "Architect's order: tester round 4 green (running; includes the live sandbox merge) -> implementer pushes the .legion/ deletion -> reviewer approves that head by name. No blocking finding at this head."
+    },
+    "githubFactsAtHead": {
+      "mergeable": "MERGEABLE",
+      "checks": "16 of 16 SUCCESS; `gh pr checks --required` -> lint/typecheck/test all bucket pass; Tests run 34715140329 (+ re-run 34715694262), Legion Envoy and Contracts run 34715140309",
+      "threads": "22 total, 22 unresolved, every one answered by legion-implementer; footer session on all 22 replies = 01a09442-1aad-7000-ab33-0f2a2e33ba9f (round-one replies edited in place)",
+      "reviewDecision": "REVIEW_REQUIRED"
+    },
+    "roundTwoResolutions": [
+      {
+        "id": "R2-B1",
+        "status": "resolved",
+        "how": "99cd806e: three-sha model (verified/approved/current), gates 5 and 6 as two path-only compares, gate 7 at the verified sha; mirrored in merger.md, worker bullet, architect 6.4, smoke README. Approval check dropped by the architect's decision; reviewDecision no longer fetched."
+      },
+      {
+        "id": "R2-S1",
+        "status": "resolved as proposed",
+        "how": "61b272c5: resume decision -> writeOmpConfig -> holdPaneSecret -> mint -> writePaneSecret -> openWindow -> synchronous claim delete + locator swap -> persist. Failing-tmux test replaces the redundant union test; asserts locator/claim/transcript untouched and --resume on retry. AGENTS.md:46 reworded to match."
+      },
+      {
+        "id": "R2-S2",
+        "status": "resolved; two new wording gaps (R3-S3) and one new hole (R3-S2)",
+        "how": "99cd806e + 73dbb617: exit 1 'no checks reported'/'no required checks reported' = pending; rules/branches exception; private free-plan 403 exception with stricter every-check rule (verified live: sandbox 403s with the exact sentence; sjawhar/legion returns lint/typecheck/test)."
+      },
+      {
+        "id": "R2-S3",
+        "status": "resolved by deletion (architect decision)",
+        "how": "99cd806e: 'checks the approval' removed from skill and merger.md; the spec's gate list names no review check and places review requirements with branch protection."
+      },
+      {
+        "id": "R2-S4",
+        "status": "resolved",
+        "how": "99cd806e + 08320c32: all six role prompts and the architect skill show legion-acme-legion-41-architect (LEGION-18's drift guard requires the shared paragraph identical); 'rejects any other shape'. skills/legion-worker/SKILL.md:26 untouched under constraint A - the only remaining uppercase example."
+      },
+      {
+        "id": "R2-S5",
+        "status": "resolved",
+        "how": "99cd806e: pr merge <url> --squash --match-head-commit <current sha>; mirrored in merger.md 49 and smoke README 114."
+      },
+      {
+        "id": "R2-S6",
+        "status": "resolved",
+        "how": "98bc069b: checkSubagentSession first; same-id/same-file navigation skips; notice names the unwrapped shell."
+      },
+      {
+        "id": "R2-N1..N8",
+        "status": "all addressed",
+        "how": "61b272c5 (1,2,3,4,6), 99cd806e (5,8), 98bc069b (7)."
+      },
+      {
+        "id": "R2-ATTR",
+        "status": "resolved",
+        "how": "Fourteen round-one replies PATCHed in place; root cause $'…' ANSI-C quoting not expanding the variable."
+      },
+      {
+        "id": "R2-PRBODY",
+        "status": "resolved for this head",
+        "how": "CI names 665f4b1b runs; Threads line dispositions all 22 by id and commit (prose, each named); E2E/Thermo are explicit placeholders for round 4 and the cleanup head."
+      }
+    ],
+    "rebaseChecks": {
+      "legion18_22": "cli/index.ts keeps both imports (MERGE_AUTHORITY_REFUSED + boot-probes); daemon AGENTS.md keeps main's /issues/status row and this branch's /grants row; stale markControllerReady stub removed from worker-stream-e2e.test.ts. True diff vs merge base: 47 files, all LEGION-16's.",
+      "legion29": "Merged claimController keeps token/onEnvoyRoleRegained/rerunReadyAfterRegain; regain reads controllerSessionID live, omits ompSessionFile. LEGION-29's two regain tests still assert boot ready, steady-tick silence, 404-tick soft claim + one re-run; added assertion: re-run without transcript ([ready, readyAgain]). envoy.test.ts LEGION-29 tests untouched except pr-queue -> release-captain fixture rename.",
+      "bridgeFix5ca28946": "Right fix, not a workaround: LEGION-29's reassert covers only the instance's own claimed topic, so the claim must live in the instance whose heartbeat closure holds the pane's SessionManager; routing by served session is the correct invariant. 'Pane re-claims on rebind' would be wrong (envoy.ts drops the role on new/resume by design; controller claim must go through /controller/ready). Residual: the routing key reads the instance's lagging module `sessionID` (written only by its own establishSessionNow at envoy.ts:723), so correctness depends on envoy.ts's session_switch handler running before legion.ts's (manifest order; sequential dispatch). Deep-review harness reproduced both orders: envoy-first correct; legion-first -> fallback to last-bound (subagent) instance -> role stolen for ses_subagent. R3-S1.",
+      "constraintA": "vs main@origin (LEGION-18 in): one hunk @@ -260,10 +260,14 @@, the merger bullet."
+    },
+    "newFindings": [
+      {
+        "id": "R3-S1",
+        "severity": "should-fix",
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 776,
+        "clause": "Spec Requirements: interactive session Sami types into; LEGION-29's re-assert design",
+        "finding": "Bridge routing key `sessionID: () => sessionID` lags its own rebind; correct only under envoy-before-legion sequential handler dispatch, which nothing in the code states. Legion-first order reproduces the stolen-role bug.",
+        "expected": "Key on activeSessionContext?.sessionManager.getSessionId() ?? sessionID (live manager already returns the new id), or document the ordering contract at claimEnvoyRole and legion.ts:645. Fix stale 'one slot, like claim' comments at envoy.ts 110 and 169-170."
+      },
+      {
+        "id": "R3-S2",
+        "severity": "should-fix",
+        "file": "skills/legion-controller/SKILL.md",
+        "line": 206,
+        "clause": "Spec Requirements: required checks green; never merge on known red",
+        "finding": "Gate 2 exception 1 reads rules/branches (rulesets only; GitHub REST: 'all active rules that apply to the specified branch'). Classic branch protection answers [] -> false 'holds' on a fresh head -> pr merge refused by GitHub -> spurious failed gate to the architect. Bounded (never an unprotected merge) but the same class as R2-S2.",
+        "expected": "Require both rules/branches [] AND branches/<base>/protection/required_status_checks 404, or drop the exception and treat exit 1 as pending."
+      },
+      {
+        "id": "R3-S3",
+        "severity": "should-fix",
+        "file": "skills/legion-controller/SKILL.md",
+        "line": 197,
+        "clause": "gh pr checks manual: buckets pass/fail/pending/skipping/cancel; exit 8 = pending",
+        "finding": "skipping and cancel buckets undefined (this repo's envoy-and-contracts.yaml skips six jobs via needs.changes; under the free-plan every-row rule a skipped job can never satisfy gate 2); exit 8 unnamed; free-plan sentence 'match exactly' fails on the trailing period/JSON wrapper and (per GitHub docs, [INFERENCE] not observed live) the org Team variant.",
+        "expected": "pass+skipping green; pending pending; fail+cancel never merge; name exit 8; match the message field containing the Pro or Team sentence."
+      },
+      {
+        "id": "R3-S4",
+        "severity": "should-fix (comment accuracy)",
+        "file": "packages/pi-envoy/extensions/legion.test.ts",
+        "line": 2179,
+        "clause": "Comments describe current behaviour",
+        "finding": "Regain-step comment describes the pre-fix bridge ('routes to the instance bound last (the subagent's)'); intervals holds one tick (subagent setInterval is a no-op). The assertion does lock the fix (old slot -> no third ready -> timeout).",
+        "expected": "State the true mechanism; tick intervals[0] explicitly; drive the no-op via session_tree not reason:'fork'; consider splitting the five-contract test."
+      },
+      {
+        "id": "R3-N1..N7",
+        "severity": "nit (fast-follow, anchored legion.ts:329)",
+        "finding": "unreachable `?? sessionID`; unexplained re-registration of onEnvoyRoleRegained; controllerTranscript pulls little weight and re-posts once after a takeover; processes.ts hold comment argues a dissolved hazard; processes.test.ts:3960 pins mint ordering; gate 7 docs-only has no operational test; 230-char toast."
+      }
+    ],
+    "acceptedThreads": {
+      "why": "resolveReviewThread answers FORBIDDEN 'Resource not accessible by integration' for legion-reviewer[bot] (tested on PRRT_kwDORFy7ds6hxSIs at this head; LEGION-34). Listed here as accepted instead; the approving review on the cleanup head will say so again.",
+      "threads": [
+        {
+          "id": "PRRT_kwDORFy7ds6hxSIs",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSIv",
+          "path": "packages/daemon/src/daemon/processes.ts",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSIy",
+          "path": "packages/daemon/src/daemon/api/routes/controller.ts",
+          "line": 34,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI1",
+          "path": "packages/pi-envoy/extensions/legion.ts",
+          "line": 729,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI2",
+          "path": "packages/daemon/src/daemon/processes.ts",
+          "line": 2647,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI5",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI6",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI9",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSI-",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSJA",
+          "path": "skills/legion-worker/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSJD",
+          "path": "packages/daemon/src/daemon/__tests__/api.test.ts",
+          "line": 756,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSJG",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSJI",
+          "path": "packages/daemon/src/daemon/AGENTS.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hxSJK",
+          "path": "packages/daemon/src/cli/index.ts",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykDy",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykDz",
+          "path": "packages/daemon/src/daemon/processes.ts",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykD2",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykD3",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykD7",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykD9",
+          "path": "skills/legion-controller/SKILL.md",
+          "line": null,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykD_",
+          "path": "packages/pi-envoy/extensions/legion.ts",
+          "line": 343,
+          "accepted": true
+        },
+        {
+          "id": "PRRT_kwDORFy7ds6hykEE",
+          "path": "packages/daemon/src/daemon/processes.ts",
+          "line": null,
+          "accepted": true
+        }
+      ]
+    },
+    "thermo": {
+      "ranAt": "665f4b1be75516dabd285578d2b9c85256e8f129",
+      "deepReview": "No blocking. Should-fix adopted: R3-S1 (bridge key, reproduced both orders), R3-S3 (buckets/exit 8/Team wording). Nits adopted: R3-S4, stale envoy.ts comments, controllerTranscript re-post after takeover. Confirmed: spawnController ordering (no await between claim delete and locator swap; hold before mint; old locator covers the secret file during the mint), LEGION-29 tests intact, three-sha gates admit only verified+.legion+docs/solutions, redaction and 403-before-lease unchanged, computeResumeArgument EACCES path clean.",
+      "codeQuality": "No blocking. Should-fix adopted: R3-S2 (rulesets-only hole, verified against GitHub REST docs), R3-S4, stale comments, unreachable ??. Nits adopted: re-registration comment, controllerTranscript, hold comment, mints pin, docs-only test, toast length. Confirmed: spawnController doc comment line-by-line accurate; AGENTS.md:46 accurate; revocation-scope test defends a contract; gate-2 mechanics executable as written (fields, exit-1 messages, compare jq, GraphQL, --match-head-commit real); READY first line identical across all five files; grown session-switch test locks the bridge fix (traced: old slot -> timeout).",
+      "prBodyThermoLine": "Deferred to the cleanup head, where both agents run once more and the line is written naming that head."
+    },
+    "wouldApprove": "YES, at this head, absent the agreed ordering. No blocking finding remains; the four should-fixes are robustness and wording (R3-S1 is a real ordering dependence but correct under the runtime we ship against and covered by a passing test; R3-S2/S3 cannot produce an unprotected merge; R3-S4 is a comment). I recommend the implementer land R3-S1..S4 in the same pass as the .legion/ deletion is prepared, so the cleanup head I approve carries them; if the architect prefers to approve without them, I will approve the cleanup head and record them as the Fast-follow line.",
+    "remainingBeforeApproval": [
+      "Tester round 4 green at 665f4b1b (or at the head carrying R3-S1..S4 if landed first), including the live sandbox green merge and red READY (A5 iii/iv).",
+      "PR body at the final head: E2E line names the verified sha with the sandbox evidence; Thermo line written by me; Threads line current.",
+      "Implementer pushes the .legion/ deletion at the architect's direction; I re-read that head (differs from the verified head by that deletion only), re-run both thermo agents, and approve it by name with `legion gh -- pr review --approve`."
+    ],
+    "operationalNote": "Grant stacking bit me twice this round in a new shape: my own tool-call text contained hand-written `export LEGION_GRANT=` lines shadowing the hook's injection, and a leftover `export` shell function from my workaround script swallowed the hook's exports entirely. Neither is this change's defect; recorded for LEGION-12's owner. Remedy: never write export LEGION_GRANT yourself; never shadow `export` in the persistent shell."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T18:46:03.320Z"
+  "completed": "2026-09-12T21:08:51.202Z"
 }
