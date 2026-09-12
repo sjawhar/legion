@@ -13,7 +13,9 @@ export interface GitHubTokenSource {
   getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
 }
 
-export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
+/** The controller merges under the implement App's identity, subject to the repository's own
+ * branch protection; only the reviewer role uses the review App. */
+export function appRoleForLegionRole(role: LegionRole | "controller"): GitHubAppRole {
   return role === "reviewer" ? "review" : "implement";
 }
 

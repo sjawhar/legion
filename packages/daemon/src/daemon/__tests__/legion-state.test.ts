@@ -104,9 +104,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v24 state with a valid project and admission capacity", () => {
+  it("initializes empty v25 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 24,
+      version: 25,
       project: "omp",
       issues: {},
       trees: {},
@@ -488,7 +488,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -606,7 +606,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -662,7 +662,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(24);
+      expect(migrated.version).toBe(25);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -730,7 +730,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(24);
+      expect(migrated.version).toBe(25);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -764,7 +764,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it('migrates v23 state to v24 by tagging every persisted locator with runtime: "tmux"', async () => {
+  it('migrates v23 state through v24 to v25: every persisted locator tagged runtime: "tmux", the controller locator stripped of its socket', async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v23-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -786,19 +786,20 @@ describe("legion state", () => {
       tmuxSession: "legion-omp-project",
       tmuxWindowId: "@7",
       tmuxPaneId: "%9",
-      socketPath: "/state/workers/controller.sock",
     };
-    // The v23 file: the same state, every locator predating the discriminant.
+    // The v23 file: the same state, every locator predating the discriminant, and the
+    // controller still behind its shim socket.
     const v23State = JSON.parse(JSON.stringify({ ...current, version: 23 }));
     delete v23State.trees[issue].locator.runtime;
     delete v23State.roles[implementerToken].locator.runtime;
     delete v23State.controllerLocator.runtime;
+    v23State.controllerLocator.socketPath = "/state/workers/controller.sock";
     const raw = JSON.stringify(v23State);
     await writeFile(file, raw, "utf8");
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
@@ -865,14 +866,52 @@ describe("legion state", () => {
     }
   });
 
-  it("rejects a v24 locator that carries no runtime discriminant", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-untagged-"));
+  it("rejects a current-version locator that carries no runtime discriminant", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-untagged-"));
     const file = path.join(tempDir, "state.json");
-    const v24State = JSON.parse(JSON.stringify(stateWithTree()));
-    delete v24State.trees[issue].locator.runtime;
-    await writeFile(file, JSON.stringify(v24State), "utf8");
+    const untagged = JSON.parse(JSON.stringify(stateWithTree()));
+    delete untagged.trees[issue].locator.runtime;
+    await writeFile(file, JSON.stringify(untagged), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+  });
+
+  it("migrates v24 state to v25 by stripping the controller locator's socketPath and keeping its runtime tag", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    current.trees = {};
+    current.issues = {};
+    current.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@7",
+      tmuxPaneId: "%9",
+    };
+    await writeFile(
+      file,
+      JSON.stringify({
+        ...current,
+        version: 24,
+        controllerLocator: {
+          ...current.controllerLocator,
+          socketPath: "/state/workers/controller.sock",
+        },
+      }),
+      "utf8"
+    );
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("migrates v24 state without a controller locator to v25 unchanged", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-no-controller-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    delete current.controllerLocator;
+    await writeFile(file, JSON.stringify({ ...current, version: 24 }), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {
@@ -902,6 +941,15 @@ describe("legion state", () => {
             ...current.trees[issue],
             locator: { ...current.trees[issue]?.locator, pid: 1234 },
           },
+        },
+      },
+      {
+        ...current,
+        controllerLocator: {
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@7",
+          tmuxPaneId: "%9",
+          socketPath: "/state/workers/controller.sock",
         },
       },
     ];

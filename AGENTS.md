@@ -17,7 +17,9 @@ verdict changes each role needs. Root processes run in tmux; phase workers are h
   provisions issue workspaces. Phase workers (planner/implementer/tester/reviewer/merger, and
   sub-architects for child issues) are headless `omp --mode rpc` processes the daemon spawns
   directly, one tmux pane per worker, bridged through `legion worker-shim`; the daemon enforces
-  recursion limits when spawning them.
+  recursion limits when spawning them. The controller is an interactive OMP terminal session in
+  the daemon's private tmux server (no `--mode rpc`, no shim); attach with
+  `tmux -L legion-<project> attach`. It is also the merge queue.
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
   handoffs are the recovery source of truth.
 
@@ -45,7 +47,7 @@ legion status <issue> <status>       # Set an issue's Dispatch lifecycle status 
 legion stop <team>                   # Stop swarm
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
-legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses `pr merge`; the merge queue merges, not workers)
+legion gh -- <args>                  # Run gh with a session-bound GitHub token (`pr merge` is redeemed with merge intent the daemon grants only to the controller's own grant; every phase-worker grant is refused)
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
@@ -116,9 +118,9 @@ option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, 
 closes the ask on Dispatch (`resolved`, with a reason the dashboard shows), so no one has to click
 and nothing waits in a human's inbox. Whether a human must approve a pull
 request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
-neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
-its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never
-read or written by Legion.
+neither reads nor writes it. The merger publishes `READY` to the controller's role topic; the
+controller verifies the gates against live GitHub and merges under the implement App and the
+repository's rules. No lifecycle labels exist; GitHub issues are never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.

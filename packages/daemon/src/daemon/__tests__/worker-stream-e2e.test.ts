@@ -51,7 +51,6 @@ function startApi(): { api: LegionApi; state: LegionState } {
       closeTree: inert,
       markTreeReady: inert,
       confirmRootReady: inert,
-      markControllerReady: inert,
       cancelBootWatchdog: inert,
       beginLinger: inert,
     },

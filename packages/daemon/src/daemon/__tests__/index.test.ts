@@ -904,64 +904,6 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("accepts controller/ready even when the controller's shim socket is unreachable", async () => {
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
-    const daemonConfig = config(stateDir);
-    const firstNats = new FakeNats();
-    const secondNats = new FakeNats();
-    const publications: Array<{ topic: string; payload: unknown }> = [];
-    let controllerSecret: string | undefined;
-    let first: daemonIndex.DaemonHandle | undefined;
-    let second: daemonIndex.DaemonHandle | undefined;
-
-    try {
-      first = await startDaemon(
-        daemonConfig,
-        daemonTestDependencies(firstNats, publications, (secret) => {
-          controllerSecret = secret;
-        })
-      );
-      const controller = controllerToken(daemonConfig.project);
-      firstNats.emit(
-        `notifications.envoy.exceptions.notifications.role.${controller}`,
-        controllerException(daemonConfig.project)
-      );
-      await first.drain();
-      expect(controllerSecret).toBeString();
-      await first.stop();
-      first = undefined;
-
-      const secondOptions = daemonTestDependencies(secondNats, publications, () => {});
-      second = await startDaemon(daemonConfig, {
-        deps: {
-          ...secondOptions.deps,
-          connectWorkerRpc: async () => {
-            throw new Error("ECONNREFUSED: controller shim socket unreachable");
-          },
-        },
-      });
-
-      const ready = await fetch(
-        `http://127.0.0.1:${second.server.port}/legion/v1/controller/ready`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            secret: controllerSecret,
-            sessionId: "ses-controller",
-          }),
-        }
-      );
-
-      // A shim connect failure must never block /controller/ready from accepting the role: the
-      // socket connect is best-effort (see markControllerReady's doc comment).
-      expect(ready.status).toBe(200);
-    } finally {
-      await first?.stop();
-      await second?.stop();
-      await rm(stateDir, { recursive: true, force: true });
-    }
-  });
   it("drains a pending controller notice at boot when the controller role claim was already live (no /controller/ready needed)", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -1800,7 +1742,9 @@ describe("startDaemon", () => {
           },
         })
       ).rejects.toThrow(
-        /pi-legion-envoy manifest at .* could not be read \(ENOENT: no such file or directory\); this daemon requires a plugin speaking daemon API contract 1\./
+        new RegExp(
+          `pi-legion-envoy manifest at .* could not be read \\(ENOENT: no such file or directory\\); this daemon requires a plugin speaking daemon API contract ${LEGION_DAEMON_API_VERSION}\\.`
+        )
       );
     } finally {
       await rm(stateDir, { recursive: true, force: true });

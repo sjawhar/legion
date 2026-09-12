@@ -1,0 +1,413 @@
+{
+  "issue": "LEGION-16",
+  "title": "The Legion controller becomes a live terminal session and merges pull requests itself",
+  "spec": {
+    "approved": "dispatch://LEGION-16/spec (version 4; read with dispatch_doc_read({ issue: \"LEGION-16\" }))",
+    "original": "dispatch://LEGION-16/artifact/spec@v1",
+    "status": "Every requirement, acceptance criterion, error behaviour, and rejected alternative in the spec is settled. This plan implements it; it does not reopen any of it."
+  },
+  "tree": "Single issue, one PR, no children. Phases: planner (this) -> implementer -> tester -> reviewer -> merger.",
+  "branch": {
+    "name": "legion/LEGION-16",
+    "baseAtPlanTime": "7db2cd83 (chore: release cli v1.1.2); main@origin was b24f8e79 (pi-envoy v1.4.2 release, version bump only). Rebase onto current main before opening the PR if anything under packages/ or skills/ moved.",
+    "workspaceRule": "Every shell command starts `cd -- \"$LEGION_WORKSPACE\" &&`; every jj command uses `-R \"$LEGION_WORKSPACE\"`."
+  },
+  "summary": "Ten ordered tasks. Contracts first (T1) because the daemon routes (T3-T5) and the pi-envoy extension (T7) both compile against @legion/contracts. Then state schema + migration (T2), the daemon process change (T3), the two daemon route slices (T4 ready/ompSessionFile, T5 grants/merge authority), the CLI (T6), the addressing fragment (T7), the extension (T8), the pr-queue retirement + controller skill (T9), docs (T10), and the PR body + tester handoff (T11). Each task names its files, symbols, observable acceptance, and the test that proves it. The `contradictions` list records where current code disagrees with the spec so the implementer does not rediscover it.",
+  "globalConstraints": [
+    "Repo conventions: Biome (double quotes, semicolons, 100 cols), strict TS, `node:` imports, `type` imports, no barrel files, co-located `__tests__/`, Bun test. Run `bunx biome check`, `bunx tsc --noEmit`, `bun test`, and `go test ./...` (in packages/envoy) once at the end, not per task.",
+    "jj, not git: `jj -R \"$LEGION_WORKSPACE\" new` per logical commit; never `jj abandon`, `jj edit @-`, or `jj op restore`. Commit attribution is automatic.",
+    "Only the implementer creates the bookmark and PR: `jj bookmark set legion/LEGION-16 && jj git push --bookmark legion/LEGION-16`, then `legion gh -- pr create` with `Dispatch: LEGION-16` in the body.",
+    "No `docs/plans/` file for this issue. `.legion/plan.json` is the only plan artifact (spec Acceptance 6).",
+    "Tests are permanent load: keep a test only where a plausible bug would fail it; delete tests that pin the shim/socket behaviour this change removes rather than re-pinning them to new text.",
+    "Existing tests that assert `addressingFragment(...)` by calling the function (processes.test.ts lines 634, 1513, 2206, 2237, 5647) self-adjust; only literal-text assertions need editing."
+  ],
+  "rigNotes": {
+    "source": "docs/solutions/legion/worker-pane-shell-gotchas.md (read it first; none of these is in scope to fix here)",
+    "stackedGrants": "The pi-envoy bash hook prepends N `export LEGION_GRANT=` blocks per call and only the first redeems. Source the `export`-shadowing function from that doc's section 1 once per session and end every grant-consuming command (`jj git push`, `legion gh`, `legion handoff complete`) with `; grant_release`. Grants expire 60 seconds after mint (GRANT_TTL_MS in api.ts), so run the consuming command in the same bash call that minted it.",
+    "daemonTestSuiteInAPane": "Every Legion pane carries DISPATCH_URL/DISPATCH_TOKEN_FILE, which makes one pre-existing CLI test (`legion start --check-config > validates github_apps.<role>.private_key_command...`) fail only inside a pane. Run `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test` and say so in the handoff; CI is unaffected.",
+    "jjSplitBookmark": "After `jj split -m '...' <paths>` the issue bookmark stays on the empty working copy; before every push run `jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-16 -r @- --allow-backwards` then `jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-16`, after checking `jj diff -r @- --stat` holds exactly the intended paths."
+  },
+  "constraintA_concurrentEditContractWithLegion18": {
+    "file": "skills/legion-worker/SKILL.md",
+    "agreedWith": "LEGION-18 architect (skill and role-prompt audit)",
+    "legion16MayTouch": "ONLY the merger bullet, currently lines 228-231: `- The merger confirms the approved head still equals the current head, then publishes / `READY #<n> at <sha>` plus the PR body's gate facts to the merge queue's role / (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue / merges under its own authority.`",
+    "legion16MustNotTouch": [
+      "The heading `## PR body and merge-queue discipline` (line 183) stays exactly as is.",
+      "Lines 183-227: the intro paragraph (including line 185's `merge queue's READY format` wording), the fenced `## Verification` template, and the thread / fast-follow / tester / reviewer / frozen-base bullets.",
+      "Anything else in the file. LEGION-18 is rewriting the reviewer bullet (219-225) and inserting new bullets elsewhere in that section."
+    ],
+    "rebaseRule": "Whichever PR (LEGION-16 or LEGION-18) merges second rebases onto the other; the merger bullet is the only line range both could touch, and LEGION-18 has agreed not to touch it."
+  },
+  "constraintB_plainLanguageForHumans": {
+    "appliesTo": "Anything a human reads: the PR title and body (including the `## Verification` block's prose), every dispatch_message and dispatch_comment, every GitHub PR comment or review this issue's workers post.",
+    "rule": "Full sentences in plain English, one idea per sentence. No repo shorthand or coined nouns. Expand every identifier on first use: an issue key gets its title, a PR number gets its title, a file gets what it is for, a symbol gets what it does. No bare event ids. The `.legion/*.json` handoffs are machine-read and exempt.",
+    "provenance": "Sami, relayed by the LEGION-16 architect after this plan's first start."
+  },
+  "contradictions": [
+    {
+      "id": "C1",
+      "where": "packages/daemon/src/daemon/processes.ts `controllerAlive()` (lines 2875-2897) and `retireAndRespawnStuckController` (line 1679)",
+      "current": "Both `delete this.deps.state.controllerLocator` when the pane is dead or being retired. `ensureController` (1396-1418) calls `controllerAlive()` FIRST and only then `spawnController(secret)`, so by the time the respawn runs the locator, and with it any recorded `ompSessionFile`, is already gone.",
+      "spec": "Errors table: `controller pane dead on probe -> ensureController respawns with --resume when a session file is recorded`.",
+      "resolution": "T3 captures `const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile` at the top of `ensureController`, before the probe, and passes it to `spawnController(secret, resumeSessionFile)`; `spawnController` writes it onto the fresh locator (mirroring `launchWorker` lines 2508-2509) so a `/controller/ready` that omits the field does not lose it. `retireAndRespawnStuckController` stops deleting the locator itself: it kills the pane and calls `ensureController()`, whose own probe then finds the pane dead, clears the locator, and resumes."
+    },
+    {
+      "id": "C2",
+      "where": "Spec Design bullet: `Delete markControllerReady's socket connect and its index.ts call`",
+      "current": "`packages/daemon/src/daemon/index.ts` never calls `markControllerReady`. The call is `packages/daemon/src/daemon/api/routes/controller.ts:25`; the interface member is `packages/daemon/src/daemon/api.ts:84` (`ProcessManager`-shaped `processManager` dep); the implementation is `processes.ts:2670-2678`; stubs live in `__tests__/api.test.ts:119,161,762`, `__tests__/api.thermo-auth.test.ts:57`; `config.ts:86` and `processes.ts:2866` doc comments name it.",
+      "resolution": "T3 deletes all of these; nothing in index.ts changes for it."
+    },
+    {
+      "id": "C3",
+      "where": "packages/daemon/src/cli/index.ts `cmdGh` lines 98-101 and `isPrMergeInvocation` doc comment 86-90",
+      "current": "Unconditional client-side refusal: `throw new CliError(\"Legion workers never merge; publish READY to the merge queue\")` before any network call. `src/cli/__tests__/index.test.ts` tests at lines 61-85 (`refuses to merge a PR: no Legion worker role ever merges directly`), 82-108 (`--repo` bypass), 110-134 (`gh api .../merge` bypass) pin that text and assert `fetchCalled === false`.",
+      "spec": "Rejected: `Keep the client-side pr merge refusal in cmdGh and add a controller env flag`. Design: `isPrMergeInvocation` sends `merge: true` to `/gh-token`; a 403 becomes a CliError naming the reason.",
+      "resolution": "T6."
+    },
+    {
+      "id": "C4",
+      "where": "packages/daemon/src/daemon/api/auth.ts `Grant` (13-18), `SessionCapability` (6-11); api/github.ts `appRoleForLegionRole(role: LegionRole)` (16-18); contracts `Grant.request` (legion-daemon-api.ts 221-229, strictObject requiring tree+issue); `LEGION_ROLES` excludes `controller`",
+      "current": "A grant's `role` is always a `LegionRole` copied from a `SessionCapability`; the controller never has a `SessionCapability` (only `state.controllerCapabilityHash`, checked by `requireController`), so it cannot reach `/grants` at all, and `appRoleForLegionRole(\"controller\")` does not type-check.",
+      "spec": "`/grants` accepts `{secret, sessionId}` authenticated by the controller capability and mints `role: \"controller\"`; `appRoleForLegionRole(\"controller\") -> implement`.",
+      "resolution": "T5 widens `Grant` to a two-member union and adds the controller branch to `handleGrants`, following the dual-credential precedent in `api/routes/issues.ts` `handleIssueStatus` (lines 23-55: presence of both optional fields selects the session form; neither selects the controller form; exactly one is 400). Do NOT put `controller` into `LEGION_ROLES` (it is not a phase role; `roleToken`/`parseRoleToken` would accept it)."
+    },
+    {
+      "id": "C5",
+      "where": "packages/daemon/src/daemon/api/routes/workers.ts `handlePhaseComplete` lines 321-335",
+      "current": "Reads `grant.issue` and `grant.role` and calls `roleToken(project, grant.issue, grant.role)`; a controller grant has no issue and is not a phase.",
+      "resolution": "T5: after `resolveGrant`, `if (grant.role === \"controller\") throw new HttpError(403, \"A controller grant cannot complete a phase\")` — this also narrows the union for the rest of the handler."
+    },
+    {
+      "id": "C6",
+      "where": "packages/pi-envoy/extensions/legion.ts `tool_call` hook lines 588-600",
+      "current": "`active === undefined` for the controller session (only `bootstrapRoot`/`bootstrapWorker` set `capability`), so the controller's bash calls return `undefined`: no grant, no `LEGION_GRANT`, no gh shim. Test `does not block bash calls from the controller session` (legion.test.ts 1612-1648) pins `resolves.toBeUndefined()`.",
+      "spec": "A claimed controller session's bash call is wrapped with `LEGION_GRANT` and the gh shim exactly like a worker's.",
+      "resolution": "T8 replaces that test with one asserting the wrap and the grant request body `{ sessionId, secret }`."
+    },
+    {
+      "id": "C7",
+      "where": "packages/pi-envoy/extensions/legion.ts `claimController` (249-262) and `persistedTranscript` (109-120)",
+      "current": "`claimController` sends `{ secret, sessionId }` only; `persistedTranscript` is typed `(context: SessionContext)` while `claimController` receives `CommandContext | SessionContext`. Contract `ControllerReady.request` is a strictObject that would reject an extra field.",
+      "resolution": "T1 adds the optional field to the contract; T8 widens `persistedTranscript`'s parameter to `CommandContext | SessionContext` (both expose the same `sessionManager` with `ensureOnDisk`/`getSessionFile`) and sends `ompSessionFile`."
+    },
+    {
+      "id": "C8",
+      "where": "packages/pi-envoy/roles/controller-root.md (12 lines)",
+      "current": "There is no attached-human note in the file. The spec says `attached-human note stays`, assuming one exists.",
+      "resolution": "T9 adds one sentence (see task) so the prompt matches the spec's intent: the pane is a live TUI and Sami may type into it directly."
+    },
+    {
+      "id": "C9",
+      "where": "packages/contracts/src/legion-daemon-api.ts `State.response.controllerLocator: stateWindowLocator` (line 93) and packages/daemon/src/daemon/api/state.ts lines 85-89",
+      "current": "The redacted `controllerLocator` carries only tmuxSession/tmuxWindowId/tmuxPaneId; trees already expose `ompSessionFile` via `stateTreeLocator` (line 43) and state.ts line 59.",
+      "resolution": "T1 switches `controllerLocator` to `stateTreeLocator`; T3 copies `ompSessionFile` in state.ts. `socketPath` must still never appear (api.test.ts line 739 asserts it)."
+    },
+    {
+      "id": "C10",
+      "where": "packages/pi-envoy/src/legion/daemon-client.ts `post()` lines 117-141",
+      "current": "A 403 whose body is `{error:\"Invalid session secret\"}` on a `{sessionId, secret}`-shaped body triggers `/worker-session` recovery when the client was built with a `recovery` (as `roleDaemon()` is). A controller grant body has exactly that shape.",
+      "resolution": "T8 mints the controller grant through a recovery-less client (`createLegionDaemonClient(url)`, as `claimController` already does), so a controller 403 (`Invalid controller capability`) is surfaced, never 'recovered'. (The daemon's controller 403 text differs anyway; this removes the dependence on that text.)"
+    },
+    {
+      "id": "C11",
+      "where": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "current": "Tests pinning the shim: 5353 `connects a worker-shim client to the controller's socket when it becomes ready`, 5376 `does nothing when the controller has no recorded socket yet`, 9255 `swallows a controller shim connect failure on ready...`; 3715-3720 asserts `socketPath` on `controllerLocator`; 1487/1513-1514 and 1519 assert the controller window command contains `worker-shim --socket ... -- <omp> --mode rpc`. api.test.ts 758 `responds to controller/ready before its own shim connects...`; index.test.ts 797 `accepts controller/ready even when the controller's shim socket is unreachable`.",
+      "resolution": "T3/T4 delete the shim-pinning tests and rewrite the command/locator assertions."
+    },
+    {
+      "id": "C12",
+      "where": "Bootstrap of this very PR",
+      "current": "The live LEGION deployment's controller predates this change and holds no merge credential, so it cannot merge PR LEGION-16 itself.",
+      "resolution": "Not an implementer item. The merger for this issue publishes READY as usual; if the controller topic has no capable holder, it follows the 404 fallback to the architect, and the architect surfaces the READY to Sami with `dispatch_message` for a one-time human merge (spec Design, Bootstrap). Recorded here so nobody treats it as a defect."
+    }
+  ],
+  "planDecisions": [
+    {
+      "id": "D1",
+      "decision": "`ensureController` carries the resume file across the liveness probe (see C1). `spawnController(controllerSecret, resumeSessionFile?)` calls the existing `computeResumeArgument(issue, resumeSessionFile, logVerb)` (processes.ts 1995-2020) so a recorded-but-missing session file throws (same-agent invariant, same as roots/workers) and a recorded file logs `[legion] <logVerb> <label> by resuming OMP session <file>`. `computeResumeArgument`'s first parameter is typed `IssueKey` (= `string`, contracts/legion-roles.ts:8) and is used only in log text, so pass `controllerToken(project)` as the label and `\"resurrecting the controller\"` as the verb.",
+      "why": "Boring reuse over a parallel helper; the only alternative (a separate persisted `controllerResumeSessionFile`) is a second state field for one consumer."
+    },
+    {
+      "id": "D2",
+      "decision": "`/controller/ready` stores `ompSessionFile` only when `state.controllerLocator` exists; otherwise it logs `[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it` and continues.",
+      "why": "A `/legion-claim-controller` from a hand-started session has no daemon pane to resume into; the daemon must not invent a locator."
+    },
+    {
+      "id": "D3",
+      "decision": "The controller grant form does not additionally require `sessionId` to equal `state.roles[controllerToken].sessionId`; `sessionId` is recorded on the grant so `deleteCapability(sessionId)` semantics stay uniform.",
+      "why": "The controller secret is a single 0600-file capability held only by the controller pane; the spec's error table defines only the wrong-secret failure. Adding a second check invents a rule the spec does not have."
+    },
+    {
+      "id": "D4",
+      "decision": "Daemon 403 text for a non-controller grant with `merge: true`: `Only the controller may merge; publish READY to the controller`. CLI `CliError` message: `this grant cannot merge; publish READY to the controller` followed by `: <daemon error text>` when the response body parses as `{error}`.",
+      "why": "Spec names the CLI phrase; appending the daemon's reason keeps an expired-grant 403 distinguishable from the authority refusal."
+    },
+    {
+      "id": "D5",
+      "decision": "The merger's READY message carries the issue key and the PR URL alongside `READY #<n> at <sha>` and the gate facts, e.g. first line `READY #<n> at <sha> for <KEY> (<pr url>)`. The controller resolves the tree's architect topic as `notifications.role.` + `legion-<project>-<root>-architect` using `legion state --json` (`issues[<KEY>].parent` chain to the root, or `trees`).",
+      "why": "The controller must reply to the tree's architect (spec Errors table); without the issue key in the message it cannot find that topic. The addressing fragment gives the merger the controller topic; nothing gives the controller the architect topic except state."
+    },
+    {
+      "id": "D6",
+      "decision": "A READY that cannot merge yet only because required checks are still running, a flake rerun was issued, or `mergeable == UNKNOWN` is a *pending READY*: the controller `envoy_subscribe`s to `notifications.github.<owner>.<repo>.pr.<n>.checks` (and `pr.<n>` lifecycle), re-verifies on that wake using the READY sha from its own conversation, and `envoy_unsubscribe`s once it has merged or reported a failed gate. If a resumed controller no longer has the READY in context, it asks the merger's role topic (from the wake's `source_session`/issue key) to republish READY rather than guessing a sha.",
+      "why": "Spec: the controller never polls; `pr.<n>.checks` is the wake. The daemon routes PR events to the architect, not the controller, so the controller must subscribe itself. Conversation memory is the controller's only state (`Controller state is disposable` forbids local bookkeeping, not remembering the current wake)."
+    },
+    {
+      "id": "D7",
+      "decision": "`retireAndRespawnStuckController` passes `{ skipGraceful: true }` to `stopProcess`; `stopProcess`'s parameter type drops `socketPath` for the controller call site only via the existing structural type (no signature change needed: `socketPath?` stays for workers).",
+      "why": "Spec: controller stop paths use the pane-kill branch. Explicit is clearer than relying on `locator.socketPath` being undefined."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Contracts: controller ready carries ompSessionFile; grants gain the controller form; gh-token gains merge; state exposes the controller's ompSessionFile",
+      "files": [
+        "packages/contracts/src/legion-daemon-api.ts",
+        "packages/contracts/src/legion-daemon-api.test.ts"
+      ],
+      "steps": [
+        "In `LegionDaemonApi.ControllerReady.request` (line 100) add `ompSessionFile: nonEmptyString.optional()`.",
+        "Replace `LegionDaemonApi.Grant.request` (221-227) with `z.strictObject({ sessionId: nonEmptyString, secret: nonEmptyString, tree: nonEmptyString.optional(), issue: nonEmptyString.optional() })` and add a comment mirroring the `IssueStatus` one (205-208): both `tree` and `issue` select a session capability grant; neither selects the controller capability grant; exactly one is invalid (the handler 400s).",
+        "In `LegionDaemonApi.GitHubToken.request` (231) add `merge: z.literal(true).optional()`. This schema is also bound to `/legion/v1/git-credential` in api.ts (167-170), so both routes accept it.",
+        "Change `State.response.controllerLocator: stateWindowLocator.optional()` (93) to `stateTreeLocator.optional()`; update the redaction comment at 34-37/79-81 to say the controller locator has no socket at all now.",
+        "Exported types `ControllerReadyInput`, `GrantInput`, `GitHubTokenInput` (240, 259, 261) widen automatically."
+      ],
+      "acceptance": "`ControllerReady.request.parse({secret, sessionId, ompSessionFile})` and without the field both succeed; `Grant.request.parse({sessionId, secret})` succeeds; `GitHubToken.request.parse({grantId, merge: true})` succeeds and `{grantId, merge: false}` fails; `State.response` accepts `controllerLocator.ompSessionFile`.",
+      "tests": "Add those four parse cases to packages/contracts/src/legion-daemon-api.test.ts following its existing style."
+    },
+    {
+      "id": "T2",
+      "title": "State: controllerLocator drops socketPath and gains ompSessionFile; version 24 with a migration that strips a persisted socketPath",
+      "files": [
+        "packages/daemon/src/daemon/legion-state.ts",
+        "packages/daemon/src/daemon/__tests__/legion-state.test.ts"
+      ],
+      "steps": [
+        "Change `LegionState.controllerLocator` (172-175) to `Pick<TmuxWindowLocator, \"tmuxSession\" | \"tmuxWindowId\" | \"tmuxPaneId\" | \"ompSessionFile\">`.",
+        "Bump `LegionState.version` (168) and `LegionStateSchema.version` (340) to 24; in the `controllerLocator` schema (346-354) replace `socketPath: z.string().optional()` with `ompSessionFile: z.string().optional()` (schema stays `.strict()`).",
+        "Add `migrateV23State(state)`: `if (!recordValue(state) || state.version !== 23) return state;` then, if `controllerLocator` is a record, return `{ ...state, version: 24, controllerLocator: <copy without socketPath> }`, otherwise `{ ...state, version: 24 }`. Doc comment: the live deployment's state carries a `socketPath` on `controllerLocator` today (the controller ran behind `legion worker-shim`); the strict schema would refuse boot without this strip. Append it to the `migrations` array (855-871) after `migrateV22State`.",
+        "Update `newLegionState` (search for `version: 23` in the file) and every other `version: 23` literal.",
+        "Persist path check: `saveState` writes whatever `state` holds; nothing else references `controllerLocator.socketPath` in this file."
+      ],
+      "acceptance": "A v23 state file whose `controllerLocator` is `{tmuxSession, tmuxWindowId, tmuxPaneId, socketPath}` loads as v24 with the same three tmux fields and no `socketPath`; a v23 file without a controllerLocator loads as v24 unchanged; a v24 file with `controllerLocator.socketPath` is rejected (strict).",
+      "tests": "In legion-state.test.ts add `migrates v23 state to v24 by stripping the controller locator's socketPath` modelled on the v22->v23 test at 742-772, plus the rejection case modelled on `rejects removed v6 fields on current-version state` (773). Update the chain test at 474 (`...through v18, v19, v20, v21, v22, and v23`) to end at v24 and any `version: 23` expectations in `stateWithTree`/`initialState` fixtures."
+    },
+    {
+      "id": "T3",
+      "title": "Daemon process: spawnController launches interactive omp (no rpc, no shim, no socket), resumes the recorded session file, exports LEGION_STATE_DIR; markControllerReady is deleted; controller stop uses the pane kill",
+      "files": [
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/api.ts",
+        "packages/daemon/src/daemon/api/routes/controller.ts",
+        "packages/daemon/src/daemon/api/state.ts",
+        "packages/daemon/src/daemon/config.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts",
+        "packages/daemon/src/daemon/__tests__/api.test.ts",
+        "packages/daemon/src/daemon/__tests__/api.thermo-auth.test.ts",
+        "packages/daemon/src/daemon/__tests__/index.test.ts",
+        "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts (only if it stubs markControllerReady; tsc will tell)"
+      ],
+      "steps": [
+        "`spawnController(controllerSecret: string, resumeSessionFile?: string)` (2618-2661): delete `const socketPath = await this.prepareSocket(\"controller\")` and the `shimmedShellCommand` call. Build `const resumeArgument = await this.computeResumeArgument(token, resumeSessionFile, \"resurrecting the controller\")` (D1) — when `resumeSessionFile` is undefined, log `[legion] starting the controller fresh: no OMP session file is recorded` and use an empty argument. Command: `cd ${shellPath(controllerDir)} && ${withOmpLaunchPrefix(prefix, ompInvocation)}${resumeArgument} --append-system-prompt \"$(cat ${shellPath(promptPath)})\"` (no `--mode rpc`, no `worker-shim`).",
+        "Add `LEGION_STATE_DIR: this.deps.config.stateDir` to the controller `tmuxEnv` block (2632-2643); keep every existing key. The gh shim the extension installs lives at `<stateDir>/worker-bin` (pi-envoy gh-shim.ts:9) and reads this variable.",
+        "Record `this.deps.state.controllerLocator = { tmuxSession, tmuxWindowId, tmuxPaneId, ...(resumeSessionFile ? { ompSessionFile: resumeSessionFile } : {}) }` (no `socketPath`).",
+        "`ensureController` (1396-1418): read `const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile;` before `await this.controllerAlive()`; pass it to `spawnController(controllerSecret, resumeSessionFile)`.",
+        "`retireAndRespawnStuckController` (1659-1681): call `this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true })` (D7) and remove line 1679's `delete this.deps.state.controllerLocator;` — `ensureController()`'s probe now clears it (C1). Update the method's doc comment accordingly (the 'leaves the locator exactly as it was' clause for a failed stop still holds).",
+        "Delete `markControllerReady` (2670-2678) and its doc comment (2663-2669); delete `markControllerReady(): void | Promise<void>;` from the `processManager` interface in api.ts (84); delete lines 22-25 of api/routes/controller.ts (the comment and the `Promise.resolve(ctx.deps.processManager.markControllerReady()).catch(() => {});` call). Fix doc comments naming it: config.ts 85-89, processes.ts 2863-2867.",
+        "api/state.ts 85-89: add `ompSessionFile: state.controllerLocator.ompSessionFile` to the redacted controller locator (C9).",
+        "Grep `processes.ts` for any remaining `controllerLocator?.socketPath` / `controllerLocator.socketPath` (should be none after the above). `controllerAlive` (2875-2897), `reconcileTmuxWindows` (1249-1293), `isOmpPane` (2722-2732), `tmux.listUnknownPanes` (tmux.ts 288-316, filters on `worker-shim`) need no change: the controller window/pane is a recorded locator, and the pane's `sh -c` cmdline still contains `omp`.",
+        "`pruneSecretFiles`/`persist` (2969-2970) already keep the controller secret file alive while `controllerLocator` exists — unchanged."
+      ],
+      "acceptance": "spawnController's `new-window` command is `cd <stateDir>/controller && <prefix> <omp>[ --resume=<file>] --append-system-prompt \"$(cat <ext>/roles/controller-root.md)\"` with no `--mode rpc` and no `worker-shim`; the pane env includes `LEGION_STATE_DIR=<stateDir>` and every previous key; `state.controllerLocator` equals `{tmuxSession, tmuxWindowId, tmuxPaneId}` (plus `ompSessionFile` when resuming); when `controllerLocator.ompSessionFile` is recorded and the pane is dead, the next `ensureController` passes `--resume=<file>`; when it is recorded but the file is missing, `ensureController` rejects with `Refusing to start ... recorded OMP session file is missing`; the stuck-controller retire path issues `kill-pane` and never connects a socket; `GET /legion/v1/state` shows `controllerLocator.ompSessionFile` and never `socketPath`.",
+      "tests": {
+        "rewrite": [
+          "processes.test.ts 654 `launches controller and root windows with disjoint exact environments` — add `LEGION_STATE_DIR` to the controller env expectation.",
+          "processes.test.ts 1487 `passes the packaged role prompt path...` (expected controller command at 1514) and 1519 `prepends the configured omp_launch_prefix...` — controller command becomes the TUI shape above.",
+          "processes.test.ts 3675 `spawns one controller window when the controller delivery fails` — locator expectation at 3715-3720 drops `socketPath`.",
+          "processes.test.ts 8717 (DISPATCH env to the controller pane) — still holds; add nothing unless the env assertion is exact.",
+          "api.test.ts 639 (`projects redacted durable state...`) — the `controllerLocator` fixture at 649-653 and expectation at 717-721 gain `ompSessionFile`; keep line 739's `not.toContain(\"socketPath\")`.",
+          "index.test.ts 797 `accepts controller/ready even when the controller's shim socket is unreachable` — rewrite as `accepts controller/ready with no shim socket at all` or delete if nothing beyond the 200 remains worth asserting."
+        ],
+        "delete": [
+          "processes.test.ts 5353, 5376, 9255 (shim connect on ready).",
+          "api.test.ts 758 `responds to controller/ready before its own shim connects...` and the `markControllerReadyImpl` option/stub at 119/161; api.thermo-auth.test.ts:57 stub."
+        ],
+        "add": [
+          "processes.test.ts: `ensureController resumes the recorded controller session file when the pane is found dead` — seed `state.controllerLocator = {tmuxSession, tmuxWindowId:\"@42\", tmuxPaneId:\"%1\", ompSessionFile: <temp .jsonl that exists>}`, mock `list-panes` dead, assert the `new-window` command contains `--resume=<file>` and the fresh locator carries `ompSessionFile`.",
+          "processes.test.ts: `ensureController refuses a fresh controller when the recorded session file is missing` — same seed with a non-existent file; assert rejection message and no `new-window`.",
+          "processes.test.ts: extend 3806 (`retires a stuck controller pane and spawns a fresh one...`) to assert no `connectWorkerRpc` call and that the fresh spawn carries the stale locator's `ompSessionFile` when one was recorded. Its `run` mock must report the pane dead (`list-panes` failing / no pid) once `kill-pane` has run, because the respawn now comes from `ensureController`'s own probe rather than an explicit locator delete (C1)."
+        ]
+      }
+    },
+    {
+      "id": "T4",
+      "title": "Daemon route: /controller/ready records ompSessionFile on the controller locator",
+      "files": [
+        "packages/daemon/src/daemon/api/routes/controller.ts",
+        "packages/daemon/src/daemon/__tests__/api.test.ts"
+      ],
+      "steps": [
+        "In `handleControllerReady` after the role claim (17-20): `const ompSessionFile = body.ompSessionFile; if (typeof ompSessionFile === \"string\" && ompSessionFile.length > 0) { if (ctx.deps.state.controllerLocator) ctx.deps.state.controllerLocator.ompSessionFile = ompSessionFile; else console.warn(\"[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it\"); }` before `await ctx.save()` (D2). The route table already validates the body against the T1 contract, so a non-string never reaches here.",
+        "Update the route's header comment (5-10) to say the controller is an interactive TUI session and its session file is what `ensureController` resumes."
+      ],
+      "acceptance": "POST `/legion/v1/controller/ready` `{secret, sessionId, ompSessionFile}` -> 200, `state.controllerLocator.ompSessionFile === ompSessionFile`, role claim recorded, `onControllerReady` still called once; the same POST without `ompSessionFile` -> 200 and the locator is untouched; with a wrong secret -> 403 `Invalid controller capability`.",
+      "tests": "api.test.ts: add `records the controller's OMP session file on /controller/ready and leaves it unset when omitted` (seed `state.controllerLocator` without `ompSessionFile`; two POSTs; assert both states). The existing 786 `retries controller startup redelivery after a failed ready callback` and the pending-notice tests (index.test.ts 855, 889) must pass unchanged (spec Acceptance 1)."
+    },
+    {
+      "id": "T5",
+      "title": "Daemon credentials: controller grant form, merge authority on gh-token/git-credential, appRoleForLegionRole(controller), phase/complete refuses a controller grant",
+      "files": [
+        "packages/daemon/src/daemon/api/auth.ts",
+        "packages/daemon/src/daemon/api/routes/credentials.ts",
+        "packages/daemon/src/daemon/api/github.ts",
+        "packages/daemon/src/daemon/api/routes/workers.ts",
+        "packages/daemon/src/daemon/__tests__/api.test.ts"
+      ],
+      "steps": [
+        "auth.ts: replace `interface Grant` (13-18) with `export type Grant = { issue: IssueKey; role: LegionRole; sessionId: string; expiresAt: number } | { role: \"controller\"; sessionId: string; expiresAt: number };`. `resolveGrant`, `setGrant`, `deleteCapability` compile unchanged.",
+        "github.ts: `export function appRoleForLegionRole(role: LegionRole | \"controller\"): GitHubAppRole { return role === \"reviewer\" ? \"review\" : \"implement\"; }` with a one-line comment that the controller merges with the implement App (spec: implement-App token under the repository's own rules).",
+        "credentials.ts `handleGrants` (21-37): `const hasTree = body.tree !== undefined; const hasIssue = body.issue !== undefined; if (hasTree !== hasIssue) throw new HttpError(400, \"grants requires both tree and issue, or neither\");` then `if (hasTree) { <existing session-capability path> } else { await ctx.auth.requireController(ctx.deps.state, body); const sessionId = requiredString(body, \"sessionId\"); ctx.auth.setGrant(grantId, { role: \"controller\", sessionId, expiresAt }); }`. Same `{grantId, expiresAt}` response.",
+        "credentials.ts: add `function requireMergeAuthority(grant: Grant, body: Record<string, unknown>): void { if (body.merge === true && grant.role !== \"controller\") throw new HttpError(403, \"Only the controller may merge; publish READY to the controller\"); }` and call it right after the first `resolveGrant` in both `handleGitCredential` (50) and `handleGhToken` (63), before the GitHub lease await (D4).",
+        "workers.ts `handlePhaseComplete` (321): after `const grant = ctx.auth.resolveGrant(body);` add `if (grant.role === \"controller\") throw new HttpError(403, \"A controller grant cannot complete a phase\");` (C5).",
+        "Import `type Grant` in credentials.ts from `../auth`."
+      ],
+      "acceptance": "POST `/grants` `{secret: <controller secret>, sessionId}` -> 200 `{grantId, expiresAt}`; POST `/gh-token` `{grantId, merge: true}` with that grant -> 200 `{token, appLogin}` where the token source was asked for the `implement` App; POST `/gh-token` `{grantId, merge: true}` with a tester/architect/merger grant -> 403 `{error: \"Only the controller may merge; publish READY to the controller\"}` and the GitHub token source is never called; the same without `merge` -> 200 as today; `/git-credential` behaves identically; POST `/grants` `{secret: \"wrong\", sessionId}` -> 403 `Invalid controller capability`; POST `/grants` with `tree` but no `issue` -> 400; POST `/phase/complete` with a controller grant -> 403.",
+      "tests": "api.test.ts: add `mints a controller grant from the controller capability and lets only it redeem gh-token with merge` (covers the 200/403 matrix above, asserting `tokenRoles` shows `implement` for the controller redemption and no call for the refused one) and `refuses a controller grant on phase/complete`. Extend the existing 1145 `reissues a daemon-registered worker session capability and keeps grants short-lived` only if its `/grants` body assertions break (they should not: the session form is unchanged)."
+    },
+    {
+      "id": "T6",
+      "title": "CLI: legion gh -- pr merge sends merge:true instead of refusing; a 403 names the reason",
+      "files": [
+        "packages/daemon/src/cli/index.ts",
+        "packages/daemon/src/cli/__tests__/index.test.ts"
+      ],
+      "steps": [
+        "`cmdGh` (98-116): replace the throw at 99-101 with `const merge = isPrMergeInvocation(args);` and send `body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) })`. On `!response.ok`: read the body once as text; try `JSON.parse` for `{error}`; if `merge && response.status === 403` throw `new CliError(\\`this grant cannot merge; publish READY to the controller${reason ? `: ${reason}` : \"\"}\\`)`; otherwise keep `Unable to redeem LEGION_GRANT (${status})` (append the reason when present).",
+        "Rewrite `isPrMergeInvocation`'s doc comment (86-90): the argv shape is unchanged; the sentence `No Legion worker role ever merges a PR directly; the merge queue does that under its own PAT` becomes `A merge invocation is redeemed with merge: true, which the daemon grants only to the controller's own grant; every phase-worker grant is refused server-side.`",
+        "`cmdCredential` (118-136) is unchanged: nothing on the git-credential path merges."
+      ],
+      "acceptance": "`cmdGh([\"pr\",\"merge\",\"123\",\"--squash\"], ...)` POSTs `{grantId, merge: true}` to `/gh-token`; with a 200 it spawns `gh pr merge 123 --squash` under the token; with a 403 `{error:\"Only the controller may merge; publish READY to the controller\"}` it rejects with a `CliError` whose message starts `this grant cannot merge; publish READY to the controller` and `code: 1`, and `spawnGh` is never called. `cmdGh([\"pr\",\"view\",\"merge-fix\"])` still sends no `merge` field.",
+      "tests": "index.test.ts: rewrite 61-85, 82-108, 110-134 into (a) `sends merge intent to the daemon for a pr merge invocation and runs gh when granted` (asserts the fetch body includes `merge: true` and `spawnGh` receives the argv), (b) `refuses a pr merge the daemon does not authorise, naming the reason` (403 path, `spawnGh` not called), (c) keep one bypass-shape case (`gh api .../merge` or `--repo`) asserting `merge: true` is sent, since `isPrMergeInvocation` still decides that. Keep 136+ `allows a pr subcommand that merely mentions merge...` and assert no `merge` field in its fetch body."
+    },
+    {
+      "id": "T7",
+      "title": "addressingFragment names the project's controller (merge queue) topic",
+      "files": [
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts"
+      ],
+      "steps": [
+        "`addressingFragment` (152-165): compute `const controllerTopic = roleTopic(controllerToken(project));` and return `Legion addressing: your role topic is \\`${ownTopic}\\`; your tree's architect is \\`${architectTopic}\\`; the project's controller (merge queue) is \\`${controllerTopic}\\`; a sibling role on your issue is your topic with the trailing \\`-<role>\\` replaced.`",
+        "Grep for literal assertions of the fragment text: none exist today (`Legion addressing` appears only in processes.ts and skills/legion-worker/SKILL.md:32, which is prose and stays). The five processes.test.ts expectations call `addressingFragment(...)` and self-adjust."
+      ],
+      "acceptance": "`addressingFragment(\"omp\", root, root, \"merger\")` contains `` the project's controller (merge queue) is `notifications.role.legion-omp-controller` `` (spec Acceptance 2).",
+      "tests": "processes.test.ts: add `addressingFragment names the controller topic` asserting `toContain(roleTopic(controllerToken(\"omp\")))` and that the own/architect topics are still present."
+    },
+    {
+      "id": "T8",
+      "title": "pi-envoy extension: controller reports its session file on ready; a claimed controller's bash calls are wrapped with a controller grant and the gh shim",
+      "files": [
+        "packages/pi-envoy/extensions/legion.ts",
+        "packages/pi-envoy/src/legion/daemon-client.ts (types only; `ControllerReadyInput`/`GrantInput` come from T1 — verify no local narrowing)",
+        "packages/pi-envoy/extensions/legion.test.ts"
+      ],
+      "steps": [
+        "Widen `persistedTranscript(context: SessionContext)` (109-120) to `(context: CommandContext | SessionContext)` — both expose `sessionManager.ensureOnDisk()`/`getSessionFile()`.",
+        "`claimController` (249-262): before `daemon.controllerReady(...)`, `const { sessionFile } = await persistedTranscript(context);` and send `{ secret, sessionId: sessionID, ompSessionFile: sessionFile }`. A missing transcript throws exactly as it does for roots (boot failure per controller-root.md); do not soften it — the field is optional on the wire only so a controller running an older plugin can still claim.",
+        "Extract the wrap in the `tool_call` hook (601-621) into a local `const wrapBashWithGrant = async (command: string, mint: () => Promise<GrantResponse>): Promise<ToolCallEventResult> => { try { const grant = await mint(); const stateDir = requiredEnvironment(process.env, \"LEGION_STATE_DIR\"); const workerBin = await installWorkerGhShim(stateDir); return { input: { ...toolCall.input, command: [workerGhEnvironment(grant.grantId, stateDir, workerBin), command].join(\"\\n\") } }; } catch (error) { return { block: true, reason: messageFor(error) }; } }` (`import type { GrantResponse } from \"@legion/contracts\"`).",
+        "In the `active === undefined` branch (588-600), before the unregistered-worker check: `if (controllerSessionID !== undefined && controllerSessionID === sessionID && controllerCapability !== undefined) { const secret = controllerCapability; return wrapBashWithGrant(toolCall.input.command, () => createLegionDaemonClient(requiredEnvironment(process.env, \"LEGION_DAEMON_URL\")).grant({ sessionId: sessionID, secret })); }` (recovery-less client per C10). The worker branch becomes `return wrapBashWithGrant(toolCall.input.command, () => roleDaemon().grant({ tree: active.tree, issue: active.issue, sessionId: sessionID, secret: active.secret }));`.",
+        "Update the comment at 590-592 (`The controller is exempt...`) to say the controller is wrapped through its own capability above and only an unregistered *worker* is blocked.",
+        "A controller session that never completed `claimController` (no `controllerSessionID`) keeps today's behaviour: `undefined` (not blocked) — spec Errors: a wrong-secret grant is what blocks, with the daemon's 403 text as the reason."
+      ],
+      "acceptance": "For a controller session: `/controller/ready` body is `{ secret, sessionId, ompSessionFile: \"/tmp/session.jsonl\" }` and `ensureOnDisk` runs before it; a `bash` tool call returns `input.command` beginning with `export LEGION_GRANT='<grantId>'` + the `workerGhEnvironment` lines + the original command, after a POST `/legion/v1/grants` with body exactly `{ sessionId, secret: \"controller-secret\" }`; when `/grants` answers 403 `{error:\"Invalid controller capability\"}` the call is `{ block: true, reason: \"POST /legion/v1/grants failed with 403: {\\\"error\\\":\\\"Invalid controller capability\\\"}\" }`. Worker wrapping (test 1495) is unchanged.",
+      "tests": "legion.test.ts: update 621 `claims the controller role at startup and on demand...` request expectations (both `/controller/ready` bodies gain `ompSessionFile`); replace 1612 `does not block bash calls from the controller session` with `rewrites a claimed controller's bash calls with a controller grant and the gh shim` (mirror 1495's assertions) and add `blocks a controller bash call when the daemon refuses the controller grant` (mirror 1562). Keep 1590 (unregistered worker blocked) and add an assertion that a controller session with `LEGION_ROLE=controller` whose claim has not happened is not blocked."
+    },
+    {
+      "id": "T9",
+      "title": "Retire pr-queue everywhere; the merger publishes READY to the controller; the controller skill gains the Merge queue section and two wake rows; controller-root.md gets the attached-human note",
+      "files": [
+        "packages/pi-envoy/roles/merger.md",
+        "packages/pi-envoy/roles/controller-root.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-worker/SKILL.md (merger bullet ONLY — constraint A)",
+        "skills/legion-controller/SKILL.md",
+        "packages/envoy/internal/store/kv_test.go",
+        "packages/pi-envoy/extensions/envoy.test.ts"
+      ],
+      "steps": [
+        "roles/merger.md: line 12-15 and step 3 (41-48): READY goes to the project's controller topic named in the `Legion addressing` line of the system prompt (`the project's controller (merge queue) is ...`); the message carries `READY #<n> at <sha> for <KEY> (<pr url>)` plus the PR body's gate facts (D5); on a 404 no-holder from `envoy_publish`, publish the same READY to the architect's topic and stay idle; never merge; do not `legion handoff complete` until the READY was delivered to the controller or, on 404, to the architect. Remove the sentence `pr-queue is an operator-run session holding that role...`. Line 40's `enforced by GitHub and the merge queue` -> `enforced by GitHub and the controller`.",
+        "roles/controller-root.md: append one sentence to the second paragraph: `This session runs in a terminal pane Sami can attach to (`tmux -L legion-<project> attach`); a message typed directly into this session is a direct human instruction and is answered first, before any wake.` (C8; matches the skill's `Direct user message always first`).",
+        "skills/legion-architect/SKILL.md step 6 item 4 (183-187): `the merger verifies the current head is the reviewer-approved head plus only the retro commits and publishes READY #<n> at <sha> to the project's controller topic (the merge queue; named in its Legion addressing line); it never merges. The controller verifies the gates against live GitHub and merges under the implement App's identity and the repository's own rules (branch protection, CODEOWNERS); whether a human must approve first is that repository's setting, not Legion's, and you never ask for or wait on such an approval. If the controller reports a failed gate to you, treat it like pr-blocked: fix through the phases, never bypass.` Wake row `pr-merged` (221): `The merge queue landed the PR` -> `The controller merged the PR`.",
+        "skills/legion-worker/SKILL.md lines 228-231 ONLY: `- The merger confirms the approved head still equals the current head, then publishes READY #<n> at <sha> plus the PR body's gate facts to the project's controller topic (the merge queue, named in the Legion addressing line at the end of the system prompt) with envoy_publish; on a 404 no-holder it publishes the same READY to the architect's topic and stays idle. The merger never merges; the controller verifies the gates against live GitHub and merges under its own authority.` Do not touch lines 183-227 or anything else in the file (constraint A). Verify with `jj diff -r @ skills/legion-worker/SKILL.md` that only that bullet changed.",
+        "skills/legion-controller/SKILL.md: (a) description front-matter adds `merge-queue READY handling`; (b) new `## Merge queue` section after `## Mentions` (or before `## New issue triage` — implementer's choice, keep heading level `##`) containing: the READY message shape (D5); verification gates 1-5 read from live GitHub with `legion gh -- pr view <n> --json headRefOid,mergeable,reviewDecision,statusCheckRollup,body` and `legion gh -- api graphql` for unresolved review threads: (1) `headRefOid == <sha>` from READY, (2) every required check green, (3) 0 unresolved review threads, (4) `mergeable != CONFLICTING`, (5) the PR body's `## Verification` block complete at that head (CI/Threads/E2E lines name that sha); merge with `legion gh -- pr merge <n> --squash` only when all five hold; never on a known red check; never admin-merge without an explicit deployment grant; one `legion gh -- run rerun <run-id> --failed` for a job that looks flaky, then wait for the `pr.<n>.checks` wake (never poll); `mergeable == CONFLICTING` -> reply to the tree's architect asking for a rebase (the only rebase trigger; Sami: unnecessary rebases clog the CI queue); `mergeable == UNKNOWN` -> re-read on the next `pr.<n>.checks` wake, never merge on UNKNOWN; any failed gate -> reply to the tree's architect topic naming the gate and the evidence (D5 for how to find that topic); after a successful merge the controller publishes NOTHING to the architect: the daemon derives `{type:\"pr-merged\", pr, mergeCommitSha}` from GitHub's merged webhook (reducers.ts:769) and routes it to the architect itself, and a second copy would make the architect run its step-7 sign-off twice — state this in the section; policy questions (should this merge at all, admin merge, a gate that looks wrong) go to Sami via `dispatch_ask` on the issue; pending-READY subscription rule (D6). (c) Two wake-table rows in the exact `| Wake | Content | Controller action |` shape at 50-59: `| READY from a merger (\\`notifications.role.<controller token>\\`) | \\`READY #<n> at <sha> for <KEY> (<pr url>)\\` + gate facts | Run the Merge queue gates against live GitHub; merge, or report the failed gate to the tree's architect |` and `| \\`pr.<n>.checks\\` settled on a PR with a pending READY | check rollup for the head | Re-run the Merge queue gates for that READY; merge, report, or keep waiting only if still pending |`. (d) In `## Start and claim the controller role` (16-35) add that the controller now runs as an interactive terminal session in the daemon's private tmux server and that `LEGION_STATE_DIR` is in its environment so `legion gh --` works through the gh shim.",
+        "packages/envoy/internal/store/kv_test.go:1640 `const role = \"pr-queue\"` -> `const role = \"release-captain\"` (any arbitrary role name not used elsewhere; keep the test's meaning).",
+        "packages/pi-envoy/extensions/envoy.test.ts: every `pr-queue` at 736, 759-767, 815-823, 864, 885, 937-994 -> `release-captain` (same arbitrary fixture role). These tests exercise role claim/switch mechanics, not the merge queue."
+      ],
+      "acceptance": "`grep -rn pr-queue skills packages docs --exclude-dir=plans` prints nothing (spec Acceptance 4); `go test ./...` in packages/envoy and `bun test packages/pi-envoy` green; the controller skill has a `## Merge queue` section and the two new wake rows; `jj diff` on skills/legion-worker/SKILL.md touches only the merger bullet.",
+      "tests": "No new unit tests: skill/role prose. The tester proves the behaviour on the smoke rig (testerScenario)."
+    },
+    {
+      "id": "T10",
+      "title": "Docs in the same PR: root AGENTS.md, daemon AGENTS.md, pi-envoy AGENTS.md, smoke README",
+      "files": [
+        "AGENTS.md",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "packages/pi-envoy/AGENTS.md",
+        "scripts/smoke/README.md"
+      ],
+      "steps": [
+        "AGENTS.md line 48 (`legion gh -- <args>` row): `refuses pr merge; the merge queue merges, not workers` -> `pr merge is redeemed with merge intent the daemon grants only to the controller's own grant; every phase-worker grant is refused`. Lines 111-113 (`The merger publishes READY to the merge queue, which merges...`): `The merger publishes READY to the controller's role topic; the controller verifies the gates against live GitHub and merges under the implement App and the repository's rules.` Lines 10-12 and 17-19 describe phase workers (still `omp --mode rpc` + worker-shim) and stay; add one sentence to the Architecture bullet list: `The controller is an interactive OMP terminal session in the daemon's private tmux server; attach with tmux -L legion-<project> attach.`",
+        "packages/daemon/src/daemon/AGENTS.md: line 13 `controllerLocator (minus socketPath)` -> `controllerLocator (tmuxSession/tmuxWindowId/tmuxPaneId/ompSessionFile; it has no socket)`; line 22 `/controller/ready | Controller lifecycle.` -> describe the optional `ompSessionFile` and that it is what `ensureController` resumes with `--resume`; `/grants` row (line 18 area) gains the controller form `{secret, sessionId}` minting role `controller`; `/gh-token`/`/git-credential` gain `merge: true` semantics (403 for any non-controller grant); Operational invariants paragraph (45): add that the controller pane runs interactive `omp` (no `--mode rpc`, no `legion worker-shim`, no socket), its stop path is a direct `kill-pane`, and a dead controller is respawned with `--resume=<controllerLocator.ompSessionFile>` when recorded, fresh (logged) otherwise; the OMP invocation section (62-100) already lists the controller pane for env/prefix/secret delivery — add `LEGION_STATE_DIR` to the controller's listed env and the attach command.",
+        "packages/pi-envoy/AGENTS.md: the `Legion lifecycle modules` / where-to-look rows: note that `legion.ts`'s bash `tool_call` hook wraps a claimed controller session's commands with a controller grant (`/grants` `{sessionId, secret}`) exactly like a worker's, and that `claimController` reports `ompSessionFile`.",
+        "scripts/smoke/README.md: line 94 `checkpoint 8 verifies that the merge queue respected it` -> `the controller respected it`; add a paragraph under the rig description: the controller pane is an interactive OMP TUI (`tmux -L legion-<slug> capture-pane -t <controllerLocator.tmuxPaneId>` shows it; `tmux send-keys` talks to it); checkpoint 13 still holds (no secret on argv/environ for the controller pane — the boot/controller secret travels by `LEGION_CONTROLLER_SECRET_FILE`); describe the READY exercise the tester runs (testerScenario) so future smoke runs repeat it. Checkpoint table rows 1 and 13 keep their text."
+      ],
+      "acceptance": "Reviewer checks the PR file list contains all four files (spec Acceptance 6) and that no doc still says the controller runs `--mode rpc`/`worker-shim`/socket or that `legion gh` refuses `pr merge` unconditionally.",
+      "tests": "None (docs)."
+    },
+    {
+      "id": "T11",
+      "title": "Final verification, PR body, tester handoff",
+      "files": [
+        ".legion/implement.json",
+        "PR body on GitHub"
+      ],
+      "steps": [
+        "Run once: `bunx biome check`, `bunx tsc --noEmit`, `bun test`, `cd packages/envoy && go test ./...`, `grep -rn pr-queue skills packages docs --exclude-dir=plans` (must print nothing).",
+        "Smoke-run the daemon side yourself before handing to the tester: `bun test packages/daemon --test-name-pattern controller` and `bun test packages/pi-envoy` green; then, if a local rig is available, `scripts/smoke/up.sh` and confirm the controller pane shows a TUI (spec Acceptance 5 first clause). Record what you ran in `.legion/implement.json` `testerNotes`.",
+        "PR body (constraint B applies — plain English, full sentences, identifiers expanded on first use): title `Legion controller runs as an attachable terminal session and merges pull requests itself (LEGION-16)`; first paragraph explains, for a reader who has not seen the code, what changed and why (the controller is now a normal interactive OMP session in the daemon's private tmux server so Sami can attach and talk to it; it now verifies and merges pull requests once a merger reports them ready; the separate hand-run merge queue session, previously addressed as the `pr-queue` role, no longer exists); then the `## Verification` block from skills/legion-worker/SKILL.md with the CI line, the Threads line, the Thermo line, an `E2E` placeholder the tester fills in, `Fast-follow: none` (or one named item), `Chain: not stacked`; the line `Dispatch: LEGION-16`. Every dispatch_message or dispatch_comment this issue's workers post follows the same rule.",
+        "`.legion/implement.json`: fields `commits` (jj change ids + one-line descriptions), `deviationsFromPlan` (each with reason), `testerNotes` (how to run the smoke scenario, which fixture role name replaced pr-queue), `filesChanged`, `verificationCommandsRun` with their outcomes."
+      ],
+      "acceptance": "All five commands green; PR open against main with the body above; `.legion/implement.json` committed and pushed; `legion handoff complete` run.",
+      "tests": "n/a"
+    }
+  ],
+  "testerScenario": {
+    "purpose": "Spec Acceptance 5 on this box (Acceptance 7 is Sami's post-release check on the LEGION deployment).",
+    "rig": "`scripts/smoke/up.sh` against `SMOKE_REPO` with the branch build (follow scripts/smoke/README.md for `SMOKE_PROJECT`, `DISPATCH_URL`, `SMOKE_BRANCH_PROTECTION`).",
+    "steps": [
+      "Controller pane: read `controllerLocator.tmuxPaneId` from `legion state --json`; `tmux -L legion-<slug> capture-pane -p -t <paneId>` shows the OMP TUI (prompt/status line), not an rpc stream; `tmux -L legion-<slug> list-panes -t <paneId> -F '#{pane_pid}'` then `pstree -a <pid>` shows `omp` with no `--mode rpc` and no `worker-shim`; `tmux -L legion-<slug> send-keys -t <paneId> 'What project are you the controller for?' Enter` and capture again after ~30s: a model reply appears.",
+      "Resume: `legion state --json` shows `controllerLocator.ompSessionFile`; `tmux -L legion-<slug> kill-pane -t <paneId>`; trigger a controller wake (a Dispatch issue creation, or a `notifications.role.legion-<slug>-controller` publish via the listener API `POST /v1/messages/publish`); the daemon log shows a `by resuming OMP session <file>` line for the controller and the new pane's command contains `--resume=<file>`; the earlier conversation is visible in the pane.",
+      "Green merge: drive a sandbox PR through the normal phases (or open a trivial PR on `SMOKE_REPO` with a complete `## Verification` block and green required checks, approved per the sandbox's branch protection); from any Envoy-enabled session (or the listener API) publish `READY #<n> at <headSha> for <KEY> (<url>)` plus the gate facts to `notifications.role.legion-<slug>-controller`; observe the controller pane running `legion gh -- pr view` then `legion gh -- pr merge`; `gh pr view <n> --json merged` -> `true`; the architect topic (claim it from a scratch OMP session with `envoy_role_set legion-<slug>-<ROOT>-architect`, or tail the daemon/listener logs) receives `pr-merged` for that PR — emitted by the daemon from GitHub's merged webhook, not by the controller.",
+      "Red READY: open a PR whose required check fails (or READY with a wrong sha); publish READY; `gh pr view <n> --json merged` stays `false`, the PR stays open, and the architect topic receives a message naming the failed gate (`head`, `checks`, `threads`, `mergeable`, or `verification block`).",
+      "Negative control for the CLI gate: from a phase-worker pane (`LEGION_GRANT` wrapped), run `legion gh -- pr merge <n> --squash`: exit non-zero, message starts `this grant cannot merge; publish READY to the controller`, daemon log shows the 403, `gh` never spawned (no merge on GitHub).",
+      "Checkpoint 13 (`scripts/smoke/checkpoints.sh 13`) still passes: no `LEGION_CONTROLLER_SECRET=`/`DISPATCH_TOKEN=` on the controller pane's argv or environ."
+    ],
+    "evidenceToRecord": "Per spec Testing row 5: pane captures, `pstree` output, the READY payloads sent, `gh pr view --json merged,state,mergeCommit` before/after for both PRs, the architect-topic replies, the CLI negative-control output, and the commands for Acceptance 4 (`grep -rn pr-queue ...` empty; lint/typecheck/test/go test green). Written into `.legion/test.json` and the PR body's `E2E` line (plain English, constraint B)."
+  },
+  "reviewerNotes": [
+    "Spec Acceptance 6: file list must include AGENTS.md, packages/daemon/src/daemon/AGENTS.md, packages/pi-envoy/AGENTS.md, skills/legion-controller/SKILL.md, skills/legion-architect/SKILL.md, skills/legion-worker/SKILL.md (merger bullet only), packages/pi-envoy/roles/merger.md, scripts/smoke/README.md; no docs/plans/ file.",
+    "Constraint A: `jj diff` on skills/legion-worker/SKILL.md must touch only the merger bullet.",
+    "`GET /legion/v1/state` must still never contain `socketPath` (api.test.ts 739) and no `*Hash`/`*Secret`/`*Token` key.",
+    "Not a docs-only PR: the Thermo line is required."
+  ],
+  "architectNotes": [
+    "C12: this PR cannot be merged by the live controller (it predates the change). Expect the merger's READY to fall back to you on 404 or reach a controller without merge authority; surface it to Sami with dispatch_message (plain English, constraint B) for the one-time human merge.",
+    "LEGION-18 touches skills/legion-worker/SKILL.md concurrently; whichever PR merges second rebases (constraint A).",
+    "Post-release, spec Acceptance 7 is Sami's: `tmux -L legion-<project> attach` shows the controller TUI; a real merger READY merges; the architect receives pr-merged."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T06:13:49.955Z"
+}

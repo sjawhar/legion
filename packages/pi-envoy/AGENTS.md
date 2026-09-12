@@ -59,6 +59,7 @@ block through that tool or a `:::ask` directive, not as an issue-level `dispatch
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
 | Legion lifecycle modules | `src/legion/` | Classification, daemon client, gh shim, jj attribution, control directives, tools |
+| Controller session (`legion.ts`) | `claimController`, the `bash` `tool_call` hook | `claimController` reports the session's persisted transcript as `ompSessionFile` on `/controller/ready` so the daemon can `--resume` the pane. A claimed controller session's `bash` calls are wrapped with `LEGION_GRANT` and the gh shim exactly like a worker's; the grant comes from `/grants` `{sessionId, secret}` (the controller capability) through a recovery-less daemon client, so a 403 is surfaced as the block reason, never treated as a worker session to recover. A controller that has not claimed yet is passed through unwrapped, not blocked. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |

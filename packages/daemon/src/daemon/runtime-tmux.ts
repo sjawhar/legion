@@ -114,12 +114,14 @@ export class TmuxRuntime implements Runtime {
   constructor(private readonly deps: TmuxRuntimeDeps) {}
 
   /**
-   * Opens (or splits into) the tmux window for the spec's issue — or the controller's own
-   * window — running `legion worker-shim` around the caller's inner OMP command. Delivers the
-   * spec's one secret as a 0600 file at `<stateDir>/secrets/<role token>` and exports only its
-   * `<NAME>_FILE` path, appended after the spec's own env pairs; the write happens before any
-   * tmux call, so an fs failure is an ordinary launch failure. The caller owns that file's
-   * lifetime (hold/prune) — this method only writes it.
+   * Opens (or splits into) the tmux window for the spec's issue — running `legion worker-shim`
+   * around the caller's inner OMP command — or the controller's own window, where the inner
+   * command runs bare: the controller is an interactive OMP terminal session Sami can attach to,
+   * with no shim and no socket. Delivers the spec's one secret as a 0600 file at
+   * `<stateDir>/secrets/<role token>` and exports only its `<NAME>_FILE` path, appended after the
+   * spec's own env pairs; the write happens before any tmux call, so an fs failure is an
+   * ordinary launch failure. The caller owns that file's lifetime (hold/prune) — this method only
+   * writes it.
    */
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const [secret, ...extraSecrets] = Object.entries(spec.secrets);
@@ -175,12 +177,21 @@ export class TmuxRuntime implements Runtime {
     return { runtime: "tmux", tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
   }
 
+  /** The controller's window: the inner command bare in its pane — no `legion worker-shim`, so
+   * the locator carries no `socketPath` and `connect` refuses it; `stop` falls straight through
+   * to the pane kill and `probe` reads the pane like any other. */
   private async spawnController(
     spec: SpawnSpec,
     token: string,
-    secret: [string, string]
+    [secretName, secretValue]: [string, string]
   ): Promise<TmuxLocator> {
-    const { socketPath, paneArgv } = await this.preparePane("controller", spec, token, secret);
+    const shellCommand = `cd ${shellPath(spec.workspaceDir)} && ${spec.innerCommand}`;
+    const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
+    const paneArgv = [
+      ...tmuxEnv(spec.env),
+      ...tmuxEnv({ [`${secretName}_FILE`]: secretFile }),
+      shellCommand,
+    ];
     const session = this.deps.tmux.socket;
     const window = await tmux.openWindow(this.deps.tmux, session, "controller", paneArgv, session);
     return {
@@ -188,15 +199,14 @@ export class TmuxRuntime implements Runtime {
       tmuxSession: session,
       tmuxWindowId: window.windowId,
       tmuxPaneId: window.paneId,
-      socketPath,
     };
   }
 
-  /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
-   * fresh shim socket path (its directory made, a stale socket removed), the process's one secret
-   * written as a 0600 file, and the pane argv — the spec's env pairs, the secret's `<NAME>_FILE`
-   * pointer, then the `legion worker-shim --socket <path> -- <inner>` command every Legion OMP
-   * process (root, phase worker, controller) runs inside its pane. */
+  /** Everything a new issue pane needs before any tmux call, in the order every spawn performs
+   * it: a fresh shim socket path (its directory made, a stale socket removed), the process's one
+   * secret written as a 0600 file, and the pane argv — the spec's env pairs, the secret's
+   * `<NAME>_FILE` pointer, then the `legion worker-shim --socket <path> -- <inner>` command every
+   * headless Legion OMP process (root architect, phase worker) runs inside its pane. */
   private async preparePane(
     socketName: string,
     spec: SpawnSpec,
@@ -297,8 +307,9 @@ export class TmuxRuntime implements Runtime {
    * `client.closed` is a confirmed graceful close and skips the kill; a socket error while
    * waiting is NOT proof the process exited (a reset proves nothing about the pane), so it is
    * treated exactly like a timeout — fall through to `client.close()` and the kill-pane attempt.
-   * A dead/unreachable shim, or `skipGraceful` (the caller already confirmed nothing live is
-   * there to ask), also skip straight to the kill. Every real locator carries a pane id (`spawn`
+   * A dead/unreachable shim, a locator with no socket at all (the controller's interactive pane),
+   * or `skipGraceful` (the caller already confirmed nothing live is there to ask) also skip
+   * straight to the kill. Every real locator carries a pane id (`spawn`
    * always records one); a locator without one is a corrupt or legacy record, not a case to
    * silently degrade for. Throws `ProcessStopFailed` for any `kill-pane` failure other than the
    * pane having already been reaped on its own (`"can't find pane"`) or the private server itself

@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
+import type { Grant } from "../auth";
 import type { RouteContext } from "../context";
 import { appRoleForLegionRole } from "../github";
-import { requiredString, validateContractResponse } from "../http";
+import {
+  HttpError,
+  MERGE_AUTHORITY_REFUSED,
+  requiredString,
+  validateContractResponse,
+} from "../http";
 
 export async function handleProvisioningCredential(
   ctx: RouteContext,
@@ -18,22 +24,44 @@ export async function handleProvisioningCredential(
   );
 }
 
+/** Two credential forms, selected exactly like `handleIssueStatus`'s: both `tree` and `issue`
+ * present is a session-capability grant (phase worker or root architect); neither present is the
+ * controller-capability grant (`secret` is the controller secret) and mints `role: "controller"`;
+ * exactly one present is a malformed request. */
 export async function handleGrants(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
-  const { tree, issue } = ctx.requireTreeIssue(body);
-  const capability = ctx.auth.requireSessionCapability(body, tree, issue);
-  const sessionId = requiredString(body, "sessionId");
+  const hasTree = body.tree !== undefined;
+  const hasIssue = body.issue !== undefined;
+  if (hasTree !== hasIssue) {
+    throw new HttpError(400, "grants requires both tree and issue, or neither");
+  }
   const grantId = randomUUID();
   const expiresAt = ctx.now() + ctx.grantTtlMs;
-  ctx.auth.setGrant(grantId, { issue, role: capability.role, sessionId, expiresAt });
+  const sessionId = requiredString(body, "sessionId");
+  if (hasTree) {
+    const { tree, issue } = ctx.requireTreeIssue(body);
+    const capability = ctx.auth.requireSessionCapability(body, tree, issue);
+    ctx.auth.setGrant(grantId, { issue, role: capability.role, sessionId, expiresAt });
+  } else {
+    await ctx.auth.requireController(ctx.deps.state, body);
+    ctx.auth.setGrant(grantId, { role: "controller", sessionId, expiresAt });
+  }
   return Response.json(
     validateContractResponse(LegionDaemonApi.Grant.response, {
       grantId,
       expiresAt: new Date(expiresAt).toISOString(),
     })
   );
+}
+
+/** `merge: true` (`legion gh -- pr merge`) is honoured only for the controller's own grant; every
+ * phase-worker and architect grant is refused here, before any GitHub lease is fetched. */
+function requireMergeAuthority(grant: Grant, body: Record<string, unknown>): void {
+  if (body.merge === true && grant.role !== "controller") {
+    throw new HttpError(403, MERGE_AUTHORITY_REFUSED);
+  }
 }
 
 /** Re-resolves the grant after the GitHub lease await, not merely once before it: `resolveGrant`
@@ -48,6 +76,7 @@ export async function handleGitCredential(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
+  requireMergeAuthority(grant, body);
   const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
   ctx.auth.resolveGrant(body);
   return new Response(`username=x-access-token\npassword=${lease.token}`, {
@@ -61,6 +90,7 @@ export async function handleGhToken(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
+  requireMergeAuthority(grant, body);
   const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
   ctx.auth.resolveGrant(body);
   return Response.json(

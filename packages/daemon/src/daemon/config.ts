@@ -99,10 +99,10 @@ export interface DaemonConfig {
   workerBootRegistrationDeadlineIntervals: number;
   /** Seconds before a single worker RPC request over a `legion worker-shim` unix socket
    * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs the connect-time
-   * `negotiate_protocol` round trip that `markTreeReady`/`workerReady`/`markControllerReady`
-   * kick off in the background after `/process/ready`/`/worker/ready`/`/controller/ready`
-   * already responded — small by default, raised only under measured load sensitivity, never a
-   * substitute for those routes responding before they dial back into the caller's own socket. */
+   * `negotiate_protocol` round trip that `markTreeReady`/`workerReady` kick off in the
+   * background after `/process/ready`/`/worker/ready` already responded — small by default,
+   * raised only under measured load sensitivity, never a substitute for those routes responding
+   * before they dial back into the caller's own socket. The controller has no socket. */
   workerRpcTimeoutSeconds: number;
   /** TCP port the worker stream listener (`worker-stream-listener.ts`) accepts reverse-dialed
    * `legion worker-shim --connect` streams on, bound to the same address as the API.

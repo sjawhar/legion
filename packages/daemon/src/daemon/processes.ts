@@ -126,8 +126,9 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the second `--append-system-prompt` fragment every root and phase-worker process gets,
- * so the model can address the architect (and derive a sibling's topic) without hand-encoding a
- * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
+ * so the model can address the architect, the project's controller (the merge queue a merger
+ * publishes READY to), and derive a sibling's topic without hand-encoding a `roleToken` itself —
+ * the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
 export function addressingFragment(
   project: string,
   treeKey: IssueKey,
@@ -136,10 +137,11 @@ export function addressingFragment(
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
   const architectTopic = roleTopic(roleToken(project, treeKey, "architect"));
+  const controllerTopic = roleTopic(controllerToken(project));
   return (
     `Legion addressing: your role topic is \`${ownTopic}\`; your tree's architect is ` +
-    `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
-    "`-<role>` replaced."
+    `\`${architectTopic}\`; the project's controller (merge queue) is \`${controllerTopic}\`; ` +
+    "a sibling role on your issue is your topic with the trailing `-<role>` replaced."
   );
 }
 
@@ -1331,8 +1333,10 @@ export class ProcessManager {
     this.cancelControllerRegistrationDeadline();
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
-        const controllerSecret = await this.deps.mintControllerCapability();
-        await this.spawnController(controllerSecret);
+        // The dead pane's locator is still recorded (`controllerAlive` is a pure probe): its
+        // `ompSessionFile` is what `spawnController` resumes, and `spawnController` clears the
+        // locator itself, only once the resume decision has succeeded.
+        await this.spawnController(this.deps.state.controllerLocator?.ompSessionFile);
         const freshLocator = this.deps.state.controllerLocator;
         if (freshLocator) this.armControllerRegistrationDeadline(freshLocator);
       })().finally(() => {
@@ -1575,11 +1579,16 @@ export class ProcessManager {
    * a `/controller/ready` landing during that probe's own await must still win over this
    * stale-timeout decision, never be raced by it. A `state.controllerLocator` that no longer
    * matches `locator` by reference is the same "superseded" case caught above, checked again
-   * directly against live state for good measure. On a failed stop/kill, logs and leaves the
-   * locator exactly as it was -- clearing it and spawning a second controller over a process that
-   * never actually stopped would orphan that process with nothing tracking it; a later
-   * `ensureController` call re-observes this same stuck locator and re-arms a fresh wait for it
-   * instead.
+   * directly against live state for good measure. A pane found already dead here (it hung past
+   * the deadline, then exited on its own) is resurrected at once; a pane still alive but never
+   * claimed is killed first -- the controller pane has no shim socket to ask, so the stop is the
+   * direct pane kill. On a failed kill, logs and leaves the locator exactly as it was -- clearing
+   * it and spawning a second controller onto a pane that never actually stopped would orphan that
+   * pane with nothing tracking it; a later `ensureController` call re-observes this same stuck
+   * locator and re-arms a fresh wait for it instead. In both the dead and the killed case the
+   * locator is left in place for `ensureController`: its own probe (pure, see `controllerAlive`)
+   * finds the pane dead and `spawnController` resumes the session file it recorded before
+   * clearing it.
    */
   private async retireAndRespawnStuckController(
     locator: NonNullable<LegionState["controllerLocator"]>
@@ -1590,18 +1599,18 @@ export class ProcessManager {
     if (this.deps.state.roles[token]) return;
     const stillAlive = await this.controllerAlive();
     if (this.deps.state.roles[token]) return;
-    if (!stillAlive) return;
     if (this.deps.state.controllerLocator !== locator) return;
-    try {
-      await this.stopProcess(token, locator, this.workerStopTimeoutMs);
-    } catch (error) {
-      console.error(
-        "[legion] failed to stop a stuck controller process; leaving it in place rather than orphaning it:",
-        error
-      );
-      return;
+    if (stillAlive) {
+      try {
+        await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
+      } catch (error) {
+        console.error(
+          "[legion] failed to stop a stuck controller pane; leaving it in place rather than orphaning it:",
+          error
+        );
+        return;
+      }
     }
-    delete this.deps.state.controllerLocator;
     await this.ensureController();
   }
 
@@ -2450,16 +2459,44 @@ export class ProcessManager {
     }
   }
 
-  private async spawnController(controllerSecret: string): Promise<void> {
+  /** Opens the controller's tmux window running an interactive OMP session — no `--mode rpc`,
+   * no `legion worker-shim`, no socket: the pane is a live TUI Sami can attach to. Resumes
+   * `resumeSessionFile` (the `ompSessionFile` the previous pane reported on `/controller/ready`)
+   * so a respawn keeps the conversation; no recorded file starts fresh and logs it. A recorded
+   * file that has gone missing refuses (same-agent invariant) before anything is mutated: the
+   * dead pane's locator, and with it the recorded file, stays exactly as it was and the
+   * controller capability is not rotated, so every later call refuses again with the same
+   * honest log instead of silently starting fresh — the controller has no launch-failure counter
+   * and never escalates; an operator restores the file or clears the locator (stop the daemon,
+   * delete `controllerLocator` from the state file, start it). The previous incarnation is
+   * retired only once its replacement's pane exists: the locator swap and the claim deletion
+   * happen together, synchronously, after `openWindow` resolves, so a launch that fails at tmux
+   * leaves locator and claim untouched with only the capability rotated (harmless: the pane it
+   * authorised is dead) and the next call resumes the same file. */
+  private async spawnController(resumeSessionFile: string | undefined): Promise<void> {
     const controllerDir = path.join(this.deps.config.stateDir, "controller");
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
-    await this.writeOmpConfig(controllerDir);
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
     const token = controllerToken(this.deps.state.project);
-    // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
+    if (resumeSessionFile === undefined) {
+      console.info("[legion] starting the controller fresh: no OMP session file is recorded");
+    }
+    const resumeArgument = await this.computeResumeArgument(
+      token,
+      resumeSessionFile,
+      "resurrecting the controller"
+    );
+    await this.writeOmpConfig(controllerDir);
+    // Interactive: no `--mode rpc`. The tmux runtime opens this command in the pane directly, with
+    // no `legion worker-shim` and no socket (see `TmuxRuntime.spawnController`).
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    // Taken before the first write (the mint's own persist), released once the locator is in
+    // state or the launch has failed — see `holdProcessSecret`. On a respawn the dead
+    // incarnation's locator also covers the file until the swap below; on a fresh start the hold
+    // alone does.
     const releaseSecret = this.holdProcessSecret(token);
     try {
+      const controllerSecret = await this.deps.mintControllerCapability();
       // Tracked before the runtime writes it — see `spawnTree`.
       this.processSecretFiles.add(token);
       const env = {
@@ -2467,40 +2504,39 @@ export class ProcessManager {
         LEGION_ROLE: "controller",
         LEGION_DAEMON_URL: this.deps.config.daemonUrl,
         LEGION_PROJECT: this.deps.state.project,
+        // The gh shim the extension installs lives under `<stateDir>/worker-bin` and reads this.
+        LEGION_STATE_DIR: this.deps.config.stateDir,
         ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
         ENVOY_URL: this.deps.config.envoyUrl,
         PATH: this.deps.processPath,
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
-      this.deps.state.controllerLocator = await this.runtime.spawn("controller", {
+      const locator = await this.runtime.spawn("controller", {
         role: "controller",
         workspaceDir: controllerDir,
         env,
         innerCommand,
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret },
       });
+      // The previous incarnation is retired here, in one synchronous step now that its
+      // replacement exists. Its role claim goes with its locator: the claim is the
+      // registration-deadline guard's evidence that the *current* pane reached
+      // `/controller/ready`, and leaving a dead incarnation's claim in place would make every
+      // later deadline see "claimed" and do nothing, so a resumed pane that hangs or dies during
+      // boot would never be recovered. The new pane puts the claim back through
+      // `/controller/ready` — the only path that ever writes it. `ompSessionFile` is carried onto
+      // the fresh locator so a `/controller/ready` that omits the field (an older plugin) does
+      // not lose the file the next respawn needs.
+      delete this.deps.state.roles[token];
+      this.deps.state.controllerLocator = {
+        ...locator,
+        ...(resumeSessionFile === undefined ? {} : { ompSessionFile: resumeSessionFile }),
+      };
     } finally {
       releaseSecret();
     }
     await this.persist();
-  }
-
-  /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
-   * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
-   * connect failure (listener race, stale socket, RPC timeout) must never block
-   * `/controller/ready` from accepting the role — the daemon holds no events to replay here
-   * either; the connection is retried on the next `spawnWorker`/`workerReady`/reconnect attempt
-   * that touches this socket.
-   */
-  async markControllerReady(): Promise<void> {
-    const locator = this.deps.state.controllerLocator;
-    if (!locator) return;
-    try {
-      await this.clientFor(controllerToken(this.deps.state.project), locator);
-    } catch (error) {
-      console.error("[legion] failed to connect controller shim socket on ready:", error);
-    }
   }
 
   private async writeOmpConfig(directory: string): Promise<void> {
@@ -2556,10 +2592,11 @@ export class ProcessManager {
    * client this manager is deliberately closing. Everything past that — the runtime's own
    * graceful attempt when nothing was cached, and the kill itself — is `Runtime.stop`'s;
    * `skipGraceful` (the caller already confirmed nothing live is there to ask) skips straight to
-   * it. A `ProcessStopFailed` from the runtime (it could not confirm the process stopped) is
-   * rethrown as `StopFailed` for this token; every other error passes through unchanged. The
-   * caller must never treat the process as stopped, or its claim/locator as safe to delete, when
-   * it cannot confirm that.
+   * it, and so does a locator with no socket at all (the controller's interactive pane). A
+   * `ProcessStopFailed` from the runtime (it could not confirm the process stopped) is rethrown
+   * as `StopFailed` for this token; every other error passes through unchanged. The caller must
+   * never treat the process as stopped, or its claim/locator as safe to delete, when it cannot
+   * confirm that.
    */
   private async stopProcess(
     token: string,
@@ -2626,17 +2663,18 @@ export class ProcessManager {
   /** The daemon-configured `worker_rpc_timeout_seconds` (default 5), in milliseconds -- the
    * timeout every runtime dial and `probeWorker` call in this file uses for a single
    * worker RPC request (`negotiate_protocol`/`get_state`), including the background
-   * connect `markTreeReady`/`workerReady`/`markControllerReady` kick off after
-   * `/process/ready`/`/worker/ready`/`/controller/ready` already responded. */
+   * connect `markTreeReady`/`workerReady` kick off after `/process/ready`/`/worker/ready`
+   * already responded. */
   private get workerRpcTimeoutMs(): number {
     return this.deps.config.workerRpcTimeoutSeconds * 1000;
   }
 
-  /** Probes the controller's recorded locator for liveness through the runtime, clearing the
-   * locator on a dead verdict (a dead controller's record must never keep `ensureController`
-   * from spawning a fresh one). An `unknown` verdict is refused exactly as `probe` refuses it
-   * for a tree — never treated as dead, which would delete the record of a possibly-live
-   * controller and spawn a second one beside it. */
+  /** Probes the controller's recorded locator for liveness through the runtime. A pure probe,
+   * like `probe` for roots: a dead verdict returns `false` and leaves the locator — and the
+   * `ompSessionFile` it records — untouched for `spawnController` to resume and then clear. An
+   * `unknown` verdict is refused exactly as `probe` refuses it for a tree — never treated as
+   * dead, which would spawn a second controller beside a possibly-live one. (The tmux runtime's
+   * own `probe` backfills a never-recorded pane id in place.) */
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
@@ -2646,11 +2684,7 @@ export class ProcessManager {
         "Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy"
       );
     }
-    if (result.status === "dead") {
-      delete this.deps.state.controllerLocator;
-      return false;
-    }
-    return true;
+    return result.status === "alive";
   }
 
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {

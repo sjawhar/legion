@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { controllerToken, type LegionRole } from "@legion/contracts";
+import { controllerToken, type GrantResponse, type LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -107,7 +107,7 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
 };
 
 async function persistedTranscript(
-  context: SessionContext
+  context: CommandContext | SessionContext
 ): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
   await context.sessionManager.ensureOnDisk();
   const sessionFile = context.sessionManager.getSessionFile();
@@ -198,6 +198,13 @@ export default function legionExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
+  /** The transcript the last successful controller claim reported (undefined after a takeover
+   * from a hand-started session, which reports none). Compared beside the session id when a
+   * navigation leaves the id alone, because one path moves the file under the same id with no
+   * session event of its own: a `!cd <dir>` or `/move` typed into the pane relocates the
+   * transcript (`SessionManager.moveTo`), and the next tree or branch navigation is when the
+   * daemon's recorded resume target can follow it. */
+  let controllerTranscript: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
   const controlCodec = StringCodec();
@@ -283,7 +290,23 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
-  const claimController = async (context: CommandContext | SessionContext): Promise<void> => {
+  /**
+   * Claims the controller role for the context's session and posts `/controller/ready`. The
+   * transcript the daemon records on its controller locator — and later `--resume`s into a fresh
+   * pane — must be the daemon pane's own, so `reportTranscript` is true only from that pane: its
+   * session start, a session switch typed into it, and `/legion-claim-controller` run inside it.
+   * The same command from a hand-started session (no `LEGION_CONTROLLER` marker) passes false:
+   * it takes the role and the daemon's recorded session id, but leaves the pane's recorded file
+   * untouched, so a dead pane is never resumed into an operator's live transcript. A missing
+   * transcript on the pane path is a boot failure, exactly as it is for a root architect. The
+   * regain re-run below omits the transcript on purpose: the daemon keeps a recorded file when a
+   * later claim omits the field, and a takeover session must never become the pane's resume
+   * target.
+   */
+  const claimController = async (
+    context: CommandContext | SessionContext,
+    options: { readonly reportTranscript: boolean }
+  ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const daemon = createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
     const secret = controllerCapability ?? requiredControllerCapability(process.env);
@@ -291,14 +314,53 @@ export default function legionExtension(pi: PiApi): void {
     const { project } = await daemon.state();
     const token = controllerToken(project);
     await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
-    await daemon.controllerReady({ secret, sessionId: sessionID });
+    const ompSessionFile = options.reportTranscript
+      ? (await persistedTranscript(context)).sessionFile
+      : undefined;
+    await daemon.controllerReady({
+      secret,
+      sessionId: sessionID,
+      ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+    });
     controllerSessionID = sessionID;
+    controllerTranscript = ompSessionFile;
+    // Re-registered on every claim (boot, each `/new`, each takeover) on purpose: the slot is
+    // last-wins, so the live listener always carries the session id of the claim that landed
+    // last, and nothing here is cleared or read live.
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
       await rerunReadyAfterRegain("controller/ready", role, reason, () =>
         daemon.controllerReady({ secret, sessionId: sessionID })
       );
     });
+  };
+
+  /** `/new`, `/resume`, or `/fork` typed into the controller pane replaces the session id and its
+   * transcript. Re-claim so the Envoy role, the daemon's recorded session id, the transcript the
+   * daemon would resume, and the `controllerSessionID` that keeps `bash` wrapped all follow the
+   * new session; otherwise the merge queue is stranded until the pane dies. A `task`-spawned
+   * subagent inside the pane loads its own instance of this module with the pane's environment
+   * and must never claim (see `isSubagentSession`), and a tree navigation that left the session
+   * id and transcript as they were has nothing to re-claim — every `/controller/ready` runs a
+   * forced resync, so it is not posted for nothing. A failed re-claim is reported to the operator
+   * sitting at the pane rather than thrown out of the handler. */
+  const reclaimControllerAfterSessionChange = async (context: SessionContext): Promise<void> => {
+    if (await checkSubagentSession(context)) return;
+    if (classifySession(process.env).kind !== "controller") return;
+    if (
+      context.sessionManager.getSessionId() === controllerSessionID &&
+      context.sessionManager.getSessionFile() === controllerTranscript
+    ) {
+      return;
+    }
+    try {
+      await claimController(context, { reportTranscript: true });
+    } catch (error) {
+      context.ui.notify(
+        `legion: re-claiming the controller for this session failed (${messageFor(error)}). Until a re-claim succeeds, controller wakes and merges will not reach this session and its shell commands run without a Legion grant, so legion gh is unavailable.`,
+        "warning"
+      );
+    }
   };
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -564,7 +626,7 @@ export default function legionExtension(pi: PiApi): void {
       case "controller": {
         const sessionID = context.sessionManager.getSessionId();
         if (controllerSessionID === undefined || controllerSessionID === sessionID) {
-          await claimController(context);
+          await claimController(context, { reportTranscript: true });
         }
         return;
       }
@@ -583,6 +645,12 @@ export default function legionExtension(pi: PiApi): void {
         return;
     }
   });
+
+  // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
+  // navigation carries no reason, and every one of them can leave the pane on a new session id.
+  pi.on("session_switch", (_event, context) => reclaimControllerAfterSessionChange(context));
+  pi.on("session_branch", (_event, context) => reclaimControllerAfterSessionChange(context));
+  pi.on("session_tree", (_event, context) => reclaimControllerAfterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
@@ -638,11 +706,45 @@ export default function legionExtension(pi: PiApi): void {
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
+    const command = toolCall.input.command;
+    const wrapBashWithGrant = async (
+      mint: () => Promise<GrantResponse>
+    ): Promise<ToolCallEventResult> => {
+      try {
+        const grant = await mint();
+        const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
+        const workerBin = await installWorkerGhShim(stateDir);
+        return {
+          input: {
+            ...toolCall.input,
+            command: [workerGhEnvironment(grant.grantId, stateDir, workerBin), command].join("\n"),
+          },
+        };
+      } catch (error) {
+        return { block: true, reason: messageFor(error) };
+      }
+    };
     if (active === undefined) {
-      // A worker (root or phase) whose own boot handshake has not completed
-      // yet has no capability to mint a grant with. The controller is
-      // exempt: the daemon also sets LEGION_ROLE=controller on its process,
-      // but a controller never claims a Legion role here.
+      // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
+      // authenticated by the controller capability) and is wrapped exactly like a worker. The
+      // client is recovery-less: no recovery token exists for the controller.
+      if (
+        controllerSessionID !== undefined &&
+        controllerSessionID === sessionID &&
+        controllerCapability !== undefined
+      ) {
+        const secret = controllerCapability;
+        return wrapBashWithGrant(() =>
+          createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL")).grant({
+            sessionId: sessionID,
+            secret,
+          })
+        );
+      }
+      // A worker (root or phase) whose own boot handshake has not completed yet has no
+      // capability to mint a grant with, so it is blocked. A controller that has not yet
+      // claimed (the daemon also sets LEGION_ROLE=controller on its process) is not: nothing
+      // here can mint for it until `claimController` runs, and a wrong secret is what blocks it.
       if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
         return {
           block: true,
@@ -651,27 +753,14 @@ export default function legionExtension(pi: PiApi): void {
       }
       return undefined;
     }
-    try {
-      const grant = await roleDaemon().grant({
+    return wrapBashWithGrant(() =>
+      roleDaemon().grant({
         tree: active.tree,
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-      });
-      const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
-      const workerBin = await installWorkerGhShim(stateDir);
-      return {
-        input: {
-          ...toolCall.input,
-          command: [
-            workerGhEnvironment(grant.grantId, stateDir, workerBin),
-            toolCall.input.command,
-          ].join("\n"),
-        },
-      };
-    } catch (error) {
-      return { block: true, reason: messageFor(error) };
-    }
+      })
+    );
   });
 
   pi.on("session_shutdown", async (_event, context) => {
@@ -732,6 +821,13 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-claim-controller", {
     description: "Claim the Legion controller role and register daemon authority for this session",
-    handler: async (_args, context) => claimController(context),
+    // Inside the daemon pane (the `LEGION_CONTROLLER` marker) this is the manual override for a
+    // lost claim, and the pane's own transcript is the right resume target. From a hand-started
+    // session it is an interactive takeover: the role and the recorded session id move to this
+    // session, the daemon pane's recorded transcript does not (see `claimController`).
+    handler: async (_args, context) =>
+      claimController(context, {
+        reportTranscript: classifySession(process.env).kind === "controller",
+      }),
   });
 }

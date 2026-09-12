@@ -10,12 +10,13 @@ export interface SessionCapability {
   secretHash: Buffer;
 }
 
-export interface Grant {
-  issue: IssueKey;
-  role: LegionRole;
-  sessionId: string;
-  expiresAt: number;
-}
+/** A short-lived credential handle (`LEGION_GRANT`). A phase worker's or root architect's grant
+ * carries the issue and `LegionRole` its session capability was minted for; the controller's
+ * grant carries only `role: "controller"` — it has no issue, is not a phase, and is the one grant
+ * `/gh-token` and `/git-credential` honour `merge: true` for. */
+export type Grant =
+  | { issue: IssueKey; role: LegionRole; sessionId: string; expiresAt: number }
+  | { role: "controller"; sessionId: string; expiresAt: number };
 
 export interface BootToken {
   tree: IssueKey;
@@ -150,6 +151,15 @@ export class CapabilityService {
     this.capabilities.delete(sessionId);
     for (const [grantId, grant] of this.grants) {
       if (grant.sessionId === sessionId) this.grants.delete(grantId);
+    }
+  }
+
+  /** Drops every grant the controller minted. Called when the controller capability rotates
+   * (`mintControllerCapability`, on every controller spawn), so a grant minted by the previous
+   * pane cannot outlive the secret that authorised it. */
+  revokeControllerGrants(): void {
+    for (const [grantId, grant] of this.grants) {
+      if (grant.role === "controller") this.grants.delete(grantId);
     }
   }
 

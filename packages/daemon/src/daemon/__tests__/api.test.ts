@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -45,7 +45,6 @@ describe("Legion HTTP API", () => {
     generation: number;
   }>;
   let treeReadyConnected: IssueKey[];
-  let controllerConnected: boolean;
   let workerReadyConnected: boolean;
   let confirmRootReadyCalls: Array<{ tree: IssueKey; generation: number }>;
   let now: number;
@@ -61,7 +60,6 @@ describe("Legion HTTP API", () => {
     spawnedWorkers = [];
     workerReadyCalls = [];
     treeReadyConnected = [];
-    controllerConnected = false;
     workerReadyConnected = false;
     confirmRootReadyCalls = [];
     now = 1_700_000_000_000;
@@ -117,7 +115,6 @@ describe("Legion HTTP API", () => {
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
     mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];
     markTreeReadyImpl?: LegionApiDeps["processManager"]["markTreeReady"];
-    markControllerReadyImpl?: LegionApiDeps["processManager"]["markControllerReady"];
     workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
@@ -159,7 +156,6 @@ describe("Legion HTTP API", () => {
         confirmRootReady: (tree, generation) => {
           confirmRootReadyCalls.push({ tree, generation });
         },
-        markControllerReady: options?.markControllerReadyImpl ?? (() => {}),
         cancelBootWatchdog: () => {},
         spawnWorker:
           options?.spawnWorkerImpl ??
@@ -653,7 +649,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
-      socketPath: "/tmp/legion/controller.sock",
+      ompSessionFile: "/tmp/controller.jsonl",
     };
     state.gates[root] = { designAskId: "ask-1", designApproved: "ask-1" };
     state.pendingStatusWrites[child] = { status: "in_progress", statusAtRecord: "todo" };
@@ -733,6 +729,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
+      ompSessionFile: "/tmp/controller.jsonl",
     });
     expect(body.roles).toMatchObject({
       [controllerToken(state.project)]: { role: "controller", sessionId: "ses_controller" },
@@ -775,32 +772,89 @@ describe("Legion HTTP API", () => {
     expect(leakedKeys).toEqual([]);
   });
 
-  it("responds to controller/ready before its own shim connects, delivering the connect afterward", async () => {
-    const shimGate = Promise.withResolvers<void>();
-    let connected: Promise<void> | undefined;
+  it("records the controller's OMP session file on /controller/ready and leaves it unset when omitted", async () => {
+    state.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+    };
+    let readyCalls = 0;
     await start({
-      markControllerReadyImpl: () => {
-        connected = (async () => {
-          await shimGate.promise;
-          controllerConnected = true;
-        })();
-        return connected;
+      onControllerReady: async () => {
+        readyCalls += 1;
       },
     });
 
-    // Same shape as /process/ready: the response returns before the (best-effort)
-    // markControllerReady connect below settles, so a slow/failing shim connect can never add
-    // RPC-timeout latency to the controller's own ready call.
-    const ready = await json("/legion/v1/controller/ready", {
+    const withoutFile = await json("/legion/v1/controller/ready", {
       secret: controllerSecret,
       sessionId: "ses_controller",
     });
-    expect(ready.response.status).toBe(200);
-    expect(controllerConnected).toBe(false);
+    expect(withoutFile.response.status).toBe(200);
+    expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+    });
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_controller",
+    });
+    expect(readyCalls).toBe(1);
 
-    shimGate.resolve();
-    await connected;
-    expect(controllerConnected).toBe(true);
+    const withFile = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_controller",
+      ompSessionFile: "/tmp/controller.jsonl",
+    });
+    expect(withFile.response.status).toBe(200);
+    expect(state.controllerLocator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+      ompSessionFile: "/tmp/controller.jsonl",
+    });
+    expect(readyCalls).toBe(2);
+
+    // An older plugin (or a takeover claim) that omits the field leaves the recorded file alone.
+    const omittedAfterRecord = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_takeover",
+    });
+    expect(omittedAfterRecord.response.status).toBe(200);
+    expect(state.controllerLocator?.ompSessionFile).toBe("/tmp/controller.jsonl");
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_takeover",
+    });
+
+    const wrongSecret = await json("/legion/v1/controller/ready", {
+      secret: "wrong",
+      sessionId: "ses_controller",
+      ompSessionFile: "/tmp/other.jsonl",
+    });
+    expect(wrongSecret.response.status).toBe(403);
+    expect(wrongSecret.body).toEqual({ error: "Invalid controller capability" });
+    expect(state.controllerLocator?.ompSessionFile).toBe("/tmp/controller.jsonl");
+  });
+
+  it("accepts an OMP session file on /controller/ready when no controller pane is recorded, without inventing a locator", async () => {
+    delete state.controllerLocator;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await start();
+      const ready = await json("/legion/v1/controller/ready", {
+        secret: controllerSecret,
+        sessionId: "ses_controller",
+        ompSessionFile: "/tmp/controller.jsonl",
+      });
+      expect(ready.response.status).toBe(200);
+      expect(state.controllerLocator).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("retries controller startup redelivery after a failed ready callback", async () => {
@@ -1424,6 +1478,144 @@ describe("Legion HTTP API", () => {
       grantId: grant.body.grantId,
     });
     expect(token.response.status).toBe(403);
+  });
+  it("mints a controller grant from the controller capability and lets only it redeem gh-token with merge", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architectGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(architectGrant.status).toBe(200);
+
+    // A phase-worker grant carrying merge intent is refused before any GitHub lease is fetched.
+    const refusedToken = await json("/legion/v1/gh-token", {
+      grantId: architectGrant.body.grantId,
+      merge: true,
+    });
+    expect(refusedToken.response.status).toBe(403);
+    expect(refusedToken.body).toEqual({
+      error: "Only the controller may merge; publish READY to the controller",
+    });
+    const refusedCredential = await json("/legion/v1/git-credential", {
+      grantId: architectGrant.body.grantId,
+      merge: true,
+    });
+    expect(refusedCredential.response.status).toBe(403);
+    expect(tokenRoles).toEqual([]);
+    // The same grant without merge intent still redeems as before.
+    const plainToken = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
+    expect(plainToken.response.status).toBe(200);
+    expect(tokenRoles).toEqual(["implement"]);
+
+    // The controller form: no tree/issue, authenticated by the controller capability.
+    const wrongSecret = await json("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: "wrong",
+    });
+    expect(wrongSecret.response.status).toBe(403);
+    expect(wrongSecret.body).toEqual({ error: "Invalid controller capability" });
+    const halfForm = await json("/legion/v1/grants", {
+      tree: root,
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(halfForm.response.status).toBe(400);
+
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+    expect(controllerGrant.body).toEqual({
+      grantId: expect.any(String),
+      expiresAt: new Date(now + 60_000).toISOString(),
+    });
+
+    const merged = await json("/legion/v1/gh-token", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(merged.response.status).toBe(200);
+    expect(merged.body).toEqual({
+      token: "minted-implement-acme",
+      appLogin: "legion-implement[bot]",
+    });
+    const credential = await curl("/legion/v1/git-credential", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(credential.status).toBe(200);
+    expect(credential.body).toBe("username=x-access-token\npassword=minted-implement-acme");
+    expect(tokenRoles).toEqual(["implement", "implement", "implement"]);
+  });
+  it("refuses a controller grant on phase/complete", async () => {
+    await start();
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+
+    const completed = await json("/legion/v1/phase/complete", {
+      grantId: controllerGrant.body.grantId,
+      summary: "done",
+    });
+    expect(completed.response.status).toBe(403);
+    expect(completed.body).toEqual({ error: "A controller grant cannot complete a phase" });
+    expect(publications).toEqual([]);
+  });
+  it("revokes outstanding controller grants when the controller capability is rotated for a respawn, leaving phase-worker grants alone", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_architect",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    const architectGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_architect",
+      secret: started.body.secret,
+    });
+    expect(architectGrant.status).toBe(200);
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+
+    // What `spawnController` does before opening a fresh pane.
+    await api?.mintControllerCapability();
+
+    const stale = await json("/legion/v1/gh-token", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(stale.response.status).toBe(403);
+    expect(tokenRoles).toEqual([]);
+    // The architect's grant was minted by a different capability and outlives the rotation.
+    const survivor = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
+    expect(survivor.response.status).toBe(200);
+    expect(tokenRoles).toEqual(["implement"]);
   });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();

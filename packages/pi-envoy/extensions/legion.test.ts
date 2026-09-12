@@ -63,7 +63,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 }));
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
-const { default: envoyExtension } = await import("./envoy");
+const { default: envoyExtension, resetLegionRoleClaimBridgeForTests } = await import("./envoy");
 const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
@@ -145,6 +145,11 @@ beforeEach(() => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  // OMP's `session_shutdown` removes each envoy instance from the process-wide role-claim
+  // bridge; this suite binds a fixture per test and never shuts it down, so it clears the
+  // bridge itself — otherwise a stale instance still serving a reused session id (its client
+  // bound to a previous test's fetch stub) would capture a later test's claim.
+  resetLegionRoleClaimBridgeForTests();
   natsConnections.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   for (const key of environmentKeys) {
@@ -157,7 +162,7 @@ afterEach(async () => {
   );
 });
 
-function createPi(): {
+function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
@@ -216,7 +221,9 @@ function createPi(): {
     registerCommand: (name, command) => commands.push({ name, ...command }),
     registerMessageRenderer: () => undefined,
   };
-  envoyExtension(pi as never);
+  // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
+  // handlers for one session event run in the opposite order to the manifest's.
+  if (options.bindEnvoy !== false) envoyExtension(pi as never);
   return { commands, handlers, tools, sentMessages, activeTools, pi };
 }
 
@@ -233,6 +240,109 @@ function createRealZodPi(): TestPi["zod"] {
     enum: (values) => z.enum(values as [string, ...string[]]) as unknown as ZodProperty,
     unknown: () => z.unknown() as unknown as ZodProperty,
     discriminatedUnion: () => ({}),
+  };
+}
+
+/**
+ * A listener-plus-daemon stub for the controller-pane tests. It records every request, keeps a
+ * per-session interest registry — a role claim registers its role topic exactly as the real
+ * listener does, so a rebind's registry lookup can find a role the session already holds —
+ * arbitrates a soft claim the listener's way (granted when the role is unheld, already this
+ * session's, or held by the declared previous session; 409 with the live holder otherwise),
+ * and answers the heartbeat's role read from `holder`, or "no holder" while `lostClaim` is set.
+ */
+function controllerPaneListener(token: string): {
+  readonly fetch: typeof fetch;
+  readonly requests: { readonly path: string; readonly body: unknown }[];
+  readonly registry: { holder: string | undefined; lostClaim: boolean };
+  readonly readyPosted: (count: number) => Promise<void>;
+} {
+  const requests: { readonly path: string; readonly body: unknown }[] = [];
+  const topics = new Map<string, Set<string>>();
+  const registry = { holder: undefined as string | undefined, lostClaim: false };
+  const readyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
+  const interest = (sessionID: string) => ({
+    session_id: sessionID,
+    machine_id: "machine",
+    dir: "/tmp/legion-workspace",
+    topics: [...(topics.get(sessionID) ?? [])],
+  });
+  const stub = (async (input, init) => {
+    const url = new URL(input.toString());
+    const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+    requests.push({ path: url.pathname, body });
+    if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+    if (url.pathname === "/legion/v1/controller/ready") {
+      const posted = requests.filter((request) => request.path === url.pathname).length;
+      for (const waiter of readyWaiters.splice(0)) {
+        if (waiter.count <= posted) waiter.resolve();
+        else readyWaiters.push(waiter);
+      }
+      return Response.json({});
+    }
+    if (url.pathname === "/legion/v1/grants") {
+      return Response.json({
+        grantId: `grant-for-${body?.sessionId}`,
+        expiresAt: "2099-01-01T00:00:00Z",
+      });
+    }
+    if (url.pathname === "/v1/interests/subscribe") {
+      const held = topics.get(body.session_id) ?? new Set<string>();
+      for (const topic of body.topics ?? []) held.add(topic);
+      topics.set(body.session_id, held);
+      return Response.json(interest(body.session_id));
+    }
+    if (url.pathname === "/v1/interests/unsubscribe") {
+      const held = topics.get(body.session_id);
+      for (const topic of body.topics ?? []) held?.delete(topic);
+      return Response.json({ removed: body.topics ?? [] });
+    }
+    if (url.pathname.startsWith("/v1/interests/")) {
+      const sessionID = url.pathname.slice("/v1/interests/".length);
+      if (!topics.has(sessionID)) {
+        return Response.json({ error: `no interests for ${sessionID}` }, { status: 404 });
+      }
+      return Response.json(interest(sessionID));
+    }
+    if (url.pathname === `/v1/roles/${token}`) {
+      if (registry.lostClaim || registry.holder === undefined) {
+        return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+      }
+      return Response.json({ role: token, holder: registry.holder, last_seen: 1 });
+    }
+    if (url.pathname === "/v1/roles/set") {
+      const holder = registry.holder;
+      if (
+        body.soft === true &&
+        holder !== undefined &&
+        holder !== body.session_id &&
+        holder !== body.previous_session_id
+      ) {
+        return Response.json(
+          { error: `role ${body.role} is held by ${holder}`, role: body.role, holder },
+          { status: 409 }
+        );
+      }
+      registry.holder = body.session_id;
+      registry.lostClaim = false;
+      const held = topics.get(body.session_id) ?? new Set<string>();
+      held.add(`notifications.role.${body.role}`);
+      topics.set(body.session_id, held);
+      return Response.json(interest(body.session_id));
+    }
+    return Response.json(interest(body?.session_id ?? ""));
+  }) as typeof fetch;
+  return {
+    fetch: stub,
+    requests,
+    registry,
+    readyPosted: (count) => {
+      const posted = requests.filter((request) => request.path === "/legion/v1/controller/ready");
+      if (posted.length >= count) return Promise.resolve();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      readyWaiters.push({ count, resolve });
+      return promise;
+    },
   };
 }
 
@@ -663,6 +773,8 @@ describe("Legion OMP extension", () => {
     }
     await sessionStart({}, sessionContext("ses_controller"));
     await sessionStart({}, sessionContext("ses_interactive"));
+    // A hand-started takeover session carries no daemon-pane marker.
+    delete process.env.LEGION_CONTROLLER;
     await claimCommand.handler("", sessionContext("ses_interactive"));
 
     expect(requests).toEqual([
@@ -697,7 +809,11 @@ describe("Legion OMP extension", () => {
       { path: "/v1/roles/set", body: { session_id: "ses_controller", role: token } },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-secret", sessionId: "ses_controller" },
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
       {
         path: "/v1/interests/subscribe",
@@ -740,11 +856,26 @@ describe("Legion OMP extension", () => {
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
+      // The takeover command moves the role and session id but never reports a transcript: the
+      // daemon pane's recorded file must stay the pane's own.
       {
         path: "/legion/v1/controller/ready",
         body: { secret: "controller-secret", sessionId: "ses_interactive" },
       },
     ]);
+
+    // The same command typed into the daemon pane itself (the marker present) is the manual
+    // override for a lost claim, and the pane's own transcript is the right resume target.
+    process.env.LEGION_CONTROLLER = "1";
+    await claimCommand.handler("", sessionContext("ses_pane", "/tmp/pane.jsonl"));
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/controller/ready",
+      body: {
+        secret: "controller-secret",
+        sessionId: "ses_pane",
+        ompSessionFile: "/tmp/pane.jsonl",
+      },
+    });
   });
   test("a controller that regains its role re-runs controller/ready so held notices drain", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
@@ -791,6 +922,16 @@ describe("Legion OMP extension", () => {
     );
     const ready = {
       path: "/legion/v1/controller/ready",
+      body: {
+        secret: "controller-secret",
+        sessionId: "ses_controller",
+        ompSessionFile: "/tmp/session.jsonl",
+      },
+    };
+    // The re-run carries no transcript: the daemon keeps the file it recorded when a later claim
+    // omits the field, and a regain must never re-point the pane's resume target.
+    const readyAgain = {
+      path: "/legion/v1/controller/ready",
       body: { secret: "controller-secret", sessionId: "ses_controller" },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -806,7 +947,7 @@ describe("Legion OMP extension", () => {
     listenerHoldsClaim = false;
     intervals[0]?.();
     await secondReady.promise;
-    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, readyAgain]);
     expect(
       requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
     ).toEqual([
@@ -865,6 +1006,14 @@ describe("Legion OMP extension", () => {
     );
     const ready = {
       path: "/legion/v1/controller/ready",
+      body: {
+        secret: "controller-secret",
+        sessionId: "ses_controller_rebind",
+        ompSessionFile: "/tmp/session.jsonl",
+      },
+    };
+    const readyAgain = {
+      path: "/legion/v1/controller/ready",
       body: { secret: "controller-secret", sessionId: "ses_controller_rebind" },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -882,7 +1031,7 @@ describe("Legion OMP extension", () => {
     listenerHoldsClaim = false;
     intervals[0]?.();
     await secondReady.promise;
-    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, readyAgain]);
     expect(
       requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
     ).toEqual([
@@ -1047,7 +1196,11 @@ describe("Legion OMP extension", () => {
 
     await claimCommand.handler("", {
       cwd: "/tmp/legion-workspace",
-      sessionManager: { getSessionId: () => "ses_interactive" },
+      sessionManager: {
+        getSessionId: () => "ses_interactive",
+        getSessionFile: () => "/tmp/session.jsonl",
+        ensureOnDisk: async () => undefined,
+      },
       ui: { notify: () => undefined },
     });
 
@@ -1110,7 +1263,11 @@ describe("Legion OMP extension", () => {
     await expect(
       claimCommand.handler("", {
         cwd: "/tmp/legion-workspace",
-        sessionManager: { getSessionId: () => "ses_interactive" },
+        sessionManager: {
+          getSessionId: () => "ses_interactive",
+          getSessionFile: () => "/tmp/session.jsonl",
+          ensureOnDisk: async () => undefined,
+        },
         ui: { notify: () => undefined },
       })
     ).rejects.toThrow(
@@ -1537,12 +1694,18 @@ describe("Legion OMP extension", () => {
     }
     await sessionStart({}, sessionContext("ses_controller"));
     await sessionStart({}, sessionContext("ses_interactive"));
+    // A hand-started takeover session carries no daemon-pane marker.
+    delete process.env.LEGION_CONTROLLER;
     await claimCommand.handler("", sessionContext("ses_interactive"));
 
     expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "file-controller-secret", sessionId: "ses_controller" },
+        body: {
+          secret: "file-controller-secret",
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
       {
         path: "/legion/v1/controller/ready",
@@ -1893,15 +2056,25 @@ describe("Legion OMP extension", () => {
       reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
     });
   });
-  test("does not block bash calls from the controller session", async () => {
+  test("rewrites a claimed controller's bash calls with a controller grant and the gh shim", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_ROLE = "controller";
     process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    globalThis.fetch = (async (input) => {
+    globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
       if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
       if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ grantId: "controller-grant-1", expiresAt: "2099-01-01T00:00:00Z" });
+      }
       return Response.json({
         session_id: "ses_controller_bash",
         machine_id: "machine",
@@ -1917,19 +2090,313 @@ describe("Legion OMP extension", () => {
       throw new Error("controller lifecycle handlers were not registered");
     }
     const context = sessionContext("ses_controller_bash");
+
+    // Before the claim completes nothing can mint for the controller, so its call passes
+    // through unwrapped rather than being blocked as an unregistered worker.
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-controller-unclaimed", input: { command: "true" } },
+        context
+      )
+    ).resolves.toBeUndefined();
+
+    await sessionStart({}, context);
+    const result = await toolCall(
+      {
+        toolName: "bash",
+        toolCallId: "call-controller-bash",
+        input: { command: "legion gh -- pr merge 7 --squash" },
+      },
+      context
+    );
+
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("input" in result) ||
+      typeof result.input !== "object" ||
+      result.input === null ||
+      !("command" in result.input) ||
+      typeof result.input.command !== "string"
+    ) {
+      throw new Error("controller shell was not rewritten with a controller grant");
+    }
+    const lines = result.input.command.split("\n");
+    expect(lines[0]).toBe("export LEGION_GRANT='controller-grant-1'");
+    expect(lines.at(-1)).toBe("legion gh -- pr merge 7 --squash");
+    expect(result.input.command).toContain(`PATH='${path.join(stateDir, "worker-bin")}':$PATH`);
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/grants",
+      body: { sessionId: "ses_controller_bash", secret: "controller-secret" },
+    });
+    expect(await readFile(path.join(stateDir, "worker-bin", "gh"), "utf8")).toContain(
+      'exec legion gh -- "$@"'
+    );
+  });
+  test("blocks a controller bash call when the daemon refuses the controller grant", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ error: "Invalid controller capability" }, { status: 403 });
+      }
+      return Response.json({
+        session_id: "ses_controller_refused",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("controller lifecycle handlers were not registered");
+    }
+    const context = sessionContext("ses_controller_refused");
     await sessionStart({}, context);
 
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-controller-bash",
+          toolCallId: "call-controller-refused",
           input: { command: "legion state" },
         },
         context
       )
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      block: true,
+      reason: 'POST /legion/v1/grants failed with 403: {"error":"Invalid controller capability"}',
+    });
   });
+  /** The daemon pane's environment for the controller re-claim tests. */
+  const controllerPaneEnvironment = async (): Promise<void> => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+  };
+  /** One SessionManager per pane, exactly as OMP hands it out: `/new` mutates the manager the
+   * boot-time contexts (and every handler closure) already hold, so the live id and file are
+   * read through it, never frozen in a context object. */
+  const controllerPane = (
+    ticks: (() => void)[]
+  ): { readonly context: SessionContext; switchTo: (id: string, file: string) => void } => {
+    let liveSessionID = "ses_pane_first";
+    let liveSessionFile = "/tmp/first.jsonl";
+    return {
+      context: {
+        ...sessionContext(liveSessionID),
+        sessionManager: {
+          getSessionId: () => liveSessionID,
+          getSessionFile: () => liveSessionFile,
+          ensureOnDisk: async () => undefined,
+        },
+        setInterval: (callback) => ticks.push(callback),
+      },
+      switchTo: (id, file) => {
+        liveSessionID = id;
+        liveSessionFile = file;
+      },
+    };
+  };
+  const controllerReadyBody = (sessionId: string, ompSessionFile?: string) => ({
+    path: "/legion/v1/controller/ready",
+    body: {
+      secret: "controller-secret",
+      sessionId,
+      ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+    },
+  });
+
+  test("re-claims the controller and re-reports its transcript when /new changes the pane's session id, keeping bash wrapped", async () => {
+    await controllerPaneEnvironment();
+    const token = "legion-omp-controller";
+    const listener = controllerPaneListener(token);
+    globalThis.fetch = listener.fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const sessionSwitch = fixture.handlers.get("session_switch");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || sessionSwitch === undefined || toolCall === undefined) {
+      throw new Error("controller lifecycle handlers were not registered");
+    }
+    const pane = controllerPane([]);
+    await sessionStart({}, pane.context);
+
+    // Sami types /new into the pane: OMP moves it to a fresh session id and transcript.
+    pane.switchTo("ses_pane_second", "/tmp/second.jsonl");
+    await sessionSwitch({ reason: "new" }, pane.context);
+
+    const readies = listener.requests.filter((r) => r.path === "/legion/v1/controller/ready");
+    expect(readies).toEqual([
+      controllerReadyBody("ses_pane_first", "/tmp/first.jsonl"),
+      controllerReadyBody("ses_pane_second", "/tmp/second.jsonl"),
+    ]);
+    expect(listener.registry.holder).toBe("ses_pane_second");
+
+    const result = await toolCall(
+      { toolName: "bash", toolCallId: "call-after-switch", input: { command: "legion state" } },
+      pane.context
+    );
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("input" in result) ||
+      typeof result.input !== "object" ||
+      result.input === null ||
+      !("command" in result.input) ||
+      typeof result.input.command !== "string"
+    ) {
+      throw new Error("the switched controller session's shell was not rewritten with a grant");
+    }
+    expect(result.input.command.split("\n")[0]).toBe(
+      "export LEGION_GRANT='grant-for-ses_pane_second'"
+    );
+    expect(listener.requests.at(-1)).toEqual({
+      path: "/legion/v1/grants",
+      body: { sessionId: "ses_pane_second", secret: "controller-secret" },
+    });
+  });
+
+  test("a tree navigation that changes nothing and a task subagent's switch re-claim nothing; a tree navigation after the transcript moved under the same id re-reports the moved file", async () => {
+    await controllerPaneEnvironment();
+    const token = "legion-omp-controller";
+    const listener = controllerPaneListener(token);
+    globalThis.fetch = listener.fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const sessionTree = fixture.handlers.get("session_tree");
+    if (sessionStart === undefined || sessionTree === undefined) {
+      throw new Error("controller lifecycle handlers were not registered");
+    }
+    const pane = controllerPane([]);
+    await sessionStart({}, pane.context);
+
+    // A tree navigation that leaves the session id and transcript as they were re-claims
+    // nothing: every /controller/ready runs a forced resync and must not be posted for nothing.
+    await sessionTree({ newLeafId: "leaf" }, pane.context);
+    // A task-spawned subagent inside the pane loads its own instance of this module with the
+    // pane's environment; its switch events must never take the controller role or record the
+    // subagent's transcript as the pane's.
+    const { childFile } = await createSubagentTranscriptPaths();
+    const subagent = createPi();
+    legionExtension(subagent.pi);
+    const subagentSwitch = subagent.handlers.get("session_switch");
+    if (subagentSwitch === undefined) throw new Error("subagent switch handler missing");
+    await subagentSwitch({ reason: "new" }, sessionContext("ses_subagent", childFile));
+    expect(listener.requests.filter((r) => r.path === "/legion/v1/controller/ready")).toEqual([
+      controllerReadyBody("ses_pane_first", "/tmp/first.jsonl"),
+    ]);
+    expect(listener.registry.holder).toBe("ses_pane_first");
+
+    // `!cd <dir>` (or /move) typed into the pane relocates the transcript under the same session
+    // id with no session event of its own; the next tree navigation is where the daemon's
+    // recorded resume target follows it.
+    pane.switchTo("ses_pane_first", "/tmp/elsewhere/first.jsonl");
+    await sessionTree({ newLeafId: "leaf-2" }, pane.context);
+    expect(listener.requests.filter((r) => r.path === "/legion/v1/controller/ready")).toEqual([
+      controllerReadyBody("ses_pane_first", "/tmp/first.jsonl"),
+      controllerReadyBody("ses_pane_first", "/tmp/elsewhere/first.jsonl"),
+    ]);
+  });
+
+  // OMP dispatches one session event to every extension's handler; the manifest lists envoy.ts
+  // before legion.ts, but nothing in the code may depend on that. The claim legion.ts makes on
+  // /new must reach the pane's own envoy instance in either order, because only that instance's
+  // heartbeat re-asserts the role (LEGION-29): under the previous last-bound-wins routing the
+  // legion-first order handed the claim to the subagent's instance, whose heartbeat then saw the
+  // pane's id as drift and soft-claimed the controller role for the subagent's session.
+  for (const order of ["envoy.ts", "legion.ts"] as const) {
+    test(`after /new in a pane that ran a task subagent, the heartbeat re-asserts the controller for the pane's new session when ${order} handles the switch first`, async () => {
+      await controllerPaneEnvironment();
+      const token = "legion-omp-controller";
+      const listener = controllerPaneListener(token);
+      globalThis.fetch = listener.fetch;
+      const fixture = createPi({ bindEnvoy: order === "envoy.ts" });
+      legionExtension(fixture.pi);
+      if (order === "legion.ts") envoyExtension(fixture.pi as never);
+      const sessionStart = fixture.handlers.get("session_start");
+      const sessionSwitch = fixture.handlers.get("session_switch");
+      if (sessionStart === undefined || sessionSwitch === undefined) {
+        throw new Error("controller lifecycle handlers were not registered");
+      }
+      const paneTicks: (() => void)[] = [];
+      const pane = controllerPane(paneTicks);
+      await sessionStart({}, pane.context);
+      expect(listener.registry.holder).toBe("ses_pane_first");
+
+      // The pane runs a `task`: a fresh pair of extension instances binds in this process and
+      // the subagent's session starts, with its own heartbeat.
+      const { childFile } = await createSubagentTranscriptPaths();
+      const subagent = createPi();
+      legionExtension(subagent.pi);
+      const subagentStart = subagent.handlers.get("session_start");
+      if (subagentStart === undefined) throw new Error("subagent handlers were not registered");
+      const subagentTicks: (() => void)[] = [];
+      await subagentStart(
+        {},
+        {
+          ...sessionContext("ses_subagent", childFile),
+          setInterval: (callback) => subagentTicks.push(callback),
+        }
+      );
+
+      // Sami types /new into the pane.
+      pane.switchTo("ses_pane_second", "/tmp/second.jsonl");
+      await sessionSwitch({ reason: "new" }, pane.context);
+      await listener.readyPosted(2);
+      expect(listener.registry.holder).toBe("ses_pane_second");
+
+      // The subagent's heartbeat sees no drift and holds no role: nothing to re-assert.
+      expect(subagentTicks).toHaveLength(1);
+      subagentTicks[0]?.();
+      await Promise.resolve();
+      expect(listener.registry.holder).toBe("ses_pane_second");
+
+      // The listener later loses sight of the pane (a reaped claim, a listener restart). Only
+      // the pane's own heartbeat is registered here, and only a topic its instance holds is
+      // re-asserted — so the claim must have reached the pane's instance: it soft-claims for the
+      // session the pane holds now and re-runs controller/ready for it, without a transcript,
+      // so the daemon keeps /tmp/second.jsonl as the file it would resume.
+      listener.registry.lostClaim = true;
+      expect(paneTicks).toHaveLength(1);
+      paneTicks[0]?.();
+      await listener.readyPosted(3);
+      expect(
+        listener.requests.filter((r) => r.path === "/legion/v1/controller/ready").at(-1)
+      ).toEqual(controllerReadyBody("ses_pane_second"));
+      expect(listener.requests.filter((r) => r.path === "/v1/roles/set").at(-1)).toEqual({
+        path: "/v1/roles/set",
+        body: { session_id: "ses_pane_second", role: token, soft: true },
+      });
+      expect(listener.registry.holder).toBe("ses_pane_second");
+      const claimsBySubagent = listener.requests.filter(
+        (r) =>
+          r.path === "/v1/roles/set" &&
+          typeof r.body === "object" &&
+          r.body !== null &&
+          "session_id" in r.body &&
+          r.body.session_id === "ses_subagent"
+      );
+      expect(claimsBySubagent).toEqual([]);
+    });
+  }
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
     const tree = "REPO-42";

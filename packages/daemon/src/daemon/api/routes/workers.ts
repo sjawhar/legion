@@ -313,6 +313,10 @@ export async function handlePhaseComplete(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
+  // A controller grant has no issue and is not a phase; refusing it here also narrows the union.
+  if (grant.role === "controller") {
+    throw new HttpError(403, "A controller grant cannot complete a phase");
+  }
   const summary = requiredString(body, "summary");
   const tree = rootForIssue(ctx.deps.state, grant.issue);
   if (!tree) throw new HttpError(404, `No Legion tree contains issue ${grant.issue}`);

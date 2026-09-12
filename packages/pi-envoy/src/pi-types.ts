@@ -106,9 +106,14 @@ export interface PiEventContract {
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
 }
 
+/** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same
+ * live object a `SessionContext` carries; only the members this package reads are typed. */
 export interface CommandContext {
   readonly cwd: string;
-  readonly sessionManager: { readonly getSessionId: () => string };
+  readonly sessionManager: Pick<
+    SessionContext["sessionManager"],
+    "getSessionId" | "getSessionFile" | "ensureOnDisk"
+  >;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };

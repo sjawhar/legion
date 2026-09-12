@@ -86,7 +86,6 @@ export interface LegionApiProcessManager {
   closeTree(tree: IssueKey, options?: { stopRoot?: boolean }): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
   confirmRootReady(tree: IssueKey, generation: number): void;
-  markControllerReady(): void | Promise<void>;
   cancelBootWatchdog(token: string, generation?: number): void;
   beginLinger(tree: IssueKey): void;
 }
@@ -286,6 +285,8 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
+      // Grants the previous controller pane minted die with its secret.
+      auth.revokeControllerGrants();
       await save();
       return secret;
     },

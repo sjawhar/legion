@@ -10,6 +10,7 @@ import {
   LegionDaemonApi,
 } from "@legion/contracts";
 import { defineCommand, runMain } from "citty";
+import { MERGE_AUTHORITY_REFUSED } from "../daemon/api/http";
 import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "../daemon/boot-probes";
 import {
   type DaemonConfig,
@@ -100,8 +101,9 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
 /** True when the forwarded `gh` argv would merge a PR: a `pr … merge` subcommand invocation (the
  * non-flag tokens contain `pr` followed later by `merge` — `gh pr merge`'s own flags like
  * `--repo <value>` insert extra non-flag tokens between them without changing the subcommand), or
- * a raw REST `gh api` call whose path token ends in `/merge`. No Legion worker role ever merges a
- * PR directly; the merge queue does that under its own PAT. */
+ * a raw REST `gh api` call whose path token ends in `/merge`. A merge invocation is redeemed with
+ * `merge: true`, which the daemon grants only to the controller's own grant; every phase-worker
+ * grant is refused server-side. */
 function isPrMergeInvocation(args: string[]): boolean {
   const positional = args.filter((arg) => !arg.startsWith("-"));
   const prIndex = positional.indexOf("pr");
@@ -110,16 +112,22 @@ function isPrMergeInvocation(args: string[]): boolean {
 }
 
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
-  if (isPrMergeInvocation(args)) {
-    throw new CliError("Legion workers never merge; publish READY to the merge queue");
-  }
+  const merge = isPrMergeInvocation(args);
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) }),
   });
   if (!response.ok) {
-    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})`);
+    const body = await response.text();
+    // Only the daemon's own authority refusal earns the "publish READY" wording: an expired or
+    // unknown grant on a merge invocation is a redemption failure like any other, and telling the
+    // controller to publish READY to itself would be wrong. The daemon's body says the same thing
+    // as this sentence, so it is not appended here; the generic branch keeps the raw body.
+    if (merge && response.status === 403 && body.includes(MERGE_AUTHORITY_REFUSED)) {
+      throw new CliError("this grant cannot merge; publish READY to the controller");
+    }
+    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status}): ${body}`);
   }
   const payload = LegionDaemonApi.GitHubToken.response.safeParse(await response.json());
   if (!payload.success) {
