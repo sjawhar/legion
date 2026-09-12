@@ -36,6 +36,10 @@ digraph oracle_decision {
 
 ## Research Strategy
 
+If the deployment instructions name a librarian (or oracle) role, publish your question to
+`notifications.role.<name>` with `expects_reply: required` and wait for the reply before
+researching yourself.
+
 Run steps 1-2 first (parallel OK), then 3-4 if needed:
 
 | Step | Tool | Query |

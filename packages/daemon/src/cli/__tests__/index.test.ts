@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cmdCheckConfig, cmdGh, cmdHandoffComplete, resolveControllerSecret } from "../index";
+import {
+  cmdCheckConfig,
+  cmdGh,
+  cmdHandoffComplete,
+  loadStartConfig,
+  resolveControllerSecret,
+} from "../index";
 
 describe("legion gh", () => {
   it("redeems the worker-extension grant only into the gh child environment", async () => {
@@ -205,6 +211,33 @@ describe("legion start --check-config", () => {
     await expect(cmdCheckConfig(undefined, configPath)).rejects.toThrow(
       "github_apps.implement requires exactly one of private_key or private_key_command"
     );
+  });
+
+  it("resolves relative instructions and state_dir against the --config file's directory, not the cwd", async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-")));
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(
+      configPath,
+      [
+        "project: acme/99",
+        "envoy_url: http://127.0.0.1:9020",
+        "dispatch_project: ACME",
+        "repos:",
+        "  - acme/widgets",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "gates:",
+        "  design: off",
+        "state_dir: ./state",
+        "instructions: ./ops/deployment.md",
+      ].join("\n")
+    );
+    expect(process.cwd()).not.toBe(dir);
+
+    const config = loadStartConfig(undefined, configPath, { resolveSecrets: false });
+
+    expect(config.stateDir).toBe(path.join(dir, "state"));
+    expect(config.instructionsPath).toBe(path.join(dir, "ops", "deployment.md"));
   });
 });
 

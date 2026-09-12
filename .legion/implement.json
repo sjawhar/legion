@@ -1,0 +1,131 @@
+{
+  "issue": "LEGION-17",
+  "spec": "dispatch://LEGION-17/spec (version 4)",
+  "plan": ".legion/plan.json at 2bbb2544 \u2014 followed verbatim; every code block applied as written and re-verified red\u2192green in this workspace",
+  "pr": {
+    "number": 956,
+    "url": "https://github.com/sjawhar/legion/pull/956",
+    "base": "main",
+    "head": "legion/LEGION-17",
+    "headSha": "b31d077bcfbc09cc46b6aae5663b2e2e86a72d34 (last code commit; the branch head is the `implement: record handoff` commit directly above it, which adds only .legion/implement.json)",
+    "title": "feat(daemon): legion.yaml instructions appended to every pane's system prompt",
+    "ci": "Tests run 34677595614 \u2014 success at 61631b7c (lint, typecheck, test, pr-title all pass; https://github.com/sjawhar/legion/actions/runs/34677595614). Legion Envoy and Contracts run 34677587650 \u2014 pass (pi-envoy job ran; the other package jobs skipped as unchanged). This handoff-only commit re-triggers CI at the final head; the tester records that run in the PR body.",
+    "rebasedOnto": "8f6fad3670993105b8082504fb701a789ac075d1 (main, chore: release pi-envoy v1.4.3): the branch as first pushed was based on 7db2cd83 and GitHub reported it CONFLICTING with main, so no pull_request workflow ran; rebased with `jj rebase -s <plan handoff> -d main` and resolved two 2-sided conflicts \u2014 index.ts (main #954 added probeSleep and a fourth verifyOmpAgentsCapability argument; kept the materialize block ahead of the probe call) and packages/pi-envoy/AGENTS.md (main changed the adjacent Dispatch-tools row from twelve to thirteen tools; kept both rows). Gate re-run on the rebased tree: 828 pass / 3 skip / 0 fail, biome and tsc clean, up.test.sh exit 0."
+  },
+  "commits": [
+    {
+      "sha": "2b2964f7295cf5ebc06c197e29a3a710f53619ef",
+      "message": "feat(daemon): legion.yaml instructions key, LEGION_INSTRUCTIONS, config-relative --config paths",
+      "files": [
+        "packages/daemon/src/daemon/config.ts",
+        "packages/daemon/src/cli/index.ts",
+        "packages/daemon/src/daemon/__tests__/config.test.ts",
+        "packages/daemon/src/cli/__tests__/index.test.ts"
+      ]
+    },
+    {
+      "sha": "cc625df7cfc97aa843877838ba2eba2f511b6435",
+      "message": "feat(daemon): append deployment instructions to every launched pane's system prompt",
+      "files": [
+        "packages/daemon/src/daemon/deployment-instructions.ts",
+        "packages/daemon/src/daemon/index.ts",
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/deployment-instructions.test.ts",
+        "packages/daemon/src/daemon/__tests__/index.test.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts",
+        "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts"
+      ]
+    },
+    {
+      "sha": "b31d077bcfbc09cc46b6aae5663b2e2e86a72d34",
+      "message": "docs(legion): deployment instructions in skills, AGENTS docs, and the smoke rig config",
+      "files": [
+        "skills/legion-worker/SKILL.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-controller/SKILL.md",
+        "skills/legion-oracle/SKILL.md",
+        "AGENTS.md",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "packages/pi-envoy/AGENTS.md",
+        "scripts/smoke/README.md",
+        "scripts/smoke/up.sh",
+        "scripts/smoke/up.test.sh"
+      ]
+    }
+  ],
+  "gate": {
+    "cwd": "packages/daemon",
+    "biome": "bunx biome check --write src/ \u2192 Checked 139 files, no fixes applied",
+    "tsc": "bunx tsc --noEmit \u2192 clean",
+    "bunTest": {
+      "command": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000",
+      "pass": 828,
+      "skip": 3,
+      "fail": 0,
+      "files": 55,
+      "skipsAre": "the three pre-existing processes.test.ts skips; both real-tmux suites (real-shutdown-e2e, real-deployment-instructions-e2e) executed \u2014 4 pass / 0 fail when run alone under LEGION_E2E=1, 1 pass / 3 skip without it",
+      "note": "824 pass at the pre-rebase head cbe61746; 828 at the rebased head (main contributed four tests)"
+    },
+    "perFile": {
+      "config.test.ts": "37 pass (was 35)",
+      "cli/__tests__/index.test.ts": "15 pass (was 14)",
+      "deployment-instructions.test.ts": "4 pass (new)",
+      "index.test.ts": "20 pass (was 18)",
+      "processes.test.ts": "191 pass / 3 skip (was 190)",
+      "real-deployment-instructions-e2e.test.ts": "1 pass, 4 expect() calls under LEGION_E2E=1"
+    },
+    "redBeforeGreen": "config tests: `Unknown config key \"instructions\"`; CLI test: `Export named 'loadStartConfig' not found`; module test: `Cannot find module '../deployment-instructions'`; processes test: toEndWith mismatch \u2014 each observed failing before its source change and passing after",
+    "smoke": "bash scripts/smoke/up.test.sh \u2192 8 PASS lines, 0 other lines, exit 0 (the two new instructions assertions are silent-on-pass `|| exit 1` blocks like the repos: assertion they follow)"
+  },
+  "deviationsFromPlan": [
+    "None in code, tests, skills, or docs: the plan's reference diff applied cleanly and biome made no changes.",
+    "Bookmark placement: each `jj split` carried legion/LEGION-17 along to the empty working-copy commit (which holds the uncommitted .omp/config.yml), so the bookmark was moved back one commit with `jj bookmark set legion/LEGION-17 -r @- --allow-backwards` before pushing. Only the three commits + plan handoff are on the remote; .omp/config.yml is not committed."
+  ],
+  "harnessSymptom": "The planner-reported multi-`export LEGION_GRANT` symptom reproduced (1\u20134 blocks per bash call; last wins; first push 403'd `Unable to redeem LEGION_GRANT`). Worked around inside the persistent tool shell by shadowing `export` with a function that performs the first LEGION_GRANT export per call and skips later ones (all other exports pass through), so `jj git push`, `legion gh pr create`, and `legion gh pr view` authenticated through the normal credential helper with the daemon-minted grant. Reported to the architect via envoy (a995bf98751bd5d4ffa9b38c244c2cc5).",
+  "testerNotes": [
+    "Plan task 8 lists the criteria. A is real-surface config proof via `bun run packages/daemon/src/cli/index.ts start --check-config --config <file>` from a cwd other than the config's directory (Config OK; `instructions must not be empty`; `LEGION_INSTRUCTIONS must not be empty`).",
+    "B: run `cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts`; the argv.json lands under the test's temp state dir at `<state>/controller/argv.json` (removed in afterAll \u2014 read it inside the test window or add a console.log locally, do not commit that).",
+    "C (negative control for the PR body's E2E section): `legion start` against a legion.yaml with `instructions: ./missing.md` must exit non-zero with `[legion] instructions file <abs path> could not be read` and leave no `<state_dir>/state.json` or `deployment-instructions.md`; `daemon.lock` may exist. defaultDependencies requires dispatch_url + DISPATCH_TOKEN before anything else runs; nats_urls may be unreachable. Then with a real file, `<state_dir>/deployment-instructions.md` appears with the header `# Deployment instructions (<project as written>)` before the OMP probes run.",
+    "The PR body's CI line reads `pending`; fill in the pr-checks-result run id once GitHub schedules it for cbe61746, and fill the E2E section with the real-surface evidence from C.",
+    "E (live LEGION deployment check) is operator-only after release: record 'not run \u2014 operator step'.",
+    "Header uses DaemonConfig.legionId (`project:` verbatim, e.g. `sjawhar/legion`), never the sanitized DaemonConfig.project token \u2014 the E2E test proves this with project `realinstructions` and legionId `sjawhar/legion`."
+  ],
+  "neverCommitted": [
+    ".omp/config.yml (extension-provisioned working-copy file)",
+    "docs/plans/* (spec forbids a plan document)"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T06:15:23.673Z",
+  "corrective": [
+    {
+      "review": "https://github.com/sjawhar/legion/pull/956#pullrequestreview-5185638453 (REQUEST_CHANGES at ac484904; spec conformance and both thermo agents clean; one blocking finding, three nits)",
+      "commit": "043d4ad694c16b6536492d86abaed1627bda45a8",
+      "commitMessage": "test(daemon): write the E2E argv record atomically",
+      "branchHeadAfterPush": "043d4ad6 on top of 75f78e70 (`review: record handoff`, the reviewer's local-only handoff commit, which this push carried to origin because the review App cannot push) on top of ac484904 (tester handoff)",
+      "changes": [
+        "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts: writes `../argv.json.tmp` then renameSync to `./argv.json`, so the watched directory receives exactly one inotify event and the record is complete when it fires (blocking finding, threads r3995426385 and r3995426388).",
+        "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts: waitForFile keeps its watch loop; on the 30 s abort it throws `argv record never appeared at <path>` (keyed on signal.aborted \u2014 Bun raises TimeoutError, not AbortError), matching waitForSocket in real-shutdown-e2e.test.ts (nit 1).",
+        "packages/daemon/src/daemon/deployment-instructions.ts: DEPLOYMENT_INSTRUCTIONS_FILE no longer exported (nit 2).",
+        "packages/daemon/src/daemon/__tests__/index.test.ts: boot test retitled to `\u2026appends it to the controller's launch command` (nit 3)."
+      ],
+      "whyNotSameDirectoryTemp": "The reviewer's literal suggestion (argv.json.tmp beside the record) removed the empty read but timed out 9/250 with the record present at timeout (diagnosed with a throwaway instrumented copy: exists=true, pane already exited). Bun 1.3.14's directory watcher reports a rename as one event named by the source file \u2014 identical to the event it already reported for the temp file's creation \u2014 and coalesces a later event that closely follows an earlier one, so the wake for the rename was swallowed. Isolated 300-run probes with real subprocesses: same-directory temp 22 misses; completion-marker file after the write 45 misses; rename in from the parent directory 0 misses. Probe scripts were throwaway under /tmp/legion17-watchprobe.",
+      "loopResult": {
+        "sameDirectoryTemp": "50/50 then 241/250 (9 watch timeouts, record present) \u2014 rejected",
+        "parentDirectoryRenameRun1": "300 iterations: 287 pass, 13 fail in the contiguous block 124\u2013136 while the load average reached 245 on 32 cores; 4 were tmux commands killed on timeout (exit 143) or kill-window failing, 1 the test's 60 s limit, 8 `never appeared` with 36\u201363 s test durations (pane had not produced the record within 30 s at all); none matched the watch-miss signature",
+        "parentDirectoryRenameRun2": "150/150 pass at normal load (per-run wall 1.50\u20132.25 s, median 1.65 s)",
+        "command": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 src/daemon/__tests__/real-deployment-instructions-e2e.test.ts"
+      },
+      "gate": "at 043d4ad6 from packages/daemon: bunx biome check --write src/ \u2192 no fixes; bunx tsc --noEmit clean; env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 \u2192 828 pass / 3 skip / 0 fail across 55 files; bash scripts/smoke/up.test.sh exit 0",
+      "threadReplies": [
+        "https://github.com/sjawhar/legion/pull/956#discussion_r3995584355 (reply on r3995426385)",
+        "https://github.com/sjawhar/legion/pull/956#discussion_r3995585131 (reply on r3995426388)"
+      ],
+      "prBody": "Threads line lists both threads and the two extra nits with the fixing commit; E2E section gained the corrective-round paragraph with the loop counts; gate line gained the 043d4ad6 re-run. Reviewer threads left unresolved for the reviewer; .legion/ not deleted.",
+      "harnessNotes": "Grant-export shell workaround unchanged. The bash tool was blocked for ~1 minute at 07:47Z with `Unable to connect` from the grant-minting hook while the daemon was briefly unreachable (load spike); it recovered on its own.",
+      "ci": "Tests run 34681976948 \u2014 success at 043d4ad6 (https://github.com/sjawhar/legion/actions/runs/34681976948); Tests run 34682352937 \u2014 success at 4dfbbe89, the corrective-handoff head (https://github.com/sjawhar/legion/actions/runs/34682352937); Legion Envoy and Contracts runs 34681899136 and 34682353057 also succeeded at those heads.",
+      "resume": "Pane stopped at 16:34Z during the host memory incident (Legion drain ordered by Sami) after the round was already complete and pushed. Resumed by the architect; verified on resume that 043d4ad6 and 4dfbbe89 were on origin, both thread replies (r3995584355, r3995585131) were posted, the PR body carried the corrective Threads/E2E/gate text, and the daemon had recorded the completion (issue status `testing`). No work redone; only this CI note added."
+    }
+  ]
+}

@@ -34,6 +34,13 @@ or copy it into a transcript.
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.
 
+## Deployment instructions
+
+Deployment instructions, when present, are the operator's standing rules for this repository —
+required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
+the merge credential. They override this skill's defaults where they conflict; they never
+override a Sami ruling quoted here.
+
 ## Turn discipline
 
 - **Direct user message always first.** If this turn includes a direct user message, answer

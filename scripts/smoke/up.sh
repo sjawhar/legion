@@ -269,6 +269,15 @@ write_daemon_config() {
     omp_launch_prefix_yaml="omp_launch_prefix:
 $(printf '%s\n' $omp_launch_prefix | sed 's/^/  - /')"
   fi
+  # The rig's own deployment instructions (the `instructions` key below): every pane the smoke
+  # daemon launches gets this file appended to its system prompt, so the rig exercises the same
+  # mechanism an operator uses to hand a real deployment its standing rules.
+  cat >"${smoke_dir}/deployment-instructions.md" <<EOF
+This deployment is the Legion smoke rig (scripts/smoke/up.sh). It exercises Dispatch project
+${smoke_dispatch_project} against the repository ${SMOKE_REPO}; its issues and pull requests are
+smoke exercises, never production work. Keep every artifact you create inside that repository and
+that Dispatch project.
+EOF
   cat >"${smoke_dir}/legion.yaml" <<EOF
 project: ${SMOKE_PROJECT}
 port: ${daemon_port}
@@ -285,6 +294,7 @@ linger_hours: 72
 max_fix_attempts: 3
 resync_interval_seconds: 600
 state_dir: ${smoke_dir}/daemon
+instructions: ${smoke_dir}/deployment-instructions.md
 omp_invocation: mise x ${omp_pin} -- omp
 ${omp_launch_prefix_yaml}
 gates:

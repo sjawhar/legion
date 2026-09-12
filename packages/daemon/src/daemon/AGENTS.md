@@ -39,6 +39,7 @@ The localhost-only Legion API lives in `api.ts`.
 | `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) reached through a worker's `legion worker-shim` unix socket rather than a spawned process's stdio. |
 | `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback, every argv prefixed `tmux -L legion-<project>` (`TmuxServer`) — no daemon state. |
 | `secrets.ts` | `<state_dir>/secrets` primitives: 0700 directory, 0600 files, and the listing prune `index.ts` runs at boot; `ProcessManager.persist()` prunes the files it wrote itself without listing. |
+| `deployment-instructions.ts` | `<state_dir>/deployment-instructions.md`: reads the operator's `instructions` file once at boot, refuses a missing/unreadable/blank one naming the resolved path, and writes `# Deployment instructions (<project>)` + content for every pane to `$(cat)`. |
 
 ## Operational invariants
 
@@ -75,6 +76,22 @@ credentials (they live in secretsd, not the daemon's own environment) gets them 
 process: the prefix's own exec — `secrets KEY... -- <omp invocation>` — resolves them *inside* the
 pane, never on the daemon's environment or a pane's tmux `-e` argv. Empty by default (nothing is
 prepended). See `withOmpLaunchPrefix` in `processes.ts`.
+
+Set `instructions` in `legion.yaml` (a path, resolved against `legion.yaml`'s own directory when
+relative — `legion start --config` passes that directory as the loader's `configDir`) or
+`LEGION_INSTRUCTIONS` (used as given; consulted only when the file omits the key, like every other
+`LEGION_*` override) to a markdown file of the deployment's standing rules — required checks,
+deploy/smoke commands, code-owner expectations, standing Envoy roles to consult, the merge
+credential. An empty value from either source is rejected at config load. At startup the daemon
+reads the file once, refuses to start when it is missing, unreadable, a directory, or blank (the
+message names the resolved path), and writes `# Deployment instructions (<project as written in
+legion.yaml>)` plus the content to `<state_dir>/deployment-instructions.md`
+(`deployment-instructions.ts`). Every pane it launches — root architect, sub-architects, phase
+workers, controller — appends that file as its last `--append-system-prompt "$(cat …)"` fragment,
+after the role prompt and (for roots and workers) the addressing fragment; `systemPromptArguments`
+in `processes.ts` is the one builder both launch sites use, so they cannot drift. Absent key: no
+fragment. The file is `$(cat)`-expanded by the pane's shell exactly like the role prompt, never
+inlined into the command.
 
 Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` when
 `dispatch_url` is configured: `DISPATCH_URL` is the configured service base URL (no `/mcp` suffix),
@@ -122,6 +139,8 @@ first boot rather than hold its running-worker slot until some later launch fork
 `tmux kill-session -t legion-<project>` on the default server once, start the new daemon;
 `reconnectWorkers` finds every recorded socket dead and roots resurrect (`--resume`) onto the
 private server. No migration code.
+
+Before loading state, opening core NATS, or serving the API, the daemon also reads the configured `instructions` file (above) and materializes `<state_dir>/deployment-instructions.md`; a missing, unreadable, or blank file — or a failed write — refuses startup naming the resolved path, exactly like a missing tool.
 
 Before loading state, opening core NATS, or serving the API, the daemon probes the exact resolved OMP executable with an isolated extension and refuses startup unless it confirms `pi.agents`. Both this probe and the plugin-load probe below run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. It also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 

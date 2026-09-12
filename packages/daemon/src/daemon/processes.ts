@@ -116,6 +116,10 @@ export interface ProcessManagerDeps {
   /** Invalidates a session's daemon-minted capability the moment its process is observed dead, so a stale credential file cannot keep minting grants until a respawn overwrites it. */
   revokeSessionCapability(sessionId: string): void;
   now(): number;
+  /** `<state_dir>/deployment-instructions.md`, materialized by `index.ts` at boot when
+   * `config.instructionsPath` is set — appended to every launched pane's system prompt as its
+   * last `--append-system-prompt "$(cat <this file>)"` fragment. Undefined: no fragment. */
+  deploymentInstructionsFile?: string;
 }
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
@@ -166,6 +170,25 @@ export function addressingFragment(
 
 function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+
+/** The ordered `--append-system-prompt` arguments every daemon-launched OMP process receives:
+ * the packaged role prompt, the addressing fragment (every root and phase worker; the controller
+ * has none), then the deployment instructions file when configured. Both file-backed fragments
+ * are `"$(cat <path>)"` expanded by the pane's own shell — never inlined into the command (size
+ * and quoting). One builder for `launchShimmedProcess` and `spawnController` alike, so the two
+ * launch sites cannot drift. */
+function systemPromptArguments(
+  promptPath: string,
+  addressingPrompt: string | undefined,
+  deploymentInstructionsFile: string | undefined
+): string {
+  const fragments = [`"$(cat ${shellPath(promptPath)})"`];
+  if (addressingPrompt !== undefined) fragments.push(shellPath(addressingPrompt));
+  if (deploymentInstructionsFile !== undefined) {
+    fragments.push(`"$(cat ${shellPath(deploymentInstructionsFile)})"`);
+  }
+  return fragments.map((fragment) => `--append-system-prompt ${fragment}`).join(" ");
 }
 
 /** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
@@ -2392,7 +2415,7 @@ export class ProcessManager {
   ): Promise<WorkerLocator> {
     await (this.deps.statPrompt ?? stat)(promptPath);
     const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc ${systemPromptArguments(promptPath, addressingPrompt, this.deps.deploymentInstructionsFile)}`;
     const socketPath = await this.prepareSocket(workerSocketBasename(issue, role));
     const shellCommand = this.shimmedShellCommand(workspaceDir, socketPath, innerCommand);
 
@@ -2621,7 +2644,7 @@ export class ProcessManager {
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir);
     const socketPath = await this.prepareSocket("controller");
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
     const shellCommand = this.shimmedShellCommand(controllerDir, socketPath, innerCommand);
     const session = this.tmux.socket;
     const token = controllerToken(this.deps.state.project);

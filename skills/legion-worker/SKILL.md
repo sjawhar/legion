@@ -59,6 +59,13 @@ round, a question) can deliver a new prompt to this same session. Treat it as a
 continuation — re-read the current issue and your own prior handoff, since time has
 passed — never as a fresh identity.
 
+## Deployment instructions
+
+Deployment instructions, when present, are the operator's standing rules for this repository —
+required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
+the merge credential. They override this skill's defaults where they conflict; they never
+override a Sami ruling quoted here.
+
 ## Asking another role
 
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to

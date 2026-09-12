@@ -91,6 +91,12 @@ export interface DaemonConfig {
   gates: { design: "root-issues" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
+  /** Optional operator markdown appended to every launched pane's system prompt (root architect,
+   * sub-architects, phase workers, controller) as the last `--append-system-prompt` fragment —
+   * the deployment's standing rules for this repository. The `instructions` file key is resolved
+   * against the config file's directory when relative; `LEGION_INSTRUCTIONS` is used as given.
+   * Read once at boot (`index.ts`): a missing, unreadable, or blank file refuses startup. */
+  instructionsPath?: string;
 }
 
 export interface LoadedConfigFile {
@@ -175,6 +181,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_boot_registration_deadline_intervals: null,
   worker_rpc_timeout_seconds: null,
   state_dir: null,
+  instructions: null,
   // `merge` is recognized (not an "unknown key") so setting it surfaces the specific
   // removed-setting error `parseGates` throws below instead of the generic "Unknown config key"
   // message. Never mapped to a field.
@@ -630,6 +637,13 @@ export function loadConfigFromFile(
   if (stateDir !== undefined) {
     fields.stateDir = path.isAbsolute(stateDir) ? stateDir : path.resolve(configDir, stateDir);
   }
+  const instructions = readString(config.instructions, "instructions");
+  if (instructions !== undefined) {
+    requireNonEmpty(instructions, "instructions");
+    fields.instructionsPath = path.isAbsolute(instructions)
+      ? instructions
+      : path.resolve(configDir, instructions);
+  }
   const gates = parseGates(config.gates, "gates");
   if (gates !== undefined) fields.gates = gates;
   const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
@@ -878,6 +892,12 @@ export function resolveDaemonConfig(
     env.LEGION_STATE_DIR,
     path.join(os.homedir(), ".legion", project)
   );
+  const instructionsPath = resolveValue(
+    opts.cliOverrides?.instructionsPath,
+    fileString(fields, "instructionsPath"),
+    env.LEGION_INSTRUCTIONS,
+    undefined
+  );
 
   return {
     config: {
@@ -907,6 +927,10 @@ export function resolveDaemonConfig(
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,
+      instructionsPath:
+        instructionsPath.value === undefined
+          ? undefined
+          : requireNonEmpty(instructionsPath.value, "LEGION_INSTRUCTIONS"),
     },
   };
 }

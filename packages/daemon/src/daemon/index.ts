@@ -23,6 +23,7 @@ import { EnvoyPublishError } from "./api/http";
 import { GATE_OFF_APPROVAL, publishDesignApproved } from "./api/routes/issues";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
+import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
 import {
   createDaemonRunner,
@@ -402,6 +403,18 @@ async function startDaemonLocked(
   if (config.dispatchToken !== undefined) {
     await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
   }
+  // The operator's deployment instructions, read and validated exactly once and re-materialized
+  // under `<state_dir>` for every pane to `$(cat)` — see `deployment-instructions.ts`. Refuses
+  // startup on a missing/unreadable/blank file (naming the resolved path) before the OMP probes
+  // below spend seconds launching a process for a deployment that is misconfigured anyway.
+  const deploymentInstructionsFile =
+    config.instructionsPath === undefined
+      ? undefined
+      : await materializeDeploymentInstructions(
+          config.instructionsPath,
+          config.stateDir,
+          config.legionId
+        );
   const probeSleep =
     deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   await verifyOmpAgentsCapability(
@@ -489,6 +502,7 @@ async function startDaemonLocked(
     dispatchClient: deps.dispatchClient,
     now: deps.now,
     sleep: deps.sleep,
+    deploymentInstructionsFile,
   });
 
   // Awaited (not fire-and-forget): reconnectWorkers is the source of truth

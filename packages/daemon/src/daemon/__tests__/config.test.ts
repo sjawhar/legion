@@ -686,4 +686,67 @@ describe("daemon config", () => {
       loadConfigFromFile(["project: acme/7", "runtime: opencode"].join("\n"), "/tmp/legion-config")
     ).toThrow('Unknown config key "runtime"');
   });
+
+  it("resolves instructions: a relative file key against the config dir, an absolute one as given, LEGION_INSTRUCTIONS as given when the file omits it, undefined when neither is set", () => {
+    const relative = loadConfigFromFile(
+      ["project: acme/7", "instructions: ./deployment.md"].join("\n"),
+      "/tmp/legion-config"
+    );
+    expect(
+      resolveDaemonConfig({ configFile: relative, env: requiredEnv }).config.instructionsPath
+    ).toBe("/tmp/legion-config/deployment.md");
+
+    const absolute = loadConfigFromFile(
+      ["project: acme/7", "instructions: /srv/legion/deployment.md"].join("\n"),
+      "/tmp/legion-config"
+    );
+    expect(
+      resolveDaemonConfig({ configFile: absolute, env: requiredEnv }).config.instructionsPath
+    ).toBe("/srv/legion/deployment.md");
+
+    // Config-file value wins over env, matching every other setting's precedence
+    // (`resolveValue`: cli > config > env > default).
+    expect(
+      resolveDaemonConfig({
+        configFile: relative,
+        env: { ...requiredEnv, LEGION_INSTRUCTIONS: "/elsewhere/relative-looking.md" },
+      }).config.instructionsPath
+    ).toBe("/tmp/legion-config/deployment.md");
+
+    // Env is never config-relative: there is no config file to be relative to.
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_INSTRUCTIONS: "relative/deployment.md" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      }).config.instructionsPath
+    ).toBe("relative/deployment.md");
+
+    expect(
+      resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      }).config.instructionsPath
+    ).toBeUndefined();
+  });
+
+  it("rejects an empty instructions path from either source, naming the key", () => {
+    expect(() =>
+      loadConfigFromFile(["project: acme/7", "instructions: ''"].join("\n"), "/tmp/legion-config")
+    ).toThrow("instructions must not be empty");
+    expect(() =>
+      loadConfigFromFile(["project: acme/7", "instructions: '  '"].join("\n"), "/tmp/legion-config")
+    ).toThrow("instructions must not be empty");
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_INSTRUCTIONS: "" },
+        cliOverrides: {
+          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        },
+      })
+    ).toThrow("LEGION_INSTRUCTIONS must not be empty");
+  });
 });
