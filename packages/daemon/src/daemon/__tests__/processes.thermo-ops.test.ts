@@ -87,8 +87,8 @@ function manager(
     dispatchClient: fakeDispatchClient(),
   };
   const runtime = new TmuxRuntime({
-    tmux: { run: deps.run, socket: "legion-omp" },
-    project: "omp",
+    tmux: { run: deps.run, socket: `legion-${state.project}` },
+    project: state.project,
     stateDir,
     connectWorkerRpc: async () => {
       throw new Error("connectWorkerRpc is not exercised by this fixture");

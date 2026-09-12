@@ -293,9 +293,13 @@ function manager(
       return result;
     },
   };
+  // Mirrors index.ts: the private server and the secret-file project come from the fixture's
+  // `state.project`, never a constant — the live-tmux tests below give each run its own project
+  // and drive `tmux -L legion-<project>` themselves, so a hardcoded socket would spawn onto a
+  // server those tests never look at (and leak it).
   const runtime = new TmuxRuntime({
-    tmux: { run: deps.run, socket: "legion-omp" },
-    project: "omp",
+    tmux: { run: deps.run, socket: `legion-${state.project}` },
+    project: state.project,
     stateDir: deps.config.stateDir,
     connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
     workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
@@ -5512,7 +5516,13 @@ describe("ProcessManager", () => {
           "#{window_name}",
         ]);
 
-        expect(windows.stdout.split(/\r?\n/)).not.toContain("bash");
+        // The listing must be a real answer from the server this root spawned into: a
+        // `no server running` error (the runtime spawned somewhere else) would otherwise satisfy
+        // the `bash` assertion below vacuously.
+        expect(windows.exitCode).toBe(0);
+        const windowNames = windows.stdout.split(/\r?\n/);
+        expect(windowNames).toContain("legion-42");
+        expect(windowNames).not.toContain("bash");
       } finally {
         await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
       }

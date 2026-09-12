@@ -288,9 +288,14 @@ async function startDaemonLocked(
   const nats = await deps.createNatsTransport(config);
   let api: LegionApi;
 
+  // `state.project`, not `config.project`: every role token, secret-file name, and pane the
+  // manager reasons about is keyed by the persisted project (`ProcessManager` reads
+  // `deps.state.project` throughout), so the private server and the runtime's secret-file
+  // names must come from the same value — exactly what the manager derived before the runtime
+  // boundary existed.
   const runtime = new TmuxRuntime({
-    tmux: { run: runner, socket: `legion-${config.project}` },
-    project: config.project,
+    tmux: { run: runner, socket: `legion-${state.project}` },
+    project: state.project,
     stateDir: config.stateDir,
     connectWorkerRpc: deps.connectWorkerRpc,
     workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
