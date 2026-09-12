@@ -697,7 +697,11 @@ describe("Legion OMP extension", () => {
       { path: "/v1/roles/set", body: { session_id: "ses_controller", role: token } },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-secret", sessionId: "ses_controller" },
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
       {
         path: "/v1/interests/subscribe",
@@ -742,7 +746,11 @@ describe("Legion OMP extension", () => {
       { path: "/v1/roles/set", body: { session_id: "ses_interactive", role: token } },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_interactive",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
     ]);
   });
@@ -1047,7 +1055,11 @@ describe("Legion OMP extension", () => {
 
     await claimCommand.handler("", {
       cwd: "/tmp/legion-workspace",
-      sessionManager: { getSessionId: () => "ses_interactive" },
+      sessionManager: {
+        getSessionId: () => "ses_interactive",
+        getSessionFile: () => "/tmp/session.jsonl",
+        ensureOnDisk: async () => undefined,
+      },
       ui: { notify: () => undefined },
     });
 
@@ -1090,7 +1102,11 @@ describe("Legion OMP extension", () => {
       {
         method: "POST",
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-capability", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-capability",
+          sessionId: "ses_interactive",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
     ]);
   });
@@ -1110,7 +1126,11 @@ describe("Legion OMP extension", () => {
     await expect(
       claimCommand.handler("", {
         cwd: "/tmp/legion-workspace",
-        sessionManager: { getSessionId: () => "ses_interactive" },
+        sessionManager: {
+          getSessionId: () => "ses_interactive",
+          getSessionFile: () => "/tmp/session.jsonl",
+          ensureOnDisk: async () => undefined,
+        },
         ui: { notify: () => undefined },
       })
     ).rejects.toThrow(
@@ -1542,11 +1562,19 @@ describe("Legion OMP extension", () => {
     expect(requests.filter((request) => request.path === "/legion/v1/controller/ready")).toEqual([
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "file-controller-secret", sessionId: "ses_controller" },
+        body: {
+          secret: "file-controller-secret",
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "file-controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "file-controller-secret",
+          sessionId: "ses_interactive",
+          ompSessionFile: "/tmp/session.jsonl",
+        },
       },
     ]);
   });
@@ -1893,15 +1921,25 @@ describe("Legion OMP extension", () => {
       reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
     });
   });
-  test("does not block bash calls from the controller session", async () => {
+  test("rewrites a claimed controller's bash calls with a controller grant and the gh shim", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_ROLE = "controller";
     process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    globalThis.fetch = (async (input) => {
+    globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
       if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
       if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ grantId: "controller-grant-1", expiresAt: "2099-01-01T00:00:00Z" });
+      }
       return Response.json({
         session_id: "ses_controller_bash",
         machine_id: "machine",
@@ -1917,18 +1955,96 @@ describe("Legion OMP extension", () => {
       throw new Error("controller lifecycle handlers were not registered");
     }
     const context = sessionContext("ses_controller_bash");
+
+    // Before the claim completes nothing can mint for the controller, so its call passes
+    // through unwrapped rather than being blocked as an unregistered worker.
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-controller-unclaimed", input: { command: "true" } },
+        context
+      )
+    ).resolves.toBeUndefined();
+
+    await sessionStart({}, context);
+    const result = await toolCall(
+      {
+        toolName: "bash",
+        toolCallId: "call-controller-bash",
+        input: { command: "legion gh -- pr merge 7 --squash" },
+      },
+      context
+    );
+
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("input" in result) ||
+      typeof result.input !== "object" ||
+      result.input === null ||
+      !("command" in result.input) ||
+      typeof result.input.command !== "string"
+    ) {
+      throw new Error("controller shell was not rewritten with a controller grant");
+    }
+    const lines = result.input.command.split("\n");
+    expect(lines[0]).toBe("export LEGION_GRANT='controller-grant-1'");
+    expect(lines.at(-1)).toBe("legion gh -- pr merge 7 --squash");
+    expect(result.input.command).toContain(`PATH='${path.join(stateDir, "worker-bin")}':$PATH`);
+    expect(requests.at(-1)).toEqual({
+      path: "/legion/v1/grants",
+      body: { sessionId: "ses_controller_bash", secret: "controller-secret" },
+    });
+    expect(await readFile(path.join(stateDir, "worker-bin", "gh"), "utf8")).toContain(
+      'exec legion gh -- "$@"'
+    );
+  });
+  test("blocks a controller bash call when the daemon refuses the controller grant", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") return Response.json({});
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ error: "Invalid controller capability" }, { status: 403 });
+      }
+      return Response.json({
+        session_id: "ses_controller_refused",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("controller lifecycle handlers were not registered");
+    }
+    const context = sessionContext("ses_controller_refused");
     await sessionStart({}, context);
 
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "call-controller-bash",
+          toolCallId: "call-controller-refused",
           input: { command: "legion state" },
         },
         context
       )
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      block: true,
+      reason: 'POST /legion/v1/grants failed with 403: {"error":"Invalid controller capability"}',
+    });
+    // A controller 403 is surfaced as-is: the recovery-less client never tries /worker-session.
+    expect(requests.some((request) => request.path === "/legion/v1/worker-session")).toBe(false);
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];

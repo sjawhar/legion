@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { controllerToken, type LegionRole } from "@legion/contracts";
+import { controllerToken, type GrantResponse, type LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -107,7 +107,7 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
 };
 
 async function persistedTranscript(
-  context: SessionContext
+  context: CommandContext | SessionContext
 ): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
   await context.sessionManager.ensureOnDisk();
   const sessionFile = context.sessionManager.getSessionFile();
@@ -291,7 +291,11 @@ export default function legionExtension(pi: PiApi): void {
     const { project } = await daemon.state();
     const token = controllerToken(project);
     await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
-    await daemon.controllerReady({ secret, sessionId: sessionID });
+    // The daemon resumes this transcript (`--resume`) when it respawns a dead controller pane, so
+    // the conversation Sami is having in the TUI survives. A missing transcript is a boot failure,
+    // exactly as it is for a root architect.
+    const { sessionFile } = await persistedTranscript(context);
+    await daemon.controllerReady({ secret, sessionId: sessionID, ompSessionFile: sessionFile });
     controllerSessionID = sessionID;
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
@@ -638,11 +642,46 @@ export default function legionExtension(pi: PiApi): void {
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
+    const command = toolCall.input.command;
+    const wrapBashWithGrant = async (
+      mint: () => Promise<GrantResponse>
+    ): Promise<ToolCallEventResult> => {
+      try {
+        const grant = await mint();
+        const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
+        const workerBin = await installWorkerGhShim(stateDir);
+        return {
+          input: {
+            ...toolCall.input,
+            command: [workerGhEnvironment(grant.grantId, stateDir, workerBin), command].join("\n"),
+          },
+        };
+      } catch (error) {
+        return { block: true, reason: messageFor(error) };
+      }
+    };
     if (active === undefined) {
-      // A worker (root or phase) whose own boot handshake has not completed
-      // yet has no capability to mint a grant with. The controller is
-      // exempt: the daemon also sets LEGION_ROLE=controller on its process,
-      // but a controller never claims a Legion role here.
+      // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
+      // authenticated by the controller capability) and is wrapped exactly like a worker. The
+      // client is recovery-less on purpose: a controller 403 is a wrong secret to surface, never
+      // a worker session to "recover".
+      if (
+        controllerSessionID !== undefined &&
+        controllerSessionID === sessionID &&
+        controllerCapability !== undefined
+      ) {
+        const secret = controllerCapability;
+        return wrapBashWithGrant(() =>
+          createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL")).grant({
+            sessionId: sessionID,
+            secret,
+          })
+        );
+      }
+      // A worker (root or phase) whose own boot handshake has not completed yet has no
+      // capability to mint a grant with, so it is blocked. A controller that has not yet
+      // claimed (the daemon also sets LEGION_ROLE=controller on its process) is not: nothing
+      // here can mint for it until `claimController` runs, and a wrong secret is what blocks it.
       if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
         return {
           block: true,
@@ -651,27 +690,14 @@ export default function legionExtension(pi: PiApi): void {
       }
       return undefined;
     }
-    try {
-      const grant = await roleDaemon().grant({
+    return wrapBashWithGrant(() =>
+      roleDaemon().grant({
         tree: active.tree,
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-      });
-      const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
-      const workerBin = await installWorkerGhShim(stateDir);
-      return {
-        input: {
-          ...toolCall.input,
-          command: [
-            workerGhEnvironment(grant.grantId, stateDir, workerBin),
-            toolCall.input.command,
-          ].join("\n"),
-        },
-      };
-    } catch (error) {
-      return { block: true, reason: messageFor(error) };
-    }
+      })
+    );
   });
 
   pi.on("session_shutdown", async (_event, context) => {
