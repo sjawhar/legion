@@ -123,7 +123,9 @@
         "https://github.com/sjawhar/legion/pull/956#discussion_r3995585131 (reply on r3995426388)"
       ],
       "prBody": "Threads line lists both threads and the two extra nits with the fixing commit; E2E section gained the corrective-round paragraph with the loop counts; gate line gained the 043d4ad6 re-run. Reviewer threads left unresolved for the reviewer; .legion/ not deleted.",
-      "harnessNotes": "Grant-export shell workaround unchanged. The bash tool was blocked for ~1 minute at 07:47Z with `Unable to connect` from the grant-minting hook while the daemon was briefly unreachable (load spike); it recovered on its own."
+      "harnessNotes": "Grant-export shell workaround unchanged. The bash tool was blocked for ~1 minute at 07:47Z with `Unable to connect` from the grant-minting hook while the daemon was briefly unreachable (load spike); it recovered on its own.",
+      "ci": "Tests run 34681976948 \u2014 success at 043d4ad6 (https://github.com/sjawhar/legion/actions/runs/34681976948); Tests run 34682352937 \u2014 success at 4dfbbe89, the corrective-handoff head (https://github.com/sjawhar/legion/actions/runs/34682352937); Legion Envoy and Contracts runs 34681899136 and 34682353057 also succeeded at those heads.",
+      "resume": "Pane stopped at 16:34Z during the host memory incident (Legion drain ordered by Sami) after the round was already complete and pushed. Resumed by the architect; verified on resume that 043d4ad6 and 4dfbbe89 were on origin, both thread replies (r3995584355, r3995585131) were posted, the PR body carried the corrective Threads/E2E/gate text, and the daemon had recorded the completion (issue status `testing`). No work redone; only this CI note added."
     }
   ]
 }
