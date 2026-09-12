@@ -304,6 +304,9 @@ export interface Suggestion {
 
 export interface CommentEventPayload extends Comment {
   readonly artifact_name: string;
+  /** The document owner for an artifact comment, including direct author routes. */
+  readonly project_key?: string;
+  readonly artifact_slug?: string;
   /** The question text of the ask this comment replies to (Comment.ask_id); empty otherwise. */
   readonly ask_question?: string;
   /** The state of that ask when the comment was posted. A human reply while it is still `open`
@@ -905,6 +908,8 @@ export const AskEditedEventPayloadSchema = z.object({
 export const CommentEventPayloadSchema = z.object({
   id: z.string().optional(),
   artifact_name: z.string().optional(),
+  project_key: z.string().optional(),
+  artifact_slug: z.string().optional(),
   body: z.string().optional(),
   reply_to: z.string().nullish(),
   ask_id: z.string().nullish(),

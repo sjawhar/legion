@@ -350,10 +350,9 @@ type AskResolution struct {
 }
 
 // Comment is a collaboration comment, optionally with an edit suggestion. A comment
-// replies to at most one of another comment (ReplyTo) or an ask (AskID): a
-// top-level reply in an ask's thread sets AskID; a reply nested under that
-// comment sets ReplyTo instead, so an ask's full thread is "AskID = the ask"
-// plus the ReplyTo chains rooted at those comments.
+// replies to at most one of another comment (ReplyTo) or an ask (AskID). Comment
+// threads store their root ID in ReplyTo, and ask threads store their ask ID in
+// AskID, so both thread forms remain flat.
 type Comment struct {
 	ID         string      `json:"id"`
 	IssueKey   *string     `json:"issue_key"`
@@ -383,6 +382,10 @@ type Suggestion struct {
 type CommentEventPayload struct {
 	Comment
 	ArtifactName string `json:"artifact_name"`
+	// ProjectKey and ArtifactSlug identify the document owning an artifact comment,
+	// including direct author routes whose topic no longer carries document details.
+	ProjectKey   string `json:"project_key,omitempty"`
+	ArtifactSlug string `json:"artifact_slug,omitempty"`
 	// AskQuestion is the question text of the ask this comment replies to
 	// (Comment.AskID), carried alongside the id-shaped in_reply_to so a
 	// notification renderer can show "re: <question>" instead of a bare UUID.
@@ -393,10 +396,9 @@ type CommentEventPayload struct {
 	// answers in the thread or rewords the question. Empty when the comment does
 	// not reply to an ask.
 	AskState string `json:"ask_state,omitempty"`
-	// ThreadRootID is the id of the comment thread's root (Comment.ReplyTo's
-	// target) for a comment.created event that replies to another comment, so
-	// a routed agent can reply under the same root humans use. Empty when the
-	// comment does not reply to another comment.
+	// ThreadRootID is the root ID stored in Comment.ReplyTo for a comment.created
+	// event that replies to another comment. Empty when the comment replies to an
+	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 }
 

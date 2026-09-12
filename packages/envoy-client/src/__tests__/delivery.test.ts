@@ -138,6 +138,14 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("does not offer a reply hint for an ask.opened event", () => {
+    const decoded = decode(renderInbound(dispatchEvent("ask.opened", openAsk), reader).content) as {
+      envoy: Record<string, unknown>;
+    };
+
+    expect(decoded.envoy.reply_with).toBeUndefined();
+  });
+
   test("renders a targeted Dispatch message with its reply path", () => {
     const rendered = renderInbound(
       JSON.stringify(
@@ -423,6 +431,54 @@ describe("renderInbound dispatch events", () => {
     };
 
     expect(decoded.envoy.re).toBe("Which API should we ship?");
+    expect(decoded.envoy.reply_with).toBe(
+      'dispatch_comment(issue="DSP-1", reply_to_ask="ask-1", body="...")'
+    );
+  });
+
+  test("gives ordinary comment events a reply_to hint", () => {
+    const decoded = decode(
+      renderInbound(dispatchEvent("comment.created", { ...comment, ask_id: null }), reader).content
+    ) as { envoy: Record<string, unknown> };
+
+    expect(decoded.envoy.reply_with).toBe(
+      'dispatch_comment(issue="DSP-1", reply_to="comment-1", body="...")'
+    );
+  });
+
+  test("gives document-owned ask comments a project document reply hint", () => {
+    const raw = JSON.stringify(
+      envelope({
+        event_id: "dispatch-document-comment",
+        source: "dispatch",
+        topic: "notifications.agent.session-asker",
+        payload: JSON.stringify({
+          id: 3,
+          issue_key: null,
+          artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+          project: "CORE",
+          seq: 9,
+          type: "comment.created",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          created_at: "2026-09-09T00:00:00Z",
+          payload: {
+            ...comment,
+            ask_id: "ask-1",
+            project_key: "CORE",
+            artifact_slug: "design-notes",
+          },
+        }),
+      })
+    );
+
+    const decoded = decode(renderInbound(raw, reader).content) as {
+      envoy: Record<string, unknown>;
+    };
+
+    expect(decoded.envoy.reply_with).toBe(
+      'dispatch_comment(project="CORE", artifact="design-notes", reply_to_ask="ask-1", body="...")'
+    );
   });
 
   test("a human reply on a still-open ask reaches the agent with the ask's state", () => {

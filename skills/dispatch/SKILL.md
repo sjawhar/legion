@@ -290,10 +290,10 @@ dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body,
 It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
 `ref` names the owner (an issue or project-document reference) in place of `issue`/`project`.
 `quote` requires `artifact`; omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`)
-takes no `quote`; it belongs to its parent's anchor. Use `reply_to` to continue a comment thread at
-its root; a reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a
-question asked with `dispatch_ask`. Comments are edited only by their author from the dashboard. A
-delivered `comment.created` event carries the comment `id`; reply to it with
+takes no `quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server
+keeps threads flat. A reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly
+under a question asked with `dispatch_ask`. Comments are edited only by their author from the
+dashboard. A delivered `comment.created` event carries the comment `id`; reply to it with
 `dispatch_comment({ reply_to: <id> })`.
 
 Propose an exact replacement instead of describing it:

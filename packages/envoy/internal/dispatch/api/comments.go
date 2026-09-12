@@ -185,14 +185,18 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "replies cannot carry anchors")
 		return
 	}
+	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "replies cannot carry suggestions")
+		return
+	}
 	var replyRoot *model.Comment
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must be a full comment id")
 			return
 		}
 		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must be a full comment id")
 			return
 		}
 		root, err := s.loadCommentForUpdate(r.Context(), tx, *input.ReplyTo)
@@ -204,20 +208,40 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			s.writeHandlerError(w, err)
 			return
 		}
-		if root.ReplyTo != nil || root.AskID != nil {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must be a thread root")
-			return
+		for {
+			if root.AskID != nil {
+				input.AskID = root.AskID
+				input.ReplyTo = nil
+				break
+			}
+			if root.ReplyTo == nil {
+				input.ReplyTo = &root.ID
+				replyRoot = &root
+				break
+			}
+			root, err = s.loadCommentForUpdate(r.Context(), tx, *root.ReplyTo)
+			if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
+				writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to must identify a comment on this owner")
+				return
+			}
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
-		replyRoot = &root
+	}
+	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "replies cannot carry suggestions")
+		return
 	}
 	var askQuestion, askState string
 	if input.AskID != nil {
 		if strings.TrimSpace(*input.AskID) == "" {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must be a full ask id")
 			return
 		}
 		if _, err := uuid.Parse(*input.AskID); err != nil {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must identify an ask on this owner")
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "ask_id must be a full ask id")
 			return
 		}
 		if err := tx.QueryRow(r.Context(), `
@@ -370,10 +394,15 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
+		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, "", "", "")
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		event, err := s.appendEvent(r.Context(), tx, owner.event(
 			"comment.reopened",
 			actor,
-			commentEventPayload(*reopenedRoot, reopenedArtifactName, "", "", ""),
+			payload,
 		))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -385,10 +414,15 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if replyRoot != nil {
 		threadRootID = replyRoot.ID
 	}
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, askQuestion, askState, threadRootID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,
-		commentEventPayload(comment, artifactName, askQuestion, askState, threadRootID),
+		payload,
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -489,10 +523,15 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.reopened",
 		actor,
-		commentEventPayload(comment, artifactName, "", "", ""),
+		payload,
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -597,10 +636,15 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
-		commentEventPayload(comment, artifactName, "", "", ""),
+		payload,
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -824,10 +868,15 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		events = append(events, versionEvent)
 	}
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		eventType,
 		actor,
-		commentEventPayload(comment, artifactName, "", "", ""),
+		payload,
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -937,8 +986,21 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 	return comment, nil
 }
 
-func commentEventPayload(comment model.Comment, artifactName, askQuestion, askState, threadRootID string) model.CommentEventPayload {
-	return model.CommentEventPayload{Comment: comment, ArtifactName: artifactName, AskQuestion: askQuestion, AskState: askState, ThreadRootID: threadRootID}
+func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName, askQuestion, askState, threadRootID string) (model.CommentEventPayload, error) {
+	payload := model.CommentEventPayload{
+		Comment:      comment,
+		ArtifactName: artifactName,
+		AskQuestion:  askQuestion,
+		AskState:     askState,
+		ThreadRootID: threadRootID,
+	}
+	if comment.ArtifactID == nil {
+		return payload, nil
+	}
+	if err := tx.QueryRow(ctx, `select project_key, slug from artifacts where id = $1`, *comment.ArtifactID).Scan(&payload.ProjectKey, &payload.ArtifactSlug); err != nil {
+		return model.CommentEventPayload{}, fmt.Errorf("load artifact comment event owner: %w", err)
+	}
+	return payload, nil
 }
 
 func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment model.Comment) (string, error) {

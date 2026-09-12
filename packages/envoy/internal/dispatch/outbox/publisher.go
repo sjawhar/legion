@@ -284,9 +284,8 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		}
 	}
 	if inReplyTo != "" {
-		// The root is what humans reply under; the parent (reply_to's own target) is
-		// usually the same comment today since a reply must target a thread root, but
-		// walking to the true root keeps this correct if nesting is ever allowed.
+		// New comment threads persist ReplyTo as their root ID. Walking still keeps
+		// routing correct for legacy nested rows and finds the root author.
 		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, inReplyTo)); err != nil {
 			return err
 		}
