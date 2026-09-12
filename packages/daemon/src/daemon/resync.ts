@@ -59,17 +59,6 @@ function hasTree(state: LegionState, issue: IssueKey): boolean {
   return false;
 }
 
-function hasActiveTree(state: LegionState, issue: IssueKey): boolean {
-  const seen = new Set<IssueKey>();
-  let current: IssueKey | undefined = issue;
-  while (current && !seen.has(current)) {
-    if (state.trees[current]?.status === "active") return true;
-    seen.add(current);
-    current = state.issues[current]?.parent;
-  }
-  return false;
-}
-
 async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFailure[]> {
   const refs: Record<string, GitHubPRRef> = {};
   const snapshots = new Map<string, CiSnapshot>();
@@ -240,9 +229,11 @@ async function healStatusDrift(deps: RunResyncDeps, now: number): Promise<number
 
 /** Root-issue consistency anomalies a healed drift scan cannot itself explain: an issue Dispatch
  * still considers alive but whose tree/admission bookkeeping has fallen out of step with its own
- * status. Never self-heals `zero-owner-tree` (an architect or human must decide whether to
- * re-admit); `untriaged-open` self-heals by re-emitting the `issue.created` controller wake the
- * daemon apparently lost. */
+ * status. A root whose tree is `queued` is waiting for an admission slot the daemon itself owns
+ * and is not an anomaly; a `launch-failed` one is reported exactly once, by the launch-failed
+ * loop below, never also as `zero-owner-tree`. Never self-heals `zero-owner-tree` (an architect
+ * or human must decide whether to re-admit); `untriaged-open` self-heals by re-emitting the
+ * `issue.created` controller wake the daemon apparently lost. */
 function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAnomaly[]> {
   const anomalies: ResyncAnomaly[] = [];
   const acks: Promise<void>[] = [];
@@ -275,13 +266,19 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
       );
       continue;
     }
-    if (!hasActiveTree(deps.state, node.key)) {
-      anomalies.push({
-        kind: "zero-owner-tree",
-        issue: node.key,
-        detail: `Dispatch status "${node.status}" has no active Legion tree`,
-      });
+    // Every node reaching here is a root (children were skipped above), so its own tree entry
+    // is the whole ownership question. `queued` waits for an admission slot the daemon owns;
+    // `launch-failed` is reported by the loop below. Anything else -- no tree, or one that is
+    // lingering, dead, or closed -- leaves a still-open issue with nobody responsible for it.
+    const treeStatus = deps.state.trees[node.key]?.status;
+    if (treeStatus === "active" || treeStatus === "queued" || treeStatus === "launch-failed") {
+      continue;
     }
+    anomalies.push({
+      kind: "zero-owner-tree",
+      issue: node.key,
+      detail: `Dispatch status "${node.status}" has no active Legion tree`,
+    });
   }
   for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
     [IssueKey, LegionState["trees"][IssueKey]]
