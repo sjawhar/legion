@@ -10,6 +10,7 @@ import {
   LegionDaemonApi,
 } from "@legion/contracts";
 import { defineCommand, runMain } from "citty";
+import { MERGE_AUTHORITY_REFUSED } from "../daemon/api/http";
 import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "../daemon/boot-probes";
 import {
   type DaemonConfig,
@@ -110,20 +111,6 @@ function isPrMergeInvocation(args: string[]): boolean {
   return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
 }
 
-/** The `error` field of a daemon JSON error body, or undefined when the body is not one. */
-function daemonErrorReason(bodyText: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(bodyText);
-    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
-      const { error } = parsed;
-      if (typeof error === "string" && error.length > 0) return error;
-    }
-  } catch {
-    // Not JSON: no reason to surface beyond the status.
-  }
-  return undefined;
-}
-
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
   const merge = isPrMergeInvocation(args);
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
@@ -132,12 +119,14 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
     body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) }),
   });
   if (!response.ok) {
-    const reason = daemonErrorReason(await response.text());
-    const suffix = reason === undefined ? "" : `: ${reason}`;
-    if (merge && response.status === 403) {
-      throw new CliError(`this grant cannot merge; publish READY to the controller${suffix}`);
+    const body = await response.text();
+    // Only the daemon's own authority refusal earns the "publish READY" wording: an expired or
+    // unknown grant on a merge invocation is a redemption failure like any other, and telling the
+    // controller to publish READY to itself would be wrong.
+    if (merge && response.status === 403 && body.includes(MERGE_AUTHORITY_REFUSED)) {
+      throw new CliError(`this grant cannot merge; publish READY to the controller: ${body}`);
     }
-    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})${suffix}`);
+    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status}): ${body}`);
   }
   const payload = LegionDaemonApi.GitHubToken.response.safeParse(await response.json());
   if (!payload.success) {

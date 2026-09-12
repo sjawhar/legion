@@ -108,26 +108,36 @@ describe("legion gh", () => {
     ).rejects.toEqual(
       expect.objectContaining({
         message:
-          "this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller",
+          'this grant cannot merge; publish READY to the controller: {"error":"Only the controller may merge; publish READY to the controller"}',
         code: 1,
       })
     );
     expect(spawnCalled).toBe(false);
   });
 
-  it("still reports an ordinary redemption failure by status when no merge was intended", async () => {
-    await expect(
-      cmdGh(["api", "user"], {
-        env: { LEGION_GRANT: "expired-grant" },
-        fetch: async () => Response.json({ error: "Invalid or expired grant" }, { status: 403 }),
-        spawnGh: async () => 0,
-      })
-    ).rejects.toEqual(
-      expect.objectContaining({
-        message: "Unable to redeem LEGION_GRANT (403): Invalid or expired grant",
-        code: 1,
-      })
-    );
+  it("reports an expired or unknown grant as a redemption failure by status, whether or not a merge was intended", async () => {
+    for (const args of [
+      ["api", "user"],
+      ["pr", "merge", "123", "--squash"],
+    ]) {
+      let spawnCalled = false;
+      await expect(
+        cmdGh(args, {
+          env: { LEGION_GRANT: "expired-grant" },
+          fetch: async () => Response.json({ error: "Invalid or expired grant" }, { status: 403 }),
+          spawnGh: async () => {
+            spawnCalled = true;
+            return 0;
+          },
+        })
+      ).rejects.toEqual(
+        expect.objectContaining({
+          message: 'Unable to redeem LEGION_GRANT (403): {"error":"Invalid or expired grant"}',
+          code: 1,
+        })
+      );
+      expect(spawnCalled).toBe(false);
+    }
   });
 
   it("treats the --repo and REST shapes as merge invocations too: `gh pr --repo <value> merge`, `gh api .../pulls/<n>/merge`", async () => {

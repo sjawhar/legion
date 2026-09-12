@@ -3,7 +3,12 @@ import { LegionDaemonApi } from "@legion/contracts";
 import type { Grant } from "../auth";
 import type { RouteContext } from "../context";
 import { appRoleForLegionRole } from "../github";
-import { HttpError, requiredString, validateContractResponse } from "../http";
+import {
+  HttpError,
+  MERGE_AUTHORITY_REFUSED,
+  requiredString,
+  validateContractResponse,
+} from "../http";
 
 export async function handleProvisioningCredential(
   ctx: RouteContext,
@@ -34,14 +39,13 @@ export async function handleGrants(
   }
   const grantId = randomUUID();
   const expiresAt = ctx.now() + ctx.grantTtlMs;
+  const sessionId = requiredString(body, "sessionId");
   if (hasTree) {
     const { tree, issue } = ctx.requireTreeIssue(body);
     const capability = ctx.auth.requireSessionCapability(body, tree, issue);
-    const sessionId = requiredString(body, "sessionId");
     ctx.auth.setGrant(grantId, { issue, role: capability.role, sessionId, expiresAt });
   } else {
     await ctx.auth.requireController(ctx.deps.state, body);
-    const sessionId = requiredString(body, "sessionId");
     ctx.auth.setGrant(grantId, { role: "controller", sessionId, expiresAt });
   }
   return Response.json(
@@ -56,7 +60,7 @@ export async function handleGrants(
  * phase-worker and architect grant is refused here, before any GitHub lease is fetched. */
 function requireMergeAuthority(grant: Grant, body: Record<string, unknown>): void {
   if (body.merge === true && grant.role !== "controller") {
-    throw new HttpError(403, "Only the controller may merge; publish READY to the controller");
+    throw new HttpError(403, MERGE_AUTHORITY_REFUSED);
   }
 }
 

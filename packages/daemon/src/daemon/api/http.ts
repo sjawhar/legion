@@ -10,6 +10,12 @@ export class HttpError extends Error {
   }
 }
 
+/** The `error` body of the 403 `/gh-token` and `/git-credential` give a non-controller grant that
+ * carries `merge: true`. `legion gh` (`cli/index.ts`) matches this exact text to word its own
+ * refusal, so the two sides share the one definition. */
+export const MERGE_AUTHORITY_REFUSED =
+  "Only the controller may merge; publish READY to the controller";
+
 /** Raised by `publishToEnvoy` (`../index.ts`) for a non-2xx Envoy response. `status` carries
  * Envoy's own HTTP status verbatim so callers can distinguish "no live session holds this role"
  * (404) from a genuine delivery failure without parsing the error message. */

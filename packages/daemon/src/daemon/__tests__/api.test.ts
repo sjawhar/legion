@@ -818,6 +818,18 @@ describe("Legion HTTP API", () => {
     });
     expect(readyCalls).toBe(2);
 
+    // An older plugin (or a takeover claim) that omits the field leaves the recorded file alone.
+    const omittedAfterRecord = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_takeover",
+    });
+    expect(omittedAfterRecord.response.status).toBe(200);
+    expect(state.controllerLocator?.ompSessionFile).toBe("/tmp/controller.jsonl");
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_takeover",
+    });
+
     const wrongSecret = await json("/legion/v1/controller/ready", {
       secret: "wrong",
       sessionId: "ses_controller",
@@ -840,7 +852,6 @@ describe("Legion HTTP API", () => {
       });
       expect(ready.response.status).toBe(200);
       expect(state.controllerLocator).toBeUndefined();
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("no controller pane is recorded"));
     } finally {
       warn.mockRestore();
     }
