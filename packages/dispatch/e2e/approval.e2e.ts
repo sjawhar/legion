@@ -40,7 +40,7 @@ test("a spec's approval is a human review pinned to its version: requested by th
     await expect(card).toContainText("Approve spec.md (version 1)?");
     await expect(card.getByRole("radio", { name: "Other" })).toHaveCount(0);
     await card.getByRole("radio", { name: /^Approve Approve/ }).check();
-    await card.getByRole("button", { name: "Submit answer" }).click();
+    await card.getByRole("button", { name: "Answer" }).click();
     await expect(card).toHaveCount(0);
 
     // The document header shows the approval pinned to version 1.

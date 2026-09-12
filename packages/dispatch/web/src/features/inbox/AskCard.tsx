@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { type FormEvent, type KeyboardEvent, type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -269,10 +269,12 @@ function AskThreadDisclosure({
   ask,
   thread,
   createReply,
+  embedded = false,
 }: {
   ask: Ask;
   thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  embedded?: boolean;
 }): ReactNode {
   const [open, setOpen] = useState(false);
 
@@ -295,6 +297,10 @@ function AskThreadDisclosure({
   }
 
   const count = thread.data?.replies.length ?? 0;
+  // With no replies there is nothing to disclose; the only reason to open the thread is the
+  // answered-ask Reply composer. An open ask's composer lives in the card, a resolved ask has
+  // none, so neither gets a trigger here.
+  if (count === 0 && ask.state !== "answered") return null;
   return (
     <>
       <button
@@ -310,7 +316,13 @@ function AskThreadDisclosure({
       </button>
       {open ? (
         <div id={`thread-${ask.id}`}>
-          <AskThread ask={ask} createReply={createReply} showResolution={false} thread={thread} />
+          <AskThread
+            ask={ask}
+            createReply={createReply}
+            embedded={embedded}
+            showResolution={false}
+            thread={thread}
+          />
         </div>
       ) : null}
     </>
@@ -330,10 +342,8 @@ export function AskCard({
   // ask id never collide when a responsive transition briefly renders both.
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
-  const [otherSelected, setOtherSelected] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [questionChoice, setQuestionChoice] = useState(false);
-  const [actionCannot, setActionCannot] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
@@ -401,26 +411,30 @@ export function AskCard({
   const isApproval = ask.kind === "approval";
   const isAction = ask.kind === "action";
   const isSubmitting = mutation.isPending || clarification.isPending;
+  const trimmedAnswer = answerText.trim();
+  const canAnswer = isApproval
+    ? selected.length > 0 && (!selected.includes("Request changes") || trimmedAnswer !== "")
+    : isAction
+      ? selected.length > 0 && (!selected.includes("Can't") || trimmedAnswer !== "")
+      : hasOptions
+        ? selected.length > 0 || trimmedAnswer !== ""
+        : trimmedAnswer !== "";
+  const answerPlaceholder =
+    isApproval && selected.includes("Request changes")
+      ? "Why? (required)"
+      : isApproval && selected.includes("Approve")
+        ? "Note (optional)"
+        : selected.length > 0
+          ? "Add a note (optional)"
+          : "Answer in your own words, or ask a question back";
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
-      if (isAction) {
-        mutation.mutate({ selected: ["Can't"], text });
+      if (isApproval || isAction || hasOptions) {
+        mutation.mutate(text === "" ? { selected } : { selected, text });
         return;
       }
-      if (isApproval) {
-        mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
-        return;
-      }
-      if (hasOptions) {
-        mutation.mutate(otherSelected ? { selected, text } : { selected });
-        return;
-      }
-      mutation.mutate(text === "" ? { selected } : { selected, text });
+      mutation.mutate({ selected: [], text });
     });
-  };
-
-  const markActionDone = () => {
-    submitGuard.guard(() => mutation.mutate({ selected: ["Done"] }));
   };
 
   const selectRealOption = (label: string) => {
@@ -434,68 +448,52 @@ export function AskCard({
       return;
     }
     setSelected([label]);
-    setOtherSelected(false);
-    setAnswerText("");
-  };
-
-  const toggleOther = () => {
-    setQuestionChoice(false);
-    if (ask.multiple) {
-      setOtherSelected((current) => {
-        const next = !current;
-        if (!next) {
-          setAnswerText("");
-        }
-        return next;
-      });
-      return;
-    }
-    setSelected([]);
-    setOtherSelected(true);
   };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const text = answerText.trim();
-    if (isAction) {
-      sendAnswer(text);
-      return;
-    }
-    if (!isApproval && hasOptions && otherSelected && isQuestionShapedAnswer(text)) {
+    if (!canAnswer) return;
+    if (
+      !isApproval &&
+      !isAction &&
+      selected.length === 0 &&
+      isQuestionShapedAnswer(trimmedAnswer)
+    ) {
       setQuestionChoice(true);
       return;
     }
-    sendAnswer(text);
+    sendAnswer(trimmedAnswer);
   };
   const sendClarification = () => {
-    const text = answerText.trim();
-    if (text === "") return;
-    submitGuard.guard(() => clarification.mutate(text));
+    if (trimmedAnswer === "") return;
+    submitGuard.guard(() => clarification.mutate(trimmedAnswer));
   };
-  const canSubmit = isAction
-    ? actionCannot && answerText.trim() !== ""
-    : isApproval
-      ? selected.length > 0 && (!selected.includes("Request changes") || answerText.trim() !== "")
-      : hasOptions
-        ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
-        : answerText.trim() !== "";
-  const showTextarea = isAction
-    ? actionCannot
-    : isApproval
-      ? selected.includes("Request changes")
-      : !hasOptions || otherSelected;
+  const submitFromKeyboard = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   const completed = justAnswered ?? (ask.state === "open" ? null : ask);
-  // The thread's own "still open?" wording must track the post-answer ask, not the possibly
-  // stale prop passed to this instance: `justAnswered` renders before an invalidated `ask` prop
-  // round-trips down from the parent.
   const currentAsk = completed ?? ask;
   const threadNode =
     thread === "collapsed" ? (
-      <AskThreadDisclosure ask={currentAsk} createReply={reply} thread={threadQuery} />
+      <AskThreadDisclosure
+        ask={currentAsk}
+        createReply={reply}
+        embedded={completed === null}
+        thread={threadQuery}
+      />
     ) : (
-      <AskThread ask={currentAsk} createReply={reply} showResolution={false} thread={threadQuery} />
+      <AskThread
+        ask={currentAsk}
+        createReply={reply}
+        embedded={completed === null}
+        showResolution={false}
+        thread={threadQuery}
+      />
     );
 
   if (completed !== null) {
@@ -522,210 +520,169 @@ export function AskCard({
   }
 
   return (
-    <>
-      <article className={`rounded-xl p-4 shadow-sm ${card}`} data-testid={`ask-${ask.id}`}>
-        {ask.anchor === null ? null : (
-          <blockquote
-            className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
-          >
-            {ask.anchor.quote}
-          </blockquote>
-        )}
-        <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
-        {ask.block_id === undefined ||
-        ask.block_id === null ||
-        ask.block_artifact === undefined ? null : (
-          <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
-            <AskBlockLink ask={ask} />
-          </p>
-        )}
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            {isApproval ? (
-              <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
-                Approval requested
-              </p>
-            ) : isAction ? (
-              <span
-                className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
-              >
-                Action
-              </span>
-            ) : null}
-            <div className={`font-medium ${textPrimaryOnSurface}`}>
-              <MarkdownBody markdown={ask.question} />
-            </div>
-            <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
-              {actorLabel(ask.author)} ·{" "}
-              {isAction ? (
-                <time dateTime={ask.created_at}>{formatAskAge(ask.created_at)}</time>
-              ) : (
-                <Timestamp at={ask.created_at} />
-              )}
+    <article className={`rounded-xl p-4 shadow-sm ${card}`} data-testid={`ask-${ask.id}`}>
+      {ask.anchor === null ? null : (
+        <blockquote
+          className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
+        >
+          {ask.anchor.quote}
+        </blockquote>
+      )}
+      <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
+      {ask.block_id === undefined ||
+      ask.block_id === null ||
+      ask.block_artifact === undefined ? null : (
+        <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
+          <AskBlockLink ask={ask} />
+        </p>
+      )}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          {isApproval ? (
+            <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
+              Approval requested
             </p>
-            <AskEditHistory ask={ask} edits={edits} />
-          </div>
-          <span
-            className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}
-          >
-            {URGENCY_LABELS[ask.urgency]}
-          </span>
-        </div>
-        {tmuxTarget === undefined ? null : (
-          <button
-            className={`mt-3 text-sm font-medium ${linkText} ${linkHoverText}`}
-            onClick={() => {
-              void navigator.clipboard?.writeText(tmuxTarget);
-            }}
-            type="button"
-          >
-            Copy tmux target
-          </button>
-        )}
-        <form className="mt-4 space-y-3" onSubmit={submit}>
-          {isAction ? (
-            <fieldset aria-label="Action controls" className="flex flex-wrap gap-2">
-              <legend className="sr-only">Action controls</legend>
-              <button
-                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-                disabled={isSubmitting}
-                onClick={markActionDone}
-                type="button"
-              >
-                Done
-              </button>
-              <button
-                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-                disabled={isSubmitting}
-                onClick={() => {
-                  setActionCannot(true);
-                  setAnswerText("");
-                }}
-                type="button"
-              >
-                Can&apos;t
-              </button>
-            </fieldset>
-          ) : ask.options.length === 0 ? null : (
-            <fieldset className="space-y-2">
-              <legend className="sr-only">Answer options</legend>
-              {ask.options.map((option) => {
-                const checked = selected.includes(option.label);
-                return (
-                  <label
-                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
-                    key={option.label}
-                  >
-                    <input
-                      checked={checked}
-                      disabled={isSubmitting}
-                      name={`ask-${ask.id}`}
-                      onChange={() => selectRealOption(option.label)}
-                      type={ask.multiple ? "checkbox" : "radio"}
-                    />
-                    <span>
-                      <span className={`font-medium ${textPrimaryOnSurface}`}>
-                        <MarkdownBody markdown={option.label} variant="inline" />
-                      </span>
-                      {option.description === undefined ? null : (
-                        <span className={`mt-0.5 block text-sm ${textMutedOnSurface}`}>
-                          <MarkdownBody markdown={option.description} variant="inline" />
-                        </span>
-                      )}
-                    </span>
-                  </label>
-                );
-              })}
-              {isApproval ? null : (
-                <label
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
-                >
-                  <input
-                    checked={otherSelected}
-                    disabled={isSubmitting}
-                    name={`ask-${ask.id}`}
-                    onChange={toggleOther}
-                    type={ask.multiple ? "checkbox" : "radio"}
-                  />
-                  <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
-                </label>
-              )}
-            </fieldset>
-          )}
-          {showTextarea ? (
-            <label
-              className={`block text-sm font-medium ${textSecondaryOnSurface}`}
-              htmlFor={answerFieldId}
+          ) : isAction ? (
+            <span
+              className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
             >
-              {isApproval || isAction ? "Reason" : "Your answer"}
-              <textarea
-                className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-                disabled={isSubmitting}
-                id={answerFieldId}
-                onChange={(event) => {
-                  setAnswerText(event.target.value);
-                  setQuestionChoice(false);
-                }}
-                value={answerText}
-              />
-            </label>
+              Action
+            </span>
           ) : null}
-          {isAction ? (
-            actionCannot ? (
-              <button
-                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-                disabled={!canSubmit || isSubmitting}
-                type="submit"
-              >
-                {mutation.isPending ? "Submitting…" : "Submit Can't"}
-              </button>
-            ) : null
-          ) : questionChoice ? (
-            <fieldset aria-label="Question-shaped answer" className="space-y-2">
-              <button
-                className={`min-h-11 w-full rounded-lg border px-3 py-2 text-left text-sm font-semibold ${borderDefault} ${textPrimaryOnSurface} ${cardHoverBorder}`}
-                disabled={isSubmitting}
-                onClick={sendClarification}
-                ref={(node) => node?.focus()}
-                type="button"
-              >
-                This reads like a question — send as clarification (keeps the ask open)
-              </button>
-              <button
-                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-                disabled={isSubmitting}
-                onClick={() => sendAnswer(answerText.trim())}
-                type="button"
-              >
-                Answer with it anyway
-              </button>
-              {clarification.isError ? (
-                <QueryError
-                  message="Could not send your clarification."
-                  onRetry={() => submitGuard.retryLast(clarification)}
-                  retrying={clarification.isPending}
-                />
-              ) : null}
-            </fieldset>
-          ) : (
+          <div className={`font-medium ${textPrimaryOnSurface}`}>
+            <MarkdownBody markdown={ask.question} />
+          </div>
+          <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
+            {actorLabel(ask.author)} ·{" "}
+            {isAction ? (
+              <time dateTime={ask.created_at}>{formatAskAge(ask.created_at)}</time>
+            ) : (
+              <Timestamp at={ask.created_at} />
+            )}
+          </p>
+          <AskEditHistory ask={ask} edits={edits} />
+          {tmuxTarget === undefined ? null : (
             <button
-              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-              disabled={!canSubmit || isSubmitting}
-              type="submit"
+              className={`mt-3 text-sm font-medium ${linkText} ${linkHoverText}`}
+              onClick={() => {
+                void navigator.clipboard?.writeText(tmuxTarget);
+              }}
+              type="button"
             >
-              {mutation.isPending ? "Submitting…" : "Submit answer"}
+              Copy tmux target
             </button>
           )}
-          {mutation.isError ? (
-            <QueryError
-              message="Could not save your answer."
-              onRetry={() => submitGuard.retryLast(mutation)}
-              retrying={mutation.isPending}
-            />
-          ) : null}
-        </form>
-      </article>
+        </div>
+        <span
+          className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}
+        >
+          {URGENCY_LABELS[ask.urgency]}
+        </span>
+      </div>
       {threadNode}
-    </>
+      <form className="mt-4 space-y-3" onSubmit={submit}>
+        {ask.options.length === 0 ? null : (
+          <fieldset className="space-y-2">
+            <legend className="sr-only">Answer options</legend>
+            {ask.options.map((option) => {
+              const checked = selected.includes(option.label);
+              return (
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
+                  key={option.label}
+                >
+                  <input
+                    checked={checked}
+                    disabled={isSubmitting}
+                    name={`ask-${ask.id}`}
+                    onChange={() => selectRealOption(option.label)}
+                    type={ask.multiple ? "checkbox" : "radio"}
+                  />
+                  <span>
+                    <span className={`font-medium ${textPrimaryOnSurface}`}>
+                      <MarkdownBody markdown={option.label} variant="inline" />
+                    </span>
+                    {option.description === undefined ? null : (
+                      <span className={`mt-0.5 block text-sm ${textMutedOnSurface}`}>
+                        <MarkdownBody markdown={option.description} variant="inline" />
+                      </span>
+                    )}
+                  </span>
+                </label>
+              );
+            })}
+          </fieldset>
+        )}
+        <label className="block" htmlFor={answerFieldId}>
+          <span className="sr-only">{isApproval ? "Reason" : "Your answer"}</span>
+          <textarea
+            className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+            disabled={isSubmitting}
+            id={answerFieldId}
+            onChange={(event) => {
+              setAnswerText(event.target.value);
+              setQuestionChoice(false);
+            }}
+            onKeyDown={submitFromKeyboard}
+            placeholder={answerPlaceholder}
+            rows={2}
+            value={answerText}
+          />
+        </label>
+        {questionChoice ? (
+          <fieldset aria-label="Question-shaped answer" className="flex gap-2">
+            <button
+              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+              disabled={isSubmitting}
+              onClick={sendClarification}
+              ref={(node) => node?.focus()}
+              type="button"
+            >
+              {clarification.isPending ? "Sending…" : "Ask back instead"}
+            </button>
+            <button
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+              disabled={isSubmitting}
+              onClick={() => sendAnswer(trimmedAnswer)}
+              type="button"
+            >
+              Answer with it anyway
+            </button>
+          </fieldset>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+              disabled={!canAnswer || isSubmitting}
+              type="submit"
+            >
+              {mutation.isPending ? "Answering…" : "Answer"}
+            </button>
+            <button
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+              disabled={trimmedAnswer === "" || isSubmitting}
+              onClick={sendClarification}
+              type="button"
+            >
+              {clarification.isPending ? "Sending…" : "Ask back"}
+            </button>
+          </div>
+        )}
+        {mutation.isError ? (
+          <QueryError
+            message="Could not save your answer."
+            onRetry={() => submitGuard.retryLast(mutation)}
+            retrying={mutation.isPending}
+          />
+        ) : null}
+        {clarification.isError ? (
+          <QueryError
+            message="Could not send your clarification."
+            onRetry={() => submitGuard.retryLast(clarification)}
+            retrying={clarification.isPending}
+          />
+        ) : null}
+      </form>
+    </article>
   );
 }

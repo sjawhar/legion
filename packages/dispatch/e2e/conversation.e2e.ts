@@ -270,9 +270,9 @@ test("Conversation coalesces answered asks and toggles activity without remounti
     const card = conversation.getByTestId(`ask-${ask.id}`);
     await expect(card.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(card.getByRole("radio", { name: "Hold" })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Submit answer" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Answer" })).toBeVisible();
     await card.getByRole("radio", { name: "Ship" }).check();
-    await card.getByRole("button", { name: "Submit answer" }).click();
+    await card.getByRole("button", { name: "Answer" }).click();
     await expect(
       card.getByRole("list", { name: "Options" }).locator('li[data-selected="true"]')
     ).toContainText("Ship");

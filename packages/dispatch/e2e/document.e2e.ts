@@ -162,7 +162,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await expect(inboxDocument).toBeVisible();
     const inboxAsk = bobPage.getByTestId(`ask-${askId}`);
     await inboxAsk.getByLabel("Your answer").fill("Yes, publish it.");
-    await inboxAsk.getByRole("button", { name: "Submit answer" }).click();
+    await inboxAsk.getByRole("button", { name: "Answer" }).click();
     await expect
       .poll(() => getAsk(askId))
       .toMatchObject({

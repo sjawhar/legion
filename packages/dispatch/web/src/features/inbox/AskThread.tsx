@@ -57,7 +57,10 @@ function useAskThread(
   const submit = useMutation({
     mutationFn: (text: string) => {
       if (ask.issue_key === null) {
-        throw new Error("cannot reply to an ask without an issue");
+        if (ask.artifact_id === null || ask.artifact_id === undefined) {
+          throw new Error("document ask is missing its artifact id");
+        }
+        return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text });
       }
       return createReply(ask.issue_key, { ask_id: ask.id, body: text });
     },
@@ -97,20 +100,22 @@ export interface AskThreadProps {
   thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   showResolution?: boolean;
+  /** A thread inside an open ask card inherits the card's compact flow. */
+  embedded?: boolean;
 }
 
 /**
  * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, oldest first. An open ask's composer
- * is framed as asking for clarification (replying never answers the question); an answered
- * ask keeps the plain reply composer. A resolved ask keeps its history and recorded
- * resolution without a composer.
+ * the ask (Comment.ask_id) plus their own reply chains, oldest first. Answered asks keep a
+ * plain reply composer; open asks reserve their single composer for answering or asking back.
+ * A resolved ask keeps its history and recorded resolution without a composer.
  */
 export function AskThread({
   ask,
   thread,
   createReply: reply = createReply,
   showResolution = true,
+  embedded = false,
 }: AskThreadProps): ReactNode {
   // Each AskThread instance owns its reply field label so transient duplicate
   // mounts during a responsive transition cannot share an ask-id-derived id.
@@ -121,12 +126,11 @@ export function AskThread({
     thread
   );
   const resolution = resolvedInfo(ask);
-  const isOpen = ask.state === "open";
 
   return (
     <section
       aria-label="Replies"
-      className={`mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
+      className={embedded ? "space-y-3" : `mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
       {showResolution && resolution !== null ? (
@@ -151,18 +155,13 @@ export function AskThread({
           ))}
         </ul>
       )}
-      {resolution === null && ask.issue_key !== null ? (
+      {resolution === null && ask.state === "answered" ? (
         <form className="flex flex-col gap-2" onSubmit={submitReply}>
-          {isOpen ? (
-            <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-              Replying does not answer the question.
-            </p>
-          ) : null}
           <label
             className={`block text-sm font-medium ${textSecondaryOnCanvas}`}
             htmlFor={replyFieldId}
           >
-            {isOpen ? "Ask for clarification" : "Reply"}
+            Reply
             <textarea
               className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
               disabled={isPending}
@@ -176,7 +175,7 @@ export function AskThread({
             disabled={body.trim() === "" || isPending}
             type="submit"
           >
-            {isOpen ? (isPending ? "Sending…" : "Send") : isPending ? "Replying…" : "Reply"}
+            {isPending ? "Replying…" : "Reply"}
           </button>
           {isError ? (
             <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />
