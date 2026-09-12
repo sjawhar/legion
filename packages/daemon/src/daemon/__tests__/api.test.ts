@@ -1577,6 +1577,24 @@ describe("Legion HTTP API", () => {
     expect(completed.body).toEqual({ error: "A controller grant cannot complete a phase" });
     expect(publications).toEqual([]);
   });
+  it("revokes outstanding controller grants when the controller capability is rotated for a respawn", async () => {
+    await start();
+    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(controllerGrant.status).toBe(200);
+
+    // What `spawnController` does before opening a fresh pane.
+    await api?.mintControllerCapability();
+
+    const stale = await json("/legion/v1/gh-token", {
+      grantId: controllerGrant.body.grantId,
+      merge: true,
+    });
+    expect(stale.response.status).toBe(403);
+    expect(tokenRoles).toEqual([]);
+  });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();
     const leaseGate = Promise.withResolvers<void>();

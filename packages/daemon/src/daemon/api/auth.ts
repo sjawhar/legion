@@ -154,6 +154,15 @@ export class CapabilityService {
     }
   }
 
+  /** Drops every grant the controller minted. Called when the controller capability rotates
+   * (`mintControllerCapability`, on every controller spawn), so a grant minted by the previous
+   * pane cannot outlive the secret that authorised it. */
+  revokeControllerGrants(): void {
+    for (const [grantId, grant] of this.grants) {
+      if (grant.role === "controller") this.grants.delete(grantId);
+    }
+  }
+
   setGrant(grantId: string, grant: Grant): void {
     this.grants.set(grantId, grant);
   }

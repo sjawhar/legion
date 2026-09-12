@@ -425,6 +425,7 @@ describe("TmuxRuntime", () => {
       tmuxArgv("set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"),
       tmuxArgv(
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id} #{pane_id} #{pane_pid}",
@@ -512,6 +513,7 @@ describe("TmuxRuntime", () => {
     expect(window).toEqual(
       tmuxArgv(
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id} #{pane_id} #{pane_pid}",

@@ -553,6 +553,7 @@ describe("ProcessManager", () => {
         "-L",
         "legion-omp",
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id} #{pane_id} #{pane_pid}",

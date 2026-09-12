@@ -285,6 +285,8 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
+      // Grants the previous controller pane minted die with its secret.
+      auth.revokeControllerGrants();
       await save();
       return secret;
     },
