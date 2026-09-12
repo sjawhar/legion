@@ -201,10 +201,21 @@ legion gh -- api repos/<owner>/<repo>/compare/<approved sha>...<current sha> --j
    exist but none is required it exits 1 with `no required checks reported on the '<branch>'
    branch` — a freshly pushed head has no check runs for a few seconds, and a head that conflicts
    with the base never gets any. Either exit is **pending**, never green: subscribe to
-   `pr.<n>.checks` exactly as for a running check and re-run the gates on that wake. The one
-   exception is a repository that genuinely requires no checks, and that fact is read from the
-   repository, never from the absence of rows: the `rules/branches/<base branch>` query above
-   returning `[]` is what lets this gate hold with no check rows.
+   `pr.<n>.checks` exactly as for a running check and re-run the gates on that wake. Two
+   exceptions, both read from the repository, never from the absence of rows:
+   - A repository that genuinely requires no checks: the `rules/branches/<base branch>` query
+     above returning `[]` is what lets this gate hold with no check rows.
+   - A private repository on GitHub's free plan cannot define required checks at all: that same
+     query answers HTTP 403 with a body saying
+     `Upgrade to GitHub Pro or make this repository public to enable this feature`. Match that
+     sentence exactly — any other 403 is a permission error and stays an error, never "no
+     required checks". Under it, gate 2 requires every check reported on the head to be green
+     instead: `legion gh -- pr checks <pr url> --json name,state,bucket,link` (without
+     `--required`) exits 0 with at least one row and every row's `bucket` is `pass`. A `pending`
+     row is pending, a `fail` row never merges, and no rows (the exit-1 `no checks reported`)
+     stays pending exactly as above. This is stricter than "no required checks, merge", and
+     GitHub still enforces whatever protection the repository does have at `pr merge` time, so a
+     wrong read costs a refused merge reported to the architect, never an unprotected one.
 3. **threads**: zero unresolved review threads (the count of `isResolved: false` is 0).
 4. **mergeable**: `mergeable` is not `CONFLICTING` and not `UNKNOWN`.
 5. **cleanup only**: `compare/<verified sha>...<approved sha>` reports `status` `identical` or
