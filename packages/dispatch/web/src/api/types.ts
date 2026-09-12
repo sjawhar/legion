@@ -8,6 +8,7 @@ export type {
   AnswerAskInput,
   Artifact,
   ArtifactApproval,
+  ArtifactBlock,
   ArtifactDetails,
   ArtifactReview,
   ArtifactReviewEventPayload,

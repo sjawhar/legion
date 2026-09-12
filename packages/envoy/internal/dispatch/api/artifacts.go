@@ -440,7 +440,51 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	references, err := s.blockReferences(r.Context(), artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for index := range blocks {
+		blocks[index].References = references[blocks[index].ID]
+	}
 	writeJSON(w, http.StatusOK, blocks)
+}
+
+func (s *server) blockReferences(ctx context.Context, artifactID string) (map[string]model.BlockReferences, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select anchor_block_id,
+		       count(*) filter (where kind = 'comment'),
+		       count(*) filter (where kind = 'ask')
+		from (
+			select anchor->>'block_id' as anchor_block_id, 'comment' as kind
+			from comments
+			where anchor->>'artifact_id' = $1 and nullif(anchor->>'block_id', '') is not null
+			union all
+			select anchor->>'block_id' as anchor_block_id, 'ask' as kind
+			from asks
+			where anchor->>'artifact_id' = $1 and nullif(anchor->>'block_id', '') is not null
+		) anchored
+		group by anchor_block_id
+	`, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("list block references: %w", err)
+	}
+	defer rows.Close()
+
+	references := make(map[string]model.BlockReferences)
+	for rows.Next() {
+		var blockID string
+		var comments, asks int
+		if err := rows.Scan(&blockID, &comments, &asks); err != nil {
+			return nil, fmt.Errorf("scan block references: %w", err)
+		}
+		references[blockID] = model.BlockReferences{Comments: comments, Asks: asks}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate block references: %w", err)
+	}
+	return references, nil
 }
 
 func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {

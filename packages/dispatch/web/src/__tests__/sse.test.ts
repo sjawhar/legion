@@ -41,6 +41,7 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
     ["inbox"],
     ["asks", "CORE-1"],
     ["projects"],
+    ["artifact"],
   ]);
 });
 test("an ask edit refreshes the issue, its asks list, user state, the inbox, and the ask's own read", () => {
@@ -89,6 +90,7 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
     ["inbox"],
     ["asks", "CORE-1"],
     ["projects"],
+    ["artifact"],
     ["ask-thread", "ask-1"],
   ]);
 });
@@ -274,6 +276,7 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
     ["inbox"],
     ["asks", "CORE-1"],
     ["projects"],
+    ["artifact"],
     ["ask-thread", "ask-1"],
   ]);
 });

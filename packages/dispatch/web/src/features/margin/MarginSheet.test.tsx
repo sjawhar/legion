@@ -60,6 +60,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           visibleArtifact: specArtifact,
         },
         placement: {
+          blockPlacements: new Map(),
           markPlacements: new Map(),
         },
         selection: {
@@ -76,6 +77,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           threadKey: undefined,
           toggle: () => {},
         },
+        filter: { blockId: undefined, clear: () => {} },
         tab: {
           set: () => {},
           value: "comments",
@@ -163,7 +165,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
               slug: "design-notes",
             },
           },
-          placement: { markPlacements: new Map() },
+          placement: { blockPlacements: new Map(), markPlacements: new Map() },
           selection: {
             expandedThreadKey: undefined,
             editingCommentId: undefined,
@@ -173,6 +175,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
             showResolved: false,
           },
           sheet: { closeThread: () => {}, expanded: true, threadKey: undefined, toggle: () => {} },
+          filter: { blockId: undefined, clear: () => {} },
           tab: { set: () => {}, value: "comments" },
         }}
       />
@@ -195,6 +198,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
   const root: Comment = {
     anchor: {
       artifact_id: specArtifact.id,
+      block_id: null,
       mark_id: "mark-1",
       orphaned: false,
       quote: "selected text",
@@ -280,7 +284,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             viewerLogin: "alice",
             visibleArtifact: specArtifact,
           },
-          placement: { markPlacements: new Map() },
+          placement: { blockPlacements: new Map(), markPlacements: new Map() },
           selection: {
             expandedThreadKey: root.id,
             editingCommentId: undefined,
@@ -299,6 +303,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               sheetClosed = expanded === false;
             },
           },
+          filter: { blockId: undefined, clear: () => {} },
           tab: { set: () => {}, value: "comments" },
         }}
       />

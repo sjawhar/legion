@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 import { Schema } from "prosemirror-model";
 
-import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
+import {
+  blockPlacements,
+  composerKindFor,
+  markPlacements,
+  setActiveBlockClass,
+  setActiveMarkClass,
+} from "./marks";
 
 const schema = new Schema({
   marks: {
@@ -10,7 +16,7 @@ const schema = new Schema({
   },
   nodes: {
     doc: { content: "paragraph+" },
-    paragraph: { content: "inline*", group: "block" },
+    paragraph: { attrs: { blockId: { default: null } }, content: "inline*", group: "block" },
     text: { group: "inline" },
   },
 });
@@ -69,6 +75,26 @@ test("markPlacements reports the first position and matching vertical offset of 
   ]);
 });
 
+test("blockPlacements reports each stable block's position and offset", () => {
+  const doc = schema.node("doc", undefined, [
+    schema.node("paragraph", { blockId: "block-1" }, schema.text("First")),
+    schema.node("paragraph", { blockId: "block-2" }, schema.text("Second")),
+  ]);
+
+  expect([
+    ...blockPlacements(
+      doc,
+      new Map([
+        ["block-1", 40],
+        ["block-2", 72],
+      ])
+    ),
+  ]).toEqual([
+    ["block-1", { pos: 0, top: 40 }],
+    ["block-2", { pos: 7, top: 72 }],
+  ]);
+});
+
 test("composerKindFor maps every selection-bar composer action", () => {
   expect(composerKindFor("comment")).toBe("comment");
   expect(composerKindFor("suggest")).toBe("suggestion");
@@ -93,4 +119,18 @@ test("setActiveMarkClass toggles the active class on matching spans only", () =>
   expect(root.querySelector('[data-id="a"]')?.classList.contains("dispatch-mark-active")).toBe(
     false
   );
+});
+
+test("setActiveBlockClass toggles the active class on matching block elements only", () => {
+  const root = document.createElement("div");
+  root.innerHTML = '<p data-block-id="a"></p><p data-block-id="b"></p>';
+
+  setActiveBlockClass(root, ["a"]);
+
+  expect(
+    root.querySelector('[data-block-id="a"]')?.classList.contains("dispatch-block-active")
+  ).toBe(true);
+  expect(
+    root.querySelector('[data-block-id="b"]')?.classList.contains("dispatch-block-active")
+  ).toBe(false);
 });

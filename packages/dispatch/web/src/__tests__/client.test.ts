@@ -272,6 +272,7 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
   await api.listArtifactComments("artifact-1");
   await api.createArtifactComment("artifact-1", { body: "Looks good" });
   await api.getArtifactEvents("artifact-1", { after: 2, limit: 10 });
+  await api.getArtifactBlocks("artifact-1");
   await api.getIssueReferences("CORE-1");
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
@@ -284,6 +285,7 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     ["GET", "/api/v1/artifacts/artifact-1/comments"],
     ["POST", "/api/v1/artifacts/artifact-1/comments"],
     ["GET", "/api/v1/artifacts/artifact-1/events?after=2&limit=10"],
+    ["GET", "/api/v1/artifacts/artifact-1/blocks"],
     ["GET", "/api/v1/issues/CORE-1/references"],
   ]);
   expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({

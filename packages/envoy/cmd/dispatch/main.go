@@ -57,6 +57,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "backfill-block-ids" {
 		os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "backfill-anchor-blocks" {
+		os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
@@ -531,6 +534,51 @@ func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) in
 		}
 	}
 	return exitCode
+}
+
+func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer) int {
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(out, "backfill-anchor-blocks: DATABASE_URL is required")
+		return 1
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-anchor-blocks: open database: %v\n", err)
+		return 1
+	}
+	defer database.Pool.Close()
+	if err := database.Migrate(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-anchor-blocks: migrate database: %v\n", err)
+		return 1
+	}
+	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
+		fmt.Fprintf(out, "backfill-anchor-blocks: migrate legacy documents: %v\n", err)
+		return 1
+	}
+	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
+	defer service.Shutdown(context.Background())
+	reports, err := service.BackfillBlockIDs(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-anchor-blocks: stamp document blocks: %v\n", err)
+		return 1
+	}
+	for _, report := range reports {
+		if report.Err != nil {
+			fmt.Fprintf(out, "backfill-anchor-blocks: stamp document %s: %v\n", report.ArtifactID, report.Err)
+			return 1
+		}
+	}
+	result, err := service.BackfillAnchorBlocks(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-anchor-blocks: %v\n", err)
+		return 1
+	}
+	writeAnchorBlockBackfillReport(out, result)
+	return 0
+}
+
+func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {
+	fmt.Fprintf(out, "backfill-anchor-blocks: asks=%d comments=%d skipped=%d\n", result.Asks, result.Comments, result.Skipped)
 }
 
 func writeBlockIDBackfillReport(out io.Writer, report docs.BlockIDBackfill) bool {

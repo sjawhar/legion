@@ -22,7 +22,7 @@ the native Dispatch tool suite:
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
-| Document block offsets | `src/dispatch-api.ts` | `ArtifactBlock` maps a stable block ID and type to byte offsets in canonical artifact markdown. |
+| Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs and canonical markdown offsets, including per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
 
 ## Critical conventions
 
@@ -40,6 +40,9 @@ the native Dispatch tool suite:
 - `dispatch_doc_edit` supports `replace`, `delete`, `insert`, and `retype`. `retype` names a
   stable block id, a server-declared type, and optional client-owned attributes. Ask lifecycle
   payloads include nullable `block_id`; `block.repaired` records a server-owned attribute repair.
+- Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;
+  new quotes use their lowest complete containing block, while quotes across top-level siblings
+  remain unpinned. Clients must preserve the field.
 - Do not hand-edit `packages/envoy/internal/contracts/generated.go`.
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.

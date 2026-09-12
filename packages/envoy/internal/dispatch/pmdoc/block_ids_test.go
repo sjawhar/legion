@@ -39,6 +39,58 @@ func TestEnsureBlockIDsRemintsDuplicateAfterFirstOccurrence(t *testing.T) {
 	}
 }
 
+func TestBlockIDForRangeUsesTheLowestContainingBlock(t *testing.T) {
+	tests := []struct {
+		name string
+		tree *Node
+		r    Range
+		want string
+	}{
+		{
+			name: "within one block",
+			tree: &Node{Type: "doc", Children: []*Node{{
+				Type: "paragraph", Attrs: Attrs{BlockIDAttr: "paragraph"},
+				Children: []*Node{{Type: "text", Text: "Anchored text"}},
+			}}},
+			r:    Range{From: 1, To: 9},
+			want: "paragraph",
+		},
+		{
+			name: "siblings under one list item",
+			tree: &Node{Type: "doc", Children: []*Node{{
+				Type: "bullet_list", Attrs: Attrs{BlockIDAttr: "list"}, Children: []*Node{{
+					Type: "list_item", Attrs: Attrs{BlockIDAttr: "item"}, Children: []*Node{
+						{Type: "paragraph", Attrs: Attrs{BlockIDAttr: "first"}, Children: []*Node{{Type: "text", Text: "One"}}},
+						{Type: "paragraph", Attrs: Attrs{BlockIDAttr: "second"}, Children: []*Node{{Type: "text", Text: "Two"}}},
+					},
+				}},
+			}}},
+			r:    Range{From: 3, To: 11},
+			want: "item",
+		},
+		{
+			name: "siblings under document root",
+			tree: &Node{Type: "doc", Children: []*Node{
+				{Type: "paragraph", Attrs: Attrs{BlockIDAttr: "first"}, Children: []*Node{{Type: "text", Text: "One"}}},
+				{Type: "paragraph", Attrs: Attrs{BlockIDAttr: "second"}, Children: []*Node{{Type: "text", Text: "Two"}}},
+			}},
+			r:    Range{From: 1, To: 9},
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			blockID, err := BlockIDForRange(test.tree, test.r)
+			if err != nil {
+				t.Fatalf("BlockIDForRange: %v", err)
+			}
+			if blockID != test.want {
+				t.Fatalf("BlockIDForRange = %q, want %q", blockID, test.want)
+			}
+		})
+	}
+}
+
 func TestEnsureBlockIDsStampsNestedStructuralBlocks(t *testing.T) {
 	tree := &Node{Type: "doc", Children: []*Node{{
 		Type: "bullet_list", Children: []*Node{{

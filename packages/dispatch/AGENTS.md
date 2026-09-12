@@ -33,8 +33,10 @@ The Inbox puts every open ask whose latest reply is not a human's under `Waiting
 The document margin groups each issue-owned anchored root comment and all of its replies into one
 flat thread card. A collapsed card shows a two-line root preview and reply summary; selecting it
 expands the replies and an inline reply composer. An expanded card and its Proof mark
-cross-highlight, and the card aligns to the mark. Project-document thread replies are handled by
-the margin-by-owner surface.
+cross-highlight, and the card aligns to the mark. When a stored block anchor's mark is gone, its
+card stays aligned to and highlights the `#b-<blockId>` block; a quote that spans top-level blocks
+has no block anchor and retains existing orphan behavior. The block reference gutter opens the margin
+filtered to one block. Project-document thread replies are handled by the margin-by-owner surface.
 
 Resolved comment threads are hidden until the `Resolved (N)` control is opened. Their cards name
 the resolving actor and time, expose `Reopen`, and allow a reply to reopen the thread through the

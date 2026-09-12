@@ -127,8 +127,10 @@ recommendation and its reason last, in `question`. Never put file paths, line nu
 numbers, document versions, or role tokens in the question; if the human needs that detail, anchor
 the ask to the document passage instead. Apply the phone test from "Writing for the human" before
 posting. Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
-is zero-based and selects a repeated quote, and an anchor whose quote later disappears becomes
-orphaned but stays readable against its original document version.
+is zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
+containing block while retaining its quote as display text, so rewording the passage keeps it
+attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
+against their original document version if their quote disappears.
 
 An ask must be answerable from its own text and its anchor alone. Anchor a question about a document passage with `anchor`; thread one
 about a comment with `reply_to`; thread a follow-up on your own ask with `reply_to_ask`; cite anything else with a `dispatch://`
@@ -290,11 +292,12 @@ dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body,
 
 It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
 `ref` names the owner (an issue or project-document reference) in place of `issue`/`project`.
-`quote` requires `artifact`; omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`)
-takes no `quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server
-keeps threads flat. A reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly
-under a question asked with `dispatch_ask`. Comments are edited only by their author from the
-dashboard. A delivered `comment.created` event carries the comment `id`; reply to it with
+`quote` requires `artifact`; its anchor is pinned to the containing block while retaining the quote
+for display. Omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no
+`quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server keeps
+threads flat. A reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a
+question asked with `dispatch_ask`. Comments are edited only by their author from the dashboard. A
+delivered `comment.created` event carries the comment `id`; reply to it with
 `dispatch_comment({ reply_to: <id> })`.
 
 Propose an exact replacement instead of describing it:

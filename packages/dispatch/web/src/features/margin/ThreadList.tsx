@@ -19,11 +19,12 @@ interface ThreadListProps {
   hoveredMarkId: string | undefined;
   isClosed: boolean;
   owner: MarginOwner;
+  blockPlacements: ReadonlyMap<string, MarkPlacement>;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   onAction(id: string, action: MarginItemAction): void;
   onEdit(id: string, body: string): Promise<unknown>;
   onRetryAction(): void;
-  onSelect(id: string): void;
+  onSelect(id: string, blockID: string | undefined): void;
   onToggle(key: string): void;
   onToggleResolved(): void;
   pendingActionId: string | undefined;
@@ -34,15 +35,40 @@ interface ThreadListProps {
 }
 
 function isAnchoredThread(thread: Thread): boolean {
-  return thread.anchor !== null && !thread.anchor.orphaned;
+  return (
+    thread.anchor !== null &&
+    (!thread.anchor.orphaned || typeof thread.anchor.block_id === "string")
+  );
 }
 
 function placementFor(
   thread: Thread,
-  markPlacements: ReadonlyMap<string, MarkPlacement>
+  markPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockPlacements: ReadonlyMap<string, MarkPlacement>
 ): MarkPlacement | undefined {
-  const markId = threadMarkId(thread);
-  return markId === undefined ? undefined : markPlacements.get(markId);
+  if (thread.anchor === null) {
+    return undefined;
+  }
+  if (thread.anchor.orphaned) {
+    return typeof thread.anchor.block_id === "string"
+      ? blockPlacements.get(thread.anchor.block_id)
+      : undefined;
+  }
+  return markPlacements.get(thread.anchor.mark_id);
+}
+
+function anchorElementFor(thread: Thread): HTMLElement | null {
+  if (thread.anchor === null) {
+    return null;
+  }
+  if (thread.anchor.orphaned) {
+    return typeof thread.anchor.block_id === "string"
+      ? document.querySelector<HTMLElement>(
+          `[data-block-id="${CSS.escape(thread.anchor.block_id)}"]`
+        )
+      : null;
+  }
+  return document.querySelector<HTMLElement>(`[data-id="${CSS.escape(thread.anchor.mark_id)}"]`);
 }
 
 export function ThreadList({
@@ -54,6 +80,7 @@ export function ThreadList({
   hoveredItemId,
   hoveredMarkId,
   isClosed,
+  blockPlacements,
   markPlacements,
   onAction,
   onEdit,
@@ -81,21 +108,17 @@ export function ThreadList({
   const discussion = threads.filter((thread) => !isAnchoredThread(thread));
   const topFor = useCallback(
     (thread: Thread) => {
-      const placement = placementFor(thread, markPlacements);
+      const placement = placementFor(thread, markPlacements, blockPlacements);
       if (placement === undefined) {
         return 0;
       }
-      const markId = threadMarkId(thread);
-      const mark =
-        markId === undefined
-          ? null
-          : document.querySelector<HTMLElement>(`[data-id="${CSS.escape(markId)}"]`);
+      const mark = anchorElementFor(thread);
       const region = anchoredRegion.current;
       return mark === null || region === null
         ? placement.top
         : mark.getBoundingClientRect().top - region.getBoundingClientRect().top;
     },
-    [markPlacements]
+    [blockPlacements, markPlacements]
   );
   const measure = useCallback(() => {
     const next = new Map<string, number>();
@@ -139,7 +162,7 @@ export function ThreadList({
       onAction={onAction}
       onEdit={onEdit}
       onRetryAction={onRetryAction}
-      onSelect={() => onSelect(thread.key)}
+      onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}
       pendingAction={pendingActionId === thread.key}

@@ -37,6 +37,7 @@ interface CommentsTabProps {
   hoveredMarkId: string | undefined;
   isClosed: boolean;
   owner: MarginOwner;
+  blockPlacements: ReadonlyMap<string, MarkPlacement>;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
@@ -46,7 +47,7 @@ interface CommentsTabProps {
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
-  onSelectCard: (id: string) => void;
+  onSelectCard: (id: string, blockID: string | undefined) => void;
   onToggleThread: (key: string) => void;
   onToggleResolved: () => void;
   pendingActionId: string | undefined;
@@ -97,6 +98,7 @@ export function CommentsTab({
   hoveredMarkId,
   isClosed,
   owner,
+  blockPlacements,
   markPlacements,
   needsYou,
   onAction,
@@ -176,6 +178,7 @@ export function CommentsTab({
               hoveredItemId={hoveredItemId}
               hoveredMarkId={hoveredMarkId}
               isClosed={isClosed}
+              blockPlacements={blockPlacements}
               markPlacements={markPlacements}
               onAction={onAction}
               onEdit={onEdit}

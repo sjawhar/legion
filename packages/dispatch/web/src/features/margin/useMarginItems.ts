@@ -186,11 +186,43 @@ export function threadMarkId(thread: Thread): string | undefined {
   return thread.anchor?.mark_id;
 }
 
+function anchorPlacement(
+  anchor: Anchor | null,
+  markPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockPlacements: ReadonlyMap<string, MarkPlacement>
+): MarkPlacement | undefined {
+  if (anchor === null) {
+    return undefined;
+  }
+  if (anchor.orphaned) {
+    return typeof anchor.block_id === "string" ? blockPlacements.get(anchor.block_id) : undefined;
+  }
+  return markPlacements.get(anchor.mark_id);
+}
+
+function isInBlock(anchor: Anchor | null, blockFilterId: string | undefined): boolean {
+  return blockFilterId === undefined || anchor?.block_id === blockFilterId;
+}
+
+function itemAnchor(item: MarginItem): Anchor | null {
+  return item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
+}
+
+function itemPlacement(
+  item: MarginItem,
+  markPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockPlacements: ReadonlyMap<string, MarkPlacement>
+): MarkPlacement | undefined {
+  return anchorPlacement(itemAnchor(item), markPlacements, blockPlacements);
+}
+
 export function useMarginItems(
   owner: MarginOwner | undefined,
   tab: MarginTab,
   visibleArtifact: Artifact | undefined,
-  markPlacements: ReadonlyMap<string, MarkPlacement>
+  markPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockPlacements: ReadonlyMap<string, MarkPlacement>,
+  blockFilterId: string | undefined
 ) {
   const queryClient = useQueryClient();
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
@@ -251,28 +283,28 @@ export function useMarginItems(
         openAsks.set(ask.id, ask);
       }
     }
-    return [...openAsks.values()];
-  }, [answeredAsks.asks, inboxOpenAsks]);
+    return [...openAsks.values()].filter((ask) => isInBlock(ask.anchor, blockFilterId));
+  }, [answeredAsks.asks, blockFilterId, inboxOpenAsks]);
   const openAskCount = needsYou.length;
   const anchoredAsks = useMemo(
-    () => answeredAsks.asks.filter((ask) => ask.state !== "open"),
-    [answeredAsks.asks]
+    () =>
+      answeredAsks.asks.filter(
+        (ask) => ask.state !== "open" && isInBlock(ask.anchor, blockFilterId)
+      ),
+    [answeredAsks.asks, blockFilterId]
   );
   /** Issue-level (unanchored) comments belong to the Conversation tab; the margin shows document-anchored review. */
   const allThreads = useMemo(
     () =>
       commentThreads(
         withoutAskThreadReplies(anchoredThreadComments(comments.data ?? [], visibleArtifact?.id))
-      ),
-    [comments.data, visibleArtifact?.id]
+      ).filter((thread) => isInBlock(thread.anchor, blockFilterId)),
+    [blockFilterId, comments.data, visibleArtifact?.id]
   );
   const compareThreads = useCallback(
     (left: Thread, right: Thread) => {
-      const leftMarkId = threadMarkId(left);
-      const rightMarkId = threadMarkId(right);
-      const leftPlacement = leftMarkId === undefined ? undefined : markPlacements.get(leftMarkId);
-      const rightPlacement =
-        rightMarkId === undefined ? undefined : markPlacements.get(rightMarkId);
+      const leftPlacement = anchorPlacement(left.anchor, markPlacements, blockPlacements);
+      const rightPlacement = anchorPlacement(right.anchor, markPlacements, blockPlacements);
       if (leftPlacement !== undefined && rightPlacement !== undefined) {
         return leftPlacement.pos - rightPlacement.pos;
       }
@@ -281,7 +313,7 @@ export function useMarginItems(
       }
       return right.root.comment.created_at.localeCompare(left.root.comment.created_at);
     },
-    [markPlacements]
+    [blockPlacements, markPlacements]
   );
   const sortedThreads = useMemo(
     () => [...allThreads].sort(compareThreads),
@@ -303,11 +335,8 @@ export function useMarginItems(
     }));
     return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
       (left, right) => {
-        const leftMarkId = marginItemMarkId(left);
-        const rightMarkId = marginItemMarkId(right);
-        const leftPlacement = leftMarkId === undefined ? undefined : markPlacements.get(leftMarkId);
-        const rightPlacement =
-          rightMarkId === undefined ? undefined : markPlacements.get(rightMarkId);
+        const leftPlacement = itemPlacement(left, markPlacements, blockPlacements);
+        const rightPlacement = itemPlacement(right, markPlacements, blockPlacements);
         if (leftPlacement !== undefined && rightPlacement !== undefined) {
           return leftPlacement.pos - rightPlacement.pos;
         }
@@ -319,7 +348,7 @@ export function useMarginItems(
         ).localeCompare(left.kind === "ask" ? left.ask.created_at : left.comment.created_at);
       }
     );
-  }, [anchoredAsks, markPlacements, sortedThreads]);
+  }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);
   const marginItems = useMemo<MarginItem[]>(
     () => [...needsYou.map((ask) => ({ ask, kind: "ask" as const })), ...items],
     [items, needsYou]

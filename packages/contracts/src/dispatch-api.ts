@@ -60,6 +60,8 @@ export interface CreatedAgentToken extends AgentToken {
 
 export interface Anchor {
   readonly artifact_id: string;
+  /** Stable owner block for new anchors; null for legacy rows awaiting backfill. */
+  readonly block_id: string | null;
   readonly mark_id: string;
   readonly version: number;
   readonly quote: string;
@@ -180,6 +182,10 @@ export interface ArtifactBlock {
   readonly type: string;
   readonly from: number;
   readonly to: number;
+  readonly references: {
+    readonly comments: number;
+    readonly asks: number;
+  };
 }
 
 export interface Version {
@@ -870,6 +876,14 @@ const askEventPayloadFields = {
   answer: z
     .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
     .nullish(),
+  anchor: z
+    .object({
+      quote: z.string().optional(),
+      mark_id: z.string().optional(),
+      block_id: z.string().nullable().optional(),
+    })
+    .passthrough()
+    .nullish(),
   resolution: z
     .object({
       kind: z.enum(["retracted", "resolved"]).optional(),
@@ -915,7 +929,9 @@ export const CommentEventPayloadSchema = z.object({
   ask_id: z.string().nullish(),
   ask_question: z.string().optional(),
   ask_state: z.enum(["open", "answered", "resolved"]).optional(),
-  anchor: z.object({ quote: z.string().optional() }).nullish(),
+  anchor: z
+    .object({ block_id: z.string().nullable().optional(), quote: z.string().optional() })
+    .nullish(),
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
   created_at: z.string().optional(),
