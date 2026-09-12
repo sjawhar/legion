@@ -3,17 +3,17 @@
   "pr": {
     "number": 970,
     "url": "https://github.com/sjawhar/legion/pull/970",
-    "reviewedHead": "b2381958a39b1ad9b977d7938b3ab28d98471eb1",
+    "reviewedHead": "5344caabdc0196eac323c5f20a6be88c81088893",
     "branch": "legion/LEGION-29"
   },
   "spec": "dispatch://LEGION-29/artifact/spec (v4)",
   "verdict": "CHANGES_REQUESTED",
   "review": {
-    "id": 5187041653,
-    "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187041653",
-    "submittedAt": "2026-09-12T16:02:19Z",
+    "id": 5187400317,
+    "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187400317",
+    "submittedAt": "2026-09-12T17:48:04Z",
     "event": "REQUEST_CHANGES",
-    "commitId": "b2381958a39b1ad9b977d7938b3ab28d98471eb1"
+    "commitId": "5344caabdc0196eac323c5f20a6be88c81088893"
   },
   "threads": [
     {
@@ -110,7 +110,146 @@
   ],
   "throwaway": "packages/pi-envoy/extensions/zz-review-throwaway.test.ts (copy of legion.test.ts + one case) — run once with --test-name-pattern 'review throwaway', failed as predicted (controller/ready count 1, expected 2), deleted; not committed.",
   "nextRound": "Implementer fixes items 1 and 2 (plus any cheap non-blocking), pushes to legion/LEGION-29, fills the PR body CI/Thermo lines; tester re-runs behavioural testing on the new head; reviewer reviews that head. .legion/ deletion only after a clean review.",
+  "round1": {
+    "verdict": "CHANGES_REQUESTED",
+    "review": {
+      "id": 5187041653,
+      "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187041653",
+      "submittedAt": "2026-09-12T16:02:19Z",
+      "event": "REQUEST_CHANGES",
+      "commitId": "b2381958a39b1ad9b977d7938b3ab28d98471eb1"
+    },
+    "reviewedHead": "b2381958a39b1ad9b977d7938b3ab28d98471eb1",
+    "threads": [
+      {
+        "id": 3996761324,
+        "blocking": true,
+        "file": "packages/pi-envoy/extensions/legion.ts",
+        "line": 517
+      },
+      {
+        "id": 3996761326,
+        "blocking": true,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 401
+      },
+      {
+        "id": 3996761327,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 424
+      },
+      {
+        "id": 3996761329,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 374
+      },
+      {
+        "id": 3996761332,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/legion.ts",
+        "line": 524
+      },
+      {
+        "id": 3996761334,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 347
+      },
+      {
+        "id": 3996761338,
+        "blocking": false,
+        "file": "packages/pi-envoy/extensions/legion.test.ts",
+        "line": 798
+      }
+    ]
+  },
+  "round2": {
+    "reviewedHead": "5344caabdc0196eac323c5f20a6be88c81088893",
+    "testedHead": "5e1056825b44b793effff50a7a357ed8f2d60cf4",
+    "verdict": "CHANGES_REQUESTED",
+    "review": {
+      "id": 5187400317,
+      "url": "https://github.com/sjawhar/legion/pull/970#pullrequestreview-5187400317",
+      "submittedAt": "2026-09-12T17:48:04Z",
+      "event": "REQUEST_CHANGES",
+      "commitId": "5344caabdc0196eac323c5f20a6be88c81088893"
+    },
+    "round1ThreadVerification": [
+      {
+        "id": 3996761324,
+        "verified": "fixed in 7972a372 — onEnvoyRoleRegained call sites at head: legion.ts:296 (claimController, after controllerReady) and legion.ts:424 (bootstrapRoot, after process/ready) only; both behind the checkSubagentSession bail; controllerRoleToken removed; envoy.ts:90/133 docblocks corrected. Pinned by legion.test.ts 'a controller's regain hook survives a task subagent's in-process extension re-bind' (same shape as the round-1 reproduction, which failed on the setup-time registration)."
+      },
+      {
+        "id": 3996761326,
+        "verified": "fixed in 028cf958 — envoy.ts:417-421 `void Promise.resolve().then(() => regained(role, reason)).catch(logger.warn)`; healing releases once listener calls (5 s transport timeout) settle. Pinned by envoy.test.ts 'a regain hook that never settles does not block the next heartbeat tick's registration' (round-1 code: latch held, third registration never lands, timeout)."
+      },
+      {
+        "id": 3996761327,
+        "verified": "fixed in 028cf958 — registrationFailed set only in the rejection branch (envoy.ts:455-458). Pinned by 'a failed role read does not make the next healthy heartbeat report a regain' (round-1 code fired 'reregistered'). The rewrite introduced round-2 blocking item at envoy.ts:452."
+      },
+      {
+        "id": 3996761329,
+        "verified": "fixed in 028cf958 — const id = sessionID at entry (envoy.ts:370); guard claimedRoleTopic !== topic || sessionID !== id (L386); all post-await uses read id. No test (rebind race not reachable for Legion sessions) — accepted."
+      },
+      {
+        "id": 3996761332,
+        "verified": "fixed in 7972a372 — rerunReadyAfterRegain wraps both kinds in callReadyWithRetry; catch message states held work stays undelivered until next regain or boot."
+      },
+      {
+        "id": 3996761334,
+        "verified": "fixed in 028cf958 — clause removed from reassertRole docblock."
+      },
+      {
+        "id": 3996761338,
+        "verified": "fixed in 7972a372 — comment states behaviour."
+      }
+    ],
+    "threads": [
+      {
+        "id": 3997043281,
+        "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3997043281",
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 452,
+        "blocking": true,
+        "summary": "registrationFailed = false runs on registration success before reassertRole; fail → (subscribe OK, GET /v1/roles rejects) → healthy never fires 'reregistered'; held controllerPendingNotices / root catch-up stranded until next real claim loss or reboot. Regression vs round-1 flag (reset only on full-chain success) and vs AGENTS.md:61 / plan R1. Fix: reset in the existing full-chain-success .then; pin fail → role-read-fail → healthy ⇒ regained === [{role, reason:'reregistered'}]."
+      },
+      {
+        "id": 3997043284,
+        "url": "https://github.com/sjawhar/legion/pull/970#discussion_r3997043284",
+        "file": "packages/pi-envoy/extensions/envoy.ts",
+        "line": 359,
+        "blocking": false,
+        "summary": "reassertRole docblock says 'registry outage' where the flag comment and AGENTS.md:61 say 'failed registration'."
+      }
+    ],
+    "optionalCleanup": "register-only-with-identity invariant stated in three code comments (envoy.ts:90-95, envoy.ts:133-136, legion.ts:263-266); onEnvoyRoleRegained docblock is the contract, the others can point at it. Not gating.",
+    "contractRecheck": {
+      "unhandledRejection": "PASS — heartbeat chain: registration rejection → registrationFailed=true, rethrow → warn-once .catch → .finally; reassertRole rejection → same .catch; detached hook .catch calls logger.warn + messageFor (instanceof Error ? message : String) — no throwing path for anything legion.ts produces; rerunReadyAfterRegain try/catch wraps callReadyWithRetry and every argument evaluation.",
+      "registrationDisplacement": "PASS — two call sites, both only after identity established; subagent instance bails at session_start before classification.",
+      "acceptance1to3": "PASS — GET-first, soft claim without previous_session_id, 409 → drop + one notify + no further requests, no transcript entry: unchanged code paths (only id capture + detached hook changed); round-1 unit cases pass; tester round-2 live A1/A2/A3 pass at 5e105682.",
+      "docs": "AGENTS.md:61 accurate to head once the L452 fix lands ('first healthy tick after a failed registration'); SKILL.md:32-35 unchanged, accurate.",
+      "scope": "jj diff b2381958..5344caab --summary: .legion/*, packages/pi-envoy/{AGENTS.md, extensions/envoy.ts, envoy.test.ts, legion.ts, legion.test.ts}. No Go/daemon/package.json/pin change.",
+      "conventions": "inline `type RoleRegainReason` import matches existing `type NatsConnection` style; biome/tsc green in CI."
+    },
+    "githubVerified": {
+      "head": "5344caabdc0196eac323c5f20a6be88c81088893",
+      "checks": "5e105682 and 5344caab: Tests (pr-title/lint/typecheck/test) SUCCESS; Legion Envoy and Contracts (changes/pi-envoy) SUCCESS, others SKIPPED; commit status legion/tester=success on both",
+      "round1Threads": "7/7 isResolved=true, each with one implementer reply naming the fixing commit",
+      "prBody": "CI line names Tests run 34704649870 and Legion Envoy and Contracts run 34704649712 at 5e105682; Threads section lists all 7 with dispositions; Thermo line records round-1 verdict — implementer to append the round-2 thermo verdict and the new thread."
+    },
+    "focusedRun": "cd packages/pi-envoy && env -u LEGION_* -u DISPATCH_TOKEN_FILE bun test extensions/envoy.test.ts extensions/legion.test.ts → 128 pass, 0 fail, 427 expect() calls",
+    "thermo": {
+      "head": "5344caab",
+      "scope": "round-2 diff b2381958..5344caab with round-1 findings as context",
+      "deepReview": "0 blocking by its own grading, 1 non-blocking = the envoy.ts:452 ordering (I graded it blocking: correctness gap on the recovery path, lands in this PR per the worker contract); categories 1-6 clean. agent://ThermoDeepR2",
+      "codeQuality": "1 blocking = the same envoy.ts:452 ordering; non-blocking: reassertRole docblock 'registry outage' wording, triple-stated invariant, capability===undefined narrowing (left as TS narrowing). agent://ThermoQualityR2",
+      "rerunNext": "Fix is one line + one test in envoy.ts/envoy.test.ts; targeted re-read suffices."
+    },
+    "nextRound": "Implementer moves the registrationFailed reset into the full-chain-success .then, adds the pinning test, aligns the docblock wording, updates the PR body Thermo/Threads lines; tester re-runs (the R1 outage-recovery path is the one to exercise live: registration failure then a failing role read then healthy → one controller/ready); reviewer reviews that head. .legion/ deletion only after a clean review."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T16:03:35.471Z"
+  "completed": "2026-09-12T17:48:49.436Z"
 }
