@@ -1,0 +1,23 @@
+{
+  "id": 241,
+  "issue_key": "LEGSMOKE-3",
+  "seq": 5,
+  "type": "artifact.approved",
+  "actor": {
+    "kind": "user",
+    "id": "sjawhar"
+  },
+  "notify": true,
+  "created_at": "2026-09-12T02:30:00Z",
+  "payload": {
+    "artifact_id": "5025ec5b-0000-4000-8000-000000000001",
+    "name": "spec.md",
+    "version": 12,
+    "actor": {
+      "kind": "user",
+      "id": "sjawhar"
+    },
+    "reason": null,
+    "ask_id": "18258070-0000-4000-8000-000000000001"
+  }
+}

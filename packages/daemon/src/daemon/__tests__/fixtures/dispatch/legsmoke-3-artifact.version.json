@@ -1,0 +1,28 @@
+{
+  "id": 243,
+  "issue_key": "LEGSMOKE-3",
+  "seq": 7,
+  "type": "artifact.version",
+  "actor": {
+    "kind": "session",
+    "id": "legsmoke-3-architect"
+  },
+  "notify": false,
+  "created_at": "2026-09-12T02:32:00Z",
+  "payload": {
+    "artifact_id": "5025ec5b-0000-4000-8000-000000000001",
+    "name": "spec.md",
+    "version": {
+      "number": 13,
+      "named": false,
+      "summary": null,
+      "authors": [
+        {
+          "kind": "session",
+          "id": "legsmoke-3-architect"
+        }
+      ],
+      "created_at": "2026-09-12T02:32:00Z"
+    }
+  }
+}
