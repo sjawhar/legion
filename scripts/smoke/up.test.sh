@@ -218,6 +218,41 @@ SMOKE_PROJECT="acme/1" write_daemon_config
 
 printf 'PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix\n'
 
+# Acceptance 1 (LEGION-10): the real daemon loader accepts the file write_daemon_config emits.
+# `--check-config` never resolves secrets (config.ts `resolveSecrets: false`) and the generated
+# file sets no dispatch_url -- but resolveDaemonConfig also reads DISPATCH_URL from the
+# environment and then demands DISPATCH_TOKEN, so scrub both (and the retired alias) to keep the
+# case independent of whatever shell runs this harness.
+readonly daemon_cli="${project_root}/packages/daemon/src/cli/index.ts"
+SMOKE_PROJECT="acme/1" write_daemon_config
+if ! env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \
+  bun run "$daemon_cli" start acme/1 --config "${SMOKE_DIR}/legion.yaml" --check-config >"$assertion_file" 2>&1; then
+  printf 'expected the daemon loader to accept the generated config; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'Config OK'* ]] || {
+  printf 'expected "Config OK" from --check-config; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+printf 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)\n'
+
+# The pre-#941 gates block: `merge: human` under `gates:` is exactly what the loader must refuse.
+sed 's/^  design: root-issues$/  design: root-issues\n  merge: human/' "${SMOKE_DIR}/legion.yaml" >"${SMOKE_DIR}/legion-gates-merge.yaml"
+grep -Fxq '  merge: human' "${SMOKE_DIR}/legion-gates-merge.yaml" || {
+  printf 'fixture error: the gates.merge line was not inserted\n' >&2
+  exit 1
+}
+if env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL \
+  bun run "$daemon_cli" start acme/1 --config "${SMOKE_DIR}/legion-gates-merge.yaml" --check-config >"$assertion_file" 2>"$warning_file"; then
+  printf 'expected loader to reject gates.merge\n' >&2
+  exit 1
+fi
+[[ "$(<"$warning_file")" == *'gates.merge is not a Legion setting'* ]] || {
+  printf 'expected "gates.merge is not a Legion setting" on stderr; stderr:\n%s\n' "$(<"$warning_file")" >&2
+  exit 1
+}
+printf 'PASS: the real daemon loader rejects the pre-#941 gates.merge block\n'
+
 export DISPATCH_URL="http://dispatch.test"
 export DISPATCH_TOKEN="test-dispatch-token"
 printf '{"key":"LEGSMOKE-7"}' >"$response_file"
