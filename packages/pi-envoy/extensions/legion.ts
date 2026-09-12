@@ -526,6 +526,18 @@ export default function legionExtension(pi: PiApi): void {
         ).controllerReady({ secret: controllerCapability, sessionId: controllerSessionID });
         console.error(`[legion] re-ran controller/ready after role ${role} was ${reason}`);
       }
+      if (capability?.kind === "root-architect" && role === capability.roleToken) {
+        const root = capability;
+        await callReadyWithRetry("root process/ready after role regain", () =>
+          roleDaemon().processReady({
+            tree: root.tree,
+            sessionId: root.sessionID,
+            secret: root.secret,
+            generation: generation(process.env),
+          })
+        );
+        console.error(`[legion] re-ran process/ready after role ${role} was ${reason}`);
+      }
     } catch (error) {
       console.error(
         `[legion] ready call after role ${role} was ${reason} failed; the next regain or boot retries it: ${messageFor(error)}`
