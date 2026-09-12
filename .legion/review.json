@@ -5,60 +5,105 @@
     "number": 967,
     "url": "https://github.com/sjawhar/legion/pull/967"
   },
-  "reviewedCodeSha": "fb3c2310793b",
-  "prHeadSha": "1bd5d7530e0058774eb90971964fe4af7792374a",
   "baseSha": "b24f8e79fa44 (fork point; main at 7add4d03 merges clean per implement.json)",
-  "specVersion": 4,
-  "verdict": "CHANGES_REQUESTED",
-  "review": {
-    "id": 5186303415,
-    "url": "https://github.com/sjawhar/legion/pull/967#pullrequestreview-5186303415",
-    "state": "CHANGES_REQUESTED",
-    "commit": "1bd5d7530e0058774eb90971964fe4af7792374a"
-  },
-  "threads": [
-    {
-      "id": "PRRT_kwDORFy7ds6hvuwS",
-      "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086379",
-      "path": "packages/daemon/src/daemon/worker-stream-listener.ts",
-      "line": 165,
-      "severity": "blocking",
-      "finding": "hello phase has no deadline: a connection that sends nothing (or <4096 bytes with no newline) holds its fd/pending buffer/closure forever; the 4096-byte bound fires on bytes, never on silence. Probe: idle connection still open 1.5 s after connect; helloReader.close/error are no-ops; reject reachable only from data.",
-      "fix": "arm a timer in `open` via the listener's existing injectable setTimeout (reuse options.rpcTimeoutMs; no new config key so config.ts stays at the plan's insertion points), clear it in register / reject / helloReader close+error, reject with `worker-stream: rejected hello (hello timeout)` and no state change; add `hello timeout` to both AGENTS.md reason lists; one listener test on the awaitRegistration fake-timer seam (idle -> timer fires -> closed, logged once, registrations.size 0; hello first -> timer cleared)."
-    },
-    {
-      "id": "PRRT_kwDORFy7ds6hvuwT",
-      "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086380",
-      "path": "packages/daemon/src/daemon/index.ts",
-      "line": 587,
-      "severity": "blocking (same change)",
-      "finding": "listener started without the daemon's injected clock",
-      "fix": "pass setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout at the single listener-start site (plan insertion point; no #962 overlap)."
-    }
-  ],
-  "verifiedClean": {
-    "1_contract": "one hello_ack line in register after claim resolves and before createWorkerRpcClient; shim spawns OMP synchronously in the ack callback (frame sharing the ack's read pinned by test); backoff [200,400,800,1600,3200,5000,5000], failures reset only on ack; hello re-sent per dial; gap frames replayed in order via bridge.onConnect; all rejections close+log `worker-stream: rejected hello (<reason>)` before any registrations.set; awaitRegistration resolves existing / on hello / rejects on fake-clock timeout and on close; worker_stream_port default port+1, !== port, <= 65535; five --socket test cases byte-unchanged (worker-shim.test.ts diff: 2 import lines removed, 3 pure insertions).",
-    "2_bootToken": "CapabilityService.resolveWorkerClaim is the only boot-token->claim lookup (/worker/started workers.ts:137, listener via api.resolveWorkerBootToken); getWorkerBootToken removed; fallback uses equalSecretHash (timingSafeEqual). workers.ts:75-81 equalSecretHash is /worker-session's session-bound rebind, pre-existing, outside plan ownership - not a defect. Stale-generation/already-bound reject before touching registrations (no eviction). Token never logged. Rejections leave no half-registered client or dangling waiter (waiters settle only from register, with their own timers). unregister chained on client.closed at registration; close() clears map first.",
-    "3_transport": "worker-rpc.ts diff: protocol logic unchanged except `!line` guard moved into createLineReader; handlers via socket.data.handlers; post-hello remainder fed to client synchronously before waiters settle (test: agent_start sharing hello's write -> runState running); worker-rpc.test.ts runs every case over unix + accepted TCP.",
-    "4_shim": "createShimBridge shared; backlog 1000 + one drop log both modes; loop terminates on child exit (all awaits raced with exit.promise; finally ends live handle); refused dial and pre-ack close both back off; ack-then-drop guarded by `dropped`; WorkerShimConnectDeps split justified by byte-unchanged socket cases and no connect/sleep dependency in socket mode.",
-    "5_lineReader": "streaming TextDecoder; reset() on close in socket-mode listen and connect; single-chunk frames identical.",
-    "6_pr962": "config.ts/index.ts/workers.ts/AGENTS.md at plan insertion points only; hostname literal at single listener site with merger-swap comment; no second bind field; config.bind not requested.",
-    "7_thermo_docs": "thermonuclear-deep-review: 0 blocking / 1 should-fix (hello deadline, requested) / 2 nits; thermonuclear-code-quality: 0 blocking / 2 should-fix (stdout pump dup -> fast-follow; deps.setTimeout wiring -> requested) / 3 nits. AGENTS.md rows accurate; `hello timeout` must be added to both lists with the fix.",
-    "githubFacts": "PR head 1bd5d753 = fb3c2310 + .legion/implement.json + .legion/test.json; checks pr-title/lint/typecheck/test success at 1bd5d753 (run 34687715347 at fb3c2310); 0 review threads before this review; tester commit status success on f9e6d93d."
-  },
-  "fastFollow": [
-    "createShimBridge.attach stdout pump onto createLineReader (third copy of the split loop; would also drop empty stdout lines that today spend a backlog slot)",
-    "hoist the three identical waitFor pollers into ci-fixtures.ts",
-    "config.ts:860-865 names LEGION_WORKER_STREAM_PORT for a CLI-sourced out-of-range value",
-    "AGENTS.md invariant bullet: frames before hello_ack are also consumed by the shim (dropped with a log)"
-  ],
+  "specVersion": 5,
   "observationsForLegion24": [
     "permanently rejected token (unknown/stale) -> shim retries forever at 5 s cap, one daemon log line per attempt; pod lifecycle must reap",
     "half-open old stream answers `already bound to a live stream` until the daemon observes the close; liveness probe/keepalive decides how fast",
     "`--boot-token-file is only valid with --connect` wording accepted per spec v4"
   ],
-  "nextRound": "After the implementer pushes the deadline fix and the tester re-verifies, review the new head: verify the two threads are dispositioned individually, re-run the listener suite, then (if clean) post a COMMENT review naming that head and await the .legion/ deletion head before approving.",
+  "round1": {
+    "reviewedCodeSha": "fb3c2310793b",
+    "prHeadSha": "1bd5d7530e0058774eb90971964fe4af7792374a",
+    "verdict": "CHANGES_REQUESTED",
+    "review": {
+      "id": 5186303415,
+      "url": "https://github.com/sjawhar/legion/pull/967#pullrequestreview-5186303415",
+      "state": "CHANGES_REQUESTED",
+      "commit": "1bd5d7530e0058774eb90971964fe4af7792374a"
+    },
+    "threads": [
+      {
+        "id": "PRRT_kwDORFy7ds6hvuwS",
+        "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086379",
+        "path": "packages/daemon/src/daemon/worker-stream-listener.ts",
+        "line": 165,
+        "severity": "blocking",
+        "finding": "hello phase has no deadline: a connection that sends nothing (or <4096 bytes with no newline) holds its fd/pending buffer/closure forever; the 4096-byte bound fires on bytes, never on silence. Probe: idle connection still open 1.5 s after connect; helloReader.close/error are no-ops; reject reachable only from data.",
+        "fix": "arm a timer in `open` via the listener's existing injectable setTimeout (reuse options.rpcTimeoutMs; no new config key so config.ts stays at the plan's insertion points), clear it in register / reject / helloReader close+error, reject with `worker-stream: rejected hello (hello timeout)` and no state change; add `hello timeout` to both AGENTS.md reason lists; one listener test on the awaitRegistration fake-timer seam (idle -> timer fires -> closed, logged once, registrations.size 0; hello first -> timer cleared)."
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6hvuwT",
+        "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086380",
+        "path": "packages/daemon/src/daemon/index.ts",
+        "line": 587,
+        "severity": "blocking (same change)",
+        "finding": "listener started without the daemon's injected clock",
+        "fix": "pass setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout at the single listener-start site (plan insertion point; no #962 overlap)."
+      }
+    ],
+    "verifiedClean": {
+      "1_contract": "one hello_ack line in register after claim resolves and before createWorkerRpcClient; shim spawns OMP synchronously in the ack callback (frame sharing the ack's read pinned by test); backoff [200,400,800,1600,3200,5000,5000], failures reset only on ack; hello re-sent per dial; gap frames replayed in order via bridge.onConnect; all rejections close+log `worker-stream: rejected hello (<reason>)` before any registrations.set; awaitRegistration resolves existing / on hello / rejects on fake-clock timeout and on close; worker_stream_port default port+1, !== port, <= 65535; five --socket test cases byte-unchanged (worker-shim.test.ts diff: 2 import lines removed, 3 pure insertions).",
+      "2_bootToken": "CapabilityService.resolveWorkerClaim is the only boot-token->claim lookup (/worker/started workers.ts:137, listener via api.resolveWorkerBootToken); getWorkerBootToken removed; fallback uses equalSecretHash (timingSafeEqual). workers.ts:75-81 equalSecretHash is /worker-session's session-bound rebind, pre-existing, outside plan ownership - not a defect. Stale-generation/already-bound reject before touching registrations (no eviction). Token never logged. Rejections leave no half-registered client or dangling waiter (waiters settle only from register, with their own timers). unregister chained on client.closed at registration; close() clears map first.",
+      "3_transport": "worker-rpc.ts diff: protocol logic unchanged except `!line` guard moved into createLineReader; handlers via socket.data.handlers; post-hello remainder fed to client synchronously before waiters settle (test: agent_start sharing hello's write -> runState running); worker-rpc.test.ts runs every case over unix + accepted TCP.",
+      "4_shim": "createShimBridge shared; backlog 1000 + one drop log both modes; loop terminates on child exit (all awaits raced with exit.promise; finally ends live handle); refused dial and pre-ack close both back off; ack-then-drop guarded by `dropped`; WorkerShimConnectDeps split justified by byte-unchanged socket cases and no connect/sleep dependency in socket mode.",
+      "5_lineReader": "streaming TextDecoder; reset() on close in socket-mode listen and connect; single-chunk frames identical.",
+      "6_pr962": "config.ts/index.ts/workers.ts/AGENTS.md at plan insertion points only; hostname literal at single listener site with merger-swap comment; no second bind field; config.bind not requested.",
+      "7_thermo_docs": "thermonuclear-deep-review: 0 blocking / 1 should-fix (hello deadline, requested) / 2 nits; thermonuclear-code-quality: 0 blocking / 2 should-fix (stdout pump dup -> fast-follow; deps.setTimeout wiring -> requested) / 3 nits. AGENTS.md rows accurate; `hello timeout` must be added to both lists with the fix.",
+      "githubFacts": "PR head 1bd5d753 = fb3c2310 + .legion/implement.json + .legion/test.json; checks pr-title/lint/typecheck/test success at 1bd5d753 (run 34687715347 at fb3c2310); 0 review threads before this review; tester commit status success on f9e6d93d."
+    },
+    "fastFollow": [
+      "createShimBridge.attach stdout pump onto createLineReader (third copy of the split loop; would also drop empty stdout lines that today spend a backlog slot)",
+      "hoist the three identical waitFor pollers into ci-fixtures.ts",
+      "config.ts:860-865 names LEGION_WORKER_STREAM_PORT for a CLI-sourced out-of-range value",
+      "AGENTS.md invariant bullet: frames before hello_ack are also consumed by the shim (dropped with a log)"
+    ],
+    "nextRound": "After the implementer pushes the deadline fix and the tester re-verifies, review the new head: verify the two threads are dispositioned individually, re-run the listener suite, then (if clean) post a COMMENT review naming that head and await the .legion/ deletion head before approving."
+  },
+  "reviewedCodeSha": "a0c6da16f47d",
+  "prHeadSha": "179761e8f8d1c38244a689b99bf8bd9ea7d8dc89",
+  "verdict": "CLEAN at a0c6da16; approval awaits the .legion/ deletion head",
+  "round2": {
+    "verdict": "CLEAN (COMMENT review; not approved yet)",
+    "review": {
+      "id": 5186370755,
+      "url": "https://github.com/sjawhar/legion/pull/967#pullrequestreview-5186370755",
+      "state": "COMMENTED",
+      "commit": "179761e8f8d1c38244a689b99bf8bd9ea7d8dc89"
+    },
+    "threadDispositions": [
+      {
+        "id": "PRRT_kwDORFy7ds6hvuwS",
+        "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086379",
+        "disposition": "fixed in 2e5843212024",
+        "reply": "https://github.com/sjawhar/legion/pull/967#discussion_r3996155719",
+        "verified": "deadline armed in helloReader (from open) on injectable setTimer with options.rpcTimeoutMs; every rejection path + expiry via one fail(reason) that clears the timer; success path clears before register; helloReader close/error clear; fake-clock test pins expiry->closed, one log line, registrations.size 0, hello-first->cleared; `hello timeout` in both AGENTS.md lists",
+        "resolved": false,
+        "why": "review App identity cannot resolve threads (viewerCanResolve false; resolveReviewThread FORBIDDEN) - implementer to click resolve with the .legion/ deletion push"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6hvuwT",
+        "url": "https://github.com/sjawhar/legion/pull/967#discussion_r3996086380",
+        "disposition": "fixed in 2e5843212024",
+        "reply": "https://github.com/sjawhar/legion/pull/967#discussion_r3996156328",
+        "verified": "index.ts passes setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout at the single listener-start site; hostname literal + merger comment unchanged",
+        "resolved": false,
+        "why": "same"
+      }
+    ],
+    "followUpCommits": {
+      "4b024c83": "probeWorkerSocket docstring names ProcessManager's per-token cache, method-agnostic; accurate in either #962 order",
+      "8455b24a": "stdout pump via createLineReader; forwardToSocket (summary, write-or-backlog, 1000 cap, one drop log) untouched; delta = trimmed lines, empty lines dropped; socket-mode cases byte-unchanged vs main (only two import removals)",
+      "1118a8e0": "one waitFor(predicate, timeoutMs=5000) in ci-fixtures; e2e keeps 10 s by argument",
+      "0f3f5fc1": "out-of-range worker_stream_port names cli/config/env source; inside this PR's config.ts inserted block; default message unchanged; CLI case tested",
+      "a0c6da16": "AGENTS.md pre-ack frames consumed/dropped-with-log note matches cmdWorkerShimConnect"
+    },
+    "reran": "bun test worker-stream-listener.test.ts + worker-shim.test.ts -> 30 pass / 0 fail (13 + 17)",
+    "githubFacts": "PR head 179761e8 = a0c6da16 + .legion/implement.json + .legion/test.json; checks pr-title/lint/typecheck/test success; tester commit status 54043383560 success on a0c6da16",
+    "fastFollowRemaining": "none",
+    "approvalGate": "approve only the head that is a0c6da16 plus the .legion/ directory removal and nothing else; verify with jj diff --from a0c6da16 --to <head> --stat before approving; both threads should be resolved by then"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-12T11:36:26.479Z"
+  "completed": "2026-09-12T12:10:55.029Z"
 }
