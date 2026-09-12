@@ -49,6 +49,7 @@ import {
 import { runResync } from "./resync";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { connectWorkerRpc } from "./worker-rpc";
+import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
@@ -90,6 +91,7 @@ export interface DaemonStartOptions {
 
 export interface DaemonHandle {
   server: LegionApi["server"];
+  workerStreamPort: number;
   config: DaemonConfig;
   ready(): Promise<void>;
   drain(): Promise<void>;
@@ -641,6 +643,24 @@ async function startDaemonLocked(
     },
     apiDeps
   );
+  // Bound with the API and torn down with it. `hostname` is the literal the API itself uses on
+  // this branch; LEGION-21 (#962) introduces `config.bind`, and the merger swaps this to
+  // `config.bind` once that is on main. A bind failure is startup-fatal: stop the API server it
+  // would have partnered so nothing half-listens behind the instance lock's release.
+  let workerStream: WorkerStreamListener;
+  try {
+    workerStream = startWorkerStreamListener({
+      hostname: "127.0.0.1",
+      port: config.workerStreamPort,
+      rpcTimeoutMs: config.workerRpcTimeoutSeconds * 1000,
+      resolveBootToken: api.resolveWorkerBootToken,
+      setTimeout: deps.setTimeout,
+      clearTimeout: deps.clearTimeout,
+    });
+  } catch (error) {
+    api.stop();
+    throw error;
+  }
 
   // Awaited only now that `api` is assigned: the promotion cascade this can
   // trigger calls back into `processManager`'s `mintBootToken`/
@@ -740,6 +760,14 @@ async function startDaemonLocked(
         );
       }
       try {
+        workerStream.close();
+      } catch (error) {
+        failure ??= error;
+        console.error(
+          `[legion] worker stream shutdown failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      try {
         api.stop();
       } catch (error) {
         failure ??= error;
@@ -779,7 +807,15 @@ async function startDaemonLocked(
   deps.onSignal("SIGINT", stopForSignal);
 
   console.log(`legion daemon listening on 127.0.0.1:${api.server.port}`);
-  return { server: api.server, config, ready: () => ready, drain, stop };
+  console.log(`legion worker stream listening on 127.0.0.1:${workerStream.port}`);
+  return {
+    server: api.server,
+    workerStreamPort: workerStream.port,
+    config,
+    ready: () => ready,
+    drain,
+    stop,
+  };
 }
 
 if (import.meta.main) {

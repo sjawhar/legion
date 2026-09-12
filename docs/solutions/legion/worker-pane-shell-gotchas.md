@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports, the pane's DISPATCH_URL in the daemon test suite, and jj split's bookmark placement"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, and the box's hanging git credential helper"
 category: legion
 tags:
   - legion
@@ -15,17 +15,22 @@ module: legion
 related_issues:
   - "LEGION-9"
   - "sjawhar/legion#945"
+  - "LEGION-22"
+  - "sjawhar/legion#967"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
+  - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
+  - "legion handoff write: Handoff data field schemaVersion is not allowed"
 ---
 
 # Worker-Pane Shell Gotchas
 
-Three things every phase worker on `sjawhar/legion` hit during LEGION-9 (planner, implementer, tester, and reviewer
-each rediscovered the first one). None is part of any issue's scope; the first is re-filed to the controller as a rig bug.
-Until it is fixed, this is the workaround.
+Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
+LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
+from LEGION-22. None is part of any issue's scope; §1 is re-filed to the controller as a rig bug. Until it is fixed,
+this is the workaround.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
 
@@ -66,19 +71,36 @@ Two observations for whoever fixes the hook: the count is per session, not per t
 5.2.37), inside a function, `builtin export "$@"` with an expanded `NAME=value` word returned 0 without binding the
 variable — a plain assignment followed by `builtin export NAME` did. Cause not investigated.
 
-## 2. The pane's `DISPATCH_URL` fails one pre-existing CLI test
+**Alternative (LEGION-22): probe the grants instead of locking on the first.** Grants are reusable for their whole
+60 s TTL (`GRANT_TTL_MS` in `api.ts`; `resolveGrant` checks expiry only), so a shell can record every grant the hook
+injected and, right before a credentialed command, keep the first one the daemon accepts:
+
+```bash
+export() { case "$1" in LEGION_GRANT=*) LEGION_GRANTS_SEEN="${LEGION_GRANTS_SEEN:+$LEGION_GRANTS_SEEN }${1#LEGION_GRANT=}";; esac; builtin export "$@"; }
+pickgrant() {
+  local g
+  for g in ${LEGION_GRANTS_SEEN:-}; do
+    if LEGION_GRANT="$g" legion gh -- api rate_limit >/dev/null 2>&1; then builtin export LEGION_GRANT="$g"; unset LEGION_GRANTS_SEEN; return 0; fi
+  done
+  unset LEGION_GRANTS_SEEN; return 1
+}
+```
+
+Define both once (the persistent shell can be reset between rounds — if `type -t pickgrant` prints nothing, define them
+again), then `pickgrant && jj git push …` / `pickgrant && legion gh -- …` / `pickgrant && legion handoff complete …`.
+It needs no `grant_release` bookkeeping and self-heals if a later grant is the live one. Observed 1 → 10 stacked
+blocks over one implementer session; the first block redeemed every time.
+
+## 2. The pane's `DISPATCH_URL` fails one pre-existing CLI test (fixed in #967)
 
 Every Legion pane carries `DISPATCH_URL` (and `DISPATCH_TOKEN_FILE`) but not `DISPATCH_TOKEN`.
 `src/cli/__tests__/index.test.ts` › `legion start --check-config > validates github_apps.<role>.private_key_command
-without executing it` reads `process.env` rather than an isolated env, so `resolveDaemonConfig` refuses and the test
-fails in every pane while staying green in CI. Run the daemon suite as
-
-```bash
-env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test
-```
-
-and say so in the handoff (the `env -u` is the rig's, not the change's). The fix belongs to that test (inject env into
-`cmdCheckConfig` or clear `DISPATCH_*` in the test), re-filed separately.
+without executing it` read `process.env` rather than an isolated env, so `resolveDaemonConfig` refused
+(`dispatch_url is set but DISPATCH_TOKEN is not`) and the test failed in every pane while staying green in CI.
+sjawhar/legion#967 (`wxzknkyk`) made that `describe` scrub `LEGION_*`/`DISPATCH_*`/`ENVOY_*` around its cases, so
+`bun test packages/daemon` runs clean from a pane on branches that include it. On older branches the workaround is
+still `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, and say so in the handoff. The general rule stands: a CLI
+test that reaches `process.env` through a helper with no env seam will fail wherever the pane's env differs from CI's.
 
 ## 3. `jj split` leaves the bookmark on the empty working copy
 
@@ -100,3 +122,33 @@ the described commit must hold exactly the paths you named.
 Related: a reviewer's local commit in the shared workspace (its push 403s — the review App has no `contents`
 permission) rides along on the implementer's next push; verify with `jj log` that it is an ancestor before building
 on it.
+
+## 4. The box's global git credential helper hangs; the rig daemon's clone dies at the runner timeout
+
+`~/.gitconfig` on the rig box sets `credential.helper = !gh auth git-credential`. When `gh` blocks on the D-Bus secret
+service (observed 30–90 s, and an 8 s probe timing out), any git operation the smoke-rig daemon runs *through the
+global config* — its first `jj git clone` of the workspace — is killed at the 30 s runner timeout: `launchFailures 1`,
+the tree re-queued, a half-written clone directory left behind. Legion's own credential path (`legion credential`,
+configured per workspace) is unaffected; only the daemon's global-config fallback hits it.
+
+Workaround used by the LEGION-21 and LEGION-22 testers: run the rig daemon with
+`GIT_CONFIG_GLOBAL=<helper-free copy of ~/.gitconfig>` from its first boot (copy `~/.gitconfig`, drop the
+`[credential]` section). If the clone already died, remove the half-written workspace directory before restarting;
+admission reconciliation re-spawns the tree on boot. Diagnose with `timeout 8 git credential fill <<<$'protocol=https\nhost=github.com'`
+— a hang, not a prompt, is the symptom.
+
+## 5. Smoke-rig root issues: create them only once the daemon and bridge are live
+
+`up.sh` in `envoy` mode creates the root Dispatch issue **after** the daemon and the envoy bridge report ready, for a
+reason: the bridge relays live NATS traffic only, and `reduceIssueUpdated` ignores keys the daemon has never seen.
+A root created by hand before `RIG READY` (e.g. to dodge `ensure_root_issue`'s `POSSIBLE_DUPLICATE` 409 against earlier
+smoke roots) never enters the daemon's state and the controller never triages it; checkpoints 1–4 then wait forever.
+Create it after `RIG READY` with `force: true` and write the key to `${SMOKE_DIR}/root-issue`, or ice the stray one
+and create another. The rig is single-occupancy (shared ports 19370/19371/19020/14222, shared `LEGSMOKE` project,
+shared private tmux server): message the other worker before `up.sh` and run `down.sh` when finished.
+
+## 6. `legion handoff write` rejects the ledger's own fields
+
+Re-writing a phase handoff from the existing `.legion/<phase>.json` (e.g. adding a `round2` key) fails with
+`Handoff data field schemaVersion is not allowed`: the ledger adds `schemaVersion`, `phase`, and `completed` itself.
+Strip them first — `jq 'del(.schemaVersion, .phase, .completed)'` — and pass the rest as `--data`.

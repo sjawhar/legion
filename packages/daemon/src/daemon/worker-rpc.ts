@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createLineReader } from "./line-reader";
 import { createSocketLineWriter } from "./socket-writer";
 
 const DEFAULT_RPC_TIMEOUT_MS = 5_000;
@@ -28,16 +29,18 @@ export type WorkerRunState = "unknown" | "running" | "idle";
 
 /**
  * Minimal client for the OMP RPC protocol v2, reached through a worker's
- * `legion worker-shim` unix socket rather than a spawned process's stdio. The
- * shim forwards every frame between the socket and the wrapped `omp --mode rpc`
- * process unchanged, so this client speaks the same newline-delimited JSON
- * protocol `packages/coding-agent/src/modes/rpc/rpc-mode.ts` implements. Any
- * logical frame larger than `MAX_RPC_FRAME_BYTES` arrives as a sequence of
- * `rpc_chunk` lines instead of one plain JSONL line; this client reassembles that
- * sequence before dispatching the frame through the same path a plain frame takes
- * (see `connectWorkerRpc`'s `pushRpcChunk`). A worker's `agent_end` frame — which
- * carries the whole turn's `messages` — is the frame most likely to arrive
- * chunked, since it is the only one whose size scales with turn length.
+ * `legion worker-shim` stream — the unix socket the daemon dials or the TCP
+ * stream a `--connect` shim dialed in — rather than a spawned process's stdio.
+ * The shim forwards every frame between the stream and the wrapped
+ * `omp --mode rpc` process unchanged, so this client speaks the same
+ * newline-delimited JSON protocol `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
+ * implements. Any logical frame larger than `MAX_RPC_FRAME_BYTES` arrives as a
+ * sequence of `rpc_chunk` lines instead of one plain JSONL line; this client
+ * reassembles that sequence before dispatching the frame through the same path a
+ * plain frame takes (see `createWorkerRpcClient`'s `pushRpcChunk`). A worker's
+ * `agent_end` frame — which carries the whole turn's `messages` — is the frame
+ * most likely to arrive chunked, since it is the only one whose size scales with
+ * turn length.
  */
 export interface WorkerRpcClient {
   /** Resolves once the underlying socket connection closes. */
@@ -105,16 +108,53 @@ function decodeRpcChunkData(data: unknown): Buffer {
   return bytes;
 }
 
-/** Connects to a running worker-shim's unix socket and negotiates nothing by itself — call
- * `negotiate()` next. `connectTimeoutMs` (the daemon's configured `worker_rpc_timeout_seconds`,
- * `DEFAULT_RPC_TIMEOUT_MS` when a caller omits it, e.g. a test fixture) becomes this client's
- * default per-request timeout for `negotiate()` and any `getState()` call that does not pass its
- * own override. */
-export async function connectWorkerRpc(
-  socketPath: string,
-  connectTimeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
-): Promise<WorkerRpcClient> {
-  let buffer = "";
+/** The per-connection event sink a `WorkerRpcClient` (or a listener reading a preamble first)
+ * installs in `socket.data.handlers`; `workerRpcSocketHandlers` forwards every Bun socket event
+ * to whatever is installed there. */
+export interface WorkerRpcSocketHandlers {
+  data(chunk: Buffer): void;
+  drain(): void;
+  close(): void;
+  error(error: Error): void;
+}
+
+export interface WorkerRpcSocketData {
+  handlers: WorkerRpcSocketHandlers | undefined;
+}
+
+export type WorkerRpcSocket = Bun.Socket<WorkerRpcSocketData>;
+
+/** The static Bun handler table every transport that carries a `WorkerRpcClient` binds at
+ * `Bun.connect`/`Bun.listen`. Bun binds one table per call, not per connection, so this table
+ * forwards each event to whatever `socket.data.handlers` currently holds: the client installs
+ * itself there (`createWorkerRpcClient`), and a listener that has to read something first — the
+ * worker stream listener's `hello` line — installs its own sink in `open` and swaps afterwards. */
+export const workerRpcSocketHandlers: Bun.SocketHandler<WorkerRpcSocketData> = {
+  data(socket, chunk) {
+    socket.data.handlers?.data(chunk);
+  },
+  drain(socket) {
+    socket.data.handlers?.drain();
+  },
+  close(socket) {
+    socket.data.handlers?.close();
+  },
+  error(socket, error) {
+    socket.data.handlers?.error(error);
+  },
+};
+
+/** Wraps an already-open Bun socket — the unix socket `connectWorkerRpc` dialed, or a TCP socket
+ * the worker stream listener accepted — in a protocol v2 client. Attaches by installing its
+ * handlers in `socket.data.handlers`, so the socket must have been created with
+ * `workerRpcSocketHandlers` (or a table that spreads it). Negotiates nothing by itself — call
+ * `negotiate()` next. `timeoutMs` (the daemon's configured `worker_rpc_timeout_seconds`,
+ * `DEFAULT_RPC_TIMEOUT_MS` when a caller omits it, e.g. a test fixture) is the default
+ * per-request timeout for `negotiate()` and any `getState()` call without its own override. */
+export function createWorkerRpcClient(
+  socket: WorkerRpcSocket,
+  timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
+): WorkerRpcClient {
   const pending = new Map<string, PendingRequest>();
   const closedResolvers = Promise.withResolvers<void>();
   let runState: WorkerRunState = "unknown";
@@ -231,7 +271,6 @@ export async function connectWorkerRpc(
   };
 
   const handleLine = (line: string): void => {
-    if (!line) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -269,55 +308,45 @@ export async function connectWorkerRpc(
     }
   };
 
-  const socket = await Bun.connect({
-    unix: socketPath,
-    socket: {
-      data(_socket, data) {
-        buffer += data.toString("utf8");
-        let index = buffer.indexOf("\n");
-        while (index !== -1) {
-          handleLine(buffer.slice(0, index).trim());
-          buffer = buffer.slice(index + 1);
-          index = buffer.indexOf("\n");
-        }
-      },
-      drain() {
-        writer.drain();
-      },
-      close() {
-        writer.clear();
-        failAllPending(new Error("Worker RPC socket closed"));
-        // Conservative, not idle: the daemon has not yet confirmed this worker is actually
-        // gone (it may reconnect), so its slot must keep counting as occupied until
-        // `markWorkerDead` decides otherwise — firing the idle trigger here would wrongly
-        // signal freed capacity.
-        runState = "unknown";
-        closedResolvers.resolve();
-      },
-      error(_socket, error) {
-        writer.clear();
-        failAllPending(error);
-        closedResolvers.reject(error);
-      },
-    },
-  });
-  // Assigned synchronously after the connect resolves; the handlers above only run on later
-  // ticks, so none observes it uninitialized.
   const writer = createSocketLineWriter(socket);
+  const reader = createLineReader(handleLine);
+  socket.data.handlers = {
+    data(chunk) {
+      reader.push(chunk);
+    },
+    drain() {
+      writer.drain();
+    },
+    close() {
+      writer.clear();
+      failAllPending(new Error("Worker RPC socket closed"));
+      // Conservative, not idle: the daemon has not yet confirmed this worker is actually
+      // gone (it may reconnect), so its slot must keep counting as occupied until
+      // `markWorkerDead` decides otherwise — firing the idle trigger here would wrongly
+      // signal freed capacity.
+      runState = "unknown";
+      closedResolvers.resolve();
+    },
+    error(error) {
+      writer.clear();
+      failAllPending(error);
+      closedResolvers.reject(error);
+    },
+  };
 
   const request = (
     type: string,
     extra: Record<string, unknown> = {},
-    timeoutMs = connectTimeoutMs
+    requestTimeoutMs = timeoutMs
   ): Promise<Record<string, unknown>> => {
     const id = randomUUID();
     const settled = Promise.withResolvers<Record<string, unknown>>();
     pending.set(id, settled);
     const timer = setTimeout(() => {
       if (pending.delete(id)) {
-        settled.reject(new Error(`Worker RPC "${type}" timed out after ${timeoutMs}ms`));
+        settled.reject(new Error(`Worker RPC "${type}" timed out after ${requestTimeoutMs}ms`));
       }
-    }, timeoutMs);
+    }, requestTimeoutMs);
     writer.write(JSON.stringify({ id, type, ...extra }));
     return settled.promise.finally(() => clearTimeout(timer));
   };
@@ -352,8 +381,8 @@ export async function connectWorkerRpc(
         throw error;
       }
     },
-    getState(timeoutMs = connectTimeoutMs) {
-      return request("get_state", {}, timeoutMs).then((response) => {
+    getState(requestTimeoutMs = timeoutMs) {
+      return request("get_state", {}, requestTimeoutMs).then((response) => {
         const data = isRecord(response.data) ? response.data : undefined;
         if (typeof data?.isStreaming === "boolean") {
           if (data.isStreaming) runState = "running";
@@ -382,6 +411,20 @@ export async function connectWorkerRpc(
   };
 }
 
+/** Connects to a running worker-shim's unix socket and wraps it (see `createWorkerRpcClient`).
+ * `connectTimeoutMs` is the daemon's configured `worker_rpc_timeout_seconds`. */
+export async function connectWorkerRpc(
+  socketPath: string,
+  connectTimeoutMs: number = DEFAULT_RPC_TIMEOUT_MS
+): Promise<WorkerRpcClient> {
+  const socket = await Bun.connect<WorkerRpcSocketData>({
+    unix: socketPath,
+    data: { handlers: undefined },
+    socket: workerRpcSocketHandlers,
+  });
+  return createWorkerRpcClient(socket, connectTimeoutMs);
+}
+
 /** The shared connect-then-probe facts a `WorkerRpcClient`-reaching caller needs to decide
  * liveness — one of `client`/`connectError` is always set, never both. `stateAnswered` is only
  * meaningful when `client` is set: a connected socket whose `get_state` call itself rejects
@@ -395,7 +438,7 @@ export interface SocketProbeResult {
 }
 
 /** Connects to `socketPath` (via the caller's own connect-and-cache `connect` function — every
- * caller in this daemon reuses `ProcessManager.workerClient`'s per-token cache/negotiate) and
+ * caller in this daemon reuses `ProcessManager`'s per-token cache/negotiate) and
  * probes `get_state`, gathering the raw facts every liveness dialect in this package needs
  * (`reconnectWorkers`, `onWorkerClientClosed`, `spawnWorker`'s resume check, and the boot
  * watchdog's own alive probe) instead of each duplicating this same connect-then-getState

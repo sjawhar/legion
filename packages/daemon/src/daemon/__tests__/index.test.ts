@@ -240,6 +240,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     dispatchUrl: "http://127.0.0.1:18766",
@@ -1809,6 +1810,60 @@ describe("startDaemon", () => {
     } finally {
       first.server.stop();
       await first.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  /** The dependency bundle every startDaemon test in this file uses, on a fresh state. */
+  function daemonDeps(daemonConfig: DaemonConfig): daemonIndex.DaemonStartOptions {
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    return { deps: { ...options.deps, loadState: async () => state, saveState: async () => {} } };
+  }
+
+  it("binds the worker stream listener with the API and closes it with the daemon", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+    let port: number;
+    try {
+      port = daemon.workerStreamPort;
+      expect(port).toBeGreaterThan(0);
+      // A garbage first line is refused by Legion's own listener — proving the port is ours.
+      const closed = Promise.withResolvers<void>();
+      const socket = await Bun.connect<undefined>({
+        hostname: "127.0.0.1",
+        port,
+        socket: { data() {}, close: () => closed.resolve(), error() {} },
+      });
+      socket.write("not json\n");
+      await closed.promise;
+    } finally {
+      await daemon.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+    await expect(
+      Bun.connect<undefined>({ hostname: "127.0.0.1", port, socket: { data() {} } })
+    ).rejects.toThrow();
+  });
+
+  it("refuses to start when worker_stream_port is bound, naming the setting, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const occupied = Bun.listen<undefined>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {} },
+    });
+    try {
+      await expect(
+        startDaemon({ ...daemonConfig, workerStreamPort: occupied.port }, daemonDeps(daemonConfig))
+      ).rejects.toThrow(`worker_stream_port ${occupied.port} on 127.0.0.1 is unavailable`);
+      // The instance lock and API port were released: a second start on a free stream port works.
+      const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+      await daemon.stop();
+    } finally {
+      occupied.stop(true);
       await rm(stateDir, { recursive: true, force: true });
     }
   });

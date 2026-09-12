@@ -51,6 +51,7 @@ legion state                         # Read daemon state
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates via LEGION_GRANT exactly like `legion gh`/`legion credential` — no session secret in the request)
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
+legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token (Kubernetes runtime; daemon-spawned)
 ```
 
 ## Version Control

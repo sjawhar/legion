@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -153,6 +153,23 @@ describe("legion gh", () => {
   });
 });
 describe("legion start --check-config", () => {
+  // `cmdCheckConfig` resolves against the real process env, so ambient daemon settings must not
+  // leak into these cases: a Legion worker pane exports `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`
+  // (never `DISPATCH_TOKEN`), which alone makes `resolveDaemonConfig` refuse the file under test.
+  const ambient = new Map<string, string>();
+  beforeEach(() => {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && /^(LEGION_|DISPATCH_|ENVOY_)/.test(key)) {
+        ambient.set(key, value);
+        delete process.env[key];
+      }
+    }
+  });
+  afterEach(() => {
+    for (const [key, value] of ambient) process.env[key] = value;
+    ambient.clear();
+  });
+
   it("validates github_apps.<role>.private_key_command without executing it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const marker = path.join(dir, "spawned");
