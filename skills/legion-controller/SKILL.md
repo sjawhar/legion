@@ -25,7 +25,10 @@ environment, then run:
 The command resolves the project from daemon state, claims the Envoy role for the current
 session, and posts readiness before controller commands can act. It retains the environment
 capability for `legion({ op: "set_status", issue, status })`. Never pass a secret as a command argument
-or copy it into a transcript.
+or copy it into a transcript. The claim is kept alive automatically afterwards: the Envoy
+registration heartbeat re-asserts it and re-posts readiness whenever the listener loses sight of
+this session, so `/legion-claim-controller` is the manual override, not a routine step after a
+listener restart.
 
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.

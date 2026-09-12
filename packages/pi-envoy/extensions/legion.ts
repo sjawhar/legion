@@ -29,7 +29,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import { claimEnvoyRole } from "./envoy";
+import { claimEnvoyRole, onEnvoyRoleRegained, type RoleRegainReason } from "./envoy";
 
 interface LegionCapability {
   readonly kind: "root-architect" | "phase-worker";
@@ -246,19 +246,59 @@ export default function legionExtension(pi: PiApi): void {
     });
   };
 
+  /**
+   * Re-runs a role's daemon ready call after the Envoy heartbeat re-established this session as
+   * the role's live holder (`reassertRole` in envoy.ts). Whatever the daemon published to the
+   * role meanwhile got a 404 "no holder", and recovery differs by kind:
+   *  - controller: the daemon queued each notice in `controllerPendingNotices` and only
+   *    `/controller/ready` drains them (and forces a resync) -- the same call the boot handshake
+   *    and `/legion-claim-controller` make, so re-run it (index.ts `onControllerReady`).
+   *  - root architect: the daemon's no-holder recovery (`onUndeliverable` -> `resumeWorker`) is
+   *    a no-op for the root's claim (no worker locator to resume), so nothing replays the missed
+   *    wake; `/process/ready` re-emits the overseer catch-up (`onTreeReady`), so re-run it. A
+   *    stale generation 409s, which `callReadyWithRetry` propagates without retrying.
+   *  - phase worker (sub-architect included): `resumeWorker` -> `spawnWorker` already prompts or
+   *    queues a state-derived catch-up on the live worker's own socket, and `/worker/ready` is a
+   *    no-op once the boot is confirmed. No listener is registered for it.
+   * The listener is registered only by the two paths that establish an identity
+   * (`claimController`, `bootstrapRoot`), never at extension setup: OMP binds every extension
+   * factory again for each in-process `task` subagent, and an identity-less instance writing the
+   * bridge's single slot would replace the holder's listener. Never throws: after a definitive
+   * 4xx or an exhausted retry budget the daemon's held work stays undelivered until the listener
+   * loses the claim again or the process boots afresh.
+   */
+  const rerunReadyAfterRegain = async (
+    endpoint: "controller/ready" | "process/ready",
+    role: string,
+    reason: RoleRegainReason,
+    call: () => Promise<void>
+  ): Promise<void> => {
+    try {
+      await callReadyWithRetry(`${endpoint} after role regain`, call);
+      console.error(`[legion] re-ran ${endpoint} after role ${role} was ${reason}`);
+    } catch (error) {
+      console.error(
+        `[legion] ${endpoint} after role ${role} was ${reason} failed; the daemon's held work stays undelivered until the next regain or boot: ${messageFor(error)}`
+      );
+    }
+  };
+
   const claimController = async (context: CommandContext | SessionContext): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const daemon = createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
     const secret = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = secret;
     const { project } = await daemon.state();
-    await claimEnvoyRole(
-      sessionID,
-      controllerToken(project),
-      "setInterval" in context ? context : undefined
-    );
+    const token = controllerToken(project);
+    await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
     await daemon.controllerReady({ secret, sessionId: sessionID });
     controllerSessionID = sessionID;
+    onEnvoyRoleRegained(async (role, reason) => {
+      if (role !== token) return;
+      await rerunReadyAfterRegain("controller/ready", role, reason, () =>
+        daemon.controllerReady({ secret, sessionId: sessionID })
+      );
+    });
   };
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -381,6 +421,19 @@ export default function legionExtension(pi: PiApi): void {
             generation: generation(process.env),
           })
         );
+        onEnvoyRoleRegained(async (role, reason) => {
+          if (role !== roleToken || capability === undefined) return;
+          // Read live: `roleDaemon()`'s recovery may have swapped in a reissued secret since boot.
+          const { secret } = capability;
+          await rerunReadyAfterRegain("process/ready", role, reason, () =>
+            roleDaemon().processReady({
+              tree,
+              sessionId: sessionID,
+              secret,
+              generation: generation(process.env),
+            })
+          );
+        });
         registerArchitectTools();
         await activateLegionTool();
       } catch (error) {

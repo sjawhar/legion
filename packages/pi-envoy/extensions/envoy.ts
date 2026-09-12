@@ -30,7 +30,11 @@ import {
   type MessageMetadataArguments,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
-import { createEnvoyClient, expandSubscriptionTopics } from "@legion/envoy-client/transport";
+import {
+  createEnvoyClient,
+  EnvoyApiError,
+  expandSubscriptionTopics,
+} from "@legion/envoy-client/transport";
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
@@ -70,6 +74,16 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
 
 type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
 
+/**
+ * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —
+ * the listener no longer named this session and a soft claim landed; `"reregistered"` — the
+ * claim itself survived, but this session had been unreachable (a registry outage), so the
+ * listener may have answered "no holder" for it meanwhile.
+ */
+export type RoleRegainReason = "reclaimed" | "reregistered";
+
+type LegionRoleRegained = (role: string, reason: RoleRegainReason) => Promise<void>;
+
 type LegionRoleClaimReady = {
   readonly promise: Promise<LegionRoleClaim>;
   readonly resolve: (claim: LegionRoleClaim | PromiseLike<LegionRoleClaim>) => void;
@@ -78,6 +92,13 @@ type LegionRoleClaimReady = {
 type LegionRoleClaimBridge = {
   claim: LegionRoleClaim | undefined;
   readonly ready: LegionRoleClaimReady;
+  /**
+   * legion.ts's regain hook. One slot, like `claim`, but several legion.ts instances share a
+   * process: OMP re-binds every extension factory for each in-process `task` subagent. Only an
+   * instance that has established a Legion identity registers here, so the slot always holds
+   * the identity-bearing instance's listener.
+   */
+  regained: LegionRoleRegained | undefined;
 };
 
 interface GlobalLegionRoleClaimBridgeStore {
@@ -94,9 +115,10 @@ function legionRoleClaimBridge(): LegionRoleClaimBridge {
   const bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
   if (bridge) return bridge;
 
-  const createdBridge = {
+  const createdBridge: LegionRoleClaimBridge = {
     claim: undefined,
     ready: Promise.withResolvers<LegionRoleClaim>(),
+    regained: undefined,
   };
   store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
   return createdBridge;
@@ -109,6 +131,19 @@ export async function claimEnvoyRole(
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
   await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
+}
+
+/**
+ * Registers the hook the heartbeat fires after it re-establishes this session as `role`'s live
+ * holder (see `reassertRole`). legion.ts re-runs the role's daemon ready call from it. Last
+ * registration wins, exactly like `claimEnvoyRole`'s bridge slot — so legion.ts calls this only
+ * from the paths that establish a Legion identity, never at extension setup, or a `task`
+ * subagent's identity-less instance would replace the holder's listener.
+ */
+export function onEnvoyRoleRegained(
+  listener: (role: string, reason: RoleRegainReason) => Promise<void>
+): void {
+  legionRoleClaimBridge().regained = listener;
 }
 function resolveSkillsDirectory(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -369,6 +404,80 @@ export default function envoyExtension(pi: PiApi): void {
       selfSubscribed: true,
     });
 
+  /**
+   * Heartbeat follow-up: make sure the listener still resolves this session as the live holder
+   * of `claimedRoleTopic`. The listener can lose sight of a live holder without this process
+   * noticing — a claim reaped after this session's registry entry lapsed, NATS data loss, an
+   * older listener build. Reads first (`GET /v1/roles/<role>`), so a healthy tick writes
+   * nothing; a soft claim goes out only when the listener does not name this session, and the
+   * listener's soft-claim rule is the arbiter: a 409 (a different live holder) ends
+   * re-assertion for good — the newer holder is correct, so the local claim is dropped exactly
+   * as a refused automatic reclaim drops it (`setEnvoyRole`), with no transcript entry either
+   * way. A regain (`"reclaimed"`), or the first healthy tick after a failed registration,
+   * during which the listener may have answered "no holder" for a claim that survived
+   * (`"reregistered"`), fires legion.ts's hook so the role's daemon ready call runs again. The
+   * listener calls here propagate to the heartbeat's warn-once path; the hook runs detached
+   * from that chain (see below).
+   */
+  const reassertRole = async (afterOutage: boolean, context: SessionContext): Promise<void> => {
+    const topic = claimedRoleTopic;
+    if (topic === undefined) return;
+    // Both captured at entry: a session rebind or an explicit envoy_role_set/envoy_unsubscribe
+    // racing this tick changes them mid-flight, and that call is the truth.
+    const id = sessionID;
+    const role = topic.slice(ROLE_TOPIC_PREFIX.length);
+    const holder = await client.getRole(role).then(
+      (info) => info.holder,
+      (error: unknown) => {
+        // 404 is the listener's answer for "no live holder", not a failure.
+        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
+        throw error;
+      }
+    );
+    let reason: RoleRegainReason;
+    if (holder === id) {
+      if (!afterOutage) return;
+      reason = "reregistered";
+    } else {
+      const result = await client.setRole({ sessionID: id, role, soft: true });
+      if (claimedRoleTopic !== topic || sessionID !== id) {
+        // Superseded while in flight, so a claim that landed here is handed straight back.
+        if (result.claimed) await client.unsubscribe({ sessionID: id, topics: [topic] });
+        return;
+      }
+      if (!result.claimed) {
+        claimedRoleTopic = undefined;
+        logger.warn("envoy: role re-assertion refused; held by another live session", {
+          role,
+          sessionID: id,
+          holder: result.holder,
+        });
+        context.ui.notify(
+          `envoy: role ${role} is now held by session ${result.holder}; this session no longer holds it`,
+          "warning"
+        );
+        return;
+      }
+      logger.warn("envoy: role re-asserted after the listener lost the claim", {
+        role,
+        sessionID: id,
+        previousHolder: holder ?? null,
+      });
+      reason = "reclaimed";
+    }
+    const regained = legionRoleClaimBridge().regained;
+    if (regained === undefined) return;
+    // Detached from the heartbeat chain: the hook is a daemon round-trip this side cannot bound
+    // (`/controller/ready` drains held notices and runs a forced resync), and the chain's
+    // `healing` latch must release as soon as registration and the claim are settled, or the
+    // next tick could never register. `Promise.resolve().then` also catches a synchronous throw.
+    void Promise.resolve()
+      .then(() => regained(role, reason))
+      .catch((error: unknown) => {
+        logger.warn("envoy: role regain hook failed", { role, reason, error: messageFor(error) });
+      });
+  };
+
   const ensureHeartbeat = (context: SessionContext): void => {
     if (heartbeatRegistered) return;
     // Never let a heartbeat tick reject unhandled: OMP treats unhandled
@@ -376,6 +485,12 @@ export default function envoyExtension(pi: PiApi): void {
     // would kill a live session. Warn once per outage; registration
     // self-heals on the next successful tick.
     let heartbeatOutageNotified = false;
+    // Set only by a failed registration, never by a failed role check afterwards: the listener
+    // answers "no holder" for a session whose registry entry lapsed, not for a role read that
+    // failed, and only the former warrants a `"reregistered"` regain on the next healthy tick.
+    // Cleared only once a whole tick — registration and re-assertion — has succeeded, so a
+    // recovery tick whose role read errors still owes the regain to the next healthy one.
+    let registrationFailed = false;
     let healing = false;
     context.setInterval(() => {
       // Sessions can be created lazily after session_start (a fresh TUI has no
@@ -387,8 +502,19 @@ export default function envoyExtension(pi: PiApi): void {
       const drifted = liveSessionID !== sessionID;
       if (healing) return;
       healing = true;
+      // A drifted id re-establishes the whole session (reclaimHeldRoles included); a steady one
+      // re-registers, then checks the listener still resolves this session's role.
+      const afterOutage = registrationFailed;
       void (drifted ? establishSession(context) : registerSession())
+        .then(
+          () => (drifted ? undefined : reassertRole(afterOutage, context)),
+          (error: unknown) => {
+            registrationFailed = true;
+            throw error;
+          }
+        )
         .then(() => {
+          registrationFailed = false;
           heartbeatOutageNotified = false;
         })
         .catch((error) => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -137,6 +137,12 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
 
 const temporaryPaths: string[] = [];
 
+beforeEach(() => {
+  // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
+  // environment; every test starts from none and sets only what it declares.
+  for (const key of environmentKeys) delete process.env[key];
+});
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   natsConnections.splice(0);
@@ -175,10 +181,8 @@ function createPi(): {
   process.env.LEGION_STATE_DIR ??= "/tmp/legion-state";
   // The envoy extension registers the dispatch tools whenever the developer's own
   // ~/.config/opencode/envoy.json enables dispatch; this fixture's zod stub is not a real
-  // schema builder, so the resolution must see no user config and no DISPATCH_* override.
+  // schema builder, so the resolution must see no user config.
   process.env.HOME = "/nonexistent-home-for-legion-tests";
-  delete process.env.DISPATCH_URL;
-  delete process.env.DISPATCH_TOKEN;
   const pi: TestPi = {
     zod: {
       object: (shape) => shape,
@@ -318,6 +322,7 @@ async function bootWorker(options: {
   readonly workspace: string;
   readonly requests?: { readonly path: string; readonly body: unknown }[];
   readonly extraRoutes?: (url: URL, body: unknown) => Response | undefined;
+  readonly intervals?: (() => void)[];
 }): Promise<{
   readonly toolCall: Handler;
   readonly context: SessionContext;
@@ -364,7 +369,13 @@ async function bootWorker(options: {
   if (sessionStart === undefined || toolCall === undefined) {
     throw new Error("worker lifecycle handlers were not registered");
   }
-  const context = { ...sessionContext(sessionId), cwd: options.workspace };
+  const context: SessionContext = {
+    ...sessionContext(sessionId),
+    cwd: options.workspace,
+    setInterval: (callback) => {
+      options.intervals?.push(callback);
+    },
+  };
   await sessionStart({}, context);
   return { toolCall, context, token };
 }
@@ -734,6 +745,271 @@ describe("Legion OMP extension", () => {
         body: { secret: "controller-secret", sessionId: "ses_interactive" },
       },
     ]);
+  });
+  test("a controller that regains its role re-runs controller/ready so held notices drain", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const token = "legion-omp-controller";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    let listenerHoldsClaim = true;
+    const secondReady = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 2) {
+          secondReady.resolve();
+        }
+        return Response.json({});
+      }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_controller", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("controller handlers were not registered");
+    const intervals: (() => void)[] = [];
+    await sessionStart(
+      {},
+      { ...sessionContext("ses_controller"), setInterval: (callback) => intervals.push(callback) }
+    );
+    const ready = {
+      path: "/legion/v1/controller/ready",
+      body: { secret: "controller-secret", sessionId: "ses_controller" },
+    };
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    // A steady tick: the listener still names this session, so nothing is claimed or re-run.
+    intervals[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+    expect(requests.filter((request) => request.path === "/v1/roles/set")).toHaveLength(1);
+
+    // The listener no longer names this session: the next tick soft-claims and re-runs
+    // controller/ready.
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await secondReady.promise;
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_controller", role: token },
+      { session_id: "ses_controller", role: token, soft: true },
+    ]);
+  });
+  test("a controller's regain hook survives a task subagent's in-process extension re-bind", async () => {
+    // OMP binds every extension factory again for each in-process `task` subagent, so a second
+    // legionExtension(pi) — with no Legion identity — runs in the controller's process. It must
+    // not replace the controller's regain listener on the process-wide bridge slot.
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const token = "legion-omp-controller";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_CONTROLLER_SECRET = "controller-secret";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    let listenerHoldsClaim = true;
+    const secondReady = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/state") return Response.json(redactedLegionState("omp"));
+      if (url.pathname === "/legion/v1/controller/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 2) {
+          secondReady.resolve();
+        }
+        return Response.json({});
+      }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_controller_rebind", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const controller = createPi();
+    legionExtension(controller.pi);
+    const controllerStart = controller.handlers.get("session_start");
+    if (controllerStart === undefined) throw new Error("controller handlers were not registered");
+    const intervals: (() => void)[] = [];
+    await controllerStart(
+      {},
+      {
+        ...sessionContext("ses_controller_rebind"),
+        setInterval: (callback) => intervals.push(callback),
+      }
+    );
+    const ready = {
+      path: "/legion/v1/controller/ready",
+      body: { secret: "controller-secret", sessionId: "ses_controller_rebind" },
+    };
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    // The controller runs a `task`: a fresh extension instance binds and its subagent session
+    // starts in this same process, exactly as OMP does it.
+    const subagent = createPi();
+    legionExtension(subagent.pi);
+    const subagentStart = subagent.handlers.get("session_start");
+    if (subagentStart === undefined) throw new Error("subagent handlers were not registered");
+    const { childFile } = await createSubagentTranscriptPaths();
+    await subagentStart({}, sessionContext("ses_controller_subagent", childFile));
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await secondReady.promise;
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_controller_rebind", role: token },
+      { session_id: "ses_controller_rebind", role: token, soft: true },
+    ]);
+  });
+  test("a root architect that regains its role re-runs process/ready so the overseer catch-up replays", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const tree = "REPO-42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-root-regain";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    let listenerHoldsClaim = true;
+    const secondReady = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/process/ready") {
+        if (requests.filter((request) => request.path === url.pathname).length === 2) {
+          secondReady.resolve();
+        }
+        return Response.json({});
+      }
+      if (url.pathname === `/v1/roles/${token}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+        }
+        return Response.json({ role: token, holder: "ses_root", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") listenerHoldsClaim = true;
+      return Response.json({
+        session_id: "ses_root",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    const intervals: (() => void)[] = [];
+    await sessionStart(
+      {},
+      { ...sessionContext("ses_root"), setInterval: (callback) => intervals.push(callback) }
+    );
+    const ready = {
+      path: "/legion/v1/process/ready",
+      body: { tree, sessionId: "ses_root", secret: "root-secret", generation: 3 },
+    };
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await secondReady.promise;
+
+    expect(requests.filter((request) => request.path === ready.path)).toEqual([ready, ready]);
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_root", role: token },
+      { session_id: "ses_root", role: token, soft: true },
+    ]);
+  });
+  test("a phase worker that regains its role re-runs nothing: the daemon's own no-holder recovery prompts its catch-up", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const token = roleToken("omp", "REPO-43", "implementer");
+    const intervals: (() => void)[] = [];
+    let listenerHoldsClaim = true;
+    const reasserted = Promise.withResolvers<void>();
+    await bootWorker({
+      role: "implementer",
+      sessionId: "ses_worker_regain",
+      workspace,
+      requests,
+      intervals,
+      extraRoutes: (url, body) => {
+        if (url.pathname === `/v1/roles/${token}`) {
+          if (!listenerHoldsClaim) {
+            return Response.json({ error: `no holder for role ${token}` }, { status: 404 });
+          }
+          return Response.json({ role: token, holder: "ses_worker_regain", last_seen: 1 });
+        }
+        const soft =
+          typeof body === "object" && body !== null && "soft" in body && body.soft === true;
+        if (url.pathname === "/v1/roles/set" && soft) {
+          listenerHoldsClaim = true;
+          reasserted.resolve();
+        }
+        return undefined;
+      },
+    });
+    expect(requests.filter((request) => request.path === "/legion/v1/worker/ready")).toHaveLength(
+      1
+    );
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await reasserted.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(
+      requests.filter((request) => request.path === "/v1/roles/set").map((request) => request.body)
+    ).toEqual([
+      { session_id: "ses_worker_regain", role: token },
+      { session_id: "ses_worker_regain", role: token, soft: true },
+    ]);
+    // The daemon's resumeWorker -> spawnWorker path (processes.ts) already prompts or queues the
+    // worker's catch-up on a no-holder 404, and /worker/ready is a no-op on a confirmed claim.
+    expect(requests.filter((request) => request.path === "/legion/v1/worker/ready")).toHaveLength(
+      1
+    );
   });
   test("takes over the controller role through the daemon-ready handshake", async () => {
     const requests: { readonly method: string; readonly path: string; readonly body: unknown }[] =

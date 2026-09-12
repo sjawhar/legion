@@ -22,6 +22,8 @@ related_issues:
   - "LEGION-12"
   - "LEGION-14"
   - "sjawhar/legion#952"
+  - "LEGION-29"
+  - "sjawhar/legion#970"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
@@ -42,7 +44,8 @@ symptoms:
 Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
 from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
-`packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again. None is part of any
+`packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again; the §1 attribution
+finding and the `packages/pi-envoy` note in §2 are from LEGION-29. None is part of any
 issue's scope; §1 is filed as LEGION-12 (a rig bug in the pi-envoy extension's tool-call hook) and §7 as LEGION-29.
 Until they are fixed, these are the workarounds.
 
@@ -107,6 +110,15 @@ text contains a copy of an earlier call's block (easy when re-running a previous
 is the last `export` and wins — the same 403 with only one *injected* grant in sight. Command text starts at
 `cd -- "$LEGION_WORKSPACE" && …`.
 
+**LEGION-29 evidence on where the extra blocks come from.** Its implementer and tester both saw 2–4
+`export LEGION_GRANT='…'` blocks per call and traced every block after the first to the *model's own command text*:
+the assistant re-emits the previous call's injected prelude, and the extra blocks often carry UUIDs that never
+existed on the daemon (a `POST /legion/v1/gh-token` probe of each returned `Invalid or expired grant` for all but
+the first block, which redeemed for its whole 60 s). The same command issued once through eval's `tool.bash`
+redeemed first time. So in that session the hook injected exactly one grant per call and only the replayed copies
+403'd; whether LEGION-9's 1 → 10 growth had the same cause is not established by either record. The per-call
+workaround above (pin the first block's uuid inline) covers both cases.
+
 **Alternative (LEGION-22): probe the grants instead of locking on the first.** Grants are reusable for their whole
 60 s TTL (`GRANT_TTL_MS` in `api.ts`; `resolveGrant` checks expiry only), so a shell can record every grant the hook
 injected and, right before a credentialed command, keep the first one the daemon accepts:
@@ -137,6 +149,16 @@ sjawhar/legion#967 (`wxzknkyk`) made that `describe` scrub `LEGION_*`/`DISPATCH_
 `bun test packages/daemon` runs clean from a pane on branches that include it. On older branches the workaround is
 still `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, and say so in the handoff. The general rule stands: a CLI
 test that reaches `process.env` through a helper with no env seam will fail wherever the pane's env differs from CI's.
+
+The same leak hit `packages/pi-envoy` on LEGION-29 (fixed in sjawhar/legion#970): `envoy.test.ts` cleared
+`DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which `resolveDispatchConfig` reads *ahead* of the token (see
+[secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)), so three Dispatch-tool
+tests registered real tools against the fixture's stub zod; `legion.test.ts` inherited the pane's
+`LEGION_TREE`/`LEGION_ROLE`/`LEGION_ISSUE` markers, so nine tests died on `Legion session has both controller and
+tree launch markers`. Both suites now clear the whole variable family in `beforeEach` (the existing `environmentKeys`
+list in `legion.test.ts`; `DISPATCH_TOKEN_FILE` beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore
+it in `afterEach`. Clear the variable *family the resolver consumes*, in its precedence order — clearing the familiar
+name and leaving the file-pointer alive disables nothing.
 
 Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
