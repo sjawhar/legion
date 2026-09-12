@@ -185,7 +185,8 @@
       "the Depot-trust-relationship failure path (step `depot/setup-action` failing with the remedy summary) — only reachable once DEPOT_PROJECT_ID is set but the trust relationship is still missing",
       "anonymous pull: `docker logout ghcr.io && docker pull <digest>` (GHCR visibility)",
       "runtime: mise `github:` backend resolution of the OMP fork, jj fork, and gh inside the Depot builder, and OMP's native-module download from the builder (egress) — both worked on this box, unverified on Depot"
-    ]
+    ],
+    "superseded": "VOID as of depotRemoval: Depot is out of the pipeline (spec v11); see depotRemoval.stillUnverified for what remains."
   },
   "verifiedLocally": [
     "spec acceptance 4: image-ref.test.ts (4 tests) — digest-only, exact refusal text",
@@ -358,5 +359,88 @@
       "outcome": "failure at step 3 'Require the Depot project variable' — ::error::Repository variable DEPOT_PROJECT_ID is unset … (expected; nothing created on Depot/GitHub/AWS; no image built)",
       "tests": "Tests run 34691746389 success at a9510e8f"
     }
+  },
+  "depotRemoval": {
+    "trigger": "Sami 2026-09-12 14:17Z via the operator, relayed by the root architect: the 'Depot, no buildx on workstations' rule was agent-c-only and was generalized into the LEGION-19 spec by mistake; root decision 3 is void. Spec dispatch://LEGION-23/spec version 11 (Acceptance 3, the worker-image.yaml Design row, Errors, new Rejected row 'Depot as the builder').",
+    "commit": {
+      "sha": "ddc06ab73b64b2dd7bd14055907fddba46f76930",
+      "subject": "ci(worker-image): build on the GitHub runner with docker/build-push-action; drop Depot"
+    },
+    "changes": [
+      ".github/workflows/worker-image.yaml: deleted 'Require the Depot project variable', `depot/setup-action`, and 'Depot failure remedy'; `depot/build-push-action@v1` → `docker/setup-buildx-action@v3` + `docker/build-push-action@v6` (the pair release-envoy-listener.yaml uses) keeping context/file/platforms linux/amd64/push/tags/labels (revision + version)/secrets github_token; added `cache-from: type=gha`, `cache-to: type=gha,mode=max`; dropped the Depot-only `lint: true`. `id-token: write` kept solely for the optional ECR mirror's aws-actions/configure-aws-credentials (comment says so). Unchanged: triggers, BUILT_SHA checkout/tag/label, concurrency, GHCR login, Record digest, Append digest to the CLI release, main-only ECR gate with per-variable skip lines and the `gh run rerun --failed` failure note.",
+      ".github/workflows/release.yaml: unchanged (no Depot mention existed).",
+      "packages/daemon/docker/worker.Dockerfile: header comment → built by worker-image.yaml on the GitHub-hosted runner; 'never build it on a workstation' kept; 'the CI runner is not a workstation'. Instructions untouched.",
+      "docs/kubernetes.md: 'How it is built' → buildx action + gha cache on the runner, GITHUB_TOKEN only, no third-party builder/project variable/extra credential; 'built only by this workflow, on the GitHub-hosted runner'; the `gh run rerun <run-id> --failed` retry sentence kept; prerequisites paragraph → 'The build has no prerequisites outside this repository' with GHCR visibility as its own post-first-push sentence; ECR section unchanged.",
+      "AGENTS.md and packages/daemon/src/daemon/AGENTS.md: no Depot mention (grep).",
+      "grep -i depot over the whole branch diff vs main outside .legion/: zero hits (the only repo-wide hit, docs/research/knowledge-graph-tools/per-tool/roam-research.md, is pre-existing and unrelated)."
+    ],
+    "staticProof": [
+      "actionlint on both workflows → clean; hadolint --ignore DL3008 --ignore DL3003 (published container) → clean (Dockerfile instructions unchanged)",
+      "packages/daemon: bunx biome check src/ → 139 files clean; bunx tsc --noEmit → ok (nothing under packages/daemon/src changed)",
+      "yaml: steps = checkout | Compute tags | setup-buildx | login | Build and push (docker/build-push-action@v6 with context,file,platforms,push,cache-from,cache-to,tags,labels,secrets) | Record digest | Append digest | Decide ECR mirror | configure-aws-credentials | Mirror to ECR | ECR mirror failure note",
+      "Compute tags + Decide ECR mirror shell simulations re-run in five shapes, identical to review round 1: pull_request with AWS vars → sha- only, `not a main run`; main+released → sha-+0.9.0, tag_release=true, enabled=true; main+skipped/no vars → three per-variable lines; main one var unset → one line; non-main dispatch with version → sha- only, version_label=sha-…, `not a main run`"
+    ],
+    "ciIterations": [
+      {
+        "attempt": 1,
+        "runId": 34699597661,
+        "url": "https://github.com/sjawhar/legion/actions/runs/34699597661",
+        "head": "ddc06ab73b64",
+        "event": "pull_request",
+        "outcome": "success (4m42s; started 14:32:43Z, completed 14:37:25Z)",
+        "steps": "checkout (HEAD is now at ddc06ab) → Compute tags → setup-buildx → login → Build and push (mise resolved omp/18.1.15, jj 0.45.1-sami.20260910-043938, gh 2.98.0; `✔ Linked @sjawhar/pi-legion-envoy`; `probe-image: OK (/opt/omp/bin/omp)` at 8.5 s of the last RUN) → Record digest → Append digest skipped (tag_release=false on a PR run) → Decide ECR mirror (`ECR mirror skipped: not a main run`) → configure-aws-credentials/Mirror/failure note skipped",
+        "cause": "n/a — no failure; plan risk 7's 1–3 iterations were not needed"
+      }
+    ],
+    "digest": {
+      "reference": "ghcr.io/sjawhar/legion-worker@sha256:a13eadff46862ae3057bf714e12500f32193f3b7eda91b9ca5a50a2a8177921c",
+      "tags": [
+        "ghcr.io/sjawhar/legion-worker:sha-ddc06ab73b64"
+      ],
+      "manifestList": "sha256:a13eadff46862ae3057bf714e12500f32193f3b7eda91b9ca5a50a2a8177921c",
+      "platformManifest": "sha256:76846276b7fccb8ad667ffa7e7c333071d8866b577eb5234f3eef033ee47fde9",
+      "labels": {
+        "org.opencontainers.image.revision": "ddc06ab73b64b2dd7bd14055907fddba46f76930",
+        "org.opencontainers.image.version": "sha-ddc06ab73b64",
+        "org.opencontainers.image.source": "https://github.com/sjawhar/legion (Dockerfile LABEL)"
+      },
+      "arch": "amd64",
+      "sizeBytes": 373491164
+    },
+    "packageVisibility": "PUBLIC: `docker logout ghcr.io` then `docker pull ghcr.io/sjawhar/legion-worker@sha256:a13eadff…` succeeded anonymously (pull exit 0, ~7 min on this box's link). No visibility change made or needed; no dispatch_ask required.",
+    "localConfirmation": [
+      {
+        "cmd": "docker run --rm --entrypoint sh <digest> -c 'omp --version && legion --help && jj --version && git --version && gh --version && bun --version && id -u'",
+        "output": "omp/18.1.15 | Wake-driven Legion daemon (legion) | jj 0.45.1-sami.20260910-043938-bb5ffc8f… | git version 2.39.5 | gh version 2.98.0 (2026-08-20) | 1.3.14 | 1000 | HOME=/home/legion OMP_PROFILE=legion LEGION_OMP_PATH=/opt/omp/bin/omp — exit 0 (spec acceptance 1)"
+      },
+      {
+        "cmd": "docker run --rm --entrypoint legion <digest> probe-image",
+        "output": "probe-image: OK (/opt/omp/bin/omp) — exit 0 in 8.2 s (spec acceptance 2)"
+      },
+      {
+        "cmd": "docker run --rm --entrypoint sh <digest> -c 'readlink ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy && ls ~/.omp/natives ~/.omp/natives/*/ && cat ~/.omp/profiles/legion/plugins/omp-plugins.lock.json'",
+        "output": "/opt/legion/pi-legion-envoy | 18.1.15 | pi_natives.linux-x64-baseline.node pi_natives.linux-x64-modern.node | lock: @sjawhar/pi-legion-envoy version 1.5.0 enabled true"
+      },
+      {
+        "cmd": "docker run --rm <digest> --help",
+        "output": "worker-shim usage (placeholder ENTRYPOINT) — exit 0"
+      },
+      {
+        "cmd": "docker run --rm --entrypoint legion -e LEGION_OMP_PATH=/nonexistent <digest> probe-image",
+        "output": "[legion] Configured OMP invocation does not expose pi.agents: sh: 1: exec: /nonexistent: not found — exit 1 (negative control)"
+      },
+      {
+        "cmd": "docker inspect <digest>",
+        "output": "user=1000:1000 entrypoint=[legion, worker-shim] arch=amd64; labels revision=ddc06ab7…, version=sha-ddc06ab73b64, source=https://github.com/sjawhar/legion"
+      }
+    ],
+    "stillUnverified": [
+      "spec acceptance 3 main path: `:<cli version>` tag and the release-body append — only on the first main run after merge where `cli` releases a version",
+      "ECR mirror success path — AWS variables unset on sjawhar/legion and the AWS side is root-architect scope; the skip path (`not a main run` on PR runs) is proven by run 34699597661",
+      "gha cache hit on a second build (this run populated it)",
+      "tmux runtime unchanged (spec Testing last row): smoke checkpoints 1–4/13 are the tester's closure condition after PR #957"
+    ],
+    "deferred": "processes.ts:176 withOmpLaunchPrefix doc comment still says the probes live in index.ts — main@origin remains 7add4d03 (LEGION-21/#962 not merged), so it stays for the .legion/ cleanup push.",
+    "constraints": "no image built on this box (the runner built it); nothing created on GitHub/AWS beyond the branch push and the workflow's own package push; no OMP_FORK_PIN bump; no new PR; LEGION-12 two-call grant pattern for jj git push / legion gh (one push attempt hung the shell and did not land; the retry landed in 9 s)"
   }
 }
