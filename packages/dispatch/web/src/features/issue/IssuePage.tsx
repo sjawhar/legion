@@ -12,7 +12,14 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
-import type { Artifact, ExternalLink, Issue, UserIssueState, UserState } from "../../api/types";
+import type {
+  Artifact,
+  ExternalLink,
+  Issue,
+  IssueDetails,
+  UserIssueState,
+  UserState,
+} from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -204,7 +211,7 @@ function IssueHeader({
 }: {
   documentArtifact: Artifact | undefined;
   isClosed: boolean;
-  issue: Issue;
+  issue: IssueDetails;
   onShowDiffChange(next: boolean): void;
   onVersionChange(version: number | null): void;
   showDiff: boolean;
@@ -251,6 +258,17 @@ function IssueHeader({
   });
   const drafts = useIssueDrafts(issue, updateIssue);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
+  const staleOpenAsk = issue.open_asks.find(
+    (ask) => Date.parse(ask.created_at) < Date.now() - 60 * 60 * 1000
+  );
+  const waitingOn =
+    staleOpenAsk === undefined
+      ? null
+      : staleOpenAsk.author.kind === "session" && staleOpenAsk.author.owner !== undefined
+        ? staleOpenAsk.author.owner
+        : issue.created_by.kind === "user"
+          ? issue.created_by.id
+          : "you";
   const pinGuard = useSubmitGuard();
   const updateState = useMutation({
     mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
@@ -366,6 +384,11 @@ function IssueHeader({
             ))}
           </select>
         </label>
+        {waitingOn === null ? null : (
+          <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
+            Waiting on {waitingOn}
+          </span>
+        )}
         {showDocumentControls && documentArtifact !== undefined ? (
           <ApprovalChip artifact={documentArtifact} variant="header" />
         ) : null}

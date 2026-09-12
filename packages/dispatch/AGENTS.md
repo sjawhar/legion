@@ -24,17 +24,9 @@ Resolved asks leave the Inbox and open-ask badges, but their thread and Conversa
 
 A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned to a version: the header of an issue document, the issue's Spec header, and a project document page show a chip (`Draft` header-only, `Awaiting approval`, `Approved v12`, `Approved v12 · changed since` when edited after approval, `Changes requested`) that opens the review history, plus `Approve` (`Approve v<latest>` when stale) and `Request changes` (reason required) controls that `POST /artifacts/{id}/reviews`; artifact and document lists show the chip only, never for a draft. An agent's `dispatch_request_approval` opens an ask of `kind: "approval"`, which the Inbox card renders as `Approval requested` with the two fixed options and no Other row, requiring a `Reason` when `Request changes` is chosen; answering it is the same review. Approval is the exception path (Legion's design gate), so nothing about it is prominent.
 
-Answering and asking for clarification are different acts on an ask card (`features/inbox/`). Answering: when an ask offers
-options, free text is an explicit **Other** choice - the last row of the option list, which reveals the `Your answer` field;
-a question-shaped Other response presents an inline default action to send it as clarification (keeping the ask open) or to answer
-with it anyway. A chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an
-`Other` label once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask
-is labelled `Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
-partitions the server-ordered rows by `last_reply`: asks whose newest reply is a human's are listed under `Waiting on agents`
-with a `Waiting on <asker>` chip (the agent owes the next turn), everything else under `Needs you` with a `<agent> replied` chip
-when an agent spoke last; both headings appear only when the waiting section is non-empty. The card, its collapsed disclosure,
-and its inline thread share one `["ask-thread", id]` query of `GET /api/v1/asks/{id}`, whose `edits` list every rewording; the
-card's `Show N previous versions` disclosure renders each with its editor and time.
+Answering and asking for clarification are different acts on an ask card (`features/inbox/`). Question asks with options expose free text as an explicit **Other** choice; an action ask instead has an `Action` chip, its compact opened age, and fixed `Done` / `Can't` controls (`Can't` requires a reason). Clarifying keeps an ask open and its reply thread is labelled `Ask for clarification` / `Send` (answered asks keep `Reply`), saying `Replying does not answer the question.`
+
+The Inbox puts every open ask whose latest reply is not a human's under `Waiting on you`, oldest first, and never duplicates it in the remaining `Needs you` / `Waiting on agents` partition. The Inbox and every project page link their shared `GET /api/v1/inbox` data as `Blocked on you: N items, oldest 6h` when that leading group is non-empty. An issue header shows `Waiting on <login>` beside status when it has an open ask older than an hour.
 
 ## Margin threads
 

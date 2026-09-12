@@ -17,6 +17,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
@@ -60,6 +61,12 @@ export function ProjectPage(): ReactNode {
   }, [login]);
 
   const route = parseProjectPath(location.pathname, location.search);
+  const projectKey = route?.project;
+  const inbox = useQuery({
+    queryKey: ["inbox", projectKey],
+    queryFn: () => api.getInbox(projectKey),
+    enabled: projectKey !== undefined,
+  });
   const projects = useQuery({
     queryKey: ["projects"],
     queryFn: () => api.listProjects(),
@@ -96,6 +103,7 @@ export function ProjectPage(): ReactNode {
 
   return (
     <section>
+      <BlockedOnYou asks={inbox.data ?? []} />
       <header className="mb-6">
         <Link
           className={`text-sm font-semibold ${linkText} ${linkHoverText}`}

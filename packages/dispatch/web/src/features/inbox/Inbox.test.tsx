@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -74,7 +74,7 @@ test("Inbox labels an artifact-owned ask with its project and document page link
   }
 });
 
-test("Inbox renders a flat list with no section heading when every row needs the viewer", async () => {
+test("Inbox puts every ask waiting on the viewer under Waiting on you", async () => {
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -99,7 +99,9 @@ test("Inbox renders a flat list with no section heading when every row needs the
 
   try {
     await screen.findByText("Which approach?");
-    expect(screen.queryAllByRole("heading", { level: 2 })).toHaveLength(0);
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+    ).toEqual(["Waiting on you"]);
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -107,7 +109,7 @@ test("Inbox renders a flat list with no section heading when every row needs the
   }
 });
 
-test("Inbox splits rows needing the viewer from rows waiting on an agent, and chips the waiting row", async () => {
+test("Inbox keeps rows waiting on agents below Waiting on you without duplicating rows", async () => {
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -136,7 +138,7 @@ test("Inbox splits rows needing the viewer from rows waiting on an agent, and ch
     const headings = screen
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
-    expect(headings).toEqual(["Needs you", "Waiting on agents"]);
+    expect(headings).toEqual(["Waiting on you", "Waiting on agents"]);
     expect(screen.getByText("Waiting on session-1")).toBeTruthy();
   } finally {
     view.unmount();
@@ -145,7 +147,7 @@ test("Inbox splits rows needing the viewer from rows waiting on an agent, and ch
   }
 });
 
-test("Inbox chips a Needs-you row whose last reply came from an agent", async () => {
+test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () => {
   const askA = issueAsk({
     id: "ask-a",
     last_reply: {
@@ -182,5 +184,71 @@ test("Inbox chips a Needs-you row whose last reply came from an agent", async ()
     view.unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
+  }
+});
+
+test("Inbox sorts Waiting on you oldest first and hides the blocker line when empty", async () => {
+  const oldest = issueAsk({
+    created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    id: "ask-oldest",
+    question: "Oldest action",
+  });
+  const recent = issueAsk({
+    created_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
+    id: "ask-recent",
+    question: "Recent action",
+  });
+  const agentWaits = issueAsk({
+    id: "ask-agent",
+    last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+    question: "Waiting on agent",
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([recent, agentWaits, oldest]);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: [oldest, recent, agentWaits].find((ask) => ask.id === id) ?? oldest,
+    edits: [],
+    replies: [],
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const waiting = await screen.findByRole("heading", { name: "Waiting on you" });
+    const section = waiting.parentElement;
+    if (section === null) throw new Error("Waiting on you section is missing");
+    expect(
+      within(section)
+        .getAllByTestId(/^ask-ask-/)
+        .map((card) => card.dataset.testid)
+    ).toEqual(["ask-ask-oldest", "ask-ask-recent"]);
+    expect(screen.getByText("Blocked on you: 2 items, oldest 2d")).toBeTruthy();
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+
+  const emptyInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const emptyView = render(
+    <MemoryRouter>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    await screen.findByText("Nothing needs you");
+    expect(screen.queryByText(/Blocked on you:/)).toBeNull();
+  } finally {
+    emptyView.unmount();
+    emptyInbox.mockRestore();
   }
 });

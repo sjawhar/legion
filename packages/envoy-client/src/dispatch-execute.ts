@@ -223,6 +223,12 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
+function askKind(args: ToolArguments): CreateAskInput["kind"] {
+  const value = optionalString(args, "kind");
+  if (value === undefined || value === "action") return value;
+  throw new Error("kind must be action");
+}
+
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   const projectDocument = ref.match(
     /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/
@@ -790,9 +796,11 @@ export async function executeDispatchTool(
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
+      const kind = askKind(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const askInput = {
         question: stringArg(args, "question"),
+        ...(kind === undefined ? {} : { kind }),
         ...(Array.isArray(options)
           ? { options: options as NonNullable<CreateAskInput["options"]> }
           : {}),

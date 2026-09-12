@@ -44,6 +44,7 @@ payload names renders it and drops the matching local NATS subscription
 (so the dead-connection recovery path does not resurrect it) — every other
 subscriber ignores it.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
+`dispatch_ask` can set `kind: "action"` for a human to-do with fixed `Done` / `Can't` answers. It does not expose `approval`, which is opened only through `dispatch_request_approval`.
 
 `dispatch_doc_edit` may retype an identified paragraph into any schema-declared typed block with
 `{ op: "retype", block, type, attributes }`. A question about a document is written as an `ask`

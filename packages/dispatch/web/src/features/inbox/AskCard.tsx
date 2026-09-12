@@ -48,6 +48,7 @@ import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
 import { AskThread, type AskThreadQuery } from "./AskThread";
+import { formatAskAge } from "./ask-age";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -332,6 +333,7 @@ export function AskCard({
   const [otherSelected, setOtherSelected] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [questionChoice, setQuestionChoice] = useState(false);
+  const [actionCannot, setActionCannot] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
@@ -397,9 +399,14 @@ export function AskCard({
 
   const hasOptions = ask.options.length > 0;
   const isApproval = ask.kind === "approval";
+  const isAction = ask.kind === "action";
   const isSubmitting = mutation.isPending || clarification.isPending;
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
+      if (isAction) {
+        mutation.mutate({ selected: ["Can't"], text });
+        return;
+      }
       if (isApproval) {
         mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
         return;
@@ -410,6 +417,10 @@ export function AskCard({
       }
       mutation.mutate(text === "" ? { selected } : { selected, text });
     });
+  };
+
+  const markActionDone = () => {
+    submitGuard.guard(() => mutation.mutate({ selected: ["Done"] }));
   };
 
   const selectRealOption = (label: string) => {
@@ -446,6 +457,10 @@ export function AskCard({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = answerText.trim();
+    if (isAction) {
+      sendAnswer(text);
+      return;
+    }
     if (!isApproval && hasOptions && otherSelected && isQuestionShapedAnswer(text)) {
       setQuestionChoice(true);
       return;
@@ -457,14 +472,18 @@ export function AskCard({
     if (text === "") return;
     submitGuard.guard(() => clarification.mutate(text));
   };
-  const canSubmit = isApproval
-    ? selected.length > 0 && (!selected.includes("Request changes") || answerText.trim() !== "")
-    : hasOptions
-      ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
-      : answerText.trim() !== "";
-  const showTextarea = isApproval
-    ? selected.includes("Request changes")
-    : !hasOptions || otherSelected;
+  const canSubmit = isAction
+    ? actionCannot && answerText.trim() !== ""
+    : isApproval
+      ? selected.length > 0 && (!selected.includes("Request changes") || answerText.trim() !== "")
+      : hasOptions
+        ? selected.length > 0 || (otherSelected && answerText.trim() !== "")
+        : answerText.trim() !== "";
+  const showTextarea = isAction
+    ? actionCannot
+    : isApproval
+      ? selected.includes("Request changes")
+      : !hasOptions || otherSelected;
   const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
 
   const completed = justAnswered ?? (ask.state === "open" ? null : ask);
@@ -522,16 +541,27 @@ export function AskCard({
         )}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            {ask.kind === "approval" ? (
+            {isApproval ? (
               <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
                 Approval requested
               </p>
+            ) : isAction ? (
+              <span
+                className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
+              >
+                Action
+              </span>
             ) : null}
             <div className={`font-medium ${textPrimaryOnSurface}`}>
               <MarkdownBody markdown={ask.question} />
             </div>
             <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
-              {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
+              {actorLabel(ask.author)} ·{" "}
+              {isAction ? (
+                <time dateTime={ask.created_at}>{formatAskAge(ask.created_at)}</time>
+              ) : (
+                <Timestamp at={ask.created_at} />
+              )}
             </p>
             <AskEditHistory ask={ask} edits={edits} />
           </div>
@@ -553,7 +583,30 @@ export function AskCard({
           </button>
         )}
         <form className="mt-4 space-y-3" onSubmit={submit}>
-          {ask.options.length === 0 ? null : (
+          {isAction ? (
+            <fieldset aria-label="Action controls" className="flex flex-wrap gap-2">
+              <legend className="sr-only">Action controls</legend>
+              <button
+                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+                disabled={isSubmitting}
+                onClick={markActionDone}
+                type="button"
+              >
+                Done
+              </button>
+              <button
+                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-semibold ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+                disabled={isSubmitting}
+                onClick={() => {
+                  setActionCannot(true);
+                  setAnswerText("");
+                }}
+                type="button"
+              >
+                Can&apos;t
+              </button>
+            </fieldset>
+          ) : ask.options.length === 0 ? null : (
             <fieldset className="space-y-2">
               <legend className="sr-only">Answer options</legend>
               {ask.options.map((option) => {
@@ -604,7 +657,7 @@ export function AskCard({
               className={`block text-sm font-medium ${textSecondaryOnSurface}`}
               htmlFor={answerFieldId}
             >
-              {isApproval ? "Reason" : "Your answer"}
+              {isApproval || isAction ? "Reason" : "Your answer"}
               <textarea
                 className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
                 disabled={isSubmitting}
@@ -617,7 +670,17 @@ export function AskCard({
               />
             </label>
           ) : null}
-          {questionChoice ? (
+          {isAction ? (
+            actionCannot ? (
+              <button
+                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+                disabled={!canSubmit || isSubmitting}
+                type="submit"
+              >
+                {mutation.isPending ? "Submitting…" : "Submit Can't"}
+              </button>
+            ) : null
+          ) : questionChoice ? (
             <fieldset aria-label="Question-shaped answer" className="space-y-2">
               <button
                 className={`min-h-11 w-full rounded-lg border px-3 py-2 text-left text-sm font-semibold ${borderDefault} ${textPrimaryOnSurface} ${cardHoverBorder}`}

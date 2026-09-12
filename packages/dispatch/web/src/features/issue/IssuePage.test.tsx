@@ -1056,3 +1056,24 @@ test("IssuePage shows a failed historical document version", async () => {
     restore();
   }
 });
+
+test("IssuePage names the human blocking an ask open for more than an hour", async () => {
+  const restore = stubIssuePage({
+    ...issue,
+    open_asks: [
+      {
+        ...openIssueAsk,
+        author: { id: "session-1", kind: "session", owner: "sami" },
+        created_at: new Date(Date.now() - 61 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+  const view = renderIssuePage();
+
+  try {
+    expect(await screen.findByText("Waiting on sami")).toBeTruthy();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});

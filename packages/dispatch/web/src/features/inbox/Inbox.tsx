@@ -15,6 +15,7 @@ import {
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { AskCard } from "./AskCard";
+import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return (
@@ -98,24 +99,25 @@ export function Inbox(): ReactNode {
     );
   }
 
-  // The server already orders rows (waiting-on-agent rows last, most recent activity first
-  // within each group) - this only partitions that order into two sections, never resorts it.
-  const waitingOnAgents = inbox.data.filter((ask) => ask.last_reply?.author.kind === "user");
-  const needsYou = inbox.data.filter((ask) => ask.last_reply?.author.kind !== "user");
-
-  // Everything needs the viewer: the plain flat list, unchanged from before this split existed.
-  if (waitingOnAgents.length === 0) {
-    return (
-      <ul className="space-y-3">
-        {needsYou.map((ask) => (
-          <InboxRow ask={ask} key={ask.id} />
-        ))}
-      </ul>
-    );
-  }
+  const waiting = waitingOnYou(inbox.data);
+  const waitingIDs = new Set(waiting.map((ask) => ask.id));
+  const remaining = inbox.data.filter((ask) => !waitingIDs.has(ask.id));
+  const waitingOnAgents = remaining.filter((ask) => ask.last_reply?.author.kind === "user");
+  const needsYou = remaining.filter((ask) => ask.last_reply?.author.kind !== "user");
 
   return (
     <div className="space-y-6">
+      <BlockedOnYou asks={inbox.data} />
+      {waiting.length === 0 ? null : (
+        <section>
+          <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on you</h2>
+          <ul className="space-y-3">
+            {waiting.map((ask) => (
+              <InboxRow ask={ask} key={ask.id} />
+            ))}
+          </ul>
+        </section>
+      )}
       {needsYou.length === 0 ? null : (
         <section>
           <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Needs you</h2>
@@ -126,14 +128,16 @@ export function Inbox(): ReactNode {
           </ul>
         </section>
       )}
-      <section>
-        <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
-        <ul className="space-y-3">
-          {waitingOnAgents.map((ask) => (
-            <InboxRow ask={ask} key={ask.id} />
-          ))}
-        </ul>
-      </section>
+      {waitingOnAgents.length === 0 ? null : (
+        <section>
+          <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
+          <ul className="space-y-3">
+            {waitingOnAgents.map((ask) => (
+              <InboxRow ask={ask} key={ask.id} />
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }
