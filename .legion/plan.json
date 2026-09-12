@@ -1,0 +1,294 @@
+{
+  "issue": "LEGION-20",
+  "title": "Design gate consumes Dispatch document approval (artifact.approved) instead of an Approve ask",
+  "planner": "legion-sjawharlegion-legion-20-planner",
+  "authority": {
+    "spec": "dispatch_doc_read({ issue: \"LEGION-20\" }) — the architect is correcting acceptance 6 and the CLI row per the ruling below; re-read before implementing",
+    "contract": "dispatch_doc_read({ project: \"LEGION\", artifact: \"spec-approval-design-md\" }), section 'Contract (exact shapes the daemon pins)' — every reducer test is pinned to that JSON",
+    "architectRuling": "Envoy message c051b2ec79f1a7e5dbdc4edaa27cf55e (2026-09-12T05:08Z) answering planner message 739c685fec7b484f0f7f0b010f144117; its four points are folded into 'decisions' below",
+    "branch": "legion/LEGION-20 on sjawhar/legion; jj-managed workspace (jj -R \"$LEGION_WORKSPACE\"). Rebased by the planner onto main b24f8e79 (chore: release pi-envoy v1.4.2), which includes #946 dbf46fda 'feat(dispatch): a spec can be approved - a human review pinned to a document version' — the Dispatch server half of this contract is on main.",
+    "architectCorrections": "Envoy message 56b85681f6a8453fb2d6cc25b12d7ead (05:27Z): PR #946 merged (server half on main); acceptance 7 runs against a scratch Dispatch server from main, never the shared devbox server; drop the SKIPPED-BLOCKED path."
+  },
+  "summary": "Replace the ask-id design gate with a version-pinned document-approval gate: gates[issue] becomes {artifactId, latestVersion, approvedVersion?} (state v24, migration resolves the spec document from Dispatch at boot for every gate whose tree is not closed); reduceDispatchEvent consumes artifact.approved / artifact.changes_requested / artifact.version and no longer switches on ask.answered; register_gate takes {issue, artifactId, version}; the root architect's system prompt states the project's gate policy so nothing runs when gates.design is off; catch-up, skills, role prompts, docs, and the smoke rig follow. No legion approve command (architect ruling: option B). The Dispatch server half (#946) is already on main; the daemon reuses its contract types.",
+  "decisions": [
+    {
+      "id": "D1",
+      "topic": "No `legion approve <issue>` operator command (spec acceptance 6 dropped)",
+      "finding": "The command and any gate-approving route do not exist on main: packages/daemon/src/cli/index.ts defines start/stop/restart/status/legions/gh/credential/worker-shim/state/handoff, and handleGatesRegister (packages/daemon/src/daemon/api/routes/issues.ts) is the only gate write. The spec's 'behaviour unchanged' row described nothing.",
+      "decision": "Architect ruling (option B): do not build it. The controller capability is held by an agent session, so a controller-authenticated approve route would be an agent path to opening a humans-only gate. The operator bypass is `gates.design: off` in the daemon config. Acceptance 6 and the cli/index.ts row are removed from the spec by the architect; this plan has no CLI step.",
+      "implementerAction": "Do not add an approve route, CLI subcommand, or contract entry. Docs describe `gates.design: off` as the only non-Dispatch way past the gate."
+    },
+    {
+      "id": "D2",
+      "topic": "Gate record shape and register_gate input",
+      "decision": "gates[issue] = { artifactId: string; latestVersion: number; approvedVersion?: number } (camelCase, matching every other persisted LegionState field — the spec's snake_case spelling is not used). register_gate takes { issue, artifactId, version }: the architect passes the `artifact` and `version` values from dispatch_request_approval's published result `{ artifact, version, ask, topic }` (the same convention dispatch_artifact already uses: details.artifact is the artifact id, details.version the version number). A registered gate therefore always knows its latestVersion — the same invariant the migration establishes — so the open/closed derivation never reads Dispatch.",
+      "openRule": "gate open ⇔ approvedVersion !== undefined && approvedVersion === latestVersion (export `designGateOpen(gate)` from legion-state.ts and use it everywhere the question is asked: reducers, catch-up).",
+      "reRegisterRule": "register_gate on an issue that already has a gate: same artifactId → keep approvedVersion, latestVersion = max(existing, version); different artifactId → replace wholesale with { artifactId, latestVersion: version } (an approval pins a document version; it cannot carry to another document)."
+    },
+    {
+      "id": "D3",
+      "topic": "Migration v23 → v24 resolves the spec document from Dispatch at boot, inside loadState, for gates whose tree is not closed",
+      "why": "Lazy resolution on the first artifact.version cannot express 'approved at the spec's current version at migration time' (the first version seen after upgrade is by definition an edit, which should close the gate, and the daemon would not know the version it was approved at) and would force artifactId to be optional in the permanent schema. The daemon already refuses to start without dispatch_url + DISPATCH_TOKEN and constructs deps.dispatchClient before deps.loadState runs (packages/daemon/src/daemon/index.ts:268-279 then :352), so a boot-time resolver has everything it needs. The resolution runs exactly once (only a v23 file with a nonempty gates record triggers it) and never again.",
+      "rule": "For each v23 gates entry: (a) neither designAskId nor designApproved set → drop with a log line (never registered); (b) no state.trees[issue] record, or trees[issue].status === 'closed' → drop with a log line naming the issue key (architect ruling: a finished tree's unreachable issue must never make the daemon unbootable); (c) otherwise call the injected resolver: designApproved set → { artifactId, latestVersion, approvedVersion: latestVersion }; designAskId only → { artifactId, latestVersion }. The resolver reads GET /api/v1/issues/<key> (DispatchClient.getIssue), takes artifacts.find(a => a.id === primary_artifact_id) and max(versions[].number). Any resolver failure, a missing primary artifact, or a version-less artifact throws `Cannot migrate the design gate for <issue>: <cause>` and the daemon refuses to start. A v23 state with a kept gate and no resolver supplied throws naming the issue. Never a silent 'approved'.",
+      "livePopulation": "Read via `legion state --json` at 2026-09-12 04:5x UTC: 11 gates (LEGION-6, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19), all with designAskId + designApproved. Tree statuses: LEGION-6 lingering; LEGION-9, 10, 11, 12, 13, 14, 17, 18, 19 active; LEGION-16 queued. None closed, so the architect's assumption that they are 'almost certainly all closed trees' does not hold: at the live upgrade all 11 resolve from Dispatch (11 getIssue reads, one per gate) and become approved at their spec's current version; zero are dropped. The migration still needs the closed-tree drop rule for other daemons (the smoke rig's state has closed LEGSMOKE trees)."
+    },
+    {
+      "id": "D4",
+      "topic": "The gate policy reaches the model through the root architect's system prompt",
+      "finding": "`/process/started` returns gates.design, but packages/pi-envoy/extensions/legion.ts:335-357 reads only roleTokens and secret from that response; config.gates.design is consumed nowhere else (grep gates.design across daemon and pi-envoy). The model has never been told whether the gate is armed — which is how LEGION's architects opened Approve asks under gates.design: off.",
+      "decision": "Architect-accepted: processes.ts's spawnTree appends one sentence stating the policy value to the root architect's second `--append-system-prompt` fragment (the addressing fragment). Exactly the policy value and one sentence; the legion-architect skill carries the procedure. Sub-architects (child issues) get no fragment: the root approval covers the tree and a child spec is never gated."
+    },
+    {
+      "id": "D5",
+      "topic": "Every artifact.version counts toward latestVersion (named or unnamed)",
+      "decision": "The contract's `approval.latest_version` and the 'stale' derivation compare version numbers only; Dispatch's settle path emits an unnamed artifact.version per edit (packages/envoy/internal/dispatch/docs/service.go:423, broker.go Notify comment: 'The issue topic … carry every event regardless of this value'). The daemon mirrors that: latestVersion = max(latestVersion, payload.version.number) for every artifact.version whose artifact_id matches a gate, named or not. Note the payload shape differs: artifact.version carries `version: { number, named, summary, authors, created_at }` (server.go versionEventPayload, model.Version) while artifact.approved / artifact.changes_requested carry `version: <integer>` (published contract). Confirmed against the shipped server: reviews.go latestVersionNumber is `select max(number) from artifact_versions` (all versions, named or not) and ArtifactApproval.latest_version is that value."
+    },
+    {
+      "id": "D6",
+      "topic": "Wake payloads",
+      "decision": "design-approved keeps today's exact shape `{ type: \"design-approved\" }` and is emitted only when the gate is open after the update (an approval at a version below latestVersion is recorded but emits nothing — spec Errors row). New wake `{ type: \"design-changes-requested\", version: <payload.version>, reason: <payload.reason>, author?: <payload.actor.id when a string> }` is emitted for every artifact.changes_requested that matches a gate; it also deletes approvedVersion (a changes_requested review retracts an approval — contract Rules: 'Retracting an approval is a changes_requested review'). artifact.version emits nothing."
+    },
+    {
+      "id": "D7",
+      "topic": "Decode-time validation, not reducer throws",
+      "decision": "A reducer throw is fatal (DurableReducerFailure → process exit, events.ts:854-856), so malformed artifact payloads must be rejected in dispatchIssueEvent (dispatch-events.ts) as DispatchDecodeFailure, which events.ts already logs and terms as poison without touching state (events.ts:915-918). Validate only what the reducer needs: artifact.approved → artifact_id non-empty string, version positive safe integer; artifact.changes_requested → the same plus reason non-empty string (spec Errors row); artifact.version → artifact_id non-empty string, version.number positive safe integer. `actor` is best-effort (author omitted from the wake when absent) — over-strict decoding would silently drop a real approval and leave the gate closed."
+    },
+    {
+      "id": "D8",
+      "topic": "lastAppliedSeq stamping widens to the three artifact events",
+      "decision": "Once artifact.approved / artifact.changes_requested / artifact.version are recognized types, reduceDispatchEvent stamps issues[key].lastAppliedSeq for them like every other recognized event (whether or not a gate matched), per the existing at-most-once contract in its doc comment. This is the designed behavior for recognized events and Dispatch seq is monotonic per issue; update the doc comment's event list and the reducers/events AGENTS.md sentence that enumerates recognized Dispatch events."
+    }
+  ],
+  "deviationsFromSpec": [
+    "Acceptance 6 ('legion approve <issue> still opens the gate') and the packages/daemon/src/cli/index.ts row are removed — the command never existed; architect ruling D1 (option B). Reviewer: expect no CLI or approve-route change in the diff.",
+    "register_gate accepts { issue, artifactId, version } (version required), not artifact_id alone — D2, architect-accepted.",
+    "Field names are camelCase (artifactId, latestVersion, approvedVersion) — D2.",
+    "The daemon states the gate policy in the root architect's system prompt (D4) — the spec assumed `/process/started`'s reply reached the model; it reaches only the extension.",
+    "Migration drops (with a log line) gates whose tree record is missing or closed instead of resolving them — architect refinement in D3.",
+    "Smoke checkpoint 3 has no SKIPPED-BLOCKED path for a Dispatch server without document approval: the server half is on main (#946), so a missing `approval` field is a hard failure (architect correction 56b85681)."
+  ],
+  "pinnedShapes": {
+    "artifactApprovedEvent": "{ \"type\": \"artifact.approved\", \"actor\": { \"kind\": \"user\", \"id\": \"sjawhar\" }, \"payload\": { \"artifact_id\": \"5025ec5b-…\", \"name\": \"spec.md\", \"version\": 12, \"actor\": { \"kind\": \"user\", \"id\": \"sjawhar\" }, \"reason\": null, \"ask_id\": \"18258070-…\" } } — verbatim from the contract; ask_id is null when approved from the document header. artifact.changes_requested is identical with reason required (a non-empty string). Shipped: packages/envoy/internal/dispatch/api/reviews.go writeReview emits model.ArtifactReviewEventPayload; TypeScript type ArtifactReviewEventPayload { artifact_id, name, version: number, actor, reason: string|null, ask_id: string|null } in packages/contracts/src/dispatch-api.ts:382.",
+    "artifactVersionEvent": "payload { artifact_id, name, version: { number, named, summary, authors, created_at }, diff? } — packages/envoy/internal/dispatch/api/server.go:439 versionEventPayload + model.Version (model.go:160). Not part of the published contract prose; captured from the emitter.",
+    "artifactReadApproval": "ArtifactApproval { state: draft|awaiting|approved|stale|changes_requested; latest_version: number; version?, by?, at?, reason?, ask_id?, requested_by? } (packages/contracts/src/dispatch-api.ts:125) on Artifact.approval — GET /api/v1/artifacts/{id} and the issue's artifacts list. Used only by the smoke rig checkpoint, never by the daemon.",
+    "requestApprovalToolResult": "dispatch_request_approval({ issue, artifact }) (shipped in @sjawhar/pi-legion-envoy 1.4.x; packages/envoy-client/src/dispatch-execute.ts:948-973) → details { artifact: <artifact id>, version: <number>, ask?, topic?, issue }; when the current version is already approved the server returns ask: null and the tool still returns artifact + version. Server: POST /api/v1/artifacts/{id}/approval-requests → { ask, artifact_id, version, approval } (201 new request, 200 open request or already approved).",
+    "gateRecord": "state.gates[issue] = { artifactId: string; latestVersion: number (positive int); approvedVersion?: number (positive int) }",
+    "wakes": "{ type: \"design-approved\" } (unchanged); { type: \"design-changes-requested\", version: number, reason: string, author?: string }",
+    "registerGateRequest": "POST /legion/v1/gates/register { tree, sessionId, secret, issue, artifactId, version } (strict; askId rejected as an unknown key)",
+    "catchupOverseerGates": "gates: Record<IssueKey, Partial<DesignGate> & { open?: boolean }> — `{}` for a tree issue without a gate; `{ artifactId, latestVersion, approvedVersion?, open }` for a gated one, `open` derived by designGateOpen."
+  },
+  "steps": [
+    {
+      "n": 0,
+      "title": "Branch base is current main",
+      "files": [],
+      "change": "The planner already rebased legion/LEGION-20 onto main b24f8e79 (includes #946). Before implementing: `jj -R \"$LEGION_WORKSPACE\" git fetch` and, if main@origin moved, `jj -R \"$LEGION_WORKSPACE\" rebase -s <plan commit> -d main@origin` (never abandon). Confirm packages/envoy/internal/dispatch/api/reviews.go and packages/envoy/internal/dispatch/store/migrations/0014_artifact_reviews.up.sql exist in the workspace.",
+      "tests": []
+    },
+    {
+      "n": 1,
+      "title": "Contracts: gate shape and register_gate request",
+      "files": [
+        "packages/contracts/src/legion-daemon-api.ts",
+        "packages/contracts/src/legion-daemon-api.test.ts"
+      ],
+      "change": "stateGate → z.strictObject({ artifactId: nonEmptyString, latestVersion: z.number().int().positive(), approvedVersion: z.number().int().positive().optional() }). GatesRegister.request → architectCapability.extend({ issue: nonEmptyString, artifactId: nonEmptyString, version: z.number().int().positive() }). Update the State response fixture at legion-daemon-api.test.ts:83 to the new gate shape. GatesRegisterInput's inferred type carries the change to pi-envoy's daemon-client. Reuse #946's types instead of declaring new ones: ArtifactReviewEventPayload / ArtifactApproval / Ask.kind already exist in packages/contracts/src/dispatch-api.ts; the daemon imports ArtifactReviewEventPayload (type-only) where it documents the payload. Do NOT validate with ArtifactReviewEventPayloadSchema (every field optional) — the decoder's hand-rolled checks in step 3 are what enforce reason/version, exactly like the existing issue.* checks.",
+      "tests": [
+        "legion-daemon-api.test.ts: existing State fixture parses with the new stateGate; GatesRegister.request rejects { askId } and a missing version (strict object)"
+      ]
+    },
+    {
+      "n": 2,
+      "title": "State: DesignGate, v24, migration with Dispatch resolver",
+      "files": [
+        "packages/daemon/src/daemon/legion-state.ts",
+        "packages/daemon/src/daemon/dispatch-client.ts",
+        "packages/daemon/src/daemon/index.ts",
+        "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+        "packages/daemon/src/daemon/__tests__/dispatch-client.test.ts"
+      ],
+      "change": "legion-state.ts: export interface DesignGate { artifactId: string; latestVersion: number; approvedVersion?: number } with the doc comment from D2 replacing the designAskId/designApproved comment at :192-195; export function designGateOpen(gate: DesignGate): boolean; LegionState.version: 24 and gates: Record<IssueKey, DesignGate>; schema literal 24 and the gates value schema z.object({ artifactId: z.string().min(1), latestVersion: z.number().int().positive(), approvedVersion: z.number().int().positive().optional() }).strict(); newLegionState version 24; loadState's `version !== 23` check → 24. Add `export type SpecArtifactResolver = (issue: IssueKey) => Promise<{ artifactId: string; latestVersion: number }>` and `LegionStateInit.resolveSpecArtifact?: SpecArtifactResolver` (doc: required only for a v23 file with gates to keep). Add async `migrateV23State(state, resolve)` implementing D3 (log lines: `[legion] dropping the design gate for <issue> during the v23->v24 migration: <its tree is closed | it has no tree record | it was never registered>`), invoked in loadState after the synchronous reduce chain: `const state = await migrateV23State(migrations.reduce(...), init.resolveSpecArtifact)`. dispatch-client.ts: export `specArtifactResolver(client: DispatchClient): SpecArtifactResolver` — getIssue(key), find artifacts by primary_artifact_id, max(versions[].number); throw naming the issue when the primary artifact is missing or has no versions. index.ts:352: pass `resolveSpecArtifact: specArtifactResolver(deps.dispatchClient)` in the init object.",
+      "tests": [
+        "legion-state.test.ts (acceptance 5): a v23 file with gates { A: {designAskId, designApproved}, B: {designAskId}, C: {}, D: {designAskId, designApproved} } and trees A active, B active, D closed, C absent; resolver stub returns A → {art-a, 7}, B → {art-b, 2}; expect version 24, gates { A: {artifactId:'art-a', latestVersion:7, approvedVersion:7}, B: {artifactId:'art-b', latestVersion:2} }, C and D absent, resolver called exactly for A and B (order-insensitive), a .v23.bak written.",
+        "legion-state.test.ts: v23 with a kept gate and a resolver that rejects → loadState rejects with a message containing the issue key; v23 with a kept gate and no resolver → rejects naming the issue; v23 with gates {} and no resolver → loads to v24 without calling anything.",
+        "legion-state.test.ts: update every `.toBe(23)` / 'onward to v23' to 24 and the round-trip fixture at :768 to the new gate shape; the v18 fixture at :600 still migrates (gates reset to {} by migrateV18State, so no resolver is needed).",
+        "dispatch-client.test.ts: specArtifactResolver resolves {artifactId, latestVersion} from a fake getIssue payload with two artifacts (primary chosen by primary_artifact_id, not by array position) and throws naming the issue when the primary artifact is absent."
+      ]
+    },
+    {
+      "n": 3,
+      "title": "Decoder: artifact payload validation",
+      "files": [
+        "packages/daemon/src/daemon/dispatch-events.ts",
+        "packages/daemon/src/daemon/__tests__/dispatch-events.test.ts"
+      ],
+      "change": "In dispatchIssueEvent, after the issue.* branch, add type-specific checks per D7 throwing DispatchDecodeFailure with messages naming the type and field (e.g. `Dispatch artifact.changes_requested payload has no reason`).",
+      "tests": [
+        "changes_requested without reason (and with reason: null) → throws DispatchDecodeFailure (spec Errors row).",
+        "approved with version as an object, or missing artifact_id → throws.",
+        "artifact.version with version: 13 (a bare number) or version.number missing → throws; the real emitter shape decodes.",
+        "the three fixtures from step 4 decode without error."
+      ]
+    },
+    {
+      "n": 4,
+      "title": "Reducers: artifact events drive the gate; ask.answered no longer does",
+      "files": [
+        "packages/daemon/src/daemon/reducers.ts",
+        "packages/daemon/src/daemon/__tests__/reducers.test.ts",
+        "packages/daemon/src/daemon/__tests__/fixtures/dispatch/legsmoke-3-artifact.approved.json",
+        "packages/daemon/src/daemon/__tests__/fixtures/dispatch/legsmoke-3-artifact.changes_requested.json",
+        "packages/daemon/src/daemon/__tests__/fixtures/dispatch/legsmoke-3-artifact.version.json",
+        "packages/daemon/src/daemon/__tests__/fixtures/dispatch/README.md"
+      ],
+      "change": "Delete reduceAskAnswered and its `case \"ask.answered\"`. Add `gateFor(state, event, artifactId)` returning state.gates[event.key] only when the issue node exists and gate.artifactId === payload.artifact_id (else undefined → no effect). reduceArtifactApproved: if gate approvedVersion === version already → []; set approvedVersion = version, latestVersion = max(latestVersion, version); return routeActive(state, key, { type: 'design-approved' }, dispatchEnvelope(eventId)) only when designGateOpen(gate), else []. reduceArtifactChangesRequested: delete gate.approvedVersion; return routeActive(... { type: 'design-changes-requested', version, reason, author? }). reduceArtifactVersion: latestVersion = max(latestVersion, version.number); return []. Wire the three cases in reduceDispatchEvent's switch; rewrite the doc comment's recognized-event list (drop ask.answered, add the three artifact types) and its dangling-record sentence. Fixtures: legsmoke-3-artifact.approved.json is the published contract JSON wrapped in the fixtures' Event envelope (id 241, issue_key LEGSMOKE-3, seq 5, notify true, created_at 2026-09-12T02:30:00Z, top-level actor {kind:user,id:sjawhar}); payload keys/values verbatim with the contract's truncated ids completed to full UUIDs (artifact_id 5025ec5b-0000-4000-8000-000000000001, ask_id 18258070-0000-4000-8000-000000000001) — the README must say so. legsmoke-3-artifact.changes_requested.json: same shape, seq 6, reason 'Split the migration into its own PR', ask_id null. legsmoke-3-artifact.version.json: seq 7, actor {kind:session,id:\"legsmoke-3-architect\"}, payload { artifact_id: <same>, name: 'spec.md', version: { number: 13, named: false, summary: null, authors: [<same actor>], created_at: '…' } } per the emitter shape (D5). README: add the three rows, note the approved/changes_requested rows are built from the published contract (not captures), and rewrite the legsmoke-3-ask.answered-approve.json line: it is now the 'ask.answered no longer touches the gate' negative input.",
+      "tests": [
+        "(acceptance 1) artifact.approved on gate { artifactId: <fixture id>, latestVersion: 12 } → effects [{ kind:'publish', role: architect, payload: { type:'design-approved' } }], gate { artifactId, latestVersion: 12, approvedVersion: 12 }.",
+        "(acceptance 2) artifact.changes_requested on an approved gate (approvedVersion 12 / latest 12) → effects [{ publish architect { type:'design-changes-requested', version: 12, reason: 'Split the migration into its own PR', author: 'sjawhar' } }], approvedVersion deleted, latestVersion 12.",
+        "(acceptance 3) artifact.version number 13 after approval at 12 → no effects, gate { latestVersion: 13, approvedVersion: 12 }, designGateOpen false; then artifact.approved at 13 (fixture with version overridden to 13, seq 8) → design-approved emitted, approvedVersion 13.",
+        "(acceptance 4) artifact.approved whose artifact_id is not the gate's (override artifact_id) → [] and gate unchanged; artifact.approved for an issue with a node but no gate → [] ; artifact.approved against a gate whose issue node is missing → [] and gate unchanged (mirrors the existing dangling-record test at :628).",
+        "(Errors row) artifact.approved version 11 on gate latest 12 → [] and gate { latestVersion: 12, approvedVersion: 11 }.",
+        "idempotence: re-applying the approved fixture at seq 100 after approval → [] and no mutation beyond the seq stamp (replaces the 'never re-approves' test at :512).",
+        "ask.answered: legsmoke-3-ask.answered-approve.json against a registered, unapproved gate → [] and gate unchanged (acceptance 'ask.answered no longer drives the gate'); it is no longer in REPLAY_ONCE_CASES (unknown type: no stamp), and the two ask.answered entries there are replaced by entries for the three artifact fixtures (each mutates state on first application: approved sets approvedVersion, changes_requested deletes a pre-set approvedVersion, version raises latestVersion).",
+        "Remove the ask-answered.json usages that only exercised the gate; keep the file if another test still imports it, else delete it and its README row."
+      ]
+    },
+    {
+      "n": 5,
+      "title": "API: register_gate body, /state projection, 400s that name the field",
+      "files": [
+        "packages/daemon/src/daemon/api/routes/issues.ts",
+        "packages/daemon/src/daemon/api/state.ts",
+        "packages/daemon/src/daemon/api/http.ts",
+        "packages/daemon/src/daemon/__tests__/api.test.ts"
+      ],
+      "change": "handleGatesRegister: artifactId = requiredString(body,'artifactId'); version = body.version (positive safe integer, else HttpError 400 `Expected positive integer version`); apply the D2 re-register rule; rewrite its doc comment (the architect requests approval with dispatch_request_approval, then records the document id and version here so artifact.* events know which document is the gate). state.ts:64-67: project { artifactId, latestVersion, approvedVersion? } (omit approvedVersion when undefined; the contract is strict). http.ts validateContractRequest: use safeParse and throw HttpError(400, `Invalid Legion daemon API request: ${issues.map(i => `${i.path.join('.') || '<body>'}: ${i.message}`).join('; ')}`) so a missing artifactId/version or an unknown askId key is named (spec Errors row) — no test pins the old generic text (grep confirmed).",
+      "tests": [
+        "api.test.ts:1037-1089 rewrite: out-of-tree → 403; register { artifactId:'art-1', version: 3 } → 200, gates[child] = { artifactId:'art-1', latestVersion: 3 }; pre-set approvedVersion 3 then re-register same artifactId version 5 → { artifactId:'art-1', latestVersion: 5, approvedVersion: 3 }; re-register artifactId 'art-2' version 1 → { artifactId:'art-2', latestVersion: 1 } (approval dropped).",
+        "api.test.ts: body with askId instead of artifactId → 400 whose error text contains 'askId' or 'artifactId'; body missing version → 400 containing 'version'.",
+        "api.test.ts:655/716 (GET /state) fixture and expectation → new gate shape."
+      ]
+    },
+    {
+      "n": 6,
+      "title": "Catch-up derives the gate from the new record",
+      "files": [
+        "packages/daemon/src/daemon/catchup.ts",
+        "packages/daemon/src/daemon/__tests__/catchup.test.ts"
+      ],
+      "change": "CatchupOverseerPayload.gates: Record<IssueKey, Partial<DesignGate> & { open?: boolean }>; in overseerCatchup, gates[issue] = gate ? { ...gate, open: designGateOpen(gate) } : {}.",
+      "tests": [
+        "catchup.test.ts:99-107: root gate { artifactId:'art-root', latestVersion: 3 } → { …, open: false }; child gate approved at 2 / latest 2 → { …, open: true }; a stale gate (approved 2, latest 3) → open false."
+      ]
+    },
+    {
+      "n": 7,
+      "title": "Root architect prompt states the gate policy",
+      "files": [
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts"
+      ],
+      "change": "export function designGateFragment(design: 'root-issues' | 'off'): string returning exactly one sentence: root-issues → 'Design gate policy: `gates.design: root-issues` — this project arms the root design gate; follow the legion-architect skill's approval sequence before any Legion-role spawn.'; off → 'Design gate policy: `gates.design: off` — this project does not arm the design gate; do not request spec approval, register a gate, or wait for `design-approved`.' In spawnTree (processes.ts:2071-2076) pass `${addressingFragment(project, tree.root, tree.root, 'architect')} ${designGateFragment(this.deps.config.gates.design)}` as the second prompt. Worker and sub-architect launches (launchShimmedProcess call at :2484) are unchanged.",
+      "tests": [
+        "processes.test.ts root-spawn argv expectations at :634, :1513, :2206, :2237 gain the fragment (build them with designGateFragment('root-issues'), the fixture config value); one new assertion: with config gates.design 'off' the root argv contains designGateFragment('off'); the worker expectation at :5647 is unchanged."
+      ]
+    },
+    {
+      "n": 8,
+      "title": "pi-envoy legion tool: register_gate fields",
+      "files": [
+        "packages/pi-envoy/src/legion/tools.ts",
+        "packages/pi-envoy/extensions/legion.test.ts"
+      ],
+      "change": "LEGION_OP_FIELDS.register_gate = ['issue','artifactId','version']; schema: remove askId, add artifactId: z.string().optional() and version: z.number().optional(); in the register_gate case read artifactId via stringInput and version via a positive-integer check (throw `register_gate requires a positive integer version`); call daemon.gatesRegister({ tree, sessionId, secret, issue, artifactId, version }). Update the tool description sentence if it mentions askId.",
+      "tests": [
+        "legion.test.ts:2117 case → input { op:'register_gate', issue, artifactId:'art-1', version: 2 } and body { tree, issue, artifactId:'art-1', version: 2, sessionId, secret }; a case asserting { op:'register_gate', issue, askId:'x' } is rejected as `register_gate does not accept field \"askId\"`."
+      ]
+    },
+    {
+      "n": 9,
+      "title": "Skills, role prompts, docs",
+      "files": [
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-controller/SKILL.md",
+        "packages/pi-envoy/roles/architect-root.md",
+        "packages/pi-envoy/roles/architect.md",
+        "AGENTS.md",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "packages/daemon/src/daemon/__tests__/fixtures/dispatch/README.md"
+      ],
+      "change": "skills/legion-architect/SKILL.md: (a) boundaries bullet :36-37 → 'the design gate is a human approving the root spec document at a version, requested with dispatch_request_approval — not a label and not an ask'; (b) §1 :78-95 → sequence `dispatch_artifact({ issue, name: \"spec.md\", content, summary })` then `{ artifact, version } = dispatch_request_approval({ issue: \"<root issue>\", artifact: \"spec\" })` then `legion({ op: \"register_gate\", issue: \"<root issue>\", artifactId: artifact, version })`; never open a dispatch_ask with an Approve option; park until a delivered `design-approved`; on `design-changes-requested` revise the spec, call dispatch_request_approval again (idempotent; it re-opens the request at the new version), stay parked; approval is pinned to the spec version — editing the root spec after approval closes the gate (no wake; you made the edit, or the artifact.version event on your issue tells you), so call dispatch_request_approval again and release no new wave and spawn no new role until the next design-approved while work already in flight continues; later waves and integration-failure children that leave the root spec untouched need no new approval; child specs are never gated; the whole sequence applies only when your system prompt's 'Design gate policy' line says `root-issues` — under `off` write the spec and continue without any approval step; (c) wake table: add rows `design-approved` (gate open at the current spec version: proceed to §2) and `design-changes-requested` (payload `{type, version, reason, author?}`: revise, re-request, stay parked) and note in the catchup-overseer row that `gates[LEGION_TREE].open` is the gate's current state. skills/legion-controller/SKILL.md: in the Mention/human-facing section (:121-124) add one sentence: a human asking how to let a root proceed past its design gate approves the root's spec document in Dispatch (document header Approve, or the approval ask); the controller never opens a gate and there is no operator command — a project that does not want the gate runs `gates.design: off`. Role prompts: architect-root.md :24-30 → 'When your Design gate policy line says root-issues, apply the skill's approval sequence before any Legion-role spawn and park; approval is pinned to the spec version and a root-spec edit re-closes it. After revival the delivered catchup-overseer snapshot is authoritative: when gates[LEGION_TREE].open is true, spawn.' architect.md :31-36 → sub-architects never run the approval sequence; the root architect's approval covers this child; spawn on your own schedule. AGENTS.md (root): 'Gate:' paragraph :109 → 'the design gate, when armed (`gates.design: root-issues`), is a human approving the root issue's spec document at a version in Dispatch (`artifact.approved`); a later spec version closes it until re-approved; `gates.design: off` is the only way past it without a human review — Legion has no operator approve command.' packages/daemon/src/daemon/AGENTS.md: route row :16 → 'gate registers the spec document id and version from dispatch_request_approval'; add an operational-invariants bullet describing gates[issue] = {artifactId, latestVersion, approvedVersion?}, the three artifact events, the v23→v24 migration (Dispatch resolve at boot for non-closed trees, refuse to start on failure, drop closed with a log line), and the root prompt policy fragment. Fixtures README per step 4.",
+      "tests": [
+        "docs-only; the reviewer checks the text against this step."
+      ]
+    },
+    {
+      "n": 10,
+      "title": "Smoke rig: checkpoints 3 and 4 approve the document",
+      "files": [
+        "scripts/smoke/checkpoints.sh",
+        "scripts/smoke/checkpoints.test.sh",
+        "scripts/smoke/README.md"
+      ],
+      "change": "checkpoint_three: read `.gates[$root].artifactId` and `.gates[$root].latestVersion` from daemon state (fail '<root> has no registered design gate'); artifacts=$(dispatch_artifacts \"$root\"); fail unless an artifact has .id == $artifact and .name == \"spec.md\" and .primary == true and versions nonempty; fail unless .approval.state == \"awaiting\" ('<root> has no open approval request on its registered spec document'); keep the child-issue assertion; drop the open-asks Approve assertion and the dispatch_open_asks helper if nothing else uses it. checkpoint_four: before the child-release assertion, fail unless `.gates[$root].approvedVersion == .gates[$root].latestVersion` ('daemon has not recorded the spec approval for <root>'). checkpoints.test.sh: state fixture gates → {\"LEGSMOKE-1\":{\"artifactId\":\"art-spec\",\"latestVersion\":1,\"approvedVersion\":1}}; artifacts fake → [{\"id\":\"art-spec\",\"name\":\"spec.md\",\"primary\":true,\"versions\":[{\"number\":1}],\"approval\":{\"state\":\"awaiting\",\"requested_by\":{\"kind\":\"session\",\"id\":\"arch\"},\"ask_id\":\"ask-design\"}}]; remove the asks fake case; add a negative run where the artifacts fake omits `approval` and assert the checkpoint fails naming the missing approval request. README: rows 3 and 4 in the checkpoint table; a sentence in the run flow: between checkpoints 3 and 4 a human approves the root's spec document (document header Approve on the dashboard, or answer the approval ask with Approve) — this is the human-controlled design gate; the rig needs a Dispatch server that includes #946 (a scratch server from main, see run-server.sh; the shared devbox server may lag).",
+      "tests": [
+        "bash scripts/smoke/checkpoints.test.sh (the harness runs every checkpoint against fakes)."
+      ]
+    },
+    {
+      "n": 11,
+      "title": "Verification, commit, PR",
+      "files": [],
+      "change": "Run in order: `bunx tsc --noEmit`; `bunx biome check src/` in packages/daemon, packages/contracts, packages/pi-envoy (and `bunx biome check .` from the root if the root config covers scripts); `bun test` at the repo root; `bash scripts/smoke/checkpoints.test.sh`. Commit with jj (jj -R \"$LEGION_WORKSPACE\" describe / new); logical commits are welcome (contracts+state, reducers+decoder, api+catchup+tool, skills+docs, smoke). Push `legion/LEGION-20` and open the PR with `legion gh -- pr create`; body contains `Dispatch: LEGION-20` and the READY-format Verification section from the legion-worker skill. Architect rule for the PR body: Sami's plain-language rule — full sentences, every identifier expanded on first use (an issue key with its title, a file with what it is for, a state field with what it means), no repo shorthand.",
+      "tests": []
+    }
+  ],
+  "acceptanceToTests": {
+    "1 approval records the version and wakes the architect": "reducers.test.ts step-4 test 1 (legsmoke-3-artifact.approved.json)",
+    "2 changes requested wakes with the reason, gate closed": "reducers.test.ts step-4 test 2 (legsmoke-3-artifact.changes_requested.json)",
+    "3 new version closes; approval at the new version reopens": "reducers.test.ts step-4 test 3 (legsmoke-3-artifact.version.json then approved at 13)",
+    "4 non-root / unreferenced artifact approval changes no gate": "reducers.test.ts step-4 test 4",
+    "5 migration keeps an approved tree approved at its current spec version and turns an open ask into an unapproved document gate": "legion-state.test.ts step-2 migration tests (A approved, B open, C never registered, D closed tree dropped)",
+    "6 legion approve": "removed by architect ruling D1 — no test",
+    "7 smoke checkpoint approves the document and is green against a Dispatch build with the server half": "scripts/smoke/checkpoints.sh 3 and 4 against a scratch Dispatch server from main (tester, see testerNotes.dispatchBuild), scripts/smoke/checkpoints.test.sh (unit)",
+    "8 no plan document in the repo": ".legion/plan.json is the only plan artifact; reviewer inspects the PR diff for docs/plans/",
+    "Errors: approval below latest is recorded, gate stays closed": "reducers.test.ts step-4 Errors test",
+    "Errors: register_gate with askId or without artifactId → 400 naming the field": "api.test.ts step-5",
+    "Errors: migration cannot resolve → refuse to start": "legion-state.test.ts step-2 rejecting-resolver test",
+    "Errors: changes_requested without reason is poison": "dispatch-events.test.ts step-3",
+    "Constraint: nothing runs when the gate is off": "processes.test.ts step-7 (`off` fragment present) + SKILL/role-prompt text (reviewer)"
+  },
+  "verification": {
+    "typecheck": "cd -- \"$LEGION_WORKSPACE\" && bunx tsc --noEmit",
+    "lint": "cd -- \"$LEGION_WORKSPACE\" && bunx biome check packages/daemon/src packages/contracts/src packages/pi-envoy/src packages/pi-envoy/extensions",
+    "unit": "cd -- \"$LEGION_WORKSPACE\" && bun test",
+    "smokeUnit": "cd -- \"$LEGION_WORKSPACE\" && bash scripts/smoke/checkpoints.test.sh",
+    "smokeRig": "scripts/smoke/README.md 'Start and stop' with the branch build; then `secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh 3`, a human approves the root spec document, `secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh 4`"
+  },
+  "testerNotes": {
+    "dispatchBuild": "The server half is on main (#946 dbf46fda), but the shared devbox Dispatch at http://localhost:8766 still runs an image without it; redeploying it needs Sami (YubiKey touch). Never deploy anything to that server. Acceptance 7 is proven against a SCRATCH Dispatch server built from this branch's checkout: template = packages/dispatch/e2e/run-server.sh (header identity `DISPATCH_IDENTITY=header:X-Dispatch-User`, `DISPATCH_ALLOWED_LOGINS=<your login>`, `DISPATCH_AGENT_TOKEN=<token>`, a scratch Postgres `DATABASE_URL`, `DISPATCH_PORT=<free port>`, `go run ./cmd/dispatch` from packages/envoy) with two changes: do NOT set DISPATCH_NATS_DISABLED=1 — export `ENVOY_NATS_URL=nats://127.0.0.1:14222` (the rig's isolated NATS, see up.sh nats_port) so the outbox publishes notifications.dispatch.issue.> into the rig — and start it after up.sh has brought the rig's NATS up. Then create the LEGSMOKE project on the scratch server as a human (header identity: `curl -H 'X-Dispatch-User: <login>' -X POST $DISPATCH_URL/api/v1/projects …`; see packages/dispatch/e2e/api.ts request()/seed.ts for the exact calls), export DISPATCH_URL=http://127.0.0.1:<port> and DISPATCH_TOKEN=<agent token>, and run up.sh in SMOKE_WEBHOOK_MODE=none (checkpoints 1–4 run in none mode; envoy mode would relay the production Dispatch's events instead). Probe before starting: `curl -sS -H \"X-Dispatch-User: <login>\" $DISPATCH_URL/api/v1/issues/<key>/artifacts | jq '.[0].approval'` must return an object — the branch build always does; a missing field means the wrong server.",
+    "e2eWhenAvailable": "(1) up.sh (gates.design: root-issues is what it writes) against the scratch Dispatch; (2) checkpoint 3 OK — daemon state has gates[root] = {artifactId, latestVersion} matching the primary spec.md artifact and the artifact's approval.state is awaiting; (3) approve as a human: either the dashboard document header Approve (scratch server's web dist, header identity) or `POST $DISPATCH_URL/api/v1/artifacts/<artifactId>/reviews {\"state\":\"approved\"}` with `X-Dispatch-User: <login>` (the helper in packages/dispatch/e2e/api.ts does this) — bearer/agent identity is refused, which is itself the negative control for 'humans only'; (4) checkpoint 4 OK — daemon state shows approvedVersion == latestVersion and the architect pane (tmux -L legion-<slug> capture-pane on the root window) shows the design-approved wake and a released child. Second negative control: edit the spec document after approval (dispatch_doc_edit or a named version) and confirm latestVersion advances past approvedVersion (gate closed) with no wake in the architect pane; then approve again and confirm approvedVersion follows and design-approved arrives once. Third: POST a changes_requested review with a reason and confirm the architect pane receives design-changes-requested carrying that reason and approvedVersion is gone from state.",
+    "migrationOnRealState": "Copy the live daemon's state.json (v23, 11 gates on non-closed trees) to a scratch state_dir and start the branch daemon against it with DISPATCH_URL/DISPATCH_TOKEN of the shared devbox server (read-only getIssue calls on LEGION issues are safe): it must boot to v24 with 11 gates each carrying artifactId/latestVersion/approvedVersion(==latestVersion) and write state.json.v23.bak. Then point the same v23 copy at an unreachable DISPATCH_URL and confirm it refuses to start naming a gate's issue key. Never run against the live state_dir.",
+    "gateOff": "Start a daemon with gates.design: off and confirm the root architect pane's argv (`tmux -L legion-<slug> list-panes -F '#{pane_start_command}'` or the daemon log) carries designGateFragment('off'); the architect must publish its spec and spawn without any dispatch_request_approval or register_gate call (no gates[root] entry appears in state).",
+    "askAnsweredNoLongerGates": "With a registered unapproved gate, answer any ask on the root issue with Approve (a human action); daemon state's gate must not change and no design-approved must reach the architect pane."
+  },
+  "implementerNotes": [
+    "Follow the order above: contracts → state → decoder → reducers → api/catchup → processes → pi-envoy → docs → smoke. Each step's tests are the regression lock; the smoke rig is the E2E proof (tester).",
+    "reduceDispatchEvent must never throw on a malformed artifact payload: validation lives in dispatch-events.ts (D7). Keep reducers synchronous and pure.",
+    "Do not add a Dispatch read anywhere in the reducer or API path; the only Dispatch read this change adds is the one-shot migration resolver (D3).",
+    "Do not touch closeTree/gate pruning; gate records persist as today.",
+    "The `/process/started` response's gates field stays as-is (contract-optional, harmless); the model learns the policy from the prompt fragment (D4).",
+    "ask-opened.json / ask-answered.json: keep only if still imported by a test after step 4; delete unused fixtures and their README rows rather than leaving dead files.",
+    "No docs/plans/ file. The only plan artifact is this .legion/plan.json (spec acceptance 8).",
+    "biome: double quotes, semicolons, 100-char width; `node:` prefixes; `type` imports; no barrel files."
+  ],
+  "openQuestions": [],
+  "riskNotes": [
+    "The v23→v24 migration makes exactly one daemon restart depend on Dispatch being reachable (11 getIssue reads on the live LEGION daemon). A Dispatch outage at that restart means \"refuse to start\" — retry when Dispatch is back; loadState never writes state.json (it writes only state.json.v23.bak after a successful parse), so the v23 file survives intact until the first save after a successful boot.",
+    "Widening lastAppliedSeq stamping to artifact events (D8) means a reordered older issue.updated behind an artifact event is dropped, exactly as it already is behind child.status; resync heals status drift.",
+    "The shared devbox Dispatch (http://localhost:8766) predates #946 until Sami redeploys it; until then an armed gate on THAT server cannot be satisfied. LEGION runs gates.design: off, so nothing in production is affected; the smoke rig proves the gate on a scratch server from main."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T05:31:12.636Z"
+}
