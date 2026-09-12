@@ -151,16 +151,22 @@ launched pane's system prompt. Two different failures want two different moments
   read as "wins over absent", the only reading consistent with every other key (architect ruling; the
   test `resolves instructions: … LEGION_INSTRUCTIONS as given when the file omits it` pins it).
 - **The file, at boot, before anything slow.** `startDaemonLocked` calls
-  `materializeDeploymentInstructions` right after the Dispatch-token secret write and *before*
-  `verifyOmpAgentsCapability`, the plugin contract gate, and the plugin load probe — each of which spawns
-  an OMP process and can take seconds, retry, or (on a loaded box) minutes. A missing, unreadable,
-  directory, or blank file refuses startup naming the resolved path; a failed write of the materialized
-  copy refuses startup too. The boot test asserts the ordering, not just the refusal: with an unreadable
-  path, `probed === false`, `loadedState === false`, `natsCreated === false`, and no
+  `materializeDeploymentInstructions` right after the Dispatch-token secret write and before the
+  plugin contract gate (`verifyLegionPluginContract`, a local manifest read) and before the two OMP
+  probes (`verifyOmpAgentsCapability`, `verifyLegionPluginLoaded`) are started — since #980 they run
+  as one background promise, awaited only at the launch hold, and each attempt spawns an OMP process
+  that can take seconds, retry, or (on a loaded box) minutes. A missing, unreadable, directory, or
+  blank file refuses startup naming the resolved path; a failed write of the materialized copy refuses
+  startup too. The boot test asserts the ordering, not just the refusal: with an unreadable path,
+  `probed === false`, `loadedState === false`, `natsCreated === false`, and no
   `deployment-instructions.md` exists afterwards (`index.test.ts` › "refuses to boot on an unreadable
   instructions path before loading state").
 
 Rule: for any new key that names a file the daemon consumes, validate the string where the other keys
 are validated and read the file at boot ahead of the OMP probes — never lazily at first use, where a
-misconfiguration would surface as a pane launch failure hours later — and write the boot test so it
-fails if the read is moved after a probe.
+misconfiguration would surface as a pane launch failure hours later. Write the boot test to pin what
+the ordering guarantees: under today's ordering no probe command reaches the runner and no state is
+loaded before the refusal. That guard proves the current placement; it does not catch every possible
+misorder (a read moved after the `probes` promise is created can still refuse before the first attempt
+reaches the runner), so re-check the placement by reading `startDaemonLocked` whenever boot's sequence
+changes.
