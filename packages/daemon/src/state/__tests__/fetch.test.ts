@@ -5,11 +5,29 @@
 import { describe, expect, it } from "bun:test";
 import {
   type CommandRunner,
+  defaultRunner,
   GitHubAPIError,
   getCiStatusBatch,
   getPrReviewStateBatch,
   mapMergeableState,
 } from "../fetch";
+
+describe("defaultRunner", () => {
+  it("kills a command at the caller's budget and reports the kill as a timeout", async () => {
+    const startedAt = performance.now();
+    const result = await defaultRunner(["sleep", "30"], { timeoutMs: 200 });
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+    expect(result.exitCode).toBe(143);
+    expect(result.timedOut?.limitMs).toBe(200);
+    expect(result.timedOut?.elapsedMs).toBeGreaterThanOrEqual(200);
+  });
+
+  it("reports no timeout for a command that exits on its own", async () => {
+    const result = await defaultRunner(["true"]);
+    expect(result.exitCode).toBe(0);
+    expect("timedOut" in result).toBeFalse();
+  });
+});
 
 // =============================================================================
 // TestGetPrReviewStateBatch
