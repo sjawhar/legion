@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -137,6 +137,12 @@ const originalEnvironment: Record<(typeof environmentKeys)[number], string | und
 
 const temporaryPaths: string[] = [];
 
+beforeEach(() => {
+  // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
+  // environment; every test starts from none and sets only what it declares.
+  for (const key of environmentKeys) delete process.env[key];
+});
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   natsConnections.splice(0);
@@ -175,10 +181,8 @@ function createPi(): {
   process.env.LEGION_STATE_DIR ??= "/tmp/legion-state";
   // The envoy extension registers the dispatch tools whenever the developer's own
   // ~/.config/opencode/envoy.json enables dispatch; this fixture's zod stub is not a real
-  // schema builder, so the resolution must see no user config and no DISPATCH_* override.
+  // schema builder, so the resolution must see no user config.
   process.env.HOME = "/nonexistent-home-for-legion-tests";
-  delete process.env.DISPATCH_URL;
-  delete process.env.DISPATCH_TOKEN;
   const pi: TestPi = {
     zod: {
       object: (shape) => shape,

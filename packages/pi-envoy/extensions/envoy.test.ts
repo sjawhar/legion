@@ -1188,7 +1188,7 @@ describe("envoy OMP extension", () => {
     expect(result.content).toEqual([
       {
         type: "text",
-        text: "1 result for \"astrolabe\" (7 ms)\nLEGION-2 [triage] Astrolabe - document spec.md: **astrolabe** -> http://127.0.0.1:8767/issues/LEGION-2/spec?q=astrolabe",
+        text: '1 result for "astrolabe" (7 ms)\nLEGION-2 [triage] Astrolabe - document spec.md: **astrolabe** -> http://127.0.0.1:8767/issues/LEGION-2/spec?q=astrolabe',
       },
     ]);
     expect(result.isError).toBeUndefined();
@@ -2395,7 +2395,11 @@ describe("envoy OMP extension", () => {
           type: "subscription.removed",
           actor: { kind: "user", id: "alice" },
           notify: true,
-          payload: { session_id: "ses_dropped", by: { kind: "user", id: "alice" }, topics: [topic] },
+          payload: {
+            session_id: "ses_dropped",
+            by: { kind: "user", id: "alice" },
+            topics: [topic],
+          },
         }),
       })
     );
@@ -2413,7 +2417,9 @@ describe("envoy OMP extension", () => {
   test("a subscription.removed notice naming a different session leaves this session's subscription and emits no notice", async () => {
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?subscription-removed-other-session");
+    const { default: envoyExtension } = await import(
+      "./envoy.ts?subscription-removed-other-session"
+    );
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
