@@ -1,6 +1,18 @@
 import { z } from "zod";
 import { LEGION_ROLES } from "./legion-roles";
 
+/**
+ * The version of the daemon HTTP API contract below, as spoken by the installed
+ * `@sjawhar/pi-legion-envoy` plugin: the plugin's `package.json` carries the same number under
+ * `legion.daemonApiVersion`, and the daemon refuses to start unless the installed plugin's number
+ * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/index.ts). A plugin
+ * built before a shape change validates every daemon response against the older strict schemas
+ * and fails the controller/architect boot handshake silently, so the two sides are kept in
+ * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
+ * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
+ */
+export const LEGION_DAEMON_API_VERSION = 1;
+
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
 const requiredUnknown = z.unknown().refine((value) => value !== undefined, {

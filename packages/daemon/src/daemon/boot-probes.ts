@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner } from "../state/fetch";
 import { withOmpLaunchPrefix } from "./processes";
@@ -119,6 +120,55 @@ const LEGION_LOAD_PROBE = `export default function probeLegionPluginLoaded(pi) {
 }
 `;
 
+/** The installed `@sjawhar/pi-legion-envoy` manifest, wherever OMP's ambient discovery resolves
+ * the plugin root (`getPluginsNodeModules`: the active profile, then the default roots). */
+function legionPluginManifestPath(): string {
+  return path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json");
+}
+
+/**
+ * Refuses startup unless the installed plugin was built against this daemon's HTTP API contract:
+ * its manifest's `legion.daemonApiVersion` must equal `LEGION_DAEMON_API_VERSION`
+ * (`@legion/contracts`). The plugin validates every daemon response against the strict schemas
+ * it bundles, so a plugin from before a shape change (or after a later one) fails the
+ * controller/architect boot handshake — `daemon.state()` rejects on the first unknown field —
+ * with nothing in the daemon's own logs to say why; this makes the skew a loud boot failure
+ * instead. Read on every boot: a missing or unreadable manifest, or one without the field, is a
+ * refusal, never a fallback (the load probe below would report such a plugin as merely "not
+ * loaded", sending the operator to `omp plugin list` when the fix is a reinstall).
+ */
+export async function verifyLegionPluginContract(
+  readPluginManifest: (manifestPath: string) => Promise<string>
+): Promise<void> {
+  const manifestPath = legionPluginManifestPath();
+  const refuse = (packageVersion: string, contractVersion: string): Error =>
+    new Error(
+      `[legion] pi-legion-envoy at ${manifestPath} (package ${packageVersion}) speaks daemon API contract ${contractVersion}; this daemon requires ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
+    );
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await readPluginManifest(manifestPath));
+  } catch (error) {
+    throw new Error(
+      `[legion] pi-legion-envoy manifest at ${manifestPath} could not be read (${error instanceof Error ? error.message : String(error)}); this daemon requires a plugin speaking daemon API contract ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
+    );
+  }
+  const record = typeof manifest === "object" && manifest !== null ? manifest : {};
+  const packageVersion =
+    "version" in record && typeof record.version === "string" ? record.version : "unknown";
+  const legion = "legion" in record ? record.legion : undefined;
+  const contractVersion =
+    typeof legion === "object" && legion !== null && "daemonApiVersion" in legion
+      ? legion.daemonApiVersion
+      : undefined;
+  if (contractVersion !== LEGION_DAEMON_API_VERSION) {
+    throw refuse(
+      packageVersion,
+      contractVersion === undefined ? "none" : JSON.stringify(contractVersion)
+    );
+  }
+}
+
 // A daemon and the OMP sessions it spawns share one ambient environment (Legion
 // never sets `--profile`/`OMP_PROFILE` for spawned sessions), so this probe's
 // invocation — no `--extension` beyond the probe's own — matches the daemon's real
@@ -179,11 +229,9 @@ export async function verifyLegionPluginLoaded(
           );
         }
         // exit 0, marker simply absent: the plugin is genuinely disabled or unregistered. The
-        // manifest read is a best-effort version hint for this message only — never part of the
-        // pass/fail gate, so a passing boot reads no manifest.
-        const pluginVersion = await readPluginManifest(
-          path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")
-        )
+        // manifest read here is a best-effort version hint for this message only; the contract
+        // gate (`verifyLegionPluginContract`) already read and validated it before this probe.
+        const pluginVersion = await readPluginManifest(legionPluginManifestPath())
           .then((raw) => {
             const manifest: { readonly version?: string } = JSON.parse(raw);
             return manifest.version;

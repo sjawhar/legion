@@ -19,7 +19,11 @@ import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
 import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
-import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "./boot-probes";
+import {
+  verifyLegionPluginContract,
+  verifyLegionPluginLoaded,
+  verifyOmpAgentsCapability,
+} from "./boot-probes";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -227,6 +231,7 @@ async function startDaemonLocked(
     runner,
     probeSleep
   );
+  await verifyLegionPluginContract(deps.readPluginManifest);
   await verifyLegionPluginLoaded(
     environment.ompInvocation,
     config.ompLaunchPrefix,
