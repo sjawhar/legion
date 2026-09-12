@@ -167,11 +167,25 @@ fi
   cat "$assertion_file" >&2
   exit 1
 }
-if (LEGION_OMP_PATH="relative/omp" resolve_omp_path) >"$assertion_file" 2>&1; then
-  printf 'expected a relative LEGION_OMP_PATH to fail (the daemon requires an absolute path)\n' >&2
+# Each guard must fail for its own reason, so each case satisfies every other guard:
+# an existing, executable file reached by a relative path (only the leading-slash test can
+# reject it), and an existing absolute file with no execute bit (only -x can).
+if (cd "$fake_bin" && LEGION_OMP_PATH="omp" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a relative LEGION_OMP_PATH to fail even when the file exists and is executable\n' >&2
   exit 1
 fi
-[[ "$(<"$assertion_file")" == *'LEGION_OMP_PATH is not an absolute executable file: relative/omp'* ]] || {
+[[ "$(<"$assertion_file")" == *'LEGION_OMP_PATH is not an absolute executable file: omp'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+fake_omp_noexec="${fake_bin}/omp-noexec"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_omp_noexec"
+chmod -x "$fake_omp_noexec"
+if (LEGION_OMP_PATH="$fake_omp_noexec" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a non-executable LEGION_OMP_PATH to fail\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_omp_noexec}"* ]] || {
   cat "$assertion_file" >&2
   exit 1
 }
@@ -184,11 +198,22 @@ chmod +x "$default_omp"
   printf 'expected an unset LEGION_OMP_PATH to resolve to the production rpc-fix build under XDG_STATE_HOME\n' >&2
   exit 1
 }
+# The default build present but not executable: the -x guard on the default path, not -f.
+chmod -x "$default_omp"
+if (unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when the default build is not executable\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"${default_omp} is missing or not executable"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+chmod +x "$default_omp"
 if (unset LEGION_OMP_PATH; XDG_STATE_HOME="${fake_bin}/no-state" resolve_omp_path) >"$assertion_file" 2>&1; then
   printf 'expected preflight to fail when neither LEGION_OMP_PATH nor the default build exists\n' >&2
   exit 1
 fi
-[[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"* &&
+[[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix is missing or not executable"* &&
   "$(<"$assertion_file")" == *'export LEGION_OMP_PATH='* &&
   "$(<"$assertion_file")" == *'bump omp_pin'* &&
   "$(<"$assertion_file")" == *'fix/rpc-extension-send-rejection'* ]] || {
@@ -418,6 +443,13 @@ preflight_status="$(set +e; (set -e; LEGION_OMP_PATH="${fake_bin}/missing-omp" m
   cat "$assertion_file" >&2
   exit 1
 }
+# `GREEN OMP build:` prints only after resolve_omp_path returned successfully. Its absence is what
+# proves the failed resolution stopped main() -- a `local omp_path="$(...)"` form would mask the
+# failure from set -e, print the line with an empty path, and only stop later for some other reason.
+[[ "$(<"$assertion_file")" != *'GREEN OMP build:'* ]] || {
+  printf 'expected main() to stop before printing the selected OMP build; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
 [[ ! -s "$order_log" ]] || {
   printf 'expected no process to start when OMP preflight fails; order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1
@@ -443,11 +475,13 @@ grep -Fxq "LEGION_OMP_PATH=${fake_omp}" "${SMOKE_DIR}/start_process.daemon.argv"
   printf 'expected the daemon start_process env block to carry LEGION_OMP_PATH; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.daemon.argv")" >&2
   exit 1
 }
-if grep -q '^LEGION_OMP_PATH=' "${SMOKE_DIR}/start_process.listener.argv"; then
-  printf 'LEGION_OMP_PATH belongs in the daemon env block only, not the listener one\n' >&2
+# Every start_process call recorded its argv (listener, daemon, envoy-bridge): exactly one file
+# may carry LEGION_OMP_PATH, and it is the daemon's.
+[[ "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv)" == "${SMOKE_DIR}/start_process.daemon.argv" ]] || {
+  printf 'LEGION_OMP_PATH belongs in the daemon env block only; argv files carrying it:\n%s\n' "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv || true)" >&2
   exit 1
-fi
-grep -Fxq 'omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp' "${SMOKE_DIR}/legion.yaml" || {
+}
+grep -Fxq "omp_invocation: mise x ${omp_pin} -- omp" "${SMOKE_DIR}/legion.yaml" || {
   printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\n' >&2
   exit 1
 }
