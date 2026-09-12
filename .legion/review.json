@@ -1,0 +1,194 @@
+{
+  "issue": "LEGION-16",
+  "pr": {
+    "number": 961,
+    "url": "https://github.com/sjawhar/legion/pull/961",
+    "branch": "legion/LEGION-16",
+    "base": "main",
+    "reviewedHead": "0f3edc92af045598cf47c342cca85c6b9bc74bea",
+    "implementationHead": "5cfc35fa8c90989d2c569fae09126568baaae61f",
+    "mainAtReviewTime": "7add4d03087e (chore: release pi-envoy v1.5.0); mergeable MERGEABLE; the one overlapping file main touched since the branch base, packages/envoy/internal/store/kv_test.go, still has exactly one pr-queue occurrence (line 1708 on main), so the release-captain rename merges cleanly"
+  },
+  "review": {
+    "id": 5186969879,
+    "url": "https://github.com/sjawhar/legion/pull/961#pullrequestreview-5186969879",
+    "event": "REQUEST_CHANGES",
+    "inlineComments": 14,
+    "approvalWithheldByArchitectInstruction": true
+  },
+  "wouldHaveApproved": "NO. Even absent the two outstanding items (the tester's held A5 iii/iv smoke steps and the LEGION-21 rebase), this head would not have been approved: finding B1 makes the merge queue unable to merge any template-conformant pull request, and finding B2 loses the recorded controller transcript on a reachable path the specification's Errors table covers. The eight should-fix findings are correctness gaps the specification did not anticipate; I would want them landed before approving as well, because each one strands or misdirects the very interactive controller and merge queue this change introduces.",
+  "verdictSummary": "REQUEST_CHANGES: 2 blocking, 8 should-fix (one split across two comments), 2 informational comments, 1 batched fast-follow list (7 nits). Every finding is an inline review comment on the pull request naming file, line, clause, and expectation.",
+  "findings": [
+    {
+      "id": "B1",
+      "severity": "blocking",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": 165,
+      "clause": "Spec Requirements: 'PR-body ## Verification block complete at that head'; plan T9 step 4 parenthetical '(CI/Threads/E2E lines name that sha)' mis-stated which lines carry the sha",
+      "finding": "Gate 5 requires the Threads line to name the head sha; the worker-skill template (lines 189-201, untouched) has no sha on the Threads line, so a conformant PR body can never pass and the merge queue never merges.",
+      "expected": "Every line filled (no <placeholder>); CI and E2E lines name <sha>; Thermo line names <sha> unless docs-only; Threads line reports 0 unresolved."
+    },
+    {
+      "id": "B2",
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1675,
+      "clause": "Spec Errors: 'controller pane dead on probe -> ensureController respawns with --resume when a session file is recorded'; Spec Requirements: 'resurrection resumes the recorded session file'; plan C1",
+      "finding": "retireAndRespawnStuckController's controllerAlive() probe (line 1673) deletes the locator with its ompSessionFile when the pane is dead; the `if (!stillAlive) return;` then leaves nothing for the next ensureController, which starts fresh and logs 'no OMP session file is recorded' (false).",
+      "expected": "Preferred: make controllerAlive() a pure probe and clear the locator in ensureController's dead branch right before spawnController (the root probe/removeTreeWindow split), removing the line-1401 snapshot. Alternative: respawn from this path with locator.ompSessionFile. Add a test where the stuck pane reads dead on the deadline probe and the respawn carries --resume=<file>."
+    },
+    {
+      "id": "S1",
+      "severity": "should-fix",
+      "file": "packages/daemon/src/daemon/api/routes/controller.ts",
+      "line": 26,
+      "clause": "Spec Design (extension): 'claimController sends ompSessionFile'; Spec Rejected: 'Controller restarts fresh on resurrection: loses the live conversation'; plan D2 covers only the no-locator case",
+      "finding": "An interactive takeover (/legion-claim-controller from a hand-started session) overwrites the daemon pane's recorded transcript with the operator's; a later respawn would --resume a file another live OMP process owns.",
+      "expected": "Send ompSessionFile only from claimController's session_start (daemon pane) path, not the slash-command path; test the slash-command body without the field."
+    },
+    {
+      "id": "S2",
+      "severity": "should-fix",
+      "file": "packages/pi-envoy/extensions/legion.ts",
+      "line": 617,
+      "clause": "Spec Requirements: controller is an interactive session Sami types into; Acceptance 3: claimed controller bash calls are wrapped",
+      "finding": "No session_switch/session_branch handling for the controller process: /new, /resume, /fork typed into the pane leave controllerSessionID stale (bash unwrapped, legion gh fails), never re-post /controller/ready (stale transcript), and on /new drop the Envoy role while the daemon trusts its stale state.roles record (every wake 404s until the pane dies).",
+      "expected": "Register session_switch/session_branch handlers that re-run claimController(context) for LEGION_CONTROLLER=1; test the switched session id is wrapped and /controller/ready re-posted. Daemon-side stale-role trust is a pre-existing gap for a follow-up."
+    },
+    {
+      "id": "S3",
+      "severity": "should-fix",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2639,
+      "clause": "Plan D1 ('recorded-but-missing session file throws, same-agent invariant, same as roots/workers'); packages/daemon/src/daemon/AGENTS.md line 46 ('exactly as for roots and workers'); CLAUDE.md 'No silent fallbacks'",
+      "finding": "The missing-file refusal is one-shot and uncounted: the probe already dropped the locator, so the next call starts fresh with a misleading info log; mintControllerCapability rotates the hash before the throw. Roots count launchFailures and escalate; the controller does neither.",
+      "expected": "One consistent behaviour, documented: recommended an explicit error-level 'recorded transcript missing, starting fresh' without throwing and minting the capability after the resume decision; or D1's invariant with a launch-failure counter and ceiling and a transcript that survives the failed attempt."
+    },
+    {
+      "id": "S4",
+      "severity": "should-fix",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": "155 and 168 and 181",
+      "clause": "Spec Requirements: controller merges only after live GitHub verification",
+      "finding": "gh pr view <n> / gh pr merge <n> / gh run rerun run from <state_dir>/controller, not a git checkout, so a bare number fails with 'not a git repository'.",
+      "expected": "Use <pr url> from the READY in place of <n>; give gh run rerun and the GraphQL query --repo <owner>/<repo> from that URL."
+    },
+    {
+      "id": "S4b",
+      "severity": "should-fix",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": 161,
+      "clause": "Spec Requirements: 'required checks green'",
+      "finding": "statusCheckRollup does not say which checks are required; as written the controller treats every check as required or guesses.",
+      "expected": "Name `legion gh -- pr checks <pr url> --required --json name,state,bucket` and define green (bucket pass; pending not green; fail never merges), or state the stricter every-check rule explicitly."
+    },
+    {
+      "id": "S5",
+      "severity": "should-fix",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": "203 and 207",
+      "clause": "Plan D5 (controller resolves the architect topic from legion state --json); contracts roleToken lower-cases the Dispatch project part; the section's own 'Never hand-format a token'",
+      "finding": "Templates `legion-<project>-<KEY>-merger` / `legion-<project>-<root>-architect` splice the uppercase key in verbatim; such tokens never match a live role, so failed-gate reports and READY-republish requests are dropped or 404.",
+      "expected": "Read the exact token from the `roles` keys of `legion state --json` (root architects and phase workers are all present with role and issue); drop the templates or state the encoding (project token as printed, key lower-cased, role)."
+    },
+    {
+      "id": "S6",
+      "severity": "should-fix",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": 28,
+      "clause": "Spec Acceptance 3 / Errors: a claimed controller session's bash call is wrapped with LEGION_GRANT and the gh shim",
+      "finding": "The interactive-takeover instructions list only LEGION_CONTROLLER_SECRET(_FILE) and LEGION_DAEMON_URL; wrapBashWithGrant requires LEGION_STATE_DIR and blocks every bash call without it. Regression from pass-through.",
+      "expected": "Add LEGION_STATE_DIR to the takeover environment (or pass through with a one-time notify when unset); skill and code must agree."
+    },
+    {
+      "id": "S7",
+      "severity": "should-fix",
+      "file": "skills/legion-worker/SKILL.md line 229; skills/legion-architect/SKILL.md line 199",
+      "line": 229,
+      "clause": "Plan D5 READY shape `READY #<n> at <sha> for <KEY> (<pr url>)`; constraint A permits editing the merger bullet",
+      "finding": "Both give the short form `READY #<n> at <sha>`; merger.md and the controller skill define the long form and the controller depends on <KEY> and <pr url>.",
+      "expected": "Use the full shape in both places."
+    },
+    {
+      "id": "S8",
+      "severity": "should-fix",
+      "file": "packages/daemon/src/daemon/__tests__/api.test.ts",
+      "line": 755,
+      "clause": "Plan T3 step 3 / processes.ts line 2673 comment: a /controller/ready that omits the field must not lose the recorded file",
+      "finding": "The omitted-field case is only tested against a locator that never had a file; an unconditional overwrite would pass.",
+      "expected": "Add a valid ready without ompSessionFile after withFile and assert /tmp/controller.jsonl survives."
+    },
+    {
+      "id": "C1",
+      "severity": "comment",
+      "file": "skills/legion-controller/SKILL.md",
+      "line": "71 (also 38, 63, 82, 89, 100, 115)",
+      "clause": "Known to the architect; LEGION-18 audit may already fix it",
+      "finding": "`legion({ op: \"set_status\" })` is registered only for architect sessions; the working path is the CLI `legion status <KEY> <status>`.",
+      "expected": "Substitute in the corrective pass if LEGION-18 does not."
+    },
+    {
+      "id": "C2",
+      "severity": "comment",
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 46,
+      "clause": "Spec Acceptance 7 (Sami's post-release check)",
+      "finding": "A surviving headless v23 controller pane passes controllerAlive() after the upgrade and is kept with no socket, no TUI, no merge grants until it dies.",
+      "expected": "One runbook sentence: kill the recorded controller pane once after upgrading, or have boot retire a controller pane whose cmdline contains worker-shim."
+    },
+    {
+      "id": "N1-N7",
+      "severity": "nit (fast-follow)",
+      "file": "packages/daemon/src/cli/index.ts line 99 (one batched comment)",
+      "line": 99,
+      "clause": "Worker skill: findings about naming, duplication, or wording batch into one Fast-follow line",
+      "finding": "daemonErrorReason second convention and doubled 403 message; hoist sessionId in handleGrants; skipGraceful no-op doc; vacuous /worker-session assertion (legion.test.ts 1763) and overstated comment (legion.ts 611); warn-text pin (api.test.ts 816); tmux new-window without -d yanks an attached operator; controller grants not revoked on capability rotation (60s TTL bound).",
+      "expected": "Batch into the PR body's Fast-follow line."
+    },
+    {
+      "id": "PRBODY",
+      "severity": "nit (constraint B)",
+      "file": "PR body",
+      "line": "opening paragraph; CI and E2E lines",
+      "clause": "Constraint B (Sami's plain-language rule); controller gate 5",
+      "finding": "'OMP' unexpanded on first use; CI and E2E lines name 95974ff0, one handoff commit behind head.",
+      "expected": "Expand OMP (Oh My Pi); at the final head the CI, Thermo, and E2E lines must name that head."
+    }
+  ],
+  "verifiedAgainstGitHub": {
+    "ci": "12 of 12 checks SUCCESS at 0f3edc92af045598cf47c342cca85c6b9bc74bea (pr-and-main: changes, pr-title, lint, typecheck, test; envoy-and-contracts: contracts, envoy-client, envoy-plugin, pi-envoy, dispatch, claude-envoy-bridge, envoy-go); read with legion gh -- pr view --json statusCheckRollup at 15:14Z",
+    "threadsBeforeReview": 0,
+    "threadsAfterReview": "14 unresolved (this review's own comments)",
+    "mergeable": "MERGEABLE; reviewDecision REVIEW_REQUIRED before this review",
+    "e2eClaimsSpotChecked": "The PR body's E2E paragraph matches .legion/test.json; the two HELD steps are stated as held in both. Not independently re-run: the rig at /tmp/legion16-smoke is the tester's and stays up for the held steps."
+  },
+  "thermo": {
+    "ranAt": "0f3edc92af045598cf47c342cca85c6b9bc74bea",
+    "deepReview": "No blocking finding. Should-fix items adopted as S1, S2, S3, S5, S6; nits adopted as N1, N6, N7 and C2. Confirmed sound: /grants dual-form dispatch (contract validates first; nonEmptyString.optional() rejects null/empty; exactly-one is 400), requireMergeAuthority before the GitHub lease, /phase/complete refusal narrowing, /legion/v1/state allowlist (no socketPath, no *Hash/*Secret/*Token), migrateV23State, --resume shellPath quoting, recovery-less client, controllerCapability freshness, concurrent ensureController dedupe via controllerSpawn.",
+    "codeQuality": "No blocking finding. Should-fix items adopted as B2's preferred remediation (pure controllerAlive), S7, S8; nits adopted as N1-N5. Confirmed: Grant union minimal and correct; appRoleForLegionRole widening right; CommandContext Pick minimal; wrapBashWithGrant the right extraction; every deleted shim test deleted not re-pinned; every touched doc comment accurate except the READY-shape inconsistency (S7).",
+    "prBodyThermoLine": "Not written into the PR body this pass: the head will change (corrective pass + LEGION-21 rebase) and the line must name the final head. The verdict at 0f3edc92 is recorded here and in the review body; I will re-run both agents at the final head and write the line then."
+  },
+  "constraintChecks": {
+    "A_legionWorkerSkill": "diff main@origin..0f3edc92 of skills/legion-worker/SKILL.md touches only the merger bullet (old 228-231 -> new 228-233); lines 183-227, the heading `## PR body and merge-queue discipline`, and everything after the bullet are byte-identical (diff exit 0 on each range).",
+    "B_plainLanguage": "PR title and body comply apart from the two nits in finding PRBODY. Every review comment I posted is full sentences with identifiers expanded on first use and carries the Legion footer.",
+    "acceptance6FileList": "All eight present in the diff: AGENTS.md, packages/daemon/src/daemon/AGENTS.md, packages/pi-envoy/AGENTS.md, skills/legion-controller/SKILL.md, skills/legion-architect/SKILL.md, skills/legion-worker/SKILL.md, packages/pi-envoy/roles/merger.md, scripts/smoke/README.md. No docs/plans/ file. No doc says the controller runs --mode rpc/worker-shim/socket or that legion gh refuses pr merge unconditionally (grep of AGENTS/skills/roles/README/cli/processes/tmux/index).",
+    "acceptance4Grep": "grep pr-queue over skills, packages, docs (excluding plans) is empty on the branch; on main it still appears in the five files this branch fixes, one occurrence each.",
+    "legionRolesUnchanged": "packages/contracts/src/legion-roles.ts unchanged; `controller` not in LEGION_ROLES (plan C4).",
+    "stateRedaction": "api/state.ts controllerLocator emits tmuxSession/tmuxWindowId/tmuxPaneId/ompSessionFile only; contract test adds the socketPath-on-controllerLocator leak case.",
+    "c1OrderingInEnsureController": "Correct for ensureController itself (line 1401 reads before the line 1402 probe; concurrent callers dedupe on controllerSpawn and a fresh caller cannot interleave between the probe's delete and the synchronous controllerSpawn assignment). The gap is the second controllerAlive() caller (B2)."
+  },
+  "observationsNotPostedToGitHub": [
+    "Trust posture (pre-existing, not this change): the controller secret file <state_dir>/secrets/legion-<project>-controller is 0600 to the same unix user every worker pane runs as, so 'only the controller may merge' is a cooperative gate against well-behaved agents, not a capability boundary against a hostile worker — the same posture the boot tokens already have. Recorded here so nobody reads the spec's 'checked server-side' as stronger than it is.",
+    "Pre-existing hazard (not this change): controllerAlive() deletes whatever state.controllerLocator currently is after its own await, not only the locator it captured; a probe straddling a completed respawn would drop the new locator. Fixing B2 by making the probe pure also removes this.",
+    "The .omp/config.yml in the workspace working copy is the extension-provisioned file the gotchas doc says never to commit; review.json was committed with an explicit jj split path."
+  ],
+  "remainingBeforeApproval": [
+    "Corrective implementer pass landing B1, B2 and S1-S8 (plus C1 if LEGION-18 does not), then tester re-run of the affected locks and of A5 iii/iv once the pull-request hold lifts (with the corrected gate 5 wording).",
+    "LEGION-21 (#962) rebase per implement.json testerNotes.rebaseRecipeIfLegion21LandsFirst if it merges first, renumbering migrateV23State -> v24->v25.",
+    "PR body refreshed at the final head: CI/E2E lines name it, Threads lines disposition each of the 14 threads individually, Thermo line written by me after re-running both agents at that head, 'OMP' expanded.",
+    "Then: I re-review the final head, have the implementer push the .legion/ deletion, and approve that head by name."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T15:38:20.137Z"
+}
