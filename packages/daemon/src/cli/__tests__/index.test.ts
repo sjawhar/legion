@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -406,5 +406,41 @@ describe("legion probe-image", () => {
         code: 1,
       })
     );
+  });
+
+  it("gives up after the bounded retry when every probe attempt times out", async () => {
+    const sleeps: number[] = [];
+    let attempts = 0;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        cmdProbeImage("/opt/omp/bin/omp", {
+          env: {},
+          runner: async (command) => {
+            attempts += 1;
+            expect(command).toEqual(expect.arrayContaining(["sh", "-c"]));
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 143,
+              timedOut: { limitMs: 300_000, elapsedMs: 300_100 },
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          readPluginManifest: async () => "{}",
+        })
+      ).rejects.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining("does not expose pi.agents"),
+          code: 1,
+        })
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000]);
+    expect(attempts).toBe(6);
   });
 });

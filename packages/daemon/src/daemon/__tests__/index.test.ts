@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
@@ -1331,16 +1331,16 @@ describe("startDaemon", () => {
           now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         },
       });
-      // Two transient failures → two backoff sleeps, then the pass; the plugin probe adds one more
-      // sh call that passes first time.
-      expect(sleeps).toEqual([5_000, 15_000]);
+      // Two transient failures → two backoff sleeps (10 s doubling), then the pass; the plugin
+      // probe adds one more sh call that passes first time.
+      expect(sleeps).toEqual([10_000, 20_000]);
       expect(attempts).toBe(4);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("does not retry a definitive pi.agents negative, and gives up after the last transient retry", async () => {
+  it("does not retry a definitive pi.agents negative", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const baseDeps = {
@@ -1408,27 +1408,85 @@ describe("startDaemon", () => {
       ).rejects.toThrow("does not expose pi.agents: secrets: ANTHROPIC_API_KEY: access denied");
       expect(prefixAttempts).toBe(1);
       expect(prefixSleeps).toEqual([]);
-
-      // Transient forever (marker present, OMP keeps dying): every retry is used, then fatal.
-      let transientAttempts = 0;
-      const transientSleeps: number[] = [];
-      await expect(
-        startDaemon(daemonConfig, {
-          deps: {
-            ...baseDeps,
-            runner: async () => {
-              transientAttempts += 1;
-              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 137 };
-            },
-            sleep: async (ms) => {
-              transientSleeps.push(ms);
-            },
-          },
-        })
-      ).rejects.toThrow("does not expose pi.agents");
-      expect(transientAttempts).toBe(6);
-      expect(transientSleeps).toEqual([5_000, 15_000, 45_000, 90_000, 180_000]);
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("keeps retrying a probe the runner killed past the old bound, with the backoff capped at five minutes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          runner: async (command, options) => {
+            if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+            attempts += 1;
+            expect(options?.timeoutMs).toBe(300_000);
+            // The first seven pi.agents probes never finish: the runner kills each at its budget.
+            if (attempts <= 7) {
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 143,
+                timedOut: { limitMs: 300_000, elapsedMs: 300_200 },
+              };
+            }
+            return {
+              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          readPluginManifest: async () => validLegionPluginManifest,
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      // Seven kills → seven sleeps, doubling from 10 s and capped at 300 s; the eighth pi.agents
+      // attempt passes and the plugin probe adds one more sh call.
+      expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]);
+      expect(attempts).toBe(9);
+      const logged = errorSpy.mock.calls.map((call) => String(call[0]));
+      expect(logged).toContainEqual(
+        expect.stringMatching(
+          /OMP pi\.agents probe failed transiently \(attempt 1\); retrying in 10s: command timed out after 300 s \(ran 300\.2 s\)/
+        )
+      );
+      expect(logged).toContainEqual(
+        expect.stringMatching(/attempt 7\); retrying in 300s: command timed out/)
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });
