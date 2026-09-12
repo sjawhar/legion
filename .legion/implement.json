@@ -1,0 +1,131 @@
+{
+  "issue": "LEGION-28",
+  "branch": "legion/LEGION-28",
+  "pr": {
+    "number": 980,
+    "url": "https://github.com/sjawhar/legion/pull/980",
+    "base": "main",
+    "head": "d0bd09180a58 (docs commit; the implement handoff commit is pushed on top of it)",
+    "note": "CI was green at the earlier stacked head 7ba9b19f0e7a; the rebased head's CI result is the one the READY facts must cite."
+  },
+  "baseDecision": "Final: rebased onto main@origin fd4fce51204a WITHOUT LEGION-11's commit, on the architect's decision (Envoy id becb36a65eea9c7edb0a00a7943f49f6, 2026-09-12T20:36:57Z, 'Decision: B'). History: #955 (LEGION-11) was OPEN at implementation start, so per the plan's Case B the branch was first built on a `jj duplicate` of #955's single fix commit (993e41e66622). The pr-queue organizer then reported #955 not ready (back in testing) and asked for #980 to land independently as T0; the architect chose to drop the duplicate. `jj rebase -s <task 1> -d <plan handoff>` produced exactly the predicted index.ts placement conflict in tasks 4 and 6; both were resolved toward main's placement: `reconnectWorkers`/`pruneSecretFiles` and the pending-controller-notice block stay before the API as on main (item 4 remains LEGION-11's; #955 rebases over this restructure), and only the rename comment (`enableLaunches()`), the launch hold, `stop()` hoisting, and the post-hold release sequence are this branch's. Two imports LEGION-11's commit had added to index.test.ts (`spyOn`, `type DaemonStateResponse`) were re-added in the task 3 and task 6 commits. LEGION-11's own test left with the duplicate. The chain is main -> plan handoff 014c528d -> the eight LEGION-28 commits -> implement handoff.",
+  "commitsPerTask": [
+    {
+      "task": 1,
+      "commit": "60244e203cbf",
+      "message": "feat(daemon): the command runner takes a per-call timeout and reports a kill as a timeout"
+    },
+    {
+      "task": 2,
+      "commit": "0dfb5e1ecefb",
+      "message": "feat(daemon): slow_command_timeout_seconds budgets boot probes and workspace provisioning"
+    },
+    {
+      "task": 3,
+      "commit": "ed62326459f7",
+      "message": "fix(daemon): a boot probe killed at its budget is retried with capped exponential backoff, never a crash loop"
+    },
+    {
+      "task": 4,
+      "commit": "d5ba5a7d30bc",
+      "message": "feat(daemon): a launch hold queues every spawn until boot releases it"
+    },
+    {
+      "task": 5,
+      "commit": "b297cbef3b40",
+      "message": "fix(daemon): one worker's reconnect failure no longer aborts every other worker's reconnect"
+    },
+    {
+      "task": 6,
+      "commit": "b48f88b190bc",
+      "message": "fix(daemon): boot serves state and the API while the OMP probe retries; no pane launches until it passes"
+    },
+    {
+      "task": 7,
+      "commit": "0dd44f71894b",
+      "message": "fix(workspace): provisioning commands get the slow budget, a killed command is reported as a timeout, and a clone lands only when complete"
+    },
+    {
+      "task": 8,
+      "commit": "d0bd09180a58",
+      "message": "docs(daemon): boot probe retry, launch hold, per-claim reconnect isolation, slow_command_timeout_seconds, clone-into-temp"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/src/state/fetch.ts",
+    "packages/daemon/src/state/__tests__/fetch.test.ts",
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/__tests__/config.test.ts",
+    "packages/daemon/src/daemon/__tests__/ci-fixtures.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts",
+    "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts",
+    "packages/daemon/src/daemon/boot-probes.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/cli/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/worker-admission.ts",
+    "packages/workspace/src/workspace.ts",
+    "packages/workspace/src/workspace.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "scripts/smoke/README.md"
+  ],
+  "testsRun": [
+    {
+      "command": "cd packages/daemon && bunx biome check src/",
+      "result": "Checked 143 files. No fixes applied. (rebased head)"
+    },
+    {
+      "command": "cd packages/workspace && bunx biome check src/",
+      "result": "Checked 3 files. No fixes applied. (rebased head)"
+    },
+    {
+      "command": "cd packages/daemon && bunx tsc --noEmit",
+      "result": "clean (0 errors) (rebased head)"
+    },
+    {
+      "command": "cd packages/workspace && bunx tsc --noEmit",
+      "result": "clean (0 errors) (rebased head)"
+    },
+    {
+      "command": "cd packages/daemon && bun test",
+      "result": "882 pass, 0 fail (887 tests across 56 files) at the rebased head, host load average 85-109; one earlier full run had a single load flake in 'promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees' (untouched by this branch; 3/3 standalone, clean on the re-run)"
+    },
+    {
+      "command": "cd packages/workspace && bun test",
+      "result": "10 pass, 0 fail (rebased head)"
+    }
+  ],
+  "testsAdded": [
+    "fetch.test.ts: defaultRunner kills at the caller's budget with exitCode 143 and timedOut {limitMs, elapsedMs}; a self-exiting command carries no timedOut key",
+    "config.test.ts: slowCommandTimeoutSeconds YAML beats env beats the 300 default; non-positive values refuse startup naming the key",
+    "cli/__tests__/index.test.ts: legion probe-image gives up after the bounded retry (sleeps [10000,20000,40000,80000,160000], 6 attempts) when every attempt times out",
+    "daemon/__tests__/index.test.ts: binds the API and loads state while the OMP probe is still timing out, launches nothing during the hold, and promotes the queued root and worker once it passes (acceptance 1); keeps retrying a runner-killed probe past the old bound with backoff capped at 300 s; definitive pi.agents / plugin-load / launch-prefix refusals now assert state WAS loaded, NATS WAS opened and closed, and the instance lock released (acceptance 2); the old bounded five-attempt give-up sub-case was deleted",
+    "processes.test.ts: queues a root admitted and a worker spawned while launches are held, and launches both once enableLaunches() runs; holds a resurrection and a controller launch during the hold and replays both after enableLaunches(); a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while the other two are reconciled (acceptance 3); a throw while re-arming one root's deadline is logged and the other roots are armed",
+    "workspace.test.ts: clone into a temporary sibling then rename into place with every command under the 300 s budget; a clone killed at its budget is reported as `Command timed out after 300 s (ran 300.4 s): jj git clone …`, leaves nothing at the final path, and the second attempt clones fresh (acceptance 6); an existing final dir without .jj is removed and re-cloned with a log; a plain non-timeout failure still reads `Command failed (exit 1): jj git fetch -R <dir>\\nfatal: x`"
+  ],
+  "trickyParts": [
+    "The injected test `sleep` in index.test.ts is shared between the probe backoff and the ProcessManager's registration deadlines/boot watchdog; a sleep that resolves immediately fires the deadlines and retires the panes the test asserts on. The acceptance-1 test resolves only the probe's two backoffs and leaves later sleeps pending.",
+    "The launch hold's `ensureController()` gate must come after `cancelControllerRegistrationDeadline()` but before the spawn; the pending-controller-notice `ensureController` at boot now runs after the hold (it opens a pane).",
+    "`stop()` is hoisted above the hold and guards `lingerTimer !== undefined`; `lingerTimer` became a `let` assigned after the hold.",
+    "The two `WorkerAdmission` decisions (`launchOrQueue`, `resumeOrQueueExisting`) gate on `workerPromotionEnabled` in addition to the cap, exactly as the planner's verification 2 described; `promoteQueuedWorker`/`reconcileWorkerAdmission` were already gated.",
+    "`bunx biome check packages/` from the repo root cannot run in this repo: packages/claude-envoy-bridge/biome.json is a second root configuration (pre-existing); biome was run per affected package instead."
+  ],
+  "deviations": [
+    "Task 3's commit also updates the two index.test.ts retry-policy tests the plan listed under task 6 ('retries a boot probe whose launch died transiently' -> sleeps [10000, 20000]; the bounded give-up sub-case replaced by the unbounded capped-backoff test), so that commit is self-consistent; task 6's commit carries only the ordering tests.",
+    "Task 4's commit also enables launches in processes.thermo-ops.test.ts's manager fixture (it models a booted daemon) and adds `await processManager.replayHeldRecoveries()` after boot admission in index.ts so the intermediate commit keeps the pending-notice controller spawn working; task 6 then moves that block after the hold.",
+    "workspace.test.ts 'repairs a stale reused workspace after its remote issue branch is deleted' got an explicit 60 s test timeout: it runs ~30 real jj subprocesses (one variant through mise) and exceeded bun's 5 s default on this host (load average 80–96 during implementation); packages/workspace is not run by CI (pr-and-main.yaml runs only packages/daemon).",
+    "The plan's task 7 said `commandTimeoutMs: 300_000` on every workspace test; the two real-jj tests also got it (they ignore it) so the deps type stays uniform.",
+    "PR body is in the READY format with CI already green at head (the envoy ci-green notice arrived before the handoff was written); Thermo and E2E are marked pending for the reviewer and tester.",
+    "Base changed after the PR opened: the duplicated LEGION-11 commit was dropped on the architect's decision (see baseDecision); the PR body's dependency paragraph was rewritten to say this PR does not change where reconnectWorkers runs and that #955 rebases over the boot restructure here."
+  ],
+  "openQuestions": [],
+  "queueNotice": "The pr-queue organizer registered #980 as T0 (Sami's 20:2xZ rule: candidate work test first; no re-pushes holding CI slots) and asked for one push with the rebased head plus the handoff commit; it merges via Sami's pane on green. That single push is the one made after this handoff was written.",
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T20:46:08.865Z"
+}
