@@ -147,12 +147,12 @@
       "prHead": "020677bf2746 (adds only .legion/implement.json on top of 6a55bd6d)",
       "baseAtTest": "8f6fad367099 (chore: release pi-envoy v1.4.3); main has since advanced to 95b93e0bb0d9 (#958, envoy-only)"
     },
-    "note": "round-1 (FAIL on acceptance 5 at 6a55bd6d) detail is preserved verbatim in the top-level acceptance/failure/ci/testedHead/environment/preexistingFindings/workerPaneNotes fields; round2 (PASS at c498c8fb) and round3 (PASS at 85a84243, spec v5) are the later rounds; round3 is the current verdict."
+    "note": "round-1 (FAIL on acceptance 5 at 6a55bd6d) detail is preserved verbatim in the top-level acceptance/failure/ci/testedHead/environment/preexistingFindings/workerPaneNotes fields; round2 (PASS c498c8fb), round3 (PASS 85a84243, spec v5), round4 (PASS 042de1f6 on main d458b7fe, spec v6, merge candidate) follow; round4 is the current verdict."
   },
   "currentTestedHead": {
-    "code": "85a842437180d6ec800b516bb2238fff544be445",
-    "prHead": "7141adf65a20 (implement: record hardening-round handoff, on top of 85a84243)",
-    "base": "7add4d03087e (main, unchanged since round 2)"
+    "code": "042de1f6fc5b5f365d92aa7c0ea3c22676ed1b54",
+    "prHead": "248c85fa1685a97979550fa1cf1f0cf8344a3bc4 (implement: record registry-fix CI links; dd26b764 = second-rebase + registry-fix handoff; both are code 042de1f6 + .legion handoffs)",
+    "base": "d458b7fe1506 (main, chore: release cli v1.3.1; descendant of #966 3a22761f and #967 5c5c3013); main@origin at test time fd4fce51 (chore: release pi-envoy v1.11.1)"
   },
   "round2": {
     "round": 2,
@@ -329,7 +329,99 @@
     "sharedSurfaceCoordination": "LEGION-22 tester announced RIG DOWN at 12:02Z; round-3 rig taken at 12:02:51Z (up.sh under hub supervision after a detached `secrets ... &` start silently never launched), torn down 12:23:00Z.",
     "completed": "2026-09-12T12:23:33Z"
   },
+  "round4": {
+    "round": 4,
+    "trigger": "merge-candidate test after the rebase round (implement.json rebaseRound: rebase onto main with #967 LEGION-22 transport refactor + WorkerStreamListener and #966 LEGION-23 boot-probes.ts move; the spec v6 seam — index.ts worker-stream listener hostname and both `listening on` log lines use config.bind) and the registry fix (implement.json registryFix: legions-registry.ts withRegistryLock mkdirs the registry dir before the lock).",
+    "testedHead": {
+      "code": "042de1f6fc5b5f365d92aa7c0ea3c22676ed1b54",
+      "prHead": "248c85fa1685a97979550fa1cf1f0cf8344a3bc4 (implement: record registry-fix CI links; dd26b764 = second-rebase + registry-fix handoff; both are code 042de1f6 + .legion handoffs)",
+      "base": "d458b7fe1506 (main, chore: release cli v1.3.1; descendant of #966 3a22761f and #967 5c5c3013); main@origin at test time fd4fce51 (chore: release pi-envoy v1.11.1)"
+    },
+    "verdict": "PASS",
+    "acceptanceVerdicts": {
+      "1": "PASS",
+      "2": "PASS",
+      "3": "PASS",
+      "4": "PASS",
+      "5": "PASS",
+      "6": "PASS",
+      "7": "PASS"
+    },
+    "ci": {
+      "prHeadTested": "248c85fa1685 (and dd26b764 as named in the assignment)",
+      "runs": [
+        "dd26b764: Tests https://github.com/sjawhar/legion/actions/runs/34713611965 success (attempt 1); Legion Envoy and Contracts https://github.com/sjawhar/legion/actions/runs/34713611969 success (attempt 1); Tests https://github.com/sjawhar/legion/actions/runs/34714205151 success",
+        "248c85fa: Tests https://github.com/sjawhar/legion/actions/runs/34714218934 success (attempt 1); Legion Envoy and Contracts https://github.com/sjawhar/legion/actions/runs/34714218897 success (attempt 1)"
+      ],
+      "mergeable": "legion gh -- pr view 962 --json mergeable,mergeStateStatus at 19:48Z -> mergeable=MERGEABLE mergeState=BLOCKED (BLOCKED = awaiting the required approvals/status contexts, not a conflict); re-checked at completion below",
+      "command": "legion gh -- api 'repos/sjawhar/legion/actions/runs?head_sha=<sha>'"
+    },
+    "diffReview": {
+      "ownedFiles": "jj diff --stat --from 85a84243 --to 042de1f6 -- processes.ts runtime.ts runtime-tmux.ts legion-state.ts config.ts -> only config.ts (+35/-1) and processes.ts (+1/-1). runtime.ts, runtime-tmux.ts, legion-state.ts: unchanged. processes.ts: one doc-comment word (withOmpLaunchPrefix's probes now live in `boot-probes.ts`, was `index.ts`). config.ts: #967's `worker_stream_port` (DaemonConfig.workerStreamPort, CONFIG_SCHEMA key, readPositiveInteger + <=65535 in the file loader, resolveValue with LEGION_WORKER_STREAM_PORT and default port+1, `must be a valid TCP port` / `must differ from port` refusals, field in the result) and #966's `import { DEFAULT_OMP_INVOCATION } from \"./omp-pin\"` replacing the local constant. Nothing else.",
+      "seam": "index.ts:477 and :488 `hostname: config.bind`; :644 `legion daemon listening on ${config.bind}:${api.server.port}`; :645 `legion worker stream listening on ${config.bind}:${workerStream.port}`",
+      "registryFix": "legions-registry.ts:83-94 withRegistryLock: `await mkdir(path.dirname(filePath), { recursive: true })` before the O_CREAT|O_EXCL|O_WRONLY open of the lock file",
+      "contractGateMove": "boot-probes.ts exports verifyOmpAgentsCapability (:61), verifyLegionPluginContract (:140), verifyLegionPluginLoaded (:184); index.ts imports all three and calls them in that order (:228 agents probe -> :234 contract gate -> :235 load probe)",
+      "wholeTreeSinceRound3": "main brought packages/dispatch (42 files), packages/envoy (58), contracts (5), pi-envoy (7), envoy-client, workflows, docs, skills; packages/daemon 37 files (ours + #966 + #967)"
+    },
+    "A": {
+      "fullSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 943 pass, 0 fail, Ran 943 tests across 57 files. [41.06s] (supervised run, log /tmp/legion21-test/r4-daemon-full-2.log). A first run at load ~160 (other agents' bun suites concurrently on the box) was 942 pass / 1 fail: 'ProcessManager > retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold' (processes.test.ts:3362; its `flushEventLoopUntil(..., 50_000)` setImmediate-tick budget ran out before the worker-died publication) — rerun in isolation 3/3 pass, full suite rerun 943/0, and the PR does not touch that test body (jj diff main@origin..042de1f6 has no hunk there); recorded as a load flake, not a regression.",
+      "liveTmuxX3": "LEGION_TMUX_LIVE=1 bun test src/daemon/__tests__/processes.test.ts --test-name-pattern 'probes a real tmux pane as alive|without a default bash window' x3 -> `2 pass / 0 fail` each; live tmux server set before = after every run = {default, legion-sjawhar24 (my own live rig at the time), legion-sjawharlegion (dogfood)} — no legion-omp/legion-smoke*/legion-defaultwindow*/legion-duplicate*; the LEGION-16 rig's legion-sjawhar16 was live at the start of the round and gone after their RIG DOWN",
+      "contracts": "bun test packages/contracts -> 94 pass, 0 fail (8 files); daemon-api-version.test.ts 1 pass (in the 6-file unit run)",
+      "tsc": "packages/daemon/node_modules/.bin/tsc --noEmit -p packages/daemon | packages/contracts | packages/pi-envoy -> rc=0 each",
+      "biome": "biome check packages/daemon/src packages/contracts/src packages/pi-envoy/src -> Checked 177 files in 317ms. No fixes applied."
+    },
+    "B": {
+      "pluginRebuild": "REBUILT: jj diff --stat c498c8fb..042de1f6 -- packages/contracts packages/pi-envoy shows contracts/src/dispatch-tools.ts + dispatch-api.ts (+tests) and pi-envoy package.json/roles/docs changed, so the c498c8fb bundle was stale. `bun build extensions/envoy.ts extensions/legion.ts --outdir … --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils` at 042de1f6 (legion.js 1,236,079 bytes vs 1,234,411 before — differs) + skills copy; manifest jq'd to {version: 1.9.0-legion21.042de1f6, legion: {daemonApiVersion: 1}, omp.extensions: [dist/envoy.js, dist/legion.js]} — the branch's merged packages/pi-envoy/package.json is 1.9.0 and carries legion.daemonApiVersion 1; installed into ~/.omp/profiles/legion21-smoke/plugins/node_modules/@sjawhar/pi-legion-envoy. Note: main@origin's released pi-envoy (1.11.1) has legion: null — the field only exists on this branch until it merges and a release is cut.",
+      "surfaceCoordination": "LEGION-16 rig (project sjawhar/16, daemon 19371, listener 19021, NATS legion-smoke-nats on 14223, tmux legion-sjawhar16, dispatch_project LEGSMOKE, envoy-mode bridge) was live at 19:38Z; distinct ports/NATS would not suffice because both daemons consume every LEGSMOKE event and would admit each other's root, and up.sh hardcodes dispatch_project. Asked the LEGION-16 tester over Envoy; they printed RIG DOWN at 19:41:04Z; my rig ran 19:42-19:52Z; surface handed back at 19:52:35Z. Their parked LEGSMOKE-43 root left untouched (my daemon's first resync reported anomalies=1 for it, as they predicted).",
+      "smokeRig": {
+        "setup": "SMOKE_DIR=/tmp/legion21-test/rig4 (fresh), SMOKE_PROJECT=sjawhar/24, SMOKE_REPO=sjawhar/legion-smoke, SMOKE_WEBHOOK_MODE=envoy, OMP_PROFILE/PI_PROFILE=legion21-smoke, LEGION_OMP_PATH=rpcfix OMP, LEGION_TMUX_PATH=/tmp/legion21-test/tmux-wrapper-r4.sh (argv tracer); `secrets ENVOY_GITHUB_WEBHOOK_SECRET -- bash /tmp/legion21-test/r4-up.sh` under hub supervision from an env scrubbed of every pane LEGION_*/DISPATCH_* (and CI/CLAUDECODE/AGENT). The rebased up.sh now writes `gates: design: off` itself, so the design gate resolved on the first boot (no daemon restart needed this round).",
+        "upLog": "STARTED NATS container legion-smoke-nats; STARTED listener; GREEN Envoy listener; GREEN webhook round-trip; GREEN webhook ingress; STARTED daemon; GREEN Legion daemon: {\"project\":\"sjawhar24\",\"version\":24,...}; STARTED envoy-bridge; GREEN Envoy bridge: upstream subscription is ready; then the pre-existing ensure_root_issue 409 (`error: could not create Dispatch root issue in LEGSMOKE`) — root LEGSMOKE-61 created by hand with force:true and recorded at ${SMOKE_DIR}/root-issue",
+        "seamLinesBothBoots": [
+          "up.sh boot (pid 3683451, --config rig4/legion.yaml): daemon.log lines 1-2 = `legion daemon listening on 127.0.0.1:19370` / `legion worker stream listening on 127.0.0.1:19371`; ss: 127.0.0.1:19370 and 127.0.0.1:19371 LISTEN on that pid; stopped cleanly (SIGTERM) before the swap",
+          "tester boot (pid 3705477, r4-start-daemon.sh: same env shape + GIT_CONFIG_GLOBAL=<rig>/gitconfig for the box's credential-helper hang): daemon.log lines 1-2 = `legion daemon listening on 127.0.0.1:19370` / `legion worker stream listening on 127.0.0.1:19371`; ss: both ports on pid 3705477"
+        ],
+        "checkpoints": [
+          "CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-61 past triage; controller locator is live",
+          "CHECKPOINT 2 OK: Dispatch reports LEGSMOKE-61 in_progress; architect locator is live",
+          "CHECKPOINT 13 OK: 3 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24",
+          "CHECKPOINT 3 OK: posted spec artifact, daemon-approved design gate (ask resolved), and child issue observed",
+          "CHECKPOINT 4 OK: a released child is tracked by admission or tree state",
+          "CHECKPOINT 13 OK: 5 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24"
+        ],
+        "checkpoint13Negative": "`tmux -L legion-sjawhar24 set-environment -g LEGION_BOOT_TOKEN planted-by-tester` -> `CHECKPOINT 13 FAILED: private tmux server global environment carries LEGION_BOOT_TOKEN` (exit 1); `set-environment -gu LEGION_BOOT_TOKEN` -> `CHECKPOINT 13 OK: 3 processes ...`",
+        "gate": "state.gates.LEGSMOKE-61 = {designAskId: d52153ef-..., designApproved: 'gate-off'} at 19:51Z; architect released LEGSMOKE-62 -> in_progress, own root @3/%3; planner split into @3 as %4",
+        "daemonUrlOnPanes": "controller @1/%1 pid 3721247, root LEGSMOKE-61 @2/%2 pid 3746254, child root LEGSMOKE-62 @3/%3 pid 4032238 (LEGION_ROLE=architect), planner @3/%4 pid 4065797 (LEGION_ROLE=planner) -> all LEGION_DAEMON_URL=http://127.0.0.1:19370",
+        "teardown": "scripts/smoke/down.sh at 19:52:35Z: STOPPED tmux session legion-sjawhar24; STOPPED NATS container legion-smoke-nats; RIG DOWN; ports 19020/19370/19371/14222 free; LEGSMOKE-61/62 set to icebox; LEGION-16 tester notified"
+      },
+      "argvComparison": "Every daemon-issued `new-window`/`split-window` line in rig4/tmux-argv.log vs rig3 and rig2, normalized only for timestamp, rig dir, issue key, target window id (-t @N) and the worker socket's 8-hex issue hash (values of -e pairs redacted by the tracer, keys kept): controller new-window (937 chars, 10 -e keys), root architect new-window (1549, 19), child-root architect new-window (1549, 19), worker split-window (1427, 17) — r4 == r3 == r2 for all four; -e key sets identical per kind, secret *_FILE last. Artifacts: /tmp/legion21-test/argv-r{2,3,4}.norm."
+    },
+    "C": {
+      "unit": "index.test.ts (in the 6-file unit run, 159 pass / 0 fail): 'refuses to start when the installed pi-legion-envoy declares no daemon API contract version, before loading state or opening NATS', '... declares a different daemon API contract version ...', '... manifest cannot be read', 'accepts an installed pi-legion-envoy that omp actually loads and speaks this daemon's API contract', plus 'refuses to start when worker_stream_port is bound, naming the setting, and releases the lock' and 'refuses to start when runtime is kubernetes, before acquiring the instance lock or anything else'",
+      "realNegativeControl": "`legion start sjawhar/2121 --config /tmp/legion21-test/a7-negative/legion.yaml` (port 19371 — free at the time, scratch state_dir, OMP_PROFILE=PI_PROFILE=legion i.e. the dogfood profile, read-only) -> rc=1 `error: [legion] pi-legion-envoy at /home/ubuntu/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 1.11.1) speaks daemon API contract none; this daemon requires 1. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.` — zero `listening on` lines (refused before the API and before state load; scratch state dir held only the pre-gate secrets/ and bin/ writes, no state.json). NOTE: the dogfood profile's installed plugin is now 1.11.1 (was 1.3.0 in rounds 1-3), i.e. main's latest release, and it still has `legion: null` because the field only exists on this branch; the gate refuses it with the same message shape. Deploy note stands and is now sharper: the dogfood daemon cannot restart on this code until a pi-envoy release cut AFTER this PR merges is installed into ~/.omp/profiles/legion.",
+      "positiveControl": "the rig daemon booted twice on legion21-smoke (manifest 1.9.0-legion21.042de1f6, legion.daemonApiVersion 1) and reached checkpoints 1-4"
+    },
+    "D": {
+      "unit": "legions-registry.test.ts: 'records daemon ownership without an obsolete shared-serve port' and 'creates the registry directory on first use and serializes concurrent writers into it' -> 2 pass",
+      "realBoot": "/tmp/legion21-test/r4-registry-boot.sh: fresh XDG_STATE_HOME=/tmp/legion21-test/registry-boot/xdg-state (did not exist before boot), scratch state_dir, project sjawhar/2124, port 19380 (worker stream 19381), own NATS container legion21-r4-nats on 14224, env scrubbed of every pane LEGION_*/DISPATCH_* -> daemon.log lines 1-2 `legion daemon listening on 127.0.0.1:19380` / `legion worker stream listening on 127.0.0.1:19381`; ss: 127.0.0.1:19380 and :19381 LISTEN on the daemon pid 3748392; GET /legion/v1/state -> {project sjawhar2124, version 24, trees 0, controllerLocator null}; xdg-state/legion/legions.json created = {\"sjawhar/2124\": {port: 19380, pid: 3748392, startedAt: 2026-09-12T19:44:01.982Z}}; no tmux server forked (fresh state spawns nothing); SIGTERM -> exit code 0; 19380/19381 released; container removed"
+    },
+    "E": {
+      "contractTest": "runtime.contract.test.ts: 'Runtime contract: FakeRuntime >' 6, 'Runtime contract: TmuxRuntime >' 6 (same six names), 'TmuxRuntime >' 16, 'ProcessManager stays runtime-agnostic >' 13, 'runtime helpers >' 5 = 46, 0 fail",
+      "grepGates": "processes.ts: eleven-symbol grep -> 0; extended regex tmuxPaneId|tmuxWindowId|tmuxSession|socketPath|podName|podUid|TmuxLocator|K8sLocator|runtime-tmux -> 0; `locator\\.runtime|runtime ===` -> no match",
+      "stateMigration": "migrate.ts on a fresh read-only dogfood copy: source version=23 locators=32 tagged=0 -> loaded version=24 locators=32 tmux=32 (trees-with-locator=17, claims-with-locator=14, controllerLocator tmux); v23.bak byte-identical to source (110529 bytes); save+reload round-trips; runtime-less locator refused `Invalid discriminator value. Expected 'tmux' | 'kubernetes'`. strict.ts on the same copy (trees=32/17 with locator, roles=87, workerClaims=86/14 with locator): worker legion-sjawharlegion-legion-11-implementer minus socketPath -> `Invalid Legion state: worker claim LEGION-11/implementer has a tmux locator without socketPath`; minus tmuxPaneId -> `... without tmuxPaneId`; tree LEGION-10 minus socketPath or tmuxPaneId -> LOADED; controllerLocator minus socketPath -> LOADED (dogfood state shrank from 47 to 32 locators since round 3 — it churns with live work)",
+      "configCli": "bind.yaml -> `error: bind must be 127.0.0.1 unless runtime is kubernetes`; k8s-nourl.yaml -> `error: daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)`; k8s.yaml -> `error: runtime: kubernetes is not implemented yet`; url-otherport (port 19370 + daemon_url :19371) --check-config -> `error: daemon_url must be http://127.0.0.1:19370 when runtime is tmux (got http://127.0.0.1:19371; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`; no yaml daemon_url + this pane's LEGION_DAEMON_URL=:13370 -> same refusal naming :13370; daemon_url == :19370 -> `Config OK: project=sjawhar2121`; state dir never created. config.test.ts + legion-state.test.ts + index.test.ts + runtime.contract.test.ts + legions-registry.test.ts + daemon-api-version.test.ts -> 159 pass / 0 fail across 6 files.",
+      "legion16": "legion gh -- pr view 961 at 19:53Z: state=OPEN mergedAt=null head=665f4b1be755 — not merged; legion-state.ts stays `version: 24` with migrateV23State (lines 153/403/858)"
+    },
+    "preexistingFindings": [
+      "Still present (box-wide, not this PR): `gh auth git-credential get` hangs ~60 s, so an up.sh-started daemon has its smoke-repo `jj git clone` killed at the 30 s runner timeout; the rig daemon was again started with GIT_CONFIG_GLOBAL=<rig>/gitconfig (helper lines removed).",
+      "Still present: up.sh ensure_root_issue 409 POSSIBLE_DUPLICATE; root created by hand with force:true after RIG READY.",
+      "Load flake (not this PR): processes.test.ts 'retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm...' failed once in a full run at load ~160 with the box running several other agents' bun suites; 3/3 in isolation and 943/0 on the supervised rerun; test body untouched by the PR.",
+      "Deploy note (sharpened): the dogfood profile now holds pi-envoy 1.11.1 (main's latest release) which has no legion.daemonApiVersion, so the contract gate refuses it exactly like 1.3.0 did; a release built from a post-merge main must be installed into ~/.omp/profiles/legion before the dogfood daemon restarts on this code."
+    ],
+    "sharedSurfaceCoordination": "LEGION-16 tester asked over Envoy at 19:38Z (envoy_publish to notifications.role.legion-sjawharlegion-legion-16-tester); RIG DOWN at 19:41:04Z; my rig 19:42-19:52Z; RIG DOWN + handback message at 19:52:35Z.",
+    "artifacts": "/tmp/legion21-test/{r4-daemon-full,r4-daemon-full-2,r4-unit,r4-migrate,r4-strict,r4-tsc-*}.log, pi-legion-envoy-r4/ (rebuilt plugin), rig4/ (legion.yaml, gitconfig, daemon.log*, daemon.log.upsh-boot, tmux-argv.log, checkpoints.log, root-issue), registry-boot/ (legion.yaml, daemon.log, state.json.served, xdg-state/legion/legions.json), a7-negative/daemon-r4.log, argv-r4.norm, r4-*.sh",
+    "completed": "2026-09-12T19:55:06Z"
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T12:23:47.689Z"
+  "completed": "2026-09-12T19:55:06.868Z"
 }
