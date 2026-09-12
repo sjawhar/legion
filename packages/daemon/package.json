@@ -1,6 +1,6 @@
 {
   "name": "legion",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
   "description": "Autonomous development swarm running on the OMP coding agent",
   "bin": {
