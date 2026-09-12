@@ -84,15 +84,17 @@ jobs:
           short="${BUILT_SHA::12}"
           tags="${IMAGE}:sha-${short}"
           tag_release="false"
+          version_label="sha-$short"
           if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$CLI_VERSION" ]; then
             tags="${tags}"$'\n'"${IMAGE}:${CLI_VERSION}"
+            version_label="$CLI_VERSION"
             [ -n "$RELEASE_TAG" ] && tag_release="true"
           fi
           {
             echo "built_sha=$BUILT_SHA"
             echo "short=$short"
             echo "tag_release=$tag_release"
-            echo "version_label=${CLI_VERSION:-sha-$short}"
+            echo "version_label=$version_label"
             echo "tags<<EOF"
             echo "$tags"
             echo "EOF"
@@ -124,8 +126,8 @@ jobs:
           push: true
           lint: true
           tags: ${{ steps.meta.outputs.tags }}
+          # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
           secrets: |
@@ -139,7 +141,7 @@ jobs:
           {
             echo "### Worker image build failed"
             echo
-            echo "If the log shows a Depot authentication / OIDC error: add a GitHub trust relationship for \`${GITHUB_REPOSITORY}\` on Depot project \`${DEPOT_PROJECT_ID}\` (Depot dashboard → project → Settings → Trust Relationships; https://depot.dev/docs/cli/authentication#oidc-trust-relationships), then re-run this run (\`gh run rerun ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY}\`) or push the branch again."
+            echo "If the log shows a Depot authentication / OIDC error: add a GitHub trust relationship for \`${GITHUB_REPOSITORY}\` on Depot project \`${DEPOT_PROJECT_ID}\` (Depot dashboard → project → Settings → Trust Relationships; https://depot.dev/docs/cli/authentication#oidc-trust-relationships), then re-run the failed jobs (\`gh run rerun ${GITHUB_RUN_ID} --failed --repo ${GITHUB_REPOSITORY}\` — \`--failed\` keeps the \`cli\` job's recorded outputs; a whole-run rerun of a release.yaml call re-executes \`cli\` against its own tag and empties \`cli_version\`) or push the branch again."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record digest
@@ -183,6 +185,14 @@ jobs:
           AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
+          # main only, before the variable checks: the publish role trusts refs/heads/main alone, so a PR
+          # or non-main dispatch run would fail AssumeRole after the GHCR push — and would mirror a sha-
+          # image nobody pins. Repository variables are visible to same-repo pull_request runs.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "ECR mirror skipped: not a main run" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           missing=""
           [ -n "$AWS_ECR_PUBLISH_ROLE_ARN" ] || missing="$missing AWS_ECR_PUBLISH_ROLE_ARN"
           [ -n "$AWS_ECR_REGISTRY" ] || missing="$missing AWS_ECR_REGISTRY"
@@ -219,4 +229,4 @@ jobs:
       - name: ECR mirror failure note
         if: failure() && steps.ecr.outputs.enabled == 'true' && steps.build.outcome == 'success'
         run: |
-          echo "ECR mirror failed after the GHCR push succeeded. The GHCR digest above is authoritative; retry the mirror by re-running this run (\`gh run rerun ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY}\`) or pushing the branch again." >> "$GITHUB_STEP_SUMMARY"
+          echo "ECR mirror failed after the GHCR push succeeded. The GHCR digest above is authoritative; retry the mirror by re-running the failed jobs (\`gh run rerun ${GITHUB_RUN_ID} --failed --repo ${GITHUB_REPOSITORY}\`) or pushing the branch again." >> "$GITHUB_STEP_SUMMARY"

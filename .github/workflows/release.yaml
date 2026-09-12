@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
   id-token: write
 
 concurrency:
@@ -158,7 +157,14 @@ jobs:
       always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
       (needs.changes.outputs.cli == 'true' || needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/worker-image.yaml
-    secrets: inherit
+    # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
+    # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
+    # PR-authored Dockerfile. Job-level permissions replace the top-level set for this job and must
+    # cover everything the called workflow declares (packages: write is for the ghcr.io push).
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     with:
       cli_version: ${{ needs.cli.outputs.version }}
       release_tag: ${{ needs.cli.outputs.release_tag }}

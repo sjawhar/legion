@@ -21,16 +21,20 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
-`~/.omp/profiles/legion`). It is `linux/amd64` only: the OMP fork release ships a linux-x64 build only. One
-commit ⇒ one image: nothing in it is pinned to an npm version.
+`~/.omp/profiles/legion`). Mount writable volumes below the profile directory, never at `/home/legion`
+itself: everything the image-time probe proved lives under `HOME` — the plugin link and its lock at
+`~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
+the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
+version.
 
 ### The image is probed before it publishes
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
 (`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs the same two probes through
 `legion probe-image`, so a build whose OMP or plugin is broken fails instead of publishing. The in-cluster
-daemon (LEGION-25) runs `legion probe-image` in a one-shot pod against the configured digest. To run it
-yourself: `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
+daemon (LEGION-25, planned) is to run `legion probe-image` in a one-shot pod against the configured digest.
+To run it yourself: `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
 ### Pin by digest, never by tag
 
@@ -70,26 +74,32 @@ once merged, dispatching (trigger 3); check the Dockerfile and workflow statical
 where installed) and run `bun test` for the TypeScript. Pulling and running the published image locally is
 fine.
 
-Two prerequisites only a human can create, both one-time and both outside this repository (root decision 3
-on LEGION-19); a missing one is a finding for the architect, never something a worker creates:
+Two build prerequisites only a human can create, both one-time and both outside this repository (root
+decision 3 on LEGION-19); a missing one is a finding for the architect, never something a worker creates:
 
 - **`DEPOT_PROJECT_ID` repository variable** on `sjawhar/legion`. Unset ⇒ the workflow refuses at its first
   step and says so in the summary.
 - **Depot trust relationship.** The first build from `sjawhar/legion` fails at `depot/setup-action` until the
   Depot project's settings list a GitHub trust relationship for `sjawhar/legion`. The failed run's summary
-  carries this remedy: add the relationship, then `gh run rerun <run-id>` or push the branch again.
-- **GHCR visibility.** If the `legion-worker` package is private after its first push, an anonymous
-  `docker pull` fails; visibility is a package-settings action on GitHub with no API.
+  carries this remedy: add the relationship, then `gh run rerun <run-id> --failed` (`--failed` keeps the
+  `cli` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes `cli` against its own
+  tag and empties `cli_version`) or push the branch again.
+
+After the first push there is one more human action: if the `legion-worker` GHCR package came out private,
+an anonymous `docker pull` fails until its visibility is set to public — a package-settings action on GitHub
+with no API.
 
 ### ECR mirror
 
 Node instance roles pull from the account's ECR without pull secrets, so the workflow mirrors the image
-(by digest, same tags) when — and only when — repository variables `AWS_ECR_PUBLISH_ROLE_ARN`,
-`AWS_ECR_REGISTRY`, and `AWS_REGION` are all set. With any unset, the step is skipped and the summary says
+(by digest, same tags) on `main` runs only, and only when repository variables `AWS_ECR_PUBLISH_ROLE_ARN`,
+`AWS_ECR_REGISTRY`, and `AWS_REGION` are all set. On any other ref the step is skipped and the summary says
+`ECR mirror skipped: not a main run` (the publish role trusts `refs/heads/main` alone, and a PR's `sha-`
+image is nothing anyone pins); with a variable unset it is skipped and the summary says
 `ECR mirror skipped: <variable> unset`. The GHCR digest is authoritative; a failed mirror never changes it
-(the summary says so and names the re-run). The AWS side (publish role trusting
-`repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) lives in agent-c's `meta/infra`
-Pulumi, not here.
+(the summary says so and names the `gh run rerun <run-id> --failed` retry). The AWS side (publish role
+trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) lives in agent-c's
+`meta/infra` Pulumi, not here.
 
 ### Per-deployment toolchains layer on top
 
