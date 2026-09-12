@@ -480,14 +480,12 @@ async function startDaemonLocked(
     },
     apiDeps
   );
-  // Bound with the API and torn down with it. `hostname` is the literal the API itself uses on
-  // this branch; LEGION-21 (#962) introduces `config.bind`, and the merger swaps this to
-  // `config.bind` once that is on main. A bind failure is startup-fatal: stop the API server it
-  // would have partnered so nothing half-listens behind the instance lock's release.
+  // Bound with the API and torn down with it. A bind failure is startup-fatal: stop the API
+  // server it would have partnered so nothing half-listens behind the instance lock's release.
   let workerStream: WorkerStreamListener;
   try {
     workerStream = startWorkerStreamListener({
-      hostname: "127.0.0.1",
+      hostname: config.bind,
       port: config.workerStreamPort,
       rpcTimeoutMs: config.workerRpcTimeoutSeconds * 1000,
       resolveBootToken: api.resolveWorkerBootToken,
@@ -643,8 +641,8 @@ async function startDaemonLocked(
   deps.onSignal("SIGTERM", stopForSignal);
   deps.onSignal("SIGINT", stopForSignal);
 
-  console.log(`legion daemon listening on 127.0.0.1:${api.server.port}`);
-  console.log(`legion worker stream listening on 127.0.0.1:${workerStream.port}`);
+  console.log(`legion daemon listening on ${config.bind}:${api.server.port}`);
+  console.log(`legion worker stream listening on ${config.bind}:${workerStream.port}`);
   return {
     server: api.server,
     workerStreamPort: workerStream.port,

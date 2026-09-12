@@ -1966,15 +1966,18 @@ describe("startDaemon", () => {
   it("refuses to start when worker_stream_port is bound, naming the setting, and releases the lock", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
+    // Occupies the address the listener will bind: `config.bind`, the same host the API uses.
     const occupied = Bun.listen<undefined>({
-      hostname: "127.0.0.1",
+      hostname: daemonConfig.bind,
       port: 0,
       socket: { data() {} },
     });
     try {
       await expect(
         startDaemon({ ...daemonConfig, workerStreamPort: occupied.port }, daemonDeps(daemonConfig))
-      ).rejects.toThrow(`worker_stream_port ${occupied.port} on 127.0.0.1 is unavailable`);
+      ).rejects.toThrow(
+        `worker_stream_port ${occupied.port} on ${daemonConfig.bind} is unavailable`
+      );
       // The instance lock and API port were released: a second start on a free stream port works.
       const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
       await daemon.stop();
