@@ -218,7 +218,9 @@ func (s State) Hash() string {
 }
 
 type Store struct {
-	kv             nats.KeyValue
+	kv   nats.KeyValue
+	kvMu sync.RWMutex
+
 	mu             sync.RWMutex
 	cache          map[string]State
 	heads          map[string]string
@@ -227,9 +229,13 @@ type Store struct {
 	readyOnce      sync.Once
 	// watchErr is non-nil once the WatchAll watcher fails to start or its update
 	// stream ends. The summary loop reads only the cache (no KV fallback), so a
-	// dead watcher silently stops/staleness summaries; surfacing it via Ping lets
-	// self-health restart the listener and rebuild the cache from durable KV.
+	// dead watcher silently stops/staleness summaries; Ping exposes it to the
+	// listener, which re-establishes the watcher or exits for Docker to restart.
 	watchErr error
+
+	watcherMu         sync.Mutex
+	watcher           nats.KeyWatcher
+	watcherGeneration uint64
 }
 
 type openOpts struct {
@@ -293,9 +299,16 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
-// Ping verifies the KV bucket is reachable. Used by the listener self-health watchdog.
+// Ping verifies the KV bucket is reachable and its cache watcher is alive.
 func (s *Store) Ping() error {
-	if _, err := s.kv.Status(); err != nil {
+	if s == nil {
+		return errors.New("cistore: KV unavailable")
+	}
+	kv := s.currentKV()
+	if kv == nil {
+		return errors.New("cistore: KV unavailable")
+	}
+	if _, err := kv.Status(); err != nil {
 		return err
 	}
 	s.mu.RLock()
@@ -303,15 +316,61 @@ func (s *Store) Ping() error {
 	return s.watchErr
 }
 
-func (s *Store) watch() {
-	w, err := s.kv.WatchAll()
+// Rewatch recreates the KV watcher against conn and clears a sticky terminal
+// watcher error only after the replacement watcher starts successfully.
+func (s *Store) Rewatch(conn *nats.Conn) error {
+	if s == nil || conn == nil {
+		return errors.New("cistore: KV unavailable")
+	}
+	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
+		return fmt.Errorf("open CI store JetStream: %w", err)
+	}
+	kv, err := js.KeyValue(Bucket)
+	if err != nil {
+		return fmt.Errorf("open CI store KV bucket: %w", err)
+	}
+	if err := s.startWatch(kv); err != nil {
+		return fmt.Errorf("watch CI store KV bucket: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) watch() {
+	if err := s.startWatch(s.currentKV()); err != nil {
 		s.setWatchErr(err)
 		slog.Error("cistore watch failed", slog.String("error", err.Error()))
 		s.signalReady()
-		return
 	}
-	for entry := range w.Updates() {
+}
+
+func (s *Store) startWatch(kv nats.KeyValue) error {
+	if kv == nil {
+		return errors.New("cistore: KV unavailable")
+	}
+	watcher, err := kv.WatchAll()
+	if err != nil {
+		return err
+	}
+
+	s.watcherMu.Lock()
+	previous := s.watcher
+	s.watcherGeneration++
+	generation := s.watcherGeneration
+	s.watcher = watcher
+	s.setKV(kv)
+	s.watcherMu.Unlock()
+
+	s.setWatchErr(nil)
+	if previous != nil {
+		_ = previous.Stop()
+	}
+	go s.consumeWatch(watcher, generation)
+	return nil
+}
+
+func (s *Store) consumeWatch(watcher nats.KeyWatcher, generation uint64) {
+	for entry := range watcher.Updates() {
 		if entry == nil {
 			// WatchAll emits a nil sentinel once the initial scan of existing
 			// keys is delivered — treat that as cache-ready.
@@ -360,9 +419,12 @@ func (s *Store) watch() {
 			)
 		}
 	}
+	if !s.finishWatch(generation) {
+		return
+	}
 	// Updates() closed unexpectedly (e.g. conn lost). The cache will now go stale
-	// with no updates; surface it via Ping so the self-health watchdog restarts
-	// the listener and rebuilds the cache from durable KV.
+	// with no updates; Ping reports the terminal watcher failure until Rewatch
+	// establishes a replacement.
 	s.setWatchErr(errors.New("cistore: KV watcher stream closed"))
 	s.signalReady()
 }
@@ -392,6 +454,52 @@ func (s *Store) evictCachedLocked(key string, revision uint64) {
 	delete(s.cache, key)
 	delete(s.heads, key)
 	s.cacheRevisions[key] = revision
+}
+
+func (s *Store) currentKV() nats.KeyValue {
+	s.kvMu.RLock()
+	defer s.kvMu.RUnlock()
+	return s.kv
+}
+
+func (s *Store) setKV(kv nats.KeyValue) {
+	s.kvMu.Lock()
+	s.kv = kv
+	s.kvMu.Unlock()
+}
+
+func (s *Store) finishWatch(generation uint64) bool {
+	s.watcherMu.Lock()
+	defer s.watcherMu.Unlock()
+	if generation != s.watcherGeneration {
+		return false
+	}
+	s.watcher = nil
+	return true
+}
+
+// WatchError returns the active watcher's terminal error string, or "" while
+// the watcher is running.
+func (s *Store) WatchError() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.watchErr == nil {
+		return ""
+	}
+	return s.watchErr.Error()
+}
+
+// WatchFailed reports whether the current watcher has stopped.
+func (s *Store) WatchFailed() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.watchErr != nil
 }
 
 func (s *Store) setWatchErr(err error) {
@@ -483,10 +591,14 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 }
 
 func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool) error {
+	kv := s.currentKV()
+	if kv == nil {
+		return errors.New("cistore: KV unavailable")
+	}
 	key := Key(owner, repo, number, sha)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
-		entry, getErr := s.kv.Get(key)
+		entry, getErr := kv.Get(key)
 		var st State
 		var rev uint64
 		switch {
@@ -513,13 +625,13 @@ func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool
 			return err
 		}
 		if rev == 0 {
-			if _, err := s.kv.Create(key, buf); err == nil {
+			if _, err := kv.Create(key, buf); err == nil {
 				return nil
 			} else if !errors.Is(err, nats.ErrKeyExists) {
 				return err
 			}
 		} else {
-			if _, err := s.kv.Update(key, buf, rev); err == nil {
+			if _, err := kv.Update(key, buf, rev); err == nil {
 				return nil
 			} else if !isCASConflict(err) {
 				return err
@@ -590,6 +702,10 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	if !validHeadSHA(sha) {
 		return ErrInvalidHeadSHA
 	}
+	kv := s.currentKV()
+	if kv == nil {
+		return errors.New("cistore: KV unavailable")
+	}
 	var incomingAt time.Time
 	if updatedAt != "" {
 		var err error
@@ -601,7 +717,7 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	key := headKey(owner, repo, number)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
-		entry, getErr := s.kv.Get(key)
+		entry, getErr := kv.Get(key)
 		var current headRecord
 		var rev uint64
 		switch {
@@ -632,13 +748,13 @@ func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
 			return err
 		}
 		if rev == 0 {
-			if _, err := s.kv.Create(key, buf); err == nil {
+			if _, err := kv.Create(key, buf); err == nil {
 				return nil
 			} else if !errors.Is(err, nats.ErrKeyExists) {
 				return err
 			}
 		} else {
-			if _, err := s.kv.Update(key, buf, rev); err == nil {
+			if _, err := kv.Update(key, buf, rev); err == nil {
 				return nil
 			} else if !isCASConflict(err) {
 				return err
@@ -677,9 +793,13 @@ func isCASConflict(err error) bool {
 }
 
 func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {
+	kv := s.currentKV()
+	if kv == nil {
+		return State{}, false, errors.New("cistore: KV unavailable")
+	}
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
-		entry, err := s.kv.Get(key)
+		entry, err := kv.Get(key)
 		if err != nil {
 			return State{}, false, err
 		}
@@ -698,7 +818,7 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 		if err != nil {
 			return State{}, false, err
 		}
-		revision, err := s.kv.Update(key, buf, entry.Revision())
+		revision, err := kv.Update(key, buf, entry.Revision())
 		if err == nil {
 			s.mu.Lock()
 			s.cacheStateLocked(key, state, revision)
@@ -764,7 +884,11 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 // ClaimStillHeld verifies from durable KV that this exact snapshot retains the
 // settlement right immediately before an external publication.
 func (s *Store) ClaimStillHeld(key string, generation uint64, hash string) (bool, error) {
-	entry, err := s.kv.Get(key)
+	kv := s.currentKV()
+	if kv == nil {
+		return false, errors.New("cistore: KV unavailable")
+	}
+	entry, err := kv.Get(key)
 	if err != nil {
 		return false, err
 	}
@@ -832,7 +956,11 @@ func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 }
 
 func (s *Store) durableHeadMatches(state State) (bool, error) {
-	entry, err := s.kv.Get(headKey(state.Owner, state.Repo, state.Number))
+	kv := s.currentKV()
+	if kv == nil {
+		return false, errors.New("cistore: KV unavailable")
+	}
+	entry, err := kv.Get(headKey(state.Owner, state.Repo, state.Number))
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return true, nil
 	}

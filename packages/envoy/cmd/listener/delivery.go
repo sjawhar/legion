@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -311,6 +312,20 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	now := time.Now().UnixMilli()
 	holder, holderErr := cfg.sessions.Get(sessionID)
 	if holderErr != nil || holder.UpdatedAt <= 0 || now-holder.UpdatedAt >= int64(session.ClaimStaleAfter/time.Millisecond) {
+		if holderErr == nil || errors.Is(holderErr, nats.ErrKeyNotFound) {
+			if _, err := cfg.registry.ReleaseExpiredRoleClaim(role, sessionID, cfg.sessions.TTL()); err != nil {
+				applyDeliveryOutcome(cfg, item, deliveryOutcome{
+					sessionID:    sessionID,
+					metricStatus: "failed",
+					log: func(logger *logging.Logger) {
+						logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
+					},
+					exceptionReason: "delivery_failed",
+				})
+				message.finalize(false)
+				return
+			}
+		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
