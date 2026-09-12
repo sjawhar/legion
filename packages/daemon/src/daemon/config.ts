@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 import { stripDispatchEnv } from "./environment";
+import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 
 export type GitHubAppRole = "implement" | "review";
 
@@ -143,7 +144,6 @@ const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
 const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
-const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
