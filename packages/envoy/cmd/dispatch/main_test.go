@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -272,6 +273,32 @@ func TestCheckDocumentsReportsLegacyParseFailures(t *testing.T) {
 	}
 	if got := output.String(); !strings.Contains(got, artifactID) || !strings.Contains(got, "parse=error:") || !strings.Contains(got, "block HTML") {
 		t.Fatalf("check-documents output = %q, want artifact parse failure", got)
+	}
+}
+
+func TestWriteBlockIDBackfillReportLabelsSkippedDocuments(t *testing.T) {
+	var output bytes.Buffer
+	writeBlockIDBackfillReport(&output, docs.BlockIDBackfill{
+		ArtifactID: "artifact-1",
+		Skipped:    "service stopping",
+	})
+	const want = "artifact-1 skipped (service stopping)\n"
+	if got := output.String(); got != want {
+		t.Fatalf("backfill skipped output = %q, want %q", got, want)
+	}
+}
+
+func TestWriteBlockIDBackfillReportLabelsDocumentErrors(t *testing.T) {
+	var output bytes.Buffer
+	if writeBlockIDBackfillReport(&output, docs.BlockIDBackfill{
+		ArtifactID: "artifact-1",
+		Err:        errors.New("persist update"),
+	}) {
+		t.Fatal("error report succeeded")
+	}
+	const want = "artifact-1 error (persist update)\n"
+	if got := output.String(); got != want {
+		t.Fatalf("backfill error output = %q, want %q", got, want)
 	}
 }
 

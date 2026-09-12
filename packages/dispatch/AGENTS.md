@@ -97,6 +97,8 @@ search highlights, and the bridge between Proof marks and margin cards. `Documen
 the connection and editor creation seams; happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
 Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
+Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
+
 
 ## Commands
 

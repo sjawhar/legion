@@ -422,6 +422,27 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil})
 }
 
+func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	blocks, err := s.deps.Docs.Blocks(r.Context(), artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, blocks)
+}
+
 func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

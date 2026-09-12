@@ -262,6 +262,43 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	return renderTree(tree)
 }
 
+// Blocks returns each stamped block and its byte range in canonical markdown.
+func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error) {
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		return nil, err
+	}
+	var blocks []model.ArtifactBlock
+	var readErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			readErr = err
+			return
+		}
+		_, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+		if err != nil {
+			readErr = err
+			return
+		}
+		blocks = make([]model.ArtifactBlock, len(offsets))
+		for index, offset := range offsets {
+			blocks[index] = model.ArtifactBlock{
+				ID:   offset.ID,
+				Type: offset.Type,
+				From: offset.From,
+				To:   offset.To,
+			}
+		}
+	})
+	if readErr != nil {
+		return nil, readErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return nil, err
+	}
+	return blocks, nil
+}
+
 // SnapshotVersion returns the current immutable version, adding an unnamed
 // version only when the live text has diverged since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
@@ -330,6 +367,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return false, err
 		}
+		pmdoc.EnsureBlockIDs(next)
 		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {

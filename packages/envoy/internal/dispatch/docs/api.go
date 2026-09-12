@@ -20,6 +20,7 @@ type API interface {
 	SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string) (string, error)
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
 	Text(ctx context.Context, artifactID string) (string, error)
+	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)
 	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error)
 	CommitVersion(artifactID string, version model.Version)
 	SetIssueClosed(issueKey string, closed bool)

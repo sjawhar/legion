@@ -22,6 +22,7 @@ the native Dispatch tool suite:
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
+| Document block offsets | `src/dispatch-api.ts` | `ArtifactBlock` maps a stable block ID and type to byte offsets in canonical artifact markdown. |
 
 ## Critical conventions
 
