@@ -1,165 +1,138 @@
 {
   "issue": "LEGION-16",
+  "round": 2,
   "pr": {
     "number": 961,
     "url": "https://github.com/sjawhar/legion/pull/961",
     "branch": "legion/LEGION-16",
-    "implementationHead": "5cfc35fa8c90989d2c569fae09126568baaae61f",
-    "prHeadAtTestTime": "95974ff0c5cb507e13c6be62405dfacef4d35c28 (= 5cfc35fa + the implementer's `.legion/implement.json` handoff commit; `jj diff -r 95974ff0 --stat` touches only that file)",
-    "ciAtHead": "all checks SUCCESS at 95974ff0 (pr-and-main: lint, typecheck, test, pr-title; envoy-and-contracts: contracts, envoy-client, envoy-plugin, pi-envoy, dispatch, claude-envoy-bridge, envoy-go)"
+    "testedHead": "f27af7ecaaeba31e48be43a10f10e59ac908cacf",
+    "headComposition": "0f3edc92 (round-1 tested head) + corrective pass d6c74c4e, b97d64b7, df3f417b, 7d6f2fb6, de5a130e, bc84d57b + reviewer handoff 2a109026 + implementer handoff f27af7ec",
+    "ciAtHead": "every check SUCCESS at f27af7ec (pr-and-main: lint, typecheck, test, pr-title; envoy-and-contracts: contracts, envoy-client, envoy-plugin, pi-envoy, dispatch, claude-envoy-bridge, envoy-go) — legion gh -- pr view 961 --json statusCheckRollup at 17:47Z"
   },
   "stepZero": {
-    "pr961HeadCheck": "legion gh -- pr view 961 --json headRefOid -> 95974ff0c5cb (implementation head 5cfc35fa plus the handoff commit; verified the extra commit is only .legion/implement.json)",
-    "pr962LegionRuntimeBoundary": "legion gh -- pr view 962 --json state,mergedAt -> OPEN, mergedAt null at 14:16Z, re-checked OPEN at 14:53Z. It did not merge during this run; the rebase recipe in .legion/implement.json testerNotes.rebaseRecipeIfLegion21LandsFirst is still pending, not applied."
+    "head": "legion gh -- pr view 961 --json headRefOid -> f27af7ecaaeba31e48be43a10f10e59ac908cacf; workspace @- = f27af7ec (jj git fetch: nothing changed)",
+    "pr962LegionRuntimeBoundary": "OPEN, mergedAt null at 16:55Z and again at 17:29Z after the drain — no rebase",
+    "pr953Legion18SkillAudit": "OPEN, mergedAt null at 16:55Z — no rebase",
+    "productionDaemonIncident": "This pane was stopped during the 16:34Z host memory drain and resumed at 17:29Z; the rig (own daemon, port 19371) survived intact. No round-2 edit or commit of mine existed before the resume; the round-1 .legion/test.json (head 95974ff0/0f3edc92) was the committed state."
   },
   "verdict": {
-    "overall": "PARTIAL: A1 PASS, A2 PASS, A3 PASS, A4 PASS, A5(i) PASS, A5(ii) PASS, A5(v) PASS, A5(iii) HELD, A5(iv) HELD. No criterion failed. A5(iii)/(iv) are HELD, not FAIL, because the sandbox repository sjawhar/legion-smoke has zero pull requests of any state (`gh api repos/sjawhar/legion-smoke/pulls?state=all` -> []) and the LEGION-16 architect's retraction at 14:18Z forbids opening any new pull request anywhere until Sami's pull-request hold lifts. A supplementary merge-queue probe with a nonexistent pull request number proved the READY wake, the controller's gh call under a controller grant, the refusal, and the failed-gate report to the architect topic; it is recorded under supplementary, not as iii/iv.",
-    "A1": "PASS",
-    "A2": "PASS",
-    "A3": "PASS",
-    "A4": "PASS",
-    "A5": {
-      "i": "PASS",
-      "ii": "PASS",
+    "overall": "PARTIAL, no criterion failed. 1(a) PASS, 1(b) PASS, 1(c) PASS, 2 PASS (red case; 'head moved beyond retro' live case HELD), 3(a) PASS, 3(b) PASS, 3(c) PASS, 3(d) PASS, 3(e) PASS, 4 PASS, 5: A5(iii) HELD, A5(iv) HELD (supplementary red READY at this head PASS). Two findings for the architect/reviewer, neither introduced by this change: F1 the controller registration deadline is inert after the first registration (pre-existing guard); F2 the bash-hook grant stacking now bites the controller TUI (pre-existing hook behaviour). Details under findings.",
+    "criterion1_blocker2_resume": {
+      "a_registeredPaneResume": "PASS",
+      "b_stuckBootResume": "PASS (deadline path proven with the stale claim cleared; see F1)",
+      "c_stuckAliveKilledAndResumed": "PASS (same caveat, see F1)"
+    },
+    "criterion2_blocker1_readyShape": {
+      "redCaseHeadGate": "PASS",
+      "headMovedBeyondRetroLive": "HELD (no sandbox pull request; compare classification demonstrated read-only)",
+      "staticShapeMirrors": "PASS"
+    },
+    "criterion3_shouldFixes": {
+      "a_sessionSwitch": "PASS",
+      "b_takeover": "PASS",
+      "c_ghFromNonCheckoutDir": "PASS",
+      "d_roleTokensFromState": "PASS",
+      "e_takeoverEnvIncludesStateDir": "PASS"
+    },
+    "criterion4_unitStatic": "PASS",
+    "criterion5_a5_iii_iv": {
       "iii": "HELD",
       "iv": "HELD",
-      "v": "PASS"
+      "supplementaryRedReadyAtThisHead": "PASS"
     }
   },
-  "A1_A2_daemonUnitTests": {
-    "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test (the env -u list is the pane's, per docs/solutions/legion/worker-pane-shell-gotchas.md section 2; LEGION_E2E/LEGION_TMUX_LIVE exactly as .github/workflows/pr-and-main.yaml sets them)",
-    "result": "825 pass, 0 fail, 0 skip, 3387 expect() calls, 53 files, 33.02s, at head 95974ff0, 2026-09-12T14:26:48Z-14:27:22Z. No flakes on the first run; no rerun was needed.",
-    "targetedRun": "cd packages/daemon && env -u ... bun test --test-name-pattern 'controller|addressingFragment|addressing fragment|merge|ompSessionFile|session file|socketPath|resume' src/daemon/__tests__/processes.test.ts src/daemon/__tests__/api.test.ts src/daemon/__tests__/legion-state.test.ts src/cli/__tests__/index.test.ts -> 62 pass, 0 fail (run twice, identical)",
-    "locksForA1": [
-      "processes.test.ts: passes the packaged role prompt path to OMP for root and controller windows, without an --extension flag; the controller runs interactive omp with no shim",
-      "processes.test.ts: ensureController resumes the recorded controller session file when the pane is found dead",
-      "processes.test.ts: ensureController retires a stuck controller pane with a direct kill and resumes its recorded session file in a fresh pane once its registration deadline elapses with no role claim",
-      "api.test.ts: records the controller's OMP session file on /controller/ready and leaves it unset when omitted",
-      "api.test.ts: accepts an OMP session file on /controller/ready when no controller pane is recorded, without inventing a locator",
-      "legion-state.test.ts: migrates v23 state to v24 by stripping the controller locator's socketPath"
-    ],
-    "locksForA2": [
-      "processes.test.ts addressing-fragment test (bun test --test-name-pattern addressing -> 1 pass) asserts notifications.role.<controllerToken(project)>; the live rig confirmed the same token: the controller claimed legion-sjawhar16-controller for project sjawhar/16"
-    ]
-  },
-  "A3_cliCredentialRoutesAndExtension": {
-    "unitTests": {
-      "daemonCliAndRoutes": "included in the 825-pass daemon run; locks: cli/__tests__/index.test.ts `sends merge intent to the daemon for a pr merge invocation and runs gh when granted` and `allows a pr subcommand that merely mentions merge in an unrelated argument, without merge intent`; api.test.ts `mints a controller grant from the controller capability and lets only it redeem gh-token with merge` and `refuses a controller grant on phase/complete`",
-      "piEnvoy": "cd packages/pi-envoy && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN bun test -> 138 pass, 0 fail, 419 expect() calls, 6 files, 24.04s; bun run lint (biome lint extensions/ src/) -> Checked 19 files, no fixes; bun run typecheck -> exit 0",
-      "contracts": "cd packages/contracts && bun run lint && bun run typecheck && bun run test && bun run build -> 93 pass, 0 fail, 8 files; build bundled 87 modules"
-    },
-    "liveNegativeControl_phaseWorkerPane": {
-      "where": "Rig daemon http://127.0.0.1:19371 (branch build, state dir /tmp/legion16-smoke/rig/daemon), a real planner phase-worker pane (%4, tmux server legion-sjawhar16, role token legion-sjawhar16-legsmoke-43-planner, session 01a09615-2cc5-7000-b635-2b434deb0c08) spawned through POST /legion/v1/worker/spawn with the command as its task. Never against pull request #961 and never through the production daemon (port 13370).",
-      "command": "legion gh -- pr merge 999 --squash --repo sjawhar/legion-smoke; echo \"exit=$?\"  (the worker's bash hook prepended export LEGION_GRANT=<planner grant>, GH_CONFIG_DIR=/tmp/legion16-smoke/rig/daemon/gh, PATH=/tmp/legion16-smoke/rig/daemon/worker-bin:...)",
-      "output": "this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller\nexit=1",
-      "prNumberNote": "No pull request exists on sjawhar/legion-smoke (the architect's retraction forbids creating one), so the control used a nonexistent number; the daemon refuses before any GitHub call, so the number is never consulted. The same worker's following `legion handoff complete --summary ...` returned `[handoff] Reported phase completion`, exit 0, proving the worker grant path itself is healthy.",
-      "ghNeverSpawned": "Deterministic rerun from a shell against the same rig daemon under a freshly minted architect (LegionRole) grant: strace -f -e trace=execve <state_dir>/bin/legion gh -- pr merge 999 --squash --repo sjawhar/legion-smoke -> exactly two execve calls (the launcher script, then bun); no gh execve. Output: `this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller`, exit=1.",
-      "daemonSide": "POST /legion/v1/gh-token {grantId, merge:true} under that architect grant -> HTTP 403 {\"error\":\"Only the controller may merge; publish READY to the controller\"}; POST /legion/v1/git-credential {grantId, merge:true} -> HTTP 403 same body; control: POST /legion/v1/gh-token {grantId} (no merge) -> HTTP 200 with a ghs_ installation token. NOTE for the brief's `daemon log shows the 403`: the daemon does not log HTTP 4xx responses at all (api.ts returns HttpError as a JSON response without a console line), so the raw HTTP 403 above is the daemon-side evidence; daemon.log stayed empty for these requests.",
-      "githubUnchanged": "gh api repos/sjawhar/legion-smoke/pulls?state=all -> 0 pull requests; main = c7eed8db before and after (14:48:35Z)."
-    },
-    "livePositiveHalf_controllerGrant": "Supplementary (see A5.supplementary): the rig controller's own bash calls are LEGION_GRANT-wrapped with a controller grant; `legion gh -- pr view 999 -R sjawhar/legion-smoke --json ...` spawned gh and reached GitHub (`GraphQL: Could not resolve to a PullRequest with the number of 999`), and `legion status LEGSMOKE-43 todo` / `legion status LEGSMOKE-44 icebox` both exit 0 from that pane."
-  },
-  "A4_repoWideGates": {
-    "grep": {
-      "command": "grep -rn pr-queue skills packages docs --exclude-dir=plans",
-      "output": "(nothing)",
-      "exit": 1
-    },
-    "biome": {
-      "command": "cd packages/daemon && bunx biome check --error-on-warnings src/",
-      "output": "Checked 135 files in 616ms. No fixes applied.",
-      "exit": 0
-    },
-    "tsc": {
-      "command": "cd packages/daemon && bunx tsc --noEmit",
-      "exit": 0
-    },
-    "bunTestPerPackage": "daemon 825/0 (LEGION_E2E=1 LEGION_TMUX_LIVE=1), contracts 93/0, pi-envoy 138/0 — see A1/A3",
-    "go": {
-      "authoritative": "CI job envoy-go on PR #961 at head 95974ff0: SUCCESS (statusCheckRollup at 14:53Z).",
-      "branchGoDiff": "jj diff --from 8f6fad367099 --to @- --stat packages/envoy -> packages/envoy/internal/store/kv_test.go | 2 +- (the pr-queue -> release-captain fixture rename; nothing else in Go).",
-      "localFullRun": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun install --frozen-lockfile (exit 0), then cd packages/envoy && go list ./... | grep -v /integration | xargs go test -count=1 (14:25:29Z-14:35:39Z): 23 packages ok (incl. internal/dispatch/pmdoc 5.1s, internal/session 480s), 5 FAIL (cmd/listener, cmd/natstail, internal/bus, internal/cistore, internal/store). All 66 failing tests failed at NATS testcontainer startup — `reaper: new reaper: run container: Conflict. The container name /reaper_e9640... is already in use` (a Dead testcontainers Ryuk container whose docker removal was stuck `already in progress`) and `Post .../containers/create: context deadline exceeded` — zero assertion failures. Host load 45-90 on 32 cores, 149 docker containers, and another agent's concurrent `go test ./cmd/listener/ ./internal/store/` on the same host.",
-      "rerun1": "go test -count=1 ./cmd/listener/ ./cmd/natstail/ ./internal/bus/ ./internal/cistore/ ./internal/store/ (14:38Z-14:48Z): same 5 packages, again only NATS/testcontainer startup errors (`nats: no servers available`, reaper `unexpected container status removing`, docker create deadline).",
-      "rerunIsolated": "see goIsolatedFinal (all five previously failing packages ok, 0 failures each)"
-    }
-  },
-  "A5_smokeRig": {
-    "rigCoordinates": {
-      "wrapper": "/tmp/legion16-smoke/up-wrapper.sh (adapted from LEGION-21's; launched as `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash /tmp/legion16-smoke/up-wrapper.sh` from this worker pane; all rig keys are agent-tier, no YubiKey touch)",
-      "SMOKE_DIR": "/tmp/legion16-smoke/rig",
-      "SMOKE_REPO": "sjawhar/legion-smoke",
-      "SMOKE_PROJECT": "sjawhar/16",
-      "slug": "sjawhar16",
-      "tmuxServer": "tmux -L legion-sjawhar16 (attach: tmux -L legion-sjawhar16 attach -t legion-sjawhar16)",
-      "ports": {
-        "LEGION_DAEMON_PORT": 19371,
-        "ENVOY_PORT": 19021,
-        "NATS_PORT": 14223,
-        "note": "LEGION-21's rig (19370/14222/19020, /tmp/legion21-smoke) was already down: pid 987511 gone, ports free; untouched. up.sh's NATS container name is fixed (legion-smoke-nats) so only one rig can run at a time on this host; mine now owns it on 14223."
-      },
-      "SMOKE_WEBHOOK_MODE": "envoy (production Envoy NATS bridge)",
-      "ompBinary": "LEGION_OMP_PATH=/home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix (same as LEGION-21's rig and the production controller pane)",
-      "ompProfile": "OMP_PROFILE=PI_PROFILE=legion16-smoke (~/.omp/profiles/legion16-smoke: agent/ symlinks + config.yml copied from the legion profile; plugins/ copied from legion21-smoke with @sjawhar/pi-legion-envoy = file:/tmp/legion16-smoke/pi-legion-envoy, version 1.4.3-legion16.95974ff0, built from this branch with the package's own bun build line + skills copied to dist/skills). Required because this branch changes the extension (ompSessionFile on /controller/ready, controller bash grant-wrapping).",
-      "rootIssue": "LEGSMOKE-43 (created with force:true because up.sh's ensure_root_issue 409s POSSIBLE_DUPLICATE against earlier smoke roots — the pre-existing rig bug LEGION-21/22 also hit; key recorded at /tmp/legion16-smoke/rig/root-issue, then up.sh REUSED it). The rig controller triaged it to todo; the daemon spawned its root architect (pane %2), which posted a spec, created child LEGSMOKE-45, and is parked on its design-gate ask. LEGSMOKE-44 is my resume-probe issue (controller iceboxed it).",
-      "processes": "listener pid 701765, daemon pid 702877, envoy-bridge pid 714521 (pid files under SMOKE_DIR); down: SMOKE_DIR=/tmp/legion16-smoke/rig SMOKE_PROJECT=sjawhar/16 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
-      "leftUp": "The rig is left running so the HELD steps can be re-run cheaply when the pull-request hold lifts; tear it down with down.sh when no longer needed.",
-      "firstBootFailure": "The first up.sh attempt died at the daemon's OMP pi.agents boot probe: attempt 1 transient (marker printed, then killed by defaultRunner's fixed 30s kill timeout, packages/daemon/src/state/fetch.ts:61, while my test lanes were compiling), attempt 2 definitive with empty output. A manual probe took 7-14s once load dropped and the second up.sh passed. Pre-existing rig sensitivity, not this change."
-    },
-    "i_controllerPane": {
-      "state": "GET /legion/v1/state controllerLocator = {tmuxSession: legion-sjawhar16, tmuxWindowId: @1, tmuxPaneId: %1, ompSessionFile: /home/ubuntu/.omp/profiles/legion16-smoke/agent/sessions/-tmp-legion16-smoke-rig-daemon-controller/2026-09-12T14-36-05-897Z_01a0960c-0785-7000-a918-18d1dec9f627.jsonl}; no socketPath, no runtime field. roles: legion-sjawhar16-controller held by session 01a0960c-0785-7000-a918-18d1dec9f627. daemon.log: `[legion] starting the controller fresh: no OMP session file is recorded`.",
-      "pstree": "tmux -L legion-sjawhar16 list-panes -t %1 -F '#{pane_pid}' -> 738359; pstree -a -l 738359 -> `omp --append-system-prompt # Legion Controller Root ...` with children `bun .../cli/index.ts state --json` and 173 omp threads. /proc/738359/cmdline: first argv is the omp binary, second is --append-system-prompt; no `--mode`, no `rpc` argument, no `worker-shim` anywhere in argv.",
-      "capturePane": "tmux -L legion-sjawhar16 capture-pane -p -t %1 shows the OMP TUI: tool activity lines and the status/prompt box `╭── π  > ◕ Fable 5.1 > 🗑 …ion16-smoke/rig/daemon/controller > $1.18 ▶─6%─┃1M───╮`, not an RPC frame stream.",
-      "typedMessage": "14:38:32Z tmux -L legion-sjawhar16 send-keys -t %1 'What project are you the controller for? Answer in one sentence.' Enter; capture after 45s: `I'm the controller for the Legion project sjawhar16 (role legion-sjawhar16-controller, tmux session legion-sjawhar16), whose issues live in the Dispatch project LEGSMOKE and target the sjawhar/legion-smoke repository.`"
-    },
-    "ii_resume": {
-      "before": "controllerLocator.ompSessionFile = ...2026-09-12T14-36-05-897Z_01a0960c-0785-7000-a918-18d1dec9f627.jsonl (111959 bytes at 14:38).",
-      "kill": "14:39:46Z tmux -L legion-sjawhar16 kill-pane -t %1.",
-      "wakeAttempt1": "POST http://127.0.0.1:19021/v1/messages/publish topic notifications.role.legion-sjawhar16-controller -> HTTP 404 {\"error\":\"no holder for role legion-sjawhar16-controller\"}: the dead session had deregistered, and an API publish to an unheld role is rejected synchronously (by design), so it cannot wake the daemon. Recorded so the next tester does not repeat it.",
-      "wakeUsed": "14:40:35Z created Dispatch issue LEGSMOKE-44 (parentless -> reduceIssueCreated emits a controller triage effect; the README's `create a Dispatch issue` option).",
+  "criterion1_evidence": {
+    "rigDeadlineConfig": "up-wrapper sets LEGION_WORKER_BOOT_TIMEOUT_SECONDS=30 and LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS=2, so the controller registration deadline is 60 s (defaults are 120 s x 3 = 6 min). Stated per the brief.",
+    "a_registeredPaneResume": {
+      "setup": "controller pane %1 (session 01a0960c…, resumed from the round-1 transcript, had handled the LEGSMOKE-48 triage) killed at 17:01:41Z; wake = new parentless Dispatch issue LEGSMOKE-49 at 17:06:07Z",
       "daemonLog": "[legion] resurrecting the controller legion-sjawhar16-controller by resuming OMP session /home/ubuntu/.omp/profiles/legion16-smoke/agent/sessions/-tmp-legion16-smoke-rig-daemon-controller/2026-09-12T14-36-05-897Z_01a0960c-0785-7000-a918-18d1dec9f627.jsonl",
-      "newPane": "controllerLocator -> {tmuxWindowId: @3, tmuxPaneId: %3, ompSessionFile: <same file>}; pane pid 876504; /proc/876504/cmdline argv[1] = --resume=/home/ubuntu/.omp/profiles/legion16-smoke/agent/sessions/-tmp-legion16-smoke-rig-daemon-controller/2026-09-12T14-36-05-897Z_01a0960c-0785-7000-a918-18d1dec9f627.jsonl; no --mode rpc, no worker-shim. Role legion-sjawhar16-controller re-claimed by the same session id 01a0960c-....",
-      "conversationVisible": "capture-pane -S -400 on %3 shows the pre-kill exchange (`What project are you the controller for? ...` / `I'm the controller for the Legion project sjawhar16 ...`) and the status line resumed at the pre-kill cost ($2.10). The queued triage wake for LEGSMOKE-44 (`{\"type\":\"triage\",\"issue\":\"LEGSMOKE-44\",\"preexistingChildren\":[]}`) was delivered on /controller/ready and handled: `legion status LEGSMOKE-44 icebox -> exit 0`."
+      "newPane": "%3, argv[1] = --resume=<that file>, no --mode rpc, no worker-shim; controllerLocator {tmuxWindowId @3, tmuxPaneId %3, ompSessionFile <same file>}",
+      "conversationPreserved": "capture-pane -S -600 shows the round-1 typed question/answer ('What project are you the controller for?' / 'I'm the controller for the Legion project sjawhar16 …') and the LEGSMOKE-48 triage"
     },
-    "iii_greenMerge": {
-      "status": "HELD",
-      "reason": "sjawhar/legion-smoke has no pull request at all (state=all -> []); the architect's 14:18Z retraction forbids opening any pull request anywhere until Sami's hold lifts. Not run; not a failure.",
-      "exactCommandsToRunWhenUnheld": [
-        "Pick or (once allowed) open a sandbox PR <n> on sjawhar/legion-smoke whose body has a complete `## Verification` block and whose `ci` check is green; approve it if SMOKE_BRANCH_PROTECTION was armed.",
-        "legion gh -- pr view <n> --repo sjawhar/legion-smoke --json merged,state,mergeCommit,headRefOid   (record BEFORE)",
-        "curl -s -X POST http://127.0.0.1:19021/v1/messages/publish -H 'Content-Type: application/json' -d '{\"topic\":\"notifications.role.legion-sjawhar16-controller\",\"source_session\":\"legion16-tester-merger\",\"urgency\":\"high\",\"message\":\"READY #<n> at <headSha> for LEGSMOKE-43 (https://github.com/sjawhar/legion-smoke/pull/<n>)\\n<the PR body gate facts>\"}'",
-        "watch: tmux -L legion-sjawhar16 capture-pane -p -S -200 -t <controllerLocator.tmuxPaneId>  (expect legion gh -- pr view then legion gh -- pr merge <n> --squash)",
-        "legion gh -- pr view <n> --repo sjawhar/legion-smoke --json merged,state,mergeCommit   (record AFTER; expect merged=true)",
-        "architect topic receipt: jq -r 'select(.customType==\"envoy-message\")|.content' <trees[LEGSMOKE-43].locator.ompSessionFile> | grep -n 'pr-merged'  — must come from the daemon's webhook reducer, and the controller's transcript must contain NO envoy_publish of pr-merged (grep the controller's session file for 'pr-merged')."
-      ]
+    "b_stuckBootResume": {
+      "naturalStateAttempt": "17:07:11Z killed registered pane %3; wake LEGSMOKE-50 at 17:07:12Z; respawn %4 at 17:07:12Z; %4 killed at 17:07:13Z during boot (before /controller/ready; state.roles still held the previous incarnation's claim {controller, 01a0960c}). At 17:08:13Z (60 s) NOTHING happened: no log line, locator still %4, no respawn. At 17:09:38Z the 600 s resync produced a controller wake that 404'd (no Envoy holder) -> ensureController -> dead probe -> `resurrecting the controller … by resuming OMP session <file>` -> pane %5 with --resume=<file>. Transcript never lost, but the deadline did not act (see F1).",
+      "deadlinePathAttempt": "rig daemon stopped, roles[legion-sjawhar16-controller] deleted from state.json (controllerLocator untouched), daemon restarted (scenBC-state-edit.txt). 17:11:56.038Z wake LEGSMOKE-51; 17:11:56.253Z respawn #1 pane %6; killed at 17:11:56.268Z during boot; claims []. 17:12:56.256Z (exactly 60 s) daemon.log: `[legion] resurrecting the controller legion-sjawhar16-controller by resuming OMP session /home/ubuntu/.omp/profiles/legion16-smoke/agent/sessions/-tmp-legion16-smoke-rig-daemon-controller/2026-09-12T14-36-05-897Z_01a0960c-0785-7000-a918-18d1dec9f627.jsonl`; respawn #2 pane %7 argv = omp --resume=<that file> --append-system-prompt …; controllerLocator {%7, ompSessionFile <same file>}; zero 'no OMP session file is recorded' lines. Evidence: scenBC-run.txt."
     },
-    "iv_redReady": {
-      "status": "HELD",
-      "reason": "Same as iii: needs an existing sandbox pull request (a wrong-sha READY on any open PR would do; none exists).",
-      "exactCommandsToRunWhenUnheld": [
-        "publish `READY #<n> at 0000000000000000000000000000000000000000 for LEGSMOKE-43 (<url>)` + gate facts to notifications.role.legion-sjawhar16-controller via the listener publish API as in iii",
-        "legion gh -- pr view <n> --json merged,state -> merged=false, OPEN",
-        "architect topic receipt names the `head` gate (jq the architect session file for the controller's envoy-message)."
-      ],
-      "partialEvidenceAlreadyCaptured": "see supplementary: with a nonexistent PR number the controller refused on the head gate and the architect topic received the report naming it."
-    },
-    "v_checkpoint13": "cd $LEGION_WORKSPACE && SMOKE_DIR=/tmp/legion16-smoke/rig SMOKE_PROJECT=sjawhar/16 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/checkpoints.sh 13 -> `CHECKPOINT 13 OK: 3 processes on legion-sjawhar16 carry no bearer or boot secret; default server hosts no legion-sjawhar16` (exit 0), run with the controller pane live.",
-    "supplementary_mergeQueueWakeWithoutAPr": {
-      "readyPayloadSent": "14:50:56Z POST /v1/messages/publish topic notifications.role.legion-sjawhar16-controller, source_session legion16-tester-merger-probe, urgency high, event_id 40f9b96dd120fc68d80065f909cef2cd; message: `READY #999 at 0123456789abcdef0123456789abcdef01234567 for LEGSMOKE-43 (https://github.com/sjawhar/legion-smoke/pull/999)` followed by CI/Threads/Thermo/E2E/Fast-follow/Chain lines and a note that the PR number does not exist.",
-      "controllerBehaviour": "Delivered to the TUI controller as a wake. It ran `legion gh -- pr view 999 -R sjawhar/legion-smoke --json ...` through its grant-wrapped bash (controller grant; gh spawned and reached GitHub): `GraphQL: Could not resolve to a PullRequest with the number of 999`. It judged `failed head gate, not merged`, resolved the tree's architect from `legion state --json` (LEGSMOKE-43 parent null), checked `envoy_role_get legion-sjawhar16-legsmoke-43-architect` (live holder 01a0960e-...), and `envoy_publish`ed the report (message id c8f8ccaae05564975a1d4361f0298832, in_reply_to 40f9b96d...). It published nothing else and did not attempt a merge.",
-      "architectTopicReceipt": "The LEGSMOKE-43 architect's session transcript gained a custom_message envoy-message: from 01a0960c-0785-7000-a918-18d1dec9f627 (the controller), id c8f8ccaae05564975a1d4361f0298832, re: 40f9b96dd120fc68d80065f909cef2cd, message `Merge queue: a READY report for your tree failed the head gate and was not merged. A merger session (legion16-tester-merger-probe) reported pull request #999 in sjawhar/legion-smoke as ready to merge at commit 0123456789abcdef... Live GitHub has no pull request #999 ... so the head gate fails and nothing was merged.` The architect read it and took no lifecycle action (correct: no real PR).",
-      "controllerSelfInflictedGrantNote": "The controller's first gh call in that turn 403'd (`Invalid or expired grant`) because the model wrote its own `export LEGION_GRANT=` line over the hook-injected one; it retried without it and succeeded. Same class of failure as docs/solutions/legion/worker-pane-shell-gotchas.md section 1; not a defect of this change, but the TUI controller is not immune to it."
+    "c_stuckAliveKilledAndResumed": {
+      "setup": "pane %7 alive (a healthy resumed OMP) but with no controller role claim in daemon state (deleted while the daemon was stopped; scenC-state-edit.txt) — from the daemon's point of view a pane that never reached ready. SIGSTOP on the omp pid did not hold (kill -STOP returned 0, /proc stat stayed S), so instead the pane's live Envoy registration was removed (DELETE /v1/sessions/01a0960c… on the rig listener -> 200; /v1/roles/legion-sjawhar16-controller -> 404) so the next controller wake 404s and routes to ensureController.",
+      "run": "17:30:35.404Z wake LEGSMOKE-53; 5 s later pane %7 still alive (pid 1850206), claims []; 17:31:35Z (60 s) the daemon killed %7 (pane gone, pid 1850206 dead) and logged `[legion] resurrecting the controller legion-sjawhar16-controller by resuming OMP session <same file>`; new pane %8 argv = omp --resume=<same file> …; controllerLocator {%8, ompSessionFile <same file>}; 20 s later claim back under session 01a0960c…, Envoy holder 01a0960c…; zero 'no OMP session file is recorded' lines; the resumed session handled the queued LEGSMOKE-53 triage. Evidence: scenC-run.txt, scenC-pane-after.txt."
     }
   },
-  "observationsForReviewerAndArchitect": [
-    "Not this change, pre-existing: skills/legion-controller/SKILL.md tells the controller to use `legion({ op: \"set_status\", ... })`, but packages/pi-envoy/extensions/legion.ts registers the `legion` tool only for architect sessions (`legion is available only to root and sub-architect sessions`; unchanged vs main@origin 7add4d03). The rig controller noticed (`xd://legion -> no such tool`) and used the CLI `legion status <KEY> <status>` through its grant-wrapped bash instead, which works because of this branch's T8. Worth a skill fix or a tool registration for the controller in a follow-up issue; it does not block this PR.",
-    "The daemon never logs HTTP 4xx responses (api.ts serializes HttpError straight to the response), so `daemon log shows the 403` cannot be observed for the merge refusal; the raw HTTP 403 bodies above are the daemon-side proof.",
-    "The `/controller/ready`-recorded ompSessionFile survives the pane-dead probe (contradiction C1 fix): the resurrected locator carried the same file and the pane argv carried --resume=<file>.",
-    "State served by the rig daemon: version 24 with controllerLocator {tmuxSession, tmuxWindowId, tmuxPaneId, ompSessionFile} — the LEGION-21 renumbering rule in implement.json testerNotes.stateVersionCollisionWithLegion21 still applies to whichever PR merges second.",
-    "Rig side effects in the shared LEGSMOKE Dispatch project: LEGSMOKE-43 (root, in_progress, design-gate ask 7944ce42-1190-4c16-b8cc-62680ecf925b open), LEGSMOKE-44 (icebox, resume probe), LEGSMOKE-45 (child created by the rig architect). No GitHub side effects: sjawhar/legion-smoke has 0 pull requests and main is unchanged at c7eed8db."
+  "criterion2_evidence": {
+    "readyShapeUsed": "READY #999 at 0123456789abcdef0123456789abcdef01234567 (approved at 0123456789abcdef0123456789abcdef01234567) for LEGSMOKE-43 (https://github.com/sjawhar/legion-smoke/pull/999) + a complete ## Verification block per the worker template (ready2-payload.txt). Both shas equal (no retro commit).",
+    "publish": "17:41:31Z POST /v1/messages/publish topic notifications.role.legion-sjawhar16-controller, event_id 3f8585a2aca59d679c1f38b61200c1b5, holder 01a0960c… (ready2-publish.txt)",
+    "controllerBehaviour": "ran `legion gh -- pr view 999 -R sjawhar/legion-smoke --json headRefOid,mergeable,reviewDecision,statusCheckRollup,body` from its cwd /tmp/legion16-smoke/rig/daemon/controller (three attempts; two 403'd on the grant-stacking bug F2, one succeeded: `Could not resolve to a PullRequest with the number of 999`), judged `failed head gate, not merged`, read `legion state --json` (`.roles | keys`, `issues[LEGSMOKE-43].parent`) to find legion-sjawhar16-legsmoke-43-architect, and envoy_publish'ed to notifications.role.legion-sjawhar16-legsmoke-43-architect with in_reply_to 3f8585a2… (ready2-controller-commands.txt, ready2-controller-publish.txt). It published nothing else and attempted no merge.",
+    "architectReceipt": "the LEGSMOKE-43 architect's transcript gained envoy-message id c6bee6d4a02941f62a3ebe70792a97e4 at 17:42:08Z from 01a0960c…, re: 3f8585a2…: `Merge queue: a second READY report for your tree failed the head gate and was not merged. … Live GitHub still has no pull request #999 …` (ready2-architect-receipt.txt)",
+    "headMovedBeyondRetro": "HELD for a live READY (needs a sandbox PR with two shas). Read-only demonstration of the gate's input from the controller's cwd under a rig LegionRole grant: `legion gh -- api repos/sjawhar/legion/compare/0f3edc92…...f27af7ec… --jq '{status, ahead_by, files}'` -> ahead_by 8 with non-docs/solutions/ paths (packages/daemon/…, packages/pi-envoy/…, skills/…) => gate 5 would fail as 'head moved beyond retro'; `compare/f27af7ec…...f27af7ec…` -> {status: identical, ahead_by 0, files: []} => gate 5 holds (scen3c-nonCheckout-gh.txt).",
+    "staticMirrors": "the two-sha first line appears verbatim in packages/pi-envoy/roles/merger.md, skills/legion-worker/SKILL.md, skills/legion-architect/SKILL.md, skills/legion-controller/SKILL.md, scripts/smoke/README.md; no old `READY #<n> at <sha>` form remains outside docs/plans"
+  },
+  "criterion3_evidence": {
+    "a_sessionSwitch": "17:34:23Z `/new` typed into pane %8: claim moved from session 01a0960c… to 01a096af-443d-7000-8f7c-9fb0b5dc7a2f and controllerLocator.ompSessionFile to 2026-09-12T17-34-23-805Z_01a096af….jsonl within 12 s; a typed prompt asking for `legion state --json …` ran wrapped (pane shows the injected GH_CONFIG_DIR=/tmp/legion16-smoke/rig/daemon/gh and PATH=…/worker-bin prelude) and returned {controllerClaim: 01a096af…}. 17:35:41Z `/resume` -> picker -> selected the original transcript: claim and file reverted to 01a0960c… / …14-36-05-897Z_01a0960c….jsonl; the next wrapped `legion state --json` returned {controllerClaim: 01a0960c…}; the daemon delivered its forced-resync report on the re-ready. Evidence: scen3a-session-switch.txt.",
+    "b_takeover": "17:37:49Z hand-started omp (tmux -L legion16-takeover, cwd /tmp/legion16-smoke/takeover, env per the skill: LEGION_CONTROLLER_SECRET_FILE, LEGION_DAEMON_URL, LEGION_STATE_DIR, no LEGION_CONTROLLER=1; launch script takeover/launch.sh). Launch alone changed nothing (no auto-claim). 17:38:26Z `/legion-claim-controller`: claim -> 01a096b2-7273-7000-9ff7-3f8e33e1059a, Envoy holder -> 01a096b2…, controllerLocator.ompSessionFile UNCHANGED (…14-36-05-897Z_01a0960c….jsonl, not the operator's …17-37-52-243Z_01a096b2….jsonl). The operator session's bash was wrapped (prelude visible) and `legion state --json` succeeded with controllerClaim 01a096b2…. Restore: killed the operator session and pane %8, wake LEGSMOKE-54 -> `resurrecting the controller … by resuming OMP session <the pane's file>` -> pane %9 with --resume=<pane's file>, claim back to 01a0960c… — proving the takeover never replaced the pane's transcript. Evidence: scen3b-takeover.txt.",
+    "c_ghFromNonCheckoutDir": "From /tmp/legion16-smoke/rig/daemon/controller (`git rev-parse` -> fatal: not a git repository) with the controller pane's PATH (gh = /home/ubuntu/.dotfiles/shims/gh, `gh version 2.98.0 (2026-08-20)`) and a rig LegionRole grant: `legion gh -- pr view <url> --json headRefOid,mergeable,reviewDecision` -> {f27af7ec…, MERGEABLE, REVIEW_REQUIRED}; `pr checks <url> --required --json name,state,bucket` -> lint/typecheck/test all bucket pass; `api graphql reviewThreads` -> {total 14, unresolved 14} (the reviewer's threads, resolved on re-review); both compare calls above. All exit 0. The controller pane itself also ran the skill's `pr view -R` form from that cwd during the READY probe. Evidence: scen3c-nonCheckout-gh.txt. (The controller's own dry run of these five commands was derailed by F2 and it went off investigating; its `pwd` step printed /tmp/legion16-smoke/rig/daemon/controller.)",
+    "d_roleTokensFromState": "In the READY probe the controller ran `legion state --json 2>&1 | jq -c '{i43: …, roles: (.roles | keys), prs}'` before publishing to notifications.role.legion-sjawhar16-legsmoke-43-architect (ready2-controller-commands.txt); no hand-formatted token.",
+    "e_takeoverEnvIncludesStateDir": "skills/legion-controller/SKILL.md lines 28-34 name LEGION_CONTROLLER_SECRET(_FILE), LEGION_DAEMON_URL, and LEGION_STATE_DIR, explain the wrapped shell, and warn against LEGION_CONTROLLER=1; the launcher built from those instructions worked (3b)."
+  },
+  "criterion4_evidence": {
+    "commands": "same lanes as round 1 (/tmp/legion16-smoke/tests/run-bun.sh, run-go.sh) at head f27af7ec, 16:59Z-17:02Z, pane env scrubbed with env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN",
+    "grep": "grep -rn pr-queue skills packages docs --exclude-dir=plans -> nothing (exit 1)",
+    "daemon": "bunx biome check --error-on-warnings src/ -> clean; bunx tsc --noEmit -> exit 0; LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 827 pass, 0 fail, 3409 expect() calls, 53 files, 31.3 s",
+    "contracts": "bun run lint && typecheck && test && build -> 93 pass, 0 fail",
+    "piEnvoy": "bun run lint (biome lint) clean; bun run typecheck exit 0; bun test -> 139 pass, 0 fail, 422 expect() calls",
+    "go": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun install --frozen-lockfile; cd packages/envoy && go list ./... | grep -v /integration | xargs go test -count=1 -> all 28 packages ok, exit 0 (no NATS-testcontainer flakes this run; the box was quieter after the drain)",
+    "constraintA": "jj diff --git --from main@origin --to @- skills/legion-worker/SKILL.md -> one hunk, @@ -225,10 +225,14 @@ (the merger bullet only)"
+  },
+  "criterion5_evidence": {
+    "hold": "Sami's pull-request hold: no release relayed to me by 17:50Z. sjawhar/legion has 16 open pull requests (below the 20 mentioned when the hold was set), but I opened nothing anywhere. sjawhar/legion-smoke still has 0 pull requests of any state (gh api pulls?state=all -> 0).",
+    "iii_greenMerge": "HELD. Exact commands once a sandbox PR <n> exists: record `legion gh -- pr view <n> --repo sjawhar/legion-smoke --json merged,state,mergeCommit,headRefOid`; publish `READY #<n> at <headSha> (approved at <headSha>) for LEGSMOKE-43 (https://github.com/sjawhar/legion-smoke/pull/<n>)` + the PR body's ## Verification block to notifications.role.legion-sjawhar16-controller via POST http://127.0.0.1:19021/v1/messages/publish; watch `tmux -L legion-sjawhar16 capture-pane -p -S -200 -t <controllerLocator.tmuxPaneId>` for `legion gh -- pr view <url>` / `pr checks <url> --required` / `api graphql` / `api …/compare/<approved>...<current>` then `legion gh -- pr merge <url> --squash`; re-run the pr view (merged=true); confirm pr-merged reached the architect from the daemon (grep the LEGSMOKE-43 architect transcript for pr-merged) and that the controller transcript contains no envoy_publish of pr-merged.",
+    "iv_redReady": "HELD for a real PR; the supplementary run above proves the parser and the head gate at this head. For 'head moved beyond retro': publish a READY whose approved sha is an older commit of <n> with a non-docs/solutions/ change after it; expect the architect topic to receive that gate name.",
+    "supplementaryRedReadyAtThisHead": "PASS — see criterion2_evidence."
+  },
+  "a3NegativeControlAtThisHead": {
+    "workerPane": "planner/tester phase-worker pane spawned by the rig daemon (POST /worker/spawn role tester, session 01a096bb-7000-7000-af0b-b4fd2a2ee3d5, pane in window legsmoke-43): `legion gh -- pr merge 999 --squash --repo sjawhar/legion-smoke; echo exit=$?` -> `this grant cannot merge; publish READY to the controller: {\"error\":\"Only the controller may merge; publish READY to the controller\"}` and `exit=1`; its `legion handoff complete` then succeeded (`[handoff] Reported phase completion`). Note the suffix now carries the daemon's raw JSON body (corrective pass nit N1; cli/__tests__/index.test.ts line 104 pins this exact string); the required prefix is unchanged. Sandbox repo unchanged (0 PRs).",
+    "note": "The strace/raw-403 evidence from round 1 (gh never exec'd; 403 on /gh-token and /git-credential with merge:true, 200 without) was not re-run; that route code changed only in the error-text constant (MERGE_AUTHORITY_REFUSED)."
+  },
+  "checkpoint13": "scripts/smoke/checkpoints.sh 13 aborts with `CHECKPOINT 13 FAILED: cannot read /proc/` because daemon state still records the round-1 planner locator (pane %4, dead since round 1): the rig daemon's boot-time reconnectWorkers threw `TypeError: undefined is not an object (evaluating 'api.revokeSessionCapability')` (index.ts line 482 reads `api` before it is assigned at line 635; index.ts is unchanged vs main@origin) and left the dead claim's locator in place. The checkpoint's own assertions run by hand on every live recorded pane (server pid 1490303, controller %9 pid 2704458, root %2 pid 1497197): no DISPATCH_TOKEN=/LEGION_BOOT_TOKEN=/LEGION_CONTROLLER_SECRET= on argv or environ (only *_FILE pointers), server global env clean, default tmux server hosts no legion-sjawhar16 -> MANUAL CHECKPOINT 13 OK (checkpoint-13-manual.txt).",
+  "findings": [
+    {
+      "id": "F1",
+      "title": "The controller registration deadline is inert after the first registration (pre-existing; the corrective pass's doc wording overstates it)",
+      "evidence": "b_stuckBootResume.naturalStateAttempt: with the previous incarnation's claim still in state.roles (nothing ever deletes the controller claim — the only `delete this.deps.state.roles[token]` sites are worker paths; identical on main@origin), retireAndRespawnStuckController returns at `if (this.deps.state.roles[token]) return;` (processes.ts 1674/1676; main 1665/1667) and ensureController's alive branch cancels the deadline for the same reason. A resumed pane that hangs during boot is therefore neither killed nor resurrected at the deadline; a pane that dies is recovered only by the next 404'd wake or resync (which did resume with --resume, so B2's transcript loss is fixed). A resumed pane that hangs ALIVE forever would strand the controller until someone kills the pane — same on main.",
+      "impact": "The spec's Errors row ('dead on probe -> respawns with --resume') holds. The sentence added to packages/daemon/src/daemon/AGENTS.md in this PR ('a registration deadline that elapses on a pane already dead resurrects it at once, and one that elapses on a live-but-unclaimed pane kills it first') is only true for the very first boot in a daemon's life (or after an operator clears the claim). Not introduced by this change; the architect decides whether to fix here (e.g. clear the controller claim when the pane is found dead / on respawn) or route it separately."
+    },
+    {
+      "id": "F2",
+      "title": "bash-hook grant stacking now hits the controller TUI (pre-existing hook behaviour, docs/solutions/legion/worker-pane-shell-gotchas.md section 1)",
+      "evidence": "Per-bash-call count of injected `export LEGION_GRANT=` lines in the controller transcript: already 2 at 14:37:36Z in round 1 (head 0f3edc92, before any session switch), 2-3 through most of round 2, then 2,3,4,5,6 on consecutive calls at 17:47-17:49Z; every UUID is fresh (minted by the hook, not copied by the model). Only one redeems; the controller's `legion gh` calls 403'd `Invalid or expired grant` on two of three attempts during the READY probe and on all attempts during the 3(c) dry run, after which it minted a grant by hand from $LEGION_CONTROLLER_SECRET_FILE and went off investigating instead of answering. Hook registration is once per extension instance and the pane's OMP log shows one instance, so the multiplication is inside the host's hook dispatch, not this branch's session_switch handlers (which register no hooks). grant-prelude-analysis.txt.",
+      "impact": "The controller is the merge queue: a `legion gh -- pr merge` can 403 and need a retry, and a controller that works around it by reading the secret file is one step from exposing it. Not a regression of #961; worth its own issue."
+    }
   ],
-  "evidenceFilesOnThisBox": "/tmp/legion16-smoke/evidence/ (pane captures, pstree, argv, checkpoint-13, negative-control CLI/strace/raw-403/worker-pane transcript excerpt, READY payload, architect receipt) and /tmp/legion16-smoke/tests/ (every suite log and summary-*.log).",
-  "goIsolatedFinal": "TESTCONTAINERS_RYUK_DISABLED=true go test -count=1 -p 1 <pkg>, one package at a time (14:49Z-14:57Z): ./internal/store/ ok (exit 0), ./internal/cistore/ ok, ./internal/bus/ ok, ./cmd/natstail/ ok, ./cmd/listener/ ok — 0 failing tests in each. Together with the 23 packages that passed in the full run, every one of the 28 non-integration envoy Go packages is green locally at head 95974ff0; the earlier failures were host contention (testcontainers reaper name conflicts and docker create deadlines), not this change. One leaked NATS test container from the reaper-less run (58ccefebc10e) was removed afterwards.",
+  "observations": [
+    "Rig daemon boot: `worker reconnection failed: TypeError … api.revokeSessionCapability` (index.ts, unchanged vs main) whenever a dead worker claim exists at boot; consequence above (checkpoint 13). Pre-existing.",
+    "up.sh's ensure_root_issue 409 POSSIBLE_DUPLICATE against earlier smoke roots (pre-existing, worked around with force:true) — the recorded root LEGSMOKE-43 was REUSED this round.",
+    "Rig side effects in LEGSMOKE this round: LEGSMOKE-48..54 (parentless tester wake probes, all iceboxed by the rig controller); LEGSMOKE-43 still parked on its design-gate ask; a tester-role worker pane exists on LEGSMOKE-43 from the negative control.",
+    "The controller pane once ran `legion state`/`legion status` fine after `/new` and after `/resume`, and the daemon delivered the queued wake on every re-ready; the pi-envoy extension's session_switch path is sound."
+  ],
+  "rigCoordinates": {
+    "wrapper": "/tmp/legion16-smoke/up-wrapper.sh (secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash /tmp/legion16-smoke/up-wrapper.sh); adds LEGION_WORKER_BOOT_TIMEOUT_SECONDS=30 LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS=2",
+    "SMOKE_DIR": "/tmp/legion16-smoke/rig",
+    "SMOKE_PROJECT": "sjawhar/16",
+    "slug": "sjawhar16",
+    "SMOKE_REPO": "sjawhar/legion-smoke",
+    "webhookMode": "envoy",
+    "ports": {
+      "LEGION_DAEMON_PORT": 19371,
+      "ENVOY_PORT": 19021,
+      "NATS_PORT": 14223
+    },
+    "ompProfile": "legion16-smoke with @sjawhar/pi-legion-envoy 1.4.3-legion16.f27af7ec built from this head (/tmp/legion16-smoke/pi-legion-envoy)",
+    "processes": "listener pid 1414564, daemon pid 1925340 (restarted twice during (b)/(c), see state-edit notes), envoy-bridge pid 1424436; controller pane %9",
+    "stateEdits": "two test-rig-only edits with the daemon stopped, each deleting roles[legion-sjawhar16-controller] from state.json to arm the deadline (scenBC-state-edit.txt, scenC-state-edit.txt); backups state.json.before-edit / before-edit-2 in evidence/",
+    "leftUp": "Rig LEFT RUNNING: iii/iv are still HELD and the hold looks close to lifting (16 open pull requests on sjawhar/legion). Tear down with SMOKE_DIR=/tmp/legion16-smoke/rig SMOKE_PROJECT=sjawhar/16 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh; the LEGION-10 tester needs the fixed container name legion-smoke-nats for its own runs, so tear down on request.",
+    "evidence": "/tmp/legion16-smoke/evidence/ (round 2) and /tmp/legion16-smoke/evidence-round1-0f3edc92/, tests under /tmp/legion16-smoke/tests/ and tests-round1-0f3edc92/"
+  },
+  "round1Summary": "Head 0f3edc92 (tested 14:25Z-15:00Z): A1-A4 PASS, A5(i)(ii)(v) PASS, A5(iii)(iv) HELD; the reviewer's CHANGES_REQUESTED at that head led to the corrective pass tested here.",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-12T14:59:02.236Z"
+  "completed": "2026-09-12T17:55:37.875Z"
 }
