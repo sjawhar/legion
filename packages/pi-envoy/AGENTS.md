@@ -20,7 +20,10 @@ two seconds.
 The thirteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
 `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, and `dispatch_search` — register only when the shared
-configuration resolves a URL and bearer token. Set
+configuration resolves a URL and bearer token at load; the URL and token themselves are re-read
+on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`, or a changed
+`DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file that has since
+broken fails the call with its own error rather than using the stale endpoint. Set
 `dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
 `~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
 `dispatch.serverUrl` can use only `dispatch.token` from that same repository

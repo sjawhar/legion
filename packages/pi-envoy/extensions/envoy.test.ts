@@ -326,18 +326,15 @@ function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string)
   });
 }
 
-function targetedDispatchEnvelope(
-  mode: "aside" | "btw" | "steer",
-  dedupeKey: string
-): string {
+function targetedDispatchEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: string): string {
   return JSON.stringify({
     dedupe_key: dedupeKey,
     event_id: `dispatch-${dedupeKey}`,
     issued_at: 1,
-	    payload: JSON.stringify({
-	      event: {
-	        actor: { id: "alice", kind: "user" },
-	        issue_key: "CORE-1",
+    payload: JSON.stringify({
+      event: {
+        actor: { id: "alice", kind: "user" },
+        issue_key: "CORE-1",
         payload: {
           author: { id: "alice", kind: "user" },
           body: `Delivery ${mode} ${dedupeKey}`,
@@ -348,10 +345,10 @@ function targetedDispatchEnvelope(
           issue_key: "CORE-1",
           target: "session:ses_delivery",
         },
-	        type: "message.created",
-	      },
-	      delivery: { attempt: 1, mode },
-	    }),
+        type: "message.created",
+      },
+      delivery: { attempt: 1, mode },
+    }),
     payload_summary: `Delivery ${mode} ${dedupeKey}`,
     source: "dispatch",
     source_event_id: "1",
@@ -1189,6 +1186,61 @@ describe("envoy OMP extension", () => {
         origin: { host: "omp", cwd: "/tmp/envoy-omp-test", session_title: "current title" },
       },
     });
+  });
+
+  test("a dispatch tool call follows a changed server URL without reloading the extension", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const hosts: string[] = [];
+    globalThis.fetch = async (input) => {
+      hosts.push(new URL(input.toString()).host);
+      return new Response(JSON.stringify({ id: "ask_1", issue_key: "LEGION-1", question: "Q?" }), {
+        headers: { "content-type": "application/json" },
+      });
+    };
+    // Every test in this block imports its own extension instance (query-string variants), the
+    // file's established way to get a fresh load-time state per test.
+    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-moved");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const ask = fixture.tools.find((candidate) => candidate.name === "dispatch_ask");
+    if (ask === undefined) throw new Error("dispatch_ask was not registered");
+    const context = {
+      ...sessionContext("ses_live"),
+      sessionManager: { getSessionId: () => "ses_live", getSessionName: () => "t" },
+    };
+
+    await ask.execute(
+      "call_1",
+      { issue: "LEGION-1", question: "Q?" },
+      undefined,
+      undefined,
+      context
+    );
+    // Dispatch moved: the same live session must reach the new host on its next call.
+    process.env.DISPATCH_URL = "http://dispatch.moved.test:9000";
+    await ask.execute(
+      "call_2",
+      { issue: "LEGION-1", question: "Q?" },
+      undefined,
+      undefined,
+      context
+    );
+
+    expect(hosts).toEqual(["127.0.0.1:8767", "dispatch.moved.test:9000"]);
+
+    // A configuration that has since broken fails the call with its own reason,
+    // never with a request to the stale endpoint.
+    delete process.env.DISPATCH_TOKEN;
+    const failed = await ask.execute(
+      "call_3",
+      { issue: "LEGION-1", question: "Q?" },
+      undefined,
+      undefined,
+      context
+    );
+    expect(failed.isError).toBe(true);
+    expect(hosts).toHaveLength(2);
   });
 
   test("executes dispatch_search without an issue and returns rows in details", async () => {
@@ -2485,7 +2537,9 @@ describe("envoy OMP extension", () => {
     const replies: unknown[] = [];
     const posted = Promise.withResolvers<void>();
     globalThis.fetch = async (input, init) => {
-      if (new URL(input.toString()).pathname === "/api/v1/messages/message-targeted-rejection/reply") {
+      if (
+        new URL(input.toString()).pathname === "/api/v1/messages/message-targeted-rejection/reply"
+      ) {
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         posted.resolve();
       }
@@ -2517,56 +2571,56 @@ describe("envoy OMP extension", () => {
   });
 
   test("fails closed for a malformed targeted frame and reports the error to Dispatch", async () => {
-	    process.env.DISPATCH_URL = "http://dispatch.test";
-	    process.env.DISPATCH_TOKEN = "dispatch-token";
-	    const replies: unknown[] = [];
-	    const posted = Promise.withResolvers<void>();
-	    globalThis.fetch = async (input, init) => {
-	      if (new URL(input.toString()).pathname === "/api/v1/messages/message-malformed/reply") {
-	        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
-	        posted.resolve();
-	      }
-	      return response({});
-	    };
-	    const { default: envoyExtension } = await import("./envoy.ts?targeted-malformed");
-	    const fixture = createPi();
-	    envoyExtension(fixture.pi);
-	    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
-	    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-	    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/api/v1/messages/message-malformed/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-malformed");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-	    agent.push(
-	      JSON.stringify({
-	        event_id: "dispatch-malformed",
-	        source: "dispatch",
-	        source_event_id: "1",
-	        topic: "notifications.agent.ses_delivery",
-	        dedupe_key: "dispatch-malformed",
-	        issued_at: 1,
-	        payload_summary: "Can this ship?",
-	        payload: JSON.stringify({
+    agent.push(
+      JSON.stringify({
+        event_id: "dispatch-malformed",
+        source: "dispatch",
+        source_event_id: "1",
+        topic: "notifications.agent.ses_delivery",
+        dedupe_key: "dispatch-malformed",
+        issued_at: 1,
+        payload_summary: "Can this ship?",
+        payload: JSON.stringify({
           event: {
             actor: { id: "alice", kind: "user" },
             issue_key: "CORE-1",
             payload: { body: "Can this ship?", id: "message-malformed" },
             type: "message.created",
           },
-	          delivery: { attempt: 1, mode: "btw" },
-	        }),
-	        trace_id: "dispatch-malformed",
-	      })
-	    );
-	
+          delivery: { attempt: 1, mode: "btw" },
+        }),
+        trace_id: "dispatch-malformed",
+      })
+    );
+
     await posted.promise;
-	    expect(fixture.deliveries).toEqual([]);
-	    expect(replies).toEqual([
-	      {
-	        actor: { id: "ses_delivery", kind: "session" },
-	        attempt: 1,
-	        error: "Invalid Dispatch targeted delivery frame",
-	      },
-	    ]);
-	  });
+    expect(fixture.deliveries).toEqual([]);
+    expect(replies).toEqual([
+      {
+        actor: { id: "ses_delivery", kind: "session" },
+        attempt: 1,
+        error: "Invalid Dispatch targeted delivery frame",
+      },
+    ]);
+  });
   test("registers every session and starts its heartbeat on session start", async () => {
     const registrations: unknown[] = [];
     globalThis.fetch = async (input, init) => {
