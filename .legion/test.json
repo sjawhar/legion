@@ -1,0 +1,126 @@
+{
+  "issue": "LEGION-18",
+  "prNumber": 953,
+  "prUrl": "https://github.com/sjawhar/legion/pull/953",
+  "headSha": "15ed27b12c327a75043dcb08312a3a99072e9f2f",
+  "headConfirmed": "legion gh -- pr view 953 --repo sjawhar/legion --json headRefOid --jq .headRefOid == jj -R \"$LEGION_WORKSPACE\" log -r @- --no-graph -T commit_id == 15ed27b12c327a75043dcb08312a3a99072e9f2f",
+  "verdict": "PASS",
+  "passed": 5,
+  "failed": 0,
+  "failures": [],
+  "checks": [
+    {
+      "n": 1,
+      "acceptance": "grep for removed phrases -> nothing",
+      "verdict": "PASS",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 'learnings-researcher\\|best-practices-researcher\\|Task Explore\\|LEGION_ISSUE_BACKEND\\|not yet runnable\\|PR B (#TBD)' skills/ packages/pi-envoy/roles/ AGENTS.md; echo exit=$?",
+      "observed": "no lines; exit=1",
+      "negativeControl": {
+        "command": "git -C \"$LEGION_WORKSPACE\" grep -n -e 'learnings-researcher' -e 'best-practices-researcher' -e 'Task Explore' -e 'LEGION_ISSUE_BACKEND' -e 'not yet runnable' -e 'PR B (#TBD)' origin/main -- skills packages/pi-envoy/roles AGENTS.md",
+        "originMain": "7add4d03087e5a6aa062cbc832d7020790073c3b",
+        "lineCount": 11,
+        "lines": [
+          "skills/github/SKILL.md:3",
+          "skills/legion-architect/SKILL.md:15",
+          "skills/legion-architect/SKILL.md:16",
+          "skills/legion-controller/SKILL.md:13",
+          "skills/legion-controller/SKILL.md:14",
+          "skills/legion-oracle/SKILL.md:43",
+          "skills/legion-oracle/SKILL.md:44",
+          "skills/legion-oracle/SKILL.md:46",
+          "skills/legion-oracle/SKILL.md:59",
+          "skills/legion-worker/SKILL.md:15",
+          "skills/legion-worker/SKILL.md:16"
+        ],
+        "note": "Matches the plan's 11 exactly (planner verified on e9b5f70a; origin/main has since advanced to 7add4d03 with the same 11 hits)."
+      }
+    },
+    {
+      "n": 2,
+      "acceptance": "skills/github/ and skills/linear/ gone; bun test packages/pi-envoy green",
+      "verdict": "PASS",
+      "observed": {
+        "dirs": "test ! -e skills/github && test ! -e skills/linear && echo gone -> gone",
+        "jjFileList": "jj -R \"$LEGION_WORKSPACE\" file list skills/github skills/linear -> 'Warning: No matching entries for paths' (empty)",
+        "bunTest": "bun test packages/pi-envoy -> 137 pass, 0 fail, 412 expect() calls, 6 files [9.23s], exit 0"
+      },
+      "environmentEvidence": {
+        "dependencies": "The issue workspace had no node_modules; first run errored 'Cannot find package zod' / '@toon-format/toon' (13 pass / 4 fail / 4 errors). Ran `bun install --frozen-lockfile` (1154 packages; jj status unchanged: only the daemon-written .omp/config.yml remains in the working copy) and re-ran.",
+        "paneEnvironment": "Run inside the tester pane with its own environment, the suite reports 125 pass / 12 fail: the 12 are boot-classification tests in extensions/legion.test.ts and envoy.test.ts that read LEGION_*/DISPATCH_* from process.env (e.g. 'does not register Dispatch tools and reports the missing token once at session start' received 12 registered tools because DISPATCH_URL/DISPATCH_TOKEN_FILE are set for this pane).",
+        "scrubbedRun": "env -u for every DISPATCH_*, ENVOY_*, LEGION_* variable present (DISPATCH_TOKEN_FILE DISPATCH_URL ENVOY_NATS_URL ENVOY_TAILSCALE_OAUTH_CLIENT_ID ENVOY_TAILSCALE_OAUTH_CLIENT_KEY ENVOY_URL LEGION_BOOT_TOKEN_FILE LEGION_CREDENTIAL_HELPER LEGION_DAEMON_URL LEGION_GENERATION LEGION_GRANT LEGION_ISSUE LEGION_OMP_PATH LEGION_PROJECT LEGION_ROLE LEGION_STATE_DIR LEGION_TREE LEGION_WORKSPACE) -> 137 pass / 0 fail. CI's pi-envoy job at this head (run 34676780582) also passed. Not a PR defect: the PR changes no code or test.",
+        "recordedOncePerFix7": true
+      }
+    },
+    {
+      "n": 3,
+      "acceptance": "role prompts and worker skill carry the new rules; legion-worker carries the two Sami quotes verbatim",
+      "verdict": "PASS",
+      "observed": {
+        "rebaseQuote": "grep -c \"Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow.\" skills/legion-worker/SKILL.md -> 1 (grep -oF | wc -l -> 1)",
+        "noDeferralsQuote": "grep -c \"My rule is no deferrals.\" skills/legion-worker/SKILL.md -> 1 (grep -oF | wc -l -> 1)",
+        "oneReviewPerRound": "packages/pi-envoy/roles/reviewer.md:1 skills/legion-worker/SKILL.md:1",
+        "commentsArray": "comments\\[\\] -> packages/pi-envoy/roles/reviewer.md:1 skills/legion-worker/SKILL.md:1",
+        "neverCommitPlan": "packages/pi-envoy/roles/planner.md:1 skills/legion-worker/SKILL.md:1 (implementer's one-line reflow holds: 1 per file)",
+        "recordedOnce": "packages/pi-envoy/roles/tester.md:1 skills/legion-worker/SKILL.md:1",
+        "librarian": "skills/legion-oracle/SKILL.md -> 1",
+        "removedPhrases": "grep -rn 'Post every correctness finding\\|no schema validation' skills/ packages/pi-envoy/roles/ -> nothing, exit=1",
+        "humanAuthored": "AGENTS.md -> 1",
+        "fenceCount": "grep -c '^```' AGENTS.md -> 6 (even)",
+        "fix4Note": "Validated against the rule, not the plan's exact string: 'no schema validation' is gone and the removed-phrase grep is empty."
+      }
+    },
+    {
+      "n": 4,
+      "acceptance": "PR commits no docs/plans/* file; no .omp/config.yml",
+      "verdict": "PASS",
+      "command": "legion gh -- pr view 953 --repo sjawhar/legion --json files --jq '.files[].path'",
+      "observed": [
+        ".legion/implement.json",
+        ".legion/plan.json",
+        "AGENTS.md",
+        "packages/pi-envoy/roles/planner.md",
+        "packages/pi-envoy/roles/reviewer.md",
+        "packages/pi-envoy/roles/tester.md",
+        "skills/AGENTS.md",
+        "skills/github/SKILL.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-controller/SKILL.md",
+        "skills/legion-oracle/SKILL.md",
+        "skills/legion-worker/SKILL.md",
+        "skills/linear/SKILL.md"
+      ],
+      "note": "13 paths, exactly the plan's list; no path under docs/; .omp/config.yml absent."
+    },
+    {
+      "n": 5,
+      "acceptance": "coordination with LEGION-16 held; PR mergeable",
+      "verdict": "PASS",
+      "observed": {
+        "mergerMd": "jj diff --from main@origin --to @- --git packages/pi-envoy/roles/merger.md -> empty (0 bytes)",
+        "workerSkillPrQueue": "jj diff --from main@origin --to @- --git skills/legion-worker/SKILL.md | grep -n pr-queue -> no line, exit=1",
+        "architectSkillPrQueue": "jj diff --from main@origin --to @- --git skills/legion-architect/SKILL.md | grep -n pr-queue -> no line, exit=1; grep -n pr-queue skills/legion-architect/SKILL.md -> 179: ... `notifications.role.pr-queue` (was line 184 on base; shifted by the caveat deletion only)",
+        "mergeable": "legion gh -- pr view 953 --json mergeable,mergeStateStatus,state -> MERGEABLE BLOCKED OPEN (BLOCKED = awaiting required review; no CONFLICTING, so no rebase)"
+      }
+    }
+  ],
+  "ciAtHead": {
+    "runs": {
+      "Tests": 34676780653,
+      "Legion Envoy and Contracts": 34676780582
+    },
+    "statusCheckRollup": "lint, typecheck, test, pr-title, changes, pi-envoy SUCCESS; contracts, envoy-client, envoy-go, envoy-plugin, dispatch, claude-envoy-bridge SKIPPED (path filters); no FAILURE",
+    "note": "Read from GitHub, not from the implementer's handoff."
+  },
+  "prBodyEdit": {
+    "what": "Replaced only the line `**E2E:** left for the tester.` with the E2E section (surface, exact commands, observed output, head SHA, negative control); every other section left as the implementer wrote it.",
+    "how": "legion gh -- pr edit 953 --repo sjawhar/legion --body-file /tmp/legion18-body-after.md; readback via pr view --json body equals the submitted file byte-for-byte.",
+    "environmentEvidenceInBody": false
+  },
+  "noRebase": true,
+  "noTextChangesPushed": true,
+  "prsOpenedOrClosed": 0,
+  "reviewerNotes": "Docs-only PR: skip the Thermo line. All five plan checks pass at 15ed27b1; CI, files, and mergeability read from GitHub directly. When you run `bun test packages/pi-envoy` yourself inside a Legion pane, scrub LEGION_*/DISPATCH_*/ENVOY_* first (see checks[1].environmentEvidence) or 12 boot-classification tests read the pane's environment; the workspace also needs `bun install --frozen-lockfile` once. Coordination with LEGION-16 held (merger.md untouched; no pr-queue line touched). The implementer's fix-4 wording (architect-approved) and fix-6 one-line reflow both satisfy the checks.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T14:37:40.546Z"
+}
