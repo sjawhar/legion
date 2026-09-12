@@ -33,6 +33,13 @@ events to the right session.
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
+Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
+and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
+settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
+captured update in the same Postgres transaction as any resulting version and event, then renders
+and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
+document.
+
 ## Critical conventions
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.

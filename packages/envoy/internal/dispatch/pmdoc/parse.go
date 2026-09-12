@@ -42,6 +42,7 @@ func Parse(markdown string) (*Node, error) {
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	EnsureBlockIDs(doc)
 	return doc, nil
 }
 

@@ -223,6 +223,14 @@ type ArtifactReviewEventPayload struct {
 	AskID      *string `json:"ask_id"`
 }
 
+// ArtifactBlock is an addressable document block and its byte range in canonical markdown.
+type ArtifactBlock struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	From int    `json:"from"`
+	To   int    `json:"to"`
+}
+
 // Version is an immutable artifact version.
 type Version struct {
 	Number    int       `json:"number"`

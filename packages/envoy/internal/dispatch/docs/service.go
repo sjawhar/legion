@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
@@ -118,11 +119,16 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 }
 
 type suppressSlot struct {
-	ready    chan struct{}
-	update   []byte
-	canceled bool
-	consumed bool
+	ready     chan struct{}
+	update    []byte
+	canceled  bool
+	discarded bool
+	consumed  bool
 }
+
+// identityClosureOrigin identifies a server-owned identity repair transaction.
+// It must remain non-zero sized because Ygo compares origins by interface equality.
+type identityClosureOrigin struct{ _ byte }
 
 func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 	slot := &suppressSlot{ready: make(chan struct{})}
@@ -145,6 +151,25 @@ func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte)
 	close(slot.ready)
 }
 
+// discardSuppressedPersistence prevents a completed live mutation from falling
+// back to ygo's independent persistence after its enclosing transaction failed.
+// The persistence callback consumes the slot and discards its matching update.
+func (s *Service) discardSuppressedPersistence(room string, slot *suppressSlot) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	if slot == nil || slot.consumed || slot.canceled {
+		return
+	}
+	for _, candidate := range s.suppressed[room] {
+		if candidate == slot {
+			slot.canceled = true
+			slot.discarded = true
+			close(slot.ready)
+			return
+		}
+	}
+}
+
 func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool {
 	for {
 		s.suppressMu.Lock()
@@ -165,7 +190,19 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			s.suppressMu.Unlock()
 			continue
 		}
-		if slot.canceled || !bytes.Equal(slot.update, update) {
+		if slot.canceled {
+			slot.consumed = true
+			slots = slots[1:]
+			if len(slots) == 0 {
+				delete(s.suppressed, room)
+			} else {
+				s.suppressed[room] = slots
+			}
+			discarded := slot.discarded
+			s.suppressMu.Unlock()
+			return discarded
+		}
+		if !bytes.Equal(slot.update, update) {
 			s.suppressMu.Unlock()
 			return false
 		}
@@ -203,6 +240,20 @@ func (s *Service) cancelSuppressedPersistence(room string, slot *suppressSlot) {
 		slot.canceled = true
 		close(slot.ready)
 	}
+}
+
+// purgeSuppressedPersistence releases callbacks held for a failed room without
+// allowing its discarded slot to apply to a successor room with the same name.
+func (s *Service) purgeSuppressedPersistence(room string) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	for _, slot := range s.suppressed[room] {
+		if !slot.canceled && slot.update == nil {
+			slot.canceled = true
+			close(slot.ready)
+		}
+	}
+	delete(s.suppressed, room)
 }
 
 // New constructs the ygo server used by Dispatch's document API and websocket
@@ -250,6 +301,7 @@ func New(deps Deps) *Service {
 	srv.Authorize = service.authorize
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
+	srv.OnLastPeer = service.settleLastPeer
 
 	return service
 }
@@ -257,20 +309,44 @@ func New(deps Deps) *Service {
 // Shutdown stops queued settlements, joins any already-running callbacks, and
 // flushes ygo's document persistence workers.
 func (s *Service) Shutdown(ctx context.Context) error {
-	s.stopping.Store(true)
-
-	s.rooms.Range(func(_, value any) bool {
+	type pendingSettlement struct {
+		room       string
+		generation uint64
+	}
+	var pending []pendingSettlement
+	s.rooms.Range(func(key, value any) bool {
 		room := value.(*roomState)
 		room.mu.Lock()
 		if room.settle != nil && room.settle.Stop() {
 			s.settleWG.Done()
+			pending = append(pending, pendingSettlement{room: key.(string), generation: room.gen})
 		}
 		room.mu.Unlock()
 		return true
 	})
+	settled := make(chan struct{})
+	go func() {
+		var drain sync.WaitGroup
+		for _, settlement := range pending {
+			drain.Add(1)
+			go func(room string, generation uint64) {
+				defer drain.Done()
+				s.settleRoom(room, generation)
+			}(settlement.room, settlement.generation)
+		}
+		drain.Wait()
+		close(settled)
+	}()
+	select {
+	case <-settled:
+	case <-ctx.Done():
+		s.stopping.Store(true)
+		return ctx.Err()
+	}
+	s.stopping.Store(true)
 	s.waitSettles(ctx)
-
 	return s.srv.Shutdown(ctx)
+
 }
 
 func (s *Service) scheduleSettle(room string) {
@@ -304,10 +380,14 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 }
 
 func (s *Service) retrySettle(room string, generation uint64, err error) {
-	slog.Error("dispatch: settle document", "room", room, "error", err)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	s.retrySettleLocked(room, state, generation, err)
+}
+
+func (s *Service) retrySettleLocked(room string, state *roomState, generation uint64, err error) {
+	slog.Error("dispatch: settle document", "room", room, "error", err)
 	if state.gen == generation {
 		s.scheduleSettleLocked(room, state)
 	}
@@ -325,6 +405,24 @@ func artifactVersionEventPayload(
 	return payload
 }
 
+func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
+	fragment := doc.GetXmlFragment(fragmentName)
+	tree, err := treeOf(doc)
+	if err != nil {
+		return nil, 0, err
+	}
+	stamped := pmdoc.EnsureBlockIDsCount(tree)
+	if stamped == 0 {
+		return tree, 0, nil
+	}
+	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		return pmdoc.Update(transaction, fragment, tree)
+	}, origin); err != nil {
+		return nil, 0, err
+	}
+	return tree, stamped, nil
+}
+
 func (s *Service) settleRoom(room string, generation uint64) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -332,29 +430,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		state.mu.Unlock()
 		return
 	}
-	doc := s.srv.GetDoc(room)
-	if doc == nil {
-		state.mu.Unlock()
-		return
-	}
-	tree, err := treeOf(doc)
-	var markdown string
-	if err == nil {
-		var markdownErr error
-		markdown, markdownErr = renderTree(tree)
-		err = markdownErr
-	}
 	state.mu.Unlock()
-	if err != nil {
-		if errors.Is(err, ErrDocSchema) {
-			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+	if s.srv.GetDoc(room) == nil {
+		err := s.srv.Apply(context.Background(), room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			s.retrySettle(room, generation, fmt.Errorf("warm document for settlement: %w", err))
 			return
 		}
-		s.retrySettle(room, generation, err)
-		return
 	}
 	ctx := context.Background()
-
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -374,25 +458,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
-		state.mu.Unlock()
-		return
-	}
-	doc = s.srv.GetDoc(room)
-	if doc == nil {
-		state.mu.Unlock()
-		return
-	}
-	tree, err = treeOf(doc)
-	if err == nil {
-		markdown, err = renderTree(tree)
-	}
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
-	}
-	state.mu.Unlock()
+	tree, err := treeOf(s.srv.GetDoc(room))
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -401,10 +467,112 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	if latest.markdown == markdown {
-		if err := tx.Rollback(ctx); err != nil {
-			s.retrySettle(room, generation, fmt.Errorf("rollback unchanged document transaction: %w", err))
+	stamped := pmdoc.BlockIDRepairCount(tree)
+	var slot *suppressSlot
+	var updates [][]byte
+	if stamped > 0 {
+		slot = s.prepareSuppressedPersistence(room)
+		origin := &identityClosureOrigin{}
+		var mutationErr error
+		err = s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
+				if updateOrigin == origin {
+					updates = append(updates, append([]byte(nil), update...))
+				}
+			})
+			defer unsubscribe()
+			tree, stamped, mutationErr = ensureBlockIDsInDocument(doc, origin)
+		})
+		if errors.Is(err, websocket.ErrNoChanges) {
+			err = nil
+		}
+		if mutationErr != nil || err != nil {
+			s.cancelSuppressedPersistence(room, slot)
+			if mutationErr != nil {
+				err = mutationErr
+			}
+			if errors.Is(err, ErrDocSchema) {
+				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+				return
+			}
+			s.retrySettle(room, generation, err)
 			return
+		}
+	}
+
+	var update []byte
+	if stamped > 0 {
+		update, err = mergeUpdates(updates)
+		if err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		if err := s.srv.BroadcastUpdate(ctx, room, update); err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, fmt.Errorf("broadcast identity update: %w", err))
+			return
+		}
+		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update); appendErr != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, appendErr)
+			return
+		}
+	} else {
+		s.cancelSuppressedPersistence(room, slot)
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		if errors.Is(err, ErrDocSchema) {
+			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
+	state.mu.Lock()
+	if s.stopping.Load() || state.closed || state.failed != nil {
+		state.mu.Unlock()
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+		}
+		return
+	}
+	if state.gen != generation {
+		state.mu.Unlock()
+		if stamped == 0 {
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, fmt.Errorf("commit superseded document identity update: %w", err))
+			return
+		}
+		s.finishSuppressedPersistence(slot, update)
+		return
+	}
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
+	}
+	state.mu.Unlock()
+	if latest.markdown == markdown {
+		if err := tx.Commit(ctx); err != nil {
+			if stamped > 0 {
+				s.discardSuppressedPersistence(room, slot)
+				s.failRoom(room, fmt.Errorf("commit document identity update: %w", err))
+				return
+			}
+			s.retrySettle(room, generation, fmt.Errorf("commit document identity update: %w", err))
+			return
+		}
+		if stamped > 0 {
+			s.finishSuppressedPersistence(slot, update)
 		}
 		s.sweepUnrecordedMarks(room, tree)
 		return
@@ -412,6 +580,11 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	authors := actorSlice(pending)
 	version, err := s.writeVersionTx(ctx, tx, room, markdown, tree, &versionWrite{authors: authors})
 	if err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
 		s.retrySettle(room, generation, err)
 		return
 	}
@@ -419,23 +592,31 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if len(authors) > 0 {
 		eventActor = authors[0]
 	}
-	event := model.Event{
-		IssueKey: owner.IssueKey,
-		Type:     "artifact.version",
-		Actor:    eventActor,
-		Payload:  artifactVersionEventPayload(room, owner.Name, version, nil),
-	}
+	event := model.Event{IssueKey: owner.IssueKey, Type: "artifact.version", Actor: eventActor, Payload: artifactVersionEventPayload(room, owner.Name, version, nil)}
 	if owner.IssueKey == nil {
 		event.ArtifactID = &room
 	}
 	event, err = s.events.Append(ctx, tx, event)
 	if err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
 		s.retrySettle(room, generation, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, fmt.Errorf("commit document version: %w", err))
+			return
+		}
 		s.retrySettle(room, generation, fmt.Errorf("commit document version: %w", err))
 		return
+	}
+	if stamped > 0 {
+		s.finishSuppressedPersistence(slot, update)
 	}
 	state.mu.Lock()
 	if state.gen == generation {
@@ -444,8 +625,129 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 	}
 	state.mu.Unlock()
+
 	s.events.Publish(event)
 	s.sweepUnrecordedMarks(room, tree)
+}
+
+type BlockIDBackfill struct {
+	ArtifactID string
+	Stamped    int
+	Skipped    string
+	Err        error
+}
+
+// BackfillBlockIDs runs the identity closure against every document. A document
+// failure is reported with that document so later documents can still be stamped.
+func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, error) {
+	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
+	if err != nil {
+		return nil, fmt.Errorf("list documents: %w", err)
+	}
+	var artifactIDs []string
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		artifactIDs = append(artifactIDs, artifactID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	rows.Close()
+
+	result := make([]BlockIDBackfill, 0, len(artifactIDs))
+	for _, artifactID := range artifactIDs {
+		result = append(result, s.backfillBlockIDs(ctx, artifactID))
+	}
+	return result, nil
+}
+
+func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) BlockIDBackfill {
+	report := BlockIDBackfill{ArtifactID: artifactID}
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		report.Err = fmt.Errorf("recover document: %w", err)
+		return report
+	}
+	state := s.room(artifactID)
+	state.mu.Lock()
+	if s.stopping.Load() {
+		state.mu.Unlock()
+		report.Skipped = "service stopping"
+		return report
+	}
+	state.mu.Unlock()
+
+	backfillCtx := withBackfillInjection(ctx)
+	slot := s.prepareSuppressedPersistence(artifactID)
+	origin := &identityClosureOrigin{}
+	var updates [][]byte
+	var mutationErr error
+	err := s.srv.Apply(backfillCtx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
+			if updateOrigin == origin {
+				updates = append(updates, append([]byte(nil), update...))
+			}
+		})
+		defer unsubscribe()
+		_, report.Stamped, mutationErr = ensureBlockIDsInDocument(doc, origin)
+	})
+	if errors.Is(err, websocket.ErrNoChanges) {
+		err = nil
+	}
+
+	if mutationErr != nil {
+		s.cancelSuppressedPersistence(artifactID, slot)
+		report.Err = fmt.Errorf("stamp document: %w", mutationErr)
+		return report
+	}
+	if err != nil {
+		s.cancelSuppressedPersistence(artifactID, slot)
+		report.Err = fmt.Errorf("open document: %w", err)
+		return report
+	}
+	if report.Stamped == 0 {
+		s.cancelSuppressedPersistence(artifactID, slot)
+		return report
+	}
+	update, err := mergeUpdates(updates)
+	if err != nil {
+		s.discardSuppressedPersistence(artifactID, slot)
+		s.failRoom(artifactID, err)
+		report.Err = fmt.Errorf("capture identity update: %w", err)
+		return report
+	}
+	if err := s.srv.BroadcastUpdate(backfillCtx, artifactID, update); err != nil {
+		s.discardSuppressedPersistence(artifactID, slot)
+		s.failRoom(artifactID, fmt.Errorf("broadcast identity update: %w", err))
+		report.Err = fmt.Errorf("broadcast identity update: %w", err)
+		return report
+	}
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		s.discardSuppressedPersistence(artifactID, slot)
+		s.failRoom(artifactID, err)
+		report.Err = fmt.Errorf("begin document transaction: %w", err)
+		return report
+	}
+	defer tx.Rollback(ctx)
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update); err != nil {
+		s.discardSuppressedPersistence(artifactID, slot)
+		s.failRoom(artifactID, err)
+		report.Err = fmt.Errorf("append identity update: %w", err)
+		return report
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.discardSuppressedPersistence(artifactID, slot)
+		s.failRoom(artifactID, err)
+		report.Err = fmt.Errorf("commit identity update: %w", err)
+		return report
+	}
+	s.finishSuppressedPersistence(slot, update)
+	return report
 }
 
 func (s *Service) waitSettles(ctx context.Context) {
@@ -530,8 +832,12 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 func (s *Service) failRoom(room string, cause error) {
 	state := s.room(room)
 	state.mu.Lock()
+	defer state.mu.Unlock()
+	s.failRoomLocked(room, state, cause)
+}
+
+func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	if state.failed != nil {
-		state.mu.Unlock()
 		return
 	}
 	state.failed = cause
@@ -541,7 +847,7 @@ func (s *Service) failRoom(room string, cause error) {
 	if state.settle != nil && state.settle.Stop() {
 		s.settleWG.Done()
 	}
-	state.mu.Unlock()
+	s.purgeSuppressedPersistence(room)
 	go func() {
 		_ = s.evictRoom(room, state)
 		close(done)

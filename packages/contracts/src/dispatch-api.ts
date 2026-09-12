@@ -152,6 +152,13 @@ export interface ArtifactApproval {
   readonly requested_by?: Actor;
 }
 
+export interface ArtifactBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly from: number;
+  readonly to: number;
+}
+
 export interface Version {
   readonly number: number;
   readonly named: boolean;

@@ -19,6 +19,7 @@ export interface FakeEditor {
   destroyed: boolean;
   focused: string[];
   markdown: string | undefined;
+  focusedBlocks: string[];
   options: EditorOptions;
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
@@ -67,6 +68,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     const editor: FakeEditor = {
       destroyed: false,
       focused: [],
+      focusedBlocks: [],
       markdown: undefined,
       options,
       readOnly: options.readOnly ?? false,
@@ -86,6 +88,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       destroy() {
         editor.destroyed = true;
+      },
+      focusBlock(blockId: string) {
+        editor.focusedBlocks.push(blockId);
       },
       focusMark(markId: string) {
         editor.focused.push(markId);
