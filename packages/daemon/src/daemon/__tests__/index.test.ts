@@ -1269,6 +1269,159 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("retries a boot probe whose launch died transiently, then boots once it passes", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let attempts = 0;
+    const sleeps: number[] = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          runner: async (command) => {
+            if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+            attempts += 1;
+            // The first two pi.agents probes: OMP printed its marker, then died under load.
+            if (attempts <= 2) {
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 1 };
+            }
+            return {
+              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          readPluginManifest: async () => validLegionPluginManifest,
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      // Two transient failures → two backoff sleeps, then the pass; the plugin probe adds one more
+      // sh call that passes first time.
+      expect(sleeps).toEqual([5_000, 15_000]);
+      expect(attempts).toBe(4);
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("does not retry a definitive pi.agents negative, and gives up after the last transient retry", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const baseDeps = {
+      loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
+      saveState: async () => {},
+      createNatsTransport: async () => {
+        throw new Error("NATS must not start after a failed OMP capability probe");
+      },
+      resolveDaemonEnvironment: async () => daemonEnvironment,
+      dispatchClient: fakeDispatchClient(),
+      readPluginManifest: async () => validLegionPluginManifest,
+      tokenManager: {
+        getToken: async () => ({
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        }),
+      },
+    };
+    try {
+      // Definitive: the probe extension loaded and reported no pi.agents. One attempt, no sleep.
+      let definitiveAttempts = 0;
+      const definitiveSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              definitiveAttempts += 1;
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=missing\n", exitCode: 1 };
+            },
+            sleep: async (ms) => {
+              definitiveSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents");
+      expect(definitiveAttempts).toBe(1);
+      expect(definitiveSleeps).toEqual([]);
+
+      // Also definitive: the launch command died before OMP ever loaded the probe extension (no
+      // marker at all) — e.g. the launch prefix's `secrets` denying a key. Never retried.
+      let prefixAttempts = 0;
+      const prefixSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              prefixAttempts += 1;
+              return {
+                stdout: "",
+                stderr: "secrets: ANTHROPIC_API_KEY: access denied\n",
+                exitCode: 1,
+              };
+            },
+            sleep: async (ms) => {
+              prefixSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents: secrets: ANTHROPIC_API_KEY: access denied");
+      expect(prefixAttempts).toBe(1);
+      expect(prefixSleeps).toEqual([]);
+
+      // Transient forever (marker present, OMP keeps dying): every retry is used, then fatal.
+      let transientAttempts = 0;
+      const transientSleeps: number[] = [];
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...baseDeps,
+            runner: async () => {
+              transientAttempts += 1;
+              return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 137 };
+            },
+            sleep: async (ms) => {
+              transientSleeps.push(ms);
+            },
+          },
+        })
+      ).rejects.toThrow("does not expose pi.agents");
+      expect(transientAttempts).toBe(6);
+      expect(transientSleeps).toEqual([5_000, 15_000, 45_000, 90_000, 180_000]);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig: DaemonConfig = {

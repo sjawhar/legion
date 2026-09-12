@@ -136,6 +136,44 @@ async function publishToEnvoy(
     throw new EnvoyPublishError(topic, response.status);
   }
 }
+/** Backoff between boot-probe attempts whose failure is transient: OMP reached the probe
+ * extension (its marker is in the output) and then exited non-zero — it died under host load (a
+ * contended `models.db`, a starved process), not because of what the probe asks. A non-zero exit
+ * with no marker is the launch command failing before OMP (e.g. `secrets` denying a key) and stays
+ * a definitive failure, as does a clean exit whose answer is negative. Twice on 2026-09-12 a disk storm turned one such
+ * exit into a daemon exit, and the supervisor's 1 s relaunch then added an OMP spawn per second
+ * to the load it was dying of. Bounded: after the last attempt the failure is fatal as before. */
+const PROBE_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000, 90_000, 180_000];
+
+interface ProbeOutcome {
+  readonly passed: boolean;
+  /** `true` when the failure is a definitive negative (retrying cannot change it). */
+  readonly definitive: boolean;
+  readonly detail: string;
+}
+
+/** Runs `attempt` until it passes, fails definitively, or exhausts `PROBE_RETRY_DELAYS_MS`;
+ * throws `makeError(detail)` in the two failing cases. Each transient failure is logged with the
+ * delay before the next try, so an operator watching the supervisor log sees the daemon waiting
+ * out host load instead of a silent stall. */
+async function retryBootProbe(
+  name: string,
+  attempt: () => Promise<ProbeOutcome>,
+  makeError: (detail: string) => Promise<Error>,
+  sleep: (ms: number) => Promise<void>
+): Promise<void> {
+  for (let i = 0; ; i++) {
+    const outcome = await attempt();
+    if (outcome.passed) return;
+    const delay = PROBE_RETRY_DELAYS_MS[i];
+    if (outcome.definitive || delay === undefined) throw await makeError(outcome.detail);
+    console.error(
+      `[legion] ${name} probe failed transiently (attempt ${i + 1}/${PROBE_RETRY_DELAYS_MS.length + 1}); retrying in ${delay / 1000}s${outcome.detail ? `: ${outcome.detail}` : ""}`
+    );
+    await sleep(delay);
+  }
+}
+
 /** `exec` in the built `sh -c` command below (both this probe and `verifyLegionPluginLoaded`'s)
  * replaces the shell process image with the launch prefix/OMP invocation instead of leaving it
  * as a child: on the runner's own timeout, only the `sh` process would otherwise be killed,
@@ -144,30 +182,42 @@ async function publishToEnvoy(
 async function verifyOmpAgentsCapability(
   ompInvocation: string,
   ompLaunchPrefix: readonly string[],
-  runner: CommandRunner
+  runner: CommandRunner,
+  sleep: (ms: number) => Promise<void>
 ): Promise<void> {
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-omp-probe-"));
   const probePath = path.join(probeDir, "probe.mjs");
   try {
     await writeFile(probePath, OMP_AGENTS_CAPABILITY_PROBE, "utf8");
-    const result = await runner([
-      "sh",
-      "-c",
-      `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
-      "sh",
-      probePath,
-    ]);
-    if (
-      result.exitCode === 0 &&
-      (result.stderr.includes(OMP_AGENTS_CAPABILITY_MARKER) ||
-        result.stdout.includes(OMP_AGENTS_CAPABILITY_MARKER))
-    ) {
-      return;
-    }
-
-    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-    throw new Error(
-      `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+    await retryBootProbe(
+      "OMP pi.agents",
+      async () => {
+        const result = await runner([
+          "sh",
+          "-c",
+          `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
+          "sh",
+          probePath,
+        ]);
+        const output = `${result.stderr}\n${result.stdout}`;
+        const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+        if (result.exitCode === 0 && output.includes(OMP_AGENTS_CAPABILITY_MARKER)) {
+          return { passed: true, definitive: false, detail };
+        }
+        // Transient only when OMP got as far as loading the probe extension (marker present) and
+        // then died. Everything else is an answer no retry changes: a clean exit without the
+        // marker, the extension reporting `missing`, or the launch command failing before OMP.
+        const transient =
+          result.exitCode !== 0 &&
+          output.includes(OMP_AGENTS_CAPABILITY_MARKER) &&
+          !output.includes("LEGION_OMP_AGENTS=missing");
+        return { passed: false, definitive: !transient, detail };
+      },
+      async (detail) =>
+        new Error(
+          `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+        ),
+      sleep
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });
@@ -207,54 +257,65 @@ async function verifyLegionPluginLoaded(
   ompInvocation: string,
   ompLaunchPrefix: readonly string[],
   runner: CommandRunner,
-  readPluginManifest: (manifestPath: string) => Promise<string>
+  readPluginManifest: (manifestPath: string) => Promise<string>,
+  sleep: (ms: number) => Promise<void>
 ): Promise<void> {
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-plugin-probe-"));
   const probePath = path.join(probeDir, "probe.mjs");
+  const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
   try {
     await writeFile(probePath, LEGION_LOAD_PROBE, "utf8");
-    const result = await runner([
-      "sh",
-      "-c",
-      `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --extension "$1" --json >/dev/null`,
-      "sh",
-      probePath,
-    ]);
-    if (
-      result.exitCode === 0 &&
-      (result.stderr.includes(LEGION_LOADED_MARKER) || result.stdout.includes(LEGION_LOADED_MARKER))
-    ) {
-      return;
-    }
-    if (result.exitCode !== 0) {
-      // The launch command itself (the configured `omp_launch_prefix` plus the OMP invocation)
-      // failed before reaching omp — e.g. `secrets` denying a key. That is a launch failure,
-      // not a plugin-registration problem, so it gets its own message: the plugin-disabled
-      // diagnosis below would send the operator to `omp plugin list` when the fix is the
-      // prefix/credential.
-      const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
-      const stderr = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
-      throw new Error(
-        `[legion] OMP launch probe failed (exit ${result.exitCode}) for launch command "${launchCommand}"${stderr ? `: ${stderr}` : ""}`
-      );
-    }
-    // exit 0, marker simply absent: the plugin is genuinely disabled or unregistered. The
-    // manifest read is a best-effort version hint for the error message only — it is not part
-    // of the pass/fail gate above.
-    const manifestPath = path.join(
-      getPluginsNodeModules(),
-      "@sjawhar",
-      "pi-legion-envoy",
-      "package.json"
-    );
-    const version = await readPluginManifest(manifestPath)
-      .then((raw) => {
-        const manifest: { readonly version?: string } = JSON.parse(raw);
-        return manifest.version;
-      })
-      .catch(() => undefined);
-    throw new Error(
-      `[legion] pi-legion-envoy${version ? ` ${version}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
+    let lastExitCode = 0;
+    await retryBootProbe(
+      "pi-legion-envoy load",
+      async () => {
+        const result = await runner([
+          "sh",
+          "-c",
+          `exec ${launchCommand} models --extension "$1" --json >/dev/null`,
+          "sh",
+          probePath,
+        ]);
+        lastExitCode = result.exitCode;
+        const output = `${result.stderr}\n${result.stdout}`;
+        if (result.exitCode === 0 && output.includes(LEGION_LOADED_MARKER)) {
+          return { passed: true, definitive: false, detail: "" };
+        }
+        // Transient only when omp loaded the plugin (marker present) and then died under load. A
+        // non-zero exit without the marker is the launch command (the configured
+        // `omp_launch_prefix` plus the OMP invocation) failing before or inside omp — e.g.
+        // `secrets` denying a key — a definitive launch failure with its own message below; the
+        // plugin-disabled diagnosis would send the operator to `omp plugin list` when the fix is
+        // the prefix/credential.
+        const transient = result.exitCode !== 0 && output.includes(LEGION_LOADED_MARKER);
+        return {
+          passed: false,
+          definitive: !transient,
+          detail: result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH),
+        };
+      },
+      async (detail) => {
+        if (lastExitCode !== 0) {
+          return new Error(
+            `[legion] OMP launch probe failed (exit ${lastExitCode}) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+          );
+        }
+        // exit 0, marker simply absent: the plugin is genuinely disabled or unregistered. The
+        // manifest read is a best-effort version hint for this message only — never part of the
+        // pass/fail gate, so a passing boot reads no manifest.
+        const pluginVersion = await readPluginManifest(
+          path.join(getPluginsNodeModules(), "@sjawhar", "pi-legion-envoy", "package.json")
+        )
+          .then((raw) => {
+            const manifest: { readonly version?: string } = JSON.parse(raw);
+            return manifest.version;
+          })
+          .catch(() => undefined);
+        return new Error(
+          `[legion] pi-legion-envoy${pluginVersion ? ` ${pluginVersion}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
+        );
+      },
+      sleep
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });
@@ -341,12 +402,20 @@ async function startDaemonLocked(
   if (config.dispatchToken !== undefined) {
     await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
   }
-  await verifyOmpAgentsCapability(environment.ompInvocation, config.ompLaunchPrefix, runner);
+  const probeSleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  await verifyOmpAgentsCapability(
+    environment.ompInvocation,
+    config.ompLaunchPrefix,
+    runner,
+    probeSleep
+  );
   await verifyLegionPluginLoaded(
     environment.ompInvocation,
     config.ompLaunchPrefix,
     runner,
-    deps.readPluginManifest
+    deps.readPluginManifest,
+    probeSleep
   );
   await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");
