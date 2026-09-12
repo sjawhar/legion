@@ -7,7 +7,7 @@
     "base": "main",
     "headSha": "5cfc35fa8c90989d2c569fae09126568baaae61f"
   },
-  "rebasedOnto": "main@origin 8f6fad367099 (chore: release pi-envoy v1.4.3) before any task started; the plan's base 7db2cd83 had moved (skills/legion-controller, skills/legion-architect, daemon index.ts among 89 files).",
+  "rebasedOnto": "main@origin e7a284f2 (after LEGION-18 #953 merged as d07086e1 and LEGION-22 #967 merged as 5c5c3013; LEGION-21 #962 still open, so state stays v24 and no tmux-runtime recipe was needed)",
   "commits": [
     {
       "change": "uvwstwxz",
@@ -107,19 +107,19 @@
     },
     {
       "task": "T11",
-      "deviation": "PR title is `feat(legion): the Legion controller runs as an attachable terminal session and merges pull requests itself (LEGION-16)` — the plan's title with a conventional-commit prefix.",
+      "deviation": "PR title is `feat(legion): the Legion controller runs as an attachable terminal session and merges pull requests itself (LEGION-16)` \u2014 the plan's title with a conventional-commit prefix.",
       "reason": "The repository's `pr-title` CI check (pr-and-main.yaml) requires `type(scope): summary` because squash merges use the PR title as the commit subject and the release workflows version from it; the plan's bare title failed that check on the first run."
     }
   ],
   "testerNotes": {
     "fixtureRoleThatReplacedPrQueue": "release-captain (packages/envoy/internal/store/kv_test.go TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim; packages/pi-envoy/extensions/envoy.test.ts role claim/switch tests). Arbitrary; nothing else references it.",
-    "runningTestsInsideALegionPane": "Two rig artifacts, neither this change's: (1) docs/solutions/legion/worker-pane-shell-gotchas.md section 2 — run the daemon suite with `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`; (2) NEW: the pane's own LEGION_TREE/LEGION_ROLE/LEGION_ISSUE/etc. leak into packages/pi-envoy/extensions/legion.test.ts (its afterEach restores the *original* env, which inside a pane already has LEGION_TREE, so `classifySession` throws `Legion session has both controller and tree launch markers`). Run pi-envoy tests as `env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p' | tr '\\n' ' ') -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`. CI is unaffected by both.",
+    "runningTestsInsideALegionPane": "Two rig artifacts, neither this change's: (1) docs/solutions/legion/worker-pane-shell-gotchas.md section 2 \u2014 run the daemon suite with `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`; (2) NEW: the pane's own LEGION_TREE/LEGION_ROLE/LEGION_ISSUE/etc. leak into packages/pi-envoy/extensions/legion.test.ts (its afterEach restores the *original* env, which inside a pane already has LEGION_TREE, so `classifySession` throws `Legion session has both controller and tree launch markers`). Run pi-envoy tests as `env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p' | tr '\\n' ' ') -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`. CI is unaffected by both.",
     "grantStacking": "The gotchas doc's `export`-shadowing function relies on calling `grant_release` after every call; a skipped release leaves the lock set and every later call keeps a stale grant (`jj git push` 403s with 'could not read Username'). A burst-detecting variant needs no release: it adopts the first `export LEGION_GRANT` after a >=2s gap since the previous one. Source this once: export() { case \"$1\" in LEGION_GRANT=*) local now=$EPOCHSECONDS; if [ -z \"${_lg_last:-}\" ] || [ $((now - _lg_last)) -ge 2 ]; then LEGION_GRANT=\"${1#LEGION_GRANT=}\"; builtin export LEGION_GRANT; fi; _lg_last=$now ;; *) builtin export \"$@\" ;; esac; }. Kept at /tmp/legion16-grant-trap.sh on this box.",
     "smokeRigNotRun": "scripts/smoke/up.sh was NOT run by the implementer. The shared rig ports (daemon 19370, NATS 14222) are held by LEGION-21's rig (`bun run .../legion-21/packages/daemon/src/cli/index.ts start sjawhar/24 --config /tmp/legion21-smoke/rig/legion.yaml`, state dir /tmp/legion21-smoke); up.sh refuses occupied ports. Coordinate with LEGION-21's worker or use SMOKE_DIR/NATS_PORT/ENVOY_PORT/LEGION_DAEMON_PORT overrides (README `## Start and stop`). Also needs the user-authenticated gh for SMOKE_BRANCH_PROTECTION.",
-    "testerScenarioOnThisBox": "Follow .legion/plan.json testerScenario.steps. Concretely: (1) `legion state --json | jq .controllerLocator` — expect tmuxSession/tmuxWindowId/tmuxPaneId/ompSessionFile and no socketPath/runtime fields from this branch; `tmux -L legion-<slug> capture-pane -p -t <paneId>` shows the OMP prompt; `pstree -a $(tmux -L legion-<slug> list-panes -t <paneId> -F '#{pane_pid}')` shows omp with no `--mode rpc`/`worker-shim`; `tmux ... send-keys -t <paneId> 'What project are you the controller for?' Enter`. (2) Resume: kill-pane, then wake the controller (create a Dispatch issue in SMOKE_PROJECT or POST /v1/messages/publish to notifications.role.legion-<slug>-controller on the listener); daemon log line is `[legion] resurrecting the controller legion-<slug>-controller by resuming OMP session <file>` and the new pane command carries `--resume=<file>`. Fresh start logs `[legion] starting the controller fresh: no OMP session file is recorded`. (3) READY shape the controller expects: first line `READY #<n> at <sha> for <KEY> (<pr url>)`, then the PR body's gate facts. The controller finds the architect topic via `legion state --json` issues[KEY].parent chain. It publishes NOTHING after a successful merge; `pr-merged` on the architect topic comes from the daemon's webhook reducer. (4) Negative CLI control from any phase-worker pane: `legion gh -- pr merge <n> --squash` → exit 1, message `this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller`; daemon log shows the 403 on /legion/v1/gh-token; gh never spawned. (5) Checkpoint 13 unchanged.",
-    "stateVersionCollisionWithLegion21": "LEGION-21's running rig daemon serves state `version: 24` with `controllerLocator.runtime: \"tmux\"` — its unpushed work also bumps the state to v24 (its pushed branch is still v23). Whichever of LEGION-16/LEGION-21 merges second must renumber its migration (v24→v25) and rebase; this branch's migrateV23State strips controllerLocator.socketPath. Reported to the architect. AGREED RULE (LEGION-16 architect with LEGION-21 architect, 2026-09-12T07:20Z): whichever pull request merges second rebases and renumbers its migration to 24->25; if LEGION-21 lands first, this branch's migrateV23State becomes migrateV24State, strips socketPath, and leaves their runtime field untouched. Tester and reviewer need not re-raise it.",
-    "rebaseRecipeIfLegion21LandsFirst": "From the LEGION-16 architect (2026-09-12T07:21Z), relayed from LEGION-21's architect. LEGION-21 (runtime boundary) is PR #962 https://github.com/sjawhar/legion/pull/962, already pushed at state v24 and in its testing phase, so it will most likely merge before #961. Its migrations are independent of ours but the CODE is not: on that branch the controller's spawn, stop, and probe no longer live in processes.ts. spawnController there only builds the environment and inner command and calls runtime.spawn(\"controller\", spec); the tmux-specific controller branch in a new file, runtime-tmux.ts (TmuxRuntime.spawn), is what does prepareSocket, the worker-shim wrapping, and openWindow; markControllerReady reaches the socket through ProcessManager.clientFor -> runtime.connect(locator), which throws 'tmux locator <window> has no shim socket' when socketPath is absent (caught and logged). Recipe once #962 is on main (check with `legion gh -- pr view 962 --json state,mergedAt`): (1) rebase legion/LEGION-16 onto main; (2) our 'controller is not shimmed' change moves into runtime-tmux.ts's controller branch and to the connect/stop call sites, not the old processes.ts sites; markControllerReady and clientFor's controller path go away as before; the pane-kill stop path is whatever their runtime's stop branch is when no socket exists; (3) keep their shared Locator union (a z.discriminatedUnion on a `runtime` field; the tmux member already has tmuxPaneId and socketPath optional, so a controller locator without socketPath already parses) instead of a separate controller schema; their api/state.ts redactLocator already strips socketPath from every projected locator, so T3's state.ts step reduces to carrying ompSessionFile through; (4) renumber our migration to migrateV24State (v24 -> v25) and re-fixture its test: it strips socketPath and leaves their runtime field intact; (5) their branch adds a daemon/plugin version handshake — LEGION_DAEMON_API_VERSION in packages/contracts/src/legion-daemon-api.ts and legion.daemonApiVersion in packages/pi-envoy/package.json must be bumped together whenever LegionDaemonApi's shape changes, or the daemon refuses to boot against the installed plugin. #961 changes that shape (controllerLocator gains ompSessionFile on /state, /controller/ready gains ompSessionFile, /grants gains the controller form, /gh-token and /git-credential gain merge), so bump both together in the same commit and say so in the PR body's opening paragraph in plain English: the installed pi-envoy plugin must be released at the matching version before a daemon built from this change will boot. A rebase after review changes the head and the issue goes back through tester and reviewer; that is expected, not a defect. #962 had NOT merged when this handoff was written; whichever of tester, reviewer, or the implementer-again is active when it lands performs this recipe.",
-    "goTestsOnThisBox": "Full `go list ./... | grep -v /integration | xargs go test` on this heavily loaded box: internal/dispatch/pmdoc needs `bun install --frozen-lockfile` in packages/envoy/internal/dispatch/pmdoc/gen first (CI does this; then green). internal/bus, internal/cistore, internal/store each failed ONE NATS-testcontainer test per run, a different one every run (TestCoreSubscriptionRestoresAfterConnectionRecovery, TestRecordHeadAndHead, TestInterestReaper; then TestSubOK_AfterSubscribe, TestSummaryTickConcurrentExactlyOnce, TestWatch_PropagatesUpsert) with 'nats: no servers available'/'connection closed' — load, not this change. Every TestSetRole* test (the file this branch touches) passed in a targeted -v run. CI's envoy job is the authoritative Go run."
+    "testerScenarioOnThisBox": "Follow .legion/plan.json testerScenario.steps. Concretely: (1) `legion state --json | jq .controllerLocator` \u2014 expect tmuxSession/tmuxWindowId/tmuxPaneId/ompSessionFile and no socketPath/runtime fields from this branch; `tmux -L legion-<slug> capture-pane -p -t <paneId>` shows the OMP prompt; `pstree -a $(tmux -L legion-<slug> list-panes -t <paneId> -F '#{pane_pid}')` shows omp with no `--mode rpc`/`worker-shim`; `tmux ... send-keys -t <paneId> 'What project are you the controller for?' Enter`. (2) Resume: kill-pane, then wake the controller (create a Dispatch issue in SMOKE_PROJECT or POST /v1/messages/publish to notifications.role.legion-<slug>-controller on the listener); daemon log line is `[legion] resurrecting the controller legion-<slug>-controller by resuming OMP session <file>` and the new pane command carries `--resume=<file>`. Fresh start logs `[legion] starting the controller fresh: no OMP session file is recorded`. (3) READY shape the controller expects: first line `READY #<n> at <sha> for <KEY> (<pr url>)`, then the PR body's gate facts. The controller finds the architect topic via `legion state --json` issues[KEY].parent chain. It publishes NOTHING after a successful merge; `pr-merged` on the architect topic comes from the daemon's webhook reducer. (4) Negative CLI control from any phase-worker pane: `legion gh -- pr merge <n> --squash` \u2192 exit 1, message `this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller`; daemon log shows the 403 on /legion/v1/gh-token; gh never spawned. (5) Checkpoint 13 unchanged.",
+    "stateVersionCollisionWithLegion21": "LEGION-21's running rig daemon serves state `version: 24` with `controllerLocator.runtime: \"tmux\"` \u2014 its unpushed work also bumps the state to v24 (its pushed branch is still v23). Whichever of LEGION-16/LEGION-21 merges second must renumber its migration (v24\u2192v25) and rebase; this branch's migrateV23State strips controllerLocator.socketPath. Reported to the architect. AGREED RULE (LEGION-16 architect with LEGION-21 architect, 2026-09-12T07:20Z): whichever pull request merges second rebases and renumbers its migration to 24->25; if LEGION-21 lands first, this branch's migrateV23State becomes migrateV24State, strips socketPath, and leaves their runtime field untouched. Tester and reviewer need not re-raise it.",
+    "rebaseRecipeIfLegion21LandsFirst": "From the LEGION-16 architect (2026-09-12T07:21Z), relayed from LEGION-21's architect. LEGION-21 (runtime boundary) is PR #962 https://github.com/sjawhar/legion/pull/962, already pushed at state v24 and in its testing phase, so it will most likely merge before #961. Its migrations are independent of ours but the CODE is not: on that branch the controller's spawn, stop, and probe no longer live in processes.ts. spawnController there only builds the environment and inner command and calls runtime.spawn(\"controller\", spec); the tmux-specific controller branch in a new file, runtime-tmux.ts (TmuxRuntime.spawn), is what does prepareSocket, the worker-shim wrapping, and openWindow; markControllerReady reaches the socket through ProcessManager.clientFor -> runtime.connect(locator), which throws 'tmux locator <window> has no shim socket' when socketPath is absent (caught and logged). Recipe once #962 is on main (check with `legion gh -- pr view 962 --json state,mergedAt`): (1) rebase legion/LEGION-16 onto main; (2) our 'controller is not shimmed' change moves into runtime-tmux.ts's controller branch and to the connect/stop call sites, not the old processes.ts sites; markControllerReady and clientFor's controller path go away as before; the pane-kill stop path is whatever their runtime's stop branch is when no socket exists; (3) keep their shared Locator union (a z.discriminatedUnion on a `runtime` field; the tmux member already has tmuxPaneId and socketPath optional, so a controller locator without socketPath already parses) instead of a separate controller schema; their api/state.ts redactLocator already strips socketPath from every projected locator, so T3's state.ts step reduces to carrying ompSessionFile through; (4) renumber our migration to migrateV24State (v24 -> v25) and re-fixture its test: it strips socketPath and leaves their runtime field intact; (5) their branch adds a daemon/plugin version handshake \u2014 LEGION_DAEMON_API_VERSION in packages/contracts/src/legion-daemon-api.ts and legion.daemonApiVersion in packages/pi-envoy/package.json must be bumped together whenever LegionDaemonApi's shape changes, or the daemon refuses to boot against the installed plugin. #961 changes that shape (controllerLocator gains ompSessionFile on /state, /controller/ready gains ompSessionFile, /grants gains the controller form, /gh-token and /git-credential gain merge), so bump both together in the same commit and say so in the PR body's opening paragraph in plain English: the installed pi-envoy plugin must be released at the matching version before a daemon built from this change will boot. A rebase after review changes the head and the issue goes back through tester and reviewer; that is expected, not a defect. #962 had NOT merged when this handoff was written; whichever of tester, reviewer, or the implementer-again is active when it lands performs this recipe.",
+    "goTestsOnThisBox": "Full `go list ./... | grep -v /integration | xargs go test` on this heavily loaded box: internal/dispatch/pmdoc needs `bun install --frozen-lockfile` in packages/envoy/internal/dispatch/pmdoc/gen first (CI does this; then green). internal/bus, internal/cistore, internal/store each failed ONE NATS-testcontainer test per run, a different one every run (TestCoreSubscriptionRestoresAfterConnectionRecovery, TestRecordHeadAndHead, TestInterestReaper; then TestSubOK_AfterSubscribe, TestSummaryTickConcurrentExactlyOnce, TestWatch_PropagatesUpsert) with 'nats: no servers available'/'connection closed' \u2014 load, not this change. Every TestSetRole* test (the file this branch touches) passed in a targeted -v run. CI's envoy job is the authoritative Go run."
   },
   "filesChanged": [
     "AGENTS.md",
@@ -177,7 +177,7 @@
     },
     {
       "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
-      "outcome": "820 pass, 5 skip, 0 fail across 53 files (a prior run had one load-flaky tick-budget root-tree test fail — `promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees` — which passed 3/3 alone; the run before that flaked a different root-tree test the same way)"
+      "outcome": "820 pass, 5 skip, 0 fail across 53 files (a prior run had one load-flaky tick-budget root-tree test fail \u2014 `promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees` \u2014 which passed 3/3 alone; the run before that flaked a different root-tree test the same way)"
     },
     {
       "command": "cd packages/daemon && bun test --test-name-pattern controller",
@@ -201,7 +201,7 @@
     },
     {
       "command": "scripts/smoke/up.sh",
-      "outcome": "NOT RUN — rig ports held by LEGION-21's rig; left to the tester (see testerNotes.smokeRigNotRun)"
+      "outcome": "NOT RUN \u2014 rig ports held by LEGION-21's rig; left to the tester (see testerNotes.smokeRigNotRun)"
     }
   ],
   "schemaVersion": 1,
@@ -387,11 +387,11 @@
     "rebaseStatus": "LEGION-21's #962 and LEGION-18's #953 both still OPEN and unmerged at 17:58Z (legion gh -- pr view); main@origin 05e3e7e5 (chore: release pi-envoy v1.6.0) has not touched anything under this branch's files; no rebase.",
     "f1": {
       "cause": "The controller's `state.roles[controllerToken]` claim, written by `/controller/ready`, was never deleted by anything (only worker paths delete claims; identical on main). `retireAndRespawnStuckController` returns at `if (this.deps.state.roles[token]) return;` and `ensureController`'s alive branch cancels the deadline on the same test, so after a daemon's first controller registration every later incarnation's deadline saw a claim (the predecessor's) and did nothing: a resumed pane that died during boot was recovered only by the next resync probe (~2.5 min on the rig), and a resumed pane that hung alive would never have been recovered.",
-      "fixShape": "(a) — `spawnController` deletes the previous incarnation's `state.roles[controllerToken]` claim alongside `delete controllerLocator`, after the resume decision has succeeded and before `mintControllerCapability`. The new pane puts the claim back through `/controller/ready`, the only path that writes it, so the guard keeps its meaning ('the current pane registered').",
+      "fixShape": "(a) \u2014 `spawnController` deletes the previous incarnation's `state.roles[controllerToken]` claim alongside `delete controllerLocator`, after the resume decision has succeeded and before `mintControllerCapability`. The new pane puts the claim back through `/controller/ready`, the only path that writes it, so the guard keeps its meaning ('the current pane registered').",
       "whyNotB": "(b) would compare the claim against a generation or session the deadline was armed for; the controller has neither a generation field nor a persisted expected session id, so (b) adds state to LegionState (another migration) for a comparison (a) makes unnecessary. (a) is one line and mirrors how `removeTreeWindow`/`retireWorkerLocator` already drop a claim when they retire a pane.",
-      "claimConsumersChecked": "Readers of the controller claim: `ensureController`'s alive branch and the deadline guard (the two this fixes), `index.ts` boot-time `controllerPendingNotices` drain (skips when no claim; `/controller/ready`'s `onControllerReady` drains them on the new pane's claim, so nothing is lost), `api/state.ts` redaction (projection only), and `/controller/ready` (the writer). Secret-file liveness (`liveSecretFiles`/`pruneSecretFiles`/`persist`) keys the controller's secret file off `controllerLocator`, never the claim, and `holdPaneSecret` covers the window between the locator delete and the fresh locator write — unchanged and still consistent with the route.",
+      "claimConsumersChecked": "Readers of the controller claim: `ensureController`'s alive branch and the deadline guard (the two this fixes), `index.ts` boot-time `controllerPendingNotices` drain (skips when no claim; `/controller/ready`'s `onControllerReady` drains them on the new pane's claim, so nothing is lost), `api/state.ts` redaction (projection only), and `/controller/ready` (the writer). Secret-file liveness (`liveSecretFiles`/`pruneSecretFiles`/`persist`) keys the controller's secret file off `controllerLocator`, never the claim, and `holdPaneSecret` covers the window between the locator delete and the fresh locator write \u2014 unchanged and still consistent with the route.",
       "takeoverInteraction": "A `/legion-claim-controller` session's claim is also deleted when the daemon pane is respawned; before this fix the new pane's `/controller/ready` overwrote that claim anyway (and the Envoy role claim is last-claim-wins), so a respawn superseding a takeover is not new behaviour.",
-      "tests": "Two added to processes.test.ts beside the corrective-pass pair, both seeded with a registered first incarnation (`state.roles[controllerToken] = {role:\"controller\", sessionId:\"ses-incarnation-1\"}`) and its dead pane: (1) `resurrects a resumed controller whose pane died before re-claiming once the registration deadline fires, ignoring the previous incarnation's claim` — the resume of incarnation 2 leaves no claim, incarnation 2 dies during boot, the deadline fires, incarnation 3 is spawned with `--resume=<file>` and no kill-pane; (2) `kills a resumed controller pane that stays alive without re-claiming once the registration deadline fires, then resumes the same transcript` — incarnation 2 stays alive unclaimed, the deadline kills exactly pane %2, incarnation 3 is spawned with `--resume=<file>`. Both failed before the fix (stale claim survived; nothing killed) and pass after.",
+      "tests": "Two added to processes.test.ts beside the corrective-pass pair, both seeded with a registered first incarnation (`state.roles[controllerToken] = {role:\"controller\", sessionId:\"ses-incarnation-1\"}`) and its dead pane: (1) `resurrects a resumed controller whose pane died before re-claiming once the registration deadline fires, ignoring the previous incarnation's claim` \u2014 the resume of incarnation 2 leaves no claim, incarnation 2 dies during boot, the deadline fires, incarnation 3 is spawned with `--resume=<file>` and no kill-pane; (2) `kills a resumed controller pane that stays alive without re-claiming once the registration deadline fires, then resumes the same transcript` \u2014 incarnation 2 stays alive unclaimed, the deadline kills exactly pane %2, incarnation 3 is spawned with `--resume=<file>`. Both failed before the fix (stale claim survived; nothing killed) and pass after.",
       "docs": "The daemon AGENTS.md controller bullet now states the claim deletion, that `/controller/ready` is the only writer, and that the deadline sentence holds 'whichever incarnation the pane is'."
     },
     "f2": "Not addressed here, per the architect: the bash-hook grant-stacking bug (LEGION-12's class) also hits the controller TUI; evidence is with LEGION-12's architect. No workaround added to the skill or extension.",
@@ -434,7 +434,93 @@
       }
     ],
     "pullRequestHold": "No new pull request opened; pushed to the existing legion/LEGION-16 branch of PR #961.",
-    "testerNote": "Both F1 scenarios should now hold on the rig without editing state.json: kill a registered controller pane, let the daemon resume it, then either kill the respawn during boot (expect `resurrecting the controller … by resuming OMP session <file>` at the 60 s deadline with `--resume=<file>`) or let it hang alive without claiming (expect kill-pane at the deadline, then the same resume, and the claim back under the same session id once the resumed OMP posts /controller/ready).",
+    "testerNote": "Both F1 scenarios should now hold on the rig without editing state.json: kill a registered controller pane, let the daemon resume it, then either kill the respawn during boot (expect `resurrecting the controller \u2026 by resuming OMP session <file>` at the 60 s deadline with `--resume=<file>`) or let it hang alive without claiming (expect kill-pane at the deadline, then the same resume, and the claim back under the same session id once the resumed OMP posts /controller/ready).",
     "completedAt": "2026-09-12T18:06:49.516496Z"
+  },
+  "fourthPass": {
+    "completedAt": "2026-09-12T19:12:03.322623+00:00",
+    "review": "reviewer round 2 at head df664670 (session 01a09624-3c98-7000-b194-fc1294ffbd20): 1 blocker, 6 should-fixes, 8 batched nits, PR-body items",
+    "reviewedHead": "df6646704ceabe90cff1a23fbe4927fb05ab0f07",
+    "newHead": "457d96d7ae336656d0fcd307d3fda598713b85de",
+    "newHeadSource": "GitHub's own headRefOid from `legion gh -- pr view 961 --json headRefOid` after the push, not a locally computed sha",
+    "rebase": {
+      "onto": "main@origin e7a284f2",
+      "conflicts": [
+        "packages/daemon/src/daemon/AGENTS.md: kept main's /issues/status row and this branch's /grants row",
+        "packages/daemon/src/cli/index.ts: kept both imports (MERGE_AUTHORITY_REFUSED from this branch, boot-probes from main)"
+      ],
+      "fallout": "packages/daemon/src/daemon/__tests__/worker-stream-e2e.test.ts carried a `markControllerReady: inert` stub for a method main no longer has; removed and squashed into the T3 commit (ozxuqqyn)",
+      "rebasedHeadPushed": "7025860dde6d (CI green there before the fix commits landed)"
+    },
+    "gateDesign": {
+      "threeShas": "verified (what the PR body's Verification block's CI, Thermo, E2E lines agree on), approved (the reviewer's head-pinned approval, carried in READY), current (the head, carried in READY)",
+      "compares": {
+        "verified...approved": "only deletions under .legion/ \u2192 failed gate name `cleanup changed more than .legion`",
+        "approved...current": "only changes under docs/solutions/ \u2192 failed gate name `head moved beyond retro`"
+      },
+      "approvalPromiseDeleted": "architect decision: the controller does not verify review approval; the repository's branch protection does at merge time. reviewDecision dropped from the gate-1 command.",
+      "checksRule": "`gh pr checks --required` never returns an empty list; exit 1 with `no checks reported\u2026`/`no required checks reported\u2026` = pending, never green. Verified live on #962. A repo requiring no checks is read from `gh api repos/<o>/<r>/rules/branches/<base>` (this repo returns lint, typecheck, test).",
+      "mergePin": "legion gh -- pr merge <pr url> --squash --match-head-commit <current sha>; flag confirmed present in the pinned gh 2.98.0"
+    },
+    "findingsToCommits": [
+      {
+        "thread": 3997185401,
+        "finding": "blocker: gate 6 unpassable under the real review flow",
+        "commit": "bf9fbc9fe11e"
+      },
+      {
+        "thread": 3997185402,
+        "finding": "(a) transcript lost if launch fails after the deletes",
+        "commit": "70054ae75c01",
+        "shape": "reviewer's proposal: resolve resume \u2192 hold secret \u2192 mint \u2192 openWindow \u2192 atomic locator swap + claim delete + save; failed-launch test replaces the union test"
+      },
+      {
+        "thread": 3997185405,
+        "finding": "(b) `--required` empty-list false green",
+        "commit": "bf9fbc9fe11e"
+      },
+      {
+        "thread": 3997185408,
+        "finding": "(c) approval promise no gate performs",
+        "commit": "bf9fbc9fe11e",
+        "resolution": "promise deleted per architect, not a gate added"
+      },
+      {
+        "thread": 3997185410,
+        "finding": "(d) uppercase token example in merger.md; 'escapes other characters'",
+        "commit": "bf9fbc9fe11e + 457d96d7ae33",
+        "note": "LEGION-18's drift guard requires the closing paragraph identical across all six role prompts, so all six and the architect skill's bullet moved together; skills/legion-worker/SKILL.md:26 untouched under constraint A"
+      },
+      {
+        "thread": 3997185413,
+        "finding": "(e) merge does not pin the head",
+        "commit": "bf9fbc9fe11e"
+      },
+      {
+        "thread": 3997185417,
+        "finding": "(f) session-change re-claim skips the subagent guard",
+        "commit": "46d64565857f"
+      },
+      {
+        "thread": 3997185424,
+        "finding": "batched nits 1-8",
+        "commit": "1,2,3,4,6 \u2192 70054ae75c01; 5,8 \u2192 bf9fbc9fe11e; 7 \u2192 46d64565857f"
+      }
+    ],
+    "threadReplies": "Eight replies posted, one per thread, plain English, none resolved (the reviewer resolves on re-review): reply ids 3997253857, 3997253909, 3997253961, 3997254025, 3997254116, 3997254172, 3997254248, 3997254327. All carry this session's footer.",
+    "footerRepair": {
+      "rootCause": "/tmp/legion16-post-replies.sh built the footer with $'\u2026' (ANSI-C quoting), which does not expand $LEGION_REPLY_SESSION \u2014 the fourteen round-1 replies were posted with session \"\". Not the export shadow suspected earlier (declare -p showed the variable bound).",
+      "fix": "footer built with printf; the fourteen round-1 reply comments (3996849553, 3996849620, 3996849679, 3996849734, 3996850083, 3996850132, 3996850173, 3996850225, 3996850272, 3996850554, 3996850626, 3996850660, 3996850707, 3996850739) were edited in place via PATCH repos/sjawhar/legion/pulls/comments/<id> to carry session 01a09442-1aad-7000-ab33-0f2a2e33ba9f"
+    },
+    "verificationCommandsRun": [
+      "packages/daemon: bunx biome check --error-on-warnings src/ (clean); bunx tsc --noEmit (exit 0); env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test \u2192 876 pass, 5 skip, 0 fail (881 across 56 files); --test-name-pattern controller \u2192 52 pass",
+      "packages/contracts: tsc exit 0; biome clean; bun test \u2192 97 pass",
+      "packages/pi-envoy: tsc exit 0; biome lint clean; bun test \u2192 139 pass (the LEGION-18 drift guard failed at 138/1 before commit 457d96d7 and passes after)",
+      "grep -rn pr-queue skills packages docs --exclude-dir=plans \u2192 empty",
+      "constraint A: jj diff main@origin..@ -- skills/legion-worker/SKILL.md \u2192 exactly one hunk @@ -260,10 +260,14 @@",
+      "CI at 457d96d7: Tests run 34713263271 \u2014 lint, typecheck, test all success (https://github.com/sjawhar/legion/actions/runs/34713263271)"
+    ],
+    "pullRequestHold": "still in force: no new pull request opened anywhere; pushed to legion/LEGION-16 only",
+    "prBodyUpdated": "CI line names run 34713263271 at 457d96d7; Threads line dispositions all 22 threads with fixing commits; E2E is the tester's field (previous evidence at df666470 summarized, re-run pending); Fast-follow none; Chain not stacked"
   }
 }
