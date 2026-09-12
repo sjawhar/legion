@@ -166,6 +166,43 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 	}
 }
 
+func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	legacyConn := testnats.Connect(t, uri)
+	t.Cleanup(legacyConn.Close)
+	legacyJS, err := legacyConn.JetStream()
+	if err != nil {
+		t.Fatalf("open legacy JetStream: %v", err)
+	}
+	legacyConfig := *streamCfg
+	legacyConfig.Duplicates = 0
+	if _, err := legacyJS.AddStream(&legacyConfig); err != nil {
+		t.Fatalf("create legacy stream: %v", err)
+	}
+
+	client, err := Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect and migrate stream: %v", err)
+	}
+	t.Cleanup(client.Close)
+	info, err := client.JS().StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read migrated stream: %v", err)
+	}
+	if info.Config.Duplicates != 72*time.Hour {
+		t.Fatalf("stream duplicate window = %s, want 72h", info.Config.Duplicates)
+	}
+}
+
 func TestEnsureStreamWithConfigPurgesLegacyRoleMessages(t *testing.T) {
 	oldConfig := *streamCfg
 	oldConfig.Subjects = []string{"notifications.>"}

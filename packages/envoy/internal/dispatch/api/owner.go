@@ -10,10 +10,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// owner identifies the issue or unlinked artifact that owns collaboration.
+// owner identifies the issue, unlinked artifact, or project that owns collaboration.
 type owner struct {
 	IssueKey   *string
 	ArtifactID *string
+	ProjectKey *string
 }
 
 func issueOwner(key string) owner {
@@ -24,12 +25,19 @@ func documentOwner(artifactID string) owner {
 	return owner{ArtifactID: new(artifactID)}
 }
 
+func projectOwner(key string) owner {
+	return owner{ProjectKey: new(key)}
+}
+
 func ownerOf(issueKey, artifactID *string) owner {
 	return owner{IssueKey: issueKey, ArtifactID: artifactID}
 }
 
 func (o owner) event(eventType string, actor model.Actor, payload any) model.Event {
-	return model.Event{IssueKey: o.IssueKey, ArtifactID: o.ArtifactID, Type: eventType, Actor: actor, Payload: payload}
+	return model.Event{
+		IssueKey: o.IssueKey, ArtifactID: o.ArtifactID, ProjectKey: o.ProjectKey,
+		Type: eventType, Actor: actor, Payload: payload,
+	}
 }
 
 func ownerForArtifact(artifact model.Artifact) owner {

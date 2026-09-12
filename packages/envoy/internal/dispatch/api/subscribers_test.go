@@ -400,7 +400,7 @@ func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testin
 	}
 }
 
-func TestUnsubscribeReturns502AndLeavesTheEventAndInterestIntactWhenTheListenerFails(t *testing.T) {
+func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempotently(t *testing.T) {
 	database := openEmptyTestStore(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
@@ -416,13 +416,66 @@ func TestUnsubscribeReturns502AndLeavesTheEventAndInterestIntactWhenTheListenerF
 	}
 
 	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "alice")
-	if strings.Contains(log.Body.String(), `"type":"subscription.removed"`) {
-		t.Fatalf("event log recorded subscription.removed despite the listener call failing: %s", log.Body.String())
+	if !strings.Contains(log.Body.String(), `"type":"subscription.remove_requested"`) {
+		t.Fatalf("event log did not record the durable unsubscribe command: %s", log.Body.String())
 	}
-
 	remaining := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/subscribers", nil, "alice")
 	if rows := decodeBody[[]map[string]any](t, remaining); len(rows) != 1 || rows[0]["session_id"] != "planner" {
 		t.Fatalf("subscribers after the failed unsubscribe = %#v, want \"planner\" still intact", rows)
+	}
+
+	listener.failUnsubscribe = false
+	retry := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/subscribers/planner", nil, "alice")
+	if retry.Code != http.StatusNoContent {
+		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	log = dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "alice")
+	if strings.Count(log.Body.String(), `"type":"subscription.removed"`) != 1 {
+		t.Fatalf("retry duplicated the durable unsubscribe command: %s", log.Body.String())
+	}
+}
+
+func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
+	database := openEmptyTestStore(t)
+	bootstrap := newSubscribersHandler(t, database, "")
+	key := createTestIssue(t, bootstrap, "TEST", "Issue")
+	topic := "notifications.dispatch.issue." + key + ".>"
+	envoyURL, listener := newFakeListener(t, map[string][]string{
+		"planner": {topic},
+	}, nil)
+	handler := newSubscribersHandler(t, database, envoyURL)
+
+	first := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/subscribers/planner", nil, "alice")
+	if first.Code != http.StatusNoContent {
+		t.Fatalf("first unsubscribe: status=%d body=%s", first.Code, first.Body.String())
+	}
+	listener.mu.Lock()
+	listener.interests["planner"] = []string{topic, topic}
+	listener.mu.Unlock()
+
+	second := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/subscribers/planner", nil, "alice")
+	if second.Code != http.StatusNoContent {
+		t.Fatalf("second unsubscribe: status=%d body=%s", second.Code, second.Body.String())
+	}
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "alice")
+	events := decodeBody[[]struct {
+		ID      int64  `json:"id"`
+		Type    string `json:"type"`
+		Payload struct {
+			RequestEventID int64 `json:"request_event_id"`
+		} `json:"payload"`
+	}](t, log)
+	var requested, completed []int64
+	for _, event := range events {
+		switch event.Type {
+		case "subscription.remove_requested":
+			requested = append(requested, event.ID)
+		case "subscription.removed":
+			completed = append(completed, event.Payload.RequestEventID)
+		}
+	}
+	if len(requested) != 2 || !reflect.DeepEqual(completed, requested) {
+		t.Fatalf("resubscribed removal command IDs: requested=%v completed=%v", requested, completed)
 	}
 }
 

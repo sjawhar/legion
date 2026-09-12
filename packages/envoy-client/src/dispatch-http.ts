@@ -70,18 +70,27 @@ export interface SearchOptions {
   readonly limit?: number;
 }
 
+export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
+
+function requestSignal(signal: AbortSignal | undefined): AbortSignal {
+  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
+  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
 /** JSON HTTP client for Dispatch's native-tool API. */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #creatingIssues = new Map<string, Promise<string>>();
+  readonly #signal: AbortSignal;
 
   constructor(
     baseUrl: string,
     readonly token: string,
-    readonly fetchImpl: typeof fetch = fetch
+    readonly fetchImpl: typeof fetch = fetch,
+    signal?: AbortSignal
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
+    this.#signal = requestSignal(signal);
   }
 
   async issue(input: CreateIssueInput): Promise<Issue> {
@@ -400,6 +409,7 @@ export class DispatchClient {
     const response = await this.fetchImpl(this.#url(path, query), {
       method,
       headers,
+      signal: this.#signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     return this.#response<T>(response);
@@ -410,6 +420,7 @@ export class DispatchClient {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
+      signal: this.#signal,
     });
     return this.#response<T>(response);
   }

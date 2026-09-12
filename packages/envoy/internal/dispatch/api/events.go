@@ -14,7 +14,7 @@ import (
 
 const maxSSEReplay = 1000
 
-const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
+const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
 	from events e
 	left join issues i on i.key = e.issue_key
 	left join artifacts ar on ar.id = e.artifact_id`

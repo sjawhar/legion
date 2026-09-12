@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
+import { queryKeys } from "../../api/query-keys";
 import type { ArtifactText, ArtifactVersionContent } from "../../api/types";
 import {
   borderDefault,
@@ -87,7 +88,7 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
   });
   const projectArtifact = useQuery({
     enabled: document !== undefined,
-    queryKey: ["project", document?.project, "artifact", document?.slug],
+    queryKey: queryKeys.projectArtifact(document?.project, document?.slug),
     queryFn: () => api.getProjectArtifact(document?.project ?? "", document?.slug ?? ""),
   });
   const artifact =
@@ -106,12 +107,12 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
   });
   const ask = useQuery({
     enabled: askId !== undefined,
-    queryKey: ["ask", askId],
+    queryKey: queryKeys.ask(askId),
     queryFn: () => api.getAsk(askId ?? ""),
   });
   const comment = useQuery({
     enabled: commentId !== undefined,
-    queryKey: ["comment", commentId],
+    queryKey: queryKeys.comment(commentId),
     queryFn: () => api.getComment(commentId ?? ""),
   });
   const markdown =

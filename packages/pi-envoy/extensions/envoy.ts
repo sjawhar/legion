@@ -889,7 +889,7 @@ export default function envoyExtension(pi: PiApi): void {
         label: spec.name,
         description: spec.description,
         parameters: dispatchToolSchema(spec, zodSchemaApi(pi.zod)),
-        execute: async (_id, params, _signal, _onUpdate, context) => {
+        execute: async (_id, params, signal, _onUpdate, context) => {
           try {
             const result = await executeDispatchTool({
               tool: spec.name,
@@ -899,6 +899,7 @@ export default function envoyExtension(pi: PiApi): void {
               sessionId: context.sessionManager.getSessionId(),
               sessionTitle: context.sessionManager.getSessionName?.(),
               config: currentDispatchConfig(),
+              signal,
               env: process.env,
             });
             return toolSuccess(result.text, result.details);

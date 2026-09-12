@@ -423,3 +423,37 @@ func TestReconnectHookRunsAfterReconnect(t *testing.T) {
 		t.Fatal("reconnect hook did not run")
 	}
 }
+
+func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	item := contracts.Envelope{
+		EventID:        "dispatch-42",
+		Source:         "dispatch",
+		SourceEventID:  "42",
+		Topic:          "notifications.dispatch.issue.TEST-1.ask.answered",
+		DedupeKey:      "dispatch-42",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "TEST-1 ask answered",
+		TraceID:        "dispatch-42",
+	}
+	if err := client.Publish(item); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if err := client.Publish(item); err != nil {
+		t.Fatalf("retry publish: %v", err)
+	}
+
+	info, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	if info.State.Msgs != 1 {
+		t.Fatalf("retained messages = %d, want one after a retry with the same destination", info.State.Msgs)
+	}
+}
