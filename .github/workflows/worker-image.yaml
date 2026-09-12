@@ -1,0 +1,208 @@
+name: Worker Image
+
+on:
+  workflow_call:
+    inputs:
+      cli_version:
+        description: Version the `cli` job released in this run (empty when it released nothing)
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: The cli-v* release to append the image digest to (empty when cli_version is empty)
+        type: string
+        required: false
+        default: ""
+  # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
+  workflow_dispatch:
+    inputs:
+      cli_version:
+        description: Optional CLI version to also tag the image with (main only)
+        type: string
+        required: false
+        default: ""
+      release_tag:
+        description: Optional cli-v* release to append the digest to (main only)
+        type: string
+        required: false
+        default: ""
+  # Pre-merge iteration: a branch push touching the image files builds and publishes :sha-<short> only.
+  push:
+    branches-ignore: [main]
+    paths:
+      - packages/daemon/docker/**
+      - packages/daemon/src/daemon/omp-pin.ts
+      - .github/workflows/worker-image.yaml
+
+permissions:
+  contents: write # gh release edit
+  packages: write # ghcr.io push
+  id-token: write # depot/setup-action OIDC; aws-actions/configure-aws-credentials OIDC
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
+    # behave identically for `workflow_call`, `workflow_dispatch`, and `push`.
+    concurrency:
+      group: worker-image-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      IMAGE: ghcr.io/sjawhar/legion-worker
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require the Depot project variable
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
+        run: |
+          if [ -z "$DEPOT_PROJECT_ID" ]; then
+            echo "::error::Repository variable DEPOT_PROJECT_ID is unset; the worker image builds on Depot and needs a project (root decision 3 on LEGION-19)."
+            echo "**Worker image not built** — repository variable \`DEPOT_PROJECT_ID\` is unset." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Compute tags
+        id: meta
+        env:
+          CLI_VERSION: ${{ inputs.cli_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          short="${GITHUB_SHA::12}"
+          tags="${IMAGE}:sha-${short}"
+          tag_release="false"
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$CLI_VERSION" ]; then
+            tags="${tags}"$'\n'"${IMAGE}:${CLI_VERSION}"
+            [ -n "$RELEASE_TAG" ] && tag_release="true"
+          fi
+          {
+            echo "short=$short"
+            echo "tag_release=$tag_release"
+            echo "version_label=${CLI_VERSION:-sha-$short}"
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: depot/setup-action@v1
+        id: depot
+        with:
+          oidc: true
+          # Pinned, not latest: a new depot CLI can briefly lag on one distribution channel and break
+          # the build (agent-c's experience with dl.depot.dev vs public.ecr.aws/depot/cli); bump deliberately.
+          version: "2.102.7"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: depot/build-push-action@v1
+        with:
+          project: ${{ vars.DEPOT_PROJECT_ID }}
+          context: .
+          file: packages/daemon/docker/worker.Dockerfile
+          # The OMP fork release ships linux-x64 (and darwin-arm64) only.
+          platforms: linux/amd64
+          push: true
+          lint: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Depot failure remedy
+        if: failure() && (steps.depot.outcome == 'failure' || steps.build.outcome == 'failure')
+        env:
+          DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
+        run: |
+          {
+            echo "### Worker image build failed"
+            echo
+            echo "If the log shows a Depot authentication / OIDC error: add a GitHub trust relationship for \`${GITHUB_REPOSITORY}\` on Depot project \`${DEPOT_PROJECT_ID}\` (Depot dashboard → project → Settings → Trust Relationships; https://depot.dev/docs/cli/authentication#oidc-trust-relationships), then re-run this run (\`gh run rerun ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY}\`) or push the branch again."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          test -n "$DIGEST"
+          {
+            echo "### Worker image"
+            echo
+            echo "\`${IMAGE}@${DIGEST}\`"
+            echo
+            echo "Tags:"
+            # shellcheck disable=SC2016 # literal backticks and a sed `$` anchor, no expansion wanted
+            printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
+            echo
+            echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Append digest to the CLI release
+        if: steps.meta.outputs.tag_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          if grep -q "$DIGEST" body.md; then
+            echo "Release $RELEASE_TAG already lists $DIGEST"
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+          printf '\n\n## Worker image\n\n`%s@%s`\n' "$IMAGE" "$DIGEST" >> body.md
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
+
+      - name: Decide ECR mirror
+        id: ecr
+        env:
+          AWS_ECR_PUBLISH_ROLE_ARN: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          missing=""
+          [ -n "$AWS_ECR_PUBLISH_ROLE_ARN" ] || missing="$missing AWS_ECR_PUBLISH_ROLE_ARN"
+          [ -n "$AWS_ECR_REGISTRY" ] || missing="$missing AWS_ECR_REGISTRY"
+          [ -n "$AWS_REGION" ] || missing="$missing AWS_REGION"
+          if [ -n "$missing" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            for v in $missing; do echo "ECR mirror skipped: $v unset" >> "$GITHUB_STEP_SUMMARY"; done
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.ecr.outputs.enabled == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Mirror to ECR
+        if: steps.ecr.outputs.enabled == 'true'
+        env:
+          ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          # Manifest copy by digest (agent-c's mechanism); the GHCR digest stays authoritative.
+          printf '%s\n' "$TAGS" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create --tag "${ECR_REGISTRY}/legion-worker:${tag##*:}" "${IMAGE}@${DIGEST}"
+          done
+          echo "Mirrored to \`${ECR_REGISTRY}/legion-worker\` with the same tags; the GHCR digest \`${DIGEST}\` remains authoritative." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ECR mirror failure note
+        if: failure() && steps.ecr.outputs.enabled == 'true' && steps.build.outcome == 'success'
+        run: |
+          echo "ECR mirror failed after the GHCR push succeeded. The GHCR digest above is authoritative; retry the mirror by re-running this run (\`gh run rerun ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY}\`) or pushing the branch again." >> "$GITHUB_STEP_SUMMARY"
