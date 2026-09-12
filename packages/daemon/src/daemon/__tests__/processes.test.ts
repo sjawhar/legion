@@ -7810,6 +7810,7 @@ describe("ProcessManager", () => {
     // a launch failure -- `spawnWorker`/`launchWorker` never write a claim for a tree that has
     // already started tearing down.
     expect(spawnResult).toBeInstanceOf(TreeClosingError);
+    expect(managedState.trees[root]?.status).toBe("closed");
     // No zombie claim was ever written for a tree that closed mid-launch, and the pane this
     // launch just opened was retired (killed), not left running unrecorded and forever
     // occupying a running-worker slot.
@@ -9836,12 +9837,27 @@ describe("ProcessManager", () => {
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
   });
 
-  const reissuedPaneCases: Array<[string, { pid: number; startTicks: number | undefined }]> = [
-    ["another process took the pane id", { pid: 777, startTicks: DEFAULT_START_TICKS }],
-    ["the same pid came back with a different start time", { pid: 12345, startTicks: 999_999 }],
+  // `observed` is what the pane itself reports, distinct from the recorded identity every case
+  // shares (pid 12345, start 4242): another pid; the same pid with its own start ticks; or, when
+  // the process vanished between `list-panes` and the read, an unreadable `/proc` entry -- the
+  // only observable fact that case has.
+  const reissuedPaneCases: Array<
+    [string, { pid: number; startTicks: number | undefined; observed: RegExp }]
+  > = [
+    [
+      "another process took the pane id",
+      { pid: 777, startTicks: DEFAULT_START_TICKS, observed: /pid 777/ },
+    ],
+    [
+      "the same pid came back with a different start time",
+      { pid: 12345, startTicks: 999_999, observed: /pid 12345 .*999999/ },
+    ],
     // Errors row 3: the process vanished between `list-panes` and the `/proc` read -- unknown
     // is never alive.
-    ["its /proc stat vanished after list-panes reported it", { pid: 12345, startTicks: undefined }],
+    [
+      "its /proc stat vanished after list-panes reported it",
+      { pid: 12345, startTicks: undefined, observed: /pid 12345 .*\/proc/ },
+    ],
   ];
   it.each(
     reissuedPaneCases
@@ -9899,7 +9915,7 @@ describe("ProcessManager", () => {
       paneStartTicks: DEFAULT_START_TICKS,
     });
     // Both identities side by side: what the pane reports now, and what the locator recorded.
-    expect(log).toMatch(new RegExp(`pid ${reissued.pid}`));
+    expect(log).toMatch(reissued.observed);
     expect(log).toMatch(/recorded pid 12345 start 4242/);
   });
 
@@ -10037,21 +10053,42 @@ describe("ProcessManager", () => {
 
   /** Shared by the two registration-deadline-on-a-reissued-pane tests below: a fake tmux whose
    * `list-panes` answers each launched pane with ITS OWN launched pid (so a freshly-recorded
-   * identity verifies) until the test reissues a pane id to another process. */
+   * identity verifies) until the test reissues a pane id to another process. `resurrected`
+   * settles on the `saveState` call that records the resurrected generation's fresh locator --
+   * the actual event those tests wait for. A tick-bounded `flushEventLoopUntil` guess would
+   * race `spawnRoot`'s real workspace/secret-file writes and time out under load instead. */
   function reissuablePanes(
+    state: LegionState,
+    resurrectedGeneration: number,
     commands: string[][],
     sessionExists: boolean
   ): {
     panes: Map<string, number>;
     windowCount: () => number;
     run: (command: string[]) => Promise<{ stdout: string; exitCode: number }>;
+    resurrected: Promise<void>;
+    saveState: () => Promise<void>;
   } {
     const panes = new Map<string, number>();
     let windows = 0;
     let hasSession = sessionExists;
+    const resurrected = Promise.withResolvers<void>();
     return {
       panes,
       windowCount: () => windows,
+      resurrected: resurrected.promise,
+      saveState: async () => {
+        const tree = state.trees[root];
+        const fresh = panes.get(tree?.locator?.tmuxPaneId ?? "");
+        if (
+          tree?.generation === resurrectedGeneration &&
+          tree.status === "active" &&
+          fresh !== undefined &&
+          tree.locator?.panePid === fresh
+        ) {
+          resurrected.resolve();
+        }
+      },
       run: async (command) => {
         commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: hasSession ? 0 : 1 };
@@ -10088,10 +10125,11 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const firstGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
-    const tmuxFake = reissuablePanes(commands, false);
+    const tmuxFake = reissuablePanes(state, 2, commands, false);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
+      saveState: tmuxFake.saveState,
       // Only the first armed deadline (generation 1) is under this test's control; the
       // resurrect's own fresh spawn arms a second deadline (generation 2), which must stay
       // pending so the assertions see exactly one retry cycle.
@@ -10122,7 +10160,7 @@ describe("ProcessManager", () => {
       // reissued), not the one this locator recorded.
       tmuxFake.panes.set("%1", 777);
       firstGate.resolve();
-      await flushEventLoopUntil(() => tmuxFake.windowCount() >= 2, 20_000);
+      await tmuxFake.resurrected;
     } finally {
       errors.mockRestore();
     }
@@ -10166,12 +10204,13 @@ describe("ProcessManager", () => {
     const sleepGate = Promise.withResolvers<void>();
     let sleepCalls = 0;
     const commands: string[][] = [];
-    const tmuxFake = reissuablePanes(commands, true);
+    const tmuxFake = reissuablePanes(state, 2, commands, true);
     // As a restart sees it: the recorded pane id is live, but it is some other role's OMP now.
     tmuxFake.panes.set("%1", 777);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
+      saveState: tmuxFake.saveState,
       sleep: async () => {
         sleepCalls += 1;
         if (sleepCalls === 1) {
@@ -10189,7 +10228,7 @@ describe("ProcessManager", () => {
     try {
       processes.reconnectRoots();
       sleepGate.resolve();
-      await flushEventLoopUntil(() => tmuxFake.windowCount() >= 1, 20_000);
+      await tmuxFake.resurrected;
     } finally {
       errors.mockRestore();
     }
@@ -10543,7 +10582,18 @@ describe("ProcessManager", () => {
     expect(claim.locator).toBeUndefined();
   });
 
-  it("ensureController gracefully stops, never kills, a controller locator whose pane id was reissued to another OMP process, then spawns a fresh controller", async () => {
+  /** A controller locator on pane `%1` recorded as pid 12345, where `%1` now reports pid 777;
+   * `new-window` hands out a fresh controller pane `@44`/`%3`/3333. `connectWorkerRpc` decides
+   * which `stopProcess` branch the stale controller's stop takes. */
+  async function reissuedControllerFixture(
+    connectWorkerRpc: ProcessManagerDeps["connectWorkerRpc"]
+  ): Promise<{
+    processes: ProcessManager;
+    state: LegionState;
+    commands: string[][];
+    socketPath: string;
+    run(): Promise<string>;
+  }> {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     const socketPath = path.join(stateDir, "workers", "controller.sock");
@@ -10554,21 +10604,10 @@ describe("ProcessManager", () => {
       socketPath,
       ...paneIdentity(12345),
     };
-    const shutdowns: string[] = [];
     const commands: string[][] = [];
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    let log = "";
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
-      connectWorkerRpc: async (connected) => {
-        const client = fakeWorkerRpcClient();
-        const shutdown = client.shutdown;
-        client.shutdown = () => {
-          shutdowns.push(connected);
-          shutdown();
-        };
-        return client;
-      },
+      connectWorkerRpc,
       run: async (command) => {
         commands.push(command);
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
@@ -10577,21 +10616,68 @@ describe("ProcessManager", () => {
         return { stdout: "", exitCode: 0 };
       },
     });
+    return {
+      processes,
+      state: managedState,
+      commands,
+      socketPath,
+      // Runs `ensureController` under a console.error spy and returns everything it logged.
+      async run() {
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          await processes.ensureController();
+          return errors.mock.calls.flat().join("\n");
+        } finally {
+          errors.mockRestore();
+        }
+      },
+    };
+  }
 
-    try {
-      await processes.ensureController();
-    } finally {
-      log = errors.mock.calls.flat().join("\n");
-      errors.mockRestore();
-    }
+  it("never kills a controller pane whose id was reissued to another OMP process when its recorded process is unreachable: the identity gate treats it as already gone, logs both identities, and a fresh controller spawns", async () => {
+    // The recorded controller's socket refuses, so its stop skips the graceful branch and falls
+    // straight through to the kill -- which only the identity gate stands in front of.
+    const fixture = await reissuedControllerFixture(async () => {
+      throw new Error("ECONNREFUSED");
+    });
 
-    // The recorded process was asked to shut down over its own (per-role) socket ...
-    expect(shutdowns).toEqual([socketPath]);
-    // ... but the pane wearing its id was never killed.
-    expect(commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
-    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    const log = await fixture.run();
+
+    expect(fixture.commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    const launch = fixture.commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
     expect(launch).toContain("controller");
-    expect(managedState.controllerLocator).toMatchObject({
+    expect(fixture.state.controllerLocator).toMatchObject({
+      tmuxWindowId: "@44",
+      tmuxPaneId: "%3",
+      panePid: 3333,
+      paneStartTicks: DEFAULT_START_TICKS,
+    });
+    expect(log).toMatch(/pid 777/);
+    expect(log).toMatch(/recorded pid 12345 start 4242/);
+  });
+
+  it("asks the recorded controller process to shut down over its own socket before replacing a locator whose pane id was reissued, spawning a fresh controller once it closes", async () => {
+    const shutdowns: string[] = [];
+    const fixture = await reissuedControllerFixture(async (connected) => {
+      const client = fakeWorkerRpcClient();
+      const shutdown = client.shutdown;
+      client.shutdown = () => {
+        shutdowns.push(connected);
+        shutdown();
+      };
+      return client;
+    });
+
+    const log = await fixture.run();
+
+    // The recorded process was asked to shut down over its own (per-role) socket and closed
+    // gracefully, so nothing was left for the kill gate to decide.
+    expect(shutdowns).toEqual([fixture.socketPath]);
+    expect(fixture.commands.some((c) => c[0] === "tmux" && c[3] === "kill-pane")).toBeFalse();
+    expect(fixture.commands.find((c) => c[0] === "tmux" && c[3] === "new-window")).toContain(
+      "controller"
+    );
+    expect(fixture.state.controllerLocator).toMatchObject({
       tmuxWindowId: "@44",
       tmuxPaneId: "%3",
       panePid: 3333,
