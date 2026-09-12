@@ -100,8 +100,9 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
 /** True when the forwarded `gh` argv would merge a PR: a `pr … merge` subcommand invocation (the
  * non-flag tokens contain `pr` followed later by `merge` — `gh pr merge`'s own flags like
  * `--repo <value>` insert extra non-flag tokens between them without changing the subcommand), or
- * a raw REST `gh api` call whose path token ends in `/merge`. No Legion worker role ever merges a
- * PR directly; the merge queue does that under its own PAT. */
+ * a raw REST `gh api` call whose path token ends in `/merge`. A merge invocation is redeemed with
+ * `merge: true`, which the daemon grants only to the controller's own grant; every phase-worker
+ * grant is refused server-side. */
 function isPrMergeInvocation(args: string[]): boolean {
   const positional = args.filter((arg) => !arg.startsWith("-"));
   const prIndex = positional.indexOf("pr");
@@ -109,17 +110,34 @@ function isPrMergeInvocation(args: string[]): boolean {
   return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
 }
 
-export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
-  if (isPrMergeInvocation(args)) {
-    throw new CliError("Legion workers never merge; publish READY to the merge queue");
+/** The `error` field of a daemon JSON error body, or undefined when the body is not one. */
+function daemonErrorReason(bodyText: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
+      const { error } = parsed;
+      if (typeof error === "string" && error.length > 0) return error;
+    }
+  } catch {
+    // Not JSON: no reason to surface beyond the status.
   }
+  return undefined;
+}
+
+export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
+  const merge = isPrMergeInvocation(args);
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) }),
   });
   if (!response.ok) {
-    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})`);
+    const reason = daemonErrorReason(await response.text());
+    const suffix = reason === undefined ? "" : `: ${reason}`;
+    if (merge && response.status === 403) {
+      throw new CliError(`this grant cannot merge; publish READY to the controller${suffix}`);
+    }
+    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})${suffix}`);
   }
   const payload = LegionDaemonApi.GitHubToken.response.safeParse(await response.json());
   if (!payload.success) {
