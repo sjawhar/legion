@@ -150,6 +150,15 @@ a {
   display: none;
 }
 
+/* The editor selection bar is fixed by the Proof library. When a compact review sheet opens,
+   moving the bar above the sheet's touch target leaves its close control usable while preserving
+   selection actions for a reader who continues reviewing the document. */
+@media (max-width: 1279px) {
+  body:has([data-testid="margin-sheet"][data-expanded="true"]) .dispatch-action-bar {
+    transform: translateY(-10rem);
+  }
+}
+
 ::highlight(dispatch-search) {
   background-color: #fee685; /* amber-200 */
   color: #0f172b; /* slate-900 */

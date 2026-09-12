@@ -41,6 +41,7 @@ topic and the removed session's agent topic directly; only the session the
 payload names renders it and drops the matching local NATS subscription
 (so the dead-connection recovery path does not resurrect it) — every other
 subscriber ignores it.
+`dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 
 ## Where to look
 

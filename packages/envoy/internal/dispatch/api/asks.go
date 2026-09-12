@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -233,6 +233,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
+		return
+	}
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask id must be a UUID")
 		return
 	}
 	if input.Question != nil {

@@ -76,10 +76,11 @@ Issue reads include `rank`, the server-owned ordering key used by project boards
 
 Architects create newly tracked child work with:
 ```ts
-dispatch_issue({ project, title, parent?, external?, spec?, force? })
+dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[] })
 ```
-It returns `details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is
-supplied, follow [Writing a spec](#writing-a-spec).
+`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. It returns
+`details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
+follow [Writing a spec](#writing-a-spec).
 
 ## Search first
 
@@ -188,7 +189,7 @@ Read the current document before changing it:
 dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks. `issue` with an omitted `artifact` reads the issue specification; a project needs
-`artifact`; and a `dispatch://PROJECT/artifact/<slug>` ref supplies both. Then write with:
+`artifact`; and a `dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
 
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, summary? })
@@ -266,7 +267,8 @@ Exactly one of `issue` and `project` is required. A project upload creates an un
 Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact`, `version`, and its
 write `topic`. Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
-artifact by the slug shown in the upload result or by its filename; the slug also arrives on `artifact.created` events.
+artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
+slug also arrives on `artifact.created` events.
 
 ## Messages
 
@@ -315,9 +317,9 @@ dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
 dispatch://KEY/message/<id>
-dispatch://PROJECT/artifact/<slug>[@vN]
-dispatch://PROJECT/artifact/<slug>/ask/<id>
-dispatch://PROJECT/artifact/<slug>/comment/<id>
+dispatch://PROJECT/artifact/<document-ref>[@vN]
+dispatch://PROJECT/artifact/<document-ref>/ask/<id>
+dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 ```
 
 A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records.

@@ -561,6 +561,7 @@ export interface CreateIssueInput {
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
+  readonly labels?: string[];
 
   readonly actor?: Actor;
 }
@@ -737,6 +738,7 @@ export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
+  labels: z.array(z.string()).optional(),
   status: z.string().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),

@@ -92,6 +92,7 @@ export interface ListIssuesOptions {
   status?: string;
   parent?: string;
   updated_since?: string;
+  labels?: string[];
 }
 
 export interface ListEventsOptions {
@@ -135,7 +136,15 @@ function pathWithQuery(path: string, values: object): string {
   const query = new URLSearchParams();
 
   for (const [key, value] of Object.entries(values)) {
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        query.append(key, item);
+      }
+    } else if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
       query.set(key, String(value));
     }
   }
@@ -215,7 +224,8 @@ export class DispatchApiClient {
   }
 
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
-    return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", options));
+    const { labels, ...query } = options;
+    return this.json<IssueSummary[]>(pathWithQuery("/api/v1/issues", { ...query, label: labels }));
   }
   search(
     query: string,
