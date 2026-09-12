@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, and a bash-bridge outage"
+title: "Worker-pane shell gotchas: stacked LEGION_GRANT exports and their 60-second lifetime, the pane's DISPATCH_URL in the daemon test suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, and a daemon outage blocking every bash call"
 category: legion
 tags:
   - legion
@@ -19,9 +19,14 @@ related_issues:
   - "sjawhar/legion#967"
   - "LEGION-18"
   - "sjawhar/legion#953"
+  - "LEGION-12"
+  - "LEGION-14"
+  - "sjawhar/legion#952"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete"
+  - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
   - "legion start --check-config > validates github_apps.<role>.private_key_command fails only inside a Legion pane"
+  - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
   - "legion handoff write: Handoff data field schemaVersion is not allowed"
@@ -29,14 +34,17 @@ symptoms:
   - "[handoff] Warning: phase recorded; no architect was live to receive the summary"
   - "envoy_publish: no holder for role legion-<project>-<KEY>-architect"
   - "bash tool: Unable to connect. Is the computer able to access the url?"
+  - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
 ---
 
 # Worker-Pane Shell Gotchas
 
 Things every phase worker on `sjawhar/legion` hits in a worker pane or on the smoke rig. Sections 1–3 are from
 LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first one); 4–6 and the §1 alternative are
-from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18. None is part of any issue's scope; §1 is
-filed as LEGION-12 and §7 as LEGION-29. Until they are fixed, these are the workarounds.
+from LEGION-22; 7–8 and the §1 per-call workaround are from LEGION-18; the 60-second grant lifetime in §1, the
+`packages/daemon` note in §2, and §9 are from LEGION-14, whose four workers hit §1–§3 again. None is part of any
+issue's scope; §1 is filed as LEGION-12 (a rig bug in the pi-envoy extension's tool-call hook) and §7 as LEGION-29.
+Until they are fixed, these are the workarounds.
 
 ## 1. Stacked `export LEGION_GRANT=…` lines: only the first per call redeems
 
@@ -72,6 +80,16 @@ grant_release() {
 End every command body with `; grant_release` so the next call's first grant is accepted. Verify a grant without
 side effects: `printf 'protocol=https\nhost=github.com\n' | LEGION_GRANT=<g> legion credential get` — a
 `username=…` line is good, `403` is stale.
+
+**Grants also expire 60 seconds after they are minted** (`GRANT_TTL_MS` in `packages/daemon/src/daemon/api.ts`), and
+the hook mints them at the start of the bash call, before your command runs. So a slow command ahead of the
+grant-consuming one can burn the whole lifetime: on LEGION-14, `jj bookmark set … && jj git push …` in one call, with
+the `bookmark set` taking about forty seconds on a loaded box, made the push's first credential-helper call return the
+same `Unable to redeem LEGION_GRANT (403)` even though the shadowing function above had correctly kept the first
+grant. (That particular push still landed on a later helper call; do not count on it.) Put the command that redeems
+the grant — `legion gh`, `jj git push`, `legion handoff complete`, `legion credential` — **first** in its bash call, or
+alone in one. The recipe in section 3 below puts the bookmark move and the push in the same call; on a loaded box, split
+them.
 
 Two observations for whoever fixes the hook: the count is per session, not per tool; and in this shell (bash
 5.2.37), inside a function, `builtin export "$@"` with an expanded `NAME=value` word returned 0 without binding the
@@ -119,6 +137,14 @@ sjawhar/legion#967 (`wxzknkyk`) made that `describe` scrub `LEGION_*`/`DISPATCH_
 `bun test packages/daemon` runs clean from a pane on branches that include it. On older branches the workaround is
 still `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, and say so in the handoff. The general rule stands: a CLI
 test that reaches `process.env` through a helper with no env seam will fail wherever the pane's env differs from CI's.
+
+Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
+`.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
+test script, and `bun test` from the repository root is not a CI entry point: it picks up every package, and the
+per-package `bunfig.toml` preloads do not apply from the root, so `packages/dispatch/web` fails by the hundreds with
+`document is not defined`, and the `pi-envoy` and `claude-envoy-bridge` suites fail with `ECONNREFUSED` for want of a
+live NATS broker. LEGION-14's tester spent a diagnosis cycle on 262 such failures, none in the changed package. When
+an assignment says "run the root suite", run the daemon package's suite and say which invocation you used.
 
 ## 3. `jj split` leaves the bookmark on the empty working copy
 
@@ -203,3 +229,29 @@ With that `env`, file edits and `jj split` commits behave exactly as from the pa
 commit still carries the `Omp-Session:` trailer and the role's bot author (verified on #953's four text commits, all
 made this way). What the kernel cannot do is redeem a grant — `legion gh`, `jj git push`, and `legion handoff complete`
 need the per-call `LEGION_GRANT` the bash hook injects — so queue those until the bridge returns.
+
+## 9. While the daemon's API is down, every bash tool call fails before your command runs
+
+Section 8's symptom has a specific cause worth knowing: the same tool-call hook that prepends the grant (section 1)
+must mint it from the daemon at `LEGION_DAEMON_URL` (`http://127.0.0.1:13370` on this rig) before the bash command
+starts. If the daemon is restarting — it did three times during LEGION-14's implement phase, unrelated to the branch
+under work, and was fully down for seventeen minutes — the hook fails and the tool returns `Unable to connect. Is the
+computer able to access the url?` for every bash call, whatever the command was. Nothing you type in the command
+changes that.
+
+What still works, and what to do:
+
+- **The `eval` tool and file tools are unaffected.** Probe the port from `eval` (`socket.connect(("127.0.0.1", 13370))`)
+  or start a supervised watcher through `hub` that polls the port and prints a marker when it opens, then `hub wait` on
+  that marker. Do not spin in a foreground loop.
+- **`legion handoff write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace), and neither does a
+  local `jj` commit. During the outage the implementer wrote its handoff through an `eval` subprocess carrying the
+  pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp` process (section 8's
+  recipe), plus the `JJ_CONFIG` overlay the extension adds at session start
+  (`<LEGION_STATE_DIR>/omp-attribution-<session-id>.toml`, which is what puts the `Omp-Session:` trailer on the
+  commit). Confirm the trailer matches an earlier commit of yours before relying on it.
+- **Anything that redeems a grant must wait**: pushing, `legion gh`, `legion handoff complete`. Grants minted before the
+  restart are gone with the old process's memory.
+- **Never restart, signal, or write to the daemon yourself.** It runs under a supervisor from
+  `/home/ubuntu/legion-ws-RunDaemon` and comes back on its own; it runs `main`, not your branch, so its restarts are
+  never evidence about your change.

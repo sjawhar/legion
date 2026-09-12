@@ -182,6 +182,93 @@ describe("runResync", () => {
     expect(dispatched).toHaveLength(1);
   });
 
+  it("does not report a queued root as zero-owner-tree while the admission cap is saturated", async () => {
+    const state = newLegionState("omp", 1);
+    const activeRoot: IssueKey = "LEGION-10";
+    const queuedRoots: IssueKey[] = ["LEGION-11", "LEGION-12"];
+    state.issues[activeRoot] = {
+      key: activeRoot,
+      title: "Admitted root",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[activeRoot] = {
+      root: activeRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    for (const key of queuedRoots) {
+      state.issues[key] = { key, title: `Queued root ${key}`, status: "todo", children: [] };
+      state.trees[key] = { root: key, generation: 0, status: "queued", launchFailures: 0 };
+    }
+    state.admission.active = [activeRoot];
+    state.admission.queue = [...queuedRoots];
+
+    const result = await runResync(resyncDeps(state));
+
+    expect(result.anomalies).toEqual([]);
+  });
+
+  it("reports a todo root whose tree is dead as zero-owner-tree", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = { key: issue, title: "Dead root", status: "todo", children: [] };
+    state.trees[issue] = { root: issue, generation: 2, status: "dead", launchFailures: 0 };
+
+    const result = await runResync(resyncDeps(state));
+
+    expect(result.anomalies).toEqual([
+      {
+        kind: "zero-owner-tree",
+        issue,
+        detail: 'Dispatch status "todo" has no active Legion tree',
+      },
+    ]);
+  });
+
+  it("reports a todo root queued for admission without a tree entry as zero-owner-tree", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Queue entry without a tree",
+      status: "todo",
+      children: [],
+    };
+    state.admission.queue = [issue];
+
+    const result = await runResync(resyncDeps(state));
+
+    expect(result.anomalies).toEqual([
+      {
+        kind: "zero-owner-tree",
+        issue,
+        detail: 'Dispatch status "todo" has no active Legion tree',
+      },
+    ]);
+  });
+
+  it("reports a todo root whose tree launch failed once, as launch-failed only", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = {
+      key: issue,
+      title: "Launch-failed root",
+      status: "todo",
+      children: [],
+    };
+    state.trees[issue] = {
+      root: issue,
+      generation: 3,
+      status: "launch-failed",
+      launchFailures: 3,
+    };
+
+    const result = await runResync(resyncDeps(state));
+
+    expect(result.anomalies).toEqual([
+      { kind: "launch-failed", issue, detail: "tree launch failed 3 times" },
+    ]);
+  });
+
   it("reconciles an unsettled red PR with failing check names", async () => {
     const state = newLegionState("omp", 1);
     trackIssue(state);
