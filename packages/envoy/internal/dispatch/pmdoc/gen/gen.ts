@@ -13,12 +13,13 @@ const corpus = join(here, "..", "testdata", "corpus");
 const out = join(here, "..", "testdata", "fixtures.json");
 const spliceOut = join(here, "..", "testdata", "splices.json");
 const check = process.argv.includes("--check");
+const blockSchema = JSON.parse(readFileSync(join(here, "..", "schema", "blocks.json"), "utf8"));
 
 const fixtures = [];
 for (const file of readdirSync(corpus).filter((f) => f.endsWith(".md")).sort()) {
   let blockNumber = 0;
   setBlockIdGenerator(() => `b-${String(++blockNumber).padStart(6, "0")}`);
-  const engine = await createHeadlessProof();
+  const engine = await createHeadlessProof({ blockSchema });
   const markdown = readFileSync(join(corpus, file), "utf8");
   const doc = engine.parseMarkdown(markdown);
   const ydoc = new Y.Doc();
@@ -35,7 +36,7 @@ for (const file of readdirSync(corpus).filter((f) => f.endsWith(".md")).sort()) 
 
 let spliceBlockNumber = 0;
 setBlockIdGenerator(() => `b-${String(++spliceBlockNumber).padStart(6, "0")}`);
-const engine = await createHeadlessProof();
+const engine = await createHeadlessProof({ blockSchema });
 
 // These are browser-oracle replaceRange cases. A single paragraph replacement
 // is sliced open to model Splice's inline paragraph replacement contract.

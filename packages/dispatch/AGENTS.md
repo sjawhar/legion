@@ -99,6 +99,14 @@ the connection and editor creation seams; happy-dom tests use its doubles from
 Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
+Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
+version for the session. It passes that schema to the live editor, historical-version editor, and
+the one headless Markdown engine cached per schema version; the connection carries it as
+`schema_version`. A server version mismatch admits the tab read-only and the surface shows
+`Reload to edit`. Typed blocks use `:::name{#block-id key="value"}` container directives. The server
+owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
+SPA must not invent node schemas or parse a second directive grammar.
+
 
 ## Commands
 

@@ -12,10 +12,11 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
-
+	"github.com/reearth/ygo/encoding"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
@@ -60,6 +61,109 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	config, ok := service.authorize(request)
 	if !ok || !config.ReadOnly {
 		t.Fatalf("cold closed room authorization = %#v, %t; want read-only acceptance", config, ok)
+	}
+}
+
+func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t *testing.T) {
+	for _, schemaVersion := range []string{"0", ""} {
+		t.Run(schemaVersion, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			request := httptest.NewRequest(
+				http.MethodGet,
+				"/ws/doc/"+artifactID+"?schema_version="+schemaVersion,
+				nil,
+			)
+			request.Header.Set("X-Dispatch-User", "alice")
+			request.SetPathValue("room", artifactID)
+			request = request.WithContext(
+				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}),
+			)
+
+			config, ok := service.authorize(request)
+			if !ok || !config.ReadOnly {
+				t.Fatalf(
+					"schema version %q authorization = %#v, %t; want read-only acceptance",
+					schemaVersion,
+					config,
+					ok,
+				)
+			}
+		})
+	}
+}
+
+func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
+	service, artifactID := newTestService(t)
+
+	mismatched, err := service.authorizeSchemaVersion(artifactID, "0")
+	if err != nil {
+		t.Fatalf("authorize mismatched schema version: %v", err)
+	}
+	if !mismatched.ReadOnly {
+		t.Fatalf("mismatched schema admission = %#v, want read-only", mismatched)
+	}
+
+	current, err := service.authorizeSchemaVersion(artifactID, fmt.Sprintf("%d", pmdoc.SchemaVersion()))
+	if err != nil {
+		t.Fatalf("authorize current schema version: %v", err)
+	}
+	if current.ReadOnly {
+		t.Fatalf("current schema admission = %#v, want read-write", current)
+	}
+}
+
+func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	auth := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(artifactID)
+		encoder.WriteVarUint(2) // Hocuspocus authentication message.
+		encoder.WriteVarUint(0) // Token authentication payload.
+		encoder.WriteVarString("0")
+	})
+	if err := connection.WriteMessage(gws.BinaryMessage, auth); err != nil {
+		t.Fatalf("send schema authentication: %v", err)
+	}
+
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		_, message, err := connection.ReadMessage()
+		if err != nil {
+			t.Fatalf("read schema authentication reply: %v", err)
+		}
+		decoder := encoding.NewDecoder(message)
+		if _, err := decoder.ReadVarString(); err != nil {
+			t.Fatalf("read Hocuspocus document name: %v", err)
+		}
+		kind, err := decoder.ReadVarUint()
+		if err != nil {
+			t.Fatalf("read Hocuspocus message kind: %v", err)
+		}
+		if kind != 2 {
+			continue
+		}
+		subtype, err := decoder.ReadVarUint()
+		if err != nil {
+			t.Fatalf("read Hocuspocus authentication subtype: %v", err)
+		}
+		scope, err := decoder.ReadVarString()
+		if err != nil {
+			t.Fatalf("read Hocuspocus authentication scope: %v", err)
+		}
+		if subtype != 2 || scope != "readonly" {
+			t.Fatalf("schema authentication = subtype %d scope %q, want authenticated readonly", subtype, scope)
+		}
+		return
 	}
 }
 

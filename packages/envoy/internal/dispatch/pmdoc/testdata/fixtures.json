@@ -128,6 +128,186 @@
     "rendered_by_milkdown": "> A nested quote paragraph.\n>\n> * quoted item\n> * second item\n"
   },
   {
+    "name": "callout-blocks",
+    "markdown": ":::callout{#callout-blocks-1 kind=\"note\" title=\"Body blocks\"}\nIntroduction.\n\n- Choice one\n- Choice two\n\n```text\nexample\n```\n\n> Quoted context.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "Body blocks",
+            "blockId": "callout-blocks-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Introduction."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Choice one"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Choice two"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": "text",
+                "blockId": "b-000007"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "example"
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000009"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Quoted context."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASgBAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECDUludHJvZHVjdGlvbi4oAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAQMLYnVsbGV0X2xpc3QHAAERAwlsaXN0X2l0ZW0HAAESAwlwYXJhZ3JhcGgHAAETBgQAARQKQ2hvaWNlIG9uZSgAARMHYmxvY2tJZAF3CGItMDAwMDA0KAABEgVsYWJlbAF3A+KAoigAARIIbGlzdFR5cGUBdwZidWxsZXQoAAESBnNwcmVhZAF5KAABEgdibG9ja0lkAXcIYi0wMDAwMDOHARIDCWxpc3RfaXRlbQcAASQDCXBhcmFncmFwaAcAASUGBAABJgpDaG9pY2UgdHdvKAABJQdibG9ja0lkAXcIYi0wMDAwMDYoAAEkBWxhYmVsAXcD4oCiKAABJAhsaXN0VHlwZQF3BmJ1bGxldCgAASQGc3ByZWFkAXkoAAEkB2Jsb2NrSWQBdwhiLTAwMDAwNSgAAREGc3ByZWFkAXkoAAERB2Jsb2NrSWQBdwhiLTAwMDAwMocBEQMKY29kZV9ibG9jawcAATgGBAABOQdleGFtcGxlKAABOAhsYW5ndWFnZQF3BHRleHQoAAE4B2Jsb2NrSWQBdwhiLTAwMDAwN4cBOAMKYmxvY2txdW90ZQcAAUMDCXBhcmFncmFwaAcAAUQGBAABRQ9RdW90ZWQgY29udGV4dC4oAAFEB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAUMHYmxvY2tJZAF3CGItMDAwMDA4KAABAARraW5kAXcEbm90ZSgAAQAFdGl0bGUBdwtCb2R5IGJsb2NrcygAAQAHYmxvY2tJZAF3EGNhbGxvdXQtYmxvY2tzLTEA",
+    "rendered_by_milkdown": ":::callout{#callout-blocks-1 kind=\"note\" title=\"Body blocks\"}\nIntroduction.\n\n* Choice one\n* Choice two\n\n```text\nexample\n```\n\n> Quoted context.\n:::\n"
+  },
+  {
+    "name": "callout",
+    "markdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "warning",
+            "title": "Read this",
+            "blockId": "callout-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Body text."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECCkJvZHkgdGV4dC4oAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMSgAAQAEa2luZAF3B3dhcm5pbmcoAAEABXRpdGxlAXcJUmVhZCB0aGlzKAABAAdibG9ja0lkAXcJY2FsbG91dC0xAA==",
+    "rendered_by_milkdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n"
+  },
+  {
+    "name": "code-directive-example",
+    "markdown": "```markdown\n::: {.callout}\n```\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": "markdown",
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "::: {.callout}"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQUBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBDjo6OiB7LmNhbGxvdXR9KAABAAhsYW5ndWFnZQF3CG1hcmtkb3duKAABAAdibG9ja0lkAXcIYi0wMDAwMDEA",
+    "rendered_by_milkdown": "```markdown\n::: {.callout}\n```\n"
+  },
+  {
     "name": "code-fence",
     "markdown": "````markdown\n```\nexample\n```\n````\n",
     "pm_json": {

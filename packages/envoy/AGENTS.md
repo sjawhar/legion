@@ -40,6 +40,21 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document.
 
+Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
+embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
+the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
+syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
+no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
+invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
+inside another block runs to that parent’s end. A typed block always renders its `blockId` and every
+declared attribute. Parsing mints an omitted id, while live document reads and writes validate every
+node against the schema's content rule.
+
+Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a
+content rule. Tightening content, removing or renaming a type or attribute, or requiring a new
+attribute requires a document migration and version bump. Server-owned attributes are not accepted
+from agents and are reasserted during settlement.
+
 ## Critical conventions
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.

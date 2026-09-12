@@ -252,15 +252,16 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 12 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 13 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
-  // and Conversation's live-agent query. The phone project (iphone) does not fetch
-  // the sidebar while its drawer is closed, so it uses 10. Asserted exactly (not a
+  // Conversation's live-agent query, and the one block-schema fetch every document
+  // surface shares for the session. The phone project (iphone) does not fetch the
+  // sidebar while its drawer is closed, so it uses 11. Asserted exactly (not a
   // ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 10 : 12);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 11 : 13);
 
   await alice.close();
 });

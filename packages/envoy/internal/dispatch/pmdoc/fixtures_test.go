@@ -73,11 +73,12 @@ func loadSpliceFixtures(t *testing.T) []spliceFixture {
 func TestFixturesAreWithinSchema(t *testing.T) {
 	fixtures := loadFixtures(t)
 	wantNames := []string{
-		"bare-url", "blockquote", "code-fence", "code", "emphasis", "empty", "escapes",
-		"explicit-url-space", "explicit-url-title", "footnote", "frontmatter", "headings", "hr",
-		"html", "image-delimiters", "image", "inline-code-backticks", "inline-code-spaces",
-		"link-delimiters", "links", "lists", "long", "marks", "nested-code", "ordered-list-prefixes",
-		"paragraphs", "softbreak", "table", "tasks", "unicode",
+		"bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
+		"code", "emphasis", "empty", "escapes", "explicit-url-space", "explicit-url-title",
+		"footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
+		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",
+		"marks", "nested-code", "ordered-list-prefixes", "paragraphs", "softbreak", "table", "tasks",
+		"unicode",
 	}
 	if len(fixtures) != len(wantNames) {
 		t.Fatalf("fixture count = %d, want %d", len(fixtures), len(wantNames))

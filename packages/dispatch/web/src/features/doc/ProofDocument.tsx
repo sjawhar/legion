@@ -1,3 +1,4 @@
+import type { HostBlockRenderer } from "@sjawhar/proof-editor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -12,7 +13,7 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, AuthenticatedUser, Version } from "../../api/types";
+import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import {
   secondaryButtonBorder,
   secondaryButtonDisabledText,
@@ -36,6 +37,7 @@ import type { Highlight } from "./highlight";
 import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import { DocumentRuntime } from "./runtime";
+import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
@@ -79,6 +81,32 @@ function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
     editor.view.dispatch(transaction);
   }
 }
+
+const renderTypedBlock: HostBlockRenderer = (node) => [
+  "section",
+  {
+    class: `proof-typed-block proof-typed-block-${node.type.name}`,
+    "data-proof-block-type": node.type.name,
+  },
+  [
+    "header",
+    { "data-proof-block-summary": "" },
+    ["span", { "data-proof-block-name": "" }, node.type.name],
+    [
+      "dl",
+      { "data-proof-block-attributes": "" },
+      ...Object.entries(node.attrs).flatMap(([name, value]) => [
+        ["dt", {}, name],
+        [
+          "dd",
+          { "data-proof-block-attribute": name },
+          Array.isArray(value) ? JSON.stringify(value) : String(value),
+        ],
+      ]),
+    ],
+  ],
+  ["div", { "data-proof-block-content": "" }, 0],
+];
 
 interface SearchHighlightSupport {
   readonly CSS?: {
@@ -186,14 +214,16 @@ export function ProofDocument({
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
+  const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [dispatchLinkRoutes, setDispatchLinkRoutes] = useState<
     { reference: string; route: DispatchReferenceRoute }[]
   >([]);
+  const { blockSchema: runtimeBlockSchema, connect, createEditor } = useContext(DocumentRuntime);
   const navigate = useNavigate();
-  const { connect, createEditor } = useContext(DocumentRuntime);
   const {
     composeForMark,
     focusItemForMark,
@@ -213,6 +243,11 @@ export function ProofDocument({
   setMarkPlacementsRef.current = setMarkPlacements;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
+  const blockSchemaQuery = useQuery({
+    queryFn: loadBlockSchema,
+    queryKey: ["block-schema"],
+    staleTime: Number.POSITIVE_INFINITY,
+  });
   const artifactQuery = useQuery({
     queryKey: ["artifact", artifact.id],
     queryFn: () => api.getArtifact(artifact.id),
@@ -254,6 +289,7 @@ export function ProofDocument({
     [artifactQuery.data?.versions, artifact.versions]
   );
   isClosedRef.current = isClosed;
+  const blockSchema: BlockSchema | undefined = runtimeBlockSchema ?? blockSchemaQuery.data;
   userRef.current = user;
 
   const requestNamedVersion = useCallback(() => {
@@ -289,6 +325,9 @@ export function ProofDocument({
   }, [onToolbarChange]);
 
   useEffect(() => {
+    if (blockSchema === undefined) {
+      return;
+    }
     const parent = root.current;
     if (parent === null) {
       return;
@@ -303,7 +342,15 @@ export function ProofDocument({
     };
     setConnection("connecting");
     setDispatchLinkRoutes([]);
+    schemaReadOnlyRef.current = false;
+    setSchemaReadOnly(false);
     const document = connect(artifact.id, {
+      schemaVersion: blockSchema.version,
+      onAdmission: (readOnly) => {
+        schemaReadOnlyRef.current = readOnly;
+        setSchemaReadOnly(readOnly);
+        editor?.setReadOnly(isClosedRef.current || readOnly);
+      },
       onStatus: setConnection,
       onSynced: () => {
         if (synced) {
@@ -346,11 +393,13 @@ export function ProofDocument({
           },
           onMarkClick: (markId) => focusItemForMarkRef.current(markId),
           onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
-          readOnly: isClosedRef.current,
+          readOnly: isClosedRef.current || schemaReadOnlyRef.current,
+          renderBlock: renderTypedBlock,
           user: {
             color: colorForLogin(userRef.current.login),
             name: userRef.current.login,
           },
+          blockSchema,
           ydoc: document.doc,
         }).then((handle) => {
           if (!mounted) {
@@ -438,10 +487,10 @@ export function ProofDocument({
         delete inspectionWindow.__dispatchDocument;
       }
     };
-  }, [artifact.id, connect, createEditor]);
+  }, [artifact.id, blockSchema, connect, createEditor]);
 
   useEffect(() => {
-    editorRef.current?.setReadOnly(isClosed);
+    editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
   }, [isClosed]);
 
   useEffect(() => {
@@ -464,12 +513,13 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {blockSchemaQuery.isError || schemaReadOnly ? <p>Reload to edit.</p> : null}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
       which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article
         aria-label="Document"
         className="dispatch-doc"
-        data-read-only={isClosed}
+        data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined}
         onClick={(event) => {
           // A modifier click (open in new tab/window) or a drag-selection that happens to end
@@ -539,6 +589,7 @@ export function ProofDocument({
         <div data-testid="version-view">
           <VersionView
             artifactId={artifact.id}
+            blockSchema={blockSchema}
             createdAt={versions.find((item) => item.number === version)?.created_at}
             highlight={highlight}
             version={version}

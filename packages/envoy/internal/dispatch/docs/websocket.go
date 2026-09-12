@@ -15,6 +15,7 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 type connectionState struct {
@@ -173,7 +174,23 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.actor = actor
 	connection.added = true
 	s.addConnection(room, connection.id, actor)
-	return websocket.ConnectionConfig{ReadOnly: !open}, true
+	return websocket.ConnectionConfig{
+		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
+	}, true
+}
+
+func schemaReadOnly(open bool, clientSchemaVersion string) bool {
+	return !open || clientSchemaVersion != fmt.Sprintf("%d", pmdoc.SchemaVersion())
+}
+
+// authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
+// through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
+func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
+	open, err := s.issueOpen(context.Background(), room)
+	if err != nil {
+		return websocket.ConnectionConfig{}, err
+	}
+	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
 }
 
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {

@@ -304,6 +304,7 @@ func New(deps Deps) *Service {
 
 	service.srv = srv
 	srv.Authorize = service.authorize
+	srv.OnTokenAuth = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
@@ -417,13 +418,19 @@ func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, erro
 		return nil, 0, err
 	}
 	stamped := pmdoc.EnsureBlockIDsCount(tree)
-	if stamped == 0 {
+	reasserted := pmdoc.ReassertServerOwnedAttrs(tree)
+	if stamped == 0 && !reasserted {
 		return tree, 0, nil
 	}
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		return pmdoc.Update(transaction, fragment, tree)
 	}, origin); err != nil {
 		return nil, 0, err
+	}
+	if stamped == 0 {
+		// Callers use a non-zero result as the captured-update signal. A server-attribute
+		// repair is just as durable a closure mutation as an ID stamp.
+		stamped = 1
 	}
 	return tree, stamped, nil
 }
@@ -473,6 +480,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	stamped := pmdoc.BlockIDRepairCount(tree)
+	if pmdoc.ReassertServerOwnedAttrs(tree) && stamped == 0 {
+		stamped = 1
+	}
 	var slot *suppressSlot
 	var updates [][]byte
 	if stamped > 0 {

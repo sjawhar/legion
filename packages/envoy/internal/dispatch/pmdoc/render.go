@@ -162,7 +162,19 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("[^" + label + "]: ")
 		r.blocksNoTrailing(n.Children, prefix+"    ")
 	default:
-		r.err = fmt.Errorf("%w: cannot render block %q", ErrSchema, n.Type)
+		typ, typed := typedBlock(n.Type)
+		if !typed {
+			r.err = fmt.Errorf("%w: cannot render block %q", ErrSchema, n.Type)
+			return
+		}
+		attrs, err := renderTypedAttributes(n, typ)
+		if err != nil {
+			r.err = err
+			return
+		}
+		r.writeSyntax(":::" + n.Type + "{" + attrs + "}\n" + prefix)
+		r.blocksNoTrailing(n.Children, prefix)
+		r.writeSyntax("\n" + prefix + ":::")
 	}
 }
 

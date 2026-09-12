@@ -140,6 +140,7 @@ type queryer interface {
 // Register mounts every native-workspace route on mux.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
+	mux.HandleFunc("GET /api/v1/schema/blocks", s.getBlockSchema)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
 	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts", s.listProjectArtifacts)

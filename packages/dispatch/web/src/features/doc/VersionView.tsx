@@ -3,6 +3,7 @@ import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 
 import { api } from "../../api/client";
+import type { BlockSchema } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
 import { colorForLogin } from "./connection";
 import type { EditorHandle } from "./editor";
@@ -12,6 +13,7 @@ import { DocumentRuntime } from "./runtime";
 
 export interface VersionViewProps {
   artifactId: string;
+  blockSchema: BlockSchema | undefined;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   version: number;
@@ -19,6 +21,7 @@ export interface VersionViewProps {
 
 export function VersionView({
   artifactId,
+  blockSchema,
   createdAt,
   highlight,
   version,
@@ -39,7 +42,12 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (parent === null || markdown === undefined || user === undefined) {
+    if (
+      parent === null ||
+      markdown === undefined ||
+      user === undefined ||
+      blockSchema === undefined
+    ) {
       return;
     }
 
@@ -48,6 +56,7 @@ export function VersionView({
     let mounted = true;
     void createEditor(parent, {
       awareness: null,
+      blockSchema,
       heatMapMode: "hidden",
       readOnly: true,
       user: { color: colorForLogin(user.login), name: user.login },
@@ -71,7 +80,7 @@ export function VersionView({
       handle?.destroy();
       ydoc.destroy();
     };
-  }, [createEditor, highlight, markdown, userQuery.data]);
+  }, [blockSchema, createEditor, highlight, markdown, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;

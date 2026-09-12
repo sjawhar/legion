@@ -222,6 +222,20 @@ and deleting a cell's quoted text removes only that text.
 Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated target; re-read a missing or ambiguous target before
 retrying. Pass `summary` to name the version when recording a decision.
 
+## Typed blocks
+
+The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
+container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
+and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
+a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
+its id and every rendered attribute.
+
+Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
+quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
+`::name` directives, or text `:name` directives; those strings are literal when quoted inside a code
+block. Do not set attributes the schema marks `server: true`; the server ignores them and reasserts
+its authoritative value at settlement.
+
 ## Comments and suggestions
 
 Add feedback with:

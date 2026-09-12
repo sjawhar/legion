@@ -22,6 +22,29 @@ export type Actor =
       readonly owner?: string;
     };
 
+export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
+
+export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
+
+export interface BlockAttributeSchema {
+  readonly kind: BlockAttributeKind;
+  readonly choices?: readonly string[];
+  readonly default: string | boolean | readonly string[];
+  readonly server?: boolean;
+}
+
+export interface BlockTypeSchema {
+  readonly name: string;
+  readonly content: BlockContentRule;
+  readonly render: "host";
+  readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
+}
+
+export interface BlockSchema {
+  readonly version: number;
+  readonly types: readonly BlockTypeSchema[];
+}
+
 export interface AgentToken {
   readonly id: string;
   readonly name: string;
