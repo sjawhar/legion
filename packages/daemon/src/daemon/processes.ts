@@ -2482,8 +2482,15 @@ export class ProcessManager {
       resumeSessionFile,
       "resurrecting the controller"
     );
-    // Only past the resume decision is the dead pane's locator dropped and the capability rotated.
+    // Only past the resume decision is the previous incarnation retired: its locator is
+    // dropped, its role claim is deleted, and the capability is rotated. The claim is the
+    // registration-deadline guard's evidence that the *current* pane reached
+    // `/controller/ready`; leaving the dead incarnation's claim in place would make every later
+    // deadline see "claimed" and do nothing, so a resumed pane that hangs or dies during boot
+    // would never be recovered. The new pane puts the claim back through `/controller/ready` —
+    // the only path that ever writes it.
     delete this.deps.state.controllerLocator;
+    delete this.deps.state.roles[token];
     const controllerSecret = await this.deps.mintControllerCapability();
     // Interactive: no `--mode rpc`. The tmux runtime opens this command in the pane directly, with
     // no `legion worker-shim` and no socket (see `TmuxRuntime.spawnController`).
