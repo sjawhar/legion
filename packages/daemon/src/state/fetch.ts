@@ -21,12 +21,28 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * Present only when the runner's own kill timer fired: the command did not
+   * exit within `limitMs`, so the runner sent it SIGTERM. `elapsedMs` is the
+   * wall time from spawn to exit, which includes any time a child kept the
+   * stdio pipes open after the kill. A caller must never report a kill as an
+   * ordinary `Command failed (exit N)`.
+   */
+  timedOut?: { limitMs: number; elapsedMs: number };
 }
 
 export interface CommandRunnerOptions {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * Budget after which the runner kills the command. The default of 30 s is
+   * sized for GitHub API reads; slow callers (boot probes, workspace
+   * provisioning) pass their own budget.
+   */
+  readonly timeoutMs?: number;
 }
+
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
 /**
  * Protocol for running external commands (dependency injection for testing).
@@ -45,6 +61,8 @@ export async function defaultRunner(
   cmd: string[],
   options?: CommandRunnerOptions
 ): Promise<CommandResult> {
+  const limitMs = options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const startedAt = performance.now();
   const proc = Bun.spawn(cmd, {
     cwd: options?.cwd,
     env: options?.env,
@@ -52,13 +70,15 @@ export async function defaultRunner(
     stderr: "pipe",
   });
 
+  let killed = false;
   const killTimeout = setTimeout(() => {
+    killed = true;
     try {
       proc.kill();
     } catch {
       // Process may have already exited
     }
-  }, 30_000); // 30s for gh api graphql
+  }, limitMs);
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -66,7 +86,15 @@ export async function defaultRunner(
 
   const exitCode = await proc.exited;
   clearTimeout(killTimeout);
-  return { stdout, stderr, exitCode };
+  if (!killed) {
+    return { stdout, stderr, exitCode };
+  }
+  return {
+    stdout,
+    stderr,
+    exitCode,
+    timedOut: { limitMs, elapsedMs: performance.now() - startedAt },
+  };
 }
 
 // =============================================================================
