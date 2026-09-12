@@ -91,7 +91,7 @@ async function temporaryDir(): Promise<string> {
 /** A `deps.sleep` whose waits never resolve on their own: each call is recorded with its `ms`, and
  * `fire(ms)` resolves the oldest pending wait of exactly that length when the test decides the clock
  * has advanced — so "armed but not yet expired" is observable, and expiry is a deliberate step rather
- * than a race against real time. `stopTimeout`'s `cancel` is a no-op under an injected sleep, so a
+ * than a race against real time. `boundedWait`'s `cancel` is a no-op under an injected sleep, so a
  * wait the code under test has superseded (a re-armed clock) or cancelled (`dispose()`) stays in
  * `pending` and can still be fired — which is how a test delivers a stale clock's expiry on purpose. */
 function manualSleep() {
