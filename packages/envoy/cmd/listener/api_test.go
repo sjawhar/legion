@@ -362,6 +362,110 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		}
 	})
 }
+func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
+	client := setupPublishTestClient(t)
+	if err := client.JS().DeleteKeyValue(session.SessionBucket); err != nil &&
+		!errors.Is(err, nats.ErrBucketNotFound) && !errors.Is(err, nats.ErrStreamNotFound) {
+		t.Fatalf("reset session bucket TTL: %v", err)
+	}
+	const (
+		sessionID = "ses_role_restart"
+		role      = "restart-survivor"
+	)
+	firstRegistry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open first role registry: %v", err)
+	}
+	firstSessions, err := session.OpenSessionRegistry(
+		client.Conn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(100*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("open first session registry: %v", err)
+	}
+	if err := firstSessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register role holder: %v", err)
+	}
+	var firstState atomic.Pointer[listenerDeps]
+	firstState.Store(&listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions})
+	claim := httptest.NewRecorder()
+	roleSetHandler(&firstState, "test-machine").ServeHTTP(
+		claim,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/v1/roles/set",
+			strings.NewReader(`{"session_id":"ses_role_restart","role":"restart-survivor","soft":true,"previous_session_id":"ses_previous"}`),
+		),
+	)
+	if claim.Code != http.StatusOK {
+		t.Fatalf("claim role: status = %d, body = %s", claim.Code, claim.Body.String())
+	}
+	persisted, err := firstRegistry.RoleClaim(role)
+	if err != nil {
+		t.Fatalf("read persisted role claim: %v", err)
+	}
+	if persisted.HolderSessionID != sessionID || persisted.ClaimedAt <= 0 ||
+		persisted.PreviousSessionID != "ses_previous" {
+		t.Fatalf("persisted claim = %+v", persisted)
+	}
+
+	restoredRegistry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("restore role registry: %v", err)
+	}
+	restoredSessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("restore session registry: %v", err)
+	}
+	readyCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := restoredSessions.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("restore session cache: %v", err)
+	}
+	var restoredState atomic.Pointer[listenerDeps]
+	restoredState.Store(&listenerDeps{client: client, registry: restoredRegistry, sessions: restoredSessions})
+	get := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		roleGetHandler(&restoredState).ServeHTTP(
+			recorder,
+			httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil),
+		)
+		return recorder
+	}
+
+	if response := get(); response.Code != http.StatusOK {
+		t.Fatalf("restored live role: status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	if err := restoredSessions.Delete(sessionID); err != nil {
+		t.Fatalf("expire restored holder: %v", err)
+	}
+	if response := get(); response.Code != http.StatusNotFound {
+		t.Fatalf("unregistered restored role: status = %d, want 404; body = %s", response.Code, response.Body.String())
+	}
+	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != sessionID {
+		t.Fatalf("restored grace claim = %q, %v; want %q", holder, err, sessionID)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if response := get(); response.Code != http.StatusNotFound {
+			t.Fatalf("expired role status = %d, want 404; body = %s", response.Code, response.Body.String())
+		}
+		holder, err := restoredRegistry.RoleHolder(role)
+		if err != nil {
+			t.Fatalf("read expired role claim: %v", err)
+		}
+		if holder == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expired role claim = %q, want removed", holder)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestRoleSetHandlerSoftClaim(t *testing.T) {
 	client := setupPublishTestClient(t)

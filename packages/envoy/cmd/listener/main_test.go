@@ -86,7 +86,37 @@ func resetListenerTestState(t *testing.T, conn *natsgo.Conn) {
 		t.Fatalf("failed to purge stream %s: %v", bus.Stream, err)
 	}
 	clearKVBucket(t, conn, store.Bucket)
-	clearKVBucket(t, conn, session.SessionBucket)
+	clearKVBucket(t, conn, store.RoleBucket)
+	if err := js.DeleteKeyValue(session.SessionBucket); err != nil &&
+		!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
+		t.Fatalf("failed to reset session bucket: %v", err)
+	}
+}
+
+func TestResetListenerTestStateRecreatesSessionBucket(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	defer client.Close()
+	resetListenerTestState(t, client.Conn)
+
+	if _, err := session.OpenSessionRegistry(
+		client.Conn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(100*time.Millisecond),
+	); err != nil {
+		t.Fatalf("open short-lived session registry: %v", err)
+	}
+	resetListenerTestState(t, client.Conn)
+
+	registry, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open reset session registry: %v", err)
+	}
+	if got := registry.TTL(); got != 5*time.Minute {
+		t.Fatalf("session bucket TTL = %s, want %s", got, 5*time.Minute)
+	}
 }
 
 func TestReadinessGate_NotReady_Returns503(t *testing.T) {
@@ -163,6 +193,33 @@ func TestHealthz_Starting_Returns200WithJSON(t *testing.T) {
 	}
 	if body["status"] != "starting" {
 		t.Fatalf("expected status 'starting', got %q", body["status"])
+	}
+}
+
+func TestDependencyHealthStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		terminal   bool
+		statusCode int
+		status     string
+	}{
+		{name: "transient", statusCode: http.StatusOK, status: "degraded"},
+		{name: "terminal watcher", terminal: true, statusCode: http.StatusServiceUnavailable, status: "unhealthy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			writeDependencyHealth(rr, "session kv", errors.New("probe failed"), tc.terminal)
+			if rr.Code != tc.statusCode {
+				t.Fatalf("status code = %d, want %d", rr.Code, tc.statusCode)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body["status"] != tc.status {
+				t.Fatalf("status = %q, want %q", body["status"], tc.status)
+			}
+		})
 	}
 }
 
@@ -1995,6 +2052,35 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing
 	}
 	assertDeliveryException(t, probe, item, "no_holder")
 }
+func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "expired-holder"
+	if _, err := harness.registry.SetRole("ses_expired", "test-machine", role, false); err != nil {
+		t.Fatalf("claim expired role: %v", err)
+	}
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "expired-role-delivery")
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	sub, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role handler: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscriptions: %v", err)
+	}
+
+	if err := harness.client.PublishCore(item); err != nil {
+		t.Fatalf("publish role delivery: %v", err)
+	}
+	assertDeliveryException(t, probe, item, "delivery_failed")
+	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != "" {
+		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)
+	}
+}
 
 func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
 	cases := []struct {
@@ -2623,10 +2709,8 @@ func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 }
 
 func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
-	// Regression for the sami listener after-recovery scenario — the KV
-	// registries hold handles bound to the original *nats.Conn that the bus
-	// recovery path replaced. checkSelfHealth must surface that as an error
-	// so the self-health watchdog can terminate the listener.
+	// A stale KV handle must remain observable through checkSelfHealth so
+	// /healthz reports the unavailable dependency while NATS reconnects.
 	client := setupTestNATS(t)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
@@ -2644,10 +2728,9 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 	}
 }
 
-// TestCheckSelfHealth_DurableProbeFailurePropagates pins the watchdog's role
-// in recovering from a server-side consumer deletion: bus recovery replays
-// nats.Bind, which cannot recreate a missing durable, so the probe error must
-// surface and drive the restart path.
+// TestCheckSelfHealth_DurableProbeFailurePropagates keeps a missing durable
+// consumer visible to /healthz and the monitor rather than treating it as a
+// healthy state.
 func TestCheckSelfHealth_DurableProbeFailurePropagates(t *testing.T) {
 	if err := checkSelfHealth(nil, nil, nil, func() error { return nil }); err != nil {
 		t.Fatalf("healthy durable probe should not error: %v", err)
@@ -2661,66 +2744,210 @@ func TestCheckSelfHealth_DurableProbeFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestRunSelfHealthLoop_TerminatesAfterThreshold(t *testing.T) {
+func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	logger := logging.New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var probeCalls int32
+	recovered := make(chan struct{}, 1)
 	probe := func() error {
-		atomic.AddInt32(&probeCalls, 1)
-		return errors.New("always failing for test")
+		if atomic.AddInt32(&probeCalls, 1) <= 3 {
+			return errors.New("transient NATS timeout")
+		}
+		recovered <- struct{}{}
+		return nil
 	}
-	terminated := make(chan struct{}, 1)
-	terminate := func() { terminated <- struct{}{} }
-
 	done := make(chan struct{})
 	go func() {
-		runSelfHealthLoop(logger, probe, terminate, 5*time.Millisecond, 3)
+		runSelfHealthMonitor(ctx, logger, probe, nil, nil, nil, time.Millisecond, 3)
+		close(done)
+	}()
+
+	select {
+	case <-recovered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitor stopped before the transient NATS failures recovered")
+	}
+	if got := atomic.LoadInt32(&probeCalls); got < 4 {
+		t.Fatalf("probe calls = %d, want retry after the threshold", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not stop after shutdown")
+	}
+}
+
+func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
+	client := setupTestNATS(t)
+	watcherConn, err := natsgo.Connect(client.Conn.ConnectedUrl())
+	if err != nil {
+		t.Fatalf("connect watcher: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(
+		watcherConn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for session cache: %v", err)
+	}
+	watcherConn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for !sessions.WatchFailed() {
+		if time.Now().After(deadline) {
+			t.Fatal("stopped watcher was not detected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	logger := logging.New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var rebuilds atomic.Int32
+	recovered := make(chan struct{}, 1)
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthMonitor(
+			ctx,
+			logger,
+			func() error {
+				err := sessions.Ping()
+				if err == nil {
+					select {
+					case recovered <- struct{}{}:
+					default:
+					}
+				}
+				return err
+			},
+			func(err error) bool {
+				return isUnrecoverableSelfHealthFailure(err, client, sessions, nil)
+			},
+			func() error {
+				rebuilds.Add(1)
+				return rewatchListenerKVWatchers(client.Conn, sessions, nil)
+			},
+			func() { terminated <- struct{}{} },
+			time.Millisecond,
+			3,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-recovered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitor did not rebuild the terminal watcher")
+	}
+	if got := rebuilds.Load(); got != 1 {
+		t.Fatalf("watcher rebuilds = %d, want 1", got)
+	}
+	select {
+	case <-terminated:
+		t.Fatal("monitor terminated after successful watcher rebuild")
+	default:
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not stop after shutdown")
+	}
+}
+
+func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
+	logger := logging.New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	terminalWatcher := errors.New("ci store watcher stopped")
+	var rebuilds atomic.Int32
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthMonitor(
+			ctx,
+			logger,
+			func() error { return terminalWatcher },
+			func(err error) bool { return errors.Is(err, terminalWatcher) },
+			func() error {
+				rebuilds.Add(1)
+				return errors.New("rewatch failed")
+			},
+			func() { terminated <- struct{}{} },
+			time.Millisecond,
+			3,
+		)
 		close(done)
 	}()
 
 	select {
 	case <-terminated:
 	case <-time.After(2 * time.Second):
-		t.Fatal("terminate was not invoked within 2s")
+		t.Fatal("monitor did not terminate after repeated watcher rebuild failures")
+	}
+	if got := rebuilds.Load(); got != 3 {
+		t.Fatalf("watcher rebuilds = %d, want 3", got)
 	}
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("loop did not exit after terminate")
-	}
-	if got := atomic.LoadInt32(&probeCalls); got < 3 {
-		t.Fatalf("expected at least 3 probe calls before terminate, got %d", got)
+		t.Fatal("monitor did not stop after terminal rebuild failures")
 	}
 }
 
-func TestRunSelfHealthLoop_RecoveryResetsCounter(t *testing.T) {
-	logger := logging.New("test")
-	var probeCalls int32
-	probe := func() error {
-		calls := atomic.AddInt32(&probeCalls, 1)
-		// Fail, fail, succeed, fail, fail, ... — never 3-in-a-row.
-		if calls%3 == 0 {
-			return nil
-		}
-		return errors.New("intermittent")
+type blockingNATSDrainer struct {
+	started chan struct{}
+	release chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingNATSDrainer) Drain() error {
+	close(d.started)
+	<-d.release
+	return nil
+}
+
+func (d *blockingNATSDrainer) Close() {
+	d.once.Do(func() { close(d.closed) })
+}
+
+func TestDrainNATSWithDeadlineClosesBlockedConnection(t *testing.T) {
+	drainer := &blockingNATSDrainer{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
 	}
-	terminate := func() { t.Fatal("terminate must not be called when counter resets") }
-
-	done := make(chan struct{})
-	go func() {
-		runSelfHealthLoop(logger, probe, terminate, 5*time.Millisecond, 3)
-		close(done)
-	}()
-
-	// Let the loop run long enough to do ~10 cycles and verify it never terminates.
-	time.Sleep(100 * time.Millisecond)
-	if got := atomic.LoadInt32(&probeCalls); got < 5 {
-		t.Fatalf("expected at least 5 probe calls, got %d", got)
+	done := make(chan error, 1)
+	go func() { done <- drainNATSWithDeadline(drainer, 10*time.Millisecond) }()
+	select {
+	case <-drainer.started:
+	case <-time.After(time.Second):
+		t.Fatal("NATS drain never started")
 	}
 	select {
-	case <-done:
-		t.Fatal("loop terminated despite intermittent recoveries")
-	default:
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("drain error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drain did not return at its deadline")
 	}
+	select {
+	case <-drainer.closed:
+	case <-time.After(time.Second):
+		t.Fatal("blocked NATS connection was not closed")
+	}
+	close(drainer.release)
 }
 
 // setupTestNATS launches a NATS testcontainer dedicated to this package's tests.

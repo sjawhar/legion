@@ -97,6 +97,9 @@ type Client struct {
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
 
+	reconnectHooksMu sync.Mutex
+	reconnectHooks   []func(*nats.Conn) error
+
 	// recovery state
 	recovering int32
 	stopCh     chan struct{}
@@ -364,7 +367,34 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	if err := c.restoreSubscriptions(); err != nil {
 		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
 		go c.recover()
+		return
 	}
+	if err := c.runReconnectHooks(nc); err != nil {
+		slog.Error("envoy nats reconnect hook failed", slog.String("error", err.Error()))
+	}
+}
+
+// AddReconnectHook registers recovery for state that is attached to NATS but
+// not represented by Client subscriptions, such as KV watchers.
+func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
+	if hook == nil {
+		return
+	}
+	c.reconnectHooksMu.Lock()
+	c.reconnectHooks = append(c.reconnectHooks, hook)
+	c.reconnectHooksMu.Unlock()
+}
+
+func (c *Client) runReconnectHooks(conn *nats.Conn) error {
+	c.reconnectHooksMu.Lock()
+	hooks := slices.Clone(c.reconnectHooks)
+	c.reconnectHooksMu.Unlock()
+	for _, hook := range hooks {
+		if err := hook(conn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Subscribe creates the listener's recoverable JetStream subscription.
@@ -486,6 +516,12 @@ func (c *Client) recover() {
 		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
 		if err := c.ensureConn(); err == nil {
 			err = c.restoreSubscriptions()
+			if err == nil {
+				c.mu.Lock()
+				conn := c.Conn
+				c.mu.Unlock()
+				err = c.runReconnectHooks(conn)
+			}
 			if err == nil {
 				slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
 				return
