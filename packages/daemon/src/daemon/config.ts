@@ -760,10 +760,10 @@ export function loadConfigFromFile(
   }
   const instructions = readString(config.instructions, "instructions");
   if (instructions !== undefined) {
-    requireNonEmpty(instructions, "instructions");
-    fields.instructionsPath = path.isAbsolute(instructions)
-      ? instructions
-      : path.resolve(configDir, instructions);
+    const instructionsPath = requireNonEmpty(instructions, "instructions");
+    fields.instructionsPath = path.isAbsolute(instructionsPath)
+      ? instructionsPath
+      : path.resolve(configDir, instructionsPath);
   }
   const gates = parseGates(config.gates, "gates");
   if (gates !== undefined) fields.gates = gates;

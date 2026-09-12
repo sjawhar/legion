@@ -93,16 +93,17 @@ relative — `legion start --config` passes that directory as the loader's `conf
 `LEGION_INSTRUCTIONS` (used as given; consulted only when the file omits the key, like every other
 `LEGION_*` override) to a markdown file of the deployment's standing rules — required checks,
 deploy/smoke commands, code-owner expectations, standing Envoy roles to consult, the merge
-credential. An empty value from either source is rejected at config load. At startup the daemon
-reads the file once, refuses to start when it is missing, unreadable, a directory, or blank (the
-message names the resolved path), and writes `# Deployment instructions (<project as written in
-legion.yaml>)` plus the content to `<state_dir>/deployment-instructions.md`
-(`deployment-instructions.ts`). Every pane it launches — root architect, sub-architects, phase
-workers, controller — appends that file as its last `--append-system-prompt "$(cat …)"` fragment,
-after the role prompt and (for roots and workers) the addressing fragment; `systemPromptArguments`
-in `processes.ts` is the one builder both launch sites use, so they cannot drift. Absent key: no
-fragment. The file is `$(cat)`-expanded by the pane's shell exactly like the role prompt, never
-inlined into the command.
+credential. An empty value from either source is rejected at config load. Before loading state,
+opening core NATS, or serving the API, the daemon reads the file once and refuses to start when it
+is missing, unreadable, a directory, or blank (the message names the resolved instructions path),
+then writes `# Deployment instructions (<project as written in legion.yaml>)` plus the content to
+`<state_dir>/deployment-instructions.md` (`deployment-instructions.ts`); a failed write refuses
+startup too, with Node's error naming that target path. Every pane it launches — root architect,
+sub-architects, phase workers, controller — appends that file as its last
+`--append-system-prompt "$(cat …)"` fragment, after the role prompt and (for roots and workers)
+the addressing fragment; `systemPromptArguments` in `processes.ts` is the one builder both launch
+sites use, so they cannot drift. Absent key: no fragment. The file is `$(cat)`-expanded by the
+pane's shell exactly like the role prompt, never inlined into the command.
 
 Every root, worker, and controller pane also receives `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` when
 `dispatch_url` is configured: `DISPATCH_URL` is the configured service base URL (no `/mcp` suffix),

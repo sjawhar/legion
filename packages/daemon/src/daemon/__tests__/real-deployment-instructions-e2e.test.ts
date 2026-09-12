@@ -5,7 +5,7 @@
 // process receives the materialized header + content as its last `--append-system-prompt` value.
 import { afterAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, watch, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { DaemonConfig } from "../config";
@@ -36,9 +36,15 @@ const CONTROLLER_PROMPT = path.resolve(
 const tempDirs: string[] = [];
 
 async function run(
-  command: string[]
+  command: string[],
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv }
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(command, {
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(options?.cwd ? { cwd: options.cwd } : {}),
+    ...(options?.env ? { env: options.env } : {}),
+  });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -47,21 +53,14 @@ async function run(
   return { stdout, stderr, exitCode };
 }
 
-/** Resolves once `target` exists: an existence check first (the recorder may already have run),
- * then inotify events on its directory — the recorder is a real subprocess in a real pane, so
- * there is no promise in this process to await; the directory watch is the event, not a timer.
- * The recorder moves the finished record in from the parent directory, so this directory sees a
- * single event and the name appearing means the content is whole (see `argv-recorder-omp.ts`).
- * Times out naming the path, like `waitForSocket` in `real-shutdown-e2e.test.ts`. */
+/** Polls for `target` every 20 ms for up to 30 s, like `waitForSocket` in
+ * `real-shutdown-e2e.test.ts`: the recorder is a real subprocess in a real pane, so there is no
+ * promise in this process to await. The recorder renames the finished record into place, so the
+ * name existing means the content is whole. */
 async function waitForFile(target: string): Promise<void> {
-  if (existsSync(target)) return;
-  const signal = AbortSignal.timeout(30_000);
-  try {
-    for await (const _ of watch(path.dirname(target), { signal })) {
-      if (existsSync(target)) return;
-    }
-  } catch (error) {
-    if (!signal.aborted) throw error;
+  for (let attempt = 0; attempt < 1500; attempt += 1) {
+    if (existsSync(target)) return;
+    await Bun.sleep(20);
   }
   throw new Error(`argv record never appeared at ${target}`);
 }

@@ -82,9 +82,8 @@ rather than the daemon's own environment (a daemon-spawned architect otherwise h
 key and silently falls back to a different, possibly quota-exhausted model).
 
 The generated configuration also sets `instructions: ${SMOKE_DIR}/deployment-instructions.md`, a
-file `up.sh` writes naming the rig's Dispatch project and `SMOKE_REPO`; every pane the smoke daemon
-launches gets it appended as its last `--append-system-prompt` fragment, exercising the same
-mechanism an operator uses to hand a real deployment its standing rules.
+file `up.sh` writes naming the rig's Dispatch project and `SMOKE_REPO`; see `write_daemon_config`
+in `up.sh` for what that gives every pane the smoke daemon launches.
 
 ### Fail-closed OMP probe
 
