@@ -35,7 +35,12 @@ import {
   writePhaseHandoff,
 } from "../handoff/ledger";
 import { CliError } from "./errors";
-import { cmdWorkerShim, defaultWorkerShimDeps } from "./worker-shim";
+import {
+  cmdWorkerShim,
+  cmdWorkerShimConnect,
+  defaultWorkerShimDeps,
+  resolveWorkerShimTarget,
+} from "./worker-shim";
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 interface GhCommandDeps {
@@ -535,10 +540,21 @@ const credentialCommand = defineCommand({
 const workerShimCommand = defineCommand({
   meta: {
     name: "worker-shim",
-    description: "Bridge a headless OMP worker to the daemon over a unix socket",
+    description:
+      "Bridge a headless OMP worker to the daemon over a unix socket (--socket) or a reverse-dialed TCP stream (--connect)",
   },
   args: {
-    socket: { type: "string", required: true, description: "Unix socket path" },
+    socket: { type: "string", description: "Unix socket path to listen on (tmux runtime)" },
+    connect: {
+      type: "string",
+      description:
+        "Daemon worker stream endpoint to dial, tcp://<host>:<port> (Kubernetes runtime)",
+    },
+    bootTokenFile: {
+      type: "string",
+      description:
+        "File whose trimmed contents are the boot token sent in the hello line (--connect only)",
+    },
   },
   run: ({ args }) =>
     runCli(async () => {
@@ -547,8 +563,16 @@ const workerShimCommand = defineCommand({
       // (e.g. a further-nested command), so taking the first one keeps that intact.
       const separator = process.argv.indexOf("--");
       const argv = separator === -1 ? [] : process.argv.slice(separator + 1);
-      const socketPath = String(args.socket);
-      const exitCode = await cmdWorkerShim(socketPath, argv, defaultWorkerShimDeps());
+      const target = resolveWorkerShimTarget({
+        socket: args.socket as string | undefined,
+        connect: args.connect as string | undefined,
+        bootTokenFile: args.bootTokenFile as string | undefined,
+      });
+      const deps = defaultWorkerShimDeps();
+      const exitCode =
+        target.mode === "socket"
+          ? await cmdWorkerShim(target.socketPath, argv, deps)
+          : await cmdWorkerShimConnect(target.endpoint, target.bootToken, argv, deps);
       process.exit(exitCode);
     }),
 });
