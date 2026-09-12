@@ -1,0 +1,210 @@
+{
+  "issue": "LEGION-16",
+  "pr": {
+    "number": 961,
+    "url": "https://github.com/sjawhar/legion/pull/961",
+    "branch": "legion/LEGION-16",
+    "base": "main",
+    "headSha": "5cfc35fa8c90989d2c569fae09126568baaae61f"
+  },
+  "rebasedOnto": "main@origin 8f6fad367099 (chore: release pi-envoy v1.4.3) before any task started; the plan's base 7db2cd83 had moved (skills/legion-controller, skills/legion-architect, daemon index.ts among 89 files).",
+  "commits": [
+    {
+      "change": "uvwstwxz",
+      "commit": "610874b0748cad945923cec653b663b66e622ac7",
+      "task": "T1",
+      "description": "feat(contracts): controller ready carries its OMP session file; grants gain the controller form; gh-token carries merge intent"
+    },
+    {
+      "change": "rvtpurym",
+      "commit": "7f4b6556d813bbc5c22c29ac98b7a4da49f22a42",
+      "task": "T2",
+      "description": "feat(daemon): state v24 - the controller locator drops socketPath and gains ompSessionFile (migrateV23State)"
+    },
+    {
+      "change": "ozxuqqyn",
+      "commit": "68486cade87da6c28c4b075620c146d1d4f24e4b",
+      "task": "T3+T4",
+      "description": "feat(daemon): the controller pane runs interactive omp and resumes its recorded session file; /controller/ready records ompSessionFile; markControllerReady deleted"
+    },
+    {
+      "change": "kruuntup",
+      "commit": "1da02782a2a32d1f6011bcd2d5b672420732d9b3",
+      "task": "T5",
+      "description": "feat(daemon): the controller mints its own grant and is the only grant that may merge"
+    },
+    {
+      "change": "wxxyypwn",
+      "commit": "0376f8b4eaef41eb7e3e65df74b5a49fe2ac7d1e",
+      "task": "T6",
+      "description": "feat(cli): legion gh -- pr merge sends merge intent to the daemon instead of refusing client-side"
+    },
+    {
+      "change": "sklllsko",
+      "commit": "f4ace055841718f441eb796f56648d3f1a138f01",
+      "task": "T7",
+      "description": "feat(daemon): the addressing fragment names the project's controller (merge queue) topic"
+    },
+    {
+      "change": "ropwmwrt",
+      "commit": "7c628750e7ae8cb839ce41ab8459f40c242b1ad7",
+      "task": "T8",
+      "description": "feat(pi-envoy): the controller reports its session file on ready and its bash calls carry a controller grant"
+    },
+    {
+      "change": "tvlvsozk",
+      "commit": "673fb818e6e431561dd05a3138f51f09537f9aab",
+      "task": "T9",
+      "description": "docs(skills): the controller is the merge queue; pr-queue is retired (merger.md, controller-root.md, architect/controller/worker skills, fixture role release-captain)"
+    },
+    {
+      "change": "pxxuortv",
+      "commit": "5cfc35fa8c90989d2c569fae09126568baaae61f",
+      "task": "T10",
+      "description": "docs: root AGENTS.md, daemon AGENTS.md, pi-envoy AGENTS.md, scripts/smoke/README.md"
+    }
+  ],
+  "deviationsFromPlan": [
+    {
+      "task": "T8",
+      "deviation": "Widened `CommandContext.sessionManager` in packages/pi-envoy/src/pi-types.ts to `Pick<SessionContext[\"sessionManager\"], \"getSessionId\" | \"getSessionFile\" | \"ensureOnDisk\">` and gave the two fake command contexts in legion.test.ts those members.",
+      "reason": "The plan (T8 step 1, C7) said both `CommandContext` and `SessionContext` already expose `ensureOnDisk`/`getSessionFile`. The local `CommandContext` projection only typed `getSessionId`; tsc rejected `persistedTranscript(context)` on the union. OMP's real command context carries the full SessionManager, so the projection was the thing that was wrong. envoy.test.ts's bare command contexts are unaffected: pi-envoy's tsconfig does not include envoy.test.ts."
+    },
+    {
+      "task": "T3/T4",
+      "deviation": "One commit for both tasks.",
+      "reason": "api/routes/controller.ts and __tests__/api.test.ts carry both the shim deletion (T3) and the ompSessionFile recording (T4); `jj split` cannot split one file across two commits."
+    },
+    {
+      "task": "T3",
+      "deviation": "index.test.ts `accepts controller/ready even when the controller's shim socket is unreachable` deleted rather than rewritten.",
+      "reason": "Plan offered both; nothing beyond a 200 remained, and api.test.ts now covers /controller/ready's 200/403 and the ompSessionFile recording directly."
+    },
+    {
+      "task": "T4",
+      "deviation": "Two api.test.ts tests instead of one: the planned `records the controller's OMP session file on /controller/ready and leaves it unset when omitted` (which also asserts the wrong-secret 403 leaves the recorded file untouched), plus `accepts an OMP session file on /controller/ready when no controller pane is recorded, without inventing a locator` (D2's warn-and-continue).",
+      "reason": "D2 is a distinct behaviour a plausible bug (inventing a locator, or 500ing) would break; it earned its own lock."
+    },
+    {
+      "task": "T3",
+      "deviation": "Two processes.test.ts tests whose run mocks always reported the pane alive (`retires a stuck controller pane...` and `arms a fresh registration deadline for a controller spawned from scratch...`) now report a killed pane dead.",
+      "reason": "Plan C1: the retire path no longer deletes the locator; the respawn comes from ensureController's own probe, so the mock has to let that probe see the kill. The plan named only the first test."
+    },
+    {
+      "task": "T9",
+      "deviation": "packages/pi-envoy/roles/reviewer.md line 53 (`the merge queue merges under its own authority and the repository's own rules`) left untouched.",
+      "reason": "Not in the plan's file list; the sentence stays true (the controller is the merge queue); and LEGION-18's role-prompt audit is editing roles/reviewer.md concurrently (17 lines in its pushed branch)."
+    },
+    {
+      "task": "T10",
+      "deviation": "`LEGION_STATE_DIR` in the controller pane env and the attach command are documented in the daemon AGENTS.md Operational-invariants controller bullet, not added to the `## OMP invocation and daemon tools` section.",
+      "reason": "That section already states the attach command in its tmux paragraph; one place for the controller pane's facts reads better than two."
+    },
+    {
+      "task": "T11",
+      "deviation": "`bun test` was run per package from packages/daemon, packages/contracts, packages/pi-envoy (as CI does), not once from the repo root.",
+      "reason": "The root has no tsconfig and `bunx tsc` there resolves a different TypeScript; CI's pr-and-main.yaml runs every step from packages/daemon."
+    },
+    {
+      "task": "T11",
+      "deviation": "PR title is `feat(legion): the Legion controller runs as an attachable terminal session and merges pull requests itself (LEGION-16)` — the plan's title with a conventional-commit prefix.",
+      "reason": "The repository's `pr-title` CI check (pr-and-main.yaml) requires `type(scope): summary` because squash merges use the PR title as the commit subject and the release workflows version from it; the plan's bare title failed that check on the first run."
+    }
+  ],
+  "testerNotes": {
+    "fixtureRoleThatReplacedPrQueue": "release-captain (packages/envoy/internal/store/kv_test.go TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim; packages/pi-envoy/extensions/envoy.test.ts role claim/switch tests). Arbitrary; nothing else references it.",
+    "runningTestsInsideALegionPane": "Two rig artifacts, neither this change's: (1) docs/solutions/legion/worker-pane-shell-gotchas.md section 2 — run the daemon suite with `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`; (2) NEW: the pane's own LEGION_TREE/LEGION_ROLE/LEGION_ISSUE/etc. leak into packages/pi-envoy/extensions/legion.test.ts (its afterEach restores the *original* env, which inside a pane already has LEGION_TREE, so `classifySession` throws `Legion session has both controller and tree launch markers`). Run pi-envoy tests as `env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p' | tr '\\n' ' ') -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`. CI is unaffected by both.",
+    "grantStacking": "The gotchas doc's `export`-shadowing function relies on calling `grant_release` after every call; a skipped release leaves the lock set and every later call keeps a stale grant (`jj git push` 403s with 'could not read Username'). A burst-detecting variant needs no release: it adopts the first `export LEGION_GRANT` after a >=2s gap since the previous one. Source this once: export() { case \"$1\" in LEGION_GRANT=*) local now=$EPOCHSECONDS; if [ -z \"${_lg_last:-}\" ] || [ $((now - _lg_last)) -ge 2 ]; then LEGION_GRANT=\"${1#LEGION_GRANT=}\"; builtin export LEGION_GRANT; fi; _lg_last=$now ;; *) builtin export \"$@\" ;; esac; }. Kept at /tmp/legion16-grant-trap.sh on this box.",
+    "smokeRigNotRun": "scripts/smoke/up.sh was NOT run by the implementer. The shared rig ports (daemon 19370, NATS 14222) are held by LEGION-21's rig (`bun run .../legion-21/packages/daemon/src/cli/index.ts start sjawhar/24 --config /tmp/legion21-smoke/rig/legion.yaml`, state dir /tmp/legion21-smoke); up.sh refuses occupied ports. Coordinate with LEGION-21's worker or use SMOKE_DIR/NATS_PORT/ENVOY_PORT/LEGION_DAEMON_PORT overrides (README `## Start and stop`). Also needs the user-authenticated gh for SMOKE_BRANCH_PROTECTION.",
+    "testerScenarioOnThisBox": "Follow .legion/plan.json testerScenario.steps. Concretely: (1) `legion state --json | jq .controllerLocator` — expect tmuxSession/tmuxWindowId/tmuxPaneId/ompSessionFile and no socketPath/runtime fields from this branch; `tmux -L legion-<slug> capture-pane -p -t <paneId>` shows the OMP prompt; `pstree -a $(tmux -L legion-<slug> list-panes -t <paneId> -F '#{pane_pid}')` shows omp with no `--mode rpc`/`worker-shim`; `tmux ... send-keys -t <paneId> 'What project are you the controller for?' Enter`. (2) Resume: kill-pane, then wake the controller (create a Dispatch issue in SMOKE_PROJECT or POST /v1/messages/publish to notifications.role.legion-<slug>-controller on the listener); daemon log line is `[legion] resurrecting the controller legion-<slug>-controller by resuming OMP session <file>` and the new pane command carries `--resume=<file>`. Fresh start logs `[legion] starting the controller fresh: no OMP session file is recorded`. (3) READY shape the controller expects: first line `READY #<n> at <sha> for <KEY> (<pr url>)`, then the PR body's gate facts. The controller finds the architect topic via `legion state --json` issues[KEY].parent chain. It publishes NOTHING after a successful merge; `pr-merged` on the architect topic comes from the daemon's webhook reducer. (4) Negative CLI control from any phase-worker pane: `legion gh -- pr merge <n> --squash` → exit 1, message `this grant cannot merge; publish READY to the controller: Only the controller may merge; publish READY to the controller`; daemon log shows the 403 on /legion/v1/gh-token; gh never spawned. (5) Checkpoint 13 unchanged.",
+    "stateVersionCollisionWithLegion21": "LEGION-21's running rig daemon serves state `version: 24` with `controllerLocator.runtime: \"tmux\"` — its unpushed work also bumps the state to v24 (its pushed branch is still v23). Whichever of LEGION-16/LEGION-21 merges second must renumber its migration (v24→v25) and rebase; this branch's migrateV23State strips controllerLocator.socketPath. Reported to the architect. AGREED RULE (LEGION-16 architect with LEGION-21 architect, 2026-09-12T07:20Z): whichever pull request merges second rebases and renumbers its migration to 24->25; if LEGION-21 lands first, this branch's migrateV23State becomes migrateV24State, strips socketPath, and leaves their runtime field untouched. Tester and reviewer need not re-raise it.",
+    "rebaseRecipeIfLegion21LandsFirst": "From the LEGION-16 architect (2026-09-12T07:21Z), relayed from LEGION-21's architect. LEGION-21 (runtime boundary) is PR #962 https://github.com/sjawhar/legion/pull/962, already pushed at state v24 and in its testing phase, so it will most likely merge before #961. Its migrations are independent of ours but the CODE is not: on that branch the controller's spawn, stop, and probe no longer live in processes.ts. spawnController there only builds the environment and inner command and calls runtime.spawn(\"controller\", spec); the tmux-specific controller branch in a new file, runtime-tmux.ts (TmuxRuntime.spawn), is what does prepareSocket, the worker-shim wrapping, and openWindow; markControllerReady reaches the socket through ProcessManager.clientFor -> runtime.connect(locator), which throws 'tmux locator <window> has no shim socket' when socketPath is absent (caught and logged). Recipe once #962 is on main (check with `legion gh -- pr view 962 --json state,mergedAt`): (1) rebase legion/LEGION-16 onto main; (2) our 'controller is not shimmed' change moves into runtime-tmux.ts's controller branch and to the connect/stop call sites, not the old processes.ts sites; markControllerReady and clientFor's controller path go away as before; the pane-kill stop path is whatever their runtime's stop branch is when no socket exists; (3) keep their shared Locator union (a z.discriminatedUnion on a `runtime` field; the tmux member already has tmuxPaneId and socketPath optional, so a controller locator without socketPath already parses) instead of a separate controller schema; their api/state.ts redactLocator already strips socketPath from every projected locator, so T3's state.ts step reduces to carrying ompSessionFile through; (4) renumber our migration to migrateV24State (v24 -> v25) and re-fixture its test: it strips socketPath and leaves their runtime field intact; (5) their branch adds a daemon/plugin version handshake — LEGION_DAEMON_API_VERSION in packages/contracts/src/legion-daemon-api.ts and legion.daemonApiVersion in packages/pi-envoy/package.json must be bumped together whenever LegionDaemonApi's shape changes, or the daemon refuses to boot against the installed plugin. #961 changes that shape (controllerLocator gains ompSessionFile on /state, /controller/ready gains ompSessionFile, /grants gains the controller form, /gh-token and /git-credential gain merge), so bump both together in the same commit and say so in the PR body's opening paragraph in plain English: the installed pi-envoy plugin must be released at the matching version before a daemon built from this change will boot. A rebase after review changes the head and the issue goes back through tester and reviewer; that is expected, not a defect. #962 had NOT merged when this handoff was written; whichever of tester, reviewer, or the implementer-again is active when it lands performs this recipe.",
+    "goTestsOnThisBox": "Full `go list ./... | grep -v /integration | xargs go test` on this heavily loaded box: internal/dispatch/pmdoc needs `bun install --frozen-lockfile` in packages/envoy/internal/dispatch/pmdoc/gen first (CI does this; then green). internal/bus, internal/cistore, internal/store each failed ONE NATS-testcontainer test per run, a different one every run (TestCoreSubscriptionRestoresAfterConnectionRecovery, TestRecordHeadAndHead, TestInterestReaper; then TestSubOK_AfterSubscribe, TestSummaryTickConcurrentExactlyOnce, TestWatch_PropagatesUpsert) with 'nats: no servers available'/'connection closed' — load, not this change. Every TestSetRole* test (the file this branch touches) passed in a targeted -v run. CI's envoy job is the authoritative Go run."
+  },
+  "filesChanged": [
+    "AGENTS.md",
+    "packages/contracts/src/legion-daemon-api.test.ts",
+    "packages/contracts/src/legion-daemon-api.ts",
+    "packages/daemon/src/cli/__tests__/index.test.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "packages/daemon/src/daemon/__tests__/api.thermo-auth.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/api/auth.ts",
+    "packages/daemon/src/daemon/api/github.ts",
+    "packages/daemon/src/daemon/api/routes/controller.ts",
+    "packages/daemon/src/daemon/api/routes/credentials.ts",
+    "packages/daemon/src/daemon/api/routes/process.ts",
+    "packages/daemon/src/daemon/api/routes/workers.ts",
+    "packages/daemon/src/daemon/api/state.ts",
+    "packages/daemon/src/daemon/api.ts",
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/envoy/internal/store/kv_test.go",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/extensions/legion.test.ts",
+    "packages/pi-envoy/extensions/legion.ts",
+    "packages/pi-envoy/roles/controller-root.md",
+    "packages/pi-envoy/roles/merger.md",
+    "packages/pi-envoy/src/pi-types.ts",
+    "scripts/smoke/README.md",
+    "skills/legion-architect/SKILL.md",
+    "skills/legion-controller/SKILL.md",
+    "skills/legion-worker/SKILL.md"
+  ],
+  "constraintA": "jj diff -r tvlvsozk skills/legion-worker/SKILL.md touches only the merger bullet (old lines 228-231 -> new 228-233); the heading, lines 183-227, and everything else are byte-identical. LEGION-18's pushed branch (legion/LEGION-18@origin 15ed27b1) changes 62 lines of that file, none in this bullet; its other overlaps with this branch's files are AGENTS.md lines 30/100/122 (not ours) and skills/legion-controller/SKILL.md lines 12-14 removal (adjacent to, not inside, our edits).",
+  "verificationCommandsRun": [
+    {
+      "command": "cd packages/daemon && bunx biome check --error-on-warnings src/",
+      "outcome": "Checked 135 files. No fixes applied."
+    },
+    {
+      "command": "cd packages/daemon && bunx tsc --noEmit",
+      "outcome": "exit 0"
+    },
+    {
+      "command": "cd packages/contracts && bunx tsc --noEmit && bunx biome check src/",
+      "outcome": "exit 0; Checked 18 files. No fixes applied."
+    },
+    {
+      "command": "cd packages/pi-envoy && bunx tsc --noEmit && bunx biome lint extensions/ src/",
+      "outcome": "exit 0; Checked 19 files. (pre-existing `biome format` diffs in envoy.test.ts on untouched lines; the package's lint script is `biome lint`, which is clean)"
+    },
+    {
+      "command": "cd packages/daemon && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+      "outcome": "820 pass, 5 skip, 0 fail across 53 files (a prior run had one load-flaky tick-budget root-tree test fail — `promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees` — which passed 3/3 alone; the run before that flaked a different root-tree test the same way)"
+    },
+    {
+      "command": "cd packages/daemon && bun test --test-name-pattern controller",
+      "outcome": "48 pass, 0 fail"
+    },
+    {
+      "command": "cd packages/contracts && bun test",
+      "outcome": "93 pass, 0 fail"
+    },
+    {
+      "command": "cd packages/pi-envoy && env -u LEGION_* -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test",
+      "outcome": "138 pass, 0 fail"
+    },
+    {
+      "command": "cd packages/envoy && go list ./... | grep -v /integration | xargs go test -count=1",
+      "outcome": "See testerNotes.goTestsOnThisBox: pmdoc green after its gen deps install; every other package ok except one load-flaky NATS-testcontainer test each in internal/bus, internal/cistore, internal/store (different test every run); `go test -run TestSetRole -v ./internal/store/` all 12 PASS"
+    },
+    {
+      "command": "grep -rn pr-queue skills packages docs --exclude-dir=plans",
+      "outcome": "prints nothing (exit 1)"
+    },
+    {
+      "command": "scripts/smoke/up.sh",
+      "outcome": "NOT RUN — rig ports held by LEGION-21's rig; left to the tester (see testerNotes.smokeRigNotRun)"
+    }
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-12T07:18:50.190Z"
+}
