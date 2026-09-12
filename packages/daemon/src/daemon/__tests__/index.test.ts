@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { controllerToken, roleTopic } from "@legion/contracts";
+import { controllerToken, roleToken, roleTopic } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
 import type { DaemonConfig } from "../config";
@@ -409,6 +409,94 @@ describe("startDaemon", () => {
       expect(started).toBe(true);
       expect(state.admission.active).toEqual([issue]);
       expect(state.trees[issue]?.status).toBe("active");
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with gates.design off, boot approves every registered gate a human never answered and wakes its architect", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = { ...config(stateDir), gates: { design: "off" as const } };
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    for (const key of ["WIDGETS-1", "WIDGETS-2", "WIDGETS-3"]) {
+      state.issues[key] = { key, title: key, status: "in_progress", children: [] };
+      state.trees[key] = { root: key, generation: 1, status: "active", launchFailures: 0 };
+    }
+    state.gates["WIDGETS-1"] = { designAskId: "ask-unanswered" };
+    state.gates["WIDGETS-2"] = { designAskId: "ask-human", designApproved: "ask-human" };
+    state.gates["WIDGETS-3"] = {};
+    state.issues["WIDGETS-4"] = { key: "WIDGETS-4", title: "closed", status: "done", children: [] };
+    state.trees["WIDGETS-4"] = {
+      root: "WIDGETS-4",
+      generation: 1,
+      status: "closed",
+      launchFailures: 0,
+    };
+    state.gates["WIDGETS-4"] = { designAskId: "ask-on-closed-tree" };
+    let saved = 0;
+    const published: Array<{ topic: string; payload: string }> = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {
+            saved += 1;
+          },
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          envoyPublish: async (topic, payload) => {
+            published.push({ topic, payload });
+          },
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+      expect(state.gates["WIDGETS-1"]).toEqual({
+        designAskId: "ask-unanswered",
+        designApproved: "gate-off",
+      });
+      expect(state.gates["WIDGETS-2"]).toEqual({
+        designAskId: "ask-human",
+        designApproved: "ask-human",
+      });
+      expect(state.gates["WIDGETS-3"]).toEqual({});
+      expect(state.gates["WIDGETS-4"]).toEqual({ designAskId: "ask-on-closed-tree" });
+      expect(saved).toBeGreaterThan(0);
+      expect(published.filter((p) => p.payload.includes("design-approved"))).toEqual([
+        {
+          topic: roleTopic(roleToken(daemonConfig.project, "WIDGETS-1", "architect")),
+          payload: JSON.stringify({ type: "design-approved" }),
+        },
+      ]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

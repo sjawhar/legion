@@ -107,10 +107,14 @@ human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispat
 `legion status <issue> <status>`.
 
 **Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
-option. Whether a human must approve a pull request before it merges is the repository's own
-branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. The merger publishes
-`READY` to the merge queue, which merges under its own authority and the repository's rules.
-No lifecycle labels exist; GitHub issues are never read or written by Legion.
+option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or
+`off`). With `off`, the daemon satisfies the gate the moment the architect registers it
+(`designApproved: "gate-off"`) and sends the same `design-approved` wake a human answer would, so
+no one has to click; the ask stays on Dispatch as a record. Whether a human must approve a pull
+request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
+neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
+its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never
+read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.
