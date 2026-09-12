@@ -198,8 +198,12 @@ export default function legionExtension(pi: PiApi): void {
   const defaults = envoyDefaultsFromEnvironment(process.env);
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
-  /** The transcript the last successful controller claim reported (undefined for a takeover,
-   * which reports none); lets a session-tree navigation that changed nothing skip a re-claim. */
+  /** The transcript the last successful controller claim reported (undefined after a takeover
+   * from a hand-started session, which reports none). Compared beside the session id when a
+   * navigation leaves the id alone, because one path moves the file under the same id with no
+   * session event of its own: a `!cd <dir>` or `/move` typed into the pane relocates the
+   * transcript (`SessionManager.moveTo`), and the next tree or branch navigation is when the
+   * daemon's recorded resume target can follow it. */
   let controllerTranscript: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
@@ -289,14 +293,15 @@ export default function legionExtension(pi: PiApi): void {
   /**
    * Claims the controller role for the context's session and posts `/controller/ready`. The
    * transcript the daemon records on its controller locator — and later `--resume`s into a fresh
-   * pane — must be the daemon pane's own, so `reportTranscript` is true only from that pane's own
-   * lifecycle (its session start, and a session switch typed into it). The
-   * `/legion-claim-controller` takeover from a hand-started session passes false: it takes the
-   * role and the daemon's recorded session id, but leaves the pane's recorded file untouched, so a
-   * dead pane is never resumed into an operator's live transcript. A missing transcript on the
-   * pane path is a boot failure, exactly as it is for a root architect. The regain re-run below
-   * omits the transcript on purpose: the daemon keeps a recorded file when a later claim omits
-   * the field, and a takeover session must never become the pane's resume target.
+   * pane — must be the daemon pane's own, so `reportTranscript` is true only from that pane: its
+   * session start, a session switch typed into it, and `/legion-claim-controller` run inside it.
+   * The same command from a hand-started session (no `LEGION_CONTROLLER` marker) passes false:
+   * it takes the role and the daemon's recorded session id, but leaves the pane's recorded file
+   * untouched, so a dead pane is never resumed into an operator's live transcript. A missing
+   * transcript on the pane path is a boot failure, exactly as it is for a root architect. The
+   * regain re-run below omits the transcript on purpose: the daemon keeps a recorded file when a
+   * later claim omits the field, and a takeover session must never become the pane's resume
+   * target.
    */
   const claimController = async (
     context: CommandContext | SessionContext,
@@ -319,14 +324,13 @@ export default function legionExtension(pi: PiApi): void {
     });
     controllerSessionID = sessionID;
     controllerTranscript = ompSessionFile;
+    // Re-registered on every claim (boot, each `/new`, each takeover) on purpose: the slot is
+    // last-wins, so the live listener always carries the session id of the claim that landed
+    // last, and nothing here is cleared or read live.
     onEnvoyRoleRegained(async (role, reason) => {
       if (role !== token) return;
-      // Read live, not captured: a `/new` typed into the pane moves the claim to a new session id
-      // (`reclaimControllerAfterSessionChange`), and a tick racing that re-claim must report the
-      // id the pane holds now. No transcript: the daemon keeps the file it recorded when a later
-      // claim omits the field, and a takeover session must never become the pane's resume target.
       await rerunReadyAfterRegain("controller/ready", role, reason, () =>
-        daemon.controllerReady({ secret, sessionId: controllerSessionID ?? sessionID })
+        daemon.controllerReady({ secret, sessionId: sessionID })
       );
     });
   };
@@ -353,7 +357,7 @@ export default function legionExtension(pi: PiApi): void {
       await claimController(context, { reportTranscript: true });
     } catch (error) {
       context.ui.notify(
-        `legion: re-claiming the controller for this session failed (${messageFor(error)}); controller wakes and merges will not reach this session, and its shell commands run without a Legion grant (no legion gh), until a re-claim succeeds`,
+        `legion: re-claiming the controller for this session failed (${messageFor(error)}). Until a re-claim succeeds, controller wakes and merges will not reach this session and its shell commands run without a Legion grant, so legion gh is unavailable.`,
         "warning"
       );
     }
@@ -817,8 +821,13 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-claim-controller", {
     description: "Claim the Legion controller role and register daemon authority for this session",
-    // An interactive takeover: the role and the recorded session id move to this session, the
-    // daemon pane's recorded transcript does not (see `claimController`).
-    handler: async (_args, context) => claimController(context, { reportTranscript: false }),
+    // Inside the daemon pane (the `LEGION_CONTROLLER` marker) this is the manual override for a
+    // lost claim, and the pane's own transcript is the right resume target. From a hand-started
+    // session it is an interactive takeover: the role and the recorded session id move to this
+    // session, the daemon pane's recorded transcript does not (see `claimController`).
+    handler: async (_args, context) =>
+      claimController(context, {
+        reportTranscript: classifySession(process.env).kind === "controller",
+      }),
   });
 }
