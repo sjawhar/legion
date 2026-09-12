@@ -7,7 +7,12 @@ import {
 } from "@legion/contracts";
 import type { CommandRunner } from "../state/fetch";
 import { defaultRunner } from "../state/fetch";
-import { CapabilityService, secretHash, spawnCapabilityKey } from "./api/auth";
+import {
+  CapabilityService,
+  type ResolvedWorkerClaim,
+  secretHash,
+  spawnCapabilityKey,
+} from "./api/auth";
 import { type RouteContext, requireTree, requireTreeIssue } from "./api/context";
 
 import { GitHubService, type GitHubTokenSource } from "./api/github";
@@ -110,6 +115,10 @@ export interface LegionApi {
     generation: number,
     expectedSessionId?: string
   ): Promise<string>;
+  /** The listener side of the boot-token handshake: resolves a `legion worker-shim --connect`
+   * hello's token to the claim it was minted for — the same lookup `/worker/started` performs —
+   * or `undefined` for a token no claim was ever minted. */
+  resolveWorkerBootToken(bootToken: string): ResolvedWorkerClaim | undefined;
   revokeSessionCapability(sessionId: string): void;
   stop(): void;
 }
@@ -273,6 +282,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       auth.registerWorkerBootToken(bootToken, { tree, issue, role, generation, expectedSessionId });
       return bootToken;
     },
+    resolveWorkerBootToken: (bootToken) => auth.resolveWorkerClaim(deps.state, bootToken),
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");

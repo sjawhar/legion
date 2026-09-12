@@ -134,14 +134,13 @@ export async function handleWorkerStarted(
   // generation's pane while the GitHub request is in flight.
   const capturedGeneration = claim.generation;
   const capturedPaneId = claim.locator.tmuxPaneId;
-  const boot = ctx.auth.getWorkerBootToken(bootToken);
+  const resolved = ctx.auth.resolveWorkerClaim(ctx.deps.state, bootToken);
+  if (!resolved || resolved.token !== token || (resolved.boot && resolved.boot.tree !== tree)) {
+    throw new HttpError(403, "Invalid worker boot token");
+  }
+  const boot = resolved.boot;
   if (boot) {
-    if (
-      boot.tree !== tree ||
-      boot.issue !== issue ||
-      boot.role !== role ||
-      (boot.sessionId !== undefined && boot.sessionId !== sessionId)
-    ) {
+    if (boot.sessionId !== undefined && boot.sessionId !== sessionId) {
       throw new HttpError(403, "Invalid worker boot token");
     }
     if (claim.generation !== boot.generation) {
@@ -150,18 +149,12 @@ export async function handleWorkerStarted(
     if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== sessionId) {
       throw new HttpError(409, "Worker respawn must resume the same agent session");
     }
-  } else {
+  } else if (claim.expectedSessionId !== undefined && claim.expectedSessionId !== sessionId) {
     // The in-memory boot-token map is gone (the daemon restarted between this launch and
-    // /worker/started): fall back to the hash `launchWorker` persisted onto the claim at mint —
-    // it proves the same token minted for this exact claim generation without needing the
-    // in-memory map to have survived, and the same-agent check reads the durable counterpart of
-    // the in-memory path's `expectedSessionId`.
-    if (!claim.bootTokenHash || !equalSecretHash(claim.bootTokenHash, bootToken)) {
-      throw new HttpError(403, "Invalid worker boot token");
-    }
-    if (claim.expectedSessionId !== undefined && claim.expectedSessionId !== sessionId) {
-      throw new HttpError(409, "Worker respawn must resume the same agent session");
-    }
+    // /worker/started): `resolveWorkerClaim` matched the hash `launchWorker` persisted onto the
+    // claim at mint, and the same-agent check reads the durable counterpart of the in-memory
+    // path's `expectedSessionId`.
+    throw new HttpError(409, "Worker respawn must resume the same agent session");
   }
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");
