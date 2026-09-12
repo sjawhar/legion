@@ -29,7 +29,8 @@ separate coordinator to finish necessary work.
   hold (your own, or one `spawn_worker` returned) or compute another with the
   `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
 - There is no label vocabulary. Dispatch status replaces the board, and the design gate
-  is a `dispatch_ask` answered `Approve`, not a label. Never attempt to apply a label.
+  is a human approving the root spec document at a version in Dispatch, requested with
+  `dispatch_request_approval` — not a label and not an ask. Never attempt to apply a label.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
@@ -76,34 +77,38 @@ adoption/decomposition and waves, acceptance criteria, and the integration test 
 "spec" artifact beside it (`dispatch_artifact` with the primary document's name replaces the
 human's document; do not do that). Both readers described in
 [Writing for the human](../dispatch/SKILL.md#writing-for-the-human) must be able to follow it.
-When the config-armed root design gate applies, run this exact sequence **before any
-Legion-role spawn**, including a sub-architect:
+The design gate runs only when the "Design gate policy" line at the end of your system prompt
+says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and continue
+to section 2 with no approval step at all: do not request approval, do not register a gate, and
+do not wait for `design-approved`. A sub-architect on a child issue has no policy line and never
+runs the gate either: the root approval covers the tree. When the gate is armed, run this exact
+sequence **before any Legion-role spawn**, including a sub-architect:
 
 ```text
 dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary document in place
-askId = dispatch_ask({
-  issue: "<root issue>",
-  question: "<what is true today, in one sentence> <what will be true when this lands, in one sentence> <how: one issue or N child issues, and what the first step is> I recommend Approve because <one reason>.",
-  options: [
-    { label: "Approve", description: "Work starts as described; the first worker is spawned now." },
-    { label: "Hold", description: "Nothing starts; reply on the issue with what should change first." },
-  ]
-})
-legion({ op: "register_gate", issue: "<root issue>", askId })
+{ artifact, version } = dispatch_request_approval({ issue: "<root issue>", artifact: "spec" })
+legion({ op: "register_gate", issue: "<root issue>", artifactId: artifact, version })
 ```
 
-Both options are required: a question with only `Approve` is not a decision. The whole ask is
-read on a phone by someone who has not read the code: no file paths, line numbers, document
-versions, or role tokens in it. Sami, 2026-09-12, on a gate ask that broke this rule: "I have no
-idea what the fuck you're talking about."
+`dispatch_request_approval` opens a system question on the document with the fixed options
+`Approve` and `Request changes`; a human answers it from the Inbox or approves from the
+document's own header. Never open a `dispatch_ask` with an `Approve` option yourself: an
+ordinary question is not a gate and the daemon ignores its answer. The `artifact` and `version`
+values you pass to `register_gate` are the document id and the version the human is being asked
+to approve; the daemon uses them to recognize the document's approval events. Calling
+`dispatch_request_approval` again while a request is open returns the same open request, so it
+is safe to repeat.
 
-Then park. Do not release a wave or spawn a Legion role until a later delivered wake
-shows `design-approved` on the root. On a deployment whose design gate is off
-(`gates.design: off` in its `legion.yaml`), the daemon satisfies the gate as you register it
-and `design-approved` arrives immediately — proceed. The daemon then closes the ask on Dispatch
-(you will see `ask.resolved` for it); that is expected and needs nothing from you. Approval
-covers the entire tree: later waves, re-scopes, and integration-failure children do not repeat
-this sequence.
+Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
+`design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of
+the primary document), call `dispatch_request_approval` again — it re-opens the request at the
+new version — and stay parked. Approval is pinned to the spec version: editing the root spec
+after approval closes the gate again with no wake (you made the edit, or the `artifact.version`
+event on your issue tells you), so call `dispatch_request_approval` again, and release no new
+wave and spawn no new role until the next `design-approved` arrives — work already in flight
+continues. Later waves, re-scopes, and integration-failure children that leave the root spec
+untouched need no new approval, and a child issue's spec is never gated: the root approval covers
+the tree.
 
 ## 2. Children in flight
 
@@ -223,6 +228,8 @@ corresponding lifecycle procedure.
 | `child-closed` | Read the child completion and remaining open children. Re-scope or close obsolete open work; release an appropriate next wave, or await `children-complete`. |
 | `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
+| `design-approved` | Payload `{type:"design-approved"}`. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
+| `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec, call `dispatch_request_approval` again, and stay parked; the gate is closed. |
 | `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon has already returned the issue's Dispatch status to `in_progress` for this) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. The deployment's worker cap is full; this role's spawn is queued. Do not respawn or retry — wait for `worker-started`. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
@@ -232,7 +239,7 @@ corresponding lifecycle procedure.
 | `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. This is your cue for step 7: post the sign-off comment naming that merge commit and set the issue `done`. Nothing else follows a merge. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
-| `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. |
+| `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. `gates[LEGION_TREE].open` is the design gate's current state: `true` means the root spec is approved at its current version and you may spawn; `false` (or no `open` key, meaning no gate is registered) means the sequence in section 1 still applies. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. |
 | `worker-died` | Payload `{type:"worker-died", issue, role}`. The daemon probed and retried this role's worker through `MAX_LAUNCH_FAILURES` attempts and could not confirm a boot — never a raw-event replay or a silent revive. Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |
 

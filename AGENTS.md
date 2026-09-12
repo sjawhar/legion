@@ -109,16 +109,18 @@ Statuses above are native Dispatch issue statuses, not GitHub labels — the dae
 human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch dashboard or
 `legion status <issue> <status>`.
 
-**Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
-option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or
-`off`). With `off`, the daemon satisfies the gate the moment the architect registers it
-(`designApproved: "gate-off"`), sends the same `design-approved` wake a human answer would, and
-closes the ask on Dispatch (`resolved`, with a reason the dashboard shows), so no one has to click
-and nothing waits in a human's inbox. Whether a human must approve a pull
-request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
-neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
-its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never
-read or written by Legion.
+**Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
+is a human approving the root issue's spec document at a version in Dispatch: the architect
+requests it with `dispatch_request_approval` and registers the document id and version with the
+daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its
+current version. A later spec version closes the gate until someone approves the new version, and
+a `changes_requested` review closes it with the reviewer's reason. `gates.design: off` is the only
+way past the gate without a human review — Legion has no operator approve command; with `off` the
+root architect is told so in its system prompt and adds no approval step. Whether a human must
+approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
+rule: Legion neither reads nor writes it. The merger publishes `READY` to the merge queue, which
+merges under its own authority and the repository's rules. No lifecycle labels exist; GitHub
+issues are never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.
