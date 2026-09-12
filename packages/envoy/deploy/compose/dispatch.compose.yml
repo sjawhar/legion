@@ -42,6 +42,8 @@ services:
       DISPATCH_APP_CLIENT_ID: ${DISPATCH_APP_CLIENT_ID:-}
       DISPATCH_APP_CLIENT_SECRET: ${DISPATCH_APP_CLIENT_SECRET:-}
       DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
+      DISPATCH_SERVER_URL: ${DISPATCH_SERVER_URL:?set DISPATCH_SERVER_URL (the browser origin)}
+      NATS_URLS: ${NATS_URLS:?set NATS_URLS}
       DISPATCH_ALLOWED_LOGINS: ${DISPATCH_ALLOWED_LOGINS:?set DISPATCH_ALLOWED_LOGINS}
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}
@@ -57,8 +59,6 @@ services:
       # OAuth dashboard over plain HTTP (local/tailnet use).
       DISPATCH_INSECURE_COOKIE: ${DISPATCH_INSECURE_COOKIE:-}
     volumes:
-      # NATS URLs and the dispatch block come from the shared envoy.json.
-      - ~/.config/opencode/envoy.json:/home/envoy/.config/opencode/envoy.json:ro
       # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
 

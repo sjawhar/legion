@@ -36,6 +36,12 @@ it to the agent through `dispatch.token` in `~/.config/opencode/envoy.json` or `
 The server records the minting human as the owner of that session's writes. `DISPATCH_AGENT_TOKEN`
 is the shared devbox fallback; do not configure it for an individual agent.
 
+The deployed Dispatch server's browser origin is configured separately with
+`DISPATCH_SERVER_URL` in the deployment `compose/.env`. Do not change an
+agent's `envoy.json` to set the GitHub OAuth callback origin: the value must
+be the exact URL humans type in their browser, and the GitHub App callback is
+`<DISPATCH_SERVER_URL>/auth/callback`.
+
 ## Writing a spec
 
 A spec has two readers: the human who decides reads the top; the implementer who builds reads the

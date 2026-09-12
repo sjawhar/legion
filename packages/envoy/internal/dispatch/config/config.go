@@ -54,10 +54,10 @@ func (e *InvalidConfigError) Error() string {
 	return fmt.Sprintf("invalid config %s: %s", e.Path, strings.Join(e.Issues, "; "))
 }
 
-// Load reads user and repo config and returns the shallow-merged result. A
-// missing file is not an error. A file that exists but fails validation
-// (an unrecognized key, a malformed value) stops the load and returns an
-// *InvalidConfigError naming the file and the key.
+// Load reads user and repo config and applies DISPATCH_SERVER_URL and NATS_URLS
+// environment overrides. A missing file is not an error. A file that exists
+// but fails validation (an unrecognized key, a malformed value) stops the load
+// and returns an *InvalidConfigError naming the file and the key.
 func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
@@ -91,7 +91,53 @@ func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	if repoCfg != nil {
 		merged = mergeConfig(merged, repoCfg)
 	}
+	if err := applyEnvironmentOverrides(merged); err != nil {
+		return nil, err
+	}
 	return merged, nil
+}
+
+func applyEnvironmentOverrides(cfg *EnvoyConfig) error {
+	if raw, set := os.LookupEnv("DISPATCH_SERVER_URL"); set {
+		serverURL, err := dispatchServerURL(raw)
+		if err != nil {
+			return fmt.Errorf("DISPATCH_SERVER_URL=%q (expected an absolute http(s) URL without a path)", raw)
+		}
+		if cfg.Dispatch == nil {
+			cfg.Dispatch = &DispatchConfig{}
+		}
+		cfg.Dispatch.ServerURL = serverURL
+	}
+	if raw, set := os.LookupEnv("NATS_URLS"); set {
+		natsURLs, err := natsURLs(raw)
+		if err != nil {
+			return fmt.Errorf("NATS_URLS=%q (expected a comma-separated list of NATS URLs)", raw)
+		}
+		cfg.NatsURLs = natsURLs
+	}
+	return nil
+}
+
+func dispatchServerURL(raw string) (string, error) {
+	serverURL := strings.TrimSpace(raw)
+	parsed, err := url.Parse(serverURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Hostname() == "" || parsed.Path != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.User != nil {
+		return "", errors.New("invalid dispatch server URL")
+	}
+	return serverURL, nil
+}
+
+func natsURLs(raw string) ([]string, error) {
+	values := strings.Split(raw, ",")
+	for i, value := range values {
+		values[i] = strings.TrimSpace(value)
+		if values[i] == "" {
+			return nil, errors.New("empty NATS URL")
+		}
+	}
+	return values, nil
 }
 
 func readConfigFile(path string) (*EnvoyConfig, error) {
