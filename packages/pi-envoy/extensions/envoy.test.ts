@@ -2075,6 +2075,138 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
+  test("a regain hook that never settles does not block the next heartbeat tick's registration", async () => {
+    // The hook is legion.ts's daemon round-trip (/controller/ready drains held notices and forces
+    // a resync), which this side cannot bound. The heartbeat's healing latch must release once
+    // registration and the claim are settled, or a stuck hook would stop re-registration and
+    // let the session's registry entry lapse.
+    const role = "legion-controller";
+    let listenerHoldsClaim = true;
+    let registrations = 0;
+    const thirdRegistration = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
+        }
+        return response({ role, holder: "ses_hung_hook", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        listenerHoldsClaim = true;
+        return response({
+          session_id: "ses_hung_hook",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        registrations += 1;
+        if (registrations === 3) thirdRegistration.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+      "./envoy.ts?heartbeat-hung-hook"
+    );
+    let hookCalls = 0;
+    onEnvoyRoleRegained(async () => {
+      hookCalls += 1;
+      await Promise.withResolvers<void>().promise;
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const notifications: string[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_hung_hook"),
+      setInterval: (callback) => intervals.push(callback),
+      ui: { notify: (message) => notifications.push(message) },
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+    expect(registrations).toBe(1);
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(hookCalls).toBe(1);
+    expect(registrations).toBe(2);
+
+    // The hook is still pending. The next tick must still register.
+    intervals[0]?.();
+    await thirdRegistration.promise;
+    expect(registrations).toBe(3);
+    expect(hookCalls).toBe(1);
+    expect(notifications).toEqual([]);
+  });
+
+  test("a failed role read does not make the next healthy heartbeat report a regain", async () => {
+    // Only a lapsed registration can leave the listener answering "no holder" for a claim that
+    // survived; a role read that fails after a successful registration is a plain heartbeat
+    // error and must not trigger a redundant daemon ready call on the following tick.
+    const role = "legion-controller";
+    let roleReadBroken = false;
+    const roleClaims: unknown[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        // A body the client cannot parse fails immediately, without the transport's 5xx retry.
+        if (roleReadBroken) return response({});
+        return response({ role, holder: "ses_role_read", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        roleClaims.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        return response({
+          session_id: "ses_role_read",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+      "./envoy.ts?heartbeat-role-read-failure"
+    );
+    const regained: unknown[] = [];
+    onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+      regained.push({ role: regainedRole, reason });
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const notifications: string[] = [];
+    const warned = Promise.withResolvers<void>();
+    const context: SessionContext = {
+      ...sessionContext("ses_role_read"),
+      setInterval: (callback) => intervals.push(callback),
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+          if (message.includes("registry heartbeat failed")) warned.resolve();
+        },
+      },
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+
+    roleReadBroken = true;
+    intervals[0]?.();
+    await warned.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    roleReadBroken = false;
+    intervals[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(regained).toEqual([]);
+    expect(roleClaims).toEqual([{ session_id: "ses_role_read", role }]);
+    expect(
+      notifications.filter((message) => message.includes("registry heartbeat failed"))
+    ).toHaveLength(1);
+  });
+
   test("registers a self-subscribed interest on session start", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     globalThis.fetch = async (input, init) => {
