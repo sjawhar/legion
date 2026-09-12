@@ -221,7 +221,13 @@ export const dispatchToolSpecs = [
         .describe("Optional zero-based occurrence of quote.")
         .optional(),
       body: z.string({ max: 2000 }).describe("Review comment, at most 2,000 characters."),
-      reply_to: z.string().describe("Optional comment id to reply to.").optional(),
+      reply_to: z
+        .string()
+        .describe(
+          "Full id of a comment to reply to; replying to any comment in a thread continues that " +
+            "thread (an ask's clarification thread included)."
+        )
+        .optional(),
       reply_to_ask: z
         .string()
         .describe(

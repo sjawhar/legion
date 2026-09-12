@@ -76,10 +76,22 @@ func TestDocumentAsksAndCommentsAreOwnerScoped(t *testing.T) {
 	if len(documentEvents) == 0 {
 		t.Fatal("document event list is empty")
 	}
-	for index, event := range documentEvents {
+	var commentCreated *model.Event
+	for index := range documentEvents {
+		event := &documentEvents[index]
 		if event.Seq != index+1 || event.IssueKey != nil || event.ArtifactID == nil || *event.ArtifactID != artifact.ID || event.Project != "CORE" {
 			t.Fatalf("document event %d = %#v", index, event)
 		}
+		if event.Type == "comment.created" {
+			commentCreated = event
+		}
+	}
+	if commentCreated == nil {
+		t.Fatal("document event list is missing comment.created")
+	}
+	payload, ok := commentCreated.Payload.(map[string]any)
+	if !ok || payload["project_key"] != "CORE" || payload["artifact_slug"] != artifact.Slug {
+		t.Fatalf("document comment payload = %#v, want project_key CORE and artifact_slug %q", commentCreated.Payload, artifact.Slug)
 	}
 
 	issue := createArtifactIssue(t, handler)

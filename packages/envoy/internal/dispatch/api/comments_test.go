@@ -133,47 +133,165 @@ func TestReplyToResolvedRootReopensIt(t *testing.T) {
 	}
 }
 
-func TestReplyMustTargetThreadRoot(t *testing.T) {
+func TestReplyToNestedCommentUsesThreadRoot(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Thread root replies", "before")
 	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "root"}, "alice")
 	reply := createThreadComment(t, handler, issue.Key, map[string]any{"body": "first reply", "reply_to": root.ID}, "bob")
 
-	invalid := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+	nested := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "nested reply", "reply_to": reply.ID,
 	}, "alice")
-	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `"code":"INVALID_COMMENT"`) || !strings.Contains(invalid.Body.String(), "reply_to must be a thread root") {
-		t.Fatalf("reply to reply: status=%d body=%s", invalid.Code, invalid.Body.String())
+	if nested.Code != http.StatusCreated {
+		t.Fatalf("reply to nested comment: status=%d body=%s", nested.Code, nested.Body.String())
 	}
-	if rows := countCommentRows(t, handler, issue.Key); rows != 2 {
-		t.Fatalf("comments after rejected nested reply = %d, want 2", rows)
+	created := decodeBody[model.Comment](t, nested)
+	if created.ReplyTo == nil || *created.ReplyTo != root.ID {
+		t.Fatalf("nested reply reply_to = %#v, want root %q", created.ReplyTo, root.ID)
 	}
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "second reply", "reply_to": root.ID,
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("reply to root: status=%d body=%s", response.Code, response.Body.String())
+	if created.AskID != nil {
+		t.Fatalf("nested reply ask_id = %#v, want nil", created.AskID)
+	}
+	if rows := countCommentRows(t, handler, issue.Key); rows != 3 {
+		t.Fatalf("comments after nested reply = %d, want 3", rows)
 	}
 }
 
-func TestCreateCommentRejectsMalformedReplyToAndAskID(t *testing.T) {
+func TestReplyToAskClarificationContinuesAskThread(t *testing.T) {
 	handler := newTestHandler(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Malformed thread ids", "before")
-
-	invalidReply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "reply", "reply_to": "not-a-uuid",
+	issue := createInteractionIssue(t, handler, "TEST", "Ask clarification", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, askResponse)
+	clarification := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "What does that change?", "ask_id": ask.ID,
 	}, "alice")
-	if invalidReply.Code != http.StatusBadRequest || !strings.Contains(invalidReply.Body.String(), `"code":"INVALID_COMMENT"`) {
-		t.Fatalf("malformed reply_to: status=%d body=%s", invalidReply.Code, invalidReply.Body.String())
+
+	reply := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "It changes the delivery contract.", "reply_to": clarification.ID, "actor": sessionActor(),
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("reply to clarification: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	created := decodeBody[model.Comment](t, reply)
+	if created.AskID == nil || *created.AskID != ask.ID {
+		t.Fatalf("clarification reply ask_id = %#v, want %q", created.AskID, ask.ID)
+	}
+	if created.ReplyTo != nil {
+		t.Fatalf("clarification reply reply_to = %#v, want nil", created.ReplyTo)
 	}
 
-	invalidAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "reply", "ask_id": "not-a-uuid",
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read ask thread: status=%d body=%s", read.Code, read.Body.String())
+	}
+	thread := decodeBody[struct {
+		Replies []model.Comment `json:"replies"`
+	}](t, read)
+	if len(thread.Replies) != 2 || thread.Replies[0].ID != clarification.ID || thread.Replies[1].ID != created.ID {
+		t.Fatalf("ask replies = %#v, want clarification then reply", thread.Replies)
+	}
+}
+
+func TestCreateCommentSeparatesMalformedAndWrongOwnerThreadIDs(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Thread IDs", "before")
+	otherResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Other owner", "spec": "before",
 	}, "alice")
-	if invalidAsk.Code != http.StatusBadRequest || !strings.Contains(invalidAsk.Body.String(), `"code":"INVALID_COMMENT"`) {
-		t.Fatalf("malformed ask_id: status=%d body=%s", invalidAsk.Code, invalidAsk.Body.String())
+	if otherResponse.Code != http.StatusCreated {
+		t.Fatalf("create other issue: status=%d body=%s", otherResponse.Code, otherResponse.Body.String())
+	}
+	other := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, otherResponse)
+	foreignComment := createThreadComment(t, handler, other.Key, map[string]any{"body": "other"}, "alice")
+	foreignAskResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+other.Key+"/asks", map[string]any{
+		"question": "Other ask?", "actor": sessionActor(),
+	})
+	if foreignAskResponse.Code != http.StatusCreated {
+		t.Fatalf("create foreign ask: status=%d body=%s", foreignAskResponse.Code, foreignAskResponse.Body.String())
+	}
+	foreignAsk := decodeBody[model.Ask](t, foreignAskResponse)
+
+	cases := []struct {
+		name    string
+		input   map[string]any
+		message string
+	}{
+		{
+			name:    "short reply_to",
+			input:   map[string]any{"body": "reply", "reply_to": "aabbccdd"},
+			message: "reply_to must be a full comment id",
+		},
+		{
+			name:    "wrong-owner reply_to",
+			input:   map[string]any{"body": "reply", "reply_to": foreignComment.ID},
+			message: "reply_to must identify a comment on this owner",
+		},
+		{
+			name:    "short ask_id",
+			input:   map[string]any{"body": "reply", "ask_id": "aabbccdd"},
+			message: "ask_id must be a full ask id",
+		},
+		{
+			name:    "wrong-owner ask_id",
+			input:   map[string]any{"body": "reply", "ask_id": foreignAsk.ID},
+			message: "ask_id must identify an ask on this owner",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", testCase.input, "alice")
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_COMMENT"`) || !strings.Contains(response.Body.String(), testCase.message) {
+				t.Fatalf("invalid thread id: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 	if rows := countCommentRows(t, handler, issue.Key); rows != 0 {
-		t.Fatalf("comments after rejected malformed ids = %d, want 0", rows)
+		t.Fatalf("comments after rejected thread ids = %d, want 0", rows)
+	}
+}
+
+func TestCreateCommentRejectsReplySuggestions(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Reply suggestions", "before")
+	root := createThreadComment(t, handler, issue.Key, map[string]any{"body": "root"}, "alice")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, askResponse)
+
+	for _, testCase := range []struct {
+		name  string
+		input map[string]any
+	}{
+		{
+			name: "comment reply",
+			input: map[string]any{
+				"body": "suggestion", "reply_to": root.ID, "suggestion": map[string]any{"replace_with": "replacement"},
+			},
+		},
+		{
+			name: "ask reply",
+			input: map[string]any{
+				"body": "suggestion", "ask_id": ask.ID, "suggestion": map[string]any{"replace_with": "replacement"},
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", testCase.input, "alice")
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_COMMENT"`) || !strings.Contains(response.Body.String(), "replies cannot carry suggestions") {
+				t.Fatalf("reply suggestion: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

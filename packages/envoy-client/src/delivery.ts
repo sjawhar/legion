@@ -179,6 +179,32 @@ function dispatchOwner(event: DispatchEvent, topic: string | undefined): string 
   return event.artifact_id ?? "unknown";
 }
 
+function dispatchCommentReplyWith(
+  event: DispatchEvent,
+  topic: string | undefined
+): string | undefined {
+  if (event.type !== "comment.created") return undefined;
+  const comment = CommentPayloadSchema.safeParse(event.payload);
+  if (!comment.success || comment.data.id === undefined) return undefined;
+
+  const reply = comment.data.ask_id;
+  const thread =
+    reply === undefined || reply === null || reply === "" ? "reply_to" : "reply_to_ask";
+  const threadID = thread === "reply_to" ? comment.data.id : reply;
+  if (event.issue_key !== null) {
+    return `dispatch_comment(issue="${event.issue_key}", ${thread}="${threadID}", body="...")`;
+  }
+
+  let project = comment.data.project_key;
+  let artifact = comment.data.artifact_slug;
+  if (project === undefined || project === "" || artifact === undefined || artifact === "") {
+    [project, artifact] = dispatchOwner(event, topic).split(" / ", 2);
+  }
+  if (project === undefined || project === "" || artifact === undefined || artifact === "")
+    return undefined;
+  return `dispatch_comment(project="${project}", artifact="${artifact}", ${thread}="${threadID}", body="...")`;
+}
+
 function dispatchPayload(event: DispatchEvent): unknown {
   const schema = DISPATCH_PAYLOAD_SCHEMAS[event.type];
   if (schema === undefined) return event.payload;
@@ -351,6 +377,7 @@ export function renderInbound(
         }
         askQuestion = dispatchAskQuestion(frame.event);
         messageReplyPreview = dispatchMessageReplyPreview(frame.event);
+        dispatchReply = dispatchCommentReplyWith(frame.event, subject ?? envelope.topic);
         if (frame.event.type === "message.created" && frame.event.issue_key !== null) {
           const message = MessagePayloadSchema.safeParse(frame.event.payload);
           const requested = DispatchDeliveryRequestSchema.safeParse(frame.delivery);
