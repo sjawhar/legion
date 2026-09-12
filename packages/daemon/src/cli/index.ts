@@ -66,7 +66,7 @@ interface HandoffCompleteCommandDeps {
   daemonUrl?: string;
 }
 
-interface ProbeImageDeps {
+interface ProbeImageCommandDeps {
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
   sleep(ms: number): Promise<void>;
@@ -175,7 +175,10 @@ export async function cmdHandoffComplete(
 /** The daemon's two boot probes (boot-probes.ts) against one OMP executable, with no launch prefix
  * — an image carries no `secrets` wrapper. The worker image build runs this as its last step; a
  * failure is the daemon's own probe message, exit 1, so a broken image never publishes. */
-export async function cmdProbeImage(omp: string | undefined, deps: ProbeImageDeps): Promise<void> {
+export async function cmdProbeImage(
+  omp: string | undefined,
+  deps: ProbeImageCommandDeps
+): Promise<void> {
   const ompPath = omp ?? deps.env.LEGION_OMP_PATH;
   if (!ompPath) {
     throw new CliError(

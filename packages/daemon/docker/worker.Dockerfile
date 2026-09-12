@@ -116,9 +116,12 @@ ENV OMP_PROFILE=legion \
 # image alone.
 USER 1000:1000
 WORKDIR /home/legion
-# 1. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled).
-# 2. Run the daemon's two boot probes; OMP's first run also downloads its native modules into
-#    /home/legion/.omp/natives/<version>/, so this layer ships them and a pod never fetches them.
+# 1. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
+#    OMP's first run in the image, so it also downloads OMP's native modules (~345 MB) into
+#    /home/legion/.omp/natives/<version>/; this layer ships them and a pod never fetches them.
+# 2. Run the daemon's two boot probes. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills
+#    any single omp invocation after 30 s, so a natives download inside the first probe would read as a
+#    definitive "does not expose pi.agents" failure. Step 1 must have already fetched them.
 # Any failure fails the build: a broken image never publishes.
 RUN omp plugin install /opt/legion/pi-legion-envoy \
     && legion probe-image \
