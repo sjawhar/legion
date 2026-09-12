@@ -23,12 +23,12 @@ const (
 const searchQuery = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term),
 hits as (
-  select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id,
+  select 'issue' as kind, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          ts_rank_cd(i.search, q.tsq) as rank, i.title as text, i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
-  select 'document', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text,
+  select 'document', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
          ts_rank_cd(v.search, q.tsq), v.markdown, i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, v.created_at)
     from artifacts a
@@ -38,7 +38,7 @@ hits as (
                   where v.artifact_id = a.id order by v.number desc limit 1) v on true, q
    where a.kind = 'doc' and v.search @@ q.tsq and ($2 = '' or p.key = $2)
   union all
-  select 'comment', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text,
+  select 'comment', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
          ts_rank_cd(c.search, q.tsq), c.body, i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, c.created_at)
     from comments c
@@ -47,16 +47,16 @@ hits as (
     left join projects p on p.key = a.project_key, q
    where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
-  select 'ask', k.issue_key, k.artifact_id, coalesce(k.artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text,
-         ts_rank_cd(k.search, q.tsq), k.question || ' ' || coalesce(k.answer->>'text', ''), i.title, i.status,
+  select 'ask', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end, coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, k.block_id,
+         ts_rank_cd(k.search, q.tsq), k.question || ' ' || coalesce(k.options::text, '') || ' ' || coalesce(k.answer->>'text', ''), i.title, i.status,
          p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at)
     from asks k
     left join issues i on i.key = k.issue_key
-    left join artifacts a on a.id = k.artifact_id
+    left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
     left join projects p on p.key = a.project_key, q
    where k.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
-  select 'message', m.issue_key, null::uuid, null::uuid, m.id::text, ts_rank_cd(m.search, q.tsq), m.body,
+  select 'message', m.issue_key, null::uuid, null::uuid, m.id::text, null::text, ts_rank_cd(m.search, q.tsq), m.body,
          i.title, i.status, null::text, null::text, null::text, i.updated_at
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)
@@ -70,7 +70,7 @@ select r.kind, coalesce(r.issue_key, r.owner_project), coalesce(r.issue_title, r
        coalesce(r.issue_status, 'document'),
        case when r.owner_artifact_id is null then 'issue' else 'document' end, r.issue_key,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
-       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.rank,
+       ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.rank,
        ts_headline('english',
          case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
               then substr(r.text, greatest(1, strpos(lower(r.text), lower(q.term)) - 1500), 4000)
@@ -127,6 +127,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		var ownerKey, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
 		var primary bool
 		var headline string
+		var blockID *string
 		if err := rows.Scan(
 			&result.Kind,
 			&result.Issue.Key,
@@ -142,6 +143,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			&name,
 			&primary,
 			&result.ID,
+			&blockID,
 			&result.Rank,
 			&headline,
 		); err != nil {
@@ -163,7 +165,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			result.Artifact = &model.SearchArtifact{Slug: *slug, Name: *name}
 		}
 		result.Snippet = markSnippet(headline)
-		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, searchText)
+		result.Href = searchHref(result.Kind, result.Owner, result.Artifact, primary, result.ID, blockID, searchText)
 		results = append(results, result)
 	}
 	if err := rows.Err(); err != nil {
@@ -190,7 +192,7 @@ func markSnippet(headline string) string {
 	return strings.NewReplacer(markStart, "<mark>", markEnd, "</mark>").Replace(html.EscapeString(headline))
 }
 
-func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id, query string) string {
+func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
 	if owner.Kind == "document" {
 		documentHref := "/projects/" + url.PathEscape(owner.Project) + "/documents/" + url.PathEscape(owner.Slug)
 		switch kind {
@@ -199,6 +201,9 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 		case "comment":
 			return documentHref + "?comment=" + url.QueryEscape(id)
 		case "ask":
+			if blockID != nil {
+				return documentHref + "#b-" + url.PathEscape(*blockID)
+			}
 			return documentHref + "?ask=" + url.QueryEscape(id)
 		}
 	}
@@ -215,6 +220,9 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 	case "comment":
 		return issueHref + "/comments/" + id
 	case "ask":
+		if blockID != nil {
+			return issueHref + "/spec#b-" + url.PathEscape(*blockID)
+		}
 		return issueHref + "/asks/" + id
 	case "message":
 		return issueHref + "/log"

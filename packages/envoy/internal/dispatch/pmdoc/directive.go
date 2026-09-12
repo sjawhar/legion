@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"html"
 	"strconv"
 	"strings"
 	"unicode"
@@ -211,7 +212,7 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 			if err != nil {
 				return nil, fmt.Errorf("decode value for %q: %w", name, err)
 			}
-			attrs[name] = unquoted
+			attrs[name] = html.UnescapeString(unquoted)
 			offset++
 		}
 		if offset < len(value) && !unicode.IsSpace(rune(value[offset])) {

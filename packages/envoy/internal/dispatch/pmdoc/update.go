@@ -152,7 +152,7 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 			continue
 		}
 		if !attrsEqual(Attrs{key: value}, Attrs{key: current[key]}) {
-			element.SetAttributeValue(txn, key, value)
+			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
 	for key := range current {
@@ -204,7 +204,7 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 	element := crdt.NewYXmlElement(node.Type)
 	for key, value := range node.Attrs {
 		if value != nil && key != "ychange" {
-			element.SetAttributeValue(txn, key, value)
+			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
 	for index, child := range normalizePNodeContent(node.Children) {
@@ -472,4 +472,21 @@ func simpleDiff(current, want string) (index, remove int, insert string) {
 		wantEnd--
 	}
 	return index, currentEnd - index, string(utf16.Decode(right[index:wantEnd]))
+}
+
+// yjsAttributeValue returns the Yjs "Any" encoding of a tree attribute value. The tree keeps
+// a typed block's `string[]` attribute as a Go []string; Yjs encodes arrays only as []any, and
+// ygo panics on any other slice type from inside the transaction (leaving the document mutex
+// held, so the failure surfaced as a hang rather than an error). Every element attribute
+// write goes through here so the two paths (create and update) agree with the reader, which
+// already accepts either shape.
+func yjsAttributeValue(value any) any {
+	if items, ok := value.([]string); ok {
+		out := make([]any, len(items))
+		for index, item := range items {
+			out[index] = item
+		}
+		return out
+	}
+	return value
 }

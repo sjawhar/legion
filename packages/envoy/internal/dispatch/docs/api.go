@@ -25,6 +25,8 @@ type API interface {
 	CommitVersion(artifactID string, version model.Version)
 	SetIssueClosed(issueKey string, closed bool)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
+	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
+	ScheduleSettlement(artifactID string)
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
 	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)

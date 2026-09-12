@@ -11,7 +11,7 @@ GlobalRegistrator.register();
 // document surface renders through the real schema without a network request, and a test that
 // wants a different schema replaces it through its own `api.getBlockSchema` spy before the
 // first render in its file.
-void blockSchemaCache.load(async () => serverBlockSchema as BlockSchema);
+void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSchema);
 
 class WebSocketStub {
   binaryType = "arraybuffer";

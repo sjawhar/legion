@@ -34,7 +34,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select a.id::text, a.issue_key, a.artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
+		select a.id::text, a.issue_key, a.artifact_id::text, a.block_id, a.block_artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
 		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at, a.kind, a.approval,
 		       i.key, i.title, ar.project_key, ar.slug, ar.name,
 		       lr.author, lr.created_at
@@ -66,7 +66,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		var editedAt, lastReplyAt *time.Time
 		var lastReplyAuthor []byte
 		if err := rows.Scan(
-			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
+			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
 			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
 			&issueKey, &issueTitle, &documentProject, &documentSlug, &documentName,
 			&lastReplyAuthor, &lastReplyAt,
@@ -113,6 +113,10 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		askPointers[index] = &asks[index].Ask
 	}
 	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := s.attachBlockArtifacts(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

@@ -107,6 +107,11 @@ the one headless Markdown engine cached per schema version; the connection carri
 owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
 SPA must not invent node schemas or parse a second directive grammar.
 
+`ask` is the host-rendered decision type. Every live document shows its open ask-block decisions
+as `#b-<blockId>` links; the in-document form and Inbox submit the same answer route, and an
+answered block is read-only. The editor library supplies its schema-aware Insert and Turn into
+block-menu entries; Dispatch passes the server schema rather than duplicating those commands.
+
 
 ## Commands
 

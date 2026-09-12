@@ -1,6 +1,7 @@
 import type { HostBlockRenderer } from "@sjawhar/proof-editor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  type FormEvent,
   type ReactNode,
   type RefObject,
   useCallback,
@@ -13,7 +14,7 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import {
   secondaryButtonBorder,
   secondaryButtonDisabledText,
@@ -82,31 +83,89 @@ function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
   }
 }
 
-const renderTypedBlock: HostBlockRenderer = (node) => [
-  "section",
-  {
-    class: `proof-typed-block proof-typed-block-${node.type.name}`,
-    "data-proof-block-type": node.type.name,
-  },
-  [
-    "header",
-    { "data-proof-block-summary": "" },
-    ["span", { "data-proof-block-name": "" }, node.type.name],
-    [
-      "dl",
-      { "data-proof-block-attributes": "" },
-      ...Object.entries(node.attrs).flatMap(([name, value]) => [
-        ["dt", {}, name],
+const renderTypedBlock: HostBlockRenderer = (node) => {
+  if (node.type.name !== "ask") {
+    return [
+      "section",
+      {
+        class: `proof-typed-block proof-typed-block-${node.type.name}`,
+        "data-proof-block-type": node.type.name,
+      },
+      [
+        "header",
+        { "data-proof-block-summary": "" },
+        ["span", { "data-proof-block-name": "" }, node.type.name],
         [
-          "dd",
-          { "data-proof-block-attribute": name },
-          Array.isArray(value) ? JSON.stringify(value) : String(value),
+          "dl",
+          { "data-proof-block-attributes": "" },
+          ...Object.entries(node.attrs).flatMap(([name, value]) => [
+            ["dt", {}, name],
+            [
+              "dd",
+              { "data-proof-block-attribute": name },
+              Array.isArray(value) ? JSON.stringify(value) : String(value),
+            ],
+          ]),
         ],
-      ]),
+      ],
+      ["div", { "data-proof-block-content": "" }, 0],
+    ];
+  }
+  const options: string[] = [];
+  if (node.lastChild?.type.name === "bullet_list") {
+    node.lastChild.forEach((item) => {
+      const separator = item.textContent.indexOf(": ");
+      const label = (
+        separator < 0 ? item.textContent : item.textContent.slice(0, separator)
+      ).trim();
+      if (label !== "") options.push(label);
+    });
+  }
+  const blockId = String(node.attrs.blockId);
+  const answered = node.attrs.state === "answered";
+  return [
+    "section",
+    {
+      class: "proof-typed-block proof-typed-block-ask",
+      "data-proof-block-type": "ask",
+      "data-dispatch-ask-block": blockId,
+    },
+    [
+      "header",
+      { class: "mb-3 flex items-center gap-2" },
+      ["strong", {}, "Decision"],
+      ["span", { class: "text-sm" }, String(node.attrs.urgency)],
+      answered
+        ? ["span", { class: "text-sm" }, `Answered by ${String(node.attrs.answered_by)}`]
+        : "",
     ],
-  ],
-  ["div", { "data-proof-block-content": "" }, 0],
-];
+    ["div", { "data-proof-block-content": "" }, 0],
+    answered
+      ? ["p", { class: "mt-3 text-sm" }, String(node.attrs.answer ?? "Answered")]
+      : [
+          "form",
+          { class: "mt-3 grid gap-2", "data-dispatch-ask-form": blockId },
+          ...options.map((label) => [
+            "label",
+            { class: "flex min-h-11 items-center gap-2" },
+            [
+              "input",
+              {
+                name: "selected",
+                type: node.attrs.multiple === true ? "checkbox" : "radio",
+                value: label,
+              },
+            ],
+            label,
+          ]),
+          [
+            "textarea",
+            { class: "min-h-11 border p-2", name: "answer", placeholder: "Your answer" },
+          ],
+          ["button", { class: "min-h-11 rounded px-3", type: "submit" }, "Answer"],
+        ],
+  ];
+};
 
 interface SearchHighlightSupport {
   readonly CSS?: {
@@ -261,6 +320,26 @@ export function ProofDocument({
     queryKey: ["artifact", artifact.id, "version", version],
     queryFn: () => api.getArtifactVersion(artifact.id, version ?? 0),
   });
+  const asksQuery = useQuery({
+    enabled: version === undefined,
+    queryKey: owner.kind === "issue" ? ["asks", owner.key] : ["artifact", artifact.id, "asks"],
+    queryFn: () =>
+      owner.kind === "issue" ? api.listIssueAsks(owner.key) : api.listArtifactAsks(artifact.id),
+  });
+  const answerBlockAsk = useMutation({
+    mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text?: string }) =>
+      api.answerAsk(ask.id, { selected, ...(text === undefined ? {} : { text }) }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
+      void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });
+      if (owner.kind === "issue") {
+        void queryClient.invalidateQueries({ queryKey: ["asks", owner.key] });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "asks"] });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+    },
+  });
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   const nameVersion = useMutation({
     mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
@@ -295,6 +374,35 @@ export function ProofDocument({
   const requestNamedVersion = useCallback(() => {
     setIsNameDialogOpen(true);
   }, []);
+  const submitBlockAnswer = (event: FormEvent<HTMLElement>) => {
+    event.preventDefault();
+    if (isClosed || schemaReadOnly) {
+      return;
+    }
+    const form = event.target as HTMLFormElement;
+    const blockID = form.dataset.dispatchAskForm;
+    if (blockID === undefined) {
+      return;
+    }
+    const ask = asksQuery.data?.find(
+      (candidate) => candidate.block_id === blockID && candidate.block_artifact?.id === artifact.id
+    );
+    if (ask === undefined) {
+      return;
+    }
+    const data = new FormData(form);
+    const selected = data
+      .getAll("selected")
+      .filter((value): value is string => typeof value === "string");
+    const text = String(data.get("answer") ?? "").trim();
+    answerBlockAsk.mutate({ ask, selected, ...(text === "" ? {} : { text }) });
+  };
+  const openBlockAsks = (asksQuery.data ?? []).filter(
+    (ask) =>
+      ask.state === "open" &&
+      typeof ask.block_id === "string" &&
+      ask.block_artifact?.id === artifact.id
+  );
 
   const copyBlockLink = useCallback(async () => {
     const blockId = editorRef.current?.blockIdAtSelection();
@@ -514,6 +622,29 @@ export function ProofDocument({
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {blockSchemaQuery.isError || schemaReadOnly ? <p>Reload to edit.</p> : null}
+      {version === undefined && openBlockAsks.length > 0 ? (
+        <nav aria-label="Open decisions" className="flex flex-wrap items-center gap-2">
+          <strong>{openBlockAsks.length} open decisions</strong>
+          {openBlockAsks.map((ask) => (
+            <a
+              className={`inline-flex min-h-11 items-center rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
+              href={`#b-${encodeURIComponent(ask.block_id ?? "")}`}
+              key={ask.id}
+              onClick={(event) => {
+                event.preventDefault();
+                const blockID = ask.block_id;
+                if (blockID === undefined || blockID === null) {
+                  return;
+                }
+                window.location.hash = `b-${encodeURIComponent(blockID)}`;
+                editorRef.current?.focusBlock(blockID);
+              }}
+            >
+              {ask.question}
+            </a>
+          ))}
+        </nav>
+      ) : null}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
       which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article
@@ -541,6 +672,7 @@ export function ProofDocument({
           event.preventDefault();
           navigate(isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route));
         }}
+        onSubmit={submitBlockAnswer}
       >
         <div ref={root} />
         {dispatchLinkRoutes.map(({ reference, route }) => (

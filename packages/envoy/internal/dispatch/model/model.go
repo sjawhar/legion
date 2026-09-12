@@ -248,7 +248,13 @@ type Ask struct {
 	ID         string  `json:"id"`
 	IssueKey   *string `json:"issue_key"`
 	ArtifactID *string `json:"artifact_id"`
-	Author     Actor   `json:"author"`
+	// BlockID is the typed block this indexed ask represents; nil is a row-only ask.
+	BlockID *string `json:"block_id"`
+	// BlockArtifactID identifies the document holding BlockID. It is internal to
+	// Dispatch's answer write-back; row ownership remains issue or unlinked document.
+	BlockArtifactID *string           `json:"-"`
+	BlockArtifact   *AskBlockArtifact `json:"block_artifact,omitempty"`
+	Author          Actor             `json:"author"`
 	// Kind is "question" for an ordinary ask and "approval" for one opened by an
 	// approval request, whose options are fixed and whose answer writes a review.
 	Kind          string         `json:"kind"`
@@ -265,6 +271,13 @@ type Ask struct {
 	EditedAt      *string        `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
+}
+
+// AskBlockArtifact is the document containing a typed ask block.
+type AskBlockArtifact struct {
+	ID      string `json:"id"`
+	Slug    string `json:"slug"`
+	Primary bool   `json:"primary"`
 }
 
 // AskApproval is the document an approval ask asks about, at the version the
@@ -305,6 +318,13 @@ type AskEditEventPayload struct {
 	Ask
 	Previous AskEditPrevious `json:"previous"`
 	EditedBy Actor           `json:"edited_by"`
+}
+
+// BlockRepairedEventPayload records one server-owned typed-block repair in a version.
+type BlockRepairedEventPayload struct {
+	BlockID     string `json:"block_id"`
+	Version     int    `json:"version"`
+	DisturbedBy Actor  `json:"disturbed_by"`
 }
 
 // AskOption is an answer choice.
@@ -456,13 +476,16 @@ type Event struct {
 
 // EditOp is one agent document editing operation.
 type EditOp struct {
-	Op         string `json:"op"`
-	Find       string `json:"find,omitempty"`
-	With       string `json:"with,omitempty"`
-	Occurrence *int   `json:"occurrence,omitempty"`
-	Markdown   string `json:"markdown,omitempty"`
-	After      string `json:"after,omitempty"`
-	Before     string `json:"before,omitempty"`
+	Op         string         `json:"op"`
+	Find       string         `json:"find,omitempty"`
+	With       string         `json:"with,omitempty"`
+	Occurrence *int           `json:"occurrence,omitempty"`
+	Markdown   string         `json:"markdown,omitempty"`
+	After      string         `json:"after,omitempty"`
+	Before     string         `json:"before,omitempty"`
+	Block      string         `json:"block,omitempty"`
+	Type       string         `json:"type,omitempty"`
+	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
 // Route is a validated issue delivery route.

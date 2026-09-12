@@ -184,11 +184,17 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 		if !ok {
 			return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, n.Type, name)
 		}
+		if value == nil && definition.Default == nil {
+			continue
+		}
 		if err := validateAttributeValue(definition, value); err != nil {
 			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
 		}
 	}
-	for name := range typ.Attributes {
+	for name, definition := range typ.Attributes {
+		if definition.Default == nil {
+			continue
+		}
 		if _, present := n.Attrs[name]; !present {
 			return fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
 		}
@@ -210,32 +216,6 @@ func paragraphsThenOptionalBulletList(children []*Node) bool {
 		return child.Type == "bullet_list" && index == len(children)-1
 	}
 	return true
-}
-
-// ReassertServerOwnedAttrs restores schema defaults for server-owned attributes. Type-specific
-// reconcilers can overwrite their authoritative values before this generic closure runs.
-func ReassertServerOwnedAttrs(tree *Node) bool {
-	changed := false
-	walk(tree, func(node *Node, _ []int, _, _ int) bool {
-		typ, typed := typedBlock(node.Type)
-		if !typed {
-			return true
-		}
-		for name, definition := range typ.Attributes {
-			if !definition.Server || definition.Default == nil {
-				continue
-			}
-			if node.Attrs == nil {
-				node.Attrs = Attrs{}
-			}
-			if !attrsEqual(Attrs{name: node.Attrs[name]}, Attrs{name: definition.Default}) {
-				node.Attrs[name] = cloneSchemaValue(definition.Default)
-				changed = true
-			}
-		}
-		return true
-	})
-	return changed
 }
 
 func childrenAre(children []*Node, typeName string) bool {
@@ -365,7 +345,7 @@ func attrsEqual(a, b Attrs) bool {
 	return true
 }
 
-// normalizeJSON makes ints and floats compare equal the way JSON does.
+// normalizeJSON makes equivalent wire representations compare equal.
 func normalizeJSON(v any) any {
 	switch x := v.(type) {
 	case int:
@@ -374,8 +354,21 @@ func normalizeJSON(v any) any {
 		return float64(x)
 	case float32:
 		return float64(x)
+	case []string:
+		out := make([]any, len(x))
+		for index := range x {
+			out[index] = x[index]
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for index := range x {
+			out[index] = normalizeJSON(x[index])
+		}
+		return out
+	default:
+		return x
 	}
-	return v
 }
 
 type jsonNode struct {

@@ -35,6 +35,9 @@ the native Dispatch tool suite:
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.
+- `dispatch_doc_edit` supports `replace`, `delete`, `insert`, and `retype`. `retype` names a
+  stable block id, a server-declared type, and optional client-owned attributes. Ask lifecycle
+  payloads include nullable `block_id`; `block.repaired` records a server-owned attribute repair.
 - Do not hand-edit `packages/envoy/internal/contracts/generated.go`.
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.

@@ -76,7 +76,7 @@ const SPEC_WRITING_GUIDANCE =
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
 /** Document edit operations the Dispatch server applies. */
-export const DOC_EDIT_OPS = ["replace", "delete", "insert"] as const;
+export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype"] as const;
 
 export const dispatchToolSpecs = [
   {
@@ -279,9 +279,9 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_doc_edit",
     description:
-      "Apply deterministic text edits to an issue or project document. Do not use it for review feedback or for reading; use " +
-      "dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. The spec (or any document) holds requirements, " +
-      `design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      "Apply deterministic document edits, including retyping an identified paragraph into a schema-declared typed block. " +
+      "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
+      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -303,6 +303,9 @@ export const dispatchToolSpecs = [
             markdown: z.string().describe("Markdown to insert.").optional(),
             after: z.string().describe("Anchor after which to insert.").optional(),
             before: z.string().describe("Anchor before which to insert.").optional(),
+            block: z.string().describe("Block id to retype.").optional(),
+            type: z.string().describe("Typed block name for retype.").optional(),
+            attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
           })
         )
         .describe("Flat tagged edits; the server validates fields required for each operation."),

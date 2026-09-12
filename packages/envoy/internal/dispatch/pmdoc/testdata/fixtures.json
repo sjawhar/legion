@@ -1,5 +1,193 @@
 [
   {
+    "name": "ask-answered",
+    "markdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "urgency": "high",
+            "multiple": false,
+            "state": "answered",
+            "answered_by": "alice",
+            "answered_at": "2026-09-12T13:20:00Z",
+            "selected": [
+              "REST"
+            ],
+            "answer": "Ship REST first.",
+            "blockId": "ask-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which transport should we expose?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: Matches the existing platform"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "gRPC: Adds streaming"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASIBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3BGhpZ2goAAEACG11bHRpcGxlAXkoAAEABXN0YXRlAXcIYW5zd2VyZWQoAAEAC2Fuc3dlcmVkX2J5AXcFYWxpY2UoAAEAC2Fuc3dlcmVkX2F0AXcUMjAyNi0wOS0xMlQxMzoyMDowMFooAAEACHNlbGVjdGVkAXUBdwRSRVNUKAABAAZhbnN3ZXIBdxBTaGlwIFJFU1QgZmlyc3QuKAABAAdibG9ja0lkAXcFYXNrLTEA",
+    "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;REST&#x22;]\" answer=\"Ship REST first.\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
+  },
+  {
+    "name": "ask",
+    "markdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "ask",
+          "attrs": {
+            "urgency": "high",
+            "multiple": false,
+            "state": "open",
+            "blockId": "ask-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Which transport should we expose?"
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "REST: Matches the existing platform"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "gRPC: Adds streaming"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASIBAAcBC3Byb3NlbWlycm9yAwNhc2sHAAEAAwlwYXJhZ3JhcGgHAAEBBgQAAQIhV2hpY2ggdHJhbnNwb3J0IHNob3VsZCB3ZSBleHBvc2U/KAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDC2J1bGxldF9saXN0BwABJQMJbGlzdF9pdGVtBwABJgMJcGFyYWdyYXBoBwABJwYEAAEoI1JFU1Q6IE1hdGNoZXMgdGhlIGV4aXN0aW5nIHBsYXRmb3JtKAABJwdibG9ja0lkAXcIYi0wMDAwMDQoAAEmBWxhYmVsAXcD4oCiKAABJghsaXN0VHlwZQF3BmJ1bGxldCgAASYGc3ByZWFkAXkoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwM4cBJgMJbGlzdF9pdGVtBwABUQMJcGFyYWdyYXBoBwABUgYEAAFTFGdSUEM6IEFkZHMgc3RyZWFtaW5nKAABUgdibG9ja0lkAXcIYi0wMDAwMDYoAAFRBWxhYmVsAXcD4oCiKAABUQhsaXN0VHlwZQF3BmJ1bGxldCgAAVEGc3ByZWFkAXkoAAFRB2Jsb2NrSWQBdwhiLTAwMDAwNSgAASUGc3ByZWFkAXkoAAElB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQAHdXJnZW5jeQF3BGhpZ2goAAEACG11bHRpcGxlAXkoAAEABXN0YXRlAXcEb3BlbigAAQALYW5zd2VyZWRfYnkBfygAAQALYW5zd2VyZWRfYXQBfygAAQAIc2VsZWN0ZWQBfygAAQAGYW5zd2VyAX8oAAEAB2Jsb2NrSWQBdwVhc2stMQA=",
+    "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
+  },
+  {
     "name": "bare-url",
     "markdown": "see https://example.com/x now\n",
     "pm_json": {

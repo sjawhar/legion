@@ -379,7 +379,12 @@ type askTransition struct {
 
 // answerTransition is the answer of an ask: option labels for a question, or
 // exactly one of Approve / Request changes for an approval ask.
-func answerTransition(actor model.Actor, selected []string, text *string) askTransition {
+func answerTransition(
+	actor model.Actor,
+	selected []string,
+	text *string,
+	writeBlock func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error,
+) askTransition {
 	return askTransition{
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
@@ -400,6 +405,11 @@ func answerTransition(actor model.Actor, selected []string, text *string) askTra
 				}
 			}
 			answer := model.AskAnswer{User: actor.ID, Selected: selected, Text: text, At: time.Now().UTC()}
+			if writeBlock != nil {
+				if err := writeBlock(ctx, tx, ask, answer); err != nil {
+					return model.Ask{}, err
+				}
+			}
 			answerJSON, err := encodeJSON(answer)
 			if err != nil {
 				return model.Ask{}, err
@@ -418,7 +428,7 @@ func answerTransition(actor model.Actor, selected []string, text *string) askTra
 // or publishing its event; the header review path uses it to close an open
 // approval ask alongside the review it writes.
 func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, selected []string, text *string) (model.Ask, error) {
-	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text))
+	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text, nil))
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +445,24 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	transition := answerTransition(actor, input.Selected, input.Text)
+	transition := answerTransition(actor, input.Selected, input.Text, func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
+		if ask.BlockID == nil {
+			return nil
+		}
+		if ask.BlockArtifactID == nil {
+			return fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+		}
+		attributes := map[string]any{
+			"state":       "answered",
+			"answered_by": answer.User,
+			"answered_at": timestampValue(answer.At),
+			"selected":    answer.Selected,
+		}
+		if answer.Text != nil {
+			attributes["answer"] = *answer.Text
+		}
+		return s.deps.Docs.SetBlockAttributes(docs.WithTx(ctx, tx), *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
+	})
 	// An approval ask's answer is a review of the document it names, pinned to
 	// the document's latest settled version at answer time.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
@@ -671,7 +698,7 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	ask, err := scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
+		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
 		from asks where id = $1
 	`, id))
 	if err != nil {
@@ -680,11 +707,14 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 	if err := s.attachOpenedEventIDs(ctx, q, []*model.Ask{&ask}); err != nil {
 		return model.Ask{}, err
 	}
+	if err := s.attachBlockArtifacts(ctx, q, []*model.Ask{&ask}); err != nil {
+		return model.Ask{}, err
+	}
 	return ask, nil
 }
 
 // listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
-const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval`
+const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval`
 
 // pgx caches prepared plans by query text. State and ownership each have a fixed
 // query so the partial open-ask index remains eligible under generic plans.
@@ -758,18 +788,24 @@ func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, stat
 	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
 		return nil, err
 	}
+	if err := s.attachBlockArtifacts(ctx, q, askPointers); err != nil {
+		return nil, err
+	}
 	return asks, nil
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	ask, err := scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
+		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
 		from asks where id = $1 for update
 	`, id))
 	if err != nil {
 		return model.Ask{}, err
 	}
 	if err := s.attachOpenedEventIDs(ctx, tx, []*model.Ask{&ask}); err != nil {
+		return model.Ask{}, err
+	}
+	if err := s.attachBlockArtifacts(ctx, tx, []*model.Ask{&ask}); err != nil {
 		return model.Ask{}, err
 	}
 	return ask, nil
@@ -798,6 +834,7 @@ func (s *server) attachOpenedEventIDs(
 		where type in ('ask.opened', 'ask.answered', 'ask.resolved', 'ask.edited')
 		  and payload->>'id' = any($1)
 		group by payload->>'id'
+
 	`, askIDs)
 	if err != nil {
 		return err
@@ -825,13 +862,28 @@ func (s *server) attachOpenedEventIDs(
 	}
 	return nil
 }
+func (s *server) attachBlockArtifacts(ctx context.Context, q queryer, asks []*model.Ask) error {
+	for _, ask := range asks {
+		if ask.BlockArtifactID == nil {
+			continue
+		}
+		var artifact model.AskBlockArtifact
+		if err := q.QueryRow(ctx, `
+			select id::text, slug, is_primary from artifacts where id = $1
+		`, *ask.BlockArtifactID).Scan(&artifact.ID, &artifact.Slug, &artifact.Primary); err != nil {
+			return fmt.Errorf("load ask block artifact: %w", err)
+		}
+		ask.BlockArtifact = &artifact
+	}
+	return nil
+}
 
 func scanAsk(row pgx.Row) (model.Ask, error) {
 	var ask model.Ask
 	var author, options, anchor, answer, resolution, approval []byte
 	var editedAt *time.Time
 	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
+		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
 		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
 	); err != nil {
 		return model.Ask{}, err

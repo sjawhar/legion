@@ -30,6 +30,8 @@ var (
 	ErrServiceUnavailable = errors.New("document service unavailable")
 )
 
+const maxSettleFailures = 3
+
 const (
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
@@ -83,6 +85,7 @@ type roomState struct {
 	unrecorded      map[pmdoc.MarkRef]time.Time
 	gen             uint64
 	suppressSettle  int
+	settleFailures  int
 	failed          error
 	failedDone      chan struct{}
 	closed          bool
@@ -394,9 +397,15 @@ func (s *Service) retrySettle(room string, generation uint64, err error) {
 
 func (s *Service) retrySettleLocked(room string, state *roomState, generation uint64, err error) {
 	slog.Error("dispatch: settle document", "room", room, "error", err)
-	if state.gen == generation {
-		s.scheduleSettleLocked(room, state)
+	if state.gen != generation {
+		return
 	}
+	state.settleFailures++
+	if state.settleFailures >= maxSettleFailures {
+		s.failRoomLocked(room, state, fmt.Errorf("document settlement failed %d times: %w", state.settleFailures, err))
+		return
+	}
+	s.scheduleSettleLocked(room, state)
 }
 
 func artifactVersionEventPayload(
@@ -418,19 +427,13 @@ func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, erro
 		return nil, 0, err
 	}
 	stamped := pmdoc.EnsureBlockIDsCount(tree)
-	reasserted := pmdoc.ReassertServerOwnedAttrs(tree)
-	if stamped == 0 && !reasserted {
+	if stamped == 0 {
 		return tree, 0, nil
 	}
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		return pmdoc.Update(transaction, fragment, tree)
 	}, origin); err != nil {
 		return nil, 0, err
-	}
-	if stamped == 0 {
-		// Callers use a non-zero result as the captured-update signal. A server-attribute
-		// repair is just as durable a closure mutation as an ID stamp.
-		stamped = 1
 	}
 	return tree, stamped, nil
 }
@@ -450,6 +453,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			return
 		}
 	}
+
 	ctx := context.Background()
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
@@ -479,10 +483,8 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
+
 	stamped := pmdoc.BlockIDRepairCount(tree)
-	if pmdoc.ReassertServerOwnedAttrs(tree) && stamped == 0 {
-		stamped = 1
-	}
 	var slot *suppressSlot
 	var updates [][]byte
 	if stamped > 0 {
@@ -515,6 +517,95 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 	}
 
+	state.mu.Lock()
+	if s.stopping.Load() || state.closed || state.failed != nil {
+		state.mu.Unlock()
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+		}
+		return
+	}
+	if state.gen != generation {
+		state.mu.Unlock()
+		if stamped == 0 {
+			return
+		}
+		identityUpdate, mergeErr := mergeUpdates(updates)
+		if mergeErr != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, mergeErr)
+			return
+		}
+		if err := s.srv.BroadcastUpdate(ctx, room, identityUpdate); err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, fmt.Errorf("broadcast superseded document identity update: %w", err))
+			return
+		}
+		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate); err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		if err := tx.Commit(ctx); err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, fmt.Errorf("commit superseded document identity update: %w", err))
+			return
+		}
+		s.finishSuppressedPersistence(slot, identityUpdate)
+		return
+	}
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
+	}
+	state.mu.Unlock()
+	authors := actorSlice(pending)
+	eventActor := model.Actor{}
+	if len(authors) > 0 {
+		eventActor = authors[0]
+	}
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor, latest.Number+1)
+	if err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
+	if reconciliation.changed {
+		if slot == nil {
+			slot = s.prepareSuppressedPersistence(room)
+		}
+		origin := &identityClosureOrigin{}
+		var mutationErr error
+		err = s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
+				if updateOrigin == origin {
+					updates = append(updates, append([]byte(nil), update...))
+				}
+			})
+			defer unsubscribe()
+			fragment := doc.GetXmlFragment(fragmentName)
+			mutationErr = doc.TransactE(func(transaction *crdt.Transaction) error {
+				return pmdoc.Update(transaction, fragment, tree)
+			}, origin)
+		})
+		if errors.Is(err, websocket.ErrNoChanges) {
+			err = nil
+		}
+		if mutationErr != nil || err != nil {
+			s.cancelSuppressedPersistence(room, slot)
+			if mutationErr != nil {
+				err = mutationErr
+			}
+			s.failRoom(room, fmt.Errorf("write reconciled typed blocks: %w", err))
+			return
+		}
+		stamped = 1
+	}
+
 	var update []byte
 	if stamped > 0 {
 		update, err = mergeUpdates(updates)
@@ -525,7 +616,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		if err := s.srv.BroadcastUpdate(ctx, room, update); err != nil {
 			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("broadcast identity update: %w", err))
+			s.failRoom(room, fmt.Errorf("broadcast document closure update: %w", err))
 			return
 		}
 		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update); appendErr != nil {
@@ -533,8 +624,6 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, appendErr)
 			return
 		}
-	} else {
-		s.cancelSuppressedPersistence(room, slot)
 	}
 	markdown, err := renderTree(tree)
 	if err != nil {
@@ -550,69 +639,59 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
+
 	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
 		state.mu.Unlock()
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
 		}
 		return
-	}
-	if state.gen != generation {
-		state.mu.Unlock()
-		if stamped == 0 {
-			return
-		}
-		if err := tx.Commit(ctx); err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("commit superseded document identity update: %w", err))
-			return
-		}
-		s.finishSuppressedPersistence(slot, update)
-		return
-	}
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
 	}
 	state.mu.Unlock()
-	if latest.markdown == markdown {
-		if err := tx.Commit(ctx); err != nil {
+
+	published := make([]model.Event, 0, len(reconciliation.events)+1)
+	appendEvents := func(events []model.Event) error {
+		for _, planned := range events {
+			appended, appendErr := s.events.Append(ctx, tx, planned)
+			if appendErr != nil {
+				return appendErr
+			}
+			published = append(published, appended)
+		}
+		return nil
+	}
+	if latest.markdown != markdown {
+		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, &versionWrite{authors: authors})
+		if writeErr != nil {
 			if stamped > 0 {
 				s.discardSuppressedPersistence(room, slot)
-				s.failRoom(room, fmt.Errorf("commit document identity update: %w", err))
+				s.failRoom(room, writeErr)
 				return
 			}
-			s.retrySettle(room, generation, fmt.Errorf("commit document identity update: %w", err))
+			s.retrySettle(room, generation, writeErr)
 			return
 		}
-		if stamped > 0 {
-			s.finishSuppressedPersistence(slot, update)
+		versionEvent := model.Event{
+			IssueKey: owner.IssueKey,
+			Type:     "artifact.version",
+			Actor:    eventActor,
+			Payload:  artifactVersionEventPayload(room, owner.Name, version, nil),
 		}
-		s.sweepUnrecordedMarks(room, tree)
-		return
-	}
-	authors := actorSlice(pending)
-	version, err := s.writeVersionTx(ctx, tx, room, markdown, tree, &versionWrite{authors: authors})
-	if err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
+		if owner.IssueKey == nil {
+			versionEvent.ArtifactID = &room
+		}
+		if err := appendEvents([]model.Event{versionEvent}); err != nil {
+			if stamped > 0 {
+				s.discardSuppressedPersistence(room, slot)
+				s.failRoom(room, err)
+				return
+			}
+			s.retrySettle(room, generation, err)
 			return
 		}
-		s.retrySettle(room, generation, err)
-		return
 	}
-	eventActor := model.Actor{}
-	if len(authors) > 0 {
-		eventActor = authors[0]
-	}
-	event := model.Event{IssueKey: owner.IssueKey, Type: "artifact.version", Actor: eventActor, Payload: artifactVersionEventPayload(room, owner.Name, version, nil)}
-	if owner.IssueKey == nil {
-		event.ArtifactID = &room
-	}
-	event, err = s.events.Append(ctx, tx, event)
-	if err != nil {
+	if err := appendEvents(reconciliation.events); err != nil {
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
 			s.failRoom(room, err)
@@ -624,10 +703,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if err := tx.Commit(ctx); err != nil {
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("commit document version: %w", err))
+			s.failRoom(room, fmt.Errorf("commit document settlement: %w", err))
 			return
 		}
-		s.retrySettle(room, generation, fmt.Errorf("commit document version: %w", err))
+		s.retrySettle(room, generation, fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
 	if stamped > 0 {
@@ -635,14 +714,21 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 	state.mu.Lock()
 	if state.gen == generation {
+		state.settleFailures = 0
 		for key := range pending {
 			delete(state.pending, key)
 		}
 	}
 	state.mu.Unlock()
-
-	s.events.Publish(event)
+	for _, event := range published {
+		s.events.Publish(event)
+	}
 	s.sweepUnrecordedMarks(room, tree)
+}
+
+// ScheduleSettlement queues the document closer after its caller's transaction commits.
+func (s *Service) ScheduleSettlement(artifactID string) {
+	s.scheduleSettle(artifactID)
 }
 
 type BlockIDBackfill struct {

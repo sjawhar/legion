@@ -916,11 +916,14 @@ export async function executeDispatchTool(
         ...(summary === undefined ? {} : { summary }),
         actor,
       });
+      const retyped = ops.filter((operation) => operation.op === "retype").length;
+      const versionText =
+        edited.version === null ? "no new version" : `version ${edited.version.number}`;
       return {
         text:
-          edited.version === null
-            ? `Applied ${edited.applied} ops (no new version)`
-            : `Applied ${edited.applied} ops (version ${edited.version.number})`,
+          retyped === 0
+            ? `Applied ${edited.applied} ops (${versionText})`
+            : `Applied ${edited.applied} ops; retyped ${retyped} block${retyped === 1 ? "" : "s"} (${versionText})`,
         details: writeResultDetails(resolved, {
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),

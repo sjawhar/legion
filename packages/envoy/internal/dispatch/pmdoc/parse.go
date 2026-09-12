@@ -320,9 +320,6 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 		if !ok {
 			return nil, fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, directive.Name, name)
 		}
-		if definition.Server {
-			continue
-		}
 		value, err := parseTypedAttributeValue(definition, raw)
 		if err != nil {
 			return nil, fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)

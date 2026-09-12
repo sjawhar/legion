@@ -102,6 +102,22 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			}
 		}
 		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+	case "retype":
+		if op.Block == "" {
+			return nil, invalidOp("block")
+		}
+		if op.Type == "" {
+			return nil, invalidOp("type")
+		}
+		out, err := pmdoc.RetypeBlock(tree, op.Block, op.Type, pmdoc.Attrs(op.Attributes))
+		if errors.Is(err, pmdoc.ErrSchema) {
+			field := "attributes"
+			if strings.Contains(err.Error(), "unknown typed block") {
+				field = "type"
+			}
+			return nil, &ErrInvalidOp{Field: field, Reason: err.Error()}
+		}
+		return out, err
 	default:
 		return nil, invalidOp("op")
 	}

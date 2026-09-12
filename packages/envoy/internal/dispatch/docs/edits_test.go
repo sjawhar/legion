@@ -33,6 +33,77 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	}
 }
 
+func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
+	pmdoc.SetBlockIDGenerator(func() string { return "generated-body" })
+	t.Cleanup(func() { pmdoc.SetBlockIDGenerator(nil) })
+	tree, err := pmdoc.Parse("Which transport should we expose?\n")
+	if err != nil {
+		t.Fatalf("parse source paragraph: %v", err)
+	}
+	blockID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+
+	retyped, err := applyOperation(tree, model.EditOp{
+		Op:         "retype",
+		Block:      blockID,
+		Type:       "ask",
+		Attributes: map[string]any{"multiple": true, "urgency": "high"},
+	})
+	if err != nil {
+		t.Fatalf("retype paragraph: %v", err)
+	}
+	got, _, err := pmdoc.Render(retyped)
+	if err != nil {
+		t.Fatalf("render retyped paragraph: %v", err)
+	}
+	want := ":::ask{#" + blockID + " urgency=\"high\" multiple=\"true\" state=\"open\"}\nWhich transport should we expose?\n:::\n"
+	if got != want {
+		t.Fatalf("retyped markdown = %q, want %q", got, want)
+	}
+}
+
+func TestApplyOperationLabelsInvalidRetypeFields(t *testing.T) {
+	tree, err := pmdoc.Parse("Which transport should we expose?\n")
+	if err != nil {
+		t.Fatalf("parse source paragraph: %v", err)
+	}
+	blockID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	for _, test := range []struct {
+		name  string
+		op    model.EditOp
+		field string
+	}{
+		{name: "unknown type", op: model.EditOp{Op: "retype", Block: blockID, Type: "missing"}, field: "type"},
+		{name: "invalid attributes", op: model.EditOp{Op: "retype", Block: blockID, Type: "ask", Attributes: map[string]any{"urgency": "now"}}, field: "attributes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := applyOperation(tree, test.op)
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != test.field {
+				t.Fatalf("retype error = %v, want invalid %s", err, test.field)
+			}
+		})
+	}
+}
+
+func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nShip it?\n:::\n")
+	actor := model.Actor{Kind: "user", ID: "alice"}
+
+	err := service.SetBlockAttributes(context.Background(), artifactID, "ask-1", map[string]any{
+		"answer":      "Yes.",
+		"answered_at": "2026-09-12T13:20:00Z",
+		"answered_by": "alice",
+		"selected":    []string{"Yes"},
+		"state":       "answered",
+	}, actor)
+	if err != nil {
+		t.Fatalf("write ask state: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-12T13:20:00Z\" selected=\"[&#x22;Yes&#x22;]\" answer=\"Yes.\"}\nShip it?\n:::\n")
+}
+
 func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")

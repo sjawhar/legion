@@ -23,6 +23,7 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 		}
 		return nil, err
 	}
+	pmdoc.StripServerOwnedAttrs(tree)
 	return pmdoc.StripAnchorMarks(tree), nil
 }
 

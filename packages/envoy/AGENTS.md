@@ -46,14 +46,18 @@ the fixture generator reads that checked-in file. A typed block is CommonMark ge
 syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
-inside another block runs to that parent’s end. A typed block always renders its `blockId` and every
-declared attribute. Parsing mints an omitted id, while live document reads and writes validate every
-node against the schema's content rule.
+inside another block runs to that parent’s end.
 
-Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a
-content rule. Tightening content, removing or renaming a type or attribute, or requiring a new
-attribute requires a document migration and version bump. Server-owned attributes are not accepted
-from agents and are reasserted during settlement.
+A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
+attribute. Parsing mints an omitted id, while live document reads and writes validate each node
+against its schema content rule. Schema changes are additive: add a type, add a defaulted
+attribute, add an enum choice, or widen a content rule. Tightening content, removing or renaming a
+type or attribute, or requiring a new attribute requires a document migration and version bump.
+
+`ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
+the row restores server-owned answer state into the block, and removal retracts the indexed ask.
+An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
+canonical markdown.
 
 ## Critical conventions
 

@@ -19,6 +19,7 @@ export type {
   ArtifactVersionText,
   Ask,
   AskAnswer,
+  AskBlockArtifact,
   AskEdit,
   AskEditPrevious,
   AskLastReply,
