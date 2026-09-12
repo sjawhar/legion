@@ -254,7 +254,12 @@
       "biome": "packages/daemon/src: Checked 143 files, No fixes applied",
       "daemonSuite": "cd packages/daemon && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 943 pass, 0 skip, 0 fail, 57 files (932 = 931 + the new registry case before the second rebase; +11 from #966's image-ref/cli tests after it)",
       "tmuxServers": "no legion-omp / scratch server left; answering servers: default, l12rig (another agent's, appeared during this round), legion-sjawhar16 (LEGION-16 rig), legion-sjawharlegion (dogfood)",
-      "ci": "pending at handoff-write time (the previous pushes never got a run - see rebaseRound.secondRebase.why); links recorded in the follow-up handoff commit and the PR body",
+      "ci": {
+        "prHead": "dd26b764b3c8942b6dceb2a3cb4fda8179073fb1",
+        "tests": "https://github.com/sjawhar/legion/actions/runs/34713611965 - success (first attempt)",
+        "envoyContracts": "https://github.com/sjawhar/legion/actions/runs/34713611969 - success (first attempt)",
+        "confirmedVia": "daemon ci-green notice for dd26b764 + legion gh -- run list --branch legion/LEGION-21 filtered to headSha dd26b764: both completed success"
+      },
       "contractsAndPiEnvoy": "bun test packages/contracts packages/pi-envoy/src/legion/daemon-api-version.test.ts -> 95 pass, 0 fail"
     },
     "untouched": "worker-rpc.ts, worker-stream-listener.ts, cli/worker-shim.ts, dogfood daemon, ~/.omp/profiles/legion; .legion/ kept"
