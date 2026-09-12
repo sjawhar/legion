@@ -73,6 +73,8 @@ function renderProofDocument({
   const margin = {
     current: undefined as
       | {
+          blockFilterId: string | undefined;
+          focusBlock(blockId: string): void;
           documentBridge:
             | { focusMark(markId: string): void; setActiveMarks(markIds: string[]): void }
             | undefined;
@@ -458,6 +460,48 @@ test("ProofDocument shows the current document when Version changes back to Curr
     await waitFor(() =>
       expect(within(view.container).getByRole("article").textContent).toContain("The live document")
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the block reference gutter filters the margin and focuses its block", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(
+    ["artifact", artifact.id, "blocks"],
+    [
+      {
+        from: 0,
+        id: "block-1",
+        references: { asks: 1, comments: 1 },
+        to: 17,
+        type: "paragraph",
+      },
+    ]
+  );
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    fireEvent.click(
+      await within(view.container).findByRole("button", { name: "2 references on block" })
+    );
+    expect(editors[0]?.focusedBlocks).toEqual(["block-1"]);
+    expect(margin.current?.blockFilterId).toBe("block-1");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a margin block focus request pulses the active block", async () => {
+  const { editors, margin, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => margin.current?.focusBlock("block-1"));
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toContain("block-1"));
   } finally {
     view.unmount();
   }

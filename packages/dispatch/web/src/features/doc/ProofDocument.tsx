@@ -16,6 +16,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import {
+  badgeMed,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -35,7 +36,14 @@ import type { ConnectionState } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
-import { composerKindFor, markPlacements, setActiveMarkClass } from "./marks";
+import {
+  blockOffsets,
+  blockPlacements as collectBlockPlacements,
+  composerKindFor,
+  markPlacements,
+  setActiveBlockClass,
+  setActiveMarkClass,
+} from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
@@ -284,21 +292,29 @@ export function ProofDocument({
   const { blockSchema: runtimeBlockSchema, connect, createEditor } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const {
+    blockFocusRequest,
+    blockPlacements,
     composeForMark,
+    filterToBlock,
     focusItemForMark,
     hoverItemForMark,
     registerDocument,
+    setBlockPlacements,
     setMarkPlacements,
   } = useMargin();
   const composeForMarkRef = useRef(composeForMark);
+  const filterToBlockRef = useRef(filterToBlock);
   const focusItemForMarkRef = useRef(focusItemForMark);
   const hoverItemForMarkRef = useRef(hoverItemForMark);
   const registerDocumentRef = useRef(registerDocument);
+  const setBlockPlacementsRef = useRef(setBlockPlacements);
   const setMarkPlacementsRef = useRef(setMarkPlacements);
   composeForMarkRef.current = composeForMark;
+  filterToBlockRef.current = filterToBlock;
   focusItemForMarkRef.current = focusItemForMark;
   hoverItemForMarkRef.current = hoverItemForMark;
   registerDocumentRef.current = registerDocument;
+  setBlockPlacementsRef.current = setBlockPlacements;
   setMarkPlacementsRef.current = setMarkPlacements;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
@@ -314,6 +330,11 @@ export function ProofDocument({
   const liveTextQuery = useQuery({
     queryKey: ["artifact", artifact.id, "text"],
     queryFn: () => api.getArtifactText(artifact.id),
+  });
+  const blockReferencesQuery = useQuery({
+    enabled: version === undefined,
+    queryKey: ["artifact", artifact.id, "blocks"],
+    queryFn: () => api.getArtifactBlocks(artifact.id),
   });
   const versionQuery = useQuery({
     enabled: version !== undefined,
@@ -525,7 +546,11 @@ export function ProofDocument({
             inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
           }
           registerDocumentRef.current({
+            focusBlock: (blockId) => {
+              requestAnimationFrame(() => handle.focusBlock(blockId));
+            },
             focusMark: (markId) => handle.focusMark(markId),
+            setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
             setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
           });
           const marks = document.doc.getMap("marks");
@@ -561,6 +586,9 @@ export function ProofDocument({
             frame = requestAnimationFrame(() => {
               setMarkPlacementsRef.current(
                 markPlacements(handle.view.state.doc, handle.markOffsets())
+              );
+              setBlockPlacementsRef.current(
+                collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
               );
             });
           };
@@ -600,6 +628,16 @@ export function ProofDocument({
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
   }, [isClosed]);
+
+  useEffect(() => {
+    if (blockFocusRequest === undefined) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      editorRef.current?.focusBlock(blockFocusRequest.blockId);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [blockFocusRequest]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -649,7 +687,7 @@ export function ProofDocument({
       which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article
         aria-label="Document"
-        className="dispatch-doc"
+        className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined}
         onClick={(event) => {
@@ -675,6 +713,35 @@ export function ProofDocument({
         onSubmit={submitBlockAnswer}
       >
         <div ref={root} />
+        {blockReferencesQuery.data?.some(
+          (block) => block.references.comments + block.references.asks > 0
+        ) ? (
+          <aside
+            aria-label="Block references"
+            className="pointer-events-none absolute top-0 right-0 z-10 w-8"
+          >
+            {blockReferencesQuery.data
+              .filter((block) => block.references.comments + block.references.asks > 0)
+              .map((block) => {
+                const count = block.references.comments + block.references.asks;
+                return (
+                  <button
+                    aria-label={`${count} references on block`}
+                    className={`pointer-events-auto absolute right-0 min-h-11 min-w-11 rounded-full text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
+                    key={block.id}
+                    onClick={() => {
+                      filterToBlockRef.current(block.id);
+                      editorRef.current?.focusBlock(block.id);
+                    }}
+                    style={{ top: `${blockPlacements.get(block.id)?.top ?? 0}px` }}
+                    type="button"
+                  >
+                    {count}
+                  </button>
+                );
+              })}
+          </aside>
+        ) : null}
         {dispatchLinkRoutes.map(({ reference, route }) => (
           <ReferenceTooltip key={reference} reference={reference} route={route} rootRef={root} />
         ))}

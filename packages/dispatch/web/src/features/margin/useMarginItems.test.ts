@@ -52,6 +52,7 @@ const artifact: Artifact = {
 function anchorOn(artifactId: string, quote = "anchored", orphaned = false) {
   return {
     artifact_id: artifactId,
+    block_id: null,
     mark_id: `mark-${artifactId}`,
     orphaned,
     quote,
@@ -66,6 +67,7 @@ function comment(id: string, markId: string | null, createdAt: string, orphaned 
         ? null
         : {
             artifact_id: artifact.id,
+            block_id: null,
             mark_id: markId,
             orphaned,
             quote: "selected",
@@ -138,7 +140,9 @@ function OrderedItems() {
     new Map([
       ["m-b", { pos: 4, top: 40 }],
       ["m-a", { pos: 12, top: 72 }],
-    ])
+    ]),
+    new Map(),
+    undefined
   );
   return createElement(
     "output",
@@ -188,7 +192,9 @@ function ThreadItems() {
     { key: "CORE-1", kind: "issue" },
     "comments",
     artifact,
-    new Map()
+    new Map(),
+    new Map(),
+    undefined
   );
   return createElement(
     "output",
@@ -246,7 +252,9 @@ function DocumentItems() {
     },
     "comments",
     { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
-    new Map()
+    new Map(),
+    new Map(),
+    undefined
   );
   return createElement(
     "output",
@@ -268,6 +276,7 @@ test("a document owner loads asks and comments from the artifact routes, hides p
     {
       anchor: {
         artifact_id: "artifact-1",
+        block_id: null,
         mark_id: "ask-mark",
         orphaned: false,
         quote: "Design",

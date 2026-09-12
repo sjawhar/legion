@@ -339,6 +339,9 @@ export function Composer({
       onSaved?.();
       void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      if (anchor !== undefined) {
+        void queryClient.invalidateQueries({ queryKey: ["artifact", anchor.artifact, "blocks"] });
+      }
       if (owner.kind === "issue") {
         void queryClient.invalidateQueries({ queryKey: ["events", owner.key] });
         void queryClient.invalidateQueries({ queryKey: ["issue", owner.key] });

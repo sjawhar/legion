@@ -7,7 +7,7 @@ interface UseMarginListenersOptions {
   focus: { itemId: string; seq: number } | undefined;
   items: MarginItem[];
   margin: RefObject<HTMLElement | null>;
-  onSelectCard: (id: string) => void;
+  onSelectCard: (id: string, blockID?: string) => void;
   routeItemId: string | undefined;
   selectItem: (id: string) => void;
   setHoveredItemId: (id: string | undefined) => void;

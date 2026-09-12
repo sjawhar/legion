@@ -3,6 +3,7 @@ import type {
   AgentToken,
   AnswerAskInput,
   Artifact,
+  ArtifactBlock,
   ArtifactDetails,
   ArtifactReview,
   ArtifactReviewState,
@@ -394,6 +395,10 @@ export class DispatchApiClient {
 
   getArtifactText(id: string): Promise<ArtifactText> {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
+  }
+
+  getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {
+    return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
 
   async getArtifactVersion(id: string, version: number): Promise<ArtifactVersionContent> {

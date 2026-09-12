@@ -29,6 +29,8 @@ type API interface {
 	ScheduleSettlement(artifactID string)
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
+	BlockForMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
+	BlockForQuote(ctx context.Context, artifactID, quote string) (string, error)
 	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error

@@ -164,7 +164,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   ) {
-    keys.push(["asks", event.issue_key], ["projects"]);
+    keys.push(["asks", event.issue_key], ["projects"], ["artifact"]);
     // The ask's own read (`GET /asks/{id}`) carries its resolution and every rewording, so a
     // card showing either must refetch it.
     if (

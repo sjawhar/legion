@@ -34,7 +34,9 @@ import {
 import { useMarginListeners } from "./useMarginListeners";
 
 export interface DocumentBridge {
+  focusBlock(blockId: string): void;
   focusMark(markId: string): void;
+  setActiveBlocks(blockIds: readonly string[]): void;
   setActiveMarks(markIds: readonly string[]): void;
 }
 
@@ -44,8 +46,14 @@ export interface MarkComposeRequest {
 }
 
 interface MarginContextValue {
+  blockFilterId: string | undefined;
+  blockFocusRequest: { blockId: string; seq: number } | undefined;
+  blockPlacements: ReadonlyMap<string, MarkPlacement>;
+  clearBlockFilter(): void;
   composeForMark(request: MarkComposeRequest): Promise<void>;
   documentBridge: DocumentBridge | undefined;
+  filterToBlock(blockId: string): void;
+  focusBlock(blockId: string): void;
   focusItemForMark(markId: string): void;
   focusRequest: { markId: string; seq: number } | undefined;
   hoverItemForMark(markId: string | null): void;
@@ -57,6 +65,7 @@ interface MarginContextValue {
   replaceCompose(): void;
   selectItem(id: string): void;
   selectedItemId: string | undefined;
+  setBlockPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
   setHoveredItemId(id: string | undefined): void;
   setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
   setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
@@ -91,7 +100,7 @@ export interface MarginSheetModel {
     owner: MarginOwner | undefined;
     issuePending: boolean;
     needsYou: Ask[];
-    onSelectCard: (id: string) => void;
+    onSelectCard: (id: string, blockID?: string) => void;
     openAskCount: number;
     pendingActionId: string | undefined;
     pinned: Event[];
@@ -102,6 +111,7 @@ export interface MarginSheetModel {
     visibleArtifact: Artifact | undefined;
   };
   placement: {
+    blockPlacements: ReadonlyMap<string, MarkPlacement>;
     markPlacements: ReadonlyMap<string, MarkPlacement>;
   };
   selection: {
@@ -118,6 +128,10 @@ export interface MarginSheetModel {
     threadKey: string | undefined;
     toggle: (expanded?: boolean) => void;
   };
+  filter: {
+    blockId: string | undefined;
+    clear(): void;
+  };
   tab: {
     set: (tab: MarginTab) => void;
     value: MarginTab;
@@ -127,9 +141,29 @@ export interface MarginSheetModel {
 const unavailableMargin = (): never => {
   throw new Error("MarginProvider is required");
 };
+
+function pulseBlock(blockId: string): void {
+  const escaped =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(blockId)
+      : blockId.replace(/["\\]/g, "\\$&");
+  const block = document.querySelector<HTMLElement>(`[data-block-id="${escaped}"]`);
+  if (block === null) {
+    return;
+  }
+  block.scrollIntoView({ behavior: "smooth", block: "center" });
+  block.classList.add("dispatch-mark-pulse");
+  window.setTimeout(() => block.classList.remove("dispatch-mark-pulse"), 1200);
+}
 const MarginContext = createContext<MarginContextValue>({
+  blockFilterId: undefined,
+  blockFocusRequest: undefined,
+  blockPlacements: new Map(),
+  clearBlockFilter: unavailableMargin,
   composeForMark: unavailableMargin,
   documentBridge: undefined,
+  filterToBlock: unavailableMargin,
+  focusBlock: unavailableMargin,
   focusItemForMark: unavailableMargin,
   focusRequest: undefined,
   hoverItemForMark: unavailableMargin,
@@ -141,6 +175,7 @@ const MarginContext = createContext<MarginContextValue>({
   replaceCompose: unavailableMargin,
   selectItem: unavailableMargin,
   selectedItemId: undefined,
+  setBlockPlacements: unavailableMargin,
   setHoveredItemId: unavailableMargin,
   setMarkItemIds: unavailableMargin,
   setMarkPlacements: unavailableMargin,
@@ -148,6 +183,14 @@ const MarginContext = createContext<MarginContextValue>({
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
+  const [blockFilterId, setBlockFilterId] = useState<string>();
+  const [blockFocusRequest, setBlockFocusRequest] = useState<{
+    blockId: string;
+    seq: number;
+  }>();
+  const [blockPlacements, setBlockPlacements] = useState<ReadonlyMap<string, MarkPlacement>>(
+    () => new Map()
+  );
   const [documentBridge, setDocumentBridge] = useState<DocumentBridge>();
   const [focusRequest, setFocusRequest] = useState<{ markId: string; seq: number }>();
   const [hoveredItemId, setHoveredItemId] = useState<string>();
@@ -198,6 +241,15 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     sequence.current += 1;
     setFocusRequest({ markId, seq: sequence.current });
   }, []);
+  const focusBlock = useCallback(
+    (blockId: string) => {
+      sequence.current += 1;
+      pulseBlock(blockId);
+      setBlockFocusRequest({ blockId, seq: sequence.current });
+      documentBridge?.focusBlock(blockId);
+    },
+    [documentBridge]
+  );
   const hoverItemForMark = useCallback((markId: string | null) => {
     setHoveredMarkId(markId ?? undefined);
     setHoveredItemId(markId === null ? undefined : markItemIds.current.get(markId));
@@ -212,10 +264,22 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     setDocumentBridge(bridge);
   }, []);
+  const filterToBlock = useCallback((blockId: string) => {
+    setBlockFilterId(blockId);
+  }, []);
+  const clearBlockFilter = useCallback(() => {
+    setBlockFilterId(undefined);
+  }, []);
   const value = useMemo<MarginContextValue>(
     () => ({
+      blockFilterId,
+      blockFocusRequest,
+      blockPlacements,
+      clearBlockFilter,
       composeForMark,
       documentBridge,
+      filterToBlock,
+      focusBlock,
       focusItemForMark,
       focusRequest,
       hoverItemForMark,
@@ -227,14 +291,21 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       replaceCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
+      setBlockPlacements,
       setHoveredItemId: selectHoveredItem,
       setMarkItemIds,
       setMarkPlacements,
       settleCompose,
     }),
     [
+      blockFilterId,
+      blockFocusRequest,
+      blockPlacements,
+      clearBlockFilter,
       composeForMark,
       documentBridge,
+      filterToBlock,
+      focusBlock,
       focusItemForMark,
       focusRequest,
       hoverItemForMark,
@@ -260,7 +331,11 @@ export function useMargin(): MarginContextValue {
 
 function useMarginSheet(): MarginSheetModel {
   const {
+    blockFilterId,
+    blockPlacements,
+    clearBlockFilter,
     documentBridge,
+    focusBlock,
     focusRequest,
     hoveredItemId,
     hoveredMarkId,
@@ -341,7 +416,7 @@ function useMarginSheet(): MarginSheetModel {
     retryComments,
     retryItem,
     threads,
-  } = useMarginItems(owner, tab, visibleArtifact, markPlacements);
+  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId);
 
   const historicalAsks = useMemo(
     () =>
@@ -397,9 +472,16 @@ function useMarginSheet(): MarginSheetModel {
       if (thread.resolved) {
         setShowResolved(true);
       }
-      const markId = threadMarkId(thread);
-      if (markId !== undefined) {
-        documentBridge?.focusMark(markId);
+      const blockID = thread.anchor?.block_id;
+      if (typeof blockID === "string") {
+        selectedBlockFocus.current = undefined;
+        focusBlock(blockID);
+      }
+      if (!thread.anchor?.orphaned) {
+        const markId = threadMarkId(thread);
+        if (markId !== undefined) {
+          documentBridge?.focusMark(markId);
+        }
       }
       if (ownerId !== undefined && window.matchMedia("(max-width: 767px)").matches) {
         setExpandedOwnerId(ownerId);
@@ -408,7 +490,7 @@ function useMarginSheet(): MarginSheetModel {
       }
       setExpandedThreadKey((current) => (current === key ? undefined : key));
     },
-    [documentBridge, ownerId, resolvedThreads, selectItem, threads]
+    [documentBridge, focusBlock, ownerId, resolvedThreads, selectItem, threads]
   );
   const sheetExpanded = ownerId !== undefined && expandedOwnerId === ownerId;
   const toggleSheet = useCallback(
@@ -457,6 +539,15 @@ function useMarginSheet(): MarginSheetModel {
       setExpandedOwnerId(ownerId);
     }
   }, [ownerId, routeItemId]);
+  useEffect(() => {
+    if (blockFilterId === undefined) {
+      return;
+    }
+    setTab("comments");
+    if (ownerId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+      setExpandedOwnerId(ownerId);
+    }
+  }, [blockFilterId, ownerId]);
 
   const handledFocusSequence = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -481,13 +572,19 @@ function useMarginSheet(): MarginSheetModel {
     }
   }, [focusRequest, marginItems, ownerId, selectMarginItem]);
   useEffect(() => {
-    const markIds = [selectedItemId, hoveredItemId]
-      .map((itemId) => {
-        const item = marginItems.find((candidate) => marginItemId(candidate) === itemId);
-        return item === undefined ? undefined : marginItemMarkId(item);
-      })
+    const selectedItems = [selectedItemId, hoveredItemId]
+      .map((itemId) => marginItems.find((candidate) => marginItemId(candidate) === itemId))
+      .filter((item): item is MarginItem => item !== undefined);
+    const markIds = selectedItems
+      .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
+    const blockIds = selectedItems
+      .map((item) => (item.kind === "ask" ? item.ask.anchor : item.comment.anchor))
+      .flatMap((anchor) =>
+        anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
+      );
     documentBridge?.setActiveMarks([...new Set(markIds)]);
+    documentBridge?.setActiveBlocks(blockIds);
   }, [documentBridge, hoveredItemId, marginItems, selectedItemId]);
 
   const onAction = useCallback(
@@ -496,6 +593,21 @@ function useMarginSheet(): MarginSheetModel {
     },
     [mutateItem]
   );
+  const selectedBlockFocus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
+    const anchor =
+      item === undefined ? undefined : item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
+    if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
+      selectedBlockFocus.current = undefined;
+      return;
+    }
+    if (selectedBlockFocus.current === anchor.block_id) {
+      return;
+    }
+    selectedBlockFocus.current = anchor.block_id;
+    focusBlock(anchor.block_id);
+  }, [focusBlock, marginItems, selectedItemId]);
   const onSelectCard = useCallback(
     (id: string) => {
       selectMarginItem(id);
@@ -571,7 +683,12 @@ function useMarginSheet(): MarginSheetModel {
       viewerLogin: viewer.data?.login ?? "",
       visibleArtifact,
     },
+    filter: {
+      blockId: blockFilterId,
+      clear: clearBlockFilter,
+    },
     placement: {
+      blockPlacements,
       markPlacements,
     },
     selection: {

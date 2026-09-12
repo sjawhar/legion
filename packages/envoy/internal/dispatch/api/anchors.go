@@ -58,6 +58,14 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		}
 		anchor.Quote = quote
 	}
+	blockID, err := s.deps.Docs.BlockForMark(ctx, artifact.ID, kind, anchor.MarkID)
+	if err != nil {
+		return &anchor, artifact.Name, nil, err
+	}
+	if blockID != "" {
+		anchor.BlockID = &blockID
+	}
+
 	version, wrote, err := s.deps.Docs.SnapshotVersion(ctx, tx, artifact.ID, actor)
 	if err != nil {
 		return &anchor, artifact.Name, nil, err

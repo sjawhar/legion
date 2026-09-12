@@ -106,6 +106,13 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
+  test("explains that quote anchors stay pinned to their block", () => {
+    for (const name of ["dispatch_ask", "dispatch_comment"] as const) {
+      const tool = dispatchToolSpecs.find((candidate) => candidate.name === name);
+      expect(tool?.description).toContain("quote anchor is pinned to its block");
+    }
+  });
+
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
     const schema = schemaFor("dispatch_search");
 

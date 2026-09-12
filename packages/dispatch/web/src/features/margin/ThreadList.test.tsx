@@ -12,6 +12,7 @@ function comment(id: string, body: string, resolved = false): Comment {
   return {
     anchor: {
       artifact_id: "artifact-1",
+      block_id: `${id}-block`,
       mark_id: `${id}-mark`,
       orphaned: false,
       quote: "selected text",
@@ -62,6 +63,7 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
           hoveredItemId={undefined}
           isClosed={false}
           owner={{ key: "CORE-1", kind: "issue" }}
+          blockPlacements={new Map()}
           markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
           onAction={() => {}}
           onEdit={async () => undefined}
@@ -141,6 +143,7 @@ test("an anchored card keeps its identity when its mark placement arrives after 
             hoveredItemId={undefined}
             isClosed={false}
             owner={{ key: "CORE-1", kind: "issue" }}
+            blockPlacements={new Map()}
             markPlacements={new Map([["open-mark", { pos: 5, top: 180 }]])}
             onAction={() => {}}
             onEdit={async () => undefined}
@@ -165,10 +168,33 @@ test("an anchored card keeps its identity when its mark placement arrives after 
   }
 });
 
-test("a thread whose anchor the server marks orphaned flows in Discussion", () => {
+test("an orphaned block anchor stays aligned to its block", () => {
   const orphan = thread("orphan");
   if (orphan.anchor === null) throw new Error("fixture thread has an anchor");
-  const root = { ...orphan.root.comment, anchor: { ...orphan.anchor, orphaned: true } };
+  const root = {
+    ...orphan.root.comment,
+    anchor: { ...orphan.anchor, block_id: "block-1", orphaned: true },
+  };
+  const view = renderList({
+    blockPlacements: new Map([["block-1", { pos: 5, top: 240 }]]),
+    markPlacements: new Map(),
+    threads: [{ ...orphan, anchor: root.anchor, root: { comment: root, kind: "comment" } }],
+  });
+  try {
+    const card = screen.getByTestId("margin-comment-orphan");
+    expect(screen.getByRole("region", { name: "Anchored comments" }).contains(card)).toBe(true);
+    expect(card.parentElement?.style.top).toBe("240px");
+  } finally {
+    view.unmount();
+  }
+});
+test("a legacy orphan without a block anchor flows in Discussion", () => {
+  const orphan = thread("orphan");
+  if (orphan.anchor === null) throw new Error("fixture thread has an anchor");
+  const root = {
+    ...orphan.root.comment,
+    anchor: { ...orphan.anchor, block_id: null, orphaned: true },
+  };
   const view = renderList({
     markPlacements: new Map(),
     threads: [{ ...orphan, anchor: root.anchor, root: { comment: root, kind: "comment" } }],

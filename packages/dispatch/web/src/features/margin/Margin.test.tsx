@@ -62,6 +62,7 @@ const secondIssue: IssueDetails = {
 const comment: Comment = {
   anchor: {
     artifact_id: "artifact-1",
+    block_id: null,
     mark_id: "m-1",
     orphaned: false,
     quote: "brown",
@@ -99,6 +100,7 @@ const unanchoredRootComment: Comment = {
 const anchoredAsk: Ask = {
   anchor: {
     artifact_id: "artifact-1",
+    block_id: null,
     mark_id: "m-2",
     orphaned: false,
     quote: "Review",
@@ -196,18 +198,24 @@ function FocusMarkButton(): ReactNode {
     </button>
   );
 }
-
 function DocumentBridgeButton({
+  focusBlock = () => {},
   focusMark,
+  setActiveBlocks = () => {},
   setActiveMarks,
 }: {
+  focusBlock?: (blockId: string) => void;
   focusMark: (markId: string) => void;
+  setActiveBlocks?: (blockIds: readonly string[]) => void;
   setActiveMarks: (markIds: readonly string[]) => void;
 }): ReactNode {
   const { registerDocument } = useMargin();
 
   return (
-    <button onClick={() => registerDocument({ focusMark, setActiveMarks })} type="button">
+    <button
+      onClick={() => registerDocument({ focusBlock, focusMark, setActiveBlocks, setActiveMarks })}
+      type="button"
+    >
       Register document bridge
     </button>
   );
@@ -708,6 +716,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   const answeredAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
+      block_id: null,
       mark_id: "m-3",
       orphaned: false,
       quote: "brown",
@@ -737,6 +746,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   const openAsk: Ask = {
     anchor: {
       artifact_id: "artifact-1",
+      block_id: null,
       mark_id: "m-4",
       orphaned: false,
       quote: "The",
@@ -1078,6 +1088,7 @@ test("Margin links an orphaned ask to its original document version", async () =
     ...anchoredAsk,
     anchor: {
       artifact_id: "artifact-1",
+      block_id: null,
       mark_id: "m-2",
       orphaned: true,
       quote: "Review",

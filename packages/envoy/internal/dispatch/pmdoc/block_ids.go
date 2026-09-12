@@ -89,3 +89,23 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 	})
 	return stamped
 }
+
+// BlockIDForRange returns the lowest block that contains all of r. A range
+// spanning top-level siblings has only the document root in common, which has
+// no usable block identity, so it returns an empty ID without an error.
+func BlockIDForRange(tree *Node, r Range) (string, error) {
+	if tree == nil || tree.Type != "doc" {
+		return "", ErrTargetNotFound
+	}
+	var blockID string
+	walk(tree, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type == "doc" || isInlineNodeType(node.Type) || r.From < pos || r.To > end {
+			return true
+		}
+		if id, ok := node.Attrs[BlockIDAttr].(string); ok && id != "" {
+			blockID = id
+		}
+		return true
+	})
+	return blockID, nil
+}

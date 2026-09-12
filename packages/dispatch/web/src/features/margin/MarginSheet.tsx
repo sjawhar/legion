@@ -50,6 +50,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
       viewerLogin,
       visibleArtifact,
     },
+    filter,
     placement,
     selection,
     sheet,
@@ -184,6 +185,20 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             {tab.value === "pinned" && owner?.kind === "issue" ? (
               <PinnedTab events={pinned} issueKey={owner.key} pinnedIds={pinnedIds} />
             ) : null}
+            {filter.blockId === undefined ? null : (
+              <div
+                className={`mt-3 flex items-center justify-between gap-2 text-sm ${textMutedOnSurface}`}
+              >
+                <span>References for this block</span>
+                <button
+                  className={`min-h-11 font-medium ${textPrimaryOnSurface}`}
+                  onClick={filter.clear}
+                  type="button"
+                >
+                  Clear filter
+                </button>
+              </div>
+            )}
             {tab.value === "comments" && visibleArtifact !== undefined && owner !== undefined ? (
               <CommentsTab
                 actionErrorId={actionErrorId}
@@ -202,6 +217,7 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 isClosed={isClosed}
                 owner={owner}
                 markPlacements={placement.markPlacements}
+                blockPlacements={placement.blockPlacements}
                 needsYou={needsYou}
                 onAction={actions.onAction}
                 onCloseComposer={actions.closeComposer}
@@ -257,7 +273,9 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
                 onAction={actions.onAction}
                 onEdit={actions.onEdit}
                 onRetryAction={actions.onRetryAction}
-                onSelect={() => onSelectCard(phoneThread.key)}
+                onSelect={() =>
+                  onSelectCard(phoneThread.key, phoneThread.anchor?.block_id ?? undefined)
+                }
                 onToggle={sheet.closeThread}
                 owner={owner}
                 pendingAction={pendingActionId === phoneThread.key}

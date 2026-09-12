@@ -3,6 +3,7 @@ import {
   type Actor,
   type Anchor,
   type AnchorInput,
+  type ArtifactBlock,
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
   type BlockTypeSchema,
@@ -67,6 +68,24 @@ test("requires a positive opened event id on an ask event payload", () => {
   expect(AskEventPayloadSchema.safeParse({ opened_event_id: 12, question: "Q" }).success).toBe(
     true
   );
+});
+
+test("preserves block-pinned and legacy anchors in ask event payloads", () => {
+  const blockPinned = AskEventPayloadSchema.parse({
+    opened_event_id: 12,
+    anchor: { block_id: "block-1", mark_id: "mark-1", quote: "Selected text" },
+  });
+  const legacy = AskEventPayloadSchema.parse({
+    opened_event_id: 13,
+    anchor: { mark_id: "mark-2", quote: "Older text" },
+  });
+
+  expect(blockPinned.anchor).toEqual({
+    block_id: "block-1",
+    mark_id: "mark-1",
+    quote: "Selected text",
+  });
+  expect(legacy.anchor).toEqual({ mark_id: "mark-2", quote: "Older text" });
 });
 
 test("accepts an artifact-owned ask edit event", () => {
@@ -145,9 +164,10 @@ test("permits the actor supplied with an agent project creation request", () => 
   });
 });
 
-test("models returned anchors and input selectors by mark id", () => {
+test("models anchors pinned to a block while preserving mark selectors", () => {
   const anchor: Anchor = {
     artifact_id: "artifact-1",
+    block_id: "block-1",
     mark_id: "mark-1",
     version: 2,
     quote: "selected text",
@@ -163,6 +183,7 @@ test("models returned anchors and input selectors by mark id", () => {
   expect({ anchor, quoteInput, markInput }).toEqual({
     anchor: {
       artifact_id: "artifact-1",
+      block_id: "block-1",
       mark_id: "mark-1",
       version: 2,
       quote: "selected text",
@@ -320,4 +341,16 @@ test("accepts a document event with an unlinked owner", () => {
       payload: {},
     }).success
   ).toBe(true);
+});
+
+test("models per-block anchor reference counts", () => {
+  const block: ArtifactBlock = {
+    from: 12,
+    id: "block-1",
+    references: { asks: 1, comments: 2 },
+    to: 32,
+    type: "paragraph",
+  };
+
+  expect(block.references).toEqual({ asks: 1, comments: 2 });
 });
