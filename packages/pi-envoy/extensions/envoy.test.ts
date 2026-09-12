@@ -203,12 +203,16 @@ const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
 const originalDispatchUrl = process.env.DISPATCH_URL;
 const originalDispatchToken = process.env.DISPATCH_TOKEN;
+// The Legion daemon exports DISPATCH_TOKEN_FILE into every pane it spawns; a suite run from one
+// must not see it, or the extension resolves a real Dispatch config and registers the tools.
+const originalDispatchTokenFile = process.env.DISPATCH_TOKEN_FILE;
 const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
+  delete process.env.DISPATCH_TOKEN_FILE;
   process.env.HOME = "/nonexistent-home-for-envoy-tests";
   delete process.env.TMUX_PANE;
 });
@@ -221,6 +225,8 @@ afterEach(() => {
   else process.env.DISPATCH_URL = originalDispatchUrl;
   if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
   else process.env.DISPATCH_TOKEN = originalDispatchToken;
+  if (originalDispatchTokenFile === undefined) delete process.env.DISPATCH_TOKEN_FILE;
+  else process.env.DISPATCH_TOKEN_FILE = originalDispatchTokenFile;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (originalPath === undefined) delete process.env.PATH;
@@ -1742,6 +1748,9 @@ describe("envoy OMP extension", () => {
           topics: ["notifications.role.legion-controller"],
         });
       }
+      if (url.pathname === "/v1/roles/legion-controller") {
+        return response({ role: "legion-controller", holder: "ses_role_heartbeat", last_seen: 1 });
+      }
       if (url.pathname === "/v1/interests/subscribe") {
         const body = JSON.parse(init?.body?.toString() ?? "{}") as {
           readonly session_id: string;
@@ -1783,6 +1792,213 @@ describe("envoy OMP extension", () => {
       self_subscribed: true,
       topics: ["notifications.agent.ses_role_heartbeat"],
     });
+  });
+
+  test("a heartbeat tick re-asserts a held role the listener no longer holds, softly and without a transcript entry", async () => {
+    const role = "legion-controller";
+    let listenerHoldsClaim = true;
+    const roleClaims: Record<string, unknown>[] = [];
+    const roleReads: string[] = [];
+    const reasserted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        roleReads.push(url.pathname);
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
+        }
+        return response({ role, holder: "ses_reassert", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+        roleClaims.push(body);
+        listenerHoldsClaim = true;
+        if (body.soft === true) reasserted.resolve();
+        return response({
+          session_id: "ses_reassert",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+      "./envoy.ts?heartbeat-reassert"
+    );
+    const regained: { readonly role: string; readonly reason: string }[] = [];
+    onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+      regained.push({ role: regainedRole, reason });
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_reassert"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+    await roleTool.execute("", { role });
+    expect(roleClaims).toEqual([{ session_id: "ses_reassert", role }]);
+
+    // The listener drops the claim out from under the session (a reaped claim, NATS data
+    // loss, an older listener build). Nothing in this process notices until the heartbeat.
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await reasserted.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(roleReads).toEqual([`/v1/roles/${role}`]);
+    expect(roleClaims).toEqual([
+      { session_id: "ses_reassert", role },
+      { session_id: "ses_reassert", role, soft: true },
+    ]);
+    // The held role did not change, so the durable record is not rewritten.
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+      { type: "custom", customType: "envoy-role-claim", data: { role } },
+    ]);
+    expect(regained).toEqual([{ role, reason: "reclaimed" }]);
+  });
+
+  test("heartbeat ticks while this session is the live holder issue no claim and append no transcript entry", async () => {
+    const role = "legion-controller";
+    const roleClaims: unknown[] = [];
+    let roleReads = 0;
+    let registrations = 0;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        roleReads += 1;
+        return response({ role, holder: "ses_quiet", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        roleClaims.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        return response({
+          session_id: "ses_quiet",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      if (url.pathname === "/v1/interests/subscribe") registrations += 1;
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+      "./envoy.ts?heartbeat-quiet"
+    );
+    const regained: unknown[] = [];
+    onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+      regained.push({ role: regainedRole, reason });
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_quiet"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+    const claimEntries = () =>
+      fixture.entries.filter((entry) => entry.customType === "envoy-role-claim");
+    expect(claimEntries()).toHaveLength(1);
+    expect(registrations).toBe(1);
+
+    for (let tick = 0; tick < 3; tick += 1) {
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(registrations).toBe(4);
+    expect(roleReads).toBe(3);
+    expect(roleClaims).toEqual([{ session_id: "ses_quiet", role }]);
+    expect(claimEntries()).toHaveLength(1);
+    expect(regained).toEqual([]);
+  });
+
+  test("a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role", async () => {
+    const role = "pr-queue";
+    const roleClaims: Record<string, unknown>[] = [];
+    let roleReads = 0;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        roleReads += 1;
+        // A newer live session took the role (a fork child, a second controller).
+        return response({ role, holder: "ses_newer", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+        roleClaims.push(body);
+        if (body.soft === true) {
+          return Response.json(
+            { error: `role ${role} is held by ses_newer`, role, holder: "ses_newer" },
+            { status: 409 }
+          );
+        }
+        return response({
+          session_id: "ses_refused",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+      "./envoy.ts?heartbeat-409"
+    );
+    const regained: unknown[] = [];
+    onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+      regained.push({ role: regainedRole, reason });
+    });
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const notifications: string[] = [];
+    const refused = Promise.withResolvers<void>();
+    const context: SessionContext = {
+      ...sessionContext("ses_refused"),
+      setInterval: (callback) => intervals.push(callback),
+      ui: {
+        notify: (message) => {
+          notifications.push(message);
+          if (message.includes("is now held by")) refused.resolve();
+        },
+      },
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+
+    intervals[0]?.();
+    await refused.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Two more ticks: re-registration continues, re-assertion of this role does not.
+    for (let tick = 0; tick < 2; tick += 1) {
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(roleClaims).toEqual([
+      { session_id: "ses_refused", role },
+      { session_id: "ses_refused", role, soft: true },
+    ]);
+    expect(roleReads).toBe(1);
+    expect(notifications.filter((message) => message.includes("is now held by"))).toEqual([
+      `envoy: role ${role} is now held by session ses_newer; this session no longer holds it`,
+    ]);
+    expect(regained).toEqual([]);
+    // The local claim is gone: an unsubscribe of "everything" finds no role left to release …
+    const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    const released = await unsubscribe?.execute("", {});
+    expect(released?.content[0]?.text).toBe("Unsubscribed: (none)");
+    // … and no release entry was written: the 409 mirrors setEnvoyRole's refused soft reclaim,
+    // so a later resume still lets the listener arbitrate from the transcript.
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+      { type: "custom", customType: "envoy-role-claim", data: { role } },
+    ]);
   });
 
   test("registers a self-subscribed interest on session start", async () => {
