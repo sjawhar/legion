@@ -228,6 +228,14 @@ export class ProcessManager {
     IssueKey,
     { generation: number; cancel: () => void }
   >();
+  /** Per-role-token idle-retire clock (`armIdleRetire`): armed each time the token's cached client
+   * reports an idle transition, replacing any earlier clock for that token, and cleared by
+   * `dispose()`. Bound to the exact arm by object identity, mirroring `rootRegistrationWaits`'s
+   * generation check: `createCancellableSleep.cancel()` resolves the sleep it cancels, so a
+   * superseded or disposed clock still fires — its expiry sees the map no longer holds this entry
+   * and does nothing. Under a test-injected `sleep` (no real timer, `cancel` a no-op) the same check
+   * is what neutralizes a stale fire. */
+  private readonly idleRetireWaits = new Map<string, { cancel: () => void }>();
   /** Set once by `dispose()`, never cleared: a `retireUnconfirmedRoot` expiry already in flight
    * (blocked on its own `probe`/`stopProcessSerialized` await) has no map entry left for
    * `dispose()`'s own `cancelAllRootRegistrationDeadlines` to clear, since it never deletes its
@@ -341,16 +349,17 @@ export class ProcessManager {
     this.bootWatchdog.cancel(token, generation);
   }
 
-  /** Cancels every armed boot watchdog and any pending controller-registration wait. Daemon
-   * shutdown calls this once before drain and again after — an in-flight handler during drain (a
-   * launch's own success path, `reconnectWorkers`) can still arm a watchdog after the first call,
-   * and this is the only guaranteed-safe way to catch that: no background timer may outlive the
-   * ProcessManager. Idempotent. */
+  /** Cancels every armed boot watchdog, idle-retire clock, and any pending controller/root
+   * registration wait. Daemon shutdown calls this once before drain and again after — an
+   * in-flight handler during drain (a launch's own success path, `reconnectWorkers`) can still
+   * arm a watchdog after the first call, and this is the only guaranteed-safe way to catch that:
+   * no background timer may outlive the ProcessManager. Idempotent. */
   dispose(): void {
     this.disposed = true;
     this.bootWatchdog.cancelAll();
     this.cancelControllerRegistrationDeadline();
     this.cancelAllRootRegistrationDeadlines();
+    this.cancelAllIdleRetireClocks();
   }
 
   admit(issue: IssueKey): "spawned" | "queued" {
@@ -1416,6 +1425,110 @@ export class ProcessManager {
     this.rootRegistrationWaits.clear();
   }
 
+  /** Arms (or re-arms) `token`'s idle-retire clock for `workerIdleRetireSeconds` -- a no-op when that
+   * is 0 (the timer is disabled) or after `dispose()`. Uses the same injectable timer surface as the
+   * boot watchdog and the registration deadlines (`boundedWait` over `deps.sleep`), and judges every
+   * condition at expiry, never here: a worker re-prompted inside the window fails the idle check
+   * then, and its next idle report arms a fresh clock. Two arm sites: the client's own idle
+   * transition (`clientFor`), and `retireIdleWorker`'s expiry when it declines for a reason that can
+   * change while the worker stays idle -- that worker will never report idle again, so the expiry is
+   * the only thing left that can arm its next clock. Replaces whatever clock was already armed for
+   * this token (the entry-identity check in the expiry callback is what makes the replaced one
+   * inert). */
+  private armIdleRetire(token: string, client: WorkerRpcClient): void {
+    const retireMs = this.deps.config.workerIdleRetireSeconds * 1_000;
+    if (retireMs === 0 || this.disposed) return;
+    this.idleRetireWaits.get(token)?.cancel();
+    const { timedOut, cancel } = boundedWait(retireMs, this.deps.sleep);
+    const wait = { cancel };
+    this.idleRetireWaits.set(token, wait);
+    void timedOut.then(() => {
+      // A cancelled or superseded clock still resolves (see `idleRetireWaits`); only the current arm acts.
+      if (this.idleRetireWaits.get(token) !== wait) return;
+      this.idleRetireWaits.delete(token);
+      return this.retireIdleWorker(token, client).catch((error) => {
+        console.error(`[legion] failed to retire idle worker ${token}:`, error);
+      });
+    });
+  }
+
+  /** Cancels every armed idle-retire clock. Called from `dispose()` so no background timer outlives
+   * the ProcessManager. */
+  private cancelAllIdleRetireClocks(): void {
+    for (const { cancel } of this.idleRetireWaits.values()) cancel();
+    this.idleRetireWaits.clear();
+  }
+
+  /**
+   * The idle-retire clock's expiry (see `armIdleRetire`). Inside `token`'s `mutateClaim` critical
+   * section -- serialized against `spawnWorker`, `markWorkerDead`, `closeTree`'s stops, and queue
+   * promotion for this role, every one of which is the only way a prompt or a stop reaches this
+   * worker -- re-reads the live state and retires the worker only if all of these still hold: the
+   * cached client is still `client` and still reports `"idle"` (a prompt that landed inside the
+   * window flipped it to `"running"` synchronously); the claim is a ready-confirmed worker claim with
+   * a locator (a boot still in flight is never retired); the role is not `architect` (an architect
+   * has no phase of its own -- it is never `phases[issue].phase`, so the not-active-phase test below
+   * would pass on every idle -- and it parks by design between wakes for the life of its subtree, so
+   * each wake to a retired one would relaunch it through the no-holder recovery: one relaunch per
+   * wake costs more than one idle process per child issue); the tree is neither closing nor closed
+   * (`closeTree` owns stopping every worker under it); no `pendingAssignment` is queued (a queued
+   * task prompts it in place when a slot frees); and `phases[claim.issue]` is absent, `completed`,
+   * or names a different role -- phase completion is judged per role, not per issue, so an idle
+   * implementer retires while the tester runs on the same issue. Then performs exactly
+   * `markWorkerDeadLocked`'s retirement -- `retireWorkerLocator` (graceful `shutdown` frame,
+   * kill-pane fallback), clear the locator, carry `ompSessionFile` into `resumeSessionFile`, persist
+   * -- and never touches `launchFailures`/`promptFailures`: this worker is healthy, the daemon chose
+   * to stop it. The socket close this causes reaches `onWorkerClientClosed`, whose one reconnect
+   * probe fails against the exited shim and routes to `markWorkerDead`; queued behind this same
+   * critical section, its `markWorkerDeadLocked` finds the locator already cleared and returns -- no
+   * launch failure counted, no `worker-died` published. The next `spawn_worker` for the role finds a
+   * locator-less claim with `resumeSessionFile` and launches with `--resume`, exactly the dead-pane
+   * recovery shape. No `promoteWorkerQueue()` afterwards: an idle client was never counted by
+   * `runningWorkerCount`, so nothing was freed.
+   *
+   * A decline on exactly the last two conditions -- the role is the issue's active phase, or a
+   * `pendingAssignment` is queued -- re-arms the clock. Both change without this worker ever
+   * transitioning to idle again (`/worker/started` or `promptExistingWorker` re-writing
+   * `phases[issue]` for another role; a promotion draining the queued task), and an already-idle
+   * worker's `onIdle` never fires again, so without the re-arm a worker that finished its turn while
+   * still the recorded phase would stay resident for the life of the tree once the phase moves on.
+   * Re-armed inside this same critical section, so it cannot interleave with a prompt; the
+   * identity/idle/disposed checks at the top still hold -- nothing has been awaited since. No other
+   * decline re-arms: a running worker's own next idle report arms; an architect is never retired, so
+   * a re-arm would only spin; a closing or closed tree is `closeTree`'s to stop; a missing claim,
+   * locator, or confirmation, or a replaced client, has no worker of this clock's left to judge.
+   */
+  private async retireIdleWorker(token: string, client: WorkerRpcClient): Promise<void> {
+    await this.workerAdmission.mutateClaim(token, async () => {
+      if (this.disposed) return;
+      if (this.workerClients.get(token) !== client || client.runState !== "idle") return;
+      const claim = this.deps.state.roles[token];
+      if (!claim || !("issue" in claim) || !claim.locator || claim.readyConfirmedAt === undefined) {
+        return;
+      }
+      if (claim.role === "architect") return;
+      const treeKey = this.rootForIssue(claim.issue);
+      if (treeKey === undefined || this.isTreeGone(treeKey, claim.issue)) return;
+      const phase = this.deps.state.phases[claim.issue];
+      if (
+        claim.pendingAssignment !== undefined ||
+        (phase && !phase.completed && phase.phase === claim.role)
+      ) {
+        this.armIdleRetire(token, client);
+        return;
+      }
+      const locator = claim.locator;
+      console.info(
+        `[legion] retiring idle worker ${token}: idle for ${this.deps.config.workerIdleRetireSeconds}s with no active phase; it resumes from its OMP session on its next assignment`
+      );
+      await this.retireWorkerLocator(token, locator);
+      const resumeSessionFile = locator.ompSessionFile ?? claim.resumeSessionFile;
+      delete claim.locator;
+      if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
+      await this.persist();
+    });
+  }
+
   /** Confirms `treeKey` reached `/process/ready` for `generation`: cancels its root-registration
    * deadline (a no-op if this generation's wait was never armed or was already superseded),
    * persists `readyConfirmedAt` -- the durable marker `retireUnconfirmedRoot`'s own race-safe
@@ -2138,13 +2251,14 @@ export class ProcessManager {
   /**
    * Connects (or reuses a cached connection) to a role's shim socket. `onIdle` is wired
    * unconditionally for every connection (root architect, controller, phase worker, and
-   * sub-architect alike) purely as a trigger to re-check the running-worker queue — occupancy
-   * itself is always derived fresh by `runningWorkerCount()` from `state.roles` (the root
-   * architect and controller are never in `state.roles` at all, tracked separately via
-   * `state.trees`/`state.controllerLocator`), not by opting a connection in or out here. The
-   * dial itself is the runtime's (`Runtime.connect`, raw and uncached); the negotiate, the cache,
-   * and the `closed` wiring below are this manager's, since `onWorkerClientClosed`'s stale-close
-   * guard depends on the cache it evicts from.
+   * sub-architect alike) as a trigger that (a) arms the connection's idle-retire clock
+   * (`armIdleRetire`, which judges at expiry whether this token is a retirable phase worker at
+   * all) and (b) re-checks the running-worker queue — occupancy itself is always derived fresh
+   * by `runningWorkerCount()` from `state.roles` (the root architect and controller are never in
+   * `state.roles` at all, tracked separately via `state.trees`/`state.controllerLocator`), not by
+   * opting a connection in or out here. The dial itself is the runtime's (`Runtime.connect`, raw
+   * and uncached); the negotiate, the cache, and the `closed` wiring below are this manager's,
+   * since `onWorkerClientClosed`'s stale-close guard depends on the cache it evicts from.
    */
   private async clientFor(token: string, locator: Locator): Promise<WorkerRpcClient> {
     const existing = this.workerClients.get(token);
@@ -2160,7 +2274,10 @@ export class ProcessManager {
         throw error;
       }
       this.workerClients.set(token, client);
-      client.onIdle(() => this.workerAdmission.promoteWorkerQueue());
+      client.onIdle(() => {
+        this.armIdleRetire(token, client);
+        this.workerAdmission.promoteWorkerQueue();
+      });
       // Detached from this connect call on purpose (the caller must not wait on the worker's
       // eventual close) — `.catch` here is not error recovery, it is the only thing standing
       // between an `onWorkerClientClosed` rejection (runtime/saveState failures included) and an

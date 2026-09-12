@@ -1,0 +1,214 @@
+{
+  "issue": "LEGION-30",
+  "round": 2,
+  "pr": {
+    "number": 973,
+    "url": "https://github.com/sjawhar/legion/pull/973",
+    "head_tested": "1e9ec35f893668768b6dd4ac56a7efad94c9bda3",
+    "code_head": "95f0f339fec1403da4cd973ba60f6457d3e4a350",
+    "branch": "legion/LEGION-30",
+    "ci_at_head": "Tests 34719511758 + 34719548952 success, Legion Envoy and Contracts 34719511788 success (1e9ec35f); Tests 34719073750 / Envoy 34719073749 success (95f0f339)"
+  },
+  "spec": "Dispatch primary document of LEGION-30, version 6 (Acceptance 1 and Design now record the re-arm)",
+  "verdict": "PASS (criteria 1-5, 7; criterion 6 pre-merge half proven twice, live half pending the operator's post-merge restart)",
+  "verdict_summary": "The corrective fix at 95f0f339 closes the round-1 criterion-1 gap: retireIdleWorker re-arms the idle-retire clock inside the same mutateClaim callback when its expiry declines because the role is the issue's active phase or a pendingAssignment is queued, and on no other decline. Proven by the rig ordering that found the defect (A idle as the active phase survives one full window unlogged; retired 12 s after phases[issue] moved to B, one log line, no kill-pane, no worker-died) and by 8 adversarial throwaway probes on the re-arm. Nothing fails.",
+  "criteria": {
+    "1": {
+      "verdict": "PASS",
+      "evidence": "processes.test.ts 203 pass / 3 skip / 0 fail (206). The two new tests assert exactly one new 600 000 ms wait after an active-phase / pendingAssignment decline and then, once the condition clears, one shutdown frame, no kill-pane, locator cleared, resumeSessionFile = ompSessionFile, launchFailures/promptFailures undefined, zero publications, zero clocks left pending; the two extended negatives assert zero pending waits after a running decline and after an architect decline. Rig round 2 (head 1e9ec35f, window 90 s): A=reviewer idle 21:29:48Z as phases[LEGSMOKE-74]; at T1 21:32:21Z (idle 153 s) A resident, zero daemon lines for it; B=planner spawned 21:32:31Z, phases rewritten 21:32:36Z; A retired ~21:32:48Z (line matched 21:32:51Z) with exactly one `[legion] retiring idle worker legion-sjawhar3031-legsmoke-74-reviewer: idle for 90s with no active phase; ...` line; A's claim locator=null, resumeSessionFile=2026-09-12T21-29-38-765Z_01a09786-a4cd-7000-acac-889b524aac17.jsonl, launchFailures absent, promptFailures 0; no kill-pane, no worker-died, no launch-failed in the log."
+    },
+    "2": {
+      "verdict": "PASS",
+      "evidence": "Unchanged code path; round-1 rig resume (planner --resume=<session file>, same sessionId, answered in the same session) and the unit test `resumes a retired worker with --resume on its next spawn_worker` stand at this head."
+    },
+    "3": {
+      "verdict": "PASS",
+      "evidence": "Unchanged; `does not count a retired claim ... toward the running-worker cap` passes at this head; round-2 rig: retired A's locator-less claim did not block B's launch (workerAdmission.queue=[])."
+    },
+    "4": {
+      "verdict": "PASS",
+      "evidence": "`never retires an idle sub-architect ...` now also asserts zero clocks pending after the fire (an architect decline does not re-arm); PROBE1 confirms no spin across repeated fires. Rig: root architect and controller resident for the whole run, no line for either."
+    },
+    "5": {
+      "verdict": "PASS",
+      "evidence": "Unchanged since round 1 (config.test.ts 39/0; CLI --checkConfig rejections naming the key recorded in round_1.part_a.criterion_5_exact_errors)."
+    },
+    "6": {
+      "verdict": "PRE-MERGE HALF PASS (twice); LIVE HALF PENDING",
+      "evidence": "Round 1 (13468c96): 4 real workers, 3 retired at the window, count 12->6, resume with --resume. Round 2 (1e9ec35f): the defect-finding ordering, A retired within one further window after the phase moved; before/after listings T0/T1/T2 and the daemon log in the PR body's E2E -> Re-test section. Sweep exclusion re-checked: retire-idle-workers.py (pid 2245006, MIN_AGE 900, INTERVAL 600) kills only via the live server socket legion-sjawharlegion; none of rig2's pane pids (304253, 307117, 325686, 438480) were listed there; A was 193 s old at retirement.",
+      "live_half": "PENDING the operator's post-merge restart of sjawhar/legion from main; tester records pgrep -fc 'omp --mode rpc' before and one 600 s window after plus the live daemon's retiring-idle-worker lines in the PR body."
+    },
+    "7": {
+      "verdict": "PASS",
+      "evidence": "Documents unchanged since round 1 (verified then at 13468c96; 95f0f339 touches only processes.ts and processes.test.ts)."
+    }
+  },
+  "part_a": {
+    "suite_counts": {
+      "processes.test.ts": "203 pass, 3 skip, 0 fail (206 tests, 1670 expect calls)",
+      "idle filter (-t idle)": "18 pass, 0 fail"
+    },
+    "new_tests_reviewed": "Both new tests and both extended assertions assert consumer-observable state (pending-wait count, shutdown frames, tmux argv, claim fields, publications); nothing pins implementation text.",
+    "adversarial_probes": [
+      {
+        "probe": "1 architect decline: repeated fires",
+        "result": "pending 600s clocks = 0 after the first fire; three more fire attempts return false; no shutdown; locator intact. No spin."
+      },
+      {
+        "probe": "2a closing-tree decline (closeTree parked at its first persist) while the role is the active phase",
+        "result": "not re-armed (0 pending), no shutdown; after the save is released closeTree itself sends the one shutdown and deletes the claim."
+      },
+      {
+        "probe": "2b closed-tree decline while the role is the active phase",
+        "result": "not re-armed (0 pending), no shutdown."
+      },
+      {
+        "probe": "3 cached client replaced before expiry; stale client still idle; role is the active phase",
+        "result": "identity check returns first: not re-armed (0 pending), no shutdown, locator intact."
+      },
+      {
+        "probe": "4 worker_idle_retire_seconds: 0 -- expiry body (retireIdleWorker) invoked directly on an active-phase idle worker",
+        "result": "nothing armed (armIdleRetire's retireMs === 0 guard); with the phase moved the direct call retires (one shutdown, locator cleared, resumeSessionFile set) and still arms nothing -- the only pending wait afterwards is the 10 000 ms graceful-stop timeout, not a clock."
+      },
+      {
+        "probe": "5 pendingAssignment decline -> re-armed -> queued task prompted (running, phase = this role, pendingAssignment cleared) -> finishes (idle)",
+        "result": "two 600s waits recorded under manualSleep (the superseded re-arm cannot be cancelled by the fake), firing the older one with the phase moved is inert (no shutdown), firing the newer one retires exactly once; 0 pending afterwards. Exactly one live clock."
+      },
+      {
+        "probe": "6 five consecutive active-phase declines",
+        "result": "exactly one clock pending after each; one retirement when the phase moves; zero publications."
+      },
+      {
+        "probe": "7 dispose() between a re-arm and its expiry",
+        "result": "the re-armed clock never acts (0 pending after the fire, no shutdown)."
+      }
+    ]
+  },
+  "part_b_artifacts": {
+    "pr_body": "E2E section appended with the 'Re-test (round 2 ...)' block (T0/T1/T2 listings, timeline, the one log line, claim state, sweep exclusion, teardown); criterion-1 row flipped from 're-test pending' to 'Re-tested PASS at head 1e9ec35f'; CI line updated to the runs at 1e9ec35f; LIVE half of criterion 6 left pending; Thermo left pending.",
+    "rig_teardown": "LEGSMOKE-74 PATCHed to done; legion stop sjawhar/3031 via the rig's own XDG registry (exit 0); tmux -L legion-sjawhar3031 kill-server; hub stop of legion30-rig2-bridge and legion30-rig2-listener; docker rm -f legion30-rig2-nats; rm -rf /tmp/legion30-rig2, the rig's OMP session dirs, and its tmux socket. Ports 14332/19130/19580/19581 free afterwards.",
+    "live_daemon": "Not touched by the tester in either round. Its pid changed from 3397326 to 3796317 at 21:09:36Z (registry startedAt 21:11:46Z) -- a supervisor restart that happened while this session was idle, 18 minutes before rig2 came up; both rig stops used XDG_STATE_HOME registries holding only the scratch team."
+  },
+  "observations_not_criteria": [
+    "Dispatch POST /api/v1/issues returned 409 POSSIBLE_DUPLICATE for the round-2 rig title (candidate: round 1's LEGSMOKE-63, status done); resolved with a distinct title and force:true, as the dispatch_issue tool documents.",
+    "LEGION-12 grants: only the first stacked `export LEGION_GRANT=` per bash call redeems; the later ones are pattern-shaped UUIDs that 403 with 'Invalid or expired grant'. Grants also age out (a grant minted ~20 min earlier redeemed 200 in a probe and 403'd on the next call), so the picker must prefer the newest recorded grant -- the recorder workaround from .legion/messages/20260912191117-f0d8c84c-plan-to-implement.json plus a newest-first pick worked for every legion gh call and the push here.",
+    "/process/ready still answers HTTP 500 (Envoy 404 on the inert architect topic) for this rig's driver after persisting readyConfirmedAt; only reachable by a driver that skips envoy_role_set. Noted in round 1; unchanged."
+  ],
+  "for_the_reviewer": "Nothing fails. Approve on criteria 1-5 and 7 with the live half of criterion 6 pending; the issue stays open until the post-merge live numbers exist (spec Acceptance 6). Thermo is yours.",
+  "round_1": {
+    "issue": "LEGION-30",
+    "pr": {
+      "number": 973,
+      "url": "https://github.com/sjawhar/legion/pull/973",
+      "head_tested": "13468c968adb68d10bcc15d0a96b92fbbb3943b3",
+      "branch": "legion/LEGION-30"
+    },
+    "spec": "Dispatch primary document of LEGION-30, version 5 (Acceptance 1-7)",
+    "verdict": "FAIL",
+    "verdict_summary": "Criteria 2, 3, 4, 5, 7 pass; criterion 6's pre-merge half is proven end to end on a throwaway daemon from the PR head (live half pending the operator's post-merge restart); criterion 1 FAILS on one ordering found by the rig: a worker whose idle-retire clock expired as a no-op while it was the issue's active phase is never re-armed when phases[issue] later moves to another role, so it stays resident indefinitely although every Acceptance-1 condition holds. One small fix plus one regression test; then re-test.",
+    "criteria": {
+      "1": {
+        "verdict": "FAIL",
+        "passes": "steady-state orderings: past-window retire (phases absent / completed / other role) with one graceful shutdown frame, no kill-pane, locator cleared, resumeSessionFile carried, launchFailures/promptFailures untouched, zero publications; under-window, re-prompted, active-phase, queued-task, sub-architect untouched -- all by the 9 new tests (201 pass / 3 skip / 0 fail, 204 tests) and observed live on the rig (3 retirements, negative control resident).",
+        "fails": "phase-moves-after-expiry ordering. Rig: reviewer was phases[LEGSMOKE-63]; its clock fired ~20:24:15Z as a correct no-op; at 20:25:32Z the retired planner was resumed via spawn_worker and its /worker/started re-wrote phases[LEGSMOKE-63]=planner (workers.ts:212); the reviewer -- idle since 20:22:43Z, no pendingAssignment, role != architect, tree active -- was still resident at 20:31:27Z (8.7 min idle, 5.7 min not the active phase) with no clock pending. Cause: armIdleRetire's map entry is deleted at expiry; retireIdleWorker returns without re-arming; only a worker's own idle transition arms a clock, and nothing runs when phases[issue] changes.",
+        "unit_repro": "idleWorkerFixture({role:'reviewer', phases:{[root]:{phase:'reviewer',sessionId:'ses_reviewer'}}}); expect(clock.fire(600_000)).toBeTrue(); await flushEventLoop(20); state.phases[root]={phase:'planner',sessionId:'ses_planner'}; expect(clock.pending.filter(w=>w.ms===600_000)).toHaveLength(0) /* gap */; expect(clock.fire(600_000)).toBeFalse(); shutdownCalls stays [] and locator stays set. Ran as a throwaway copy of processes.test.ts (not committed): pending clocks = 0, retired = false.",
+        "proposed_fix": "In retireIdleWorker, when the predicate declines for a reason that can change without this worker's own idle transition (active phase, pendingAssignment, closing tree) and this.workerClients.get(token) === client && client.runState === 'idle' && !this.disposed, call this.armIdleRetire(token, client) so the clock polls once per window until the phase moves. Regression test = the repro above with the inverse assertions after a second fire(600_000): one shutdown, locator cleared, resumeSessionFile set. Alternative: re-arm every cached idle client of the issue wherever phases[issue] is written (workers.ts:212, processes.ts:652, phase/complete).",
+        "real_world_shape": "Any worker that ends a turn while still the recorded phase and is then superseded by another role's spawn -- e.g. a retro implementer that never calls `legion handoff complete` before the final reviewer is spawned -- leaks one resident omp process per issue until the tree closes. The operator sweep (retire-idle-workers.py) re-evaluates every 10 min and so would eventually catch it; the daemon's clock does not."
+      },
+      "2": {
+        "verdict": "PASS",
+        "evidence": "unit: 'resumes a retired worker with --resume on its next spawn_worker' (asserts --resume=<sessionFile>, generation 2, expectedSessionId, resumeSessionFile cleared, launchFailures 0). Rig: spawn_worker planner at 20:25:32Z -> daemon log '[legion] respawning LEGSMOKE-63 by resuming OMP session .../2026-09-12T20-22-13-694Z_01a09748-ebbe-7000-841c-ec6b9789f2be.jsonl'; pane_start_command carries --resume=<that file>; claim generation 2 with the same sessionId 01a09748-ebbe-7000-841c-ec6b9789f2be; the same session file then carries 'done' then 'resumed'."
+      },
+      "3": {
+        "verdict": "PASS",
+        "evidence": "unit: 'does not count a retired claim (locator cleared, resumeSessionFile kept) toward the running-worker cap' (workerCap 1, retired claim present, a new tester still launches, queue empty). Rig: after retirement the three claims are locator-less with resumeSessionFile and the reviewer/planner spawns were never queued (workerAdmission.queue=[])."
+      },
+      "4": {
+        "verdict": "PASS",
+        "evidence": "unit: 'never retires an idle sub-architect, however long its idle window has run'. Rig: the root architect claim (role architect, no worker locator) and the controller (not a worker claim) stayed resident for the whole 16-minute run; only planner/implementer/tester were retired. retireIdleWorker's `claim.role === 'architect'` and `!('issue' in claim)` guards are the reason."
+      },
+      "5": {
+        "verdict": "PASS",
+        "evidence": "config.test.ts 39 pass / 0 fail. CLI surface (`bun run src/cli/index.ts start tester/c5 --config <tmp legion.yaml> --checkConfig`, LEGION_*/DISPATCH_*/ENVOY_* scrubbed from env): yaml 600 -> 'Config OK'; yaml 0 -> 'Config OK'; yaml -1 -> exit 1 'error: worker_idle_retire_seconds must be a non-negative integer'; yaml 1.5 -> exit 1 same text; yaml \"abc\" -> exit 1 'error: worker_idle_retire_seconds must be a finite number'; env LEGION_WORKER_IDLE_RETIRE_SECONDS=0 -> 'Config OK'; =90 -> 'Config OK'; =-1 / =1.5 / =abc -> exit 1 'error: LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer'; no key -> 'Config OK' (default 600 asserted by the unit test; --checkConfig prints only the project). Precedence YAML>env>default is unit-covered."
+      },
+      "6": {
+        "verdict": "PRE-MERGE HALF PASS; LIVE HALF PENDING",
+        "evidence": "See the PR body's E2E section. Throwaway daemon from head 13468c96: team sjawhar/3030, tmux server legion-sjawhar3030, state_dir /tmp/legion30-rig/daemon, ports 19570/19571, worker_idle_retire_seconds 90, isolated NATS 14322 + Envoy listener 19120 built from the head + smoke envoy-bridge for Dispatch events, LEGSMOKE-63 as root issue. 4 real phase workers (planner, implementer, tester, reviewer) finished a real model turn; 3 retired at the 90 s window with one 'retiring idle worker <token>: idle for 90s' line each; rig-scoped omp --mode rpc count 12 -> 6 (6 -> 3 panes; each pane = shim row + omp child row); retired planner resumed by spawn_worker with --resume=<its session file> and answered in the same session; negative control (reviewer = active phase) resident past the window; controller and root architect resident throughout. Sweep exclusion: retire-idle-workers.py only kills via the live server socket legion-sjawharlegion (none of the rig's pane pids appear there) and requires age >= 900 s; the retired workers were 55-57 s old at BEFORE and gone by age 152 s.",
+        "driver_disclosure": "The architect was the tester over the daemon's HTTP API (/process/started + /process/ready with the daemon-minted boot token, then /worker/spawn) -- the same calls the extension makes; the root and controller panes ran the real OMP with the Legion extension made inert by the rig's launch prefix for those two panes only. Every phase worker was fully real (daemon-spawned omp --mode rpc behind worker-shim, real handshake, real model turn). Nothing in the retire/resume path was mocked.",
+        "live_half": "PENDING: operator restarts sjawhar/legion from main after merge; tester records pgrep -fc 'omp --mode rpc' before and one 600 s window after, plus the live daemon's 'retiring idle worker' lines, in the PR body."
+      },
+      "7": {
+        "verdict": "PASS",
+        "evidence": "Read the four documents at the head. skills/legion-architect/SKILL.md: step 5 retro now `legion({op:'spawn_worker', issue, role:'implementer', task:...})` with the explicit 'never envoy_publish to a finished worker's role topic ... rejected with 404'; step 2 'use those live sessions' rewritten; step 6 item 2 spawn_worker on the reviewer. packages/pi-envoy/roles/architect.md: retro paragraph via spawn_worker, names worker_idle_retire_seconds and the 404. skills/legion-worker/SKILL.md: both 'still alive and idle in its pane' sentences rewritten to the idle-retire window / resume semantics. packages/daemon/src/daemon/AGENTS.md: processes.ts row names armIdleRetire/retireIdleWorker, DaemonConfig defaults name worker_idle_retire_seconds/LEGION_WORKER_IDLE_RETIRE_SECONDS default 600 (0 disables), new worker-lifecycle bullet. grep for 'never tears|still alive and idle|use those live sessions|idle since|kept alive|stays running' across the four files: only 'resume tracking that role's live session' (worker-started row, about a just-promoted running worker) remains, which is accurate."
+      }
+    },
+    "part_a": {
+      "suite_counts": {
+        "processes.test.ts": "201 pass, 3 skip, 0 fail (204 tests, 1642 expect calls)",
+        "config.test.ts": "39 pass, 0 fail",
+        "idle-retire filter (-t idle)": "18 pass, 0 fail"
+      },
+      "new_tests_reviewed": "The 9 new processes.test.ts tests assert consumer-observable invariants: shutdownCalls == [token] (one graceful frame), no tmux kill-pane command, claim.locator undefined, resumeSessionFile == the locator's ompSessionFile, launchFailures/promptFailures undefined, connectAttempts 2 (one reconnect probe from the socket-close path), revokedSessions == [sessionId], publications == [] (no worker-died), and on resume the tmux launch argv contains --resume=<file> with generation 2 / expectedSessionId. idleWorkerFixture seeds state exactly as reconnectWorkers leaves a confirmed idle worker; manualSleep makes expiry an explicit step. No assertion pins implementation text.",
+      "throwaway_predicate_probes": [
+        {
+          "case": "tree in closingTrees at expiry (closeTree parked at its first persist)",
+          "result": "no-op: no 'retiring idle worker' log, no shutdown, locator intact, connectAttempts 1; after releasing the save closeTree itself sent the one shutdown and deleted the claim."
+        },
+        {
+          "case": "tree status 'closed' at expiry",
+          "result": "no-op: no log line, no shutdown, locator intact."
+        },
+        {
+          "case": "readyConfirmedAt unset with a locator (boot in flight)",
+          "result": "reconnectWorkers still connects and the get_state idle transition arms a clock (armed=true), but expiry declines: no shutdown, locator intact, launchFailures untouched."
+        },
+        {
+          "case": "cached client replaced by a newer connection before expiry",
+          "result": "stale clock inert: identity check returns before any state read; no log, no shutdown, locator intact."
+        },
+        {
+          "case": "dispose() before expiry (manualSleep cannot cancel, so the wait is still firable)",
+          "result": "no-op: map cleared by dispose, the fire hits the entry-identity check."
+        },
+        {
+          "case": "claim locator without ompSessionFile",
+          "result": "retirement clears the locator and leaves no resumeSessionFile; the next spawn_worker launches fresh (no --resume). Unreachable for a confirmed claim: /worker/started always writes ompSessionFile onto the locator (workers.ts:204)."
+        },
+        {
+          "case": "phases[issue] names THIS role but is completed",
+          "result": "retired (one shutdown) -- matches the it.each 'completed' case."
+        },
+        {
+          "case": "spawn_worker arrives while the retirement stop is in flight (persist gated)",
+          "result": "the spawn queues behind the token's critical section (not settled while the stop is held), then resolves {status:'spawned'} with --resume=<sessionFile>."
+        },
+        {
+          "case": "GAP -- phases[issue] moves to another role AFTER this worker's clock already expired as a no-op",
+          "result": "never retired: zero pending clocks, fire(600_000) === false, shutdownCalls [] -- the criterion-1 failure above."
+        }
+      ],
+      "criterion_5_exact_errors": {
+        "yaml_-1": "error: worker_idle_retire_seconds must be a non-negative integer",
+        "yaml_1.5": "error: worker_idle_retire_seconds must be a non-negative integer",
+        "yaml_string": "error: worker_idle_retire_seconds must be a finite number",
+        "env_-1": "error: LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer",
+        "env_1.5": "error: LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer",
+        "env_abc": "error: LEGION_WORKER_IDLE_RETIRE_SECONDS must be a non-negative integer"
+      }
+    },
+    "part_b_artifacts": {
+      "pr_body": "E2E section and criterion-1/-6 rows of PR #973 edited at 2026-09-12T20:3xZ; Thermo left pending for the reviewer.",
+      "rig_teardown": "legion stop sjawhar/3030 (exit 0), tmux -L legion-sjawhar3030 kill-server, hub stop of listener and bridge, docker rm -f legion30-rig-nats, rm -rf /tmp/legion30-rig and ~/.omp/profiles/legion/agent/sessions/-tmp-legion30-rig-*, LEGSMOKE-63 PATCHed to done. Live sjawhar/legion daemon (pid 3397326, port 13370) and its state dir/tmux server untouched."
+    },
+    "observations_not_criteria": [
+      "/process/ready returns HTTP 500 ('Envoy publish to notifications.role.<architect> failed with status 404') when the architect role has no live Envoy holder at ready time, after readyConfirmedAt is already persisted -- only reachable by a driver that skips envoy_role_set (this rig); the extension always claims first. Noted, not a criterion.",
+      "A 'done' PATCH on the root issue lingers the tree (linger_hours) and leaves every worker pane resident until the linger sweep closes it -- expected per the linger design; the rig was torn down with kill-server rather than waiting 72 h.",
+      "Listing tip for the live half: a resumed launch is `omp --resume=<file> --mode rpc`, so a `pgrep -f '/omp --mode rpc'` adjacency pattern misses resumed workers; count with `--mode rpc` and `/omp` separately (the operator sweep already does)."
+    ],
+    "for_the_implementer": "Fix the criterion-1 gap (proposed_fix under criteria.1), add the regression test in processes.test.ts next to the idle-retire block, keep the fixture defaults; no rebase (main has not conflicted). Then the tester re-runs the rig with the same ordering (spawn A active, expire, resume/spawn B, expect A retired within one window).",
+    "operational_notes": "Only the first of several stacked `export LEGION_GRANT=` blocks in a bash call redeems (LEGION-12); the planner's recorder workaround (.legion/messages/20260912191117-f0d8c84c-plan-to-implement.json) worked for every legion gh call and the push here. The working copy's `.omp/config.yml` (provisioning artifact) was kept out of the handoff commit by carving it by path."
+  },
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T21:37:52.495Z"
+}

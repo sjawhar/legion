@@ -70,11 +70,13 @@ export interface WorkerRpcClient {
    * Registers a callback fired once when `runState` transitions to `"idle"` from a non-idle
    * state. Pure trigger — "something may have freed capacity, re-check occupancy" — never a
    * source of occupancy itself (that's always `runState`/a fresh `runningWorkerCount()`
-   * computation). Never fired on socket close: a closed socket's run state goes to `"unknown"`
-   * (still occupying, conservatively), not `"idle"` — a worker whose socket just died might
-   * still be mid-turn and about to reconnect, and firing this callback would wrongly signal
-   * freed capacity for one the daemon hasn't yet confirmed is actually gone. Replaces any
-   * previously registered callback.
+   * computation). `ProcessManager` also arms the worker's idle-retire clock from this same
+   * trigger (both consumers live in one composed callback in `workerClient()`), judging every
+   * retire condition at that clock's expiry rather than here. Never fired on socket close: a
+   * closed socket's run state goes to `"unknown"` (still occupying, conservatively), not
+   * `"idle"` — a worker whose socket just died might still be mid-turn and about to reconnect,
+   * and firing this callback would wrongly signal freed capacity for one the daemon hasn't yet
+   * confirmed is actually gone. Replaces any previously registered callback.
    */
   onIdle(callback: () => void): void;
 }

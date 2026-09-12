@@ -127,10 +127,12 @@ legion({
 
 The daemon spawns that sub-architect as its own process with the child's context already
 in its environment; a resume of an existing role continues the same process instead of
-starting a fresh one. Keep the returned session identifiers, because retro and adjustment
-use those live sessions. Park while children are in flight. On each child closure,
-re-scope open work, close obsolete work with a reason, and release the next wave only
-when it now makes sense. There is no inter-child dependency mechanism to encode.
+starting a fresh one. Keep the returned session identifiers; retro and adjustment resume
+those same sessions through `spawn_worker` (a finished worker is retired after
+`worker_idle_retire_seconds` and comes back from its session file). Park while children are
+in flight. On each child closure, re-scope open work, close obsolete work with a reason, and
+release the next wave only when it now makes sense. There is no inter-child dependency
+mechanism to encode.
 
 ## 3. Children complete
 
@@ -160,18 +162,24 @@ review and the merge-gate sequence.
 
 ## 5. Retro
 
-Retro is mandatory for every issue that passed review, before merge. Message the
-implementer's live session (idle since it completed its phase; the daemon never tears
-it down) with `envoy_publish` to its role token, naming the skill:
+Retro is mandatory for every issue that passed review, before merge. Send the implementer
+back in through the daemon — `spawn_worker` on the implementer carrying the retro task. This
+resumes the same agent whether its pane is still live or the daemon has already retired it
+idle (a finished worker is retired after `worker_idle_retire_seconds`, default 600 s, and
+resumed from its session file on its next assignment). Never `envoy_publish` to a finished
+worker's role topic for this: a retired role has no live holder and the publish is rejected
+with 404.
 
 ```text
-envoy_publish({
-  topic: "notifications.role.<implementer's encoded token>",
-  message: "Run the legion-retro skill now. Capture durable learnings and post the issue comment; do not create a .legion handoff file."
+legion({
+  op: "spawn_worker",
+  issue: "LEGION-40",
+  role: "implementer",
+  task: "Run the legion-retro skill now. Capture durable learnings and post the issue comment; do not create a .legion handoff file."
 })
 ```
 
-Wait for the messaged implementer to report its durable retro result. Retro output is
+Wait for the implementer to report its durable retro result. Retro output is
 `docs/solutions/` plus an issue comment; it must not create a `.legion` file or change
 the reviewer-approved head after cleanup.
 
@@ -189,7 +197,8 @@ Preserve this order exactly:
    head. The deletion must land before that approval, which is head-pinned. An implementer
    completion always writes the issue's status as `testing`; this one is not a test round,
    so on its `phase-complete` wake call `legion({ op: "set_status", issue, status: "retro" })`
-   before messaging the reviewer to approve;
+   before `spawn_worker` on the reviewer to approve that head (a finished reviewer may already
+   be retired; `spawn_worker` resumes it);
 3. retro completes without dirtying the branch beyond `docs/solutions/`;
 4. the merger verifies the current head is the reviewer-approved head plus only the retro
    commits and publishes `READY #<n> at <sha>` to `notifications.role.pr-queue`; it never
