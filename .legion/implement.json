@@ -122,10 +122,12 @@
     "This implementer session had the bug itself: one push 403'd because the model wrote imitated credential lines; the retry with a clean command pushed. Recorded because the plan asked for it, and because it is the same signature the rig measured."
   ],
   "pullRequest": {
-    "status": "held",
-    "reason": "Sami's hold on opening new pull requests across the organization; the architect holds the tree until the queue organizer relays the release",
-    "branch": "legion/LEGION-12",
-    "head": "c31edecc6d7e before the handoff commit; the branch head after `implement: record handoff` is the commit to open the pull request from"
+    "status": "open",
+    "number": 974,
+    "url": "https://github.com/sjawhar/legion/pull/974",
+    "head": "5667f1ba6806de7b11b3eb2637a16ece56e5e069",
+    "openedAt": "2026-09-12T19:34Z",
+    "note": "Opened after Sami lifted the pull-request hold, with exactly the pullRequestDraft title and body (body passed via --body-file from /tmp, never committed). Three credential blocks were in the shell command that opened it; the first-wins export shadow from doc section 1 kept the hook's real grant and legion gh succeeded first try."
   },
   "pullRequestDraft": {
     "title": "fix(pi-envoy): deliver the worker's one-time credential through the shell tool's environment, not the command text",
@@ -134,5 +136,5 @@
   "postMerge": "Task 8 (upgrade the Legion profile's plugin at ~/.omp/profiles/legion/plugins to the version release.yaml publishes for this merge, then verify the first fresh worker's real `legion gh -- api repos/sjawhar/legion --jq .full_name` and `jj git push`) is a second assignment from the architect after the merge; the doc's `1.8.x` placeholder is filled in then.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T19:16:31.594Z"
+  "completed": "2026-09-12T19:35:07.154Z"
 }
