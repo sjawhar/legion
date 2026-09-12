@@ -36,17 +36,28 @@ export function asRecord(value: unknown): Record<string, unknown> {
  */
 export interface ContractSchema<T = unknown> {
   parse(value: unknown): T;
+  safeParse(value: unknown):
+    | { success: true; data: T }
+    | {
+        success: false;
+        error: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; message: string }> };
+      };
 }
 
+/** Rejects a body the route's contract does not accept with a 400 that names every offending
+ * field (`version: Invalid input: expected number, received undefined`) or, for an unknown key on
+ * a strict object, the key itself under `<body>` — so a caller sending a retired field learns
+ * which one, instead of a bare "invalid request". */
 export function validateContractRequest(
   schema: ContractSchema,
   body: Record<string, unknown>
 ): void {
-  try {
-    schema.parse(body);
-  } catch {
-    throw new HttpError(400, "Invalid Legion daemon API request");
-  }
+  const result = schema.safeParse(body);
+  if (result.success) return;
+  const detail = result.error.issues
+    .map((issue) => `${issue.path.map(String).join(".") || "<body>"}: ${issue.message}`)
+    .join("; ");
+  throw new HttpError(400, `Invalid Legion daemon API request: ${detail}`);
 }
 
 export function validateContractResponse<T>(

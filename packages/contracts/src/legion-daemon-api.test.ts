@@ -85,7 +85,7 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
       },
     },
     admission: { cap: 2, active: ["WIDGETS-1"], queue: [] },
-    gates: { "WIDGETS-1": { designAskId: "ask-1", designApproved: "ask-1" } },
+    gates: { "WIDGETS-1": { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 } },
     controllerLocator: { runtime: "tmux", tmuxSession: "legion-acme", tmuxWindowId: "@0" },
     roles: {
       "legion:acme:controller": { role: "controller", sessionId: "ses_controller" },
@@ -162,4 +162,36 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
   ]) {
     expect(LegionDaemonApi.State.response.safeParse(leak).success).toBeFalse();
   }
+});
+
+test("GatesRegister.request names the spec document and version, never an ask id", () => {
+  const capability = { tree: "WIDGETS-1", sessionId: "ses_architect", secret: "root-secret" };
+  expect(
+    LegionDaemonApi.GatesRegister.request.safeParse({
+      ...capability,
+      issue: "WIDGETS-1",
+      artifactId: "art-1",
+      version: 2,
+    }).success
+  ).toBeTrue();
+  const askId = LegionDaemonApi.GatesRegister.request.safeParse({
+    ...capability,
+    issue: "WIDGETS-1",
+    askId: "ask-1",
+  });
+  expect(askId.success).toBeFalse();
+  const missingVersion = LegionDaemonApi.GatesRegister.request.safeParse({
+    ...capability,
+    issue: "WIDGETS-1",
+    artifactId: "art-1",
+  });
+  expect(missingVersion.success).toBeFalse();
+  expect(
+    LegionDaemonApi.GatesRegister.request.safeParse({
+      ...capability,
+      issue: "WIDGETS-1",
+      artifactId: "art-1",
+      version: 0,
+    }).success
+  ).toBeFalse();
 });
