@@ -30,11 +30,16 @@ function renderVersionView({
     number: 1,
     summary: null,
   });
+  const blockSchema = runtime.runtime.blockSchema;
+  if (blockSchema === undefined) {
+    throw new Error("VersionView test runtime must provide a block schema.");
+  }
   const view = render(
     <QueryClientProvider client={queryClient}>
       <DocumentRuntime.Provider value={runtime.runtime}>
         <VersionView
           artifactId="artifact-1"
+          blockSchema={blockSchema}
           createdAt="2026-09-09T00:00:00Z"
           highlight={highlight}
           version={1}
@@ -42,7 +47,7 @@ function renderVersionView({
       </DocumentRuntime.Provider>
     </QueryClientProvider>
   );
-  return { ...runtime, view };
+  return { ...runtime, blockSchema, view };
 }
 
 test("VersionView renders the version read-only with the highlighted quote focused", async () => {
@@ -63,6 +68,22 @@ test("VersionView renders the version read-only with the highlighted quote focus
       readOnly: true,
     });
     expect(editors[0]?.options.awareness).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("VersionView renders a typed callout with the fetched block schema", async () => {
+  const markdown = ':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n';
+  const { blockSchema, editors, view } = renderVersionView({
+    highlight: undefined,
+    markdown,
+  });
+
+  try {
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(editors[0]?.options.blockSchema).toBe(blockSchema);
+    expect(editors[0]?.markdown).toBe(markdown);
   } finally {
     view.unmount();
   }

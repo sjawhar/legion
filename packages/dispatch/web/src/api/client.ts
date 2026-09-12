@@ -13,6 +13,7 @@ import type {
   Ask,
   AskRead,
   AuthenticatedUser,
+  BlockSchema,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -189,6 +190,10 @@ export class DispatchApiClient {
 
   private post<T>(path: string, body: unknown): Promise<T> {
     return this.send<T>("POST", path, body);
+  }
+
+  getBlockSchema(): Promise<BlockSchema> {
+    return this.json<BlockSchema>("/api/v1/schema/blocks");
   }
 
   listProjects(): Promise<Project[]> {

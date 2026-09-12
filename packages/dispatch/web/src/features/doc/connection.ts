@@ -17,6 +17,8 @@ export interface DocumentConnection {
 }
 
 export interface ConnectionCallbacks {
+  schemaVersion: number;
+  onAdmission(readOnly: boolean): void;
   onStatus(state: ConnectionState): void;
   onSynced(): void;
 }
@@ -34,6 +36,10 @@ export function colorForLogin(login: string): string {
   return presenceColors[Math.abs(hash) % presenceColors.length] ?? presenceColors[0];
 }
 
+export function isSchemaReadOnly(scope: string | undefined): boolean {
+  return scope === "readonly";
+}
+
 export function wsUrl(artifactId: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/ws/doc/${encodeURIComponent(artifactId)}`;
@@ -41,15 +47,31 @@ export function wsUrl(artifactId: string): string {
 
 export const connectDocument: ConnectDocument = (artifactId, callbacks) => {
   const doc = new Y.Doc();
-  const provider = new HocuspocusProvider({
+  let synced = false;
+  let authenticated = false;
+  let provider: HocuspocusProvider;
+  const notifySynced = () => {
+    if (synced && authenticated) {
+      callbacks.onSynced();
+    }
+  };
+  provider = new HocuspocusProvider({
     document: doc,
     name: artifactId,
+    onAuthenticated: () => {
+      authenticated = true;
+      callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
+      notifySynced();
+    },
     onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
     onSynced: ({ state }) => {
       if (state) {
-        callbacks.onSynced();
+        synced = true;
+        notifySynced();
       }
     },
+    parameters: { schema_version: callbacks.schemaVersion },
+    token: String(callbacks.schemaVersion),
     url: wsUrl(artifactId),
   });
   const awareness = provider.awareness;

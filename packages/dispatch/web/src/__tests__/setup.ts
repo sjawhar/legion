@@ -1,7 +1,17 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { notifyManager } from "@tanstack/react-query";
+import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
+import type { BlockSchema } from "../api/types";
+import { blockSchemaCache } from "../features/doc/schema";
 
 GlobalRegistrator.register();
+
+// Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
+// starts already holding the checked-in server schema: every MarkdownBody, ask card, and
+// document surface renders through the real schema without a network request, and a test that
+// wants a different schema replaces it through its own `api.getBlockSchema` spy before the
+// first render in its file.
+void blockSchemaCache.load(async () => serverBlockSchema as BlockSchema);
 
 class WebSocketStub {
   binaryType = "arraybuffer";

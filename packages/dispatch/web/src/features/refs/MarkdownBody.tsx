@@ -3,6 +3,8 @@ import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import type { BlockSchema } from "../../api/types";
+import { loadBlockSchema } from "../doc/schema";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -10,13 +12,18 @@ import {
   RefLink,
 } from "./RefLink";
 
-let headlessProof: Promise<HeadlessProofEditor> | undefined;
+const headlessProofs = new Map<number, Promise<HeadlessProofEditor>>();
 
-function loadHeadlessProof(): Promise<HeadlessProofEditor> {
-  headlessProof ??= import("@sjawhar/proof-editor/headless").then(({ createHeadlessProof }) =>
-    createHeadlessProof()
+function loadHeadlessProof(blockSchema: BlockSchema): Promise<HeadlessProofEditor> {
+  const cached = headlessProofs.get(blockSchema.version);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const created = import("@sjawhar/proof-editor/headless").then(({ createHeadlessProof }) =>
+    createHeadlessProof({ blockSchema })
   );
-  return headlessProof;
+  headlessProofs.set(blockSchema.version, created);
+  return created;
 }
 
 /** Proof's schema has no node for CommonMark's raw-HTML block/inline spans (a bare tag-shaped
@@ -113,7 +120,20 @@ export function MarkdownBody({
   useEffect(() => {
     let mounted = true;
     const root = variant === "inline" ? inlineRoot.current : blockRoot.current;
-    void loadHeadlessProof().then((proof) => {
+    const renderMarkdown = async () => {
+      // Without the server schema (or Proof's headless engine) the text still renders, as
+      // literal Markdown: readable, never lost. The cause is reported and the schema cache
+      // does not retain the failure, so the next render tries the fetch again.
+      let proof: HeadlessProofEditor | undefined;
+      try {
+        proof = await loadHeadlessProof(await loadBlockSchema());
+      } catch (error) {
+        console.error(
+          "MarkdownBody: rendering literal Markdown, the block schema is unavailable",
+          error
+        );
+        proof = undefined;
+      }
       if (!mounted) {
         return;
       }
@@ -121,29 +141,33 @@ export function MarkdownBody({
         throw new Error("MarkdownBody's root is unavailable.");
       }
       let parsed: ProseMirrorNode | undefined;
-      try {
-        parsed = proof.parseMarkdown(markdown);
-      } catch {
-        parsed = undefined;
-      }
-      const serializer = DOMSerializer.fromSchema(proof.schema);
-      if (parsed === undefined) {
-        root.replaceChildren(document.createTextNode(markdown));
-      } else if (variant === "inline") {
-        const flattened = flattenInline(parsed);
-        root.replaceChildren();
-        if (flattened !== undefined) {
-          root.appendChild(serializer.serializeFragment(flattened.head.content));
-          if (flattened.extra !== "") {
-            root.appendChild(document.createTextNode(` ${flattened.extra}`));
-          }
+      if (proof !== undefined) {
+        try {
+          parsed = proof.parseMarkdown(markdown);
+        } catch {
+          parsed = undefined;
         }
+      }
+      if (proof === undefined || parsed === undefined) {
+        root.replaceChildren(document.createTextNode(markdown));
       } else {
-        root.replaceChildren(serializer.serializeFragment(parsed.content));
-        for (const item of root.querySelectorAll("li[data-spread='false']")) {
-          const paragraph = item.firstElementChild;
-          if (item.childElementCount === 1 && paragraph?.tagName === "P") {
-            paragraph.replaceWith(...paragraph.childNodes);
+        const serializer = DOMSerializer.fromSchema(proof.schema);
+        if (variant === "inline") {
+          const flattened = flattenInline(parsed);
+          root.replaceChildren();
+          if (flattened !== undefined) {
+            root.appendChild(serializer.serializeFragment(flattened.head.content));
+            if (flattened.extra !== "") {
+              root.appendChild(document.createTextNode(` ${flattened.extra}`));
+            }
+          }
+        } else {
+          root.replaceChildren(serializer.serializeFragment(parsed.content));
+          for (const item of root.querySelectorAll("li[data-spread='false']")) {
+            const paragraph = item.firstElementChild;
+            if (item.childElementCount === 1 && paragraph?.tagName === "P") {
+              paragraph.replaceWith(...paragraph.childNodes);
+            }
           }
         }
       }
@@ -155,7 +179,8 @@ export function MarkdownBody({
       linkifyDispatchRefs(root);
       setReferenceAnchors(collectReferenceAnchors(root));
       onRenderedRef.current?.();
-    });
+    };
+    void renderMarkdown();
     return () => {
       mounted = false;
     };

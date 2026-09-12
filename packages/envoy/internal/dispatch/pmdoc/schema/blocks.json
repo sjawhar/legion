@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "types": [
+    {
+      "name": "callout",
+      "content": "block+",
+      "render": "host",
+      "attributes": {
+        "kind": {
+          "kind": "enum",
+          "choices": ["note", "warning"],
+          "default": "note"
+        },
+        "title": {
+          "kind": "string",
+          "default": ""
+        }
+      }
+    }
+  ]
+}

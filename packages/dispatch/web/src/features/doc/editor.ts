@@ -1,9 +1,11 @@
 import type { CreateProofEditorOptions, ProofEditorHandle } from "@sjawhar/proof-editor";
 
+import type { BlockSchema } from "../../api/types";
+
 export type { MarkAction, StoredMark } from "@sjawhar/proof-editor";
 
 export type EditorHandle = ProofEditorHandle;
-export type EditorOptions = CreateProofEditorOptions;
+export type EditorOptions = CreateProofEditorOptions & { blockSchema: BlockSchema };
 export type CreateEditor = (root: HTMLElement, options: EditorOptions) => Promise<EditorHandle>;
 
 export const editorAttributes = {

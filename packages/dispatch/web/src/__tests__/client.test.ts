@@ -199,6 +199,22 @@ test("API client sends inline artifacts as JSON", async () => {
   });
 });
 
+test("API client reads the server-owned block schema", async () => {
+  const stub = stubFetch(() =>
+    Response.json({
+      types: [{ attributes: {}, content: "paragraph+", name: "callout", render: "host" }],
+      version: 1,
+    })
+  );
+  const api = createApiClient(stub.fetch);
+
+  const schema = await api.getBlockSchema();
+
+  expect(schema.version).toBe(1);
+  expect(schema.types[0]?.name).toBe("callout");
+  expect(stub.requests.map(({ path }) => path)).toEqual(["/api/v1/schema/blocks"]);
+});
+
 test("API client encodes list filters and artifact version query parameters", async () => {
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
