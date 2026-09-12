@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -21,7 +23,7 @@ import (
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
 const listIssuesQuery = `
-	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
 	left join asks a on a.issue_key = i.key and a.state = 'open'
@@ -30,11 +32,15 @@ const listIssuesQuery = `
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	group by i.key
-	order by i.updated_at desc, i.key desc
+	order by case i.status
+		when 'triage' then 1 when 'icebox' then 2 when 'backlog' then 3
+		when 'todo' then 4 when 'in_progress' then 5 when 'testing' then 6
+		when 'needs_review' then 7 when 'retro' then 8 when 'done' then 9
+		end, i.rank asc, i.created_at asc
 `
 
 const listPinnedIssuesQuery = `
-	select i.key, i.title, i.status, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
 	join user_issue_state s on s.issue_key = i.key and s.login = $5 and s.pinned
@@ -44,7 +50,11 @@ const listPinnedIssuesQuery = `
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	group by i.key
-	order by i.updated_at desc, i.key desc
+	order by case i.status
+		when 'triage' then 1 when 'icebox' then 2 when 'backlog' then 3
+		when 'todo' then 4 when 'in_progress' then 5 when 'testing' then 6
+		when 'needs_review' then 7 when 'retro' then 8 when 'done' then 9
+		end, i.rank asc, i.created_at asc
 `
 
 const defaultIssueSpecMarkdown = `## Summary
@@ -126,7 +136,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
+		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Rank, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -253,10 +263,22 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if usingDefaultProject {
 		labels = []string{repoLabelPrefix + externalRepo}
 	}
+	if err := lockProjectRankAllocation(r.Context(), tx, input.Project); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
+	lastRank, err := lastProjectRank(r.Context(), tx, input.Project, "")
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	issueRank := rank.Between(lastRank, "")
+
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels)
-		values ($1, $2, $3, $4, $5, $6, $7)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, rank)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, issueRank); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -388,10 +410,120 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]mod
 	return s.loadIssueAsks(ctx, q, key, "open")
 }
 
+type rankInput struct {
+	Before *string `json:"before"`
+	After  *string `json:"after"`
+}
+
+func lockProjectRankAllocation(ctx context.Context, tx pgx.Tx, project string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('issue-rank:' || $1))`, project); err != nil {
+		return fmt.Errorf("lock project rank allocation: %w", err)
+	}
+	return nil
+}
+
+func (s *server) rankForInput(ctx context.Context, q queryer, project, issueKey string, input rankInput) (string, error) {
+	var (
+		previous string
+		next     string
+		err      error
+	)
+	if input.After != nil {
+		previous, err = rankBoundary(ctx, q, project, issueKey, *input.After)
+		if err != nil {
+			return "", err
+		}
+	}
+	if input.Before != nil {
+		next, err = rankBoundary(ctx, q, project, issueKey, *input.Before)
+		if err != nil {
+			return "", err
+		}
+	}
+	if previous != "" && next != "" && previous >= next {
+		return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbors are not ordered")
+	}
+	if previous != "" {
+		next, err = nextProjectRank(ctx, q, project, issueKey, previous, next)
+	} else if next != "" {
+		previous, err = previousProjectRank(ctx, q, project, issueKey, next)
+	} else {
+		previous, err = lastProjectRank(ctx, q, project, issueKey)
+	}
+	if err != nil {
+		return "", err
+	}
+	return rank.Between(previous, next), nil
+}
+
+func nextProjectRank(ctx context.Context, q queryer, project, issueKey, previous, next string) (string, error) {
+	var rank string
+	err := q.QueryRow(ctx, `
+		select rank from issues
+		where project_key = $1 and key != $2 and rank > $3 and ($4 = '' or rank < $4)
+		order by rank
+		limit 1
+	`, project, issueKey, previous, next).Scan(&rank)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return next, nil
+	}
+	return rank, err
+}
+
+func previousProjectRank(ctx context.Context, q queryer, project, issueKey, next string) (string, error) {
+	var rank string
+	err := q.QueryRow(ctx, `
+		select rank from issues
+		where project_key = $1 and key != $2 and rank < $3
+		order by rank desc
+		limit 1
+	`, project, issueKey, next).Scan(&rank)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return rank, err
+}
+
+func lastProjectRank(ctx context.Context, q queryer, project, issueKey string) (string, error) {
+	var rank string
+	err := q.QueryRow(ctx, `
+		select rank from issues
+		where project_key = $1 and key != $2
+		order by rank desc
+		limit 1
+	`, project, issueKey).Scan(&rank)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return rank, err
+}
+
+func rankBoundary(ctx context.Context, q queryer, project, issueKey, raw string) (string, error) {
+	key := strings.TrimSpace(raw)
+	if key == "" || key == issueKey {
+		return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor must name another issue")
+	}
+	var (
+		neighborProject string
+		neighborRank    string
+	)
+	if err := q.QueryRow(ctx, `select project_key, rank from issues where key = $1 for update`, key).Scan(&neighborProject, &neighborRank); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor does not exist")
+		}
+		return "", err
+	}
+	if neighborProject != project {
+		return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor must be in the same project")
+	}
+	return neighborRank, nil
+}
+
 func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Title         *string               `json:"title"`
 		Status        *string               `json:"status"`
+		Rank          *rankInput            `json:"rank"`
 		Labels        *[]string             `json:"labels"`
 		Route         *string               `json:"route"`
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
@@ -434,7 +566,20 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+
 	key := r.PathValue("key")
+	if input.Rank != nil {
+		var project string
+		if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, key).Scan(&project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := lockProjectRankAllocation(r.Context(), tx, project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+
 	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -445,7 +590,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.ClosedAt != nil {
-		if status == "" || status == "done" || input.Title != nil || input.Labels != nil || input.Route != nil || input.ExternalLinks != nil {
+		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && input.Route == nil && input.ExternalLinks == nil
+		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || input.Route != nil || input.ExternalLinks != nil) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
@@ -469,6 +615,19 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 	}
+	if input.Rank != nil {
+		issueRank, err := s.rankForInput(r.Context(), tx, before.Project, key, *input.Rank)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `update issues set rank = $2, updated_at = now() where key = $1`, key, issueRank); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		changed = true
+	}
+
 	if input.Labels != nil {
 		if _, err := tx.Exec(r.Context(), `update issues set labels = $2, updated_at = now() where key = $1`, key, *input.Labels); err != nil {
 			s.writeHandlerError(w, err)
@@ -599,14 +758,14 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	var issue model.Issue
 	var createdBy []byte
 	if err := q.QueryRow(ctx, `
-		select i.key, i.project_key, i.number, i.title, i.status, i.labels, i.parent_key, i.route,
+		select i.key, i.project_key, i.number, i.title, i.status, i.rank, i.labels, i.parent_key, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 		       i.last_seq
 		from issues i
 		where i.key = $1
 	`, key).Scan(
-		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Labels,
+		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
 		&issue.PrimaryArtifactID, &issue.LastSeq,
 	); err != nil {

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -332,6 +333,61 @@ func seedGraphAt0007(t *testing.T, store *Store) string {
 	return commentID
 }
 
+func TestMigrate0015BackfillsIssueRanksByProjectCreationOrder(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 13)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core'), ('OPS', 'Operations');
+		insert into issues (key, project_key, number, title, created_by, created_at) values
+			('CORE-1', 'CORE', 1, 'Later', '{"kind":"user","id":"alice"}', '2026-09-12T12:00:00Z'),
+			('CORE-2', 'CORE', 2, 'Earlier', '{"kind":"user","id":"alice"}', '2026-09-12T11:00:00Z'),
+			('OPS-1', 'OPS', 1, 'Other project', '{"kind":"user","id":"alice"}', '2026-09-12T10:00:00Z');
+	`); err != nil {
+		t.Fatalf("seed pre-rank issues: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0015: %v", err)
+	}
+
+	rows, err := store.Pool.Query(ctx, `select project_key, key, rank from issues order by project_key, rank`)
+	if err != nil {
+		t.Fatalf("read ranked issues: %v", err)
+	}
+	defer rows.Close()
+	var ranked []struct {
+		Project string
+		Key     string
+		Rank    string
+	}
+	for rows.Next() {
+		var issue struct {
+			Project string
+			Key     string
+			Rank    string
+		}
+		if err := rows.Scan(&issue.Project, &issue.Key, &issue.Rank); err != nil {
+			t.Fatalf("scan ranked issue: %v", err)
+		}
+		ranked = append(ranked, issue)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ranked issues: %v", err)
+	}
+	want := []struct {
+		Project string
+		Key     string
+		Rank    string
+	}{
+		{Project: "CORE", Key: "CORE-2", Rank: "00000000000000000001"},
+		{Project: "CORE", Key: "CORE-1", Rank: "00000000000000000002"},
+		{Project: "OPS", Key: "OPS-1", Rank: "00000000000000000001"},
+	}
+	if !reflect.DeepEqual(ranked, want) {
+		t.Fatalf("rank backfill = %#v, want %#v", ranked, want)
+	}
+}
+
 func TestMigrate0009BackfillsProjectAndRefKeyFrom0007(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -451,8 +507,8 @@ func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
 	}
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
-		insert into issues (key, project_key, number, title, created_by)
-			values ('CORE-1', 'CORE', 1, 'Legacy', '{"kind":"session","id":"s"}');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Legacy', '{"kind":"session","id":"s"}', 'U');
 		insert into events (issue_key, seq, type, actor, payload, notify)
 			values ('CORE-1', 1, 'issue.created', '{"kind":"session","id":"s"}', '{}', false),
 			       ('CORE-1', 2, 'comment.created', '{"kind":"user","id":"alice"}', '{}', true);

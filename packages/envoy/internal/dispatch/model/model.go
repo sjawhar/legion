@@ -81,6 +81,7 @@ type Issue struct {
 	Number            int            `json:"number"`
 	Title             string         `json:"title"`
 	Status            string         `json:"status"`
+	Rank              string         `json:"rank"`
 	Labels            []string       `json:"labels"`
 	Parent            *string        `json:"parent"`
 	ExternalLinks     []ExternalLink `json:"external_links"`
@@ -98,6 +99,7 @@ type IssueSummary struct {
 	Key       string    `json:"key"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status"`
+	Rank      string    `json:"rank"`
 	Labels    []string  `json:"labels"`
 	Parent    *string   `json:"parent"`
 	UpdatedAt time.Time `json:"updated_at"`

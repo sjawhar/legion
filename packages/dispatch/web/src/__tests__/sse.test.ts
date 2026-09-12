@@ -115,6 +115,22 @@ test("issue changes refresh user state and the inbox", () => {
   }
 });
 
+test("issue creation and updates refresh the affected project board query", () => {
+  for (const type of ["issue.created", "issue.updated"] as const) {
+    const invalidated: unknown[][] = [];
+    applyEventInvalidations(
+      {
+        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+          invalidated.push([...queryKey]);
+          return Promise.resolve();
+        },
+      },
+      event(type, {}, { project: "CORE" })
+    );
+    expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
+  }
+});
+
 test("artifact versions refresh the document and its anchored margin items", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {

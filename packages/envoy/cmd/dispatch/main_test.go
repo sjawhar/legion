@@ -236,8 +236,8 @@ func TestCheckDocumentsReportsLegacyParseFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
-		insert into issues (key, project_key, number, title, created_by)
-		values ('TEST-1', 'TEST', 1, 'Legacy document', '{"kind":"user","id":"alice"}')
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('TEST-1', 'TEST', 1, 'Legacy document', '{"kind":"user","id":"alice"}', 'U')
 	`); err != nil {
 		t.Fatal(err)
 	}

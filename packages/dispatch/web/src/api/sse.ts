@@ -123,6 +123,12 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     ["inbox"],
   ];
 
+  if (event.type === "issue.created" || event.type === "issue.updated") {
+    if (event.project !== undefined) {
+      keys.push(["issues", "project", event.project]);
+    }
+    return keys;
+  }
   if (event.type.startsWith("issue.")) {
     return keys;
   }

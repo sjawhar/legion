@@ -54,6 +54,7 @@ export type {
   Issue,
   IssueChild,
   IssueDetails,
+  IssueRankInput,
   IssueRead,
   IssueReferences,
   IssueSummary,

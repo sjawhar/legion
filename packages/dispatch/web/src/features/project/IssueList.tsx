@@ -20,18 +20,7 @@ import {
 } from "../../theme/classes";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-
-const issueStatuses = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-  "done",
-] as const;
+import { issueStatuses } from "./board-model";
 
 function issueIsUnread(issue: IssueSummary, lastReadSequence: number): boolean {
   return issue.last_seq > lastReadSequence;
@@ -211,7 +200,7 @@ export function IssueList({ project }: { project: string }): ReactNode {
             >
               {currentStatus} ({grouped.length})
             </summary>
-            <ul>
+            <ul aria-label={`${currentStatus} issues`}>
               {grouped.map((issue) => (
                 <IssueRow
                   issue={issue}
