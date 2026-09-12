@@ -1,0 +1,65 @@
+{
+  "issue": "LEGION-13",
+  "pr": 978,
+  "prUrl": "https://github.com/sjawhar/legion/pull/978",
+  "specVersion": 6,
+  "codeHeadSha": "c185b4614e547c3374b8670e3c43ce6471ba927b",
+  "branchHeadSha": "17841ddc31ee01a53395997f21c9ae06d1964c8b",
+  "headNote": "17841ddc differs from c185b461 only by the added .legion/test.json (jj diff --from c185b461 --to 17841ddc --summary)",
+  "verdict": "CLEAN_PENDING_LEGION_DELETION",
+  "review": {
+    "id": 5187933320,
+    "url": "https://github.com/sjawhar/legion/pull/978#pullrequestreview-5187933320",
+    "event": "COMMENT",
+    "commitId": "17841ddc31ee01a53395997f21c9ae06d1964c8b",
+    "blockingFindings": 0
+  },
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6hzVnj",
+      "path": "docs/solutions/legion/worker-pane-shell-gotchas.md",
+      "line": 43,
+      "severity": "non-blocking wording",
+      "finding": "section 2's rewritten lead paragraph has no issue attribution in the intro provenance sentence; related_issues lacks LEGION-13 / sjawhar/legion#978"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6hzVnm",
+      "path": "docs/solutions/legion/worker-pane-shell-gotchas.md",
+      "line": 141,
+      "severity": "non-blocking wording, caused by this diff",
+      "finding": "docs/solutions/testing/live-proof-over-real-daemon-state-snapshots.md:126-128 still says this note holds the `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE` prefix for bun test; suggested one-line rewrite given in the thread"
+    }
+  ],
+  "threadLanding": "Recommendation to the architect: implementer folds both one-line doc fixes into the same push as the .legion/ deletion; reviewer re-reviews that head (expects diff = .legion/ deletion + two doc lines) and approves by SHA. Alternative if strict protocol preferred: name both in the PR body Fast-follow line and approve the deletion-only head.",
+  "specConformance": {
+    "1_index_ts": "loadStartConfig/cmdCheckConfig/cmdStart/cmdRestart take required positional env: NodeJS.ProcessEnv, no default; process.env passed only in citty start (index.ts:490-491) and restart (index.ts:519) handlers; resolveDaemonConfig untouched; other process.env reads in the file (cmdStop:277, cmdStatus:294, cmdLegions:307, postController:340/343, gh/credential/handoff/probe-image handlers) pre-existing and unchanged",
+    "2_index_test_ts": "check-config describe: no process.env mutation, no beforeEach/afterEach, bun:test import { describe, expect, it }; two tests pass { PATH, HOME } (resolveDaemonConfig reads neither — every env key it reads is LEGION_/DISPATCH_/ENVOY_); third test asserts exact Errors-table message for URL-without-token and success with both; legion gh test's GH_TOKEN save/restore (19-20, 46-49) pre-existing, untouched, not requested",
+    "3_gotchas_doc": "no `env -u` in the file; § 2 keeps LEGION-29 (packages/pi-envoy) and LEGION-14 (run from packages/daemon) paragraphs; title/symptoms consistent with body; two wording threads",
+    "4_branch_hygiene": "no docs/plans/ file and no .omp/config.yml on the branch; files differing from main@origin d59417f7 are exactly the three plus .legion/*.json; PR MERGEABLE, no rebase needed",
+    "5_ci": "no pr-checks-result job in this repo; Tests workflow (lint/typecheck/test/pr-title) SUCCESS at c185b461 in runs 34716344284, 34716356904, 34717048840 and at 17841ddc in run 34717116334; tester commit status success at c185b461; 0 threads before this review (GraphQL, verified directly)",
+    "6_pr_body": "plain-language check passed; identifiers expanded on first use; no sentence flagged. Reviewer updated the Threads and Thermo lines only."
+  },
+  "reviewerRuns": {
+    "cwd": "$LEGION_WORKSPACE/packages/daemon at 17841ddc (code = c185b461), reviewer pane: DISPATCH_URL set, DISPATCH_TOKEN unset, DISPATCH_TOKEN_FILE set",
+    "paneUnprefixed": "bun test src/cli/__tests__/index.test.ts → 18 pass / 0 fail, exit 0",
+    "ciShape": "DISPATCH_URL=http://127.0.0.1:1 DISPATCH_TOKEN=t → 18 pass / 0 fail, exit 0",
+    "unsetAll": "env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE → 18 pass / 0 fail, exit 0",
+    "gates": "bunx biome check src/ → 143 files, no fixes, exit 0; bunx tsc --noEmit → exit 0",
+    "revertGuard": "tester's /tmp/legion13-test scratch copy, diff vs head = index.ts:244 `env,` → `env: process.env,` only; CI shape → 17 pass / 1 fail, sole failure `resolves Dispatch settings from the injected env, not the process environment`"
+  },
+  "thermo": {
+    "runAt": "c185b4614e547c3374b8670e3c43ce6471ba927b",
+    "deepReview": "no blocking findings; nits: cmdRestart half-seamed (cmdStop:277 still process.env vs cmdStart:266 env — identical in production), executePrivateKeyCommand uses stripDispatchEnv(process.env) (config.ts:436, unreachable from --check-config, spec leaves config.ts untouched), third test success branch is a bare await (correct), docs/solutions/daemon/config-resolution-patterns.md:100-110 documents an obsolete cmdStart(…, deps) signature (pre-existing, outside diff)",
+    "codeQuality": "no blocking findings; non-blocking: the two doc threads above; nits: 9-line YAML fixture repeated in three tests; positional env judged consistent with the file's single-collaborator helpers (not a second convention); NodeJS.ProcessEnv structurally satisfies resolveLegionPaths' Record<string, string | undefined>"
+  },
+  "approvalCondition": "APPROVE only the head that the implementer pushes after deleting .legion/ (plus, if the architect takes the recommendation, the two doc lines), named by SHA, after re-checking its diff against 17841ddc",
+  "environmentNotes": [
+    "Grant stacking (LEGION-12 unmerged): sourced /tmp/legion9-grant-trap.sh; every credentialed call ended with `; grant_release`. One call showed `grants this call: 2` because the previous call skipped grant_release; the lock kept the earlier still-valid grant and redeemed fine.",
+    "The write tool is blocked for the reviewer role (`the reviewer edits nothing except the final .legion/ cleanup commit via bash`); /tmp scratch files were written through the eval kernel.",
+    "Envoy message from the pr-queue organizer (session 01a06e66) at 20:28Z about candidate work-test priority concerns other repositories (hawk/platform/hosted-broker/terminal); not acted on here.",
+    "Per worker-pane-shell-gotchas § 3 the review App's push may 403 (no contents permission); if so the review handoff commit rides along on the implementer's next push."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T20:37:43.679Z"
+}
