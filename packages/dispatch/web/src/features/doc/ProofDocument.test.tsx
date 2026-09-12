@@ -27,6 +27,21 @@ const artifact: Artifact = {
   versions: [],
 };
 
+const blockSchema = {
+  types: [
+    {
+      attributes: {
+        kind: { choices: ["note", "warning"], default: "note", kind: "enum" as const },
+        title: { default: "", kind: "string" as const },
+      },
+      content: "paragraph+" as const,
+      name: "callout",
+      render: "host" as const,
+    },
+  ],
+  version: 1,
+};
+
 function createQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
@@ -75,6 +90,7 @@ function renderProofDocument({
         }
       | undefined,
   };
+  queryClient.setQueryData(["block-schema"], blockSchema);
   const toolbar: { current: DocumentToolbar | undefined } = { current: undefined };
   const onToolbarChange = (next: DocumentToolbar) => {
     toolbar.current = next;
@@ -147,6 +163,20 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
     expect(editors[0]?.root.getAttribute("aria-multiline")).toBe("true");
     expect(editors[0]?.root.getAttribute("role")).toBe("textbox");
   } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument focuses a block named by the document hash after the editor is ready", async () => {
+  const originalHash = window.location.hash;
+  window.history.replaceState(null, "", "#b-block-1");
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    sync();
+    await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual(["block-1"]));
+  } finally {
+    window.history.replaceState(null, "", originalHash || "/");
     view.unmount();
   }
 });
@@ -300,6 +330,21 @@ test("ProofDocument reports connection status through the toolbar bag and enforc
     expect(
       within(view.container).getByText("This issue is closed. Its document is read-only.")
     ).toBeDefined();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument makes a schema-read-only admission non-editable and reloadable", async () => {
+  const { admit, editors, sync, view } = renderProofDocument();
+
+  try {
+    act(() => admit(true));
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    expect(editors[0]?.readOnly).toBe(true);
+    expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
+    expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
   } finally {
     view.unmount();
   }

@@ -10,11 +10,6 @@ with human-created children; either way you own its complete outcome. Work from 
 wakes and current artifacts. Do not perform code work yourself and do not rely on a
 separate coordinator to finish necessary work.
 
-This skill documents the target Dispatch-native contract. The `legion` tool's
-`register_gate`/`release_wave`/`set_status` ops, the Dispatch key format, and the
-`dispatch_*` tool family land with PR B (#TBD); until that PR merges, this skill's contract
-is not yet runnable on `main`.
-
 ## Tool and ownership boundaries
 
 - Use the `legion` tool for lifecycle writes. Its issue key is the Dispatch key
@@ -105,9 +100,10 @@ idea what the fuck you're talking about."
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake
 shows `design-approved` on the root. On a deployment whose design gate is off
 (`gates.design: off` in its `legion.yaml`), the daemon satisfies the gate as you register it
-and `design-approved` arrives immediately — proceed; the ask remains open on Dispatch as the
-record and needs no answer. Approval covers the entire tree: later waves, re-scopes, and
-integration-failure children do not repeat this sequence.
+and `design-approved` arrives immediately — proceed. The daemon then closes the ask on Dispatch
+(you will see `ask.resolved` for it); that is expected and needs nothing from you. Approval
+covers the entire tree: later waves, re-scopes, and integration-failure children do not repeat
+this sequence.
 
 ## 2. Children in flight
 

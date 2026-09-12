@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
@@ -75,24 +75,39 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
 
 export function IssueList({ project }: { project: string }): ReactNode {
   const [status, setStatus] = useState("all");
-  const [label, setLabel] = useState("all");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const labels = searchParams.getAll("label");
+  const setLabels = (nextLabels: string[]) => {
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("label");
+    for (const label of nextLabels) {
+      next.append("label", label);
+    }
+    setSearchParams(next, { replace: true });
+  };
   const [needsYou, setNeedsYou] = useState(false);
   const [unread, setUnread] = useState(false);
   const [search, setSearch] = useState("");
-  const issues = useQuery({
+  const allIssues = useQuery({
     queryKey: ["issues", "project", project],
     queryFn: () => api.listIssues({ project }),
   });
+  const filteredIssues = useQuery({
+    enabled: labels.length > 0,
+    queryKey: ["issues", "project", project, "labels", labels],
+    queryFn: () => api.listIssues({ labels, project }),
+  });
+  const issues = labels.length === 0 ? allIssues : filteredIssues;
   const state = useQuery({
     queryKey: ["user-state"],
     queryFn: () => api.getMyState(),
   });
-  const labels = useMemo(
+  const availableLabels = useMemo(
     () =>
-      [...new Set((issues.data ?? []).flatMap((issue) => issue.labels ?? []))].sort((left, right) =>
-        left.localeCompare(right)
+      [...new Set((allIssues.data ?? []).flatMap((issue) => issue.labels ?? []))].sort(
+        (left, right) => left.localeCompare(right)
       ),
-    [issues.data]
+    [allIssues.data]
   );
   const visibleIssues = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -100,7 +115,6 @@ export function IssueList({ project }: { project: string }): ReactNode {
       const lastReadSequence = state.data?.[issue.key]?.last_read_seq ?? 0;
       return (
         (status === "all" || issue.status === status) &&
-        (label === "all" || (issue.labels ?? []).includes(label)) &&
         (!needsYou || issue.open_asks > 0) &&
         (!unread || issueIsUnread(issue, lastReadSequence)) &&
         (query === "" ||
@@ -108,7 +122,7 @@ export function IssueList({ project }: { project: string }): ReactNode {
           issue.title.toLocaleLowerCase().includes(query))
       );
     });
-  }, [issues.data, label, needsYou, search, state.data, status, unread]);
+  }, [issues.data, needsYou, search, state.data, status, unread]);
 
   if (issues.isPending || state.isPending) {
     return <p className={textMutedOnCanvas}>Loading issues…</p>;
@@ -136,22 +150,43 @@ export function IssueList({ project }: { project: string }): ReactNode {
             ))}
           </select>
         </label>
-        <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
-          Label
-          <select
-            aria-label="Label"
-            className={`mt-1 block min-h-11 rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
-            onChange={(event) => setLabel(event.target.value)}
-            value={label}
-          >
-            <option value="all">All labels</option>
-            {labels.map((candidate) => (
-              <option key={candidate} value={candidate}>
+        <fieldset
+          aria-label="Filter by labels"
+          className="m-0 flex min-w-0 flex-wrap items-center gap-2 border-0 p-0"
+        >
+          <legend className={`text-sm font-medium ${textSecondaryOnCanvas}`}>Labels</legend>
+          {availableLabels.map((candidate) => {
+            const selected = labels.includes(candidate);
+            return (
+              <button
+                aria-pressed={selected}
+                className={`min-h-11 rounded-full border px-3 py-2 text-xs font-medium ${borderDefault} ${
+                  selected ? surfaceMutedStrongBg : surfaceMutedBg
+                } ${textSecondaryOnCanvas}`}
+                key={candidate}
+                onClick={() =>
+                  setLabels(
+                    selected
+                      ? labels.filter((label) => label !== candidate)
+                      : [...labels, candidate]
+                  )
+                }
+                type="button"
+              >
                 {candidate}
-              </option>
-            ))}
-          </select>
-        </label>
+              </button>
+            );
+          })}
+          {labels.length === 0 ? null : (
+            <button
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
+              onClick={() => setLabels([])}
+              type="button"
+            >
+              Clear labels
+            </button>
+          )}
+        </fieldset>
         <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
           Search
           <input

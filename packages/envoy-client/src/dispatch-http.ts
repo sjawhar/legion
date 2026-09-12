@@ -2,6 +2,7 @@ import type {
   Actor,
   Artifact,
   ArtifactApproval,
+  ArtifactBlock,
   ArtifactDetails,
   ArtifactReferences,
   ArtifactText,
@@ -282,6 +283,10 @@ export class DispatchClient {
     return version === undefined
       ? this.#json("GET", ["api", "v1", "artifacts", id, "text"])
       : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
+  }
+
+  async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
 
   async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {

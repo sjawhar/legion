@@ -410,6 +410,29 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("Created LEGION-13: New global search work");
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
+
+  test("dispatch_issue forwards initial labels", async () => {
+    const requests: Array<{ readonly body: unknown }> = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ body: JSON.parse(String(init?.body)) });
+      return response({ key: "LEGION-13", title: "New global search work" });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "New global search work", labels: ["frontend", "urgent"] },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual([
+      { body: expect.objectContaining({ labels: ["frontend", "urgent"] }) },
+    ]);
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -555,7 +578,7 @@ describe("executeDispatchTool", () => {
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
         "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-        "dispatch://PROJECT/artifact/<slug>"
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
     );
   });
 
@@ -1096,6 +1119,90 @@ describe("executeDispatchTool", () => {
     } else {
       expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     }
+  });
+
+  test.each([
+    ["slug", "runbook-md"],
+    ["id", "artifact-42"],
+    ["filename", "Runbook.md"],
+  ])("resolves a project document by %s for every document-owning tool", async (_form, artifactReference) => {
+    const paths: string[] = [];
+    const artifact = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/runbook-md",
+      slug: "runbook-md",
+      name: "Runbook.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-42" },
+      created_at: "2026-09-12T00:00:00Z",
+      versions: [],
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new URL(String(url));
+      paths.push(request.pathname + request.search);
+      if (request.pathname.startsWith("/api/v1/projects/CORE/artifacts/")) {
+        return request.pathname.endsWith("/runbook-md")
+          ? response(artifact)
+          : new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            });
+      }
+      if (request.pathname === "/api/v1/projects/CORE/artifacts") return response([artifact]);
+      if (request.pathname.endsWith("/text"))
+        return response({ markdown: "# Runbook", version: 1 });
+      if (request.pathname.endsWith("/asks")) {
+        return init?.method === "POST"
+          ? response({ id: "ask-42", issue_key: null, artifact_id: artifact.id })
+          : response([]);
+      }
+      if (request.pathname.endsWith("/comments")) {
+        return init?.method === "POST"
+          ? response({ id: "comment-42", issue_key: null, artifact_id: artifact.id })
+          : response([]);
+      }
+      if (request.pathname.endsWith("/edits")) return response({ applied: 1, version: null });
+      throw new Error(`unexpected request: ${request.pathname}`);
+    };
+    const shared = {
+      cwd: "/workspace",
+      host: "omp" as const,
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    };
+
+    for (const [tool, args] of [
+      ["dispatch_ask", { project: "CORE", artifact: artifactReference, question: "Publish?" }],
+      ["dispatch_comment", { project: "CORE", artifact: artifactReference, body: "Looks good." }],
+      [
+        "dispatch_suggest",
+        { project: "CORE", artifact: artifactReference, quote: "draft", replace_with: "final" },
+      ],
+      [
+        "dispatch_doc_edit",
+        {
+          project: "CORE",
+          artifact: artifactReference,
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+      ],
+      ["dispatch_doc_read", { project: "CORE", artifact: artifactReference }],
+      ["dispatch_read", { project: "CORE", artifact: artifactReference }],
+    ] as const) {
+      const result = await executeDispatchTool({ tool, args, ...shared });
+      expect(result.details).toMatchObject({ document: "CORE/runbook-md", project: "CORE" });
+    }
+
+    expect(paths).toContain(
+      artifactReference === "runbook-md"
+        ? "/api/v1/projects/CORE/artifacts/runbook-md"
+        : "/api/v1/projects/CORE/artifacts?unlinked=true"
+    );
   });
 
   test("reads a project document from a dispatch project reference", async () => {
@@ -1717,6 +1824,7 @@ describe("executeDispatchTool", () => {
           route: null,
           open_asks: [],
           last_seq: 0,
+          labels: ["frontend", "urgent"],
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
@@ -1749,6 +1857,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ issue: "DSP-42" });
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
+    expect(result.text).toContain("Labels: frontend, urgent");
   });
 
   test("keeps an issue summary readable when its references are unavailable", async () => {
@@ -1762,6 +1871,7 @@ describe("executeDispatchTool", () => {
           route: null,
           open_asks: [],
           last_seq: 0,
+          labels: [],
         });
       }
       if (pathname === "/api/v1/issues/DSP-42/events") return response([]);

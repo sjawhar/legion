@@ -21,7 +21,7 @@ func TestReadMatchesProseMirrorJSON(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(want) {
+			if !got.EqualWithBlockIDs(want) {
 				g, _ := got.JSON()
 				t.Fatalf("Read() differs from browser JSON\n got: %s\nwant: %s", g, fx.PMJSON)
 			}

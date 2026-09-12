@@ -10,6 +10,7 @@ production build from `web/dist`.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/features/conversation/` owns the issue's Conversation tab: messages, issue-level comments, and coalesced ask cards from `GET /issues/{key}/events`, with agent titles from `GET /api/v1/agents`. Turns render newest first, with the message composer and its recipient selector sticky above the list and `Load older` below it; a sent or incoming turn appears directly under the composer, an own send always follows even when scrolled into history, and a reader browsing older turns keeps their viewport position as new turns arrive above them.
 - The issue header's Subscribed agents section (`features/issue/SubscribedAgents.tsx`) and the equivalent block on a project document page list sessions from `GET .../subscribers`, live status merged from Envoy, and a human `Unsubscribe` action that notifies the removed session.
+- `features/issue/IssueLabels.tsx` edits issue-header labels with project-label suggestions; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
 - `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
@@ -25,9 +26,10 @@ A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned
 
 Answering and asking for clarification are different acts on an ask card (`features/inbox/`). Answering: when an ask offers
 options, free text is an explicit **Other** choice - the last row of the option list, which reveals the `Your answer` field;
-a chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an `Other` label
-once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask is labelled
-`Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
+a question-shaped Other response presents an inline default action to send it as clarification (keeping the ask open) or to answer
+with it anyway. A chosen Other is recorded as `{selected: [], text}` (single) or `{selected, text}` (multiple) and renders under an
+`Other` label once answered. An ask with no options keeps the free-text field alone. Clarifying: the reply thread under an open ask
+is labelled `Ask for clarification` / `Send` (answered asks keep `Reply`) and says `Replying does not answer the question.` The Inbox
 partitions the server-ordered rows by `last_reply`: asks whose newest reply is a human's are listed under `Waiting on agents`
 with a `Waiting on <asker>` chip (the agent owes the next turn), everything else under `Needs you` with a `<agent> replied` chip
 when an agent spoke last; both headings appear only when the waiting section is non-empty. The card, its collapsed disclosure,
@@ -95,6 +97,16 @@ search highlights, and the bridge between Proof marks and margin cards. `Documen
 the connection and editor creation seams; happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
 Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
+Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
+
+Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
+version for the session. It passes that schema to the live editor, historical-version editor, and
+the one headless Markdown engine cached per schema version; the connection carries it as
+`schema_version`. A server version mismatch admits the tab read-only and the surface shows
+`Reload to edit`. Typed blocks use `:::name{#block-id key="value"}` container directives. The server
+owns their schema and version, while Dispatch owns host rendering for `render: "host"` types; the
+SPA must not invent node schemas or parse a second directive grammar.
+
 
 ## Commands
 

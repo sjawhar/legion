@@ -52,6 +52,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cli == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -81,8 +84,11 @@ jobs:
             exit 0
           fi
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "skip=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "release_tag=cli-v${VERSION}"
+            echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
           echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
       - uses: oven-sh/setup-bun@v2
         if: steps.version.outputs.skip != 'true'
@@ -144,6 +150,24 @@ jobs:
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
         run: .github/scripts/release-push.sh push-main
+
+  worker_image:
+    needs: [changes, cli]
+    if: >-
+      always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
+      (needs.changes.outputs.cli == 'true' || needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/worker-image.yaml
+    # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
+    # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
+    # PR-authored Dockerfile. Job-level permissions replace the top-level set for this job and must
+    # cover everything the called workflow declares (packages: write is for the ghcr.io push).
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    with:
+      cli_version: ${{ needs.cli.outputs.version }}
+      release_tag: ${{ needs.cli.outputs.release_tag }}
 
   envoy_plugin:
     needs: [changes, cli]

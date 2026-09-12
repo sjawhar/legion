@@ -11,6 +11,7 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
+	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 	"go.abhg.dev/goldmark/frontmatter"
@@ -22,6 +23,10 @@ var markdownParser = goldmark.New(
 	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{
 		Formats: []frontmatter.Format{frontmatter.YAML},
 	}),
+	goldmark.WithParserOptions(parser.WithBlockParsers(
+		util.Prioritized(&typedDirectiveParser{}, 950),
+		util.Prioritized(&unsupportedDirectiveParser{}, 900),
+	)),
 )
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
@@ -42,6 +47,7 @@ func Parse(markdown string) (*Node, error) {
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	EnsureBlockIDs(doc)
 	return doc, nil
 }
 
@@ -263,6 +269,10 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 			children = []*Node{{Type: "paragraph"}}
 		}
 		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
+	case *typedDirective:
+		return parseTypedDirective(current, source, footnotes)
+	case *unsupportedDirective:
+		return nil, fmt.Errorf("%w: %s", ErrSchema, current.Reason)
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
@@ -287,9 +297,43 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 		if err != nil {
 			return nil, err
 		}
+
 		children = append(children, parsed)
 	}
 	return children, nil
+}
+func parseTypedDirective(directive *typedDirective, source []byte, footnotes map[int]string) (*Node, error) {
+	if !directive.Closed && directive.Parent().Kind() == ast.KindDocument {
+		return nil, fmt.Errorf("%w: typed block %q is unclosed at document level", ErrSchema, directive.Name)
+	}
+	typ, ok := typedBlock(directive.Name)
+	if !ok {
+		return nil, fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", "))
+	}
+	attrs := defaultAttributes(typ)
+	for name, raw := range directive.Attrs {
+		if name == BlockIDAttr {
+			attrs[name] = raw
+			continue
+		}
+		definition, ok := typ.Attributes[name]
+		if !ok {
+			return nil, fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, directive.Name, name)
+		}
+		if definition.Server {
+			continue
+		}
+		value, err := parseTypedAttributeValue(definition, raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)
+		}
+		attrs[name] = value
+	}
+	children, err := parseBlocks(directive, source, footnotes)
+	if err != nil {
+		return nil, err
+	}
+	return &Node{Type: directive.Name, Attrs: attrs, Children: children}, nil
 }
 
 func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {

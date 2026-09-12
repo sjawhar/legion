@@ -57,10 +57,9 @@ function tab(
   );
 }
 
-// The sticky composer sits at document top 0; the newest turn (topmost `[data-event-seq]` match)
-// sits below it. `useFollowLatest` reads both elements' `getBoundingClientRect()` to decide
-// whether the reader is pinned to the newest turn and where to scroll them back to, so these
-// tests fake a minimal two-element layout rather than exercising a real browser layout engine.
+// The sticky composer sits at document top 0 and the newest turn below it. `useFollowLatest`
+// reads their bounding rectangles only to place the newest turn beneath the composer, so these
+// tests fake that minimal layout rather than exercising a real browser layout engine.
 const COMPOSER_HEIGHT = 140;
 const NEWEST_TURN_DOC_TOP = 300;
 const RESTING_SCROLL_Y = NEWEST_TURN_DOC_TOP - COMPOSER_HEIGHT;
@@ -226,10 +225,10 @@ test("a scroll event measures the reader position in O(1) rect reads", async () 
     rectSpy.mockClear();
     window.dispatchEvent(new Event("scroll"));
 
-    // 1 from usePreserveReaderPosition's anchor re-measure, 2 from useFollowLatest's
-    // pinnedToTop() (the composer and the newest turn) — a fixed cost independent of how many
-    // turns are loaded, not the O(n) rect scan this budget guards against.
-    expect(rectSpy.mock.calls.length).toBeLessThanOrEqual(4);
+    // ReaderPosition snapshots only immediately before a content reflow; a scroll alone must do
+    // no layout reads. This guards both against O(n) scans over every loaded turn and unnecessary
+    // per-scroll layout work.
+    expect(rectSpy.mock.calls.length).toBe(0);
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

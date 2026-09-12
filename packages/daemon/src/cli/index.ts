@@ -10,6 +10,7 @@ import {
   LegionDaemonApi,
 } from "@legion/contracts";
 import { defineCommand, runMain } from "citty";
+import { verifyLegionPluginLoaded, verifyOmpAgentsCapability } from "../daemon/boot-probes";
 import {
   type DaemonConfig,
   type LoadConfigFileOptions,
@@ -34,8 +35,14 @@ import {
   writeMessage,
   writePhaseHandoff,
 } from "../handoff/ledger";
+import { type CommandRunner, defaultRunner } from "../state/fetch";
 import { CliError } from "./errors";
-import { cmdWorkerShim, defaultWorkerShimDeps } from "./worker-shim";
+import {
+  cmdWorkerShim,
+  cmdWorkerShimConnect,
+  defaultWorkerShimDeps,
+  resolveWorkerShimTarget,
+} from "./worker-shim";
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 interface GhCommandDeps {
@@ -57,6 +64,13 @@ interface HandoffCompleteCommandDeps {
   env: NodeJS.ProcessEnv;
   fetch: Fetch;
   daemonUrl?: string;
+}
+
+interface ProbeImageCommandDeps {
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  sleep(ms: number): Promise<void>;
+  readPluginManifest(manifestPath: string): Promise<string>;
 }
 
 function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
@@ -156,6 +170,28 @@ export async function cmdHandoffComplete(
     return;
   }
   console.log("[handoff] Reported phase completion");
+}
+
+/** The daemon's two boot probes (boot-probes.ts) against one OMP executable, with no launch prefix
+ * — an image carries no `secrets` wrapper. The worker image build runs this as its last step; a
+ * failure is the daemon's own probe message, exit 1, so a broken image never publishes. */
+export async function cmdProbeImage(
+  omp: string | undefined,
+  deps: ProbeImageCommandDeps
+): Promise<void> {
+  const ompPath = omp ?? deps.env.LEGION_OMP_PATH;
+  if (!ompPath) {
+    throw new CliError(
+      "probe-image: set LEGION_OMP_PATH (or pass --omp) to the OMP executable to probe"
+    );
+  }
+  try {
+    await verifyOmpAgentsCapability(ompPath, [], deps.runner, deps.sleep);
+    await verifyLegionPluginLoaded(ompPath, [], deps.runner, deps.readPluginManifest, deps.sleep);
+  } catch (error) {
+    throw new CliError(error instanceof Error ? error.message : String(error));
+  }
+  console.log(`probe-image: OK (${ompPath})`);
 }
 
 async function readStdin(): Promise<string> {
@@ -535,10 +571,21 @@ const credentialCommand = defineCommand({
 const workerShimCommand = defineCommand({
   meta: {
     name: "worker-shim",
-    description: "Bridge a headless OMP worker to the daemon over a unix socket",
+    description:
+      "Bridge a headless OMP worker to the daemon over a unix socket (--socket) or a reverse-dialed TCP stream (--connect)",
   },
   args: {
-    socket: { type: "string", required: true, description: "Unix socket path" },
+    socket: { type: "string", description: "Unix socket path to listen on (tmux runtime)" },
+    connect: {
+      type: "string",
+      description:
+        "Daemon worker stream endpoint to dial, tcp://<host>:<port> (Kubernetes runtime)",
+    },
+    bootTokenFile: {
+      type: "string",
+      description:
+        "File whose trimmed contents are the boot token sent in the hello line (--connect only)",
+    },
   },
   run: ({ args }) =>
     runCli(async () => {
@@ -547,8 +594,16 @@ const workerShimCommand = defineCommand({
       // (e.g. a further-nested command), so taking the first one keeps that intact.
       const separator = process.argv.indexOf("--");
       const argv = separator === -1 ? [] : process.argv.slice(separator + 1);
-      const socketPath = String(args.socket);
-      const exitCode = await cmdWorkerShim(socketPath, argv, defaultWorkerShimDeps());
+      const target = resolveWorkerShimTarget({
+        socket: args.socket as string | undefined,
+        connect: args.connect as string | undefined,
+        bootTokenFile: args.bootTokenFile as string | undefined,
+      });
+      const deps = defaultWorkerShimDeps();
+      const exitCode =
+        target.mode === "socket"
+          ? await cmdWorkerShim(target.socketPath, argv, deps)
+          : await cmdWorkerShimConnect(target.endpoint, target.bootToken, argv, deps);
       process.exit(exitCode);
     }),
 });
@@ -566,6 +621,24 @@ const stateCommand = defineCommand({
     }),
 });
 
+const probeImageCommand = defineCommand({
+  meta: {
+    name: "probe-image",
+    description: "Run the daemon's OMP boot probes against this image's OMP executable",
+    hidden: true,
+  },
+  args: { omp: { type: "string", description: "OMP executable (default: $LEGION_OMP_PATH)" } },
+  run: ({ args }) =>
+    runCli(() =>
+      cmdProbeImage(args.omp as string | undefined, {
+        env: process.env,
+        runner: defaultRunner,
+        sleep: (ms) => Bun.sleep(ms),
+        readPluginManifest: (manifestPath) => fs.promises.readFile(manifestPath, "utf8"),
+      })
+    ),
+});
+
 export const mainCommand = defineCommand({
   meta: { name: "legion", description: "Wake-driven Legion daemon" },
   subCommands: {
@@ -579,6 +652,7 @@ export const mainCommand = defineCommand({
     credential: credentialCommand,
     "worker-shim": workerShimCommand,
     state: stateCommand,
+    "probe-image": probeImageCommand,
   },
 });
 

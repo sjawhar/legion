@@ -27,7 +27,7 @@ verdict changes each role needs. Root processes run in tmux; phase workers are h
 - **citty** for CLI, **Bun.serve** for HTTP daemon
 - **Oh My Pi extension** for Legion tools, role delivery, workspace provisioning, and phase workers
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
-- **jj (Jujutsu)** for version control, **Linear** or **GitHub Issues** for issue tracking
+- **jj (Jujutsu)** for version control, native **Dispatch** for issue tracking
 
 ## Commands
 
@@ -51,6 +51,7 @@ legion state                         # Read daemon state
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
 legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates via LEGION_GRANT exactly like `legion gh`/`legion credential` — no session secret in the request)
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
+legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token (Kubernetes runtime; daemon-spawned)
 ```
 
 ## Version Control
@@ -75,6 +76,7 @@ legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-
 | Envoy event routing    | `packages/envoy/`                              | See @packages/envoy/AGENTS.md                  |
 | Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
+| Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 
 ## Conventions
@@ -97,6 +99,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
          │   (already spec-ready)       │            (changes requested)
          └──────────────────────────────┘
                     (urgent + clear)
+```
 
 **Phase roles:** architect → plan → implement → test → review → merge
 **Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
@@ -109,8 +112,9 @@ human or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispat
 **Gate:** the design gate is the architect's `dispatch_ask` on the root issue with an `Approve`
 option, armed per deployment by `gates.design` in `legion.yaml` (`root-issues`, the default, or
 `off`). With `off`, the daemon satisfies the gate the moment the architect registers it
-(`designApproved: "gate-off"`) and sends the same `design-approved` wake a human answer would, so
-no one has to click; the ask stays on Dispatch as a record. Whether a human must approve a pull
+(`designApproved: "gate-off"`), sends the same `design-approved` wake a human answer would, and
+closes the ask on Dispatch (`resolved`, with a reason the dashboard shows), so no one has to click
+and nothing waits in a human's inbox. Whether a human must approve a pull
 request before it merges is the repository's own branch-protection or CODEOWNERS rule: Legion
 neither reads nor writes it. The merger publishes `READY` to the merge queue, which merges under
 its own authority and the repository's rules. No lifecycle labels exist; GitHub issues are never
@@ -123,8 +127,7 @@ the phase-verdict artifacts. No lifecycle labels carry worker state.
 
 ## Documentation
 
-- Plans: `docs/plans/YYYY-MM-DD-<slug>.md`
+- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/plan.json` and the Dispatch issue document; no Legion role commits a plan or spec file here.
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.
-```

@@ -126,6 +126,19 @@ describe("dispatchToolSpecs", () => {
     expect(result.data).toMatchObject({ force: true });
   });
 
+  test("dispatch_issue preserves optional initial labels", () => {
+    const result = schemaFor("dispatch_issue").safeParse({
+      project: "DSP",
+      title: "Native workspace",
+      labels: ["frontend", "urgent"],
+    });
+
+    expect(result).toMatchObject({
+      data: { labels: ["frontend", "urgent"] },
+      success: true,
+    });
+  });
+
   test("rejects an ask with more than eight options", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({
@@ -296,6 +309,27 @@ describe("dispatchToolSpecs", () => {
     if (!artifact) throw new Error("missing dispatch_artifact");
     const argumentsSchema = artifact.arguments(schemaApi) as Record<string, unknown>;
     expect(argumentsSchema).not.toHaveProperty("primary");
+  });
+
+  test("describes project documents as accepting an artifact id, slug, or filename", () => {
+    for (const name of [
+      "dispatch_ask",
+      "dispatch_comment",
+      "dispatch_suggest",
+      "dispatch_doc_edit",
+      "dispatch_doc_read",
+      "dispatch_request_approval",
+      "dispatch_read",
+    ] as const) {
+      const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
+      if (!spec) throw new Error(`missing ${name}`);
+      const argumentsSchema = spec.arguments(schemaApi) as unknown as {
+        artifact: z.ZodOptional<z.ZodString>;
+      };
+      expect(argumentsSchema.artifact.unwrap().description, name).toContain(
+        "artifact id, slug, or filename"
+      );
+    }
   });
 
   test("rejects an ask resolution without a reason", () => {

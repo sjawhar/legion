@@ -54,6 +54,451 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	}
 }
 
+func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	settled := make(chan struct{})
+	go func() {
+		service.settleRoom(artifactID, 0)
+		close(settled)
+	}()
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("settlement blocked while stamping a legacy document")
+	}
+
+	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load stamped document: %v", err)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		t.Fatalf("decode stamped document: %v", err)
+	}
+	tree, err := treeOf(doc)
+	if err != nil {
+		t.Fatalf("read stamped document: %v", err)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
+		t.Fatalf("persisted document has %d unstamped blocks", repairs)
+	}
+}
+func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load legacy document: %v", err)
+	}
+	captured := make(chan []byte, 1)
+	service := New(Deps{
+		Store:       database,
+		Persistence: captureAppendUpdateTxStore{VersionedStore: NewPgVersioned(database), captured: captured},
+		Events:      events.NewBroker(),
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	var injected atomic.Bool
+	foreignApplied := make(chan struct{})
+	var foreignErr error
+	var unsubscribe func()
+	err = service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
+			if !injected.CompareAndSwap(false, true) {
+				return
+			}
+			tree, err := treeOf(doc)
+			if err == nil {
+				fragment := doc.GetXmlFragment(fragmentName)
+				foreignErr = doc.TransactE(func(transaction *crdt.Transaction) error {
+					return pmdoc.Update(transaction, fragment, replaceRun("before", "foreign")(tree))
+				}, "foreign update")
+			}
+			if foreignErr == nil {
+				foreignErr = err
+			}
+			close(foreignApplied)
+		})
+	})
+	if err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		t.Fatalf("warm document for settlement: %v", err)
+	}
+	t.Cleanup(unsubscribe)
+
+	service.settleRoom(artifactID, 0)
+	<-foreignApplied
+	if foreignErr != nil {
+		t.Fatalf("apply foreign update during identity settlement: %v", foreignErr)
+	}
+	identityUpdate := <-captured
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		t.Fatalf("decode legacy document: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(doc, identityUpdate, nil); err != nil {
+		t.Fatalf("apply captured identity update: %v", err)
+	}
+	tree, err := treeOf(doc)
+	if err != nil {
+		t.Fatalf("read captured identity document: %v", err)
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		t.Fatalf("render captured identity document: %v", err)
+	}
+	if markdown != "before\n" {
+		t.Fatalf("identity update changed document = %q, want only identity repairs", markdown)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	if generation != 1 {
+		t.Fatalf("generation after foreign update = %d, want 1", generation)
+	}
+	waitForPersistedProofText(t, database, artifactID, "foreign\n")
+	service.settleRoom(artifactID, generation)
+	waitForDocumentVersion(t, database, artifactID, 2)
+}
+
+func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	waitForPersistedProofText(t, database, artifactID, "after\n")
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+
+	waitForDocumentVersion(t, database, artifactID, 2)
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count settled versions: %v", err)
+	}
+	if versions != 2 {
+		t.Fatalf("versions after identity settlement = %d, want 2", versions)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("persisted changed document has %d unstamped blocks", repairs)
+	}
+}
+
+func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	if _, err := database.Pool.Exec(context.Background(), `
+		create function dispatch_test_reject_identity_settlement() returns trigger language plpgsql as $$
+		begin
+			if new.number = 2 then
+				raise exception 'reject identity settlement version';
+			end if;
+			return new;
+		end;
+		$$
+	`); err != nil {
+		t.Fatalf("create identity settlement failure function: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		create trigger dispatch_test_reject_identity_settlement
+		before insert on artifact_versions for each row
+		execute function dispatch_test_reject_identity_settlement()
+	`); err != nil {
+		t.Fatalf("create identity settlement failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_identity_settlement on artifact_versions`)
+		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_identity_settlement()`)
+	})
+
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	waitForPersistedProofText(t, database, artifactID, "after\n")
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+
+	waitForRoomFailure(t, service, artifactID)
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs == 0 {
+		t.Fatal("failed settlement persisted identity updates")
+	}
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count versions after failed settlement: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("versions after failed settlement = %d, want 1", versions)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `drop trigger dispatch_test_reject_identity_settlement on artifact_versions`); err != nil {
+		t.Fatalf("drop identity settlement failure trigger: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `drop function dispatch_test_reject_identity_settlement()`); err != nil {
+		t.Fatalf("drop identity settlement failure function: %v", err)
+	}
+	if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
+		t.Fatalf("await room recovery: %v", err)
+	}
+	service.settleRoom(artifactID, 0)
+
+	waitForDocumentVersion(t, database, artifactID, 2)
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("retry persisted document with %d unstamped blocks", repairs)
+	}
+}
+
+func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	persistence := &blockingFirstAppendStore{
+		VersionedStore: NewPgVersioned(database),
+		entered:        entered,
+		release:        release,
+	}
+	service := New(Deps{
+		Store:       database,
+		Persistence: persistence,
+		Events:      events.NewBroker(),
+		Settle:      time.Hour,
+	})
+	t.Cleanup(func() {
+		if persistence.released.CompareAndSwap(false, true) {
+			close(release)
+		}
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	if _, err := database.Pool.Exec(context.Background(), `
+		create function dispatch_test_reject_successor_settlement() returns trigger language plpgsql as $$
+		begin
+			if new.number = 2 then
+				raise exception 'reject successor settlement version';
+			end if;
+			return new;
+		end;
+		$$
+	`); err != nil {
+		t.Fatalf("create successor settlement failure function: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		create trigger dispatch_test_reject_successor_settlement
+		before insert on artifact_versions for each row
+		execute function dispatch_test_reject_successor_settlement()
+	`); err != nil {
+		t.Fatalf("create successor settlement failure trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = database.Pool.Exec(context.Background(), `drop trigger if exists dispatch_test_reject_successor_settlement on artifact_versions`)
+		_, _ = database.Pool.Exec(context.Background(), `drop function if exists dispatch_test_reject_successor_settlement()`)
+	})
+
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	<-entered
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+	waitForRoomFailure(t, service, artifactID)
+	if persistence.released.CompareAndSwap(false, true) {
+		close(release)
+	}
+	if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict failed room: %v", err)
+	}
+
+	editLiveTree(t, service, artifactID, replaceRun("after", "successor"))
+	waitForPersistedProofText(t, database, artifactID, "successor\n")
+}
+
+func TestBackfillStampsClosedIssueDocument(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.SetIssueClosed("DOC-1", true)
+
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill closed document: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("backfill reports = %#v, want one document", reports)
+	}
+	if reports[0].Stamped != 1 {
+		t.Fatalf("closed document stamped = %d, want 1", reports[0].Stamped)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("backfill persisted document with %d unstamped blocks", repairs)
+	}
+}
+
+func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.SetIssueClosed("DOC-1", true)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var blocked atomic.Bool
+	var released atomic.Bool
+	t.Cleanup(func() {
+		if released.CompareAndSwap(false, true) {
+			close(release)
+		}
+	})
+	service.srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {
+		if blocked.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+		return service.allowInject(ctx, info)
+	}
+	type result struct {
+		err error
+	}
+	backfill := make(chan result, 1)
+	go func() {
+		_, err := service.BackfillBlockIDs(context.Background())
+		backfill <- result{err: err}
+	}()
+	<-entered
+	_, applyErr := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{
+		Op:   "replace",
+		Find: "before",
+		With: "foreign",
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	if released.CompareAndSwap(false, true) {
+		close(release)
+	}
+	backfillResult := <-backfill
+	if backfillResult.err != nil {
+		t.Fatalf("backfill document: %v", backfillResult.err)
+	}
+	if !errors.Is(applyErr, ErrIssueClosed) {
+		t.Fatalf("concurrent edit during closed-document backfill = %v, want ErrIssueClosed", applyErr)
+	}
+}
+
+func TestBackfillReportsStoppingDocumentAsSkipped(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	service.stopping.Store(true)
+
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill stopping service: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("backfill reports = %#v, want one document", reports)
+	}
+	if reports[0].ArtifactID != artifactID {
+		t.Fatalf("backfill artifact = %q, want %q", reports[0].ArtifactID, artifactID)
+	}
+	if reports[0].Skipped != "service stopping" {
+		t.Fatalf("backfill skip = %q, want service stopping", reports[0].Skipped)
+	}
+}
+
+func TestBackfillReportsDocumentPersistenceFailure(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{
+		Store: database,
+		Persistence: failingBackfillVersionedStore{
+			VersionedStore: NewPgVersioned(database),
+			err:            errors.New("persist identity update"),
+		},
+		Events: events.NewBroker(),
+		Settle: time.Hour,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill persistence failure: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("backfill reports = %#v, want one document", reports)
+	}
+	if !errors.Is(reports[0].Err, service.persistence.(failingBackfillVersionedStore).err) {
+		t.Fatalf("backfill error = %v, want persistence error", reports[0].Err)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs == 0 {
+		t.Fatal("failed backfill persisted identity updates")
+	}
+}
+
 func TestSettleWritesArtifactOwnedEventForUnlinkedDocument(t *testing.T) {
 	database := openTestStore(t)
 	artifactID := createProjectDocument(t, database, "before")
@@ -484,6 +929,40 @@ func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, up
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
+type failingBackfillVersionedStore struct {
+	VersionedStore
+	err error
+}
+
+func (s failingBackfillVersionedStore) AppendUpdateTx(_ context.Context, _ pgx.Tx, _ string, _ []byte) (persistence.Version, error) {
+	return 0, s.err
+}
+
+type captureAppendUpdateTxStore struct {
+	VersionedStore
+	captured chan<- []byte
+}
+
+func (s captureAppendUpdateTxStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+	s.captured <- append([]byte(nil), update...)
+	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update)
+}
+
+type blockingFirstAppendStore struct {
+	VersionedStore
+	entered  chan<- struct{}
+	release  <-chan struct{}
+	blocked  atomic.Bool
+	released atomic.Bool
+}
+
+func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	if s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.VersionedStore.AppendUpdate(ctx, room, update)
+}
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	tx, err := service.store.Pool.Begin(context.Background())
@@ -497,6 +976,71 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
 	}
+}
+
+func seedUnidentifiedProofDocument(t *testing.T, database *store.Store, artifactID, markdown string) {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse unidentified document: %v", err)
+	}
+	removeBlockIDs(tree)
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.Transact(func(txn *crdt.Transaction) {
+		if err := pmdoc.Update(txn, fragment, tree); err != nil {
+			t.Errorf("write unidentified document: %v", err)
+		}
+	})
+	tx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin unidentified document: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := NewPgVersioned(database).AppendUpdateTx(context.Background(), tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
+		t.Fatalf("append unidentified document: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit unidentified document: %v", err)
+	}
+}
+
+func removeBlockIDs(node *pmdoc.Node) {
+	delete(node.Attrs, pmdoc.BlockIDAttr)
+	for _, child := range node.Children {
+		removeBlockIDs(child)
+	}
+}
+
+func persistedProofTree(t *testing.T, database *store.Store, artifactID string) *pmdoc.Node {
+	t.Helper()
+	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load persisted document: %v", err)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		t.Fatalf("decode persisted document: %v", err)
+	}
+	tree, err := treeOf(doc)
+	if err != nil {
+		t.Fatalf("read persisted document: %v", err)
+	}
+	return tree
+}
+
+func waitForPersistedProofText(t *testing.T, database *store.Store, artifactID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		markdown, err := renderTree(persistedProofTree(t, database, artifactID))
+		if err == nil && markdown == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	markdown, err := renderTree(persistedProofTree(t, database, artifactID))
+	t.Fatalf("persisted document = %q (%v), want %q", markdown, err, want)
 }
 
 // editLiveTree writes a browser-style tree change through the live Yjs room.

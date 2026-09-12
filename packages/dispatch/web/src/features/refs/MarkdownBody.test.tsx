@@ -6,6 +6,21 @@ import { api } from "../../api/client";
 import type { ArtifactDetails, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 
+test("renders a typed callout body through the server schema", async () => {
+  const view = render(
+    <MarkdownBody
+      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
+    />
+  );
+
+  try {
+    expect(await within(view.container).findByText("Body text.")).toBeDefined();
+    expect(view.container.textContent).not.toContain(":::callout");
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a code span containing tag-shaped text renders the literal characters with no backslashes", async () => {
   const view = render(<MarkdownBody markdown="Use `<img src=x>` here" />);
 

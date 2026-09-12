@@ -49,6 +49,40 @@ describe("createDispatchClient", () => {
     expect(Object.keys(JSON.parse(request.init.body as string))).toEqual(["status", "actor"]);
   });
 
+  it("sends resolveAsk as a POST to the ask's resolve route with kind, reason, and the daemon's session actor", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const client = createDispatchClient({
+      baseUrl: "http://127.0.0.1:8766",
+      token: "test-token",
+      project: "LEGION",
+      fetch: fakeFetch((url, init) => {
+        requests.push({ url, init });
+        return new Response('{"state":"resolved"}', { status: 200 });
+      }),
+    });
+
+    await client.resolveAsk("6f1c2b3a-ask", "the gate is off");
+
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    if (!request) throw new Error("expected a request");
+    expect(request.url).toBe("http://127.0.0.1:8766/api/v1/asks/6f1c2b3a-ask/resolve");
+    expect(request.init.method).toBe("POST");
+    expect((request.init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer test-token"
+    );
+    // Exactly the fields `resolveAsk` in asks.go decodes: `kind`, `reason`, `actor`.
+    expect(JSON.parse(request.init.body as string)).toEqual({
+      kind: "resolved",
+      reason: "the gate is off",
+      actor: {
+        kind: "session",
+        id: "legion-daemon:LEGION",
+        origin: { session_title: "Legion daemon · LEGION" },
+      },
+    });
+  });
+
   it("throws DispatchHttpError with the status and the server's error text on a non-2xx response", async () => {
     const client = createDispatchClient({
       baseUrl: "http://127.0.0.1:8766",
@@ -142,6 +176,7 @@ describe("writeStatus / retryPendingWrite serialization", () => {
         }
         applied.push(status);
       },
+      resolveAsk: async () => {},
     };
 
     const retry = retryPendingWrite(

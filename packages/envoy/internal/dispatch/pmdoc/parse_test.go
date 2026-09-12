@@ -9,6 +9,7 @@ import (
 func TestParseMatchesMilkdownForFixtures(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
+			installCounterBlockIDs(t)
 			got, err := Parse(fx.Markdown)
 			if err != nil {
 				t.Fatal(err)
@@ -17,7 +18,7 @@ func TestParseMatchesMilkdownForFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(want) {
+			if !got.EqualWithBlockIDs(want) {
 				g, _ := got.JSON()
 				t.Fatalf("Parse() differs from Milkdown\n got: %s\nwant: %s", g, fx.PMJSON)
 			}
@@ -46,6 +47,21 @@ func TestRenderParseRoundTrip(t *testing.T) {
 				t.Fatalf("round trip differs\n got: %s\nwant: %s\nmd:\n%s", g, w, md)
 			}
 		})
+	}
+}
+
+func TestParsePreservesTaskListCheckboxState(t *testing.T) {
+	doc, err := Parse("- [x] checked\n- [ ] unchecked\n")
+	if err != nil {
+		t.Fatalf("parse task list: %v", err)
+	}
+	markdown, _, err := Render(doc)
+	if err != nil {
+		t.Fatalf("render task list: %v", err)
+	}
+	const want = "- [x] checked\n- [ ] unchecked\n"
+	if markdown != want {
+		t.Fatalf("task list round trip = %q, want %q", markdown, want)
 	}
 }
 

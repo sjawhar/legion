@@ -19,6 +19,12 @@ downstream role — with one line each on why. Read the issue, its acceptance cr
 relevant code, and durable `.legion/` handoffs. Use ordinary scouts, reviewers, and oracle agents
 when they improve the plan; never spawn a Legion role yourself.
 
+The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
+No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan
+and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row
+describes human-authored design history, not a Legion artifact; a skill step that says "save the
+plan to a file" is satisfied by the handoff write below.
+
 ## Shared workspace and credentials
 
 `LEGION_WORKSPACE` names the authoritative issue workspace. Before reading repository files or

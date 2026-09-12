@@ -22,6 +22,29 @@ export type Actor =
       readonly owner?: string;
     };
 
+export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
+
+export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";
+
+export interface BlockAttributeSchema {
+  readonly kind: BlockAttributeKind;
+  readonly choices?: readonly string[];
+  readonly default: string | boolean | readonly string[];
+  readonly server?: boolean;
+}
+
+export interface BlockTypeSchema {
+  readonly name: string;
+  readonly content: BlockContentRule;
+  readonly render: "host";
+  readonly attributes: Readonly<Record<string, BlockAttributeSchema>>;
+}
+
+export interface BlockSchema {
+  readonly version: number;
+  readonly types: readonly BlockTypeSchema[];
+}
+
 export interface AgentToken {
   readonly id: string;
   readonly name: string;
@@ -150,6 +173,13 @@ export interface ArtifactApproval {
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
+}
+
+export interface ArtifactBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly from: number;
+  readonly to: number;
 }
 
 export interface Version {
@@ -561,6 +591,7 @@ export interface CreateIssueInput {
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
+  readonly labels?: string[];
 
   readonly actor?: Actor;
 }
@@ -737,6 +768,7 @@ export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
+  labels: z.array(z.string()).optional(),
   status: z.string().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),

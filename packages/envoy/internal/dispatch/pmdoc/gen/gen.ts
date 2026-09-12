@@ -5,29 +5,38 @@ import * as Y from "yjs";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { Transform } from "prosemirror-transform";
-import { createHeadlessProof } from "@sjawhar/proof-editor/headless";
+import { setBlockIdGenerator } from "@sjawhar/proof-editor";
+import { createHeadlessProof, type HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
 
 const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");
 const out = join(here, "..", "testdata", "fixtures.json");
 const spliceOut = join(here, "..", "testdata", "splices.json");
 const check = process.argv.includes("--check");
+const blockSchema = JSON.parse(readFileSync(join(here, "..", "schema", "blocks.json"), "utf8"));
 
-const engine = await createHeadlessProof();
-const fixtures = readdirSync(corpus).filter((f) => f.endsWith(".md")).sort().map((file) => {
+const fixtures = [];
+for (const file of readdirSync(corpus).filter((f) => f.endsWith(".md")).sort()) {
+  let blockNumber = 0;
+  setBlockIdGenerator(() => `b-${String(++blockNumber).padStart(6, "0")}`);
+  const engine = await createHeadlessProof({ blockSchema });
   const markdown = readFileSync(join(corpus, file), "utf8");
   const doc = engine.parseMarkdown(markdown);
   const ydoc = new Y.Doc();
   ydoc.clientID = 1;
   prosemirrorToYXmlFragment(doc, ydoc.getXmlFragment("prosemirror"));
-  return {
+  fixtures.push({
     name: file.replace(/\.md$/, ""),
     markdown,
     pm_json: doc.toJSON(),
     yjs_update_v1_b64: Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"),
     rendered_by_milkdown: engine.serializeMarkdown(doc),
-  };
-});
+  });
+}
+
+let spliceBlockNumber = 0;
+setBlockIdGenerator(() => `b-${String(++spliceBlockNumber).padStart(6, "0")}`);
+const engine = await createHeadlessProof({ blockSchema });
 
 // These are browser-oracle replaceRange cases. A single paragraph replacement
 // is sliced open to model Splice's inline paragraph replacement contract.
@@ -147,3 +156,4 @@ if (check) {
   writeFileSync(spliceOut, nextSplices);
   console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }
+setBlockIdGenerator(null);

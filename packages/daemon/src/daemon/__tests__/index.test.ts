@@ -240,6 +240,7 @@ function config(stateDir: string): DaemonConfig {
     workerBootTimeoutSeconds: 120,
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
+    workerStreamPort: 0,
     gates: { design: "root-issues" },
     githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
     dispatchUrl: "http://127.0.0.1:18766",
@@ -415,7 +416,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("with gates.design off, boot approves every registered gate a human never answered and wakes its architect", async () => {
+  it("with gates.design off, boot approves every registered gate a human never answered, wakes its architect, and closes its ask", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = { ...config(stateDir), gates: { design: "off" as const } };
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
@@ -436,6 +437,7 @@ describe("startDaemon", () => {
     state.gates["WIDGETS-4"] = { designAskId: "ask-on-closed-tree" };
     let saved = 0;
     const published: Array<{ topic: string; payload: string }> = [];
+    const resolvedAsks: string[] = [];
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
       daemon = await startDaemon(daemonConfig, {
@@ -460,7 +462,11 @@ describe("startDaemon", () => {
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
           },
-          dispatchClient: fakeDispatchClient(),
+          dispatchClient: fakeDispatchClient({
+            resolveAsk: async (id) => {
+              resolvedAsks.push(id);
+            },
+          }),
           tokenManager: {
             getToken: async () => ({
               token: "test-token",
@@ -497,6 +503,9 @@ describe("startDaemon", () => {
           payload: JSON.stringify({ type: "design-approved" }),
         },
       ]);
+      // Only the gate the daemon itself approved: a human-answered ask is already closed on
+      // Dispatch, a closed tree has nobody waiting, and an unregistered gate has no ask.
+      expect(resolvedAsks).toEqual(["ask-unanswered"]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
@@ -1809,6 +1818,60 @@ describe("startDaemon", () => {
     } finally {
       first.server.stop();
       await first.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  /** The dependency bundle every startDaemon test in this file uses, on a fresh state. */
+  function daemonDeps(daemonConfig: DaemonConfig): daemonIndex.DaemonStartOptions {
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    return { deps: { ...options.deps, loadState: async () => state, saveState: async () => {} } };
+  }
+
+  it("binds the worker stream listener with the API and closes it with the daemon", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+    let port: number;
+    try {
+      port = daemon.workerStreamPort;
+      expect(port).toBeGreaterThan(0);
+      // A garbage first line is refused by Legion's own listener — proving the port is ours.
+      const closed = Promise.withResolvers<void>();
+      const socket = await Bun.connect<undefined>({
+        hostname: "127.0.0.1",
+        port,
+        socket: { data() {}, close: () => closed.resolve(), error() {} },
+      });
+      socket.write("not json\n");
+      await closed.promise;
+    } finally {
+      await daemon.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+    await expect(
+      Bun.connect<undefined>({ hostname: "127.0.0.1", port, socket: { data() {} } })
+    ).rejects.toThrow();
+  });
+
+  it("refuses to start when worker_stream_port is bound, naming the setting, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const occupied = Bun.listen<undefined>({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: { data() {} },
+    });
+    try {
+      await expect(
+        startDaemon({ ...daemonConfig, workerStreamPort: occupied.port }, daemonDeps(daemonConfig))
+      ).rejects.toThrow(`worker_stream_port ${occupied.port} on 127.0.0.1 is unavailable`);
+      // The instance lock and API port were released: a second start on a free stream port works.
+      const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+      await daemon.stop();
+    } finally {
+      occupied.stop(true);
       await rm(stateDir, { recursive: true, force: true });
     }
   });

@@ -5,12 +5,14 @@ import {
   type AnchorInput,
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
+  type BlockTypeSchema,
   type Comment,
   CommentEventPayloadSchema,
   type CreateProjectInput,
   type DispatchEvent,
   DispatchEventSchema,
   type EditCommentInput,
+  IssueEventPayloadSchema,
   MessageEventPayloadSchema,
 } from "./dispatch-api";
 
@@ -33,6 +35,30 @@ test("accepts the typed artifact version event payload", () => {
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
 });
 
+test("preserves labels on an issue update event payload", () => {
+  expect(IssueEventPayloadSchema.parse({ labels: ["frontend", "urgent"] })).toEqual({
+    labels: ["frontend", "urgent"],
+  });
+});
+
+test("models every supported typed-block content rule", () => {
+  const types: readonly BlockTypeSchema[] = [
+    { attributes: {}, content: "paragraph+", name: "paragraphs", render: "host" },
+    { attributes: {}, content: "block+", name: "blocks", render: "host" },
+    {
+      attributes: {},
+      content: "paragraph+ bullet_list?",
+      name: "ask",
+      render: "host",
+    },
+  ];
+
+  expect(types.map((type) => type.content)).toEqual([
+    "paragraph+",
+    "block+",
+    "paragraph+ bullet_list?",
+  ]);
+});
 test("requires a positive opened event id on an ask event payload", () => {
   expect(AskEventPayloadSchema.safeParse({ question: "Q" }).success).toBe(false);
   expect(AskEventPayloadSchema.safeParse({ opened_event_id: 0, question: "Q" }).success).toBe(

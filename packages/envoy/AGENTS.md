@@ -33,6 +33,28 @@ events to the right session.
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
+Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
+and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
+settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
+captured update in the same Postgres transaction as any resulting version and event, then renders
+and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
+document.
+
+Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
+embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
+the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
+syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
+no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
+invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
+inside another block runs to that parent’s end. A typed block always renders its `blockId` and every
+declared attribute. Parsing mints an omitted id, while live document reads and writes validate every
+node against the schema's content rule.
+
+Schema changes are additive: add a type, add a defaulted attribute, add an enum choice, or widen a
+content rule. Tightening content, removing or renaming a type or attribute, or requiring a new
+attribute requires a document migration and version bump. Server-owned attributes are not accepted
+from agents and are reasserted during settlement.
+
 ## Critical conventions
 
 - `packages/contracts` is the source of truth for event contract shape; regenerate Go output from there.
@@ -40,6 +62,7 @@ events to the right session.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`).
 - Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` (any actor) opens - or returns the open - ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Answering it (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the document's latest settled version at answer time and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header and answers the open approval ask if there is one (`ask_id` null otherwise). Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` while awaiting); `stale` is derived from versions, so a new version emits nothing approval-specific. Legion's design gate is the consumer; it is the exception path, not an every-issue step.
+- `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
 - `GET /api/v1/inbox` rows carry `last_reply` (`{author, created_at}` of the newest comment with that `ask_id`, or null) and are ordered so asks whose last reply is a human's - the asker owes a clarification - come after every other row, most recent activity first within each group. A `comment.created` payload that replies to an ask carries `ask_state` (the ask's state at posting time) beside `ask_question`, so an agent can tell a clarification request on its open ask from discussion after the answer.
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title. `DELETE .../subscribers/{session_id}` (human-only) removes the matching topics via `POST /v1/interests/unsubscribe` and appends a `subscription.removed` event, which the outbox routes directly to the unsubscribed session's own `notifications.agent.<session_id>` topic in addition to the issue's own topic — the only way that session learns it was unsubscribed even though it no longer receives the issue's events.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
@@ -53,6 +76,10 @@ events to the right session.
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception.
 - A failed control delivery emits `notifications.envoy.exceptions.<original-topic>`. Its payload preserves `original_topic`, `event_id`, `reason`, `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind `readinessGate` (`internal/webhook/{github,slack,ghostwispr}.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
+
+## Security
+
+Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy has the same bounded request buffer. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications.
 
 ## Operational notes
 

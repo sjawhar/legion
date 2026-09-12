@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { colorForLogin, wsUrl } from "./connection";
+import { colorForLogin, isSchemaReadOnly, wsUrl } from "./connection";
 
 test("wsUrl builds an encoded same-origin document websocket URL", () => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -15,4 +15,10 @@ test("colorForLogin assigns each login a stable, valid CSS presence color", () =
     expect(color).toBe(colorForLogin(login));
     expect(CSS.supports("color", color)).toBe(true);
   }
+});
+
+test("a read-only Hocuspocus admission signals a schema reload", () => {
+  expect(isSchemaReadOnly("readonly")).toBe(true);
+  expect(isSchemaReadOnly("read-write")).toBe(false);
+  expect(isSchemaReadOnly(undefined)).toBe(false);
 });

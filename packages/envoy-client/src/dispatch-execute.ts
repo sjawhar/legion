@@ -54,6 +54,7 @@ type ToolArguments = {
   readonly version?: unknown;
   readonly anchor?: unknown;
   readonly options?: unknown;
+  readonly labels?: unknown;
   readonly ops?: unknown;
 } & Record<string, unknown>;
 
@@ -320,7 +321,7 @@ async function resolveOwnerArguments(
             "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
               "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
               "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-              "dispatch://PROJECT/artifact/<slug>"
+              "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
           );
         })())
       : null;
@@ -425,23 +426,24 @@ async function resolveArtifact(
         artifact: await client.getProjectArtifact(owner.project, artifactReference),
       };
     } catch (error) {
-      // The project artifact route resolves only by slug; a caller that supplied the
-      // filename (as shown in the dispatch_artifact upload result) falls back to a
-      // name match against the project's unlinked documents. Issue-attached artifacts
-      // in the same project are excluded: a name match there would silently read or
-      // mutate an issue's artifact instead of the intended project document.
+      // Project artifact routes resolve slugs. The unlinked-only collection gives project
+      // documents the same id, slug, then filename resolution as issue artifacts without
+      // allowing an issue-attached artifact of the same name to become the document owner.
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
       const artifacts = await client.listProjectArtifacts(owner.project, true);
-      const matches = artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (matches.length > 1) {
+      const artifact =
+        artifacts.find((candidate) => candidate.id === artifactReference) ??
+        artifacts.find((candidate) => candidate.slug === artifactReference);
+      if (artifact) return { owner, artifact };
+      const names = artifacts.filter((candidate) => candidate.name === artifactReference);
+      if (names.length > 1) {
         throw new Error(
           `artifact name ${artifactReference} is ambiguous in project ${owner.project}; ` +
-            `${matches.length} documents share it — use its slug instead`
+            `${names.length} documents share it — use its slug instead`
         );
       }
-      const artifact = matches[0];
-      if (!artifact) throw error;
-      return { owner, artifact };
+      if (names[0] === undefined) throw error;
+      return { owner, artifact: names[0] };
     }
   }
   const issue = await client.getIssue(owner.issue);
@@ -512,6 +514,7 @@ function issueSummary(
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
+    `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     `Route: ${issue.route ?? "none"}`,
     ...(specApproval === undefined
       ? []
@@ -702,6 +705,7 @@ export async function executeDispatchTool(
       const external = optionalString(args, "external");
       const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
+      const labels = args.labels;
       try {
         const created = await client.issue({
           project,
@@ -710,6 +714,7 @@ export async function executeDispatchTool(
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
+          ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
         return {

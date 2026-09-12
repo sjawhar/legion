@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	githubAPIBase       = "https://api.github.com"
-	proactiveRefreshMS  = 5 * 60 * 1000
-	proxyRequestTimeout = 60 * time.Second
+	githubAPIBase              = "https://api.github.com"
+	proactiveRefreshMS         = 5 * 60 * 1000
+	proxyRequestTimeout        = 60 * time.Second
+	proxyRequestMaxBytes int64 = 1 << 20
 )
 
 // ProxyConfig is the per-request state needed to forward a dashboard request
@@ -69,8 +71,13 @@ func proxy(w http.ResponseWriter, r *http.Request, cfg *ProxyConfig, target stri
 	// Buffer body up front so we can retry after a token refresh.
 	var bodyBytes []byte
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Body != nil {
-		data, err := io.ReadAll(r.Body)
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, proxyRequestMaxBytes))
 		if err != nil {
+			var maxBytes *http.MaxBytesError
+			if errors.As(err, &maxBytes) {
+				http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, `{"error":"read body"}`, http.StatusBadRequest)
 			return
 		}

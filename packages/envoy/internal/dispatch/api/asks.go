@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -65,6 +65,9 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owner) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Question string             `json:"question"`
 		Options  []model.AskOption  `json:"options"`
@@ -210,6 +213,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Question *string            `json:"question"`
 		Options  *[]model.AskOption `json:"options"`
@@ -227,6 +233,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
+		return
+	}
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask id must be a UUID")
 		return
 	}
 	if input.Question != nil {
@@ -412,6 +422,10 @@ func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor mo
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
 	var input struct {
 		Selected []string     `json:"selected"`
 		Text     *string      `json:"text"`
@@ -419,10 +433,6 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
-		return
-	}
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
 		return
 	}
 	transition := answerTransition(actor, input.Selected, input.Text)
@@ -460,6 +470,9 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Kind   string       `json:"kind"`
 		Reason string       `json:"reason"`

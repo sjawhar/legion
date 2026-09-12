@@ -14,6 +14,15 @@ type renderer struct {
 	inlineCodeFence  string
 	inlineCodePadded bool
 	err              error
+	blockOffsets     []BlockOffset
+}
+
+// BlockOffset identifies one rendered block in byte offsets of the markdown.
+type BlockOffset struct {
+	ID   string
+	Type string
+	From int
+	To   int
 }
 
 func Render(doc *Node) (string, *PositionMap, error) {
@@ -44,6 +53,36 @@ func Render(doc *Node) (string, *PositionMap, error) {
 	return r.b.String(), &PositionMap{spans: r.spans}, nil
 }
 
+// RenderWithBlockOffsets renders a document and records each identified block's
+// byte range in the returned markdown.
+func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
+	if doc == nil || doc.Type != "doc" {
+		if doc == nil {
+			return "", nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)
+		}
+		return "", nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
+	}
+	if err := doc.Validate(); err != nil {
+		return "", nil, err
+	}
+	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
+		return "", nil, nil
+	}
+	textPositions := make(map[*Node]int)
+	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
+		if node.Type == "text" {
+			textPositions[node] = pos
+		}
+		return true
+	})
+	r := &renderer{textPositions: textPositions}
+	r.blocks(doc.Children, "")
+	if r.err != nil {
+		return "", nil, r.err
+	}
+	return r.b.String(), r.blockOffsets, nil
+}
+
 func (r *renderer) blocks(nodes []*Node, prefix string) {
 	for i, n := range nodes {
 		if i > 0 {
@@ -66,6 +105,19 @@ func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
 }
 
 func (r *renderer) block(n *Node, prefix string) {
+	start := r.b.Len()
+	blockOffset := -1
+	if n.Type != "doc" && !isInlineNodeType(n.Type) {
+		if id, ok := n.Attrs[BlockIDAttr].(string); ok && id != "" {
+			blockOffset = len(r.blockOffsets)
+			r.blockOffsets = append(r.blockOffsets, BlockOffset{ID: id, Type: n.Type, From: start})
+		}
+	}
+	defer func() {
+		if blockOffset >= 0 {
+			r.blockOffsets[blockOffset].To = r.b.Len()
+		}
+	}()
 	if r.err != nil {
 		return
 	}
@@ -110,7 +162,19 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("[^" + label + "]: ")
 		r.blocksNoTrailing(n.Children, prefix+"    ")
 	default:
-		r.err = fmt.Errorf("%w: cannot render block %q", ErrSchema, n.Type)
+		typ, typed := typedBlock(n.Type)
+		if !typed {
+			r.err = fmt.Errorf("%w: cannot render block %q", ErrSchema, n.Type)
+			return
+		}
+		attrs, err := renderTypedAttributes(n, typ)
+		if err != nil {
+			r.err = err
+			return
+		}
+		r.writeSyntax(":::" + n.Type + "{" + attrs + "}\n" + prefix)
+		r.blocksNoTrailing(n.Children, prefix)
+		r.writeSyntax("\n" + prefix + ":::")
 	}
 }
 

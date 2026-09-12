@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 import { stripDispatchEnv } from "./environment";
+import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 
 export type GitHubAppRole = "implement" | "review";
 
@@ -88,6 +89,10 @@ export interface DaemonConfig {
    * already responded — small by default, raised only under measured load sensitivity, never a
    * substitute for those routes responding before they dial back into the caller's own socket. */
   workerRpcTimeoutSeconds: number;
+  /** TCP port the worker stream listener (`worker-stream-listener.ts`) accepts reverse-dialed
+   * `legion worker-shim --connect` streams on, bound to the same address as the API.
+   * `worker_stream_port` / `LEGION_WORKER_STREAM_PORT`; default `port + 1`. */
+  workerStreamPort: number;
   gates: { design: "root-issues" | "off" };
   githubApps: GitHubAppsConfig;
   stateDir: string;
@@ -139,7 +144,6 @@ const DEFAULT_TREE_STOP_TIMEOUT_SECONDS = 60;
 const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
 const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
-const DEFAULT_OMP_INVOCATION = "mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp";
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
@@ -174,6 +178,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   worker_boot_timeout_seconds: null,
   worker_boot_registration_deadline_intervals: null,
   worker_rpc_timeout_seconds: null,
+  worker_stream_port: null,
   state_dir: null,
   // `merge` is recognized (not an "unknown key") so setting it surfaces the specific
   // removed-setting error `parseGates` throws below instead of the generic "Unknown config key"
@@ -625,6 +630,11 @@ export function loadConfigFromFile(
     "resync_interval_seconds"
   );
   if (resyncIntervalSeconds !== undefined) fields.resyncIntervalMs = resyncIntervalSeconds * 1000;
+  const workerStreamPort = readPositiveInteger(config.worker_stream_port, "worker_stream_port");
+  if (workerStreamPort !== undefined) {
+    if (workerStreamPort > 65535) throw new Error("worker_stream_port must be at most 65535");
+    fields.workerStreamPort = workerStreamPort;
+  }
 
   const stateDir = readString(config.state_dir, "state_dir");
   if (stateDir !== undefined) {
@@ -841,6 +851,28 @@ export function resolveDaemonConfig(
     ),
     DEFAULT_WORKER_RPC_TIMEOUT_SECONDS
   );
+  const workerStreamPort = resolveValue(
+    opts.cliOverrides?.workerStreamPort,
+    fileNumber(fields, "workerStreamPort"),
+    parseEnvPositiveInteger(env.LEGION_WORKER_STREAM_PORT, "LEGION_WORKER_STREAM_PORT"),
+    port.value + 1
+  );
+  if (!Number.isSafeInteger(workerStreamPort.value) || workerStreamPort.value > 65535) {
+    if (workerStreamPort.source === "default") {
+      throw new Error(
+        `worker_stream_port defaults to port + 1 (${workerStreamPort.value}), which is not a valid TCP port; set worker_stream_port`
+      );
+    }
+    const settingBySource: Record<Exclude<ValueSource, "default">, string> = {
+      cli: "workerStreamPort override",
+      config: "worker_stream_port",
+      env: "LEGION_WORKER_STREAM_PORT",
+    };
+    throw new Error(`${settingBySource[workerStreamPort.source]} must be a valid TCP port`);
+  }
+  if (workerStreamPort.value === port.value) {
+    throw new Error(`worker_stream_port must differ from port (both ${port.value})`);
+  }
 
   const lifecycleNumbers: Record<string, number> = {
     admissionCap: admissionCap.value,
@@ -904,6 +936,7 @@ export function resolveDaemonConfig(
       workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
       workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
       workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
+      workerStreamPort: workerStreamPort.value,
       gates: parsedGates,
       githubApps: githubApps.value,
       stateDir: stateDir.value,

@@ -19,6 +19,7 @@ export interface FakeEditor {
   destroyed: boolean;
   focused: string[];
   markdown: string | undefined;
+  focusedBlocks: string[];
   options: EditorOptions;
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
@@ -30,12 +31,28 @@ interface FakeConnection extends DocumentConnection {
 }
 
 export interface FakeDocumentRuntime {
+  admit(readOnly: boolean): void;
   connections: FakeConnection[];
   editors: FakeEditor[];
   runtime: DocumentRuntimeValue;
   status(state: ConnectionState): void;
   sync(): void;
 }
+
+const blockSchema = {
+  types: [
+    {
+      attributes: {
+        kind: { choices: ["note", "warning"], default: "note", kind: "enum" as const },
+        title: { default: "", kind: "string" as const },
+      },
+      content: "paragraph+" as const,
+      name: "callout",
+      render: "host" as const,
+    },
+  ],
+  version: 1,
+};
 
 export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
@@ -67,6 +84,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     const editor: FakeEditor = {
       destroyed: false,
       focused: [],
+      focusedBlocks: [],
       markdown: undefined,
       options,
       readOnly: options.readOnly ?? false,
@@ -86,6 +104,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       },
       destroy() {
         editor.destroyed = true;
+      },
+      focusBlock(blockId: string) {
+        editor.focusedBlocks.push(blockId);
       },
       focusMark(markId: string) {
         editor.focused.push(markId);
@@ -113,9 +134,14 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
   };
 
   return {
+    admit(readOnly) {
+      for (const callback of callbacks) {
+        callback.onAdmission(readOnly);
+      }
+    },
     connections,
     editors,
-    runtime: { connect, createEditor },
+    runtime: { blockSchema, connect, createEditor },
     status(state) {
       for (const callback of callbacks) {
         callback.onStatus(state);

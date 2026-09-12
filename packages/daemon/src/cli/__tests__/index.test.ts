@@ -1,8 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cmdCheckConfig, cmdGh, cmdHandoffComplete, resolveControllerSecret } from "../index";
+import type { CommandRunner } from "../../state/fetch";
+import {
+  cmdCheckConfig,
+  cmdGh,
+  cmdHandoffComplete,
+  cmdProbeImage,
+  resolveControllerSecret,
+} from "../index";
 
 describe("legion gh", () => {
   it("redeems the worker-extension grant only into the gh child environment", async () => {
@@ -153,6 +160,23 @@ describe("legion gh", () => {
   });
 });
 describe("legion start --check-config", () => {
+  // `cmdCheckConfig` resolves against the real process env, so ambient daemon settings must not
+  // leak into these cases: a Legion worker pane exports `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`
+  // (never `DISPATCH_TOKEN`), which alone makes `resolveDaemonConfig` refuse the file under test.
+  const ambient = new Map<string, string>();
+  beforeEach(() => {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && /^(LEGION_|DISPATCH_|ENVOY_)/.test(key)) {
+        ambient.set(key, value);
+        delete process.env[key];
+      }
+    }
+  });
+  afterEach(() => {
+    for (const [key, value] of ambient) process.env[key] = value;
+    ambient.clear();
+  });
+
   it("validates github_apps.<role>.private_key_command without executing it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const marker = path.join(dir, "spawned");
@@ -319,5 +343,68 @@ describe("resolveControllerSecret", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("legion probe-image", () => {
+  const deps = (runner: CommandRunner, env: NodeJS.ProcessEnv) => ({
+    env,
+    runner,
+    sleep: async () => {},
+    readPluginManifest: async () => "{}",
+  });
+  const passing = async () => ({
+    stdout: "",
+    stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+    exitCode: 0,
+  });
+
+  it("refuses to probe without an explicit OMP executable (no PATH fallback)", async () => {
+    let ran = false;
+    await expect(
+      cmdProbeImage(
+        undefined,
+        deps(async () => {
+          ran = true;
+          return passing();
+        }, {})
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({ message: expect.stringContaining("LEGION_OMP_PATH"), code: 1 })
+    );
+    expect(ran).toBe(false);
+  });
+
+  it("runs the daemon's two boot probes against LEGION_OMP_PATH with no launch prefix", async () => {
+    const commands: string[][] = [];
+    await cmdProbeImage(
+      undefined,
+      deps(
+        async (command) => {
+          commands.push(command);
+          return passing();
+        },
+        { LEGION_OMP_PATH: "/opt/omp/bin/omp" }
+      )
+    );
+    expect(commands).toHaveLength(2);
+    expect(commands[0]?.[2]).toStartWith(
+      'exec /opt/omp/bin/omp models --no-extensions --extension "$1" --json'
+    );
+    expect(commands[1]?.[2]).toStartWith('exec /opt/omp/bin/omp models --extension "$1" --json');
+  });
+
+  it("surfaces a failing probe as the daemon's own message with exit 1", async () => {
+    await expect(
+      cmdProbeImage(
+        "/opt/omp/bin/omp",
+        deps(async () => ({ stdout: "", stderr: "LEGION_OMP_AGENTS=missing\n", exitCode: 0 }), {})
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining("does not expose pi.agents"),
+        code: 1,
+      })
+    );
   });
 });

@@ -29,7 +29,8 @@ numbers, document versions, or coined shorthand), with an `Approve` option, regi
 and park. Do not spawn while waiting for `design-approved`;
 later waves and re-scopes do not re-arm the gate. A deployment whose design gate is off
 answers the register itself: `design-approved` arrives right after `register_gate`, before any
-human sees the ask — proceed on it; the ask stays open as a record and needs no follow-up.
+human sees the ask — proceed on it. The daemon then closes that ask on Dispatch (you will see an
+`ask.resolved` event for it); that is expected and needs no follow-up.
 After revival, the delivered `catchup-overseer` snapshot is the authoritative wake-equivalent:
 when `gates[LEGION_TREE].designApproved` is set, spawn. During a live session, react only to
 delivered wakes; do not poll.

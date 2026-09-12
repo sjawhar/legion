@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { LegionState } from "../legion-state";
+import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import type { LegionState, WorkerRoleClaim } from "../legion-state";
 import { HttpError, requiredString } from "./http";
 
 export interface SessionCapability {
@@ -32,6 +32,17 @@ export interface WorkerBootToken {
   expectedSessionId?: string;
   /** The session that actually consumed this token; set once, blocks replay. */
   sessionId?: string;
+}
+
+/** What a boot token resolves to: the claim it was minted for, and the mint record when this
+ * process still holds one. */
+export interface ResolvedWorkerClaim {
+  /** The role claim token (`state.roles` key) the boot token was minted for. */
+  token: string;
+  claim: WorkerRoleClaim;
+  /** The in-memory mint record when this process still holds it; `undefined` once the lookup fell
+   * back to the `bootTokenHash` `launchWorker` persisted onto the claim (a restart since the mint). */
+  boot: WorkerBootToken | undefined;
 }
 
 export function secretHash(secret: string): Buffer {
@@ -158,7 +169,27 @@ export class CapabilityService {
     this.workerBootTokens.set(bootToken, { ...info });
   }
 
-  getWorkerBootToken(token: string): WorkerBootToken | undefined {
-    return this.workerBootTokens.get(token);
+  /** The one boot-token → claim lookup both `/worker/started` and the worker stream listener
+   * perform. The in-memory mint record names the claim directly; without it (this daemon
+   * restarted since the mint) the token is matched against every worker claim's persisted
+   * `bootTokenHash`, one constant-time compare per claim. Callers apply their own generation and
+   * session checks to the result; `undefined` means no claim anywhere was minted this token. */
+  resolveWorkerClaim(state: LegionState, bootToken: string): ResolvedWorkerClaim | undefined {
+    const boot = this.workerBootTokens.get(bootToken);
+    if (boot) {
+      const token = roleToken(state.project, boot.issue, boot.role);
+      const claim = state.roles[token];
+      if (claim && "issue" in claim) return { token, claim, boot };
+    }
+    for (const [token, claim] of Object.entries(state.roles)) {
+      if (
+        "issue" in claim &&
+        claim.bootTokenHash !== undefined &&
+        equalSecretHash(claim.bootTokenHash, bootToken)
+      ) {
+        return { token, claim, boot: undefined };
+      }
+    }
+    return undefined;
   }
 }

@@ -22,6 +22,7 @@ the native Dispatch tool suite:
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
+| Document block offsets | `src/dispatch-api.ts` | `ArtifactBlock` maps a stable block ID and type to byte offsets in canonical artifact markdown. |
 
 ## Critical conventions
 
@@ -30,6 +31,7 @@ the native Dispatch tool suite:
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
   `dispatch_artifact`, `dispatch_read`, and `dispatch_search`. It defines their names, descriptions,
   and field shapes; host adapters consume `dispatchToolSpecs` directly.
+- `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters); project-document arguments accept the document's artifact id, slug, or filename.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.

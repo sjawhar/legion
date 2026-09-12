@@ -78,7 +78,9 @@ func validateNode(n *Node) error {
 		return fmt.Errorf("%w: nil node", ErrSchema)
 	}
 	if !nodeTypes[n.Type] {
-		return fmt.Errorf("%w: node %q", ErrSchema, n.Type)
+		if _, typed := typedBlock(n.Type); !typed {
+			return fmt.Errorf("%w: node %q", ErrSchema, n.Type)
+		}
 	}
 	if n.Type != "text" && len(n.Marks) != 0 {
 		return fmt.Errorf("%w: node %q cannot have marks", ErrSchema, n.Type)
@@ -146,8 +148,94 @@ func validateNode(n *Node) error {
 		if len(n.Children) != 0 {
 			return fmt.Errorf("%w: %s cannot have children", ErrSchema, n.Type)
 		}
+	default:
+		if typ, typed := typedBlock(n.Type); typed {
+			return validateTypedBlock(n, typ)
+		}
 	}
 	return nil
+}
+
+func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
+	switch typ.Content {
+	case BlockContentParagraphs:
+		if len(n.Children) == 0 || !childrenAre(n.Children, "paragraph") {
+			return fmt.Errorf("%w: typed block %q content %q requires one or more paragraphs", ErrSchema, n.Type, typ.Content)
+		}
+	case BlockContentBlocks:
+		if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
+			return fmt.Errorf("%w: typed block %q content %q requires one or more blocks", ErrSchema, n.Type, typ.Content)
+		}
+	case BlockContentParagraphsOptionalBulletList:
+		if !paragraphsThenOptionalBulletList(n.Children) {
+			return fmt.Errorf("%w: typed block %q content %q requires paragraphs followed by an optional bullet list", ErrSchema, n.Type, typ.Content)
+		}
+	default:
+		return fmt.Errorf("%w: typed block %q has unsupported content rule %q", ErrSchema, n.Type, typ.Content)
+	}
+	for name, value := range n.Attrs {
+		if name == BlockIDAttr {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("%w: typed block %q blockId must be a string", ErrSchema, n.Type)
+			}
+			continue
+		}
+		definition, ok := typ.Attributes[name]
+		if !ok {
+			return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, n.Type, name)
+		}
+		if err := validateAttributeValue(definition, value); err != nil {
+			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, n.Type, name, err)
+		}
+	}
+	for name := range typ.Attributes {
+		if _, present := n.Attrs[name]; !present {
+			return fmt.Errorf("%w: typed block %q is missing attribute %q", ErrSchema, n.Type, name)
+		}
+	}
+	return nil
+}
+
+func paragraphsThenOptionalBulletList(children []*Node) bool {
+	if len(children) == 0 || children[0] == nil || children[0].Type != "paragraph" {
+		return false
+	}
+	for index, child := range children {
+		if child == nil {
+			return false
+		}
+		if child.Type == "paragraph" {
+			continue
+		}
+		return child.Type == "bullet_list" && index == len(children)-1
+	}
+	return true
+}
+
+// ReassertServerOwnedAttrs restores schema defaults for server-owned attributes. Type-specific
+// reconcilers can overwrite their authoritative values before this generic closure runs.
+func ReassertServerOwnedAttrs(tree *Node) bool {
+	changed := false
+	walk(tree, func(node *Node, _ []int, _, _ int) bool {
+		typ, typed := typedBlock(node.Type)
+		if !typed {
+			return true
+		}
+		for name, definition := range typ.Attributes {
+			if !definition.Server || definition.Default == nil {
+				continue
+			}
+			if node.Attrs == nil {
+				node.Attrs = Attrs{}
+			}
+			if !attrsEqual(Attrs{name: node.Attrs[name]}, Attrs{name: definition.Default}) {
+				node.Attrs[name] = cloneSchemaValue(definition.Default)
+				changed = true
+			}
+		}
+		return true
+	})
+	return changed
 }
 
 func childrenAre(children []*Node, typeName string) bool {
@@ -182,7 +270,8 @@ func isBlockNodeType(typeName string) bool {
 	case "paragraph", "heading", "blockquote", "bullet_list", "ordered_list", "code_block", "hr", "table", "footnote_definition", "frontmatter":
 		return true
 	default:
-		return false
+		_, typed := typedBlock(typeName)
+		return typed
 	}
 }
 
@@ -195,11 +284,21 @@ func isInlineNodeType(typeName string) bool {
 	}
 }
 
+// Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
+	return equalNode(n, o, false)
+}
+
+// EqualWithBlockIDs compares document content, structure, and block identity.
+func (n *Node) EqualWithBlockIDs(o *Node) bool {
+	return equalNode(n, o, true)
+}
+
+func equalNode(n, o *Node, includeBlockIDs bool) bool {
 	if n == nil || o == nil {
 		return n == o
 	}
-	if n.Type != o.Type || n.Text != o.Text || !attrsEqual(n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+	if n.Type != o.Type || n.Text != o.Text || !nodeAttrsEqual(n.Attrs, o.Attrs, includeBlockIDs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
 		return false
 	}
 	for i := range n.Marks {
@@ -208,8 +307,37 @@ func (n *Node) Equal(o *Node) bool {
 		}
 	}
 	for i := range n.Children {
-		if !n.Children[i].Equal(o.Children[i]) {
+		if !equalNode(n.Children[i], o.Children[i], includeBlockIDs) {
 			return false
+		}
+	}
+	return true
+}
+
+func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
+	if includeBlockIDs {
+		return attrsEqual(a, b)
+	}
+	for key, av := range a {
+		if key == BlockIDAttr {
+			continue
+		}
+		bv, ok := b[key]
+		if !ok {
+			if av == nil {
+				continue
+			}
+			return false
+		}
+		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
+			return false
+		}
+	}
+	for key, bv := range b {
+		if key != BlockIDAttr {
+			if _, ok := a[key]; !ok && bv != nil {
+				return false
+			}
 		}
 	}
 	return true

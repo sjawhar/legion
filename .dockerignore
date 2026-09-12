@@ -12,7 +12,7 @@
 **/docker-data
 tmp
 docs
-skills
+# skills/ ships inside the worker image's plugin tarball (packages/pi-envoy/scripts/prepack.sh).
 
 # Envoy: test files and deploy tooling not needed in the image.
 packages/envoy/**/*_test.go

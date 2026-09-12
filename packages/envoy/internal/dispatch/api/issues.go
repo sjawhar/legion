@@ -31,6 +31,7 @@ const listIssuesQuery = `
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
+	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	group by i.key
 	order by case i.status
 		when 'triage' then 1 when 'icebox' then 2 when 'backlog' then 3
@@ -43,12 +44,13 @@ const listPinnedIssuesQuery = `
 	select i.key, i.title, i.status, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
-	join user_issue_state s on s.issue_key = i.key and s.login = $5 and s.pinned
+	join user_issue_state s on s.issue_key = i.key and s.login = $6 and s.pinned
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
+	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	group by i.key
 	order by case i.status
 		when 'triage' then 1 when 'icebox' then 2 when 'backlog' then 3
@@ -96,6 +98,32 @@ _Map every acceptance line to the proof that exercises it._
 _List each considered alternative and the reason it was rejected._
 `
 
+const (
+	maxIssueLabels  = 20
+	maxIssueLabel16 = 40
+)
+
+func normalizeIssueLabels(values []string) ([]string, error) {
+	if len(values) > maxIssueLabels {
+		return nil, errorf(http.StatusBadRequest, "LABELS_INPUT", "labels length %d exceeds limit %d", len(values), maxIssueLabels)
+	}
+	labels := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		label := strings.TrimSpace(value)
+		if length := len16(label); length == 0 || length > maxIssueLabel16 {
+			return nil, errorf(http.StatusBadRequest, "LABELS_INPUT", "each label must be 1 to %d characters", maxIssueLabel16)
+		}
+		key := strings.ToLower(label)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		labels = append(labels, label)
+	}
+	return labels, nil
+}
+
 func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	pinned := query.Get("pinned") == "true"
@@ -112,6 +140,14 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(query.Get("project"))
 	status := strings.TrimSpace(query.Get("status"))
 	parent := strings.TrimSpace(query.Get("parent"))
+	labels, err := normalizeIssueLabels(query["label"])
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for index, label := range labels {
+		labels[index] = strings.ToLower(label)
+	}
 	var updatedSince *time.Time
 	if query.Has("updated_since") {
 		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(query.Get("updated_since")))
@@ -122,7 +158,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		updatedSince = &parsed
 	}
 	listQuery := listIssuesQuery
-	arguments := []any{project, status, parent, updatedSince}
+	arguments := []any{project, status, parent, updatedSince, labels}
 	if pinned {
 		listQuery = listPinnedIssuesQuery
 		arguments = append(arguments, login)
@@ -150,6 +186,9 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
 	var input struct {
 		Project  string       `json:"project"`
 		Title    string       `json:"title"`
@@ -157,6 +196,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		External string       `json:"external"`
 		Force    bool         `json:"force"`
 		Spec     *string      `json:"spec"`
+		Labels   []string     `json:"labels"`
 		Actor    *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -210,6 +250,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "project and title are required")
 		return
 	}
+	if usingDefaultProject {
+		input.Labels = append(input.Labels, repoLabelPrefix+externalRepo)
+	}
+	labels, err := normalizeIssueLabels(input.Labels)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if input.External == "" && !input.Force {
 		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
 		if err != nil {
@@ -258,10 +306,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	var parent any
 	if parentKey != "" {
 		parent = parentKey
-	}
-	labels := []string{}
-	if usingDefaultProject {
-		labels = []string{repoLabelPrefix + externalRepo}
 	}
 	if err := lockProjectRankAllocation(r.Context(), tx, input.Project); err != nil {
 		s.writeHandlerError(w, err)
@@ -559,6 +603,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var labels []string
+	if input.Labels != nil {
+		var err error
+		labels, err = normalizeIssueLabels(*input.Labels)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -629,7 +682,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if input.Labels != nil {
-		if _, err := tx.Exec(r.Context(), `update issues set labels = $2, updated_at = now() where key = $1`, key, *input.Labels); err != nil {
+		if _, err := tx.Exec(r.Context(), `update issues set labels = $2, updated_at = now() where key = $1`, key, labels); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

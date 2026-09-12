@@ -5,7 +5,14 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { Ask, AskEdit, AskRead, Comment } from "../api/types";
+import type {
+  AnswerAskInput,
+  Ask,
+  AskEdit,
+  AskRead,
+  Comment,
+  CreateCommentInput,
+} from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
 
@@ -275,6 +282,85 @@ test("AskCard reveals the Other field only once Other is picked, and submits its
     fireEvent.click(submit);
 
     await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Try a hybrid" }]));
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard sends a question-shaped Other response as clarification instead of closing the ask", async () => {
+  const answerCalls: AnswerAskInput[] = [];
+  const replyCalls: Array<{ issueKey: string; input: CreateCommentInput }> = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        answerCalls.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      createReply={async (issueKey, replyInput) => {
+        replyCalls.push({ issueKey, input: replyInput });
+        return reply({ ask_id: replyInput.ask_id, body: replyInput.body });
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), {
+      target: { value: "How does this fit our release plan?" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+
+    const choice = await view.findByRole("group", { name: "Question-shaped answer" });
+    expect(choice.textContent).toContain(
+      "This reads like a question — send as clarification (keeps the ask open)"
+    );
+    expect(answerCalls).toEqual([]);
+    const clarification = within(choice).getByRole("button", {
+      name: "This reads like a question — send as clarification (keeps the ask open)",
+    });
+    expect(document.activeElement).toBe(clarification);
+    fireEvent.keyDown(clarification, { key: "Enter" });
+    fireEvent.click(clarification);
+
+    await waitFor(() =>
+      expect(replyCalls).toEqual([
+        {
+          issueKey: "CORE-1",
+          input: { ask_id: "ask-1", body: "How does this fit our release plan?" },
+        },
+      ])
+    );
+    expect(answerCalls).toEqual([]);
+    expect(view.getByTestId("ask-ask-1")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard lets a human explicitly answer with a question-shaped Other response", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Other" }));
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Why wait?" } });
+    fireEvent.click(view.getByRole("button", { name: "Submit answer" }));
+    fireEvent.click(await view.findByRole("button", { name: "Answer with it anyway" }));
+
+    await waitFor(() => expect(submitted).toEqual([{ selected: [], text: "Why wait?" }]));
   } finally {
     view.unmount();
   }

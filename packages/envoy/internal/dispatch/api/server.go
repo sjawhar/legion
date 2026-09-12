@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"regexp"
 	"strings"
@@ -139,6 +140,7 @@ type queryer interface {
 // Register mounts every native-workspace route on mux.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
+	mux.HandleFunc("GET /api/v1/schema/blocks", s.getBlockSchema)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
 	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts", s.listProjectArtifacts)
@@ -191,18 +193,21 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/reviews", s.listArtifactReviews)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/reviews", s.createArtifactReview)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/approval-requests", s.requestArtifactApproval)
+	mux.HandleFunc("GET /api/v1/artifacts/{id}/blocks", s.getArtifactBlocks)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/text", s.getArtifactText)
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/versions/{number}", s.getArtifactVersion)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/versions", s.createNamedVersion)
 	mux.HandleFunc("POST /api/v1/artifacts/{id}/edits", s.editArtifact)
 	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}", s.getArtifact)
 	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/text", s.getArtifactText)
+	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/blocks", s.getArtifactBlocks)
 	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}", s.getArtifactVersion)
 	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts/{slug}/versions", s.createNamedVersion)
 	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts/{slug}/edits", s.editArtifact)
 	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}", s.getArtifact)
 	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/text", s.getArtifactText)
 	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}", s.getArtifactVersion)
+	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/blocks", s.getArtifactBlocks)
 	mux.HandleFunc("POST /api/v1/projects/{key}/artifacts/{slug}/versions", s.createNamedVersion)
 	mux.HandleFunc("POST /api/v1/projects/{key}/artifacts/{slug}/edits", s.editArtifact)
 	mux.HandleFunc("GET /api/v1/me/state", s.getUserState)
@@ -400,10 +405,27 @@ func len16(value string) int {
 	return length
 }
 
+const maxJSONRequestBytes int64 = 1 << 20
+
+type maxBytesDiscarder struct{}
+
+func (maxBytesDiscarder) Header() http.Header             { return nil }
+func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
+func (maxBytesDiscarder) WriteHeader(int)                 {}
+
 func decodeJSON(r *http.Request, value any) error {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
+		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
+	}
+	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
+		var maxBytes *http.MaxBytesError
+		if errors.As(err, &maxBytes) {
+			return errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
+		}
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}
 	if decoder.More() {
