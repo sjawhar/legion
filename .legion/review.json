@@ -1,0 +1,99 @@
+{
+  "issue": "LEGION-14",
+  "spec": {
+    "ref": "dispatch://LEGION-14/spec",
+    "version": 4
+  },
+  "planDoc": "docs/plans/2026-09-12-resync-queued-root-anomaly.md",
+  "prNumber": 952,
+  "prUrl": "https://github.com/sjawhar/legion/pull/952",
+  "reviewedHeadSha": "1c7f86e83509ec4de7761ba1b638504abfd3ca14",
+  "fixCommitSha": "8fec55b322e8b0424d0a8e1664e4f3c00660b46e",
+  "resyncTsIdenticalAtFixAndHead": "sha256 ea515886328a7127398ce80a8b56ff49c503792ad5fa0a873bf7889d8696a93b at 8fec55b3, 8ac5754c, 1c7f86e8",
+  "verdict": "CLEAN_NOT_APPROVED",
+  "verdictNote": "No correctness finding; no review submitted on this head by the architect's instruction. Approval is reserved for the head the implementer pushes after deleting .legion/, reviewed and approved by its exact sha.",
+  "githubFactsVerifiedDirectly": {
+    "ciAtHead": "Tests run 34677005727 at 1c7f86e8: lint, pr-title, typecheck, test all SUCCESS (gh pr checks + gh run list)",
+    "ciAtFix": "Tests run 34674989204 at 8fec55b3 success, as the PR body's CI line states; runs 34675792441, 34675797999, 34676947105 at 8ac5754c also success",
+    "reviewThreads": "0 (GraphQL reviewThreads.totalCount 0)",
+    "reviews": "0 (GraphQL reviews.totalCount 0; reviewDecision REVIEW_REQUIRED)",
+    "prCommits": [
+      "cddc7a0b plan: record handoff",
+      "8fec55b3 fix(daemon): ...",
+      "8ac5754c implement: record handoff",
+      "1c7f86e8 test: record handoff"
+    ],
+    "mergeable": "MERGEABLE, base main, not draft"
+  },
+  "e2eReproducedByReviewer": {
+    "driver": "/tmp/legion14-live/run-resync.tester.ts, cwd packages/daemon, fresh copies under /tmp/legion14-review/",
+    "preFixModule": "/tmp/legion14-live/resync-before.ts, confirmed equal to `jj file show -r mspqmpzy-` (cddc7a0b, sha256 d879e57c...) except for absolute import paths",
+    "v22IncidentSnapshot": {
+      "before": [
+        "zero-owner-tree:LEGION-10",
+        "zero-owner-tree:LEGION-11"
+      ],
+      "after": [],
+      "probeEffects": "1 -> 1"
+    },
+    "v22DeadLEGION10NegativeControl": {
+      "before": [
+        "zero-owner-tree:LEGION-10",
+        "zero-owner-tree:LEGION-11"
+      ],
+      "after": [
+        "zero-owner-tree:LEGION-10"
+      ]
+    },
+    "currentState": {
+      "beforeAndAfter": [
+        "untriaged-open:LEGION-27",
+        "untriaged-open:LEGION-28",
+        "launch-failed:LEGION-22",
+        "launch-failed:LEGION-23"
+      ],
+      "effects": "probe 12 -> 12, controller 2 -> 2"
+    },
+    "safetyRail": "driver pointed at $LEGION_STATE_DIR/state.json exits 1 at run-resync.tester.ts:28 before any read; no report written",
+    "stateDirUntouched": [
+      "state.json",
+      "state.json.bak-20260912T051244Z",
+      "state.json.v21.bak",
+      "state.json.v22.bak"
+    ]
+  },
+  "staticChecksAtHead": {
+    "resyncTestFile": "36 pass, 0 fail (env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test src/daemon/__tests__/resync.test.ts)",
+    "tsc": "exit 0 (packages/daemon)",
+    "biome": "exit 0 on both changed files",
+    "hasActiveTreeResidue": "none under packages/ or skills/"
+  },
+  "specConformance": {
+    "gate": "resync.ts:273-276 reads deps.state.trees[node.key]?.status, continues on active|queued|launch-failed",
+    "noAdmissionReadsAdded": true,
+    "queueEntryWithoutTreeStillReported": "yes (treeStatus undefined falls through; test at resync.test.ts:229)",
+    "launchFailedReportedExactlyOnce": "yes (second loop 283-294 byte-unchanged; test at resync.test.ts:250)",
+    "triageBranchUntouched": true,
+    "launchFailedLoopUntouched": true,
+    "detailStringUnchanged": true,
+    "parentChainWalkDropSafe": "children skipped at resync.ts:241, so hasActiveTree(node.key) only ever inspected node.key itself"
+  },
+  "thermo": {
+    "ranAt": "1c7f86e83509ec4de7761ba1b638504abfd3ca14",
+    "deepReview": "clean; 0 blocking, 0 non-blocking; independently reproduced pre-fix 34 pass / 2 fail (tests 1 and 4) in a scratch copy and post-fix 36 / 0; confirmed every processes.ts writer of tree.status=queued also enqueues the issue, so a queued tree is always daemon-owned",
+    "codeQuality": "clean; 0 blocking; 3 non-blocking wording notes (N1 test title 'failed once' vs launchFailures 3 at resync.test.ts:250; N2 docstring 232-234 duplicates inline comment 269-272; N3 hasTree 51-60 is the remaining parent-chain walker, equivalent to a direct lookup, triage branch out of scope per spec)",
+    "recordedOnPrBody": "Thermo line and Fast-follow line updated at 1c7f86e8; reviewer evidence paragraph appended"
+  },
+  "nonBlockingNotesForArchitect": [
+    "N1 and N2 are one-line edits in the two files this PR already touches; they can ride the implementer's .legion/ deletion push if you choose, or land with N3 after merge. Not required for approval.",
+    "N3 (hasTree simplification) touches the triage branch the approved design pins untouched; it is the named Fast-follow, its own change after merge."
+  ],
+  "nextStep": "Architect sends the implementer to push the .legion/ deletion on legion/LEGION-14 and messages the reviewer with the resulting head sha; the reviewer re-verifies CI at that sha, confirms resync.ts and resync.test.ts are unchanged from 1c7f86e8 (or carry only N1/N2 if chosen), and approves that exact head by sha.",
+  "rigNotes": [
+    "LEGION-12 grant-stacking bug live: 2-3 export LEGION_GRANT blocks per bash call; the export-shadowing function from docs/solutions/legion/worker-pane-shell-gotchas.md section 1 kept every grant-consuming command working.",
+    "Reviewer push of this handoff commit is expected to 403 (review App has no contents permission, per the same doc section 3); the commit rides along on the implementer's next push."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-12T14:29:28.381Z"
+}
