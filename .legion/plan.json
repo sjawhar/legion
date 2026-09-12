@@ -1,0 +1,461 @@
+{
+  "taskCount": 6,
+  "independentTasks": 2,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "Sequential, one implementer. Tasks 1 and 2 are independent of each other and of the rest; Tasks 3-4 must land in one commit (adding the identity check to probe breaks every existing liveness test until the fixtures carry identity). TDD per task: write the failing test, run only that file, implement, re-run. Commit with `jj -R \"$LEGION_WORKSPACE\" describe -m \"<msg>\" && jj -R \"$LEGION_WORKSPACE\" new` after each task's file-scoped tests pass; run the daemon package suite, tsc, and biome once at the end (Task 6).",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker",
+      "test-driven-development"
+    ],
+    "test": [
+      "legion-worker"
+    ],
+    "review": [
+      "legion-worker"
+    ]
+  },
+  "spec": "Dispatch issue LEGION-27 primary document (dispatch_doc_read issue=LEGION-27). Its Design, Errors, Testing, Rejected sections are the contract; this plan argues from it. Settled and not to be re-decided: identity = pane root pid + /proc/<pid>/stat field 22 start ticks recorded at launch; single-issue scope; tmux runtime otherwise unchanged (LEGION-19 restructures later).",
+  "goal": "A tmux pane id is never taken as proof of the process a locator recorded. Every locator (tree root, worker, controller) records the pane's root pid and that process's start ticks at launch; every liveness probe, every daemon-issued kill-pane, and every window reuse first verifies the pane still runs exactly that process.",
+  "globalConstraints": [
+    "Biome: double quotes, semicolons, ES5 trailing commas, 100-char width. `node:` prefix for builtins, `type` imports. No barrel files. Interfaces for object shapes, types for unions.",
+    "Tests: bun:test, co-located `__tests__/`. Run single files: `cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/<file>`. Never run the repo-wide suite mid-task; Task 6 runs the daemon package once.",
+    "jj, not git. Every shell command begins `cd -- \"$LEGION_WORKSPACE\" &&`; every jj command uses `-R \"$LEGION_WORKSPACE\"`. Never `jj abandon`, never `jj edit @-`.",
+    "Comments describe current behaviour, not history. Delete code the change obsoletes (the tmuxPaneId backfill, tmux.windowAlive, tmux.firstPaneId); no shims or aliases.",
+    "Keep the tmux runtime otherwise unchanged: no Runtime boundary, no change to reconnectWorkers' socket probe, no change to reconcileTmuxWindows' logic (doc comment only).",
+    "The working copy already contains a `.omp/config.yml` added by workspace provisioning. Leave it alone; commit only your own files."
+  ],
+  "fileMap": [
+    {
+      "path": "packages/daemon/src/daemon/proc-stat.ts",
+      "action": "create",
+      "responsibility": "Pure parser: field 22 (starttime) of a /proc/<pid>/stat line, splitting after the last `)`."
+    },
+    {
+      "path": "packages/daemon/src/daemon/__tests__/proc-stat.test.ts",
+      "action": "create",
+      "responsibility": "Parser unit tests incl. a comm containing spaces and parentheses, and a real /proc/self/stat line."
+    },
+    {
+      "path": "packages/daemon/src/daemon/legion-state.ts",
+      "action": "modify",
+      "responsibility": "`panePid`/`paneStartTicks` on TmuxWindowLocator, WorkerLocator, controllerLocator (types + zod); version 23 -> 24 with `migrateV23State` (pure bump)."
+    },
+    {
+      "path": "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+      "action": "modify",
+      "responsibility": "Version literal 24; v23->v24 migration + .v23.bak test; identity round-trip test."
+    },
+    {
+      "path": "packages/daemon/src/daemon/processes.ts",
+      "action": "modify",
+      "responsibility": "`readProcessStat` dep; `PaneLocator`/`PaneVerdict` types; `verifyPaneProcess`, `readPaneStartTicks`, `recordedPaneIdentity`, `describePaneVerdict`; identity recorded in launchShimmedProcess + spawnController; callers probe/controllerAlive/stopProcess/probedWindowId; watchdog dep wiring; backfill removal; comment updates."
+    },
+    {
+      "path": "packages/daemon/src/daemon/worker-boot-watchdog.ts",
+      "action": "modify",
+      "responsibility": "Deps: `paneProcessVerified(locator)` replaces `tmux` + `isOmpPane` (both dead once the pane branch is delegated); probeAlive's pane branch uses it."
+    },
+    {
+      "path": "packages/daemon/src/daemon/tmux.ts",
+      "action": "modify",
+      "responsibility": "Delete `windowAlive` and `firstPaneId` (no callers after this change)."
+    },
+    {
+      "path": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "action": "modify",
+      "responsibility": "Fixture: `DEFAULT_START_TICKS`, `procStat()`, `paneIdentity()`, default `readProcessStat`, identity on `tree()`; new tests per spec Testing lines 1,2,3,5,6,7 + launch-failure + legacy-locator + controller; delete the backfill test (line ~9745); sweep existing tests per the rules in Task 4."
+    },
+    {
+      "path": "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts",
+      "action": "modify",
+      "responsibility": "`baseDeps` uses `paneProcessVerified`; rewrite the pid-probe test (~317) as a call-order test on the new dep; new reissued-pane retire test."
+    },
+    {
+      "path": "packages/daemon/src/daemon/__tests__/api.test.ts",
+      "action": "modify-if-red",
+      "responsibility": "Any test whose seeded locator must verify alive (a spawn_worker split, a probe) gets `panePid`/`paneStartTicks` + a matching `readProcessStat`; same sweep rules as processes.test.ts."
+    },
+    {
+      "path": "packages/daemon/src/daemon/AGENTS.md",
+      "action": "modify",
+      "responsibility": "Operational invariant sentence (acceptance 4) + one clause each on the kill-pane and watchdog bullets so the doc stays true."
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "Bump the state version 23 -> 24 with a pure no-op `migrateV23State`.",
+      "why": "The file's own convention bumps for every schema-shape change even when fields are optional (v14->v15 `completed`, v21->v22 `approvalStatusPending`), and `migrateV19State`'s comment records the cost of once skipping a bump. The bump also makes `loadState` write `state.json.v23.bak` on first load, preserving the pre-identity state file for an operator diffing an incident. The migration leaves legacy locators identity-less on purpose (spec Rejected: clearing them strands roots)."
+    },
+    {
+      "decision": "One helper `verifyPaneProcess(locator): Promise<PaneVerdict>` returning a discriminated verdict rather than a boolean.",
+      "why": "Spec requires `stopProcess` to log both identities on a mismatch; a boolean would force a second tmux/proc read for the log. Boolean-only callers (`probedWindowId`, the watchdog closure) read `.verified`."
+    },
+    {
+      "decision": "Watchdog dep is `paneProcessVerified(locator: WorkerLocator): Promise<boolean>`, replacing (not sitting beside) `isOmpPane` and `tmux` in `WorkerBootWatchdogDeps`.",
+      "why": "`probeAlive` was the watchdog's only user of both; delegating its pane branch leaves them dead. The spec's 'injected beside isOmpPane' names the mechanism (injection); clean cutover forbids leaving dead deps. `isOmpPane` itself stays in processes.ts as the last step of `verifyPaneProcess`."
+    },
+    {
+      "decision": "Identity is recorded inside `launchShimmedProcess` (covers spawnTree and launchWorker, which both call it) and inside `spawnController`.",
+      "why": "`spawnTree` never calls tmux itself; the spec's naming of spawnTree/launchShimmedProcess/spawnController maps to these two code sites."
+    },
+    {
+      "decision": "An unreadable `/proc/<pid>/stat` right after tmux reported a pane throws from `recordedPaneIdentity`; the throw rides the existing launch-failure paths (`launchWorker`'s catch -> launchFailures; `spawnRoot`'s catch -> rollback + launchFailures; `spawnController`'s rejection -> `ensureController` rejects as for any spawn failure). A read failure at probe time is `stat-unreadable` -> not verified; a *malformed* stat line throws from the parser at both sites (a bug, never 'dead').",
+      "why": "Spec Errors rows 3 and 5. A pid tmux just reported whose /proc entry is gone means the process already exited: there is no orphan to kill (the pane closes itself; a fresh window whose sole pane died vanishes, so the issue-window map's stale id is dropped by the next probedWindowId). Distinguishing fs errors from parse errors keeps 'no silent fallbacks': a wrong field index must crash loud, not resurrect every root."
+    },
+    {
+      "decision": "`stopProcess` gates kill-pane on the full `verifyPaneProcess` verdict (including `isOmpPane`), returning normally on any non-verified verdict so callers clear the locator exactly as they do for PANE_GONE_STDERR today; `pane-gone` is silent, every other reason logs both identities.",
+      "why": "Spec Errors row 4 and acceptance 5. One rule ('kill iff it is our process') is what a maintainer can hold. A `not-omp` verdict cannot occur for a pane we launched (its shim command line always contains `omp`). A legacy identity-less locator whose graceful stop times out is therefore never killed by the daemon; once its locator clears, its pane is an unrecorded shim pane that `reconcileTmuxWindows` reaps after the grace period."
+    },
+    {
+      "decision": "Delete the `tmuxPaneId` backfill blocks in `probe`/`controllerAlive`, and `tmux.firstPaneId` + `tmux.windowAlive`.",
+      "why": "A locator without a pane id has no identity, so it never verifies and is retired/resurrected on first probe onto a fully-recorded locator: the backfill is unreachable. `windowAlive`'s only caller was `probedWindowId`, which now verifies recorded panes instead. `reconcileTmuxWindows`' exemption for pane-id-less locators stays (its comment is rewritten to name the new mechanism by which it shrinks)."
+    },
+    {
+      "decision": "Do NOT add `panePid`/`paneStartTicks` to the redacted `GET /legion/v1/state` projection (`api/state.ts`).",
+      "why": "That response is a strict allowlist validated against `LegionDaemonApi.State.response` in `@legion/contracts`; extending it is a contracts change outside the spec's change set. `state.json` carries the identity for diagnosis."
+    }
+  ],
+  "nonGoals": [
+    "No Runtime abstraction, no Kubernetes/`--connect` shim changes (LEGION-19).",
+    "No change to `reconnectWorkers`' socket-first probe; identity reaches an unconfirmed boot via the watchdog it re-arms and a root via the registration deadline / resync probe (spec Design).",
+    "No change to `reconcileTmuxWindows` logic.",
+    "No `@legion/contracts` change; no `api/state.ts` change.",
+    "No smoke-rig (`scripts/smoke`) work; the tester owns the acceptance-3 throwaway-tmux driver. Task 6 has a two-minute implementer smoke only."
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Pure /proc/<pid>/stat field-22 parser with unit tests",
+      "files": {
+        "create": [
+          "packages/daemon/src/daemon/proc-stat.ts",
+          "packages/daemon/src/daemon/__tests__/proc-stat.test.ts"
+        ]
+      },
+      "interfaces": {
+        "produces": "export function parseProcStatStartTicks(stat: string): number — throws Error on a malformed line."
+      },
+      "steps": [
+        {
+          "step": "Write the failing test file",
+          "path": "packages/daemon/src/daemon/__tests__/proc-stat.test.ts",
+          "code": "import { describe, expect, it } from \"bun:test\";\nimport { parseProcStatStartTicks } from \"../proc-stat\";\n\n// Fields 3..52 of a real `/proc/<pid>/stat` line for a shell; field 22 (starttime) is 1234567.\nconst TAIL =\n  \"S 1 4242 4242 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 1234567 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\";\n\ndescribe(\"parseProcStatStartTicks\", () => {\n  it(\"reads field 22 (starttime) from an ordinary stat line\", () => {\n    expect(parseProcStatStartTicks(`4242 (sh) ${TAIL}\\n`)).toBe(1234567);\n  });\n\n  it(\"counts fields only after the last `)`, so a comm containing spaces or parentheses cannot shift them\", () => {\n    expect(parseProcStatStartTicks(`4242 (tmux: server) ${TAIL}`)).toBe(1234567);\n    expect(parseProcStatStartTicks(`4242 (a) b (c)) ${TAIL}`)).toBe(1234567);\n  });\n\n  it(\"throws on a line with no comm terminator or too few fields, never returning a guess\", () => {\n    expect(() => parseProcStatStartTicks(\"4242 sh S 1 2\")).toThrow(/comm terminator/);\n    expect(() => parseProcStatStartTicks(\"4242 (sh) S 1 2 3\")).toThrow(/starttime/);\n  });\n\n  // Proves the last-`)` split and the field index hold against a real kernel line, not only\n  // the hand-written one above.\n  it(\"parses this process's own /proc/self/stat line\", async () => {\n    const stat = await Bun.file(\"/proc/self/stat\").text();\n    expect(parseProcStatStartTicks(stat)).toBeGreaterThan(0);\n  });\n});"
+        },
+        {
+          "step": "Run it; expect FAIL: cannot resolve `../proc-stat`",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/proc-stat.test.ts"
+        },
+        {
+          "step": "Write the parser",
+          "path": "packages/daemon/src/daemon/proc-stat.ts",
+          "code": "/**\n * Field 22 (`starttime`) of a `/proc/<pid>/stat` line: the process's start time in clock ticks\n * since boot. Stable for the process's whole life, so together with the pid it is the identity a\n * pane locator records at launch and re-checks before trusting (or killing) that pane. Field 2\n * (`comm`) is the executable name in parentheses and may itself contain spaces or parentheses\n * (`(tmux: server)`), so fields are counted only after the LAST `)`: what follows it is field 3\n * onward, which makes `starttime` the 20th whitespace-separated token there. Throws on a\n * malformed line -- a guessed value here could let a stale pane verify as ours.\n */\nexport function parseProcStatStartTicks(stat: string): number {\n  const commEnd = stat.lastIndexOf(\")\");\n  if (commEnd === -1) {\n    throw new Error(`malformed /proc/<pid>/stat line (no comm terminator): ${stat.trim()}`);\n  }\n  const fields = stat.slice(commEnd + 1).trim().split(/\\s+/);\n  const token = fields[22 - 3];\n  if (token === undefined || !/^\\d+$/.test(token)) {\n    throw new Error(`malformed /proc/<pid>/stat line (no starttime field): ${stat.trim()}`);\n  }\n  const ticks = Number(token);\n  if (!Number.isSafeInteger(ticks)) {\n    throw new Error(`/proc/<pid>/stat starttime out of range: ${token}`);\n  }\n  return ticks;\n}"
+        },
+        {
+          "step": "Run it; expect PASS (4 tests)",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/proc-stat.test.ts"
+        },
+        {
+          "step": "Commit",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" describe -m \"daemon: parse /proc/<pid>/stat start ticks\" && jj -R \"$LEGION_WORKSPACE\" new"
+        }
+      ],
+      "acceptance": "proc-stat.test.ts green; `4242 (a) b (c)) …` parses to 1234567; malformed input throws."
+    },
+    {
+      "id": 2,
+      "title": "State schema: pane identity on every locator, version 24",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/legion-state.ts",
+          "packages/daemon/src/daemon/__tests__/legion-state.test.ts"
+        ]
+      },
+      "interfaces": {
+        "produces": "TmuxWindowLocator & WorkerLocator gain `panePid?: number; paneStartTicks?: number`; `LegionState.controllerLocator` Pick includes both; `LegionState.version: 24`; `newLegionState` writes 24; `migrateV23State(state)`."
+      },
+      "steps": [
+        {
+          "step": "Update the existing version literal and write two failing tests",
+          "path": "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+          "detail": "Line ~108: `version: 23` -> `version: 24` in the init test (retitle it 'initializes empty v24 state …'). Then add, next to the v22->v23 test (~line 742):",
+          "code": "  it(\"migrates v23 state to v24 unchanged, leaving a pre-identity locator without panePid/paneStartTicks and backing up the v23 bytes\", async () => {\n    tempDir = await mkdtemp(path.join(os.tmpdir(), \"legion-state-v23-\"));\n    const file = path.join(tempDir, \"state.json\");\n    // stateWithTree()'s tree locator has no tmuxPaneId and no identity: exactly a locator\n    // persisted before this field existed. It must load as-is (never cleared, never backfilled).\n    const current = stateWithTree();\n    const original = JSON.stringify({ ...current, version: 23 });\n    await writeFile(file, original, \"utf8\");\n\n    expect(await loadState(file, initialState)).toEqual(current);\n    expect(await readFile(`${file}.v23.bak`, \"utf8\")).toBe(original);\n  });\n\n  it(\"persists and reloads panePid/paneStartTicks on tree, worker, and controller locators\", async () => {\n    tempDir = await mkdtemp(path.join(os.tmpdir(), \"legion-state-identity-\"));\n    const file = path.join(tempDir, \"state.json\");\n    const state = stateWithTree();\n    const tree = state.trees[issue];\n    if (!tree?.locator) throw new Error(\"fixture tree is missing a locator\");\n    tree.locator = { ...tree.locator, tmuxPaneId: \"%0\", panePid: 4242, paneStartTicks: 1234567 };\n    state.roles[roleToken(initialState.project, issue, \"tester\")] = {\n      issue,\n      role: \"tester\",\n      locator: {\n        tmuxSession: \"legion-omp-project\",\n        tmuxWindowId: \"@42\",\n        tmuxPaneId: \"%7\",\n        socketPath: \"/state/workers/tester.sock\",\n        panePid: 4243,\n        paneStartTicks: 1234570,\n      },\n    };\n    state.controllerLocator = {\n      tmuxSession: \"legion-omp-project\",\n      tmuxWindowId: \"@1\",\n      tmuxPaneId: \"%1\",\n      socketPath: \"/state/workers/controller.sock\",\n      panePid: 4244,\n      paneStartTicks: 1234580,\n    };\n\n    await saveState(file, state);\n\n    expect(await loadState(file, initialState)).toEqual(state);\n  });"
+        },
+        {
+          "step": "Run; expect FAIL (version-24 literal; the strict schema rejects the identity fields; the v23 fixture currently loads as the current version without a .bak)",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts"
+        },
+        {
+          "step": "Types",
+          "path": "packages/daemon/src/daemon/legion-state.ts",
+          "detail": "In `TmuxWindowLocator` (line ~61) and `WorkerLocator` (line ~110) add the two fields below after `ompSessionFile`; in `LegionState.controllerLocator` (line ~172) extend the Pick to `\"tmuxSession\" | \"tmuxWindowId\" | \"tmuxPaneId\" | \"socketPath\" | \"panePid\" | \"paneStartTicks\"`; `LegionState.version: 24`.",
+          "code": "  /** The pane's root process id as tmux reported it at launch, paired with `paneStartTicks`:\n   * together the identity `verifyPaneProcess` (processes.ts) re-checks before ever trusting or\n   * killing this pane. A recreated tmux server hands out the same pane ids again, so the id\n   * alone can name some other role's live process. Absent only on a locator persisted before\n   * this field existed; such a locator never verifies and is treated as dead on its first probe. */\n  panePid?: number;\n  /** Field 22 of `/proc/<panePid>/stat` (start time in clock ticks since boot), read at launch. */\n  paneStartTicks?: number;"
+        },
+        {
+          "step": "Zod schemas",
+          "detail": "Add to the three locator object schemas — `TreeStateSchema.locator` (~line 236), `WorkerLocatorSchema` (~285), `LegionStateSchema.controllerLocator` (~346):",
+          "code": "        panePid: z.number().int().positive().optional(),\n        paneStartTicks: z.number().int().nonnegative().optional(),"
+        },
+        {
+          "step": "Version bump",
+          "detail": "`LegionStateSchema.version: z.literal(24)`; `newLegionState` returns `version: 24`; `loadState`: `if (version !== 24)`; append `migrateV23State` to the `migrations` array after `migrateV22State`; add the function after `migrateV22State`:",
+          "code": "/** v23 -> v24: every locator (`TreeState.locator`, `WorkerLocator`, `controllerLocator`) gains\n * optional `panePid`/`paneStartTicks` (see `TmuxWindowLocator`) -- a pure version bump. A\n * locator persisted before this change is deliberately left without identity, neither cleared\n * nor backfilled: `verifyPaneProcess` never verifies it, so its first probe treats it as dead\n * and the ordinary path resurrects (`--resume`) or retires it exactly once. Clearing it here\n * would strand a root instead (the resync probe visits only located trees); backfilling it from\n * the live pane would trust the very reissued-pane-id ambiguity this field exists to remove. */\nfunction migrateV23State(state: unknown): unknown {\n  if (!recordValue(state) || state.version !== 23) return state;\n  return { ...state, version: 24 };\n}"
+        },
+        {
+          "step": "Run; expect PASS",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/legion-state.test.ts"
+        },
+        {
+          "step": "Commit",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" describe -m \"daemon: record pane pid and start ticks on every locator (state v24)\" && jj -R \"$LEGION_WORKSPACE\" new"
+        }
+      ],
+      "acceptance": "legion-state.test.ts green; a v23 file loads unchanged and leaves `state.json.v23.bak`; identity fields round-trip through save/load on all three locator kinds."
+    },
+    {
+      "id": 3,
+      "title": "Test fixtures + failing tests for every acceptance line (processes.test.ts, worker-boot-watchdog.test.ts)",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/__tests__/processes.test.ts",
+          "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts"
+        ]
+      },
+      "interfaces": {
+        "consumes": "Task 2 locator fields. Task 4's `ProcessManagerDeps.readProcessStat?(pid): Promise<string>` and `WorkerBootWatchdogDeps.paneProcessVerified(locator: WorkerLocator): Promise<boolean>` (write the tests against these names now; they fail to type-check until Task 4)."
+      },
+      "fixtureNotes": [
+        "`manager(state?, options?, {skipEnablePromotion?})` (~line 300) returns `{manager, state, commands, controlRequests, publications, revokedSessions}`; `commands` captures only the DEFAULT runner — a custom `run` must push into its own array. Default runner: `new-window` -> `@42 %1 12345`, `split-window` -> `%2 12345`, `list-panes` -> `livePanes(command)` (pid 12345) once any window launched.",
+        "`livePanes(command, pid = 12345)` (~line 232) answers `list-panes -F '#{pane_id} #{pane_pid}'` for whatever `-t` target with that pid. `liveRun` (~213). `tree(state, issue=root, generation=1)` (~163) seeds an active tree with locator `@42`/`%0`. `temporaryDir()` (~81), `config(stateDir)`, `flushEventLoopUntil(cond, maxTicks)` (~75), `fakeWorkerRpcClient()` (~92).",
+        "Existing patterns to copy: resurrect with --resume (line ~2186), spawnRoot launch failure rollback (~1591-1600), spawnWorker fresh window vs split (~5588, ~5713), closeTree kill-pane per pane (~2503), reconnectWorkers retire+enqueue with `skipEnablePromotion` (~8837), watchdog re-arm through ProcessManager with a fake clock (~3527), controller retire+respawn (~3807), resync probe tick (~9802).",
+        "Watchdog file: `baseDeps(overrides)` (~74), `trackRealTimers()` (~28), `locator` const and `root/child/role/token` consts at the top."
+      ],
+      "steps": [
+        {
+          "step": "Add fixture helpers next to `livePanes` (~line 232) and extend `manager()`",
+          "path": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+          "detail": "Extend `manager()`'s `options` type with `readProcessStat?: (pid: number) => Promise<string>` and add `readProcessStat: async (pid) => procStat(pid)` to the default deps object (beside `readProcessCmdline`). Add `...paneIdentity()` to the locator `tree()` seeds. Update the `livePanes` doc comment: it no longer mentions `firstPaneId`/`windowAlive` (both deleted in Task 4); the bare-`<pid>` branch may be pruned if nothing emits `list-panes -F '#{pane_id}'` any more.",
+          "code": "/** Start ticks the fixture's default `readProcessStat` reports for every pid, so a locator\n * seeded with `paneIdentity()` verifies against the default fake tmux (pid 12345). */\nconst DEFAULT_START_TICKS = 4242;\n\n/** A `/proc/<pid>/stat` line whose field 22 (starttime) is `startTicks`. */\nfunction procStat(pid: number, startTicks = DEFAULT_START_TICKS): string {\n  return `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 ${startTicks} 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\\n`;\n}\n\n/** The process identity a seeded locator needs to verify: `pid` must be what the test's fake\n * `list-panes` reports for that pane and `startTicks` what its `readProcessStat` reports. */\nfunction paneIdentity(pid = 12345, startTicks = DEFAULT_START_TICKS) {\n  return { panePid: pid, paneStartTicks: startTicks };\n}"
+        },
+        {
+          "step": "T1 (acceptance 1; spec Testing 1; spec Errors rows 2-3) — probe/resurrect on a reissued pane: different pid, same pid with a different start, and an unreadable /proc stat",
+          "code": "  it.each([\n    [\"another process took the pane id\", { pid: 777, startTicks: DEFAULT_START_TICKS }],\n    [\"the same pid came back with a different start time\", { pid: 12345, startTicks: 999_999 }],\n    // Errors row 3: the process vanished between `list-panes` and the `/proc` read -- unknown\n    // is never alive.\n    [\"its /proc stat vanished after list-panes reported it\", { pid: 12345, startTicks: undefined }],\n  ])(\n    \"probe reports a root dead when its recorded pane now runs another process (%s), and resurrecting it resumes the session without killing that pane\",\n    async (_case, reissued) => {\n      const stateDir = await temporaryDir();\n      const sessionFile = path.join(stateDir, \"architect-session.json\");\n      await writeFile(sessionFile, \"{}\", \"utf8\");\n      const state = newLegionState(\"omp\", 1);\n      tree(state); // %0 in @42, recorded pid 12345 / DEFAULT_START_TICKS\n      const locator = state.trees[root].locator;\n      if (!locator) throw new Error(\"test root is missing a locator\");\n      state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };\n      const commands: string[][] = [];\n      const { manager: processes } = manager(state, {\n        config: config(stateDir),\n        readProcessStat: async (pid) => {\n          if (pid !== reissued.pid) return procStat(pid);\n          if (reissued.startTicks === undefined) {\n            throw Object.assign(new Error(\"ENOENT\"), { code: \"ENOENT\" });\n          }\n          return procStat(pid, reissued.startTicks);\n        },\n        run: async (command) => {\n          commands.push(command);\n          if (command[0] !== \"tmux\") return { stdout: \"\", exitCode: 0 };\n          if (command[3] === \"list-panes\") return { stdout: `%0 ${reissued.pid}\\n`, exitCode: 0 };\n          if (command[3] === \"has-session\") return { stdout: \"\", exitCode: 0 };\n          if (command[3] === \"new-window\") return { stdout: \"@43 %5 555\\n\", exitCode: 0 };\n          return { stdout: \"\", exitCode: 0 };\n        },\n      });\n\n      expect(await processes.probe(root)).toBe(\"dead\");\n      await processes.resurrect(root);\n\n      expect(commands.some((c) => c[0] === \"tmux\" && c[3] === \"kill-pane\")).toBeFalse();\n      const launch = commands.find((c) => c[0] === \"tmux\" && c[3] === \"new-window\");\n      expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);\n      expect(state.trees[root].locator).toMatchObject({\n        tmuxWindowId: \"@43\",\n        tmuxPaneId: \"%5\",\n        panePid: 555,\n        paneStartTicks: DEFAULT_START_TICKS,\n      });\n    }\n  );"
+        },
+        {
+          "step": "T-legacy (spec Errors row 1; replaces the deleted backfill test at ~9745) — identity-less locator is dead on first probe, logged, resurrected with --resume",
+          "detail": "Delete `it(\"backfills a tree locator's missing pane id once probe confirms it alive, …\")` (~9745-9800): it pins the removed backfill. Add:",
+          "code": "  it(\"treats a locator recorded before identity tracking as dead on its first probe -- even though its pane is live and running OMP -- logging that once and resuming the root onto a fresh, fully-recorded pane\", async () => {\n    const stateDir = await temporaryDir();\n    const sessionFile = path.join(stateDir, \"architect-session.json\");\n    await writeFile(sessionFile, \"{}\", \"utf8\");\n    const state = newLegionState(\"omp\", 1);\n    tree(state);\n    const locator = state.trees[root].locator;\n    if (!locator) throw new Error(\"test root is missing a locator\");\n    const { panePid: _pid, paneStartTicks: _ticks, ...legacy } = locator;\n    state.trees[root].locator = { ...legacy, ompSessionFile: sessionFile };\n    state.admission.active = [root];\n    const errors = vi.spyOn(console, \"error\").mockImplementation(() => {});\n    const commands: string[][] = [];\n    const { manager: processes } = manager(state, {\n      config: config(stateDir),\n      run: async (command) => {\n        commands.push(command);\n        if (command[0] !== \"tmux\") return { stdout: \"\", exitCode: 0 };\n        if (command[3] === \"list-panes\") return livePanes(command); // %0 alive, pid 12345, OMP\n        if (command[3] === \"has-session\") return { stdout: \"\", exitCode: 0 };\n        if (command[3] === \"new-window\") return { stdout: \"@43 %5 555\\n\", exitCode: 0 };\n        return { stdout: \"\", exitCode: 0 };\n      },\n    });\n    try {\n      expect(await processes.probe(root)).toBe(\"dead\");\n      expect(errors.mock.calls.flat().join(\"\\n\")).toMatch(/no recorded process identity/);\n      await processes.resurrect(root);\n    } finally {\n      errors.mockRestore();\n    }\n    expect(commands.some((c) => c[0] === \"tmux\" && c[3] === \"kill-pane\")).toBeFalse();\n    expect(commands.find((c) => c[3] === \"new-window\")?.at(-1)).toContain(`--resume=${sessionFile}`);\n    expect(state.trees[root].locator).toMatchObject({ panePid: 555, paneStartTicks: DEFAULT_START_TICKS });\n  });"
+        },
+        {
+          "step": "T2 (acceptance 2; spec Testing 2) — boot reconnect: stale and live claims share a reissued pane id",
+          "detail": "Copy the retire+enqueue wiring from the test at ~8837 (`skipEnablePromotion: true` so the enqueued retry is not launched). Fake clock exactly as the watchdog test at ~3527: `config(stateDir, { workerBootTimeoutSeconds: 1, workerBootRegistrationDeadlineIntervals: 1_000 })`, `now: () => currentTime`, `sleep: async (ms) => { currentTime += ms; await onceEventLoop(); }`. The live claim is unconfirmed and its socket connects; the stale claim is unconfirmed and its socket refuses. Recorded identities differ; the pane now reports the live claim's pid.",
+          "code": "  it(\"reconnectWorkers clears a stale unconfirmed claim whose pane id was reissued to a live sibling -- without killing that pane -- and the live claim's re-armed watchdog verifies its pane at the next interval\", async () => {\n    const state = newLegionState(\"omp\", 1);\n    tree(state);\n    const liveToken = roleToken(\"omp\", root, \"implementer\");\n    const staleToken = roleToken(\"omp\", root, \"tester\");\n    const sharedPane = { tmuxSession: \"legion-omp\", tmuxWindowId: \"@42\", tmuxPaneId: \"%7\" };\n    state.roles[liveToken] = {\n      issue: root, role: \"implementer\", generation: 1, pendingAssignment: \"implement #41\",\n      locator: { ...sharedPane, socketPath: \"/state/workers/live.sock\", ...paneIdentity(2001, 5000) },\n    };\n    state.roles[staleToken] = {\n      issue: root, role: \"tester\", generation: 1, pendingAssignment: \"verify #41\",\n      locator: { ...sharedPane, socketPath: \"/state/workers/stale.sock\", ...paneIdentity(1001, 3000) },\n    };\n    const stateDir = await temporaryDir();\n    const commands: string[][] = [];\n    const errors = vi.spyOn(console, \"error\").mockImplementation(() => {});\n    let currentTime = Date.parse(\"2026-08-24T00:00:00.000Z\");\n    const { manager: processes } = manager(\n      state,\n      {\n        config: config(stateDir, {\n          workerBootTimeoutSeconds: 1,\n          workerBootRegistrationDeadlineIntervals: 1_000,\n        }),\n        now: () => currentTime,\n        sleep: async (ms) => {\n          currentTime += ms;\n          await onceEventLoop();\n        },\n        readProcessStat: async (pid) => procStat(pid, pid === 2001 ? 5000 : 3000),\n        connectWorkerRpc: async (socketPath) => {\n          if (socketPath.endsWith(\"stale.sock\")) throw new Error(\"ECONNREFUSED\");\n          return fakeWorkerRpcClient();\n        },\n        run: async (command) => {\n          commands.push(command);\n          if (command[0] === \"tmux\" && command[3] === \"list-panes\") return { stdout: \"%7 2001\\n\", exitCode: 0 };\n          return { stdout: \"\", exitCode: 0 };\n        },\n      },\n      { skipEnablePromotion: true }\n    );\n    try {\n      await processes.reconnectWorkers();\n      // One watchdog interval for the live claim: its pane verifies (pid 2001 / ticks 5000) so\n      // the watch re-arms instead of retiring -- observed through the re-arm log line.\n      const startTime = currentTime;\n      await flushEventLoopUntil(\n        () =>\n          currentTime - startTime >= 1_000 &&\n          errors.mock.calls.flat().join(\"\\n\").includes(\"re-arming the watch\"),\n        20_000\n      );\n    } finally {\n      processes.dispose();\n      errors.mockRestore();\n    }\n\n    const stale = state.roles[staleToken];\n    const live = state.roles[liveToken];\n    if (!stale || !(\"issue\" in stale) || !live || !(\"issue\" in live)) throw new Error(\"claims missing\");\n    expect(stale.locator).toBeUndefined(); // no longer counts toward the worker cap\n    expect(stale.launchFailures).toBe(1);\n    expect(state.workerAdmission.queue).toEqual([staleToken]);\n    expect(live.locator).toMatchObject({ tmuxPaneId: \"%7\", panePid: 2001 });\n    expect(commands.some((c) => c[0] === \"tmux\" && c[3] === \"kill-pane\")).toBeFalse();\n    const log = errors.mock.calls.flat().join(\"\\n\");\n    expect(log).toMatch(/recorded pid 1001 start 3000/);\n    expect(log).toMatch(/pid 2001/);\n  });"
+        },
+        {
+          "step": "T2b (acceptance 2, the `reconnectRoots` half) — a root whose registration deadline elapses on a reissued pane resurrects with --resume and never kills that pane",
+          "detail": "Mirror ~4151 (\"resurrects directly, once, when the root registration deadline elapses on a dead pane\") exactly — same gated `sleep`, same `has-session`/`new-session`/`new-window` scripting with `new-window` reporting `@4${n} %${n} 1000${n}` — with two changes: (1) `list-panes` reports each launched pane with ITS OWN launched pid while `paneAlive` (build a `Map<paneId, pid>` filled by the `new-window` branch and answer `list-panes -t %N` from it), so the freshly-recorded identity (pid 10001) verifies; (2) instead of `paneAlive = false`, flip the map's entry for `%1` to pid 777 before `firstGate.resolve()` — the pane is live, running OMP (default `readProcessCmdline`), but not the recorded process. Assert as ~4151 does (`windowCount` 2, `generation: 2`, `status: \"active\"`) plus: no `kill-pane -t %1` was issued, the second `new-window` carries `--resume=`, and the new locator is `{ tmuxPaneId: \"%2\", panePid: 10002, paneStartTicks: DEFAULT_START_TICKS }`. Then, in a sibling `it`, seed the same state as a *restart* would see it — `tree.status: \"active\"`, a locator with `paneIdentity(10001)`, `readyConfirmedAt` unset — call `processes.reconnectRoots()` and let the armed deadline elapse the same way; same assertions. That is the boot path acceptance 2 names."
+        },
+        {
+          "step": "T3 (acceptance 3; spec Testing 3) — tmux server recreated under the daemon: every located root resurrects with --resume, nothing kills a reissued id",
+          "detail": "Two active roots recorded on 'server A': root `@42`/`%0` pid 12345 and a second tree (a second root key with its own `tree(state, key)`) `@43`/`%1` pid 12346, both with `ompSessionFile` set to real temp files and identities `paneIdentity(12345)` / `paneIdentity(12346)`. After 'recreate', the fake tmux answers `list-panes` for `%0` -> `%0 999` (another role's OMP) and for `%1` -> exit 1 (gone); `new-window` hands out `@1 %1 <fresh pid>` on the first call then `@2 %2 <fresh pid>` (ids restart from 1). Drive the resync probe composition exactly as index.ts's `onProbe` does: for each tree `if ((await processes.probe(t)) === \"dead\") await processes.resurrect(t)`. Assert: no `kill-pane` at all; both `new-window` commands carry `--resume=<their own session file>`; both trees' new locators carry the fresh pids and DEFAULT_START_TICKS; both generations incremented. (The `runResync` plumbing itself is already covered at ~9802 — do not duplicate it.)"
+        },
+        {
+          "step": "T5 (acceptance 5; spec Testing 5) — stopProcess never kills a pane whose process is not the recorded one",
+          "detail": "Mirror ~2503's closeTree setup with one worker claim on pane `%1` (identity `paneIdentity(12345)`) whose socket refuses (so the stop falls straight through to the kill gate). Fake `list-panes` reports `%1 777`. Spy console.error. Then:",
+          "code": "    await processes.closeTree(root);\n\n    expect(commands.filter((c) => c[0] === \"tmux\" && c[3] === \"kill-pane\")).toEqual([]);\n    expect(state.roles[token]).toBeUndefined(); // claim removed as for an already-gone pane\n    const log = errors.mock.calls.flat().join(\"\\n\");\n    expect(log).toMatch(/not killing pane %1/);\n    expect(log).toMatch(/pid 777/);\n    expect(log).toMatch(/recorded pid 12345 start 4242/);"
+        },
+        {
+          "step": "T6 (acceptance 6; spec Testing 6) — window reuse requires a verified recorded pane",
+          "detail": "Seed `tree(state)` (root `@42`/`%0`, identity 12345) and a planner claim on root with locator `@42`/`%1`, identity `paneIdentity(12346)`. Fake tmux: `list-panes` for any target returns `%0 900\\n%1 901\\n` (both reissued); `new-window` -> `@99 %201 12345`; `split-window` -> `%202 67890`. Call `spawnWorker(root, root, \"tester\", \"verify #41\")`. Assert: a `new-window` was issued, no `split-window`, no `select-layout`, and the tester's locator has `tmuxWindowId: \"@99\"`. Control case as a sibling `it`: same setup but `list-panes` returns `%0 12345\\n%1 12346\\n` -> `split-window -t @42` issued and no second `new-window`."
+        },
+        {
+          "step": "T7b (acceptance 7 end-to-end through ProcessManager) — the boot watchdog retires, never re-arms, when the pane id was reissued",
+          "detail": "Copy the fake-clock wiring of ~3527. `spawnWorker` a planner (default launch `@42 %1 12345`, identity recorded 12345/DEFAULT_START_TICKS). Make `connectWorkerRpc` always refuse. After the launch resolves, flip the fake `list-panes` answer for `%1` to pid 777 (a `let reissued = false` toggled after `spawnWorker`). Advance one interval. Assert: `retireUnconfirmedBoot` ran — claim `locator` undefined, `launchFailures: 1`, token in `state.workerAdmission.queue` (use `skipEnablePromotion: true`); no `kill-pane -t %1`; the re-arm log line never appeared."
+        },
+        {
+          "step": "T-launch-fail (spec Errors row 5) — unreadable stat right after tmux reports the pane is a launch failure",
+          "detail": "Root: mirror ~1591-1600. `readProcessStat: async () => { throw Object.assign(new Error(\"ENOENT\"), { code: \"ENOENT\" }); }`. `await expect(processes.spawnRoot(root)).rejects.toThrow(/exited before its process identity could be recorded/)`; then `state.trees[root]` toEqual the same rolled-back shape that test asserts (`status: \"queued\"`, `launchFailures: 1`, `generation` unchanged, no locator). Worker: mirror ~6718-6727 — `spawnWorker` rejects with the same message, `claim.launchFailures === 1`, `claim.locator` undefined."
+        },
+        {
+          "step": "T-controller — controllerAlive with a reissued pane",
+          "detail": "Mirror ~3807. `state.controllerLocator` with `%1`, `...paneIdentity(12345)`; fake `list-panes` reports `%1 777`; `new-window` -> `@44 %3 3333`. `await processes.ensureController()`. Assert: a `new-window` named `controller` was issued; no `kill-pane` at all; `state.controllerLocator` toMatchObject `{ tmuxWindowId: \"@44\", tmuxPaneId: \"%3\", panePid: 3333, paneStartTicks: DEFAULT_START_TICKS }`."
+        },
+        {
+          "step": "Watchdog unit tests",
+          "path": "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts",
+          "detail": "In `baseDeps` replace `tmux: {...}` and `isOmpPane: async () => false` with `paneProcessVerified: async () => false`. In every test overriding `isOmpPane: async () => true` (+ a `tmux.run` list-panes stub) replace both with `paneProcessVerified: async () => true`. Rewrite the pid-probe test at ~317 (\"probes the worker's own pane pid, not its window's first pane…\") — that behaviour now lives in `verifyPaneProcess` and is covered by T1 — as the call-order contract below. Add the reissued-pane test.",
+          "code": "  it(\"decides the pane branch by paneProcessVerified(locator) -- never the pane id alone -- consulting it before the socket, and retires when both fail\", async () => {\n    const calls: string[] = [];\n    const armed = { ...locator, panePid: 4242, paneStartTicks: 1234567 };\n    const watchdog = new WorkerBootWatchdog(\n      baseDeps({\n        workerBootTimeoutSeconds: () => 0.1,\n        paneProcessVerified: async (probed) => {\n          calls.push(`pane:${probed.tmuxPaneId}:${probed.panePid}:${probed.paneStartTicks}`);\n          return false;\n        },\n        workerClient: async () => {\n          calls.push(\"socket\");\n          throw new Error(\"ECONNREFUSED\");\n        },\n        retireUnconfirmedBoot: async () => {\n          calls.push(\"retire\");\n        },\n      })\n    );\n    watchdog.arm(root, child, role, token, armed, 1);\n    await new Promise((resolve) => setTimeout(resolve, 400));\n    // The interval's connect-retry loop calls workerClient repeatedly first; the decision at the\n    // interval's end is pane -> socket -> retire.\n    expect(calls.slice(-3)).toEqual([\"pane:%7:4242:1234567\", \"socket\", \"retire\"]);\n  });\n\n  it(\"retires an unconfirmed boot whose pane fails identity (a reissued pane id running another OMP) instead of re-arming, once its socket refuses\", async () => {\n    const retired: string[] = [];\n    const errors = vi.spyOn(console, \"error\").mockImplementation(() => {});\n    const watchdog = new WorkerBootWatchdog(\n      baseDeps({\n        workerBootTimeoutSeconds: () => 0.1,\n        paneProcessVerified: async () => false,\n        workerClient: async () => {\n          throw new Error(\"ECONNREFUSED\");\n        },\n        retireUnconfirmedBoot: async (t) => {\n          retired.push(t);\n        },\n      })\n    );\n    try {\n      watchdog.arm(root, child, role, token, locator, 1);\n      await new Promise((resolve) => setTimeout(resolve, 400));\n      expect(retired).toEqual([token]);\n      expect(errors.mock.calls.flat().join(\"\\n\")).not.toMatch(/re-arming the watch/);\n    } finally {\n      errors.mockRestore();\n    }\n  });"
+        },
+        {
+          "step": "Run both files; expect the NEW tests to FAIL for the right reasons (type errors on `readProcessStat`/`paneProcessVerified`, `probe` returning \"alive\", a `split-window`/`kill-pane` being issued). Do not fix them yet — Task 4 does.",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts packages/daemon/src/daemon/__tests__/processes.test.ts"
+        }
+      ],
+      "acceptance": "Every spec Testing line has a named `it` in the file the spec names; each fails before Task 4."
+    },
+    {
+      "id": 4,
+      "title": "processes.ts + worker-boot-watchdog.ts + tmux.ts: verify a pane is the process its locator recorded",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/processes.ts",
+          "packages/daemon/src/daemon/worker-boot-watchdog.ts",
+          "packages/daemon/src/daemon/tmux.ts"
+        ]
+      },
+      "interfaces": {
+        "consumes": "`parseProcStatStartTicks` (Task 1); locator fields (Task 2).",
+        "produces": "`ProcessManagerDeps.readProcessStat?(pid: number): Promise<string>`; module types `PaneLocator`, `PaneVerdict`; module fn `describePaneVerdict(locator, verdict): string`; private methods `readPaneStartTicks(pid): Promise<number | undefined>`, `recordedPaneIdentity(paneId, pid, token): Promise<{panePid, paneStartTicks}>`, `verifyPaneProcess(locator: PaneLocator): Promise<PaneVerdict>`, `recordedLocatorsInWindow(issue, windowId): PaneLocator[]`; `WorkerBootWatchdogDeps.paneProcessVerified(locator: WorkerLocator): Promise<boolean>` (replaces `tmux`, `isOmpPane`)."
+      },
+      "steps": [
+        {
+          "step": "Dep + import",
+          "detail": "processes.ts: `import { parseProcStatStartTicks } from \"./proc-stat\";` (alphabetical among the `./` imports). In `ProcessManagerDeps` after `readProcessCmdline?` (line ~98):",
+          "code": "  /** Reads `/proc/<pid>/stat` -- overridable for tests exactly like `readProcessCmdline`;\n   * rejects once the process is gone. */\n  readProcessStat?(pid: number): Promise<string>;"
+        },
+        {
+          "step": "Module-level types and formatter",
+          "detail": "After `ControlDirective` (line ~71):",
+          "code": "/** The locator shape every pane-identity check and stop path accepts: a tree locator, a worker\n * locator, and the controller locator all satisfy it structurally. */\ntype PaneLocator = {\n  tmuxWindowId: string;\n  tmuxPaneId?: string;\n  socketPath?: string;\n  panePid?: number;\n  paneStartTicks?: number;\n};\n\n/** `verifyPaneProcess`'s verdict. Every `verified: false` names why and carries whatever the\n * pane currently reports, so a caller's log line can show both identities side by side. */\ntype PaneVerdict =\n  | { verified: true }\n  | { verified: false; reason: \"no-identity\" | \"pane-gone\" }\n  | {\n      verified: false;\n      reason: \"pid-mismatch\" | \"stat-unreadable\" | \"not-omp\";\n      observedPid: number;\n    }\n  | { verified: false; reason: \"start-mismatch\"; observedPid: number; observedStartTicks: number };\n\nfunction describePaneVerdict(\n  locator: PaneLocator,\n  verdict: Exclude<PaneVerdict, { verified: true }>\n): string {\n  const pane = locator.tmuxPaneId ?? locator.tmuxWindowId;\n  const recorded = `recorded pid ${locator.panePid ?? \"?\"} start ${locator.paneStartTicks ?? \"?\"}`;\n  switch (verdict.reason) {\n    case \"no-identity\":\n      return `pane ${pane} has no recorded process identity (locator predates identity tracking)`;\n    case \"pane-gone\":\n      return `pane ${pane} is gone`;\n    case \"pid-mismatch\":\n      return `pane ${pane} now runs pid ${verdict.observedPid} (${recorded})`;\n    case \"stat-unreadable\":\n      return `pane ${pane} pid ${verdict.observedPid} has no readable /proc stat (${recorded})`;\n    case \"start-mismatch\":\n      return `pane ${pane} runs pid ${verdict.observedPid} started at ${verdict.observedStartTicks} (${recorded})`;\n    case \"not-omp\":\n      return `pane ${pane} pid ${verdict.observedPid} is not running OMP (${recorded})`;\n  }\n}"
+        },
+        {
+          "step": "Identity methods",
+          "detail": "In `ProcessManager`, directly after `isOmpPane` (line ~2722):",
+          "code": "  /** Field 22 of `/proc/<pid>/stat`, or `undefined` when the file cannot be read (the process is\n   * gone). A malformed line throws from `parseProcStatStartTicks`: that is a bug, never \"dead\". */\n  private async readPaneStartTicks(pid: number): Promise<number | undefined> {\n    let stat: string;\n    try {\n      stat = this.deps.readProcessStat\n        ? await this.deps.readProcessStat(pid)\n        : await readFile(`/proc/${pid}/stat`, \"utf8\");\n    } catch {\n      return undefined;\n    }\n    return parseProcStatStartTicks(stat);\n  }\n\n  /** The identity `launchShimmedProcess`/`spawnController` record for a pane tmux just reported.\n   * Throws when its process is already gone -- a launch failure through the caller's existing\n   * path (`launchWorker`'s catch, `spawnRoot`'s rollback, `ensureController`'s rejection); the\n   * pane closes itself with its process, so there is nothing left to record or reap. */\n  private async recordedPaneIdentity(\n    paneId: string,\n    pid: number,\n    token: string\n  ): Promise<{ panePid: number; paneStartTicks: number }> {\n    const paneStartTicks = await this.readPaneStartTicks(pid);\n    if (paneStartTicks === undefined) {\n      throw new Error(\n        `pane ${paneId} for ${token} exited before its process identity could be recorded (/proc/${pid}/stat unreadable)`\n      );\n    }\n    return { panePid: pid, paneStartTicks };\n  }\n\n  /**\n   * Is the process this locator recorded still this pane's process? The pane id alone is not\n   * proof: a recreated tmux server reissues ids from `%1`, so a stale locator's id can name some\n   * other role's live pane -- one running OMP, so `isOmpPane` alone passes. Requires the pane's\n   * current pid to equal the recorded `panePid`, its `/proc/<pid>/stat` start ticks to equal the\n   * recorded `paneStartTicks`, then the existing `isOmpPane` check. A locator without identity\n   * (persisted before the fields existed) never verifies. Every liveness probe (`probe`,\n   * `controllerAlive`, the boot watchdog's pane branch), every daemon-issued `kill-pane`\n   * (`stopProcess`), and window reuse (`probedWindowId`) go through this.\n   */\n  private async verifyPaneProcess(locator: PaneLocator): Promise<PaneVerdict> {\n    if (\n      locator.tmuxPaneId === undefined ||\n      locator.panePid === undefined ||\n      locator.paneStartTicks === undefined\n    ) {\n      return { verified: false, reason: \"no-identity\" };\n    }\n    const pid = await tmux.panePid(this.tmux, locator.tmuxPaneId);\n    if (pid === undefined) return { verified: false, reason: \"pane-gone\" };\n    if (pid !== locator.panePid) {\n      return { verified: false, reason: \"pid-mismatch\", observedPid: pid };\n    }\n    const ticks = await this.readPaneStartTicks(pid);\n    if (ticks === undefined) return { verified: false, reason: \"stat-unreadable\", observedPid: pid };\n    if (ticks !== locator.paneStartTicks) {\n      return { verified: false, reason: \"start-mismatch\", observedPid: pid, observedStartTicks: ticks };\n    }\n    if (!(await this.isOmpPane(pid))) return { verified: false, reason: \"not-omp\", observedPid: pid };\n    return { verified: true };\n  }"
+        },
+        {
+          "step": "Record identity in launchShimmedProcess (line ~2382)",
+          "detail": "Hoist `const token = roleToken(this.deps.state.project, issue, role);` above `writePaneSecret` and use it there. The serialized callback returns `{ tmuxWindowId, tmuxPaneId, panePid }` — `panePid: pid` from `splitWindow`'s `{ paneId, pid }` and `panePid: window.pid` from `openWindow`. After the serialize:",
+          "code": "    const identity = await this.recordedPaneIdentity(tmuxPaneId, panePid, token);\n    return { tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath, ...identity };"
+        },
+        {
+          "step": "Record identity in spawnController (line ~2644)",
+          "code": "      const window = await tmux.openWindow(this.tmux, session, \"controller\", [...env, shellCommand], session);\n      const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);\n      this.deps.state.controllerLocator = {\n        tmuxSession: session,\n        tmuxWindowId: window.windowId,\n        tmuxPaneId: window.paneId,\n        socketPath,\n        ...identity,\n      };"
+        },
+        {
+          "step": "launchWorker catch comment (line ~2570-2571)",
+          "detail": "Amend the parenthetical `which only ever runs for a failure *before* a pane exists` to: `which only ever runs for a failure *before* a pane exists, or for a pane whose process was already gone when its identity was read -- see recordedPaneIdentity`."
+        },
+        {
+          "step": "probe (line ~1688) — replace body and doc comment; the backfill block goes",
+          "code": "  /** Probes a tree's recorded locator for liveness: alive only when `verifyPaneProcess` confirms\n   * the pane still runs the process the locator recorded. A locator that fails that check while\n   * its pane id still names a live pane is logged with both identities -- the reissued-pane-id\n   * case the check exists for -- then reported dead so the ordinary resurrection path resumes\n   * the root onto a fresh, fully-recorded pane. */\n  async probe(treeKey: IssueKey): Promise<\"alive\" | \"dead\"> {\n    const locator = this.deps.state.trees[treeKey]?.locator;\n    if (!locator) return \"dead\";\n    const verdict = await this.verifyPaneProcess(locator);\n    if (verdict.verified) return \"alive\";\n    if (verdict.reason !== \"pane-gone\") {\n      console.error(\n        `[legion] treating ${treeKey}'s root as dead: ${describePaneVerdict(locator, verdict)}`\n      );\n    }\n    return \"dead\";\n  }"
+        },
+        {
+          "step": "controllerAlive (line ~2875) — same shape; backfill block goes",
+          "code": "  /** Probes the controller's recorded locator for liveness through `verifyPaneProcess`; a\n   * locator that does not verify is cleared so `ensureController` spawns afresh. */\n  private async controllerAlive(): Promise<boolean> {\n    const locator = this.deps.state.controllerLocator;\n    if (!locator) return false;\n    const verdict = await this.verifyPaneProcess(locator);\n    if (verdict.verified) return true;\n    if (verdict.reason !== \"pane-gone\") {\n      console.error(\n        `[legion] treating the controller as dead: ${describePaneVerdict(locator, verdict)}`\n      );\n    }\n    delete this.deps.state.controllerLocator;\n    return false;\n  }"
+        },
+        {
+          "step": "stopProcess (line ~2786) and stopProcessSerialized (line ~2831) — take `locator: PaneLocator`; gate the kill",
+          "detail": "Keep the existing `if (!locator.tmuxPaneId) throw …missing a pane id` first (a corrupt/legacy record). Then, before `tmux.killPane`:",
+          "code": "    // The same identity check every probe runs, as the gate on the daemon's own kill: a pane\n    // whose process is not the one this locator recorded is some other role's pane wearing a\n    // reissued id, and killing it would repeat -- from inside the daemon -- exactly the operator\n    // mistake a stale locator invites. Treated as already gone (the `PANE_GONE_STDERR`\n    // contract): return normally so the caller clears this locator. A legacy identity-less\n    // locator is never killed by the daemon either; once cleared, its pane is an unrecorded\n    // shim pane `reconcileTmuxWindows` reaps after the grace period.\n    const verdict = await this.verifyPaneProcess(locator);\n    if (!verdict.verified) {\n      if (verdict.reason !== \"pane-gone\") {\n        console.error(\n          `[legion] not killing pane ${locator.tmuxPaneId} for ${token}, treating it as already gone: ${describePaneVerdict(locator, verdict)}`\n        );\n      }\n      return;\n    }"
+        },
+        {
+          "step": "Extend stopProcess's doc comment (line ~2766-2785)",
+          "detail": "Add one sentence after the `PANE_GONE_STDERR` sentence: `A pane that fails verifyPaneProcess -- not the process this locator recorded -- is treated the same way, and is never killed.`"
+        },
+        {
+          "step": "probedWindowId (line ~2228) + new helper",
+          "code": "  /** Every recorded locator for `issue` whose pane lives in `windowId`: the tree's own root\n   * locator (when `issue` is a root) and each of its worker claims'. */\n  private recordedLocatorsInWindow(issue: IssueKey, windowId: string): PaneLocator[] {\n    const found: PaneLocator[] = [];\n    const treeLocator =\n      this.rootForIssue(issue) === issue ? this.deps.state.trees[issue]?.locator : undefined;\n    if (treeLocator?.tmuxWindowId === windowId) found.push(treeLocator);\n    for (const claim of Object.values(this.deps.state.roles)) {\n      if (\"issue\" in claim && claim.issue === issue && claim.locator?.tmuxWindowId === windowId) {\n        found.push(claim.locator);\n      }\n    }\n    return found;\n  }\n\n  /** A recorded window id is reused for a new pane only when at least one recorded pane in it\n   * still verifies as the process its locator recorded (`verifyPaneProcess`). A live window\n   * alone proves nothing: after the private tmux server is recreated, the same `@N` names some\n   * other issue's window, and the in-memory `issueWindowIds` map outlives the cleared locators\n   * that once pointed there -- splitting into it would put this issue's worker in a stranger's\n   * window. Otherwise the caller opens a fresh window (`rewriteIssueWindowId` then repoints every\n   * locator for the issue), and the stale id is dropped from the map here so nothing hands it\n   * out again in between. */\n  private async probedWindowId(issue: IssueKey): Promise<string | undefined> {\n    const candidate = this.recordedWindowId(issue);\n    if (!candidate) return undefined;\n    for (const locator of this.recordedLocatorsInWindow(issue, candidate)) {\n      if ((await this.verifyPaneProcess(locator)).verified) return candidate;\n    }\n    if (this.issueWindowIds.get(issue) === candidate) this.issueWindowIds.delete(issue);\n    return undefined;\n  }"
+        },
+        {
+          "step": "Watchdog wiring in the ProcessManager constructor (line ~336-345)",
+          "detail": "Remove `tmux: this.tmux,` and `isOmpPane: (pid) => this.isOmpPane(pid),`; add:",
+          "code": "      paneProcessVerified: async (locator) => (await this.verifyPaneProcess(locator)).verified,"
+        },
+        {
+          "step": "worker-boot-watchdog.ts",
+          "detail": "Remove the `TmuxServer` type import and `import * as tmux`. In `WorkerBootWatchdogDeps` replace `tmux: TmuxServer;` and `isOmpPane(pid: number): Promise<boolean>;` with the dep below. In `probeAlive`, replace the two pid lines with `if (await this.deps.paneProcessVerified(locator)) return true;` and rewrite the first sentence of its doc comment: `True if this watch should treat \\`locator\\` as still alive: either its tmux pane still runs the process the locator recorded (\\`paneProcessVerified\\` -- pid, start ticks, and OMP; never the pane id alone, since a reissued id running another role's OMP re-armed this watch forever before identity was checked), or its shim socket accepts a connection …` (keep the rest).",
+          "code": "  /** Does `locator`'s pane still run exactly the process it recorded? `ProcessManager`'s\n   * `verifyPaneProcess` (pid + `/proc` start ticks + OMP), never a pane-id-only liveness check. */\n  paneProcessVerified(locator: WorkerLocator): Promise<boolean>;"
+        },
+        {
+          "step": "tmux.ts: delete `windowAlive` (lines ~173-177) and `firstPaneId` (~198-210) — no callers remain. Grep both names across packages/daemon to confirm."
+        },
+        {
+          "step": "reconcileTmuxWindows doc comment (processes.ts ~1245-1247)",
+          "detail": "Replace the last sentence of that paragraph (`probe`/`controllerAlive` backfill … recorded.`) with: `A locator without a pane id also carries no process identity, so verifyPaneProcess never confirms it alive: its first probe retires or resurrects it onto a fully-recorded locator, and this exemption shrinks to nothing as those legacy locators clear.`"
+        },
+        {
+          "step": "Type-check, then run the new tests",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bunx tsc --noEmit -p packages/daemon && bun test packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts packages/daemon/src/daemon/__tests__/processes.test.ts"
+        },
+        {
+          "step": "Sweep the pre-existing tests that went red, applying exactly one of these rules per failure — never weaken an assertion about kill-pane ABSENCE or locator clearing",
+          "rules": [
+            "(a) A seeded or launched locator the test needs alive (probe alive, controllerAlive true, watchdog re-arm, closeTree graceful/kill path, split into an existing window): a SEEDED locator gets `...paneIdentity(<pid>)` where `<pid>` is what that test's fake `list-panes` reports for the pane (12345 for `livePanes` defaults). A LAUNCHED locator records whatever pid the test's `new-window`/`split-window` stub reported (e.g. ~4189 reports `1000${windowCount}` while `livePanes(command)` later answers 12345): make `list-panes` answer with the launched pid for that pane id — `livePanes(command, <pid>)`, or a small `Map<paneId, pid>` the launch branch fills. Expect this pattern in most of the registration-deadline, resurrection, and controller tests.",
+            "(b) A test that pinned the removed pane-id backfill (~9745): already deleted in Task 3.",
+            "(c) A test asserting a `kill-pane` COMMAND was issued for a pane whose `list-panes` already reported it gone or reissued (e.g. ~2887 'treats a kill-pane that finds no server…'): drop only that command-presence assertion; keep every behavioural one (no `StopFailed`, locator cleared, tree state). The contract is 'already gone', not 'kill-pane was attempted'. If the test's fake `list-panes` can instead report the pane alive with the recorded identity so the kill IS attempted and its stderr exercised, prefer that — it keeps the PANE_GONE_STDERR contract covered.",
+            "(d) A test whose runner's `kill -0`/`readProcessCmdline` says OMP but whose locator has no identity and is expected alive: rule (a).",
+            "(e) `api.test.ts`: run it too; a `spawn_worker` route test expecting a split, or any probe, gets rule (a)."
+          ],
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts packages/daemon/src/daemon/__tests__/api.test.ts packages/daemon/src/daemon/__tests__/tmux.test.ts"
+        },
+        {
+          "step": "Commit",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" describe -m \"daemon: trust a pane only as the process its locator recorded\" && jj -R \"$LEGION_WORKSPACE\" new"
+        }
+      ],
+      "acceptance": "All Task 3 tests green; processes/watchdog/api/tmux test files green; `windowAlive`/`firstPaneId` gone; `bunx tsc --noEmit -p packages/daemon` clean."
+    },
+    {
+      "id": 5,
+      "title": "Daemon AGENTS.md: the operational invariant names process identity",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/AGENTS.md"
+        ]
+      },
+      "steps": [
+        {
+          "step": "Line 48 (acceptance 4)",
+          "detail": "Replace `A root is trusted only when its recorded window's pane is live and running OMP; a dead root is resurrected under a generation lock.` with `A root is trusted only when its recorded window's pane is live, running OMP, and is the process this locator recorded (the pane's root pid plus its \\`/proc/<pid>/stat\\` start ticks, captured at launch and re-checked by \\`verifyPaneProcess\\`); a dead root is resurrected under a generation lock.`"
+        },
+        {
+          "step": "Line 50 (kill-pane bullet)",
+          "detail": "After `…or immediately if its shim is unreachable or already confirmed dead` insert `, and never at all when the pane no longer runs the process the locator recorded (a reissued pane id is treated as already gone, so a stale locator can never kill another role's pane)`."
+        },
+        {
+          "step": "Watchdog bullet (the one beginning `A freshly-launched worker's boot is watched`)",
+          "detail": "Replace `(its tmux pane's pid, or a reachable/answering shim socket)` with `(its tmux pane still running the process its locator recorded -- pid and \\`/proc\\` start ticks -- or a reachable/answering shim socket)`."
+        },
+        {
+          "step": "Commit",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" describe -m \"docs(daemon): a root is trusted only as the process its locator recorded\" && jj -R \"$LEGION_WORKSPACE\" new"
+        }
+      ],
+      "acceptance": "The three sentences read true against the code; nothing else in the file changes."
+    },
+    {
+      "id": 6,
+      "title": "Package-level verification and a two-minute real-tmux smoke",
+      "steps": [
+        {
+          "step": "Daemon package checks, once",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && bunx biome check packages/daemon/src && bunx tsc --noEmit -p packages/daemon && (cd packages/daemon && bun test)"
+        },
+        {
+          "step": "Throwaway smoke on a private throwaway tmux server (never the deployment's `legion-<project>` socket). Not committed. Shows the recorded identity flipping when the server is recreated and the parser reading a real stat line.",
+          "run": "cd -- \"$LEGION_WORKSPACE\" && S=legion-smoke-$RANDOM && \\\ntmux -L \"$S\" new-session -d -s smoke 'sleep 600' && \\\nREPORT=$(tmux -L \"$S\" list-panes -t smoke -F '#{pane_id} #{pane_pid}') && echo \"before: $REPORT\" && \\\nPID=${REPORT#* } && STAT=$(cat /proc/$PID/stat) && \\\nbun -e 'import { parseProcStatStartTicks } from \"./packages/daemon/src/daemon/proc-stat.ts\"; console.log(\"start ticks:\", parseProcStatStartTicks(process.argv[1]))' \"$STAT\" && \\\ntmux -L \"$S\" kill-server && \\\ntmux -L \"$S\" new-session -d -s smoke 'sleep 600' && \\\necho \"after:  $(tmux -L \"$S\" list-panes -t smoke -F '#{pane_id} #{pane_pid}')\" && \\\ntmux -L \"$S\" kill-server",
+          "expect": "`before` and `after` print the same pane id (`%0`) with different pids; `start ticks:` prints a positive integer. Record both lines in `.legion/implement.json` as the smoke evidence; the tester's acceptance-3 driver builds on this."
+        },
+        {
+          "step": "Handoff",
+          "detail": "Write `.legion/implement.json` per the legion-worker skill (filesChanged, trickyParts incl. the sweep rules applied and any assertion dropped under rule (c), deviations if any), create/push `legion/LEGION-27`, open the PR with `Dispatch: LEGION-27` in the body, and report completion."
+        }
+      ],
+      "acceptance": "biome, tsc, and the daemon package suite green; smoke output recorded."
+    }
+  ],
+  "concerns": [
+    "Many existing tests launch panes with pid `1000${n}` (e.g. ~4189) or `67890` (split) and then answer `list-panes` with `livePanes` defaults (12345). With identity recorded at launch these now read as pid-mismatch -> dead. Rule (a) in Task 4 covers it; budget most of the sweep time there.",
+    "processes.test.ts is ~9900 lines with ~180 tests seeding identity-less locators; the Task 4 sweep is mechanical but wide. Rule (a) covers nearly all; do not restructure the fixture beyond `procStat`/`paneIdentity`/default `readProcessStat`.",
+    "T2's watchdog-interval observation relies on the same fake-clock wiring as the existing test at ~3527; if `flushEventLoopUntil` on the re-arm log proves brittle, observe the re-arm via `state.roles[liveToken].locator` still set after the interval AND the retire log's absence — never by making the live claim confirmed, which would skip the interval the spec's test names.",
+    "After a server recreate, `rewriteIssueWindowId` (existing behaviour) repoints stale locators' `tmuxWindowId` to the fresh window while their `tmuxPaneId`/identity stay stale; identity still catches them on the next probe. `reconcileTmuxWindows`' knownPanes set will contain those stale pane ids until they clear — a pre-existing narrowing hazard, unchanged here.",
+    "The `/state` API response does not expose identity (strict contract allowlist). If the tester wants to observe recorded identity, `cat <state_dir>/state.json` is the surface."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-12T19:53:48.429Z"
+}
