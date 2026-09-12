@@ -1,0 +1,130 @@
+{
+  "issue": "LEGION-10",
+  "title": "The smoke rig cannot start on this machine: four fixes under scripts/smoke/",
+  "spec": {
+    "ref": "dispatch://LEGION-10/spec",
+    "version": 13
+  },
+  "pr": {
+    "number": 957,
+    "url": "https://github.com/sjawhar/legion/pull/957",
+    "headSha": "dcabf1ec846ebbd4c35817d3a1835521eb2f5f1b",
+    "implementationSha": "8f0b120d4958",
+    "ci": "Tests run 34677732739 at dcabf1ec: pr-title, lint, typecheck, test all pass (run 34677545352 at 8f0b120d cited by the implementer also passed); PR body CI line updated to the head run",
+    "bodyEdited": "E2E section filled and CI line brought to head dcabf1ec with `legion gh -- pr edit 957 --body-file`; every other section preserved verbatim (diff against the previous body: lines 42 and 48 only)"
+  },
+  "testedBy": {
+    "role": "tester",
+    "date": "2026-09-12",
+    "roleTopic": "notifications.role.legion-sjawharlegion-legion-10-tester"
+  },
+  "verdict": "PASS on every spec acceptance criterion (1-6). One plan-only extra check (plan.json E2: zero `failed to connect controller shim socket on ready` lines) did not hold; root-caused as a daemon RPC timeout under box load, unrelated to scripts/smoke/, evidence below and in observationsForArchitect. The reviewer should read the evidence, not this line.",
+  "surface": {
+    "box": "this machine; production Legion daemon also running (socket legion-sjawharlegion); load average ~42 on 32 CPUs during the runs",
+    "operatorShell": "/tmp/legion10-smoke/run-clean.sh: env -i allowlist (HOME, PATH minus /.local/state/legion/ entries and node_modules/.bin, TMUX_TMPDIR, XDG_RUNTIME_DIR, MISE_DATA_DIR, GOROOT/GOBIN, OMP_PROFILE=legion, JJ_CONFIG without the worker attribution overlay, DISPATCH_URL, SMOKE_*), secrets from `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --` mapped to GITHUB_WEBHOOK_SECRET etc., DISPATCH_TOKEN read from ~/.config/opencode/envoy.json .dispatch.token (never printed). No LEGION_* variable and in particular no LEGION_OMP_PATH reached up.sh.",
+    "inputs": "SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 DISPATCH_URL=http://localhost:8766; none run SMOKE_DIR=/tmp/legion10-smoke/rig; envoy run SMOKE_DIR=/tmp/legion10-smoke/rig-envoy (default SMOKE_UPSTREAM_NATS); default ports 14222/19020/19370",
+    "artifactsLeftForReviewer": "/tmp/legion10-smoke/: run-clean.sh, up-none-nonexistent.log, up-none-attempt1.log + rig-attempt1-probe-failed/ (the failed first attempt), up-none.log, root-issue-readback.json, negative-409-status.txt, negative-409-body.json, controller-ready-state.json, controller-pids.txt, controller-pane-capture-1.txt, controller-pane-capture-final.txt, daemon-none.log, checkpoints-none.log, down-none-attempt1.log, down-none.log, up-envoy.log, checkpoint1-envoy.log, daemon-envoy.log, controller-pane-envoy.txt, down-envoy.log, up.test.log, checkpoints.test.log, down.test.log, cfg/ (case-B files), probe-shim.ts (read-only shim socket probe), rig/ and rig-envoy/ (scratch dirs, both torn down)"
+  },
+  "criteria": {
+    "1_daemonAcceptsGeneratedConfig": {
+      "verdict": "PASS",
+      "evidence": [
+        "up.test.sh at head: `PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)` and `PASS: the real daemon loader rejects the pre-#941 gates.merge block`",
+        "By hand: SMOKE_DIR=/tmp/legion10-smoke/cfg SMOKE_PROJECT=acme/1 write_daemon_config; sed inserted `  merge: human` under gates; `env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_MCP_URL -u DISPATCH_TOKEN_FILE bun run packages/daemon/src/cli/index.ts start acme/1 --config /tmp/legion10-smoke/cfg/bad.yaml --check-config` -> stderr `error: gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes`, exit=1; the unmodified legion.yaml -> `Config OK: project=acme1`, exit=0"
+      ]
+    },
+    "2_freshStartCreatesRootIssue": {
+      "verdict": "PASS",
+      "evidence": [
+        "`test -e /tmp/legion10-smoke/rig/root-issue` false before the run (printed `root-issue present before? NO`); LEGSMOKE held every earlier smoke root (409 body below names LEGSMOKE-43/33/27/30 as candidates)",
+        "up-none.log: `CREATED root issue LEGSMOKE-46` followed by `RIG READY`, exit 0; no `REUSED root issue`, no `could not create Dispatch root issue`",
+        "Read back: GET /api/v1/issues/LEGSMOKE-46 -> {\"key\":\"LEGSMOKE-46\",\"title\":\"Legion smoke exercise: sjawhar/legion-smoke (2026-09-12T15:20:44Z)\",\"status\":\"triage\",\"project\":\"LEGSMOKE\",\"created_at\":\"2026-09-12T15:20:44.339293Z\"}",
+        "Negative control (same POST without force): HTTP 409, body {\"error\":\"possible duplicate of LEGSMOKE-46: Legion smoke exercise: sjawhar/legion-smoke (2026-09-12T15:20:44Z)\",\"code\":\"POSSIBLE_DUPLICATE\",\"candidates\":[\"LEGSMOKE-46\",\"LEGSMOKE-43\",\"LEGSMOKE-33\",\"LEGSMOKE-27\",\"LEGSMOKE-30\"]}; nothing created",
+        "Envoy run repeated it: `CREATED root issue LEGSMOKE-47` with SMOKE_DIR=/tmp/legion10-smoke/rig-envoy and no root-issue file beforehand"
+      ]
+    },
+    "3_controllerStartsOnSelectedBuild": {
+      "verdict": "PASS on all five spec evidence items; see extraCheck for the plan-only grep",
+      "timing": "daemon up 15:20:40Z; controller role claim recorded 15:30:52Z. In none mode nothing wakes the controller spawn except the daemon's own scheduled resync (resync_interval_seconds: 600): emitResync -> publishControllerEvent -> Envoy 404 no holder -> onUndeliverable -> ensureController. The spec/README say `the daemon starts its controller` without a time; the reviewer should expect the ~10-minute wait in none mode. In envoy mode the controller was up ~20 s after RIG READY because the root's issue.created event woke the spawn.",
+      "evidence": [
+        "up-none.log: `GREEN OMP build: /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix` (resolve_omp_path default branch; LEGION_OMP_PATH unset in the operator shell)",
+        "state.json / GET /legion/v1/state: {\"roles\":{\"legion-sjawhar24-controller\":{\"role\":\"controller\",\"sessionId\":\"01a0963e-25e2-7000-a2df-4d0da9d1e783\"}},\"controllerLocator\":{\"tmuxSession\":\"legion-sjawhar24\",\"tmuxWindowId\":\"@1\",\"tmuxPaneId\":\"%1\"}}",
+        "daemon.log lines 2-3: `[legion] resync complete: anomalies=0 healed=0 ciFetchFailures=0` twice — line 2 the scheduled resync whose 404 publish spawned the controller, line 3 the forced resync only /controller/ready triggers (the daemon writes no dedicated controller-ready line)",
+        "pane %1 pid tree: `2935311 /home/ubuntu/.mise/installs/bun/1.3.14/bin/bun` (worker-shim) and `2935536 /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix`; `readlink /proc/2935536/exe` == the GREEN OMP build path; cmdline `... --mode rpc --append-system-prompt # Legion Controller R...`",
+        "First prompt taken: pane shows `agent_start`, `tool_execution_start read {\"path\":\"skill://legion-controller\"}`, `tool_execution_start bash {\"command\":\"legion state --json 2>&1\",...}`, `agent_end`",
+        "`kill -0 2935536` alive at 15:31:52Z (60 s after the ready record) and at 15:35:22Z (just before down.sh); role claim still present both times",
+        "`grep -c 'send did not invoke the agent' daemon.log` -> 0; controller pane capture grep -> 0 (none run and envoy run both)",
+        "Negative control: `LEGION_OMP_PATH=/nonexistent bash scripts/smoke/up.sh` (same shell, before any run) -> `error: LEGION_OMP_PATH is not an absolute executable file: /nonexistent`, exit 1; afterwards no legion-smoke-nats container, no listener on 14222/19020/19370, `no server running on .../legion-sjawhar24`, /tmp/legion10-smoke/rig absent (up-none-nonexistent.log)"
+      ],
+      "extraCheck": {
+        "what": "plan.json E2 asked for 0 hits of `failed to connect controller shim socket on ready`; observed 1 in the none run and 1 in the envoy run, plus 1 `failed to connect architect shim socket on ready for LEGSMOKE-47` in the envoy run — all `error: Worker RPC \"negotiate_protocol\" timed out after 5000ms`",
+        "rootCause": "markControllerReady (processes.ts ~2670) is a best-effort shim connect at /controller/ready with worker_rpc_timeout_seconds=5; under the box's load (loadavg ~42/32 CPUs, 170+ omp processes) the freshly booted omp did not answer negotiate_protocol within 5 s. The same socket answered negotiate_protocol in 12 ms when probed read-only at 15:34:06Z (/tmp/legion10-smoke/probe-shim.ts; 138 backlog frames flushed). The controller's wakes travel over Envoy/NATS, not this socket, so the controller took its prompt and stayed alive; no crash, no `send did not invoke the agent`.",
+        "why_not_a_failure": "Not one of spec acceptance 3's five evidence items; the planner derived the grep from LEGION-6 round 1 where the line coincided with the crash on the pinned build. Here every spec item holds and the crash message is absent. Daemon behaviour, nothing under scripts/smoke/ can change it. Reported to the architect (observationsForArchitect) for a decision on whether it needs its own issue."
+      }
+    },
+    "4_noneModeClaimsAreTrue": {
+      "verdict": "PASS",
+      "evidence": [
+        "Recorded mode file /tmp/legion10-smoke/rig/webhook-mode = none",
+        "checkpoints-none.log, complete: `CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy` exit=3; identical lines for 2, 3, 4 and 12, each exit=3; `CHECKPOINT 13 OK: 2 processes on legion-sjawhar24 carry no bearer or boot secret; default server hosts no legion-sjawhar24` exit=0 (run bare, no DISPATCH_TOKEN)",
+        "state.json after the resync and controller spawn: issues {}, trees {}, admission.active [] — the root was never admitted, exactly as README row 47, the Start-and-stop paragraph and the Checkpoints paragraph (line 123) state",
+        "README read against the output: row 47 (none) matches line by line; line 65 (`prints the explicit webhook-ingress block, then launches the daemon ... The daemon starts its controller, but no Dispatch issue event ever reaches the rig NATS`) matches up-none.log order and state; line 123 matches the six checkpoint lines; row 46 / line 123 forward claims proven by checkpoints.test.sh `PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and lets checkpoint 5 reach its own PR check` only — agents cannot run forward mode; stated in the PR body",
+        "Positive control in envoy mode: bridge log `BRIDGED subject=notifications.dispatch.issue.LEGSMOKE-47.issue.created`; daemon `consumed event dispatch-2500 ...issue.created`, `resync complete: anomalies=1`; controller triaged via `legion status LEGSMOKE-47 todo`; daemon admitted (in_progress, tree LEGSMOKE-47, architect pane @2); `CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-47 past triage; controller locator is live` exit=0 (checkpoint1-envoy.log)"
+      ]
+    },
+    "5_downShWorksInEveryMode": {
+      "verdict": "PASS (none and envoy on the real rig; forward by down.test.sh only)",
+      "evidence": [
+        "After none (15:35:22Z): down.sh printed `STOPPED tmux session legion-sjawhar24 on private socket legion-sjawhar24`, `STOPPED NATS container legion-smoke-nats`, `RIG DOWN`, exit=0; then `no server running on /home/ubuntu/.tmux/sockets/tmux-1000/legion-sjawhar24`, docker ps -a filter legion-smoke-nats empty, ss shows 14222/19020/19370 free, controller omp 2935536 gone, daemon 2507384 gone, listener 2506658 gone",
+        "After envoy (15:39:17Z): same three lines, exit=0; same checks pass; daemon.pid/listener.pid/envoy-bridge.pid removed; `pgrep -f legion10-smoke/rig-envoy` -> 0 processes",
+        "Also after the failed first attempt (partial start: NATS + listener up, daemon dead): down.sh -> `STOPPED NATS container legion-smoke-nats`, `RIG DOWN`, exit=0, ports free (down-none-attempt1.log)",
+        "STOPPED <name> (pid ...) lines for listener/daemon/bridge are absent because each exited on TERM within 10 s (implementer testerNotes: the line prints only on the KILL fallback)",
+        "forward: not run — `gh webhook forward` needs a user-authenticated gh identity that administers sjawhar/legion-smoke, which agents do not have; teardown proven by down.test.sh `PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record` (group killed, .pid/.start/.hook removed, `api -X DELETE repos/example-org/legion-smoke/hooks/7` issued); this exact statement is in the PR body"
+      ]
+    },
+    "6_onePrScriptsSmokeOnlyHarnessesPass": {
+      "verdict": "PASS",
+      "evidence": [
+        "PR #957 files: .legion/implement.json, .legion/plan.json, scripts/smoke/README.md, scripts/smoke/checkpoints.sh, scripts/smoke/checkpoints.test.sh, scripts/smoke/down.test.sh, scripts/smoke/up.sh, scripts/smoke/up.test.sh (the two .legion files are handoffs removed at review cleanup)",
+        "`bash -n` on all six scripts/smoke/*.sh: six `syntax ok` lines",
+        "bash scripts/smoke/up.test.sh -> 14 PASS, rc=0; checkpoints.test.sh -> 12 PASS, rc=0; down.test.sh -> 3 PASS, rc=0 (logs up.test.log / checkpoints.test.log / down.test.log)"
+      ]
+    }
+  },
+  "commandsRun": [
+    "cd -- \"$LEGION_WORKSPACE\" && for f in scripts/smoke/*.sh; do bash -n \"$f\"; done; bash scripts/smoke/up.test.sh; bash scripts/smoke/checkpoints.test.sh; bash scripts/smoke/down.test.sh",
+    "case B by hand (see criteria.1)",
+    "SMOKE_DIR=/tmp/legion10-smoke/rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/24 SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://localhost:8766 RUN_CLEAN_LEGION_OMP_PATH=/nonexistent secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash /tmp/legion10-smoke/run-clean.sh bash scripts/smoke/up.sh   # negative control, exit 1, nothing started",
+    "same without RUN_CLEAN_LEGION_OMP_PATH -> up.sh (attempt 1 died in the daemon boot probe; down.sh; attempt 2 RIG READY, LEGSMOKE-46)",
+    "curl GET /api/v1/issues/LEGSMOKE-46; curl POST /api/v1/issues without force -> 409",
+    "poll state.json for roles[legion-sjawhar24-controller]; grep daemon.log; tmux -L legion-sjawhar24 display-message/capture-pane; readlink /proc/<pid>/exe; kill -0 at +60 s",
+    "bun run /tmp/legion10-smoke/probe-shim.ts /tmp/legion10-smoke/rig/daemon/workers/controller.sock 20000   # read-only negotiate_protocol probe, 12 ms",
+    "for n in 1 2 3 4 12: secrets ... -- bash run-clean.sh bash scripts/smoke/checkpoints.sh $n; bare checkpoints.sh 13",
+    "down.sh (none); tmux/docker/ss/kill -0 checks",
+    "SMOKE_DIR=/tmp/legion10-smoke/rig-envoy SMOKE_WEBHOOK_MODE=envoy up.sh -> RIG READY (LEGSMOKE-47); checkpoints.sh 1 after ~130 s -> OK; down.sh; checks",
+    "PATCH /api/v1/issues/LEGSMOKE-46 and LEGSMOKE-47 status=done (cleanup of the two roots these runs created; both 200)",
+    "legion gh -- pr edit 957 --body-file /tmp/legion10-smoke/pr-body-new.md; read back identical apart from GitHub's trailing newline"
+  ],
+  "deviationsFromPlan": [
+    "DISPATCH_TOKEN is not a secretsd key on this box (`secrets list` has none; `secrets get DISPATCH_TOKEN --no-request` -> `secret 'DISPATCH_TOKEN' not found`), so the README's `secrets ... DISPATCH_TOKEN --` invocation cannot run here as written; the token was read from ~/.config/opencode/envoy.json .dispatch.token inside the operator shell (the README's own named source), never printed. LEGION-6's tester hit and recorded the same gap.",
+    "OMP_PROFILE=legion was kept in the operator shell to match the production daemon's launcher (/home/ubuntu/.config/legion/sjawhar-legion/run-daemon.sh exports it); the README does not mention a profile.",
+    "The first none-mode attempt failed in the daemon's boot probe (see observationsForArchitect 1); the rig was torn down with down.sh and started again with no other change. Both attempts' logs are preserved.",
+    "Waited for the LEGION-16 tester's rig (SMOKE_PROJECT=sjawhar/16, ports 14223/19021/19371) to be torn down before starting: up.sh hard-codes the docker container name legion-smoke-nats, so two rigs cannot coexist on one box even on different ports. Coordinated over the tester role topic; they ran down.sh at 15:15:18Z."
+  ],
+  "notesForReviewer": [
+    "Acceptance 3 in none mode needs the 600-second resync interval to elapse before a controller exists; do not read an empty roles map in the first ten minutes as a failure.",
+    "The three `failed to connect ... shim socket on ready` lines in the daemon logs are the 5-second negotiate_protocol timeout described under criteria.3.extraCheck, not the controller crash this PR fixes; the crash string `send did not invoke the agent` has zero hits everywhere.",
+    "When running `legion gh` or `jj git push` from a worker pane, never type your own `export LEGION_GRANT=...` line into a command: the harness prepends the real single-use grant, and a hand-typed second export overrides it and produces `Unable to redeem LEGION_GRANT (403)`. That is what the implementer's `stale second LEGION_GRANT export` note was.",
+    "Both rigs are down; /tmp/legion10-smoke/* is left in place. Smoke roots LEGSMOKE-46 and LEGSMOKE-47 are set to done."
+  ],
+  "observationsForArchitect": [
+    "Box-level flake, not this PR: ~/.omp/natives/18.1.15/ is one native-addon cache shared by every Oh My Pi build whose version starts 18.1.15; five distinct such builds were running concurrently (rpcfix, 20260908-220934, 20260910-001552, 20260910-044004, 20260910-172022) and each fresh start rewrites the file (mtimes 15:16:49, 15:17:38, 15:18:20, 15:20:40 with three different sizes). The rig daemon's boot probe died once on `Loaded ... pi_natives.linux-x64-modern.node but it does not expose the @oh-my-pi/pi-natives@18.1.15 version sentinel`. main has #954 (retry a boot probe that OMP died under) but this branch is based on 7db2cd83, before it; a rebase would give the rig daemon that retry. The spec's fail-closed probe design is fine; this is a machine hygiene issue (one natives dir per build) for the oh-my-pi side.",
+    "Daemon behaviour under load, not this PR: `Worker RPC \"negotiate_protocol\" timed out after 5000ms` at /controller/ready and at the architect's ready (worker_rpc_timeout_seconds default 5) with loadavg ~42; the socket answers in ~12 ms once omp is idle. For the controller and root architect this connect is best-effort, but phase workers receive their assignment over the same socket path (/worker/ready), so a 5 s timeout on this box may also delay or fail worker prompts. Worth its own issue or a config bump on this machine.",
+    "README gap (pre-existing, also noted by LEGION-6): the documented `secrets ... DISPATCH_TOKEN --` commands cannot run on this box because DISPATCH_TOKEN is not a secretsd key; the README's own alternative (~/.config/opencode/envoy.json .dispatch.token) works. Either add DISPATCH_TOKEN to secretsd or reword the two command blocks.",
+    "README claim `The daemon starts its controller` in none mode is true but only after the first scheduled resync (600 s). If a future tester needs a faster none-mode controller, `resync_interval_seconds` in the generated legion.yaml is the knob; not a defect against spec v13.",
+    "Two rigs cannot share a box: up.sh hard-codes the NATS container name legion-smoke-nats (ports are configurable, the name is not), and down.sh removes it by name. The LEGION-16 tester's concurrent rig blocked this run until they tore down. A per-SMOKE_PROJECT container name would remove the serialization; out of scope here."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-12T15:46:15.607Z"
+}
