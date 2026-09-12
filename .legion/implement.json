@@ -4,9 +4,10 @@
   "pr": {
     "number": 967,
     "url": "https://github.com/sjawhar/legion/pull/967",
-    "base": "main"
+    "base": "main",
+    "codeHead": "a0c6da16f47d"
   },
-  "headSha": "fb3c2310793b",
+  "headSha": "a0c6da16f47d",
   "specVersion": 3,
   "summary": "worker-rpc split into connectWorkerRpc (unix dial) + createWorkerRpcClient(socket) attached through socket.data.handlers; CapabilityService.resolveWorkerClaim is the one boot-token→claim lookup for /worker/started and the new worker-stream-listener.ts (TCP, bound with the API on worker_stream_port = port + 1, hello → hello_ack → WorkerRpcClient keyed by claim token, awaitRegistration); legion worker-shim --connect tcp://host:port --boot-token-file dials, spawns OMP only after hello_ack, reconnects 200ms→5s replaying gap frames in order; --socket refactored onto the shared createShimBridge with its five test cases byte-unchanged; architect-assigned UTF-8 split-read fix landed as line-reader.ts shared by all three socket readers.",
   "commits": [
@@ -133,7 +134,71 @@
     "log": "/tmp/legion22-smoke/checkpoints.log",
     "head": "fb3c2310793b"
   },
+  "round2": {
+    "trigger": "CHANGES_REQUESTED review 5186303415 at fb3c2310 (https://github.com/sjawhar/legion/pull/967#pullrequestreview-5186303415); findings in .legion/review.json; architect folded the four reviewer fast-follows and one #962-coordination reword into this round",
+    "codeHead": "a0c6da16f47d",
+    "specVersion": 4,
+    "commits": [
+      {
+        "change": "qskqxmtk",
+        "sha": "2e5843212024",
+        "message": "fix(daemon): worker stream listener gives each connection worker_rpc_timeout_seconds to complete its hello (rejected as hello timeout), on the daemon injected clock",
+        "threads": [
+          "discussion_r3996086379",
+          "discussion_r3996086380"
+        ]
+      },
+      {
+        "change": "nlqltntq",
+        "sha": "4b024c83a600",
+        "message": "docs(daemon): probeWorkerSocket docstring names ProcessManager per-token cache, not a method #962 renames",
+        "ruling": 3
+      },
+      {
+        "change": "utrmrrnn",
+        "sha": "8455b24ad280",
+        "message": "refactor(cli): the shim stdout pump reads through createLineReader like both socket sides",
+        "ruling": "4a"
+      },
+      {
+        "change": "txmmpsnl",
+        "sha": "1118a8e0cacb",
+        "message": "test(daemon): one waitFor poller in ci-fixtures for the shim, listener, and e2e suites",
+        "ruling": "4b"
+      },
+      {
+        "change": "musrpvml",
+        "sha": "0f3f5fc1f427",
+        "message": "fix(daemon): an out-of-range worker_stream_port names the setting it came from (CLI override, file, or env)",
+        "ruling": "4c"
+      },
+      {
+        "change": "ltkrtnvm",
+        "sha": "a0c6da16f47d",
+        "message": "docs(daemon): frames a daemon sends before hello_ack are consumed by the shim and dropped with a log",
+        "ruling": "4d"
+      }
+    ],
+    "helloDeadline": "helloReader arms one timer per connection from open via the listener setTimeout seam with options.rpcTimeoutMs (workerRpcTimeoutSeconds*1000 = 5 s by default; no new config key); a local fail(reason) clears it then rejects, used by every rejection path; the success path clears it before register; helloReader close/error clear it. Expiry -> worker-stream: rejected hello (hello timeout), socket.end(), no state change. index.ts passes setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout at the single listener-start site. Test: fake-clock case (idle -> fire -> closed, logged once, size 0; hello first -> cleared, no late rejection) fails on the pre-fix listener (timer never armed; poller times out) and passes after. The existing awaitRegistration fake-clock case now asserts cleared === [helloDeadline, waiterTimer].",
+    "deviations": [
+      "Fake clock in the listener test hoisted into a fakeClock() helper since two cases use it.",
+      "Ruling 4c: the range check keeps the default-source message verbatim and maps cli/config/env -> workerStreamPort override / worker_stream_port / LEGION_WORKER_STREAM_PORT (config-sourced values are already bounded by loadConfigFromFile, so only cli and env can reach it); one assertion added for the CLI-sourced case.",
+      "Ruling 4b: ci-fixtures.waitFor takes timeoutMs (default 5000); the e2e passes 10000 for the CLI child boot."
+    ],
+    "gates": {
+      "biome": "cd packages/daemon && bunx biome check src/ -> clean (139 files; one import-order fix folded into 1118a8e0)",
+      "tsc": "cd packages/daemon && bunx tsc --noEmit -> clean",
+      "bunTest": "bun test packages/daemon -> 856 pass, 5 skip (LEGION_E2E-gated), 0 fail, 861 tests / 55 files",
+      "e2e": "bun test packages/daemon/src/daemon/__tests__/worker-stream-e2e.test.ts at a0c6da16 -> 3 pass / 0 fail / 12 expect() [1139 ms]",
+      "ci": "Tests run 34691925336 success at a0c6da16f47d31d62987067d7bea2360a2013c3c (https://github.com/sjawhar/legion/actions/runs/34691925336)"
+    },
+    "threadReplies": [
+      "https://github.com/sjawhar/legion/pull/967#discussion_r3996109185",
+      "https://github.com/sjawhar/legion/pull/967#discussion_r3996109233"
+    ],
+    "testerNotes": "Acceptance 4 gains the hello-timeout row: `nc 127.0.0.1 19371` and type nothing -> after worker_rpc_timeout_seconds (5 s default on the rig) the daemon closes the connection and daemon.log gains `[legion] worker-stream: rejected hello (hello timeout)`; /legion/v1/state unchanged. A shim that sends hello promptly is unaffected (e2e + shim suites green). Smoke checkpoints 1-4/13 were not re-run this round: no change to --socket, config insertion points, or the daemon boot path beyond the two extra listener options; the LEGION-21 tester holds the shared rig surface at the time of writing."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T10:14:07.449Z"
+  "completed": "2026-09-12T11:48:41.233Z"
 }
