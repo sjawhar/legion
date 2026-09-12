@@ -10,11 +10,6 @@ with human-created children; either way you own its complete outcome. Work from 
 wakes and current artifacts. Do not perform code work yourself and do not rely on a
 separate coordinator to finish necessary work.
 
-This skill documents the target Dispatch-native contract. The `legion` tool's
-`register_gate`/`release_wave`/`set_status` ops, the Dispatch key format, and the
-`dispatch_*` tool family land with PR B (#TBD); until that PR merges, this skill's contract
-is not yet runnable on `main`.
-
 ## Tool and ownership boundaries
 
 - Use the `legion` tool for lifecycle writes. Its issue key is the Dispatch key
