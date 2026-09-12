@@ -13,31 +13,49 @@ The server enforces high signal: an ask question is at most 800 characters with 
 most 2,000 characters; an artifact is at most 25 MiB. It refuses over-limit input; it never truncates it. GitHub threads and markers no
 longer exist.
 
+## Writing for the human
+
+Sami, 2026-09-12, on what Legion had been producing: "It's completely incomprehensible. It's just
+compressed jargon nonsense. I have no idea what the fuck it's saying." Every spec, ask, comment,
+message, and PR body is read by a person who has not read the code, does not share this session's
+vocabulary, and is often on a phone. Write for that person.
+
+- Plain English, full sentences, one idea per sentence. Never repo shorthand or nouns you coined:
+  not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
+- Expand every identifier the first time it appears: an issue key gets its title, a PR number its
+  title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
+- Frame a request as current state → desired state → proposed change, with at least two options,
+  what each costs, and your recommendation with its reason.
+- Before posting, test it: could Sami, reading only this text on his phone, know what he is being
+  told or asked? If not, rewrite it. Length is not the problem; density is.
+
 ## Writing a spec
 
-A spec is a decision record for the human who decides and the implementer who builds, not a transcript of your thinking. Use exactly
-these document headings in this order.
+A spec has two readers: the human who decides reads the top; the implementer who builds reads the
+rest. Use these headings in this order.
 
 | Section | Required content | Form |
 | --- | --- | --- |
-| **Decisions needed** | Only decisions requiring human authority, taste, or risk appetite. Each states one question, two or three options with tradeoffs, and a recommendation. Every item is an anchored `dispatch_ask`. Answered items move into Requirements with provenance, then leave this section. No other section asks the reader anything. Empty means `None.` | One decision per line; anchor each ask to that line. |
-| **Acceptance** | Every outcome names its check and user-facing surface. An outcome without a verification method is not acceptance criteria. | Numbered lines; browser scenario, API call, or CLI command. |
-| **Requirements** | Provenance is a verbatim human quote or `inferred: <reasoning>`; readers treat inferred requirements as hypotheses. Do not restate the prompt in prose. | `requirement \| provenance` table. |
-| **Design** | State the files, components, routes, and data flow that change. | Facts, not narrative; diagrams only for genuine structure. |
-| **Errors** | Name the behaviour for every error condition; never specify a silent fallback. | `condition \| behaviour` table. |
-| **Testing** | Map every acceptance line to the proof that exercises it. | Suite or scenario. |
-| **Rejected** | Record each considered alternative and why it was rejected so it is not proposed again. | One alternative per line. |
+| **Summary** | The problem, what changes for whom, and how we will know it worked — in plain words. | Three sentences at most. |
+| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite. Each is one plain question, two or three options with what each costs, and your recommendation with its reason — understandable without opening anything else. Every item is an anchored `dispatch_ask`; an answered item moves into Requirements with its provenance. If there is nothing to decide, write `None: this records what was agreed.` and do not ask for a review. | One decision per line. |
+| **New since we talked** | Every design point the human did not settle in conversation, marked `inferred:` with the reasoning. Empty is fine. | One plain sentence per point. |
+| **Acceptance** | Each outcome names what a user will observe and the check that proves it (browser scenario, API call, or command). An outcome without a check is not acceptance. | Numbered lines. |
+| **Requirements** | What must hold, and where each came from: a quoted human sentence, or `inferred:` plus the reasoning. Readers treat inferred requirements as hypotheses. | `requirement \| where it comes from` table, or prose if the reader follows it more easily. |
+| **Design** | The files, components, routes, and data flow that change. | Prose or tables; a diagram only for real structure. |
+| **Errors** | The behaviour for every error condition. Never a silent fallback. | `condition \| behaviour` table. |
+| **Testing** | Which proof exercises each acceptance line. | One line per acceptance item. |
+| **Rejected** | Each alternative considered and why it was rejected, so it is not proposed again. | One alternative per line. |
 
 ### Rules
 
-- Every sentence is a fact, decision, or risk; delete the rest.
-- Use tables over prose and keep one idea per line.
-- Do not use Overview, Background, Introduction, Summary, or Conclusion sections.
-- Do not hedge with “might” or “could consider.”
-- Do not use TBD, TODO, or placeholders; an open item is a Decision needed.
+- The spec is the issue's one primary document. Extend it in place — a new version that keeps the
+  human's own text — never a second "spec" artifact beside it.
+- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is a
+  Decision needed.
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec in place as decisions land: the spec is the record, comments are the discussion.
-- Before sending it: no sections conflict, and every requirement has exactly one reading.
+- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Before sending it: no sections conflict, every requirement has exactly one reading, and the
+  Summary and Decisions pass the phone test above.
 
 ## Your owner
 
@@ -83,9 +101,16 @@ dispatch_ask({
 })
 ```
 It returns `details` `{ issue, topic, ask }` for an issue or `{ project, artifact, document, topic, ask }` for a project document.
-Options are buttons: never enumerate choices in prose. Put the recommendation in `question`, and put each selectable choice in
-`options`. Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is zero-based and selects a repeated
-quote, and an anchor whose quote later disappears becomes orphaned but stays readable against its original document version.
+
+An ask is read on a phone by someone who has not read the code. Open with one or two plain
+sentences: what needs deciding and why it matters now. Each option is a button with a label and
+one sentence saying what happens if it is chosen; never enumerate choices in prose. Put the
+recommendation and its reason last, in `question`. Never put file paths, line numbers, sequence
+numbers, document versions, or role tokens in the question; if the human needs that detail, anchor
+the ask to the document passage instead. Apply the phone test from "Writing for the human" before
+posting. Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
+is zero-based and selects a repeated quote, and an anchor whose quote later disappears becomes
+orphaned but stays readable against its original document version.
 
 An ask must be answerable from its own text and its anchor alone. Anchor a question about a document passage with `anchor`; thread one
 about a comment with `reply_to`; thread a follow-up on your own ask with `reply_to_ask`; cite anything else with a `dispatch://`
@@ -223,13 +248,14 @@ dispatch_artifact({ issue?, project?, name, path, summary? })
 Or, when the text is already in the call, post a Markdown document directly:
 
 ```ts
-dispatch_artifact({ issue?, project?, name: "spec.md", content: "# Design\n..." })
+dispatch_artifact({ issue?, project?, name: "load-test-results.md", content: "# Load test\n..." })
 ```
 
 Exactly one of `issue` and `project` is required. A project upload creates an unlinked project document; it must not include `artifact`.
 Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact`, `version`, and its
-write `topic`. Uploading the same `name` creates its next version. Address an existing artifact by the slug shown in the upload result
-or by its filename; the slug also arrives on `artifact.created` events.
+write `topic`. Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
+with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
+artifact by the slug shown in the upload result or by its filename; the slug also arrives on `artifact.created` events.
 
 ## Messages
 

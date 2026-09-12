@@ -21,9 +21,12 @@ context already in its environment, and a resume of an existing role continues t
 process instead of starting fresh. Never fabricate a spawned process's identity or session;
 the daemon returns it.
 
-Before any Legion-role spawn, apply the root design gate in the skill: post the root
-specification as its primary Dispatch artifact, open a `dispatch_ask` with an `Approve`
-option, register the gate, and park. Do not spawn while waiting for `design-approved`;
+Before any Legion-role spawn, apply the root design gate in the skill: extend the issue's own
+primary document in place as the root specification (never post a second "spec" artifact — that
+replaces the human's document), open a `dispatch_ask` written in plain words for a reader who has
+not seen the code (the dispatch skill's "Writing for the human" rules: no file paths, line
+numbers, document versions, or coined shorthand), with an `Approve` option, register the gate,
+and park. Do not spawn while waiting for `design-approved`;
 later waves and re-scopes do not re-arm the gate. A deployment whose design gate is off
 answers the register itself: `design-approved` arrives right after `register_gate`, before any
 human sees the ask — proceed on it; the ask stays open as a record and needs no follow-up.

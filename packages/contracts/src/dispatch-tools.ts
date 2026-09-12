@@ -56,7 +56,9 @@ function documentOwnerValidation(
   };
 }
 export const SPEC_SECTIONS = [
+  "Summary",
   "Decisions needed",
+  "New since we talked",
   "Acceptance",
   "Requirements",
   "Design",
@@ -67,7 +69,8 @@ export const SPEC_SECTIONS = [
 
 const SPEC_WRITING_GUIDANCE =
   `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` +
-  "Every line is a fact, decision, or risk; use tables over prose; see skills/dispatch Writing a spec.";
+  "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " +
+  "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;

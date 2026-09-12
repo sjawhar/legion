@@ -47,23 +47,31 @@ const listPinnedIssuesQuery = `
 	order by i.updated_at desc, i.key desc
 `
 
-const defaultIssueSpecMarkdown = `## Decisions needed
+const defaultIssueSpecMarkdown = `## Summary
 
-_List only decisions requiring human authority, taste, or risk appetite, with options, tradeoffs, and a recommendation._
+_Three sentences at most, in plain words: the problem, what changes for whom, and how we will know it worked._
 
-None.
+## Decisions needed
+
+_List only decisions requiring human authority, taste, or risk appetite: one plain question each, two or three options with what each costs, and a recommendation with its reason._
+
+None: this records what was agreed.
+
+## New since we talked
+
+_One plain sentence per design point the human did not settle in conversation, marked inferred with the reasoning._
 
 ## Acceptance
 
-_List numbered outcomes that name the check and user-facing surface that verifies each one._
+_List numbered outcomes that name what a user will observe and the check that proves each one._
 
 ## Requirements
 
-_Use a requirement | provenance table with verbatim human quotes or inferred reasoning._
+_What must hold, and where each came from: a quoted human sentence, or inferred plus the reasoning._
 
 ## Design
 
-_List the files, components, routes, and data flow that change._
+_The files, components, routes, and data flow that change._
 
 ## Errors
 
@@ -71,7 +79,7 @@ _Use a condition | behaviour table; do not specify silent fallbacks._
 
 ## Testing
 
-_Map every acceptance line to the suite or scenario that proves it._
+_Map every acceptance line to the proof that exercises it._
 
 ## Rejected
 
