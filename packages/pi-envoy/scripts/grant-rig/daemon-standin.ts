@@ -5,9 +5,10 @@
  * minting, and the three grant redemptions (git credential, GitHub token, phase completion).
  *
  * Request and response shapes come from `LegionDaemonApi` in `@legion/contracts`, and the grant
- * rule mirrors `AuthState.resolveGrant` in the real daemon (`packages/daemon/src/daemon/api/auth.ts`):
- * a grant lives for 60 seconds and redeems any number of times while it lives; an unknown or
- * expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is single-use.
+ * rule mirrors `CapabilityService.resolveGrant` in the real daemon
+ * (`packages/daemon/src/daemon/api/auth.ts`): a grant lives for 60 seconds and redeems any number
+ * of times while it lives; an unknown or expired grant id answers 403
+ * `{"error":"Invalid or expired grant"}`. Nothing is single-use.
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
@@ -63,10 +64,10 @@ function stringField(body: unknown, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** Mirrors the real daemon's rule: present and not yet expired, nothing else. */
-function resolveGrant(body: unknown): Response | undefined {
-  const grantId = stringField(body, "grantId");
-  if (grantId === undefined) return json(400, { error: "grantId is required" });
+/** Mirrors the real daemon's rule: present and not yet expired, nothing else. Each route parses
+ * its body with its own contract schema first, exactly as the daemon's route table does, and
+ * hands the parsed id here. */
+function resolveGrant(grantId: string): Response | undefined {
   const grant = grants.get(grantId);
   if (!grant || grant.expiresAt <= Date.now()) return forbidden("Invalid or expired grant");
   return undefined;
@@ -111,8 +112,12 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
         mintedGrantId: grantId,
       };
     }
+    // The daemon routes both credential redemptions through `LegionDaemonApi.GitHubToken.request`
+    // (a strict `{ grantId }`), so the stand-in refuses the same malformed bodies it would.
     case "/legion/v1/git-credential": {
-      const refused = resolveGrant(body);
+      const parsed = LegionDaemonApi.GitHubToken.request.safeParse(body);
+      if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
+      const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
       return {
         response: new Response(`username=x-access-token\npassword=${GIT_TOKEN}`, {
@@ -121,14 +126,16 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       };
     }
     case "/legion/v1/gh-token": {
-      const refused = resolveGrant(body);
+      const parsed = LegionDaemonApi.GitHubToken.request.safeParse(body);
+      if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
+      const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
       return { response: json(200, { token: GIT_TOKEN, appLogin: "rig[bot]" }) };
     }
     case "/legion/v1/phase/complete": {
       const parsed = LegionDaemonApi.PhaseComplete.request.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
-      const refused = resolveGrant(body);
+      const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
       return { response: json(200, {}) };
     }

@@ -63,11 +63,26 @@ The launch argv is the daemon's own prefix, `secrets ANTHROPIC_API_KEY GEMINI_AP
 OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the headless leg (`--no-secrets` drops the
 prefix when the keys are already in the environment).
 
+## Which Oh My Pi binary
+
+Neither script picks a binary: `run.ts` runs whatever `--omp` names. Point it at the build the
+live Legion daemon's panes run, because that is the host whose write-back behaviour the rig is
+measuring. The daemon resolves that build from `omp_invocation` in its `legion.yaml`
+(`mise x github:sjawhar/oh-my-pi@<version> -- omp`), so read the version from there — on this
+box `~/.config/legion/sjawhar-legion/legion.yaml` — and resolve it with `mise where`. The
+repository's own pin (`OMP_FORK_PIN` in `packages/daemon/src/daemon/omp-pin.ts`, printed by
+`bun packages/daemon/src/daemon/omp-pin.ts`) is the default a daemon falls back to when
+`legion.yaml` sets no `omp_invocation`; use it only when that is the daemon you are comparing
+against. Do not hard-code a build in a run book; the one the rig proved against is recorded in
+each run's `report.json`.
+
 ## Running it
 
 ```sh
 SRC=/path/to/checkout           # bun install --frozen-lockfile must have run here
-OMP=$(mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423)/bin/omp
+# The build the live daemon runs: the `omp_invocation` line of its legion.yaml names it.
+OMP_TOOL=$(sed -n 's/^omp_invocation: *"mise x \([^ ]*\) -- omp".*/\1/p' ~/.config/legion/sjawhar-legion/legion.yaml)
+OMP=$(mise where "$OMP_TOOL")/bin/omp
 eval "$(sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh "$SRC")"   # prints RIG=…
 PORT=13399
 bun $SRC/packages/pi-envoy/scripts/grant-rig/daemon-standin.ts $PORT $RIG/standin.log $RIG/state/secrets/boot &

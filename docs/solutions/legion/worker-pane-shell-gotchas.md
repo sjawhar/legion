@@ -97,13 +97,17 @@ on a later helper call; do not count on it.) Put the command that redeems the gr
 `legion handoff complete`, `legion credential` — **first** in its bash call, or alone in one. The recipe in section 3
 puts the bookmark move and the push in the same call; on a loaded box, split them.
 
-**The fix (pi-envoy 1.8.x — the post-merge task fills in the released version; LEGION-12, pull request #974).** The
-grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash call accepts), together
-with the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, and the shim-first `PATH`. The
-command text is never touched, so nothing credential-shaped is written back into the transcript for the model to copy.
-The hook's keys are spread last, so even a model that imitates a previous call's `env` object cannot displace the
-grant minted for the current call. Oh My Pi applies that `env` to the one command only; nothing enters the persistent
-shell.
+**The fix (the first pi-envoy release after 1.12.0 — the post-merge task fills in the exact version; LEGION-12, pull
+request #974).** The grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash
+call accepts), together with the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, and the
+shim-first `PATH`. The command text is never touched, so nothing credential-shaped is written back into the transcript
+for the model to copy. The hook's keys are spread last, so even a model that imitates a previous call's `env` object
+cannot displace the grant minted for the current call. Oh My Pi applies that `env` to the one command only; nothing
+enters the persistent shell. The flip side: those six variables (`LEGION_GRANT`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
+`GH_CONFIG_DIR`, `PATH`) now live in a per-command scope that is popped when the command ends, so a worker's own
+`export PATH=…` — or any change to one of those six — inside one bash call no longer carries into the next call, which
+it did while the hook's `export` lines ran in the persistent shell. Set what you need in each call, or put it in the
+call's own `env`.
 
 **On a fixed plugin, do not use the old workarounds.** Three were recorded for the old plugin: the `export()` shell
 function that kept only the first credential per call (LEGION-9, kept at `/tmp/legion9-grant-trap.sh` on the rig), the

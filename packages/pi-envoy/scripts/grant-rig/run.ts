@@ -33,8 +33,10 @@ import { parseArgs } from "node:util";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** One credential line as the unfixed hook wrote it (single-quoted), or as a model imitation
- * might (double-quoted, bare, or a literal placeholder). */
+ * might (double-quoted, bare, or a literal placeholder). Used to classify the ids; verdict A
+ * itself fails on any occurrence of the variable's name in the command text, whatever its form. */
 const GRANT_TEXT_LINE = /^export LEGION_GRANT=(?:'([^']*)'|"([^"]*)"|(\S*))/gm;
+const GRANT_NAME = "LEGION_GRANT";
 const RUN_DEADLINE_MS = 20 * 60_000;
 const EXIT_GRACE_MS = 15_000;
 
@@ -535,7 +537,11 @@ async function analyze(input: {
       );
     }
     const T = call.textIds.length;
-    if (T > 0) textFree = false;
+    // The claim verdict A prints is "free of credential lines": any mention of the variable in the
+    // model-visible text — an export, an inline `LEGION_GRANT=… legion gh`, a bare echo — is a
+    // failure, not only the exact line shape the unfixed hook used to write.
+    const mentions = call.command.split(GRANT_NAME).length - 1;
+    if (T > 0 || mentions > 0) textFree = false;
     if (call.envGrant === undefined || !UUID_V4.test(call.envGrant)) envAll = false;
     const envState =
       call.envGrant === undefined
@@ -547,7 +553,7 @@ async function analyze(input: {
       i === 0 && id === ownMint ? "hook" : classifyExtra(id, earlier, minted, ownMint)
     );
     rows.push(
-      `${String(k + 1).padStart(2)}  H=${H}/${distinct.size}  G=${oneToOne ? 1 : "?"}  T=${T}  ${envState}  ${extras.length > 0 ? `X=[${extras.join(",")}]` : ""}`
+      `${String(k + 1).padStart(2)}  H=${H}/${distinct.size}  G=${oneToOne ? 1 : "?"}  T=${T}${mentions > T ? ` (+${mentions - T} other mention${mentions - T === 1 ? "" : "s"} of ${GRANT_NAME})` : ""}  ${envState}  ${extras.length > 0 ? `X=[${extras.join(",")}]` : ""}`
     );
     for (const id of call.textIds) earlier.add(id);
 
@@ -612,7 +618,7 @@ async function analyze(input: {
   }
 
   const verdict = [
-    `A. command text free of credential lines: ${ran && textFree ? "PASS" : "FAIL"}; env carries a uuid grant on every call: ${ran && envAll ? "PASS" : "FAIL"}`,
+    `A. command text never mentions ${GRANT_NAME} (no credential line, no inline assignment, nothing): ${ran && textFree ? "PASS" : "FAIL"}; env carries a uuid grant on every call: ${ran && envAll ? "PASS" : "FAIL"}`,
     `B. one mint per bash call: ${ran && oneToOne ? "PASS" : `FAIL (${mintedInOrder.length} mints, ${calls.length} calls)`}; redemptions all 200: ${redemptionsAll200 ? "PASS" : "FAIL"}`,
     `C. every record-grant ran under its own mint: ${executedAll && executed.length > 0 ? "PASS" : "FAIL"}`,
     `D. legion commands exit=0 and never 'Unable to redeem': ${resultsClean ? "PASS" : "FAIL"}`,
