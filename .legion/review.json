@@ -181,7 +181,73 @@
     ],
     "harnessSymptom": "Fresh pane: grant-export shadow re-established inline per docs/solutions/legion/worker-pane-shell-gotchas.md §1; `legion gh -- auth status` → legion-reviewer[bot] before any write. One call that omitted `; grant_release` left the lock set and the next `legion gh` 403'd on the stale grant; releasing and retrying recovered. 2–5 stacked LEGION_GRANT blocks per call."
   },
+  "nitsReview": {
+    "at": "2026-09-13T01:58:00Z",
+    "reviewedHead": "17ba9aaa82814ea3f6a38462990d9133cc073805",
+    "reviewedHeadNote": "`test: record nits-round verification` — .legion/test.json only; code head 6af80295 (`chore(daemon): align the instructions E2E wait with its siblings and dedupe docs`); base main 4d516a1f",
+    "verdict": "CLEAN_PENDING_LEGION_DELETION",
+    "review": {
+      "id": 5189009195,
+      "url": "https://github.com/sjawhar/legion/pull/956#pullrequestreview-5189009195",
+      "state": "COMMENTED",
+      "commitId": "17ba9aaa82814ea3f6a38462990d9133cc073805",
+      "note": "Not an approval: .legion/*.json still in the diff. Approval head-pinned to the cleaned head after the deletion push."
+    },
+    "scope": "jj diff --from a0af66dc --to 6af80295: code portion identical to `jj diff -r 6af80295` (six files; the range's extra hunks are .legion/*.json handoffs only). Architect ruling: no fast-follow list, all six nits landed in one commit.",
+    "nitDispositions": [
+      {
+        "nit": 1,
+        "file": "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts",
+        "fixed": "waitForFile is a 20 ms existsSync poll, 1500 attempts (30 s), throws `argv record never appeared at <path>`; `watch` import removed — waitForSocket's shape exactly"
+      },
+      {
+        "nit": 2,
+        "file": "packages/daemon/src/cli/__tests__/fixtures/argv-recorder-omp.ts",
+        "fixed": "temp file `argv.json.tmp` beside the record + renameSync; comment describes current behaviour, coalescing rationale dropped since placement is irrelevant under a poll"
+      },
+      {
+        "nit": 3,
+        "file": "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts (run)",
+        "fixed": "forwards cwd/env; byte-identical to real-shutdown-e2e.test.ts:56-72"
+      },
+      {
+        "nit": 4,
+        "file": "packages/daemon/src/daemon/AGENTS.md",
+        "fixed": "duplicate `Before loading state…` paragraph removed; single refusal statement in the config paragraph; write failure worded `with Node's error naming that target path`"
+      },
+      {
+        "nit": 5,
+        "file": "packages/daemon/src/daemon/deployment-instructions.ts",
+        "fixed": "one doc comment on the function; const bare"
+      },
+      {
+        "nit": 6,
+        "file": "packages/daemon/src/daemon/config.ts",
+        "fixed": "`const instructionsPath = requireNonEmpty(instructions, \"instructions\")` assign-the-result idiom"
+      },
+      {
+        "nit": 7,
+        "file": "scripts/smoke/README.md",
+        "fixed": "the `same mechanism an operator uses…` sentence now lives only in up.sh's comment; README points at write_daemon_config"
+      }
+    ],
+    "behaviourUnchanged": "waitForFile keeps the 30 s / named-path contract; record still atomic via rename (existsSync flips only after renameSync); controller launch passes no run options so forwarding is inert here; config.ts semantics identical (requireNonEmpty returns its input). No thermo rerun — diff held no surprises.",
+    "verifiedAgainstGitHub": {
+      "head": "17ba9aaa82814ea3f6a38462990d9133cc073805 = workspace legion/LEGION-17@origin; my cb9c7049 review handoff is an ancestor",
+      "threads": "PRRT_kwDORFy7ds6huAFv and PRRT_kwDORFy7ds6huAFx both isResolved: true (resolved by the implementer)",
+      "ci": "at 17ba9aaa: Tests 34731758421 success, Tests 34731739566 success, Legion Envoy and Contracts 34731739572 success"
+    },
+    "localRuns": {
+      "targeted": "config.test.ts + deployment-instructions.test.ts + cli index.test.ts: 76 pass / 0 fail at load ~107",
+      "realE2E": "env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE LEGION_E2E=1 bun test --timeout 240000 real-deployment-instructions-e2e.test.ts ×5: 5 pass / 0 fail"
+    },
+    "nextSteps": [
+      "Implementer: push the .legion/ deletion carrying the two local review handoff commits (cb9c7049 and this one) first; fill PR body Thermo (`no blocking findings at 8c988ff2`, no rerun at 6af80295) and Fast-follow (`none — all six landed in 6af80295`).",
+      "Architect messages reviewer; reviewer verifies cleaned head = PR head, diff excludes .legion/, then APPROVE head-pinned to that sha."
+    ],
+    "harness": "Fresh pane: grant-export shadow re-established inline (docs/solutions/legion/worker-pane-shell-gotchas.md §1); `legion gh -- auth status` → legion-reviewer[bot] before any write; 2–4 stacked LEGION_GRANT blocks per call."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T01:37:23.797Z"
+  "completed": "2026-09-13T01:59:23.095Z"
 }
