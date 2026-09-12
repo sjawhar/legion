@@ -16,9 +16,14 @@ import {
   setConnectionState,
   transition,
 } from "./live";
+import { queryKeys } from "./query-keys";
 import type { Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
+  "project.created": true,
+  "project.updated": true,
+  "settings.repo_project.updated": true,
+  "user_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
@@ -41,6 +46,7 @@ const knownEventTypes: Record<EventType, true> = {
   "message.delivery": true,
   "message.answered": true,
   "child.status": true,
+  "subscription.remove_requested": true,
   "subscription.removed": true,
 };
 
@@ -55,6 +61,33 @@ export interface QueryInvalidator {
 
 function artifactId(event: Event): string | undefined {
   return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
+}
+
+function payloadString(event: Event, key: string): string | undefined {
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || !(key in payload)) {
+    return undefined;
+  }
+  const value = Reflect.get(payload, key);
+  return typeof value === "string" ? value : undefined;
+}
+
+function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
+  const id = payloadString(event, "id");
+  if (id !== undefined) {
+    keys.push(queryKeys.ask(id), queryKeys.askThread(id));
+  }
+}
+
+function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
+  const id = payloadString(event, "id");
+  if (id !== undefined) {
+    keys.push(queryKeys.comment(id));
+  }
+  const askID = payloadString(event, "ask_id");
+  if (askID !== undefined) {
+    keys.push(queryKeys.ask(askID), queryKeys.askThread(askID));
+  }
 }
 
 // 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
@@ -88,7 +121,28 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
-function eventQueryKeys(event: Event): (readonly unknown[])[] {
+function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
+  if (
+    event.type === "project.created" ||
+    event.type === "project.updated" ||
+    event.type === "settings.repo_project.updated"
+  ) {
+    if (event.project === undefined) {
+      throw new Error("project event is missing its project");
+    }
+    return [
+      ["projects"],
+      ["project", event.project],
+      ["issues", "project", event.project],
+      ["repo-projects"],
+    ];
+  }
+  if (event.type === "user_state.updated") {
+    return payloadString(event, "login") === signedInLogin ? [["user-state"], ["inbox"]] : [];
+  }
+  if (event.type === "subscription.remove_requested") {
+    return [];
+  }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {
       throw new Error("document event is missing its artifact id");
@@ -97,16 +151,27 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
       throw new Error("document event is missing its project");
     }
     const keys: (readonly unknown[])[] = [
-      ["artifact", event.artifact_id],
+      queryKeys.artifact(event.artifact_id),
       ["artifact-ref"],
+      queryKeys.projectArtifactPrefix(event.project),
       ["project", event.project, "artifacts"],
       ["projects"],
     ];
+    if (event.type.startsWith("ask.")) {
+      appendAskDetailKeys(keys, event);
+      keys.push(["inbox"]);
+    }
     if (
-      event.type.startsWith("ask.") ||
-      event.type === "artifact.approved" ||
-      event.type === "artifact.changes_requested"
+      event.type === "comment.created" ||
+      event.type === "comment.resolved" ||
+      event.type === "comment.reopened" ||
+      event.type === "comment.edited" ||
+      event.type === "suggestion.accepted" ||
+      event.type === "suggestion.rejected"
     ) {
+      appendCommentDetailKeys(keys, event);
+    }
+    if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
       keys.push(["inbox"]);
     }
     if (event.type === "subscription.removed") {
@@ -165,14 +230,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "ask.resolved"
   ) {
     keys.push(["asks", event.issue_key], ["projects"]);
-    // The ask's own read (`GET /asks/{id}`) carries its resolution and every rewording, so a
-    // card showing either must refetch it.
-    if (
-      (event.type === "ask.edited" || event.type === "ask.resolved") &&
-      typeof event.payload.id === "string"
-    ) {
-      keys.push(["ask-thread", event.payload.id]);
-    }
+    appendAskDetailKeys(keys, event);
     return keys;
   }
   if (event.type === "block.repaired") {
@@ -189,9 +247,7 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
     event.type === "suggestion.rejected"
   ) {
     keys.push(["comments", event.issue_key], ["artifact"]);
-    if (typeof event.payload.ask_id === "string") {
-      keys.push(["ask-thread", event.payload.ask_id]);
-    }
+    appendCommentDetailKeys(keys, event);
     return keys;
   }
 
@@ -213,8 +269,12 @@ function eventQueryKeys(event: Event): (readonly unknown[])[] {
   return keys;
 }
 
-export function applyEventInvalidations(queryClient: QueryInvalidator, event: Event): void {
-  for (const key of eventQueryKeys(event)) {
+export function applyEventInvalidations(
+  queryClient: QueryInvalidator,
+  event: Event,
+  signedInLogin?: string
+): void {
+  for (const key of eventQueryKeys(event, signedInLogin)) {
     queryClient.invalidateQueries({ queryKey: key });
   }
 }
@@ -283,7 +343,8 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       let application: StreamApplicationEvent | undefined;
       if (raw.event !== undefined && raw.event in knownEventTypes) {
         const event = JSON.parse(raw.data) as Event;
-        application = { event, queryKeys: eventQueryKeys(event) };
+        const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
+        application = { event, queryKeys: eventQueryKeys(event, signedInLogin) };
       }
       dispatch({ application, id: raw.id, kind: "stream-event", streamId });
     };

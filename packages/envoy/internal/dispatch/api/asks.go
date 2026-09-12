@@ -377,17 +377,31 @@ type askTransition struct {
 	After func(context.Context, pgx.Tx, model.Ask) ([]model.Event, error)
 }
 
+// answerRevision is the question revision a human reviewed before choosing an answer.
+// A nil EditedAt represents an ask that had not yet been edited.
+type answerRevision struct {
+	EditedAt *string
+}
+
 // answerTransition is the answer of an ask: option labels for a question, or
 // exactly one of Approve / Request changes for an approval ask.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
 	text *string,
+	revision *answerRevision,
 	writeBlock func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error,
 ) askTransition {
 	return askTransition{
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
+			if revision != nil && !sameAskRevision(revision.EditedAt, ask.EditedAt) {
+				return model.Ask{}, errorf(
+					http.StatusConflict,
+					"ASK_CHANGED",
+					"the question changed after you reviewed it; review the latest version and confirm your answer",
+				)
+			}
 			hasText := text != nil && strings.TrimSpace(*text) != ""
 			if ask.Kind == "approval" {
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
@@ -424,11 +438,18 @@ func answerTransition(
 	}
 }
 
+func sameAskRevision(expected, actual *string) bool {
+	if expected == nil || actual == nil {
+		return expected == nil && actual == nil
+	}
+	return *expected == *actual
+}
+
 // answerAskTx answers an ask inside the caller's transaction without appending
 // or publishing its event; the header review path uses it to close an open
 // approval ask alongside the review it writes.
 func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, selected []string, text *string) (model.Ask, error) {
-	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text, nil))
+	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text, nil, nil))
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
@@ -437,32 +458,48 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Selected []string     `json:"selected"`
-		Text     *string      `json:"text"`
-		Actor    *model.Actor `json:"actor"`
+		Selected         []string        `json:"selected"`
+		Text             *string         `json:"text"`
+		ExpectedEditedAt json.RawMessage `json:"expected_edited_at"`
+		Actor            *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	transition := answerTransition(actor, input.Selected, input.Text, func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
-		if ask.BlockID == nil {
-			return nil
-		}
-		if ask.BlockArtifactID == nil {
-			return fmt.Errorf("ask %q has block id without block artifact", ask.ID)
-		}
-		attributes := map[string]any{
-			"state":       "answered",
-			"answered_by": answer.User,
-			"answered_at": timestampValue(answer.At),
-			"selected":    answer.Selected,
-		}
-		if answer.Text != nil {
-			attributes["answer"] = *answer.Text
-		}
-		return s.deps.Docs.SetBlockAttributes(docs.WithTx(ctx, tx), *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
-	})
+	if input.ExpectedEditedAt == nil {
+		writeError(w, "ASK_REVISION_REQUIRED", http.StatusBadRequest, "expected_edited_at is required")
+		return
+	}
+	var expectedEditedAt *string
+	if err := json.Unmarshal(input.ExpectedEditedAt, &expectedEditedAt); err != nil {
+		writeError(w, "INVALID_ANSWER", http.StatusBadRequest, "expected_edited_at must be an RFC3339 timestamp or null")
+		return
+	}
+	transition := answerTransition(
+		actor,
+		input.Selected,
+		input.Text,
+		&answerRevision{EditedAt: expectedEditedAt},
+		func(ctx context.Context, tx pgx.Tx, ask model.Ask, answer model.AskAnswer) error {
+			if ask.BlockID == nil {
+				return nil
+			}
+			if ask.BlockArtifactID == nil {
+				return fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+			}
+			attributes := map[string]any{
+				"state":       "answered",
+				"answered_by": answer.User,
+				"answered_at": timestampValue(answer.At),
+				"selected":    answer.Selected,
+			}
+			if answer.Text != nil {
+				attributes["answer"] = *answer.Text
+			}
+			return s.deps.Docs.SetBlockAttributes(docs.WithTx(ctx, tx), *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
+		},
+	)
 	// An approval ask's answer is a review of the document it names, pinned to
 	// the document's latest settled version at answer time.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {

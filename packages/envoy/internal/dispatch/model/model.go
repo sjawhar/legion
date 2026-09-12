@@ -490,6 +490,7 @@ type Event struct {
 	ID         int64     `json:"id"`
 	IssueKey   *string   `json:"issue_key"`
 	ArtifactID *string   `json:"artifact_id"`
+	ProjectKey *string   `json:"-"`
 	Project    string    `json:"project"`
 	Seq        int       `json:"seq"`
 	Type       string    `json:"type"`

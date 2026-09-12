@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   AnswerAskInput,
   Ask,
@@ -333,6 +333,7 @@ export function AskCard({
   const [answerText, setAnswerText] = useState("");
   const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
+  const [askChanged, setAskChanged] = useState(false);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
   // thread — one fetch instead of each consumer issuing its own.
@@ -351,9 +352,16 @@ export function AskCard({
       );
       return previous;
     },
-    onError: (_error, _input, previous) => {
+    onError: (error, _input, previous) => {
       queryClient.setQueryData(["inbox"], previous);
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      if (error instanceof ApiError && error.code === "ASK_CHANGED") {
+        setAskChanged(true);
+        setSelected([]);
+        setOtherSelected(false);
+        void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
+        void threadQuery.refetch();
+      }
     },
     onSettled: () => {
       submitGuard.release();
@@ -395,26 +403,34 @@ export function AskCard({
     },
   });
 
-  const hasOptions = ask.options.length > 0;
-  const isApproval = ask.kind === "approval";
+  const displayedAsk = askChanged ? (threadQuery.data?.ask ?? ask) : ask;
+  const hasOptions = displayedAsk.options.length > 0;
+  const isApproval = displayedAsk.kind === "approval";
   const isSubmitting = mutation.isPending || clarification.isPending;
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
+      const revision = { expected_edited_at: displayedAsk.edited_at };
       if (isApproval) {
-        mutation.mutate(selected.includes("Request changes") ? { selected, text } : { selected });
+        mutation.mutate(
+          selected.includes("Request changes")
+            ? { selected, text, ...revision }
+            : { selected, ...revision }
+        );
         return;
       }
       if (hasOptions) {
-        mutation.mutate(otherSelected ? { selected, text } : { selected });
+        mutation.mutate(
+          otherSelected ? { selected, text, ...revision } : { selected, ...revision }
+        );
         return;
       }
-      mutation.mutate(text === "" ? { selected } : { selected, text });
+      mutation.mutate(text === "" ? { selected, ...revision } : { selected, text, ...revision });
     });
   };
 
   const selectRealOption = (label: string) => {
     setQuestionChoice(false);
-    if (ask.multiple) {
+    if (displayedAsk.multiple) {
       setSelected((current) =>
         current.includes(label)
           ? current.filter((currentLabel) => currentLabel !== label)
@@ -429,7 +445,7 @@ export function AskCard({
 
   const toggleOther = () => {
     setQuestionChoice(false);
-    if (ask.multiple) {
+    if (displayedAsk.multiple) {
       setOtherSelected((current) => {
         const next = !current;
         if (!next) {
@@ -465,13 +481,14 @@ export function AskCard({
   const showTextarea = isApproval
     ? selected.includes("Request changes")
     : !hasOptions || otherSelected;
-  const tmuxTarget = ask.author.kind === "session" ? ask.author.origin?.tmux : undefined;
+  const tmuxTarget =
+    displayedAsk.author.kind === "session" ? displayedAsk.author.origin?.tmux : undefined;
 
-  const completed = justAnswered ?? (ask.state === "open" ? null : ask);
+  const completed = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
   // stale prop passed to this instance: `justAnswered` renders before an invalidated `ask` prop
   // round-trips down from the parent.
-  const currentAsk = completed ?? ask;
+  const currentAsk = completed ?? displayedAsk;
   const threadNode =
     thread === "collapsed" ? (
       <AskThreadDisclosure ask={currentAsk} createReply={reply} thread={threadQuery} />
@@ -504,41 +521,44 @@ export function AskCard({
 
   return (
     <>
-      <article className={`rounded-xl p-4 shadow-sm ${card}`} data-testid={`ask-${ask.id}`}>
-        {ask.anchor === null ? null : (
+      <article
+        className={`rounded-xl p-4 shadow-sm ${card}`}
+        data-testid={`ask-${displayedAsk.id}`}
+      >
+        {displayedAsk.anchor === null ? null : (
           <blockquote
             className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
           >
-            {ask.anchor.quote}
+            {displayedAsk.anchor.quote}
           </blockquote>
         )}
-        <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
-        {ask.block_id === undefined ||
-        ask.block_id === null ||
-        ask.block_artifact === undefined ? null : (
+        <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={displayedAsk} />
+        {displayedAsk.block_id === undefined ||
+        displayedAsk.block_id === null ||
+        displayedAsk.block_artifact === undefined ? null : (
           <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
-            <AskBlockLink ask={ask} />
+            <AskBlockLink ask={displayedAsk} />
           </p>
         )}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            {ask.kind === "approval" ? (
+            {displayedAsk.kind === "approval" ? (
               <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
                 Approval requested
               </p>
             ) : null}
             <div className={`font-medium ${textPrimaryOnSurface}`}>
-              <MarkdownBody markdown={ask.question} />
+              <MarkdownBody markdown={displayedAsk.question} />
             </div>
             <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
-              {actorLabel(ask.author)} · <Timestamp at={ask.created_at} />
+              {actorLabel(displayedAsk.author)} · <Timestamp at={displayedAsk.created_at} />
             </p>
-            <AskEditHistory ask={ask} edits={edits} />
+            <AskEditHistory ask={displayedAsk} edits={edits} />
           </div>
           <span
-            className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[ask.urgency].bg} ${URGENCY_STYLES[ask.urgency].text}`}
+            className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[displayedAsk.urgency].bg} ${URGENCY_STYLES[displayedAsk.urgency].text}`}
           >
-            {URGENCY_LABELS[ask.urgency]}
+            {URGENCY_LABELS[displayedAsk.urgency]}
           </span>
         </div>
         {tmuxTarget === undefined ? null : (
@@ -552,11 +572,17 @@ export function AskCard({
             Copy tmux target
           </button>
         )}
+        {askChanged ? (
+          <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>
+            This question changed while you were answering. Review the latest wording and confirm
+            your answer again; your draft text is still here.
+          </p>
+        ) : null}
         <form className="mt-4 space-y-3" onSubmit={submit}>
-          {ask.options.length === 0 ? null : (
+          {displayedAsk.options.length === 0 ? null : (
             <fieldset className="space-y-2">
               <legend className="sr-only">Answer options</legend>
-              {ask.options.map((option) => {
+              {displayedAsk.options.map((option) => {
                 const checked = selected.includes(option.label);
                 return (
                   <label
@@ -566,9 +592,9 @@ export function AskCard({
                     <input
                       checked={checked}
                       disabled={isSubmitting}
-                      name={`ask-${ask.id}`}
+                      name={`ask-${displayedAsk.id}`}
                       onChange={() => selectRealOption(option.label)}
-                      type={ask.multiple ? "checkbox" : "radio"}
+                      type={displayedAsk.multiple ? "checkbox" : "radio"}
                     />
                     <span>
                       <span className={`font-medium ${textPrimaryOnSurface}`}>
@@ -590,9 +616,9 @@ export function AskCard({
                   <input
                     checked={otherSelected}
                     disabled={isSubmitting}
-                    name={`ask-${ask.id}`}
+                    name={`ask-${displayedAsk.id}`}
                     onChange={toggleOther}
-                    type={ask.multiple ? "checkbox" : "radio"}
+                    type={displayedAsk.multiple ? "checkbox" : "radio"}
                   />
                   <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
                 </label>

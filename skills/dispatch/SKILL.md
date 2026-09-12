@@ -139,7 +139,8 @@ dispatch_edit_ask({
 })
 ```
 At least one field besides `ask` is required. Use this only while the same decision remains open: it keeps the prior text in the event
-log. An answered or resolved ask cannot be edited. If the decision is moot or superseded, retract the old ask and open a new one.
+log and invalidates any answer draft against the prior `edited_at` revision, so the human sees the new wording and explicitly reconfirms.
+An answered or resolved ask cannot be edited. If the decision is moot or superseded, retract the old ask and open a new one.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
 self-resolve one after finding the answer:

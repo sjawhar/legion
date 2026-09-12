@@ -17,6 +17,11 @@ import (
 
 const Stream = "ENVOY_NOTIFICATIONS"
 
+// streamDuplicateWindow covers the entire retained notification lifetime, so
+// an outbox retry after a crash before published_at is recorded cannot create a
+// second retained Dispatch event while the original remains observable.
+const streamDuplicateWindow = 72 * time.Hour
+
 var streamSubjects = []string{
 	"notifications.agent.>",
 	"notifications.dispatch.>",
@@ -33,12 +38,13 @@ func StreamSubjects() []string {
 }
 
 var streamCfg = &nats.StreamConfig{
-	Name:      Stream,
-	Subjects:  streamSubjects,
-	Retention: nats.LimitsPolicy,
-	MaxAge:    72 * time.Hour,
-	Storage:   nats.FileStorage,
-	Replicas:  1,
+	Name:       Stream,
+	Subjects:   streamSubjects,
+	Retention:  nats.LimitsPolicy,
+	MaxAge:     72 * time.Hour,
+	Duplicates: streamDuplicateWindow,
+	Storage:    nats.FileStorage,
+	Replicas:   1,
 }
 
 // ConnectOption configures the bus client.
@@ -311,7 +317,9 @@ func migrateRoleLanesOffStream(js nats.JetStreamContext, oldConfig, newConfig *n
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if err == nil {
-		if info.Config.MaxAge == cfg.MaxAge && slices.Equal(info.Config.Subjects, cfg.Subjects) {
+		if info.Config.MaxAge == cfg.MaxAge &&
+			info.Config.Duplicates == cfg.Duplicates &&
+			slices.Equal(info.Config.Subjects, cfg.Subjects) {
 			return nil
 		}
 		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(cfg.Subjects)
@@ -625,12 +633,16 @@ func (c *Client) publishJetStream(item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	_, err = c.js.Publish(item.Topic, data, nats.Context(ctx))
+	options := []nats.PubOpt{nats.Context(ctx)}
+	if item.Source == "dispatch" {
+		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
+	}
+	_, err = c.js.Publish(item.Topic, data, options...)
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConnWithContext(ctx); err != nil {
 			return err
 		}
-		_, err = c.js.Publish(item.Topic, data, nats.Context(ctx))
+		_, err = c.js.Publish(item.Topic, data, options...)
 	}
 	return err
 }

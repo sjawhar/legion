@@ -203,6 +203,22 @@ func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *h
 
 func dispatchRequest(t *testing.T, handler http.Handler, method, target string, body any, login string) *httptest.ResponseRecorder {
 	t.Helper()
+	if strings.HasSuffix(target, "/answer") {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("encode answer request body: %v", err)
+		}
+		input := map[string]any{}
+		if string(data) != "null" {
+			if err := json.Unmarshal(data, &input); err != nil {
+				t.Fatalf("decode answer request body: %v", err)
+			}
+		}
+		if _, provided := input["expected_edited_at"]; !provided {
+			input["expected_edited_at"] = nil
+		}
+		body = input
+	}
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -512,6 +528,9 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "user named version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: true}}}, want: true},
 		{name: "session named version", event: model.Event{Type: "artifact.version", Actor: session, Payload: map[string]any{"version": model.Version{Named: true}}}, want: false},
 		{name: "child status", event: model.Event{Type: "child.status", Actor: session}, want: true},
+		{name: "project creation", event: model.Event{Type: "project.created", Actor: user}, want: false},
+		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
+		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {
@@ -1068,6 +1087,10 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
 	}
 	scanner := bufio.NewScanner(stream.Body)
+	projectReplay := readSSEFrame(t, scanner)
+	if projectReplay[1] != "event: project.created" {
+		t.Fatalf("project replayed SSE frame: %#v", projectReplay)
+	}
 	replayed := readSSEFrame(t, scanner)
 	if replayed[1] != "event: issue.created" || !strings.Contains(replayed[2], `"issue_key":"TEST-1"`) {
 		t.Fatalf("replayed SSE frame: %#v", replayed)
@@ -1089,14 +1112,14 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 		t.Fatalf("construct resumed SSE request: %v", err)
 	}
 	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "1")
+	resumeRequest.Header.Set("Last-Event-ID", "2")
 	resumed, err := http.DefaultClient.Do(resumeRequest)
 	if err != nil {
 		t.Fatalf("resume SSE: %v", err)
 	}
 	defer resumed.Body.Close()
 	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
-	if resumedFrame[0] != "id: 2" || resumedFrame[1] != "event: issue.updated" {
+	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
 		t.Fatalf("Last-Event-ID replay: %#v", resumedFrame)
 	}
 	staleQueryRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
@@ -1104,14 +1127,14 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 		t.Fatalf("construct stale-query SSE request: %v", err)
 	}
 	staleQueryRequest.Header.Set("Authorization", "Bearer agent-token")
-	staleQueryRequest.Header.Set("Last-Event-ID", "1")
+	staleQueryRequest.Header.Set("Last-Event-ID", "2")
 	staleQuery, err := http.DefaultClient.Do(staleQueryRequest)
 	if err != nil {
 		t.Fatalf("resume stale-query SSE: %v", err)
 	}
 	defer staleQuery.Body.Close()
 	staleQueryFrame := readSSEFrame(t, bufio.NewScanner(staleQuery.Body))
-	if staleQueryFrame[0] != "id: 2" || staleQueryFrame[1] != "event: issue.updated" {
+	if staleQueryFrame[0] != "id: 3" || staleQueryFrame[1] != "event: issue.updated" {
 		t.Fatalf("Last-Event-ID with stale since query replay: %#v", staleQueryFrame)
 	}
 }
@@ -1722,16 +1745,13 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 		t.Fatalf("open capped SSE stream: %v", err)
 	}
 	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("capped SSE status: got %d, want %d", stream.StatusCode, http.StatusOK)
-	}
 	scanner := bufio.NewScanner(stream.Body)
-	// The backlog (1005 events) exceeds one capped page (maxSSEReplay=1000); a
-	// single connection pages through all of it without ever disconnecting — a
-	// capped page used to end the stream and force a client reconnect, which left
-	// a gap where a low id committing between "read this page" and "a new
-	// connection subscribes" could be lost forever.
-	for wantID := 2; wantID <= 1006; wantID++ {
+	// The 1005 seeded events plus the issue creation exceed one capped page
+	// (maxSSEReplay=1000); a single connection pages through all of them without
+	// ever disconnecting — a capped page used to end the stream and force a client
+	// reconnect, which left a gap where a low id committing between "read this page"
+	// and "a new connection subscribes" could be lost forever.
+	for wantID := 2; wantID <= 1007; wantID++ {
 		frame := readSSEFrame(t, scanner)
 		if frame[0] != fmt.Sprintf("id: %d", wantID) {
 			t.Fatalf("paged replay frame = %#v, want id %d", frame, wantID)
@@ -1793,6 +1813,10 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
 	}
 	scanner := bufio.NewScanner(stream.Body)
+	projectReplay := readSSEFrame(t, scanner)
+	if projectReplay[1] != "event: project.created" {
+		t.Fatalf("project replayed SSE frame: %#v", projectReplay)
+	}
 	replayed := readSSEFrame(t, scanner)
 	if replayed[1] != "event: issue.created" {
 		t.Fatalf("replayed SSE frame: %#v", replayed)
@@ -1824,7 +1848,7 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 		t.Fatalf("construct resumed SSE request: %v", err)
 	}
 	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "1")
+	resumeRequest.Header.Set("Last-Event-ID", "2")
 	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
 		"title": "Renamed after disconnect",
 	}, "alice")
@@ -1837,7 +1861,7 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 	}
 	defer resumed.Body.Close()
 	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
-	if resumedFrame[0] != "id: 2" || resumedFrame[1] != "event: issue.updated" {
+	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
 		t.Fatalf("resumed replay after disconnect-all: %#v", resumedFrame)
 	}
 }
@@ -1869,7 +1893,115 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)
+
 	return mux, database, broker
+}
+func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
+	handler, database, broker := newTestHandlerWithBroker(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "OTHER", "name": "Other project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create other project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	otherCreated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "OTHER", "title": "Other issue",
+	}, "alice")
+	other := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, otherCreated)
+	if otherCreated.Code != http.StatusCreated {
+		t.Fatalf("create other issue: status=%d body=%s", otherCreated.Code, otherCreated.Body.String())
+	}
+
+	ctx := context.Background()
+	first, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin first transaction: %v", err)
+	}
+	defer first.Rollback(ctx)
+	low, err := broker.Append(ctx, first, model.Event{
+		IssueKey: new(issue.Key),
+		Type:     "test.concurrent",
+		Actor:    model.Actor{Kind: "session", ID: "seed"},
+		Payload:  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("append first event: %v", err)
+	}
+
+	type appendResult struct {
+		event model.Event
+		err   error
+	}
+	started := make(chan struct{})
+	secondResult := make(chan appendResult, 1)
+	go func() {
+		second, err := database.Pool.Begin(ctx)
+		if err != nil {
+			secondResult <- appendResult{err: err}
+			return
+		}
+		defer second.Rollback(ctx)
+		close(started)
+		event, err := broker.Append(ctx, second, model.Event{
+			IssueKey: new(other.Key),
+			Type:     "test.concurrent",
+			Actor:    model.Actor{Kind: "session", ID: "seed"},
+			Payload:  map[string]any{},
+		})
+		if err == nil {
+			err = second.Commit(ctx)
+		}
+		secondResult <- appendResult{event: event, err: err}
+	}()
+	<-started
+	waitForDatabaseLocks(t, database, 1)
+
+	if err := first.Commit(ctx); err != nil {
+		t.Fatalf("commit first event: %v", err)
+	}
+	high := <-secondResult
+	if high.err != nil {
+		t.Fatalf("append second event: %v", high.err)
+	}
+	if high.event.ID <= low.ID {
+		t.Fatalf("event ids did not follow commit order: first=%d second=%d", low.ID, high.event.ID)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+	request, err := http.NewRequest(
+		http.MethodGet,
+		httpServer.URL+"/api/v1/events?since="+fmt.Sprintf("%d", low.ID),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("construct resumed SSE request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer agent-token")
+	stream, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("open resumed SSE stream: %v", err)
+	}
+	defer stream.Body.Close()
+	frame := readSSEFrame(t, bufio.NewScanner(stream.Body))
+	if frame[0] != fmt.Sprintf("id: %d", high.event.ID) {
+		t.Fatalf("resume replay = %#v, want committed second event %d", frame, high.event.ID)
+	}
 }
 
 // TestSSELiveEventBelowSinceIsNotDropped proves the server never uses an id
@@ -2025,7 +2157,7 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 
 	httpServer := httptest.NewServer(handler)
 	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=1", nil)
+	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=2", nil)
 	if err != nil {
 		t.Fatalf("construct SSE request: %v", err)
 	}

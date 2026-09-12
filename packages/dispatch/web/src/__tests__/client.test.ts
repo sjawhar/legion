@@ -116,7 +116,11 @@ test("API client sends the documented method and JSON body for mutations", async
     name: "Core",
   });
   await api.patchIssue("CORE-1", { status: "done" });
-  await api.answerAsk("ask-1", { selected: ["Ship"], text: "Approved" });
+  await api.answerAsk("ask-1", {
+    selected: ["Ship"],
+    text: "Approved",
+    expected_edited_at: "2026-09-12T12:00:00Z",
+  });
   await api.editArtifact("artifact-1", {
     ops: [{ op: "replace", find: "draft", with: "final" }],
     summary: "Publish final copy",
@@ -135,6 +139,7 @@ test("API client sends the documented method and JSON body for mutations", async
   });
   expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({ status: "done" });
   expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({
+    expected_edited_at: "2026-09-12T12:00:00Z",
     selected: ["Ship"],
     text: "Approved",
   });

@@ -96,14 +96,16 @@ func scan(ctx context.Context, deps Deps) {
 
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		select e.id, e.issue_key, e.artifact_id::text, coalesce(i.project_key, ar.project_key), e.seq,
+		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
 		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
 		from events e
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
 		left join issues ai on ai.key = ar.issue_key
-		where e.published_at is null and (e.next_attempt_at is null or e.next_attempt_at <= now())
+		where e.published_at is null
+		  and (e.next_attempt_at is null or e.next_attempt_at <= now())
+		  and coalesce(e.payload ->> 'pending', 'false') <> 'true'
 		order by e.id
 		limit $1
 	`, batchSize)
@@ -440,6 +442,8 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 		topic = documentTopicPrefix + event.Project + "." + slug + "." + event.Type
 	} else if event.IssueKey != nil {
 		topic = "notifications.dispatch.issue." + *event.IssueKey + "." + event.Type
+	} else if event.Project != "" {
+		topic = "notifications.dispatch.project." + event.Project + "." + event.Type
 	} else {
 		return contracts.Envelope{}, fmt.Errorf("event requires exactly one owner")
 	}

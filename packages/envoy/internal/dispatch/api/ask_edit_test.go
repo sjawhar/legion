@@ -9,8 +9,9 @@ import (
 )
 
 type editableAsk struct {
-	ID            string `json:"id"`
-	OpenedEventID int64  `json:"opened_event_id"`
+	ID            string  `json:"id"`
+	OpenedEventID int64   `json:"opened_event_id"`
+	EditedAt      *string `json:"edited_at"`
 }
 
 func createEditableAsk(t *testing.T, handler http.Handler, issueKey string) editableAsk {
@@ -220,7 +221,6 @@ func TestEditAskValidatesChangedFields(t *testing.T) {
 		}
 	}
 }
-
 func TestEditAskRejectsMalformedID(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/not-a-uuid", map[string]string{
@@ -228,5 +228,38 @@ func TestEditAskRejectsMalformedID(t *testing.T) {
 	}, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) {
 		t.Fatalf("malformed ask id: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAnswerAskRejectsAQuestionEditedAfterTheHumanReadIt(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Revision check", "A spec")
+	ask := createEditableAsk(t, handler, issue.Key)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
+		"question": "Choose the verified release plan", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	current := decodeBody[editableAsk](t, edited)
+	if current.EditedAt == nil {
+		t.Fatalf("edited ask missing edited_at: %s", edited.Body.String())
+	}
+
+	staleAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected":           []string{"HTTP"},
+		"expected_edited_at": ask.EditedAt,
+	}, "alice")
+	if staleAnswer.Code != http.StatusConflict || !strings.Contains(staleAnswer.Body.String(), `"code":"ASK_CHANGED"`) {
+		t.Fatalf("stale answer: status=%d body=%s", staleAnswer.Code, staleAnswer.Body.String())
+	}
+
+	freshAnswer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected":           []string{"HTTP"},
+		"expected_edited_at": current.EditedAt,
+	}, "alice")
+	if freshAnswer.Code != http.StatusOK {
+		t.Fatalf("answer current question: status=%d body=%s", freshAnswer.Code, freshAnswer.Body.String())
 	}
 }

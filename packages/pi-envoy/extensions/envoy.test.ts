@@ -1160,10 +1160,11 @@ describe("envoy OMP extension", () => {
       sessionManager: { getSessionId: () => "ses_live", getSessionName: () => "current title" },
     };
 
+    const signal = new AbortController();
     const result = await ask.execute(
       "call_ask",
       { issue: "LEGION-1", question: "Should we ship B3?" },
-      undefined,
+      signal.signal,
       undefined,
       context
     );
@@ -1181,6 +1182,10 @@ describe("envoy OMP extension", () => {
     expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
       "Bearer dispatch-token"
     );
+    const requestSignal = requests[0]?.init?.signal;
+    expect(requestSignal).toBeInstanceOf(AbortSignal);
+    signal.abort();
+    expect(requestSignal?.aborted).toBe(true);
     expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
       question: "Should we ship B3?",
       actor: {

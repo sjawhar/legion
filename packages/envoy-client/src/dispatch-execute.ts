@@ -70,6 +70,8 @@ export interface ExecuteDispatchToolInput {
   readonly sessionId?: string;
   readonly sessionTitle?: string;
   readonly config: DispatchConfigResolution;
+  /** Host cancellation for the currently executing tool call. */
+  readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
   readonly exec?: ExecFn;
@@ -680,7 +682,7 @@ export async function executeDispatchTool(
   // argument only needs the contract's shape named when it is forwarded.
   const args = toolSchema(input.tool).parse(ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
-  const client = new DispatchClient(configUrl, configToken, input.fetchImpl);
+  const client = new DispatchClient(configUrl, configToken, input.fetchImpl, input.signal);
   const owner =
     ownerArguments.owner?.kind === "issue"
       ? {

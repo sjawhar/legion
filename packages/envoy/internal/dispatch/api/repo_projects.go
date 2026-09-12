@@ -79,21 +79,40 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mapping, err := scanRepoProject(s.deps.Store.Pool.QueryRow(r.Context(), `
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	mapping, err := scanRepoProject(tx.QueryRow(r.Context(), `
 		insert into repo_projects (repo, project, created_by)
 		values ($1, $2, $3)
-		on conflict (repo) do update set project = excluded.project
+		on conflict (repo) do update set project = excluded.project, created_by = excluded.created_by
 		returning repo, project, created_by, created_at
 	`, repo, input.Project, actorJSON))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	event, err := s.appendEvent(r.Context(), tx, projectOwner(mapping.Project).event(
+		"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": false},
+	))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
 	writeJSON(w, http.StatusOK, mapping)
 }
 
 func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	repo, err := repoProjectPath(r)
@@ -101,10 +120,36 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if _, err := s.deps.Store.Pool.Exec(r.Context(), "delete from repo_projects where repo = $1", repo); err != nil {
+	tx, err := s.begin(r.Context())
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	defer tx.Rollback(r.Context())
+	mapping, err := scanRepoProject(tx.QueryRow(r.Context(), `
+		delete from repo_projects where repo = $1
+		returning repo, project, created_by, created_at
+	`, repo))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, projectOwner(mapping.Project).event(
+		"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": true},
+	))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
 	w.WriteHeader(http.StatusNoContent)
 }
 
