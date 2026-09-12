@@ -152,6 +152,52 @@ fi
 
 printf 'PASS: selects webhook ingress mode without silently falling back\n'
 
+fake_omp="${fake_bin}/omp"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_omp"
+chmod +x "$fake_omp"
+[[ "$(LEGION_OMP_PATH="$fake_omp" resolve_omp_path)" == "$fake_omp" ]] || {
+  printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\n' >&2
+  exit 1
+}
+if (LEGION_OMP_PATH="${fake_bin}/missing-omp" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a missing LEGION_OMP_PATH to fail\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+if (LEGION_OMP_PATH="relative/omp" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected a relative LEGION_OMP_PATH to fail (the daemon requires an absolute path)\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'LEGION_OMP_PATH is not an absolute executable file: relative/omp'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+fake_state_home="${fake_bin}/xdg-state"
+default_omp="${fake_state_home}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
+mkdir -p "$(dirname "$default_omp")"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$default_omp"
+chmod +x "$default_omp"
+[[ "$(unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path)" == "$default_omp" ]] || {
+  printf 'expected an unset LEGION_OMP_PATH to resolve to the production rpc-fix build under XDG_STATE_HOME\n' >&2
+  exit 1
+}
+if (unset LEGION_OMP_PATH; XDG_STATE_HOME="${fake_bin}/no-state" resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when neither LEGION_OMP_PATH nor the default build exists\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"* &&
+  "$(<"$assertion_file")" == *'export LEGION_OMP_PATH='* &&
+  "$(<"$assertion_file")" == *'bump omp_pin'* &&
+  "$(<"$assertion_file")" == *'fix/rpc-extension-send-rejection'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+
+printf 'PASS: resolves the OMP build from LEGION_OMP_PATH or the production rpc-fix default, failing closed otherwise\n'
+
 printf '200' >"$response_file"
 if ! (assert_webhook_round_trip) >"$assertion_file" 2>&1; then
   cat "$assertion_file" >&2
@@ -340,6 +386,7 @@ assert_port_free() { :; }
 ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
 start_process() {
   printf 'start_process:%s\n' "$1" >>"$order_log"
+  printf '%s\n' "${@:2}" >"${SMOKE_DIR}/start_process.${1}.argv"
   : >"${SMOKE_DIR}/${1}.log"
 }
 wait_for_json() { printf 'wait_for_json:%s\n' "$1" >>"$order_log"; }
@@ -356,6 +403,29 @@ export DISPATCH_URL="http://dispatch.test"
 export DISPATCH_TOKEN="test-dispatch-token"
 export SMOKE_WEBHOOK_MODE="envoy"
 
+# Preflight fails closed before anything starts: a missing LEGION_OMP_PATH stops main() before
+# ensure_nats or any start_process call is reached (the stubs above log every such call).
+# resolve_omp_path fails inside `omp_path="$(...)"`, which only aborts main() under `set -e`, and
+# bash suppresses -e for anything run as an `if` condition -- so the probe runs as a plain
+# subshell that re-enables -e itself and reports its status through the substitution.
+: >"$order_log"
+preflight_status="$(set +e; (set -e; LEGION_OMP_PATH="${fake_bin}/missing-omp" main) >"$assertion_file" 2>&1; echo $?)"
+[[ "$preflight_status" != 0 ]] || {
+  printf 'expected main() to fail on a missing LEGION_OMP_PATH\n' >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *"LEGION_OMP_PATH is not an absolute executable file: ${fake_bin}/missing-omp"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+[[ ! -s "$order_log" ]] || {
+  printf 'expected no process to start when OMP preflight fails; order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+printf 'PASS: a missing OMP build stops up.sh in preflight before any process starts\n'
+
+export LEGION_OMP_PATH="$fake_omp"
+
 if ! main >"$main_output_file" 2>&1; then
   printf 'expected up.sh main() to succeed; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
@@ -365,6 +435,23 @@ fi
   printf 'expected up.sh main() to finish with RIG READY; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
 }
+[[ "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_omp}"* ]] || {
+  printf 'expected up.sh to print the selected OMP build; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+grep -Fxq "LEGION_OMP_PATH=${fake_omp}" "${SMOKE_DIR}/start_process.daemon.argv" || {
+  printf 'expected the daemon start_process env block to carry LEGION_OMP_PATH; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.daemon.argv")" >&2
+  exit 1
+}
+if grep -q '^LEGION_OMP_PATH=' "${SMOKE_DIR}/start_process.listener.argv"; then
+  printf 'LEGION_OMP_PATH belongs in the daemon env block only, not the listener one\n' >&2
+  exit 1
+fi
+grep -Fxq 'omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp' "${SMOKE_DIR}/legion.yaml" || {
+  printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\n' >&2
+  exit 1
+}
+printf 'PASS: exports the resolved OMP build as LEGION_OMP_PATH for the daemon only and keeps omp_invocation pinned\n'
 
 daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
 bridge_ready_line="$(grep -n '^wait_for_envoy_bridge$' "$order_log" | head -1 | cut -d: -f1)"
