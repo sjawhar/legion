@@ -78,9 +78,11 @@ Before you create an issue or start a design document, search:
 ```ts
 dispatch_search({ query, project?, limit? })
 ```
-It returns every issue, document, comment, ask, and message that contains the words, with the issue key and a link. Cite the hit you
-build on (`dispatch://KEY` or the document reference), or state "no prior issue" in the spec. Websearch syntax applies: `"merge queue"`,
-`-daemon`, `OR`.
+It returns every issue, document, comment, ask, and message that contains the words. Issue-owned hit lines
+start with the issue key; standalone project-document hit lines start with
+`dispatch://PROJECT/artifact/<slug>`, followed by the absolute link. Cite the hit you build on
+(`dispatch://KEY` or the document reference), or state "no prior issue" in the spec. Websearch syntax applies:
+`"merge queue"`, `-daemon`, `OR`.
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.

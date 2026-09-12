@@ -255,7 +255,7 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/issue/);
   });
 
-  test("dispatch_search needs no issue and renders results with absolute links", async () => {
+  test("dispatch_search needs no issue and renders results with absolute links (an owner-less row from an older server is issue-owned)", async () => {
     const results = [
       {
         kind: "document",
@@ -269,10 +269,27 @@ describe("executeDispatchTool", () => {
       {
         kind: "comment",
         issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        owner: { kind: "issue", key: "LEGION-2" },
         id: "comment-2",
         snippet: "Comment about <mark>astrolabe</mark>",
         rank: 0.5,
         href: "/issues/LEGION-2/spec#comment-2",
+      },
+      {
+        kind: "comment",
+        issue: { key: "CORE", title: "Navigation design", status: "document" },
+        artifact: { slug: "navigation-design", name: "Navigation design" },
+        owner: {
+          artifact_id: "document-2",
+          kind: "document",
+          name: "Navigation design",
+          project: "CORE",
+          slug: "navigation-design",
+        },
+        id: "comment-3",
+        snippet: "Comment on <mark>astrolabe</mark>",
+        rank: 0.25,
+        href: "/projects/CORE/documents/navigation-design?comment=comment-3",
       },
     ];
     const requests: string[] = [];
@@ -297,9 +314,10 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       [
-        '2 results for "astrolabe" (12 ms)',
+        '3 results for "astrolabe" (12 ms)',
         "LEGION-2 [triage] Astrolabe - document spec.md: …the **astrolabe** measures… -> http://dispatch.test/issues/LEGION-2/spec?q=astrolabe",
         "LEGION-2 [triage] Astrolabe - comment: Comment about **astrolabe** -> http://dispatch.test/issues/LEGION-2/spec#comment-2",
+        "dispatch://CORE/artifact/navigation-design [document] Navigation design - comment: Comment on **astrolabe** -> http://dispatch.test/projects/CORE/documents/navigation-design?comment=comment-3",
       ].join("\n")
     );
     expect(result.details).toEqual({ query: "astrolabe", results });

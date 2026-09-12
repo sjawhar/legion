@@ -278,14 +278,35 @@ export interface SearchArtifactRef {
   readonly name: string;
 }
 
+export type SearchOwner =
+  | { readonly kind: "issue"; readonly key: string }
+  | {
+      readonly kind: "document";
+      readonly project: string;
+      readonly slug: string;
+      readonly artifact_id: string;
+      readonly name: string;
+    };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
+  /**
+   * Who owns the hit. Servers before project-document search omit it; `searchOwnerOf` derives
+   * the issue owner from `issue` in that case.
+   */
+  readonly owner?: SearchOwner;
+  /** Legacy issue-shaped display metadata, retained for existing consumers. */
   readonly issue: SearchIssueRef;
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
   readonly rank: number;
   readonly href: string;
+}
+
+/** The hit's owner, falling back to the issue-shaped fields an older server sends. */
+export function searchOwnerOf(result: Pick<SearchResult, "owner" | "issue">): SearchOwner {
+  return result.owner ?? { kind: "issue", key: result.issue.key };
 }
 
 export interface SearchResponse {
