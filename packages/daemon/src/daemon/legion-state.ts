@@ -150,10 +150,14 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 24;
+  version: 25;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
+  /** The controller's interactive OMP pane. Unlike a root's or worker's locator it carries no
+   * shim socket: `ompSessionFile` is what `ensureController` resumes when the pane is found
+   * dead. Shares the runtime-discriminated `Locator` union; `migrateV24State` strips the socket
+   * the headless controller used to have. */
   controllerLocator?: Locator;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
@@ -340,7 +344,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(24),
+    version: z.literal(25),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -400,7 +404,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 24,
+    version: 25,
     project,
     issues: {},
     trees: {},
@@ -862,6 +866,19 @@ function migrateV23State(state: unknown): unknown {
   };
 }
 
+/** v24 -> v25: strips `socketPath` from `controllerLocator`. The controller ran behind
+ * `legion worker-shim` until now, so the live deployment's state carries a socket on its
+ * locator; the controller is an interactive OMP pane with no socket. The `runtime` tag and
+ * every other field stay. (The schema itself would accept the stale socket — the tmux locator's
+ * `socketPath` is optional — but a stale path would make `runtime.connect`/`stop` dial a socket
+ * no process listens on.) */
+function migrateV24State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 24) return state;
+  if (!recordValue(state.controllerLocator)) return { ...state, version: 25 };
+  const { socketPath: _droppedSocketPath, ...controllerLocator } = state.controllerLocator;
+  return { ...state, version: 25, controllerLocator };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -899,13 +916,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV21State,
     migrateV22State,
     migrateV23State,
+    migrateV24State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 24) {
+  if (version !== 25) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

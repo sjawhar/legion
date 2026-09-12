@@ -7,15 +7,16 @@ function isWorkerRoleClaim(claim: RoleClaim): claim is WorkerRoleClaim {
 }
 
 /** The projected shape of one locator: its runtime discriminant and the runtime's own
- * addressing fields, never a `socketPath`; `ompSessionFile` only for a tree locator
- * (`withSession`). Exhaustive over `Locator["runtime"]` — this is the one place outside the
- * runtimes themselves that reads runtime-specific fields, purely to redact them. */
+ * addressing fields, never a `socketPath`; `ompSessionFile` only for a locator the daemon
+ * resumes — a tree's or the controller's (`withSession`), never a worker claim's. Exhaustive
+ * over `Locator["runtime"]` — this is the one place outside the runtimes themselves that reads
+ * runtime-specific fields, purely to redact them. */
 function redactLocator<WithSession extends boolean>(
   locator: Locator,
   withSession: WithSession
 ): WithSession extends true
   ? NonNullable<DaemonStateResponse["trees"][string]["locator"]>
-  : NonNullable<DaemonStateResponse["controllerLocator"]> {
+  : NonNullable<DaemonStateResponse["roles"][string]["locator"]> {
   const session = withSession ? { ompSessionFile: locator.ompSessionFile } : {};
   switch (locator.runtime) {
     case "tmux":
@@ -106,7 +107,7 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
       queue: [...state.admission.queue],
     },
     gates,
-    controllerLocator: state.controllerLocator && redactLocator(state.controllerLocator, false),
+    controllerLocator: state.controllerLocator && redactLocator(state.controllerLocator, true),
     roles,
     controllerPendingNotices: state.controllerPendingNotices.length,
     pendingStatusWrites: Object.keys(state.pendingStatusWrites),
