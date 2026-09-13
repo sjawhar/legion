@@ -1,118 +1,119 @@
 {
-  "round": 2,
+  "round": 3,
   "passed": 8,
   "failed": 0,
-  "build": "PR sjawhar/legion #1088, branch legion/LEGION-62, code head 79f4d50cef6744d2821d472edec124c3e43e7552 (branch tip f86d2296c66225fbb516a00f7223f93aaa1a9562 adds only .legion/implement.json); workspace @- = f86d2296 at test time",
+  "build": "PR sjawhar/legion #1088, branch legion/LEGION-62, code head 590a125129d3cd7b8813b604610b2da378b23c08 (branch tip e6add4c0dc312410bf0c00173b0281e518594f0a adds only the updated .legion/implement.json); compared against a build of main@origin 20640b30302b served beside it",
   "pullRequest": {
     "number": 1088,
     "url": "https://github.com/sjawhar/legion/pull/1088",
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
     "reviewDecision": "REVIEW_REQUIRED",
-    "headRefOid": "f86d2296c66225fbb516a00f7223f93aaa1a9562",
-    "checks": "13 of 13 SUCCESS at f86d2296 (changes, pr-title x2, lint, contracts, typecheck, envoy-plugin, test, envoy-client, pi-envoy, dispatch, claude-envoy-bridge, envoy-go); the daemon's ci-green notice for f86d2296 arrived at 09:48:32Z. Not CONFLICTING; BLOCKED only on the required review."
+    "headRefOid": "e6add4c0dc312410bf0c00173b0281e518594f0a",
+    "checks": "Not CONFLICTING. 13 of 13 checks SUCCESS at e6add4c0 (changes, pr-title x2, lint, contracts, typecheck, envoy-plugin, test, envoy-client, pi-envoy, dispatch, claude-envoy-bridge, envoy-go); the daemon ci-green notice for e6add4c0 arrived at 10:50:49Z. BLOCKED only on the required review."
   },
   "surfaces": {
-    "local": "packages/dispatch e2e harness on the PR head: bun install --frozen-lockfile; go build ./cmd/dispatch (Go 1.26.8); VITE_DISPATCH_E2E=1 bun run build:web (rebuilt before every e2e run, after the Go tests, per the implementer's note that the unit suite rebuilds web/dist without the flag); bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, header identity alice/bob) against an isolated Postgres 16 container legion62-dispatch-pg on 127.0.0.1:55462 (55432 is the production dispatch-pg on this box; DATABASE_URL and PLAYWRIGHT_DATABASE_URL pinned to 55462). Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR=/tmp/legion62-mise. A throwaway spec e2e/legion62-verify2.e2e.ts drove lines 1-7 and was removed after the run; the four LEGION-142 specs were copied with a writable screenshot path (e2e/legion62-tmpfix-*.e2e.ts, removed) and run beside the originals.",
-    "go": "DISPATCH_TEST_DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55462/dispatch_gotest go test ./internal/dispatch/api -count=1 -> ok (149.4s); -run TestIssueDetail -v -> TestIssueDetailCarriesOpenAsks PASS, TestIssueDetailOpenAsksCarryLastReply PASS."
+    "local": "packages/dispatch e2e harness on the PR head: bun install --frozen-lockfile; go build ./cmd/dispatch (Go 1.26.8); VITE_DISPATCH_E2E=1 bun run build:web (fresh before the e2e runs; the only bun test run afterwards was a single-file IssuePage.test.tsx run, which does not rebuild web/dist, and __dispatchDocument stayed in the served bundle); bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, header identity alice) against an isolated Postgres 16 container on 127.0.0.1:55462 (55432 is the production dispatch-pg on this box). For the title comparison a second Go server (same head's binary) on port 8763 served main@origin 20640b30's web bundle, built from main's packages/dispatch/web + packages/contracts/src exported to a scratch tree beside the workspace (packages/.legion62-main-scratch, removed after the run) with the same vite config. Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR. A throwaway spec e2e/legion62-verify3.e2e.ts drove the three review answers, the bare gates for lines 1-7, and two geometry probes, and was removed; the four LEGION-142 specs were copied with a writable screenshot path (e2e/legion62-tmpfix-*.e2e.ts, removed) and run beside the originals.",
+    "go": "DISPATCH_TEST_DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55462/dispatch_gotest go test ./internal/dispatch/api -count=1 -> ok (146.9s) on this head (no Go change since 79f4d50c; re-run anyway).",
+    "unit": "bun test web/src/features/issue/IssuePage.test.tsx -t 'check-runs lookup fails|title readable|route' -> 3 pass, 0 fail (single file, no web/dist rebuild)."
   },
+  "reviewAnswers": [
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109 (grow on the rail squeezes the title below 1280)",
+      "verdict": "verified",
+      "evidence": "grow is gone from issue-metadata-rail (0 matches for 'grow flex-nowrap' in the built IssuePage chunk). Reviewer's fixture (bare issue, Route + Subscribers on the details line, 41-character title 'Issue header redesign: no wrapping labels') measured on the PR bundle and on main's bundle in the same browser: 1024 -> h1 430px on head vs 388px on main, both shown in full on two lines; 1200 -> 210 vs 168 (both clamped for 41 characters); 1279 -> 289 (unclamped) vs 247 (clamped). Every number equals the implementer's report. The implementer's regression lock (issue.e2e.ts 'issue header gives the title the row's free space beside a short details line', 31-character title at 1024/1200/1279) passes on this build. Head is at least as wide as main at all three widths for the reviewer's fixture; the 42px gain is the narrower text-only priority pill (state box 382px vs 424px on main). Screenshots verified3-title-1024-head / -main.",
+      "finding": "Boundary regression against main just below 1280 for a wider details line. With whose-turn badge + one label + Route + Subscribers (607px) at 1279 the line just fits the title row on the head (title block 200 + state 382 + rail 607 + gaps = the 1205px card) and the flex-1 min-w-[12rem] title block keeps only its minimum: h1 70px, clamped ('Migr at...'); on main the same line wraps under the title (state box 42px wider) and the h1 is 643px. Probe across 1100-1280: head squeezes only at 1271-1279 for this line; main never below 1280. Without the label (badge + Route + Subscribers, ~525px) BOTH builds squeeze: head 81-130px at 1230-1279, main 69-88px at 1260-1279. So the mechanism is pre-existing on main (the sub-xl title row: title flex-1 basis 0 with a 12rem minimum, sharing the row with state and details whenever they fit); the head shifts the squeeze band ~30-40px toward narrower windows and, for lines >= ~565px, opens a band main never reached. Screenshots verified3-title-1279-busy-head / -main. Reported for the architect; not a failure of the review answer, whose stated numbers all reproduce."
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117 (GitHubLink keeps a loaded title when the checks lookup fails)",
+      "verdict": "verified",
+      "evidence": "Browser: page.route on /api/github/rest/ answered repos/sjawhar/legion/pulls/1051 with 200 {title, state closed, merged true, head.sha} and repos/.../commits/<sha>/check-runs with 403; both requests were observed; the header link read '#1051 fix(dispatch): compact issue Spec chrome merged' with tooltip 'sjawhar/legion#1051: fix(dispatch): compact issue Spec chrome' and no 'checks:' pill. Unit: 'IssuePage keeps a pull request's title and state when only its check-runs lookup fails' passes. Screenshot verified3-github-link-checks-fail-1280. Without credentials (the harness default) the link still reads '#1051 sjawhar/legion' with the 'GitHub details are unavailable for this sign-in.' tooltip, as in round two."
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121 (Route caption while the form is open)",
+      "verdict": "verified",
+      "evidence": "At 1280 and 390: clicking the route pill removes both the 'Route:' caption and the button from the details line (0 captions, 0 buttons on issue-metadata-rail while editing); the form renders under the header rows with one visible 'Route:' caption beside the input (accessible name 'Route' kept by the sr-only label) and the input is document.activeElement; page scroll width unchanged. Save -> 'role:legion-controller-core' read back from the API and shown on the pill; clear -> route null/empty read back and 'No route' shown; Escape restores the caption and the pill. Screenshot verified3-route-form-open-1280."
+    }
+  ],
   "acceptance": [
     {
       "line": 1,
       "verdict": "passed",
-      "note": "1280x900 and 1280x800 with a one-line title, two labels, no link, no ask: 134px (title y37-67, state row y77-83, details line y117). Spec fixture (GitHub link + open ask) at 1280: 134px, everything on three rows; approval chip + Approve/Request changes + GitHub link: 174px (was 206); two-line title + GitHub link: 160px (unchanged; the title itself is 58px). No Draft/chip/Approve before an approval request. At 1536 the state row joins the title row and the card is 94px."
+      "note": "1280: 134px with a one-line title (fixture with GitHub link + open ask, and the plain two-label baseline); title y37-67, state row y77-83, details line y117; no Draft/chip/Approve before a request. 1536: 94px (state joins the title row)."
     },
     {
       "line": 2,
       "verdict": "passed",
-      "note": "390x844 with the spec fixture: 238px (bound <300; was 480). Rows: title+pin y122-188; Status | Priority | Close y197; one details line y250 holding Waiting on you (1), Labels, +, Route, Subscribers: 1, #1051 sjawhar/legion. No control other than the title alone on a row; page scrollWidth 390 = clientWidth. GitHub link reads '#1051 sjawhar/legion' (number + repository, since the e2e server has no GitHub App credentials; title once loaded), never the raw address. Note: the details line shows 316px of its 827px at rest; Route, Subscribers and the GitHub link sit in the scrolled part and appear on swiping the line (verified2-header-390-details-scrolled)."
+      "note": "390x844 with the fixture: 238px; rows title+pin / Status | Priority | Close (y197) / one details line (y250: badge, labels, +, Route, Subscribers: 1, #1051 sjawhar/legion); nothing but the title alone on a row; page scrollWidth 390 = clientWidth; link text '#1051 sjawhar/legion', no URL-text link."
     },
     {
       "line": 3,
       "verdict": "passed",
-      "note": "Eight 30-character labels via PATCH, reload. 1280: title box identical (x435.4 y37 w383.6 h58), rail overflow-x auto, 502px visible of 2037px, rail right 859 inside card right 872, chips on one row, document scrollWidth 1280 = clientWidth; scrolling the rail to its end shows the last chip at right=562. 390: title identical (x37 y122 w264 h66), rail 316 of 2125, document scrollWidth 390 = 390. 1536: 758 of 2037, document 1536 = 1536. Header height unchanged by the labels at every width (160/94/238 with those titles)."
+      "note": "Eight 30-character labels: title box identical before/after at 1280 (x435.4 y37 w383.6 h58), 1536 (w639.6 h30) and 390 (x37 y122 w264 h66); rail overflow-x auto 502/2037, 758/2037, 316/2125 inside the card; document scrollWidth 1280/1536/390 equal to clientWidth."
     },
     {
       "line": 4,
       "verdict": "passed",
-      "note": "Version / Name version inside issue-tabs only while Spec is active, zero inside the header, zero anywhere on Conversation, Children, Artifacts — at 1280, 1536 and 390. Placement unchanged from round one: on the tab row at 1536 (y133 vs tabs y130), wrapped to a right-aligned row under the tabs at 1280 with the sidebar and margin open (y212 vs y170), wrapped under the tabs at 390."
+      "note": "Version / Name version inside issue-tabs only while Spec is active, none in the header, none on Conversation/Children/Artifacts, at 1280, 1536 and 390."
     },
     {
       "line": 5,
       "verdict": "passed",
-      "note": "Popover 256x239; api and Frontend checked, backend and docs unchecked; 'doc' filters to docs + Create \"doc\"; 'urgent' + Enter creates and checks it; zero PATCHes while open, exactly one PATCH {labels:[Frontend,api,urgent]} on close. 41-character label: picker says 'Labels must be 1–40 characters.', adds nothing, closing sends no PATCH; server PATCH answers 400 LABELS_INPUT and labels are unchanged. At 390 the popover spans x118-374."
+      "note": "Popover with focused search and check list; 'doc' filters; 'urgent' + Enter creates; exactly one PATCH on close; 41-character label refused in the picker ('Labels must be 1–40 characters.', no PATCH) and by the server (400 LABELS_INPUT); labels unchanged."
     },
     {
       "line": 6,
       "verdict": "passed",
-      "note": "At 390, 1280 and 1536 (a fresh issue and ask per width): 'Waiting on you (1)' on load with the badge in view (x37 on the phone, x357 on desktop); after alice's clarification it reads 'Waiting on agents (1)' live within ~190ms and still after a reload; after the agent replies it returns to 'Waiting on you (1)' live and after a reload. GET /api/v1/issues/{key} open_asks[0].last_reply: null, then {author:{kind:user,id:alice}}, then {author:{kind:session,id:e2e-session}}."
+      "note": "Badge in view at 1280 (x357 y118), 1536 (x357 y78), 390 (x37 y237); human reply -> 'Waiting on agents (1)' live in 130-186ms and after reload; agent reply -> 'Waiting on you (1)' live and after reload; open_asks[0].last_reply follows null -> user -> session."
     },
     {
       "line": 7,
       "verdict": "passed",
-      "note": "Header select offers Triage, Icebox, Backlog, Todo, In progress, Testing, Needs review, Retro; each of the four moves lands in the API and the matching board column; status=shipped refused 400 INVALID_STATUS."
+      "note": "In progress, Testing, Needs review, Retro from the header select each land in the API and the matching board column; status=shipped refused 400 INVALID_STATUS."
     },
     {
       "line": 8,
       "verdict": "passed",
-      "note": "chromium 114 passed / 6 skipped / 5 failed; iphone 114 passed / 6 skipped / 5 failed. All ten failures are LEGION-142's EACCES on fixed /tmp screenshot paths owned by user ubuntu: agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14 on each project; the same four specs with a writable path pass 12/12 on chromium and 12/12 on iphone. The doc.e2e.ts two-user flake did not recur. issue, labels, layout, board, inbox, approval, threads, ask-blocks and live are green on both projects. Go internal/dispatch/api ok."
+      "note": "chromium 115 passed / 6 skipped / 5 failed; iphone 114 passed / 7 skipped / 5 failed. Every failure is LEGION-142's EACCES on a fixed /tmp/<name>.png owned by another user: agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14; copies of those four specs with a writable path pass 12/12 per project. Go internal/dispatch/api ok."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran every measurable claim in .legion/implement.json on a fresh build of 79f4d50c through the same harness (independent Postgres, ports and browser session). Line 2: header 238px at 390x844 with the fixture (claimed 238); Status, Priority and Close at y197 on one row; details line at y250 with the whose-turn badge at x37; GitHub link text '#1051 sjawhar/legion'; document scrollWidth 390 = clientWidth. Line 3: rail overflow-x auto, clientWidth 502 at 1280 and 316 at 390 (claimed 502/316), document scrollWidth 1280/390 equal to clientWidth, title box identical before and after (x435.4 y37 w383.6 h58 and x37 y122 w264 h66, both exactly as claimed). Line 6: 'Waiting on you (1)' on load at 390/1280/1536, 'Waiting on agents (1)' live within ~190ms and after reload, back to 'Waiting on you (1)' after the agent's reply; GET /issues/{key} open_asks[].last_reply null -> alice (user) -> e2e-session (session); go test -run TestIssueDetailOpenAsksCarryLastReply passes. The two round-one negative controls (main 7a178581: 480px header, page 2129/1889 wide, indicator never flipping) are my own measurements from round one, so the before/after the implementer describes is confirmed from both sides."
+    "how": "Re-ran the round-two proofs and the new review-answer proof from .legion/implement.json on an independent build, database and browser: 238px at 390x844 with the fixture; state row y197; link '#1051 sjawhar/legion'; rail 502/316 clientWidth and document scrollWidth equal to the window at 1280/390 with eight 30-character labels; title boxes at exactly the claimed coordinates; whose-turn flip live and after reload at 390/1280/1536 with last_reply null -> human -> agent; and the title measurements 430/388 at 1024, 210/168 at 1200, 289/247 at 1279 (head/main) with the implementer's own regression lock passing. One claim is narrower than stated: 'the 31-character test title is unclipped at all three widths' holds for the lock's own title ('Header keeps its title readable') but a different 33-character title ('Queue nightly exports for review.') clamps at 210px at 1200 on the head (168px, also clamped, on main) — the unclipped result depends on the glyph widths, not the character count. That does not change the verdict: head is wider than main at every measured width for the reviewed fixture."
   },
   "proof": [
     {
-      "criterion": "2. At 390 the same order holds, no control is cut off, no control other than the title sits alone on a row, the GitHub link shows number and title never a raw address, and the header card is under 300px with the fixture.",
-      "surface": "Local VITE_DISPATCH_E2E=1 build of 79f4d50c served by the real Go server (this head) and Postgres 16, Chromium 390x844 as alice through the packages/dispatch Playwright harness.",
-      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh && env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'lines 1 and 2' (throwaway spec, removed)",
-      "observed": "Header 238px. Rows by vertical overlap: 122-166 title + Pin; 197-241 Status | Priority | Close issue; 250-294 Frontend | api | Edit labels | Route | Subscribers: 1 | #1051 sjawhar/legion | Waiting on you (1). Page scrollWidth 390 = clientWidth. Link text '#1051 sjawhar/legion', tooltip carries the URL; no link whose text is a URL. With an approval chip added the card is 342px (outside the fixture). Screenshots dispatch://LEGION-62/artifact/verified2-header-390-png and verified2-header-390-details-scrolled-png.",
-      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
-      "negativeControl": "Round one on main 7a178581 with the same fixture: 480px, Close alone at y250, Subscribers alone at y406, the raw URL alone at y458 (dispatch://LEGION-62/artifact/verified-header-390-png)."
+      "criterion": "Review answers: title width below 1280 without grow; GitHub link keeps title and state when only check-runs fail; Route caption leaves the line with its button while the form is open.",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of 590a1251 served by the real Go server (port 8762) beside main 20640b30's bundle (port 8763), isolated Postgres 16, Chromium at 1024/1200/1279/1280/390.",
+      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh && MAIN_BASE_URL=http://127.0.0.1:8763 env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify3 (throwaway spec, removed); bunx playwright test --project=chromium issue.e2e.ts --grep 'free space beside a short details line'; bun test web/src/features/issue/IssuePage.test.tsx -t 'check-runs lookup fails'",
+      "observed": "Title (bare 41-char fixture) head/main: 430/388 at 1024, 210/168 at 1200, 289/247 at 1279; implementer's lock passes. Checks-fail: link keeps '#1051 fix(dispatch): compact issue Spec chrome merged', no checks pill; unit test passes. Route: caption and button leave the line, the form carries the caption, input focused, save/clear/Escape round-trip. Finding: 607px details line at 1279 squeezes the title to 70px on head (main 643px); the no-label line squeezes on both builds (head 81-130px at 1230-1279, main 69-88px at 1260-1279).",
+      "headSha": "590a125129d3cd7b8813b604610b2da378b23c08",
+      "negativeControl": "The same reviewer fixture on main's bundle measures 388/168/247 (clamped at 1200 and 1279) — the before state; and the 607px-line probe at 1279 shows the residual squeeze on head against 643px on main."
     },
     {
-      "criterion": "3. With eight thirty-character labels the title line does not move and the details line scrolls sideways inside the card; page scroll width equals the window width at 1280 and 390.",
-      "surface": "Same stack; labels seeded through PATCH /api/v1/issues/{key}; Chromium 1280x900, 1536x900, 390x844.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'line 3'",
-      "observed": "Title box byte-identical before/after at every width; issue-metadata-rail overflow-x auto, flex-nowrap, 502/758/316px visible of 2037/2037/2125px, rail right edge inside the card; document scrollWidth 1280/1536/390 equal to clientWidth; setting rail.scrollLeft to its end brings the last chip into view without changing document scrollWidth. Screenshots dispatch://LEGION-62/artifact/verified2-labels-1280-png and verified2-labels-390-png.",
-      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
-      "negativeControl": "Round one on main 7a178581: labels container 1714px with overflow visible, document scrollWidth 2129 at 1280 and 1889 at 390 (dispatch://LEGION-62/artifact/verified-labels-wrap-1280-png)."
+      "criterion": "Bare gates, lines 1-7: 134px at 1280; 238px at 390 with no control alone and the link as number + title; eight labels scroll inside the card with the title box unchanged and the page width unchanged; whose-turn flips live and after reload at 390/1280/1536; version controls only with Spec; label popover and the 41-character refusal; statuses from the header confirmed on the board.",
+      "surface": "Same stack, Chromium 1280x900, 1536x900, 390x844 as alice.",
+      "command": "MAIN_BASE_URL=http://127.0.0.1:8763 env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify3 (tests 'bare gates: lines 1 and 2', 'line 3', 'line 6', 'lines 4, 5 and 7')",
+      "observed": "All certified numbers hold: 134px/94px/238px headers; rows at 390 title+pin / Status|Priority|Close / one details line; link '#1051 sjawhar/legion'; title boxes identical with eight labels and document scrollWidth 1280/1536/390 = clientWidth (rail 502/758/316 of 2037/2037/2125); badge in view and flipping live (130-186ms) and after reload at all three widths; Version/Name version only with Spec; one PATCH on popover close, 41-char refused (picker + 400 LABELS_INPUT); four statuses confirmed on the board, shipped -> 400. Screenshots verified3-header-390, verified3-labels-1280, verified3-labels-390, verified3-whose-turn-you-1280, verified3-whose-turn-agents-1280, verified3-label-popover-1280.",
+      "headSha": "590a125129d3cd7b8813b604610b2da378b23c08",
+      "negativeControl": "PATCH {labels:[Frontend,<41 x>]} -> 400 LABELS_INPUT with labels unchanged; PATCH {status:'shipped'} -> 400 INVALID_STATUS with status staying retro."
     },
     {
-      "criterion": "6. Waiting on you (N) while an agent's reply is newest, Waiting on agents (N) after a human replies, live and after reload, visible at 390, 1280 and 1536.",
-      "surface": "Same stack; ask opened by session e2e-session through POST /issues/{key}/asks (bearer), human reply by alice through POST /issues/{key}/comments, agent reply by the session; Chromium at all three widths, one fresh issue per width.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'line 6'; curl GET /api/v1/issues/{key} between steps",
-      "observed": "issue-whose-turn badge 'Waiting on you (1)' on load at x37/y237 (390), x357/y118 (1280), x357/y78 (1536), in view; 'Waiting on agents (1)' 187-198ms after the human comment without a reload, and after a reload; 'Waiting on you (1)' again live after the agent comment, and after a reload. open_asks[0].last_reply: null -> {author:{kind:user,id:alice}} -> {author:{kind:session,id:e2e-session}}. Screenshots dispatch://LEGION-62/artifact/verified2-whose-turn-you-390-png, verified2-whose-turn-agents-390-png, -1280-png, -1536-png.",
-      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
-      "negativeControl": "Round one on main 7a178581: the header stayed 'Waiting on you (1)' after the human reply at 1536 and 390 and was display:none at 1280 (open_asks carried no last_reply). On this head the header's own rule hides the badge rather than guessing when last_reply is absent (IssueHeader knowsWhoseTurn)."
-    },
-    {
-      "criterion": "1, 4, 5, 7. Header order and about 140px at 1280; version controls only with Spec; label popover with one save and the 41-character refusal; every lifecycle status from the header confirmed on the board.",
-      "surface": "Same stack, Chromium 1280x900 / 1280x800 / 1536x900 / 390x844 as alice; board at /projects/CORE.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 (tests 'lines 1 and 2', 'line 4', 'line 5', 'line 7')",
-      "observed": "1280: 134px baseline (one-line title, no link), 134px with the fixture, 160px two-line title, 174px with the approval chip; no Draft before a request. Version/Name version only inside issue-tabs while Spec is active at all widths, zero on other tabs. Popover 256x239, filter, Enter-create, one PATCH on close. Status select lists all eight lifecycle statuses; In progress, Testing, Needs review, Retro each land in the API and the matching board column. Screenshots verified2-header-1280-png, verified2-header-approval-1280-png, verified2-tabs-spec-1280-png, verified2-label-popover-1280-png, verified2-status-board-retro-1280-png.",
-      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
-      "negativeControl": "41-character label: picker shows 'Labels must be 1–40 characters.' and sends no PATCH; server PATCH with it -> 400 LABELS_INPUT. PATCH status=shipped -> 400 INVALID_STATUS, status stays retro."
-    },
-    {
-      "criterion": "8. The header's existing behaviours still work: the browser suite passes; the Go API tests pass.",
+      "criterion": "Line 8: the browser suite and the Go API tests pass on this head.",
       "surface": "Full Playwright suite (chromium and iphone) against the real Go server on this head; go test ./internal/dispatch/api against an isolated database.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify2 (log /tmp/legion62-e2e-chromium2.log); same with --project=iphone; DISPATCH_TEST_DATABASE_URL=<isolated> go test ./internal/dispatch/api -count=1",
-      "observed": "chromium 114/6/5 and iphone 114/6/5 (passed/skipped/failed); the five failures per project are agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14, each EACCES on a /tmp/<name>.png owned by another user (LEGION-142); the same four specs with a writable path pass 12/12 on each project. Go: ok (149.4s).",
-      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
-      "negativeControl": "The EACCES failures are deterministic on this box (same five files, both rounds) and vanish with a writable path, so the suite is exercising the assertions, not skipping them; the doc.e2e.ts:105 flake seen in round one did not recur here."
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify3 (log /tmp/legion62-e2e-chromium3.log); same with --project=iphone (/tmp/legion62-e2e-iphone3.log); DISPATCH_TEST_DATABASE_URL=<isolated> go test ./internal/dispatch/api -count=1",
+      "observed": "chromium 115 passed / 6 skipped / 5 failed (agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14 — each EACCES on /tmp/agents-1280.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-1280.png, /tmp/polish-project-list-1280.png owned by user ubuntu; the same four specs with a writable path 12/12). iphone 114 passed / 7 skipped / 5 failed (the same five specs, EACCES on /tmp/agents-390.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-390.png, /tmp/polish-project-list-390.png; writable-path copies 12/12). Go: ok (146.9s).",
+      "headSha": "590a125129d3cd7b8813b604610b2da378b23c08",
+      "negativeControl": "The EACCES failures are the same five files as rounds one and two and vanish with a writable path; the doc.e2e.ts two-user flake the implementer hit did not recur on chromium here."
     }
   ],
   "observations": [
-    "Line 2 caveat for the architect: at 390 the details line shows 316px of its 827px content at rest — the whose-turn badge and the label chips are in view; Route, Subscribers and the GitHub link appear only after swiping the line (thin scrollbar as the affordance). This is the spec v5 design ('one horizontally scrolling line') and the measurable bounds pass; it is a phone-discoverability question, not a failure.",
-    "Priority pill: the unset option now reads 'Priority' (was 'Priority —') and the select has no native arrow; a set priority reads P0-P3 with its colour, so the pill is still recognisably a control by its colour and text.",
-    "Line 1 height table on this head at 1280 (sidebar and margin open, ~530px column): one-line title 134px; with a GitHub link and an open ask 134px; two-line title with a GitHub link 160px; approval chip + Approve/Request changes + GitHub link 174px (was 206). At 1536 the state row joins the title row: 94px.",
-    "Line 4 is unchanged by this PR: at 1280 with both rails open the Version / Name version / Copy link controls wrap to a right-aligned second row under the tabs (y212 vs tabs y170); they share the tab row from 1536. Passed in round one on the same reading.",
-    "The unchanged-diff fingerprint was not needed: no rebase happened (PR MERGEABLE, base main).",
-    "Workspace: throwaway spec files (e2e/legion62-verify2.e2e.ts, e2e/legion62-tmpfix-*.e2e.ts) and e2e/test-results removed; servers stopped; the isolated Postgres container removed; web/dist stays untracked."
+    "Finding for the architect (not blocking on the review answers as stated): below 1280 the title shares a row with the state controls and the details line whenever the line's content fits; the title block is flex-1 with basis 0 and a 12rem minimum, so in the band just below the fit threshold it keeps only ~70-130px. Main has the same band (badge + Route + Subscribers: 69-88px at 1260-1279). The PR's 42px narrower priority pill moves the band ~30-40px toward narrower windows, and for details lines of ~565px or more (badge + one label + Route + Subscribers is 607px) it opens a band (1271-1279) where main never squeezed. A possible fix is a larger title minimum below xl or forcing the details line onto its own row when the title would drop below a readable width; the reviewer's grow concern itself is resolved.",
+    "The implementer's 'unclipped at all three widths' depends on the specific 31-character title's glyph widths: at 1200 the title h1 is 210px on the head, and a 33-character title clamps there. The lock is still a valid regression lock for the grow change (it fails with grow restored, per the implementer, and 210 > 168 on main).",
+    "Line 4 placement unchanged: Version / Name version share the tab row from 1536 and wrap under the tabs at 1280 with both rails open and at 390.",
+    "The isolated toolchain, scratch main build, servers, Postgres container, throwaway specs and e2e/test-results were removed after the run; web/dist stays untracked."
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-14T09:56:30.449Z"
+  "completed": "2026-09-14T10:59:28.038Z"
 }
