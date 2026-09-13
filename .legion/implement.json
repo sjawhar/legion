@@ -1,0 +1,112 @@
+{
+  "filesChanged": [
+    "packages/contracts/src/handoff-schema.ts",
+    "packages/contracts/src/handoff-schema.test.ts",
+    "packages/daemon/src/handoff/ledger.ts",
+    "packages/daemon/src/handoff/__tests__/ledger.test.ts",
+    "packages/daemon/src/cli/__tests__/handoff.test.ts",
+    "packages/daemon/src/knowledge/__tests__/collector.test.ts",
+    "packages/daemon/src/knowledge/__tests__/feedback-logger.test.ts",
+    "packages/daemon/src/daemon/reducers.ts",
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-retro/SKILL.md",
+    "skills/legion-architect/SKILL.md",
+    "skills/AGENTS.md",
+    "AGENTS.md",
+    "packages/pi-envoy/roles/planner.md",
+    "packages/pi-envoy/roles/implementer.md",
+    "packages/pi-envoy/roles/tester.md",
+    "packages/pi-envoy/roles/reviewer.md",
+    "packages/pi-envoy/roles/merger.md",
+    "packages/pi-envoy/roles/architect.md",
+    "packages/pi-envoy/roles/architect-root.md"
+  ],
+  "commits": [
+    "1e978554ef67 feat(contracts): require a production-like proof in the implement and test handoffs",
+    "c650cb1e6598 feat(daemon): refuse a handoff the phase schema rejects and name the field on read",
+    "66e54dd7516a docs(skills): the implementer proves before merge and checks production after"
+  ],
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1028",
+  "proof": [
+    {
+      "criterion": "1 — legion handoff write --phase implement refuses a payload with no well-formed proof, exits non-zero, names the field; with one it writes and handoff read returns it",
+      "surface": "the branch's own CLI (bun packages/daemon/src/cli/index.ts) in a scratch workspace on this machine; the pane's `legion` re-execs the live daemon's main checkout, so the branch entry point is the only honest pre-merge surface",
+      "command": "cd $LEGION_WORKSPACE && S=$(mktemp -d /tmp/l53-proofR.XXXX) && bun packages/daemon/src/cli/index.ts handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"]}'; then the same with --phase test --data '{\"passed\":3,\"failed\":0,\"implementerProof\":{\"verdict\":\"verified\",\"how\":\"re-ran its command\"}}'; then --phase implement with a six-field proof; then handoff read --phase implement",
+      "observed": "first: `[handoff] Failed to write handoff: Invalid implement handoff: proof: Invalid input: expected array, received undefined`, exit=1; second: `[handoff] Failed to write handoff: Invalid test handoff: proof: a passing test handoff needs the tester's own production-like proof`, exit=1, and $S/.legion/test.json absent; third: `[handoff] Wrote implement handoff to $S/.legion/implement.json`, exit=0; read printed the handoff with its proof array (headSha 66e54dd7516a58f218bbfde069e91ccece66e6a6), exit=0. Second observation: a daemon-spawned tester pane on the scratch rig ran `legion handoff write --phase implement --workspace <mktemp> --data '{\"filesChanged\":[\"a.ts\"]}'` through the rig's <state_dir>/bin/legion launcher (which re-execs this branch) and quoted the same refusal with exit=1",
+      "headSha": "66e54dd7516a58f218bbfde069e91ccece66e6a6",
+      "negativeControl": "the two refused writes are the control (a payload the rule refuses, quoted with exit codes and messages). Before/after on the rig launcher: the same command through the negative-control leg's <state_dir>/bin/legion (daemon from main@origin c8faafecc6a7) wrote the file and exited 0; the deployed pane `legion` (~/.local/state/legion/sjawhar-legion/bin/legion, the live main build) also exits 0 today"
+    },
+    {
+      "criterion": "2 — legion handoff read of a handoff that fails validation prints one stderr line naming the file and the failing field, and returns null",
+      "surface": "the branch's own CLI in the same scratch workspace",
+      "command": "write $S/.legion/implement.json by hand as {\"schemaVersion\":1,\"phase\":\"implement\",\"completed\":\"2026-09-13T00:00:00.000Z\",\"filesChanged\":[\"a.ts\"]}; bun packages/daemon/src/cli/index.ts handoff read --phase implement --workspace \"$S\" 2>err; also a plan.json holding a valid implement handoff, then handoff read --phase plan",
+      "observed": "stdout `null`, exit=0, stderr exactly one line: `[handoff] Ignoring /tmp/l53-proofR.cWYJ/.legion/implement.json: proof: Invalid input: expected array, received undefined`; the phase mismatch printed `null` and `[handoff] Ignoring <S>/.legion/plan.json: phase is \"implement\", expected \"plan\"`",
+      "headSha": "66e54dd7516a58f218bbfde069e91ccece66e6a6",
+      "negativeControl": "the valid proof-carrying file re-written and read again: the handoff on stdout and an empty stderr (0 bytes)"
+    },
+    {
+      "criterion": "3 — a daemon-spawned planner, implementer, tester, reviewer, and merger pane receives a role prompt stating the rule",
+      "surface": "scratch daemon rig on this machine: team sjawhar/53 (slug sjawhar53), state_dir /tmp/legion53-rig/daemon, ports 19590/19591, Dispatch logging sink on 19592, NATS in docker on 14342 with the ENVOY_NOTIFICATIONS stream created by hand, private tmux server legion-sjawhar53, OMP profile l53rig = a copy of the production plugin tree (secretsd included) with only @sjawhar/pi-legion-envoy swapped for this branch's build (dist/envoy.js, dist/legion.js, dist/skills = skills/, manifest as prepack would publish it: contract 1); daemon started from $LEGION_WORKSPACE with LEGION_OMP_PATH pointing at a wrapper that records each pane's expanded argv and then execs the build live panes run today (omp 18.1.15-sami.9bff2014-rpcfix); the inert root architect never registers, so a driver claimed the architect capability via /process/started and spawned each role via /worker/spawn",
+      "command": "bash /tmp/legion53-rig/driver.sh after; then grep -n over /tmp/legion53-rig/argv/after/<role>-<pid>.txt for each role's sentence",
+      "observed": "one argv file per role with its own sentences verbatim: implementer — `fill the E2E (implementer) line yourself when the PR opens`, `required proof array and in the PR body's E2E (implementer) line`, `No surface reaches the changed path is a report to the architect, never a reason to complete the phase`, `Production: line, a pull-request comment`; tester — `implementerProof` and `A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill`; reviewer — `Approval is refused while either E2E (implementer) or E2E (tester) is missing: REQUEST_CHANGES naming the missing line`; merger — `The READY packet names both the implementer's and the tester's E2E lines`; planner — `Name the production-like surface and the exact command for each criterion`; root architect argv carries `The merge is not the close`. tmux -L legion-sjawhar53 list-panes showed one pane per role, each start command naming roles/<role>.md; all five roles ready-confirmed with no launchFailures; the Dispatch sink logged exactly one PATCH (the admission in_progress) and no other status write. Rig ran at 4ef79ebb2d834ce5c898ac57b1c21f2d4fef0d86, whose role prompts are byte-identical to 66e54dd7's (the rebase touched only skills/legion-retro and skills/legion-architect)",
+      "headSha": "4ef79ebb2d834ce5c898ac57b1c21f2d4fef0d86",
+      "negativeControl": "the same five spawns first on a rig whose profile held the released @sjawhar/pi-legion-envoy 1.23.0 and whose daemon ran from a read-only export of main@origin c8faafecc6a7883240cac3eff382a5ec53daecd3: grep -c 'E2E (implementer)' was 0 for every role's argv, while the OLD sentences were present (implementer `leave the E2E section for the tester` 1, tester `in the PR body's E2E section` 1) and the new merger/planner phrases were 0"
+    },
+    {
+      "criterion": "4 — the worker, retro, and architect skills state the same rule, and the architect's pr-merged procedure sends the implementer to production and closes only after its report",
+      "surface": "the same scratch rig: a real daemon-spawned tester pane (omp --mode rpc behind legion worker-shim) whose profile's @sjawhar/pi-legion-envoy/dist/skills is this branch's skills/ tree, resolving skill://legion-worker and skill://legion-retro the way a production pane does",
+      "command": "the tester's task (/tmp/legion53-rig/tester-task.txt) asked it to quote the sentence containing 'E2E (implementer)', the sentence containing 'A test handoff whose predecessor carried no proof', the retro sentence containing 'A defect the production check finds', the retro comment tool name, and to run legion handoff write without a proof; answer read from its session transcript under ~/.omp/profiles/l53rig/agent/sessions/; architect skill checked with grep -c 'production-check task' (2) and grep -c 'Close only after the implementer' (1) on the rig package's dist/skills/legion-architect/SKILL.md",
+      "observed": "A: `**The implementer proves the change before its phase completes, and writes the E2E (implementer) line when the pull request opens.**`; B: `A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill: record it in failures with implementerProof.verdict: \"rejected\", complete the phase, and let the architect return the issue to the implementer — the agent that developed the change owns proving it.`; C: `A defect the production check finds becomes a corrective child issue of the same tree, owned by the architect and implemented by the same implementer; the parent stays open until it lands.`, retro comment tool `dispatch_comment` (at 4ef79ebb; after the rebase onto main@origin the tool is LEGION-78's `dispatch_message`, see deviations); D: `[handoff] Failed to write handoff: Invalid implement handoff: proof: Invalid input: expected array, received undefined` / `exit=1`, `which legion` → /tmp/legion53-rig/daemon/bin/legion; E: LEGION_ROLE=tester, OMP_PROFILE=l53rig",
+      "headSha": "4ef79ebb2d834ce5c898ac57b1c21f2d4fef0d86",
+      "negativeControl": "the same tester task on the released-plugin/main leg answered A: ABSENT and quoted the old `The tester fills in the E2E section: …` sentence, B: ABSENT, C: ABSENT with the retro tool `legion gh -- issue comment`, and D: `[handoff] Wrote implement handoff to /tmp/l53-tester.lcQa/.legion/implement.json` / `exit=0`; grep -c 'legion gh -- issue comment' on the released dist/skills/legion-retro/SKILL.md was 1 and is 0 on the branch's"
+    },
+    {
+      "criterion": "5 — the PR body template carries E2E (implementer), E2E (tester), and Production: lines, and the merger's READY names both",
+      "surface": "this pull request, https://github.com/sjawhar/legion/pull/1028",
+      "command": "legion gh -- pr view 1028 --repo sjawhar/legion --json body --jq .body | grep -n 'E2E (implementer)\\|E2E (tester)\\|Production:'",
+      "observed": "all three lines present from the moment the PR opened, the Production: line as `pending …`; the merger's READY is the merger's to produce",
+      "headSha": "66e54dd7516a58f218bbfde069e91ccece66e6a6",
+      "negativeControl": "none applicable to the artifact itself: the reviewer's rule (REQUEST_CHANGES naming the missing line) is the control for a body missing either line"
+    },
+    {
+      "criterion": "6 — this issue's own lifecycle follows the new rule end to end, including the post-merge production check",
+      "surface": "production for this repository: the sjawhar/legion daemon on this machine (port 13370, checkout /home/ubuntu/legion-ws-RunDaemon) and the published @sjawhar/pi-legion-envoy installed in ~/.omp/profiles/legion/plugins (1.23.0 today)",
+      "command": "before half, run today from this pane: S=$(mktemp -d /tmp/l53-prod-before.XXXX); legion handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"]}'; echo exit=$?  (which legion → /home/ubuntu/.local/state/legion/sjawhar-legion/bin/legion). After half: the same command after the operator installs the release built from the merge commit and restarts the daemon on the merged main; plus grep -n 'E2E (implementer)' /home/ubuntu/legion-ws-RunDaemon/packages/pi-envoy/roles/implementer.md and grep -n 'E2E (tester)' ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/skills/legion-worker/SKILL.md",
+      "observed": "before half: `[handoff] Wrote implement handoff to /tmp/l53-prod-before.DGQe/.legion/implement.json`, exit=0 — the deployed build accepts a proof-less handoff today. After half: pending the merge and the operator's install/restart; recorded on the PR as `Production: pending …` and completed by this implementer when the architect sends it back",
+      "headSha": "66e54dd7516a58f218bbfde069e91ccece66e6a6",
+      "negativeControl": "the before half above is the control: exit 0 on the deployed build against exit 1 on the branch is the before/after pair that proves the deployment, not just the branch"
+    }
+  ],
+  "trickyParts": [
+    "Zod 4.3.6 accepts a .refine()d ZodObject as a discriminatedUnion member (the passing-test-handoff-needs-proof rule lives on testSchema); because a refined schema cannot take .passthrough() afterwards, every phase schema now ends in .passthrough() at its own definition and the union is built from the five schemas directly.",
+    "The pane's `legion` is the live daemon's main build (docs/solutions/legion/worker-pane-shell-gotchas.md §13), so every pre-merge proof of the CLI ran the branch's entry point `bun packages/daemon/src/cli/index.ts`; the rig's <state_dir>/bin/legion launcher re-execs the branch checkout, which is how a daemon-spawned tester pane exercised the refusal.",
+    "The rig daemon's contract gate reads the plugin manifest from its own OMP_PROFILE, so the daemon was started with OMP_PROFILE=l53rig (and PI_PROFILE, with PI_CODING_AGENT_DIR unset) and this pane's LEGION_* markers unset; the rig package's manifest was rewritten exactly as prepack.sh publishes it (omp.extensions → dist/*.js, legion.daemonApiVersion 1 from this branch's package.json), because main@origin is already at contract 2 (pi-envoy 1.23.1).",
+    "The daemon's durable JetStream consumers need the ENVOY_NOTIFICATIONS stream that the Envoy listener normally creates; the rig created it directly in its NATS (subjects notifications.>) instead of running the listener.",
+    "jj split path scoping is all-or-nothing per file: Task 1's fixture edits and Task 2's new tests share ledger.test.ts and cli/handoff.test.ts, so the edits were sequenced between the two splits; biome formatting fixes were folded into the owning commits with jj squash --into rather than a fourth commit."
+  ],
+  "deviations": [
+    "Conflict-forced rebase onto main@origin c8faafecc6a7 (GitHub reported the PR CONFLICTING): LEGION-78 (#1015) had landed `dispatch_message` for the retro post, so the retro skill keeps main's dispatch_message block (with its Legion footer and 2,000-character cap) and gains the plan's `Proofs read` and `Production check` body lines; the plan's `dispatch_comment` (which anchors a quote or answers an ask, and is the wrong tool for a free-standing issue note) is replaced by `dispatch_message` in the three production-record mentions too (worker skill post-merge bullet, retro step 5, implementer prompt) and in skills/AGENTS.md. The plan's tester check `grep -c 'dispatch_comment' skills/legion-retro/SKILL.md ≥ 1` should read `dispatch_message` (2 hits); `legion gh -- issue comment` is 0 as planned. Fingerprint 8d1133ea… → 884582d0… (changed, by that resolution).",
+    "Rig facts that moved since the plan: the installed plugin is 1.23.0 (not 1.22.2), main@origin is at daemon API contract 2 while this branch is at 1, the live daemon's panes run omp 18.1.15-sami.9bff2014-rpcfix via LEGION_OMP_PATH (the yaml pin 18.1.18 has not been picked up by a restart) — the wrapper execs that binary; the live legion.yaml has `instructions:` re-enabled, the rig left it unset as planned (the role prompt is still catted into argv either way).",
+    "The plan's proofPlan grep `spawn_worker the \\*\\*implementer\\*\\* with the production-check task` lacks the backticks the replacement text carries; the check that matches the actual text is `spawn_worker\\` the \\*\\*implementer\\*\\* with the production-check task` (1 hit); the testerChecks' `production-check task` ≥ 2 holds (2).",
+    "Acceptance 3/4 rig evidence was taken at 4ef79ebb (pre-rebase); the rebase changed only skills/legion-retro/SKILL.md and skills/legion-architect/SKILL.md (conflict resolution), so the seven role prompts the rig recorded are byte-identical at 66e54dd7; the retro skill's tool name in the tester's quote C is the one thing the rebase changed."
+  ],
+  "openQuestions": [],
+  "rigEvidence": "/tmp/l53-evidence on this machine: argv/before and argv/after (one file per role per leg), tester-answer-before.md and tester-answer-after.md, both tester transcripts, dispatch-sink-before.log and dispatch-sink-after.log, rig-panes-after.txt, rig-mode.json; the rig itself (profile l53rig, /tmp/legion53-rig, NATS container, tmux server legion-sjawhar53) was torn down; the live daemon, its state dir, profile, and tmux server were never written to",
+  "learningsInjected": [
+    "legion/worker-pane-shell-gotchas.md",
+    "legion/text-only-skill-pr-mechanics.md",
+    "testing/proof-rig-loads-the-production-plugin-tree.md",
+    "testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
+    "testing/driving-a-real-omp-worker-against-a-stand-in-daemon.md",
+    "daemon/handoff-schema-migration-patterns.md"
+  ],
+  "learningsHelpful": [
+    "legion/worker-pane-shell-gotchas.md",
+    "legion/text-only-skill-pr-mechanics.md",
+    "testing/proof-rig-loads-the-production-plugin-tree.md",
+    "testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T12:35:08.601Z"
+}
