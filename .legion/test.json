@@ -3,14 +3,14 @@
   "passed": 7,
   "failed": 0,
   "failures": [],
-  "headSha": "883cd3dfcff0564f4c469683e3e8816b20712f64",
+  "headSha": "0c6f3c18d45afd1367ef09147f38afe4d570076f",
   "codeCommit": "a3f40d856997 daemon: a failed list-panes proves nothing about the pane -- never alive, never gone",
   "testsCommit": "5f795f98f796 daemon tests: a fake gone pane must say so on stderr; waits on real events",
-  "mergeBase": "195674ab0592 (chore: release pi-envoy v1.18.1) -- #956, #994, #995, #996 included; earlier: #973, #980, #983",
-  "previousHeadSha": "246f5e7c1600ec41ec0250458e030fcf5df89067",
+  "mergeBase": "0f744bc8811e (chore: release pi-envoy v1.20.0) -- #957, #993, #1002, #992 included; main has since moved to 419a0590 (#1001 + two releases) touching no file this branch touches",
+  "previousHeadSha": "883cd3dfcff0564f4c469683e3e8816b20712f64",
   "pr": "https://github.com/sjawhar/legion/pull/981",
   "reviewRound": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188762941 (CHANGES_REQUESTED at ccf037d5: B3, B4, rebase, four non-blocking)",
-  "ci": "pr-checks-result at 883cd3df: lint/pr-title/test/typecheck all SUCCESS across runs 34739339255 and 34739406529; GitHub mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required), read via `legion gh -- pr view 981 --json mergeable,mergeStateStatus,statusCheckRollup`.",
+  "ci": "pr-checks-result at 0c6f3c18: lint/pr-title/test/typecheck SUCCESS across runs 34742308108, 34742341712, 34742420479; GitHub mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required) after its recompute (`legion gh -- pr view 981 --json mergeable,mergeStateStatus,statusCheckRollup`).",
   "blocking": {
     "B3": {
       "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125105",
@@ -164,7 +164,7 @@
     "caveats": "(1) The rig ran the branch's daemon 'when the branch sat on main 4d516a1f' and the artifact says the later rebase onto abaf0817 changed no src/daemon file; jj's evolog shows the branch was rebased more than once between 03:29Z and the 04:01Z code-commit split, so that equivalence is the implementer's word -- the independent proof for the pushed head is this round's unit/contract suites (1032/0) and my real-tmux driver at 246f5e7c. (2) The artifact's state excerpts are hand-trimmed JSON (the S1 excerpts omit `readyConfirmedAt`/status), fine for the identity fields they cite. (3) `failed to connect architect shim socket on ready ... negotiate_protocol timed out` after each resurrection is noted as pre-existing best-effort behaviour under load ~200; not identity-related. (4) The two rig adaptations (NATS container name / machine id parameterization, Dispatch event relay) were made outside the PR in a throwaway main checkout and are named for the architect -- appropriate scoping."
   },
   "observations": [
-    "Delta at 883cd3df: see delta_883cd3df. The 246f5e7c verdict and evidence below it are carried forward unchanged for everything the rebase did not touch (src byte-identical across the rebase).",
+    "Round 3 at 0c6f3c18: see round3_0c6f3c18 (verdict pass; one non-blocking test gap on handleException). Earlier sections carried forward for what round 3 did not touch.",
     "Test-quality gap (non-blocking): the r3998125119 fix -- a non-ENOENT/ESRCH /proc read error propagates from probe/stop instead of reading as gone -- is verified here by code and a throwaway run, but no committed test pins it; exact test proposed under nonBlocking[1].",
     "worker-boot-watchdog.test.ts 're-arms, never retires, a boot whose runtime probe could not complete ...' counts `liveness probe did not complete` log lines (2) beside its discriminating event-sequence assertions; the wording count is redundant with `probe` x2 and could be dropped without loss.",
     "A resync tick in which one tree's probe throws rejects `runResync` as a whole (`Promise.all` over the probe effects): the other trees' probes already in flight still complete, but that tick's resync payload is not published to the controller and `reportRootAnomalies` for that tick is lost until the next interval. Acceptable for a transient tmux failure (the daemon logs `resync failed:` and reschedules); noted for the reviewer.",
@@ -222,7 +222,84 @@
       "No throwaway server was opened this round (nothing tmux-facing changed); the LEGION_TMUX_LIVE/LEGION_E2E suites ran on their own sockets inside the package run. The mutant copy under /tmp/legion27-test/r5/mutant was removed."
     ]
   },
+  "round3_0c6f3c18": {
+    "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5189671202 (CHANGES_REQUESTED at 8d5855cf: B5 + two land-with items + fast-follow list)",
+    "scope": "The PASS at 246f5e7c/883cd3df stands for everything round 3 did not touch; the round-3 delta (34907851..0c6f3c18: processes.ts +96/-, runtime-tmux.ts, worker-boot-watchdog.ts, AGENTS.md, four test files, one docs/solutions note) and the three in-round rebases are verified below.",
+    "verdict": "pass",
+    "findings": [
+      {
+        "severity": "non-blocking gap",
+        "item": 2,
+        "finding": "No committed test covers the round-3 `handleException` catch (commit 02fd8a8d, thread r3998846683). The implementer's reply names the fix and the doc changes but no test; grep of every __tests__ file for `failed to recover` / `has no redelivery` is empty, and none of the ten existing `handleException` call sites in processes.test.ts drives a probe that throws. The code is correct (verified by a throwaway, below) and a test asserting it discriminates (a mutant with the catch removed rejects instead of resolving).",
+        "testThatShouldExist": "processes.test.ts: `handleException logs once, naming the role token, and clears nothing when the root architect's liveness probe cannot complete` -- seed an active, ready-confirmed root with an identity-bearing locator; fake `list-panes` -> {exitCode:1, stderr:'tmux: server not responding'}; `await processes.handleException(exception(roleToken('omp', root, 'architect')))` must RESOLVE (not reject); exactly one console.error line containing the role token and the probe's `cannot verify pane %0: list-panes -t %0 exited 1: tmux: server not responding`; `state.trees[root].locator` identical by reference; no `new-window`, no `kill-pane`; generation unchanged. A sibling for the controller branch (`controllerLocator` seeded, `ensureController` path) with the same shape.",
+        "evidence": "Throwaway /tmp/legion27-test/r6/handle-exception-probe.ts (not committed) against a copy of the head: handleException RESOLVED, 1 console.error `[legion] failed to recover legion-omp-legion-42-architect after a delivery exception; nothing was cleared, and this lane has no redelivery -- ... : Error: cannot verify pane %0: list-panes ...`, locator same object, new-window 0, kill-pane 0. Same script against a mutant with both `logFailure(error)` sites replaced by `throw error`: REJECTED `cannot verify pane %0: ...`, 0 log lines -- the proposed test fails there."
+      }
+    ],
+    "items": [
+      {
+        "item": 1,
+        "check": "B5 (r3998846681), aea534f2: escalateOrRetryUnconfirmedRoot wraps `await onRetry()`",
+        "code": "processes.ts escalateOrRetryUnconfirmedRoot: `try { await onRetry(); } catch (error) { console.error('[legion] failed to resurrect an unconfirmed root for <tree>; re-arming its registration deadline rather than leaving it unwatched:', error); if (this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) this.armRootRegistrationDeadline(treeKey, generation); }` -- logged once there (the timer's .catch never sees it); a spawn failure that queued/launch-failed the tree, or a newer generation, makes treeStillUnconfirmed decline the re-arm.",
+        "test": "processes.test.ts 're-arms the same generation's registration deadline when the resurrection's own re-probe cannot complete, leaving the locator intact, and resurrects normally once it can' -- PASS. Its second arm is `await secondArm.promise` (resolved by the 2nd injected sleep); without the wrap no 2nd sleep ever happens, so the test hangs there.",
+        "preFix": "Mutant (/tmp copy of the head, try/catch replaced by bare `await onRetry()` = the pre-aea534f2 shape): the test FAILS on bun's 5 s timeout at that await (`[5020 ms]`); restored copy: PASS.",
+        "realTmux": "Throwaway /tmp/legion27-test/r6/b5-real-tmux-driver.ts (not committed) on `tmux -L legion-smoke17837` (killed after; deployment server never targeted): REAL ProcessManager + REAL TmuxRuntime, injected sleep gates the deadlines. spawnRoot gen 1 -> `%1` pid 3791728 recorded, deadline armed (sleep #1). Operator `kill-pane %1` out of band (real tmux; the session ends with its only pane). Deadline 1 fires: the deadline's probe sees the pane gone through real tmux (`can't find pane`/no server -> gone), launchFailures -> 1, resurrect starts, and the resurrection's re-probe `list-panes` is faulted (exit 1, `tmux: server not responding`). Observed: exactly ONE log line for the root -- `failed to resurrect an unconfirmed root for LEGION-42; re-arming its registration deadline rather than leaving it unwatched: Error: cannot verify pane %1: list-panes -t %1 exited 1: tmux: server not responding`; locator identical by reference; generation 1; launchFailures 1; status active, unconfirmed; zero kill-pane; zero new-window; sleep #2 armed (same generation). Fault cleared, deadline 2 fires: generation 2, launchFailures 2, `new-window` carries `--resume=<session file>`, fresh identity (pid 3792977 vs 3791728; the recreated server reissued `%1` -- the very shape this PR exists for), zero kill-pane, sleep #3 (gen 2's own deadline), probe alive on the fresh pane. RESULT: PASS.",
+        "status": "confirmed"
+      },
+      {
+        "item": 2,
+        "check": "r3998846683, 02fd8a8d: handleException catches and logs a probe/recovery throw naming the role token; docs read true",
+        "code": "processes.ts handleException: `logFailure = (error) => console.error('[legion] failed to recover <roleToken> after a delivery exception; nothing was cleared, and this lane has no redelivery -- the resync backstop, the registration deadline, or the next exception retries:', error)`; the controller branch wraps `ensureController()`, the architect branch wraps `probe -> controlDirective | resurrect`; both clear nothing.",
+        "docsQuoted": [
+          "probeLocator: `... every caller's own failure handling logs and retries later without clearing anything: the resync onProbe on its next tick, a registration deadline by re-arming itself, the boot watchdog by re-arming its interval, the linger sweep on its next pass. handleException only logs -- the core-NATS exception lane has no redelivery -- and leaves the retry to those.` -- TRUE (matches index.ts resync catch, escalateOrRetryUnconfirmedRoot/retireUnconfirmedRoot re-arms, watchdog probeAlive catch, linger sweep's own catch, handleException's logFailure).",
+          "probeTree: `This is the decision point and the only place that logs it: the resurrection that follows (resurrectDeadTree) re-probes through the silent probeLocator -- so a root that came back alive between the two is never replaced -- and hands that fresh verdict to its stop, which decides nothing again.` -- TRUE (resurrectDeadTree probes via probeLocator, returns on alive, passes the verdict to removeTreeProcess).",
+          "resurrectDeadTree: `The probe is taken afresh here -- a caller's earlier verdict may be stale by now ... but silently ... A probe that cannot complete throws through to the caller, which re-arms or retries (escalateOrRetryUnconfirmedRoot, the resync tick, handleException's log) without touching the tree.` -- TRUE.",
+          "AGENTS.md process-failure-recovery bullet: `... every probe caller logs and retries later without clearing anything — the resync onProbe on its next tick, the boot watchdog by re-arming its interval, the controller and root registration deadlines by re-arming themselves (including when it is the resurrection's own re-probe or stop that throws, after the deadline's probe already found the root dead: escalateOrRetryUnconfirmedRoot catches the retry, logs once, and re-arms the same generation's deadline while the tree is still active and unconfirmed, since the resync backstop probes only confirmed roots), the linger sweep on its next pass; handleException only logs, naming the role token — the core-NATS exception lane has no redelivery, so that log is the whole record and the retry is whichever of the others reaches the root next.` -- TRUE; the probe-throw clause now lives in this bullet, and the linger bullet keeps only the stop side (`... the probe side of the same verdict is in the process-failure-recovery bullet above`)."
+        ],
+        "test": "NONE committed -- see findings[0]. Behaviour verified by throwaway on head and shown discriminating against a mutant.",
+        "status": "code confirmed; test gap (non-blocking)"
+      },
+      {
+        "item": 3,
+        "check": "r3998846684: recordedLocators dedupes by sameProcess",
+        "code": "runtime-tmux.ts: `if (opened && !found.some((locator) => sameProcess(locator, opened))) found.push(opened);` with the doc explaining state holds a spread copy after /process/started or /worker/started.",
+        "test": "runtime.contract.test.ts > TmuxRuntime 'verifies a recorded pane once even when state holds a copy of the launched locator, not the object spawn returned' -- state re-keyed to `{...root}` via the new `registerLocator`, the pane reissued so every recorded window fails, `list-panes -t %1` asserted exactly once. PASS on head; MUTANT (`!found.includes(opened)`, the pre-fix shape): FAIL `Expected length: 1 / Received length: 2` -- discriminating. A different pane counts separately by construction (sameProcess compares pane id + pid + ticks; the existing 'opens a fresh window when no recorded pane verifies ...' and 'splits a second process ...' rows still PASS).",
+        "status": "confirmed"
+      },
+      {
+        "item": 4,
+        "check": "fast-follow items",
+        "results": [
+          "Watchdog re-arm on an unconfirmable retirement: worker-boot-watchdog.ts `retire()` helper removes the armed entry before the call, catches, logs `could not be retired; re-arming the watch rather than leaving its boot unwatched`, puts the entry back under the same generation, returns false so the loop continues one more interval. Test worker-boot-watchdog.test.ts 're-arms the watch when a retirement's stop cannot be confirmed, and retires the boot on the next interval once it can' -- PASS; MUTANT (catch -> rethrow, the pre-fix shape): FAIL (`retire:1` only, no `probe, retire:2` tail). AGENTS.md watchdog bullet's new clause quoted above reads true.",
+          "stop's listing-failed message via describePaneVerdict: runtime-tmux.ts `throw new ProcessStopFailed(locator, describePaneVerdict(tmuxLocator, verdict))`; contract row 'stop throws ProcessStopFailed, killing nothing, when list-panes itself fails ...' now asserts the full sentence `cannot verify pane %1: <detail>` (a strengthening); the ProcessManager closeTree B3 row asserts `expect.stringContaining('list-panes -t %0 exited 1')` (widened from exact-equal only because the sentence grew a prefix; the argv/exit contract is still pinned).",
+          "isOmpPane rethrow row: runtime.contract.test.ts 'probe propagates an EACCES from the /proc cmdline read, and reads an ENOENT there as the process no longer being OMP' -- PASS (EACCES -> rejects.toBe(fault); ENOENT -> not-recorded-process with both identities; cleared -> alive).",
+          "Dead fixture branches removed: two `#{pane_id}`-only list-panes branches (never matched the real two-token format), `kill` argv branches (the removed `kill -0`), two bare `{stdout:'', exitCode:1}` list-panes fakes -> `paneGone()`; `${treeKey}` template no-ops -> `treeKey`; docs/solutions/testing/mutation-proof-probe-tests.md shows `lookupPane`.",
+          "Wording pins dropped: the B4 test's `failed to stop` negative match and the watchdog test's `liveness probe did not complete` count (both tests keep their behavioural assertions: shutdown over the socket / kill-pane [] / closed / locator cleared / one decision line; probe x2, retire x1, tail `probe -> retire`).",
+          "Removed-assertion audit of the whole round-3 test diff: every removed `expect` is a wording pin, a rewrap (panePid -> lookupPane in the docs note), a relocation onto the retirement's save snapshot (the same three assertions `locator undefined`, `launchFailures 1`, `queue == [token]` now read from the snapshot taken at that save; `not.toContainEqual(kill-pane -t %1)` kept), or a strengthening (stop message). No kill-pane-absence, locator-clearing, or --resume assertion weakened; the B5 test adds locator-by-reference, `kill-pane` absence twice, and `--resume` implicitly via the gen-2 relaunch path (asserted explicitly by the real-tmux driver)."
+        ],
+        "status": "confirmed"
+      },
+      {
+        "item": 5,
+        "check": "rebases: state version composition, #957 boot-retire test, formerly-flaky test",
+        "migration": "legion-state.ts: `migrateV24State` (v24 -> v25, #993's pure bump) and `migrateV25State` (v25 -> v26, this PR's pane-identity bump) both in the chain; schema literal / newLegionState / loadState check at 26; `.bak` named by the source version (`${file}.v${sourceVersion}.bak`, flag wx). Executed (/tmp/legion27-test/r6/migrate-check.ts, not committed): a v24 file with an identity-less tmux locator -> version 26, `state.json.v24.bak` byte-identical to the input, legacy locator kept identity-less; a v25 file -> version 26, `state.json.v25.bak`, same. legion-state.test.ts 'migrates v24 state to v25 as a pure version bump, leaving PR records untouched', 'migrates v25 state to v26 as a pure version bump, keeping identity-less tmux locators', 'initializes empty v26 state ...' all PASS. PR body explains the numbering: `#993 took v24 -> v25 while this PR was in review, so a v24 file walks both; the smoke-rig evidence below records v24 -> v25 and .v24.bak because that was the numbering when it ran`.",
+        "bootRetire957": "index.test.ts 'retires a ready-confirmed worker whose shim socket is dead at boot: retirement dereferences the live api without throwing, pane killed once, locator cleared, secret file removed' (45a7776e): the seeded `%7` now carries `panePid: 7777, paneStartTicks: 4242`, the fake `list-panes` answers `%7 7777`, `readProcessCmdline` reads omp; the assertions `killedPanes toEqual(['%7'])`, `persisted.locator toBeUndefined`, `exposed.locator toBeUndefined`, secret file ENOENT are unchanged -- the kill is still asserted, now on a verified pane (contract moved, not weakened). PASS.",
+        "flakyTest": "processes.test.ts 'retires an unconfirmed boot at the first watchdog interval -- never re-arming -- once its pane id has been reissued to another OMP process and its socket refuses' now resolves a `Promise.withResolvers` from `saveState` when the save carries `locator === undefined && launchFailures === 1`, snapshots state at that save (structuredClone), and asserts on the snapshot; the `flushEventLoopUntil(..., 20_000)` poll is gone. 20/20 isolated runs pass.",
+        "status": "confirmed"
+      },
+      {
+        "item": 6,
+        "check": "package checks and GitHub",
+        "result": "cd packages/daemon && bunx biome check --error-on-warnings src/ -> Checked 156 files, no fixes, exit 0; bunx tsc --noEmit -> exit 0; LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 1088 pass / 0 fail / 0 skip, 1088 tests across 62 files [49.53s] (matches the implementer's 1088/1088). Round-3 file run (processes + runtime.contract + worker-boot-watchdog + legion-state + index): 392 pass / 3 gated-skip / 0 fail. No LEGION-15/35 flake. GitHub at 0c6f3c18: lint/pr-title/test/typecheck SUCCESS on runs 34742308108, 34742341712, 34742420479; mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required) -- read UNKNOWN for ~30 s while GitHub recomputed after main advanced to 419a0590 (#1001 + two releases, no file overlap with this branch), then MERGEABLE.",
+        "status": "confirmed"
+      }
+    ],
+    "observations": [
+      "Item 2 is a test gap, not a behaviour gap: the catch exists and works; the exact test is spelled out in findings[0]. Non-blocking under the reviewer's own classification of the item ('land with B5'), but the implementer's thread reply implies a test that is not there.",
+      "The B5 real-tmux driver incidentally reproduced the original bug shape end to end: after the operator killed the sole pane the session ended, and the resurrected generation received `%1` again from the recreated server -- verified alive only because the fresh locator records the new pid/ticks.",
+      "Throwaway artifacts (/tmp/legion27-test/r6/*.ts, the /tmp mutant copy) not committed; mutant directory removed; throwaway servers legion-smoke21505 and legion-smoke17837 killed (`ls` -> no server running); deployment server legion-sjawharlegion untouched; `.omp/config.yml` left as provisioned."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T05:12:23.748Z"
+  "completed": "2026-09-13T06:30:21.723Z"
 }
