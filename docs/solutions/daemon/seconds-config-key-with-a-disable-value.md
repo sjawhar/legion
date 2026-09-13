@@ -15,6 +15,7 @@ related_issues:
   - "LEGION-30"
   - "sjawhar/legion#973"
   - "LEGION-46"
+  - "sjawhar/legion#1016"
 ---
 
 # A seconds config key with a disable value: bound it at 2147483 for the 32-bit timer, accept only the canonical literal `0`, validate every source through one check
@@ -40,18 +41,19 @@ The result is every finished worker retired the instant it goes idle — the fea
 nothing in the daemon's own logs says why (`retiring idle worker …: idle for 31536000s` reads as a
 lie).
 
-Fix: `MAX_WORKER_IDLE_RETIRE_SECONDS = 2_147_483` — the largest whole number of seconds whose
-millisecond delay fits — enforced at every source; the error names the key, the bound, and `0` as
-the real disable value:
+Fix: the bound `2_147_483` — the largest whole number of seconds whose millisecond delay fits —
+enforced at every source; the error names the key, the bound, and `0` as the real disable value:
 
 ```
-worker_idle_retire_seconds must be at most 2147483 (the largest whole number of seconds whose
-millisecond delay fits a 32-bit timer); use 0 to disable idle retirement
+worker_idle_retire_seconds must be at most 2147483; use 0 to disable idle retirement
 ```
 
-The other `*_seconds` keys (`worker_boot_timeout_seconds`, `worker_stop_timeout_seconds`, …) have
-the same exposure but no disable semantics, so a huge value is not a natural input there. Bounding
-them is LEGION-46.
+PR #973 gave this key its own constant. LEGION-46 (PR #1016) generalized the bound to every
+duration setting: the constant is now `MAX_TIMER_SECONDS` in `config.ts`, the refusal comes from
+the shared `checkAtMost(number, field, max, hint?)`, and `checkIdleRetireSeconds` passes the
+`use 0 to disable idle retirement` hint — the one thing about this key's bound that is still
+its own. The audit method, the product rule, and the unit hazard are in
+[`bound-every-duration-setting-at-the-32-bit-timer-limit.md`](bound-every-duration-setting-at-the-32-bit-timer-limit.md).
 
 ## Defect 2 — `Number()` manufactures a zero from a typo
 
@@ -89,8 +91,8 @@ loop would have been the path of least resistance and would have rejected `0`.
 
 ## Checklist for the next "0 means off" or bounded seconds key
 
-- Does the value reach `setTimeout` (directly or via `boundedWait`)? Bound it at `2147483` s with a
-  message that names the disable value.
+- Does the value reach `setTimeout` (directly or via `boundedWait`)? Bound it with
+  `MAX_TIMER_SECONDS` through `checkAtMost`, with a `hint` that names the disable value.
 - Is `0` meaningful? Then `Number()` is not enough: canonical-spelling regex on env, `Object.is(-0)`
   on both paths, `""` stays "unset" like the sibling parsers.
 - One `check*` function; call it from the file parser, the env parser, and once post-resolve so

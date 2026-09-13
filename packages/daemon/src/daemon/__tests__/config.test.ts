@@ -560,7 +560,7 @@ describe("daemon config", () => {
         "/tmp/legion-config"
       )
     ).toThrow(
-      "worker_idle_retire_seconds must be at most 2147483 (the largest whole number of seconds whose millisecond delay fits a 32-bit timer); use 0 to disable idle retirement"
+      "worker_idle_retire_seconds must be at most 2147483; use 0 to disable idle retirement"
     );
     expect(() =>
       loadConfigFromFile(
@@ -574,7 +574,7 @@ describe("daemon config", () => {
         cliOverrides,
       })
     ).toThrow(
-      "LEGION_WORKER_IDLE_RETIRE_SECONDS must be at most 2147483 (the largest whole number of seconds whose millisecond delay fits a 32-bit timer); use 0 to disable idle retirement"
+      "LEGION_WORKER_IDLE_RETIRE_SECONDS must be at most 2147483; use 0 to disable idle retirement"
     );
     expect(() =>
       resolveDaemonConfig({
@@ -606,6 +606,156 @@ describe("daemon config", () => {
     expect(() =>
       loadConfigFromFile("project: acme/7\nworker_idle_retire_seconds: -0\n", "/tmp/legion-config")
     ).toThrow("worker_idle_retire_seconds must be a non-negative integer");
+  });
+
+  it("refuses every timer setting above its bound from the file, naming the key and the bound", () => {
+    // One row per key: each defends its own call site (a `max` forgotten on one key), so a shared
+    // helper passing for one key proves nothing about the others.
+    for (const [key, value, bound] of [
+      ["worker_stop_timeout_seconds", 2147484, 2147483],
+      ["tree_stop_timeout_seconds", 2147484, 2147483],
+      ["worker_boot_timeout_seconds", 2147484, 2147483],
+      ["worker_rpc_timeout_seconds", 2147484, 2147483],
+      ["resync_interval_seconds", 2147484, 2147483],
+      ["slow_command_timeout_seconds", 2147484, 2147483],
+      ["linger_hours", 597, 596],
+    ] as const) {
+      expect(() =>
+        loadConfigFromFile(`project: acme/7\n${key}: ${value}\n`, "/tmp/legion-config")
+      ).toThrow(`${key} must be at most ${bound}`);
+    }
+  });
+
+  it("refuses every timer setting above its bound from its LEGION_* variable, naming the variable and the bound", () => {
+    for (const [name, value, bound] of [
+      ["LEGION_WORKER_STOP_TIMEOUT_SECONDS", "2147484", 2147483],
+      ["LEGION_TREE_STOP_TIMEOUT_SECONDS", "2147484", 2147483],
+      ["LEGION_WORKER_BOOT_TIMEOUT_SECONDS", "2147484", 2147483],
+      ["LEGION_WORKER_RPC_TIMEOUT_SECONDS", "2147484", 2147483],
+      ["LEGION_RESYNC_INTERVAL_SECONDS", "2147484", 2147483],
+      ["LEGION_SLOW_COMMAND_TIMEOUT_SECONDS", "2147484", 2147483],
+      ["LEGION_LINGER_HOURS", "597", 596],
+    ] as const) {
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, [name]: value } })).toThrow(
+        `${name} must be at most ${bound}`
+      );
+    }
+  });
+
+  it("accepts resync_interval_seconds exactly at 2147483 from either source and refuses 2147484: the post-resolve check judges milliseconds", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    // The file value is multiplied into milliseconds by the file loader and the env value only in
+    // resolveDaemonConfig's return, while a cliOverride is already milliseconds; the post-resolve
+    // check therefore judges the field in milliseconds (2147483 s = 2_147_483_000 ms fits).
+    expect(
+      resolveDaemonConfig({
+        configFile: loadConfigFromFile(
+          [
+            "project: acme/7",
+            "envoy_url: http://listener:9020",
+            "dispatch_project: ACME",
+            "nats_urls:",
+            "  - nats://one:4222",
+            "repos:",
+            "  - acme/widgets",
+            "resync_interval_seconds: 2147483",
+            "gates:",
+            "  design: off",
+          ].join("\n"),
+          "/tmp/legion-config"
+        ),
+      }).config.resyncIntervalMs
+    ).toBe(2_147_483_000);
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_RESYNC_INTERVAL_SECONDS: "2147483" },
+        cliOverrides,
+      }).config.resyncIntervalMs
+    ).toBe(2_147_483_000);
+    expect(() =>
+      loadConfigFromFile(
+        "project: acme/7\nresync_interval_seconds: 2147484\n",
+        "/tmp/legion-config"
+      )
+    ).toThrow("resync_interval_seconds must be at most 2147483");
+    expect(() =>
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_RESYNC_INTERVAL_SECONDS: "2147484" },
+        cliOverrides,
+      })
+    ).toThrow("LEGION_RESYNC_INTERVAL_SECONDS must be at most 2147483");
+    expect(() =>
+      resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: { ...cliOverrides, resyncIntervalMs: 2_147_483_001 },
+      })
+    ).toThrow("resyncIntervalMs must be at most 2147483000");
+    expect(
+      resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: { ...cliOverrides, resyncIntervalMs: 2_147_483_000 },
+      }).config.resyncIntervalMs
+    ).toBe(2_147_483_000);
+  });
+
+  it("refuses a cliOverride above the bound post-resolve, naming the field", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    expect(() =>
+      resolveDaemonConfig({
+        env: requiredEnv,
+        cliOverrides: { ...cliOverrides, workerStopTimeoutSeconds: 2_147_484 },
+      })
+    ).toThrow("workerStopTimeoutSeconds must be at most 2147483");
+    expect(() =>
+      resolveDaemonConfig({ env: requiredEnv, cliOverrides: { ...cliOverrides, lingerHours: 597 } })
+    ).toThrow("lingerHours must be at most 596");
+  });
+
+  it("bounds the root registration deadline, the product of worker_boot_timeout_seconds and worker_boot_registration_deadline_intervals, at 2147483 s", () => {
+    const cliOverrides = {
+      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    };
+    // Each factor is within its own bound; only the product overflows the one timer that
+    // multiplies them (the root/controller registration deadline). The file supplies the pair,
+    // `requiredEnv` the rest.
+    expect(() =>
+      resolveDaemonConfig({
+        configFile: loadConfigFromFile(
+          "worker_boot_timeout_seconds: 1000000\nworker_boot_registration_deadline_intervals: 3\n",
+          "/tmp/legion-config"
+        ),
+        env: requiredEnv,
+        cliOverrides,
+      })
+    ).toThrow(
+      "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483"
+    );
+    expect(
+      resolveDaemonConfig({
+        configFile: loadConfigFromFile(
+          "worker_boot_timeout_seconds: 2147483\nworker_boot_registration_deadline_intervals: 1\n",
+          "/tmp/legion-config"
+        ),
+        env: requiredEnv,
+        cliOverrides,
+      }).config.workerBootTimeoutSeconds
+    ).toBe(2_147_483);
+    expect(() =>
+      resolveDaemonConfig({
+        env: {
+          ...requiredEnv,
+          LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "715828",
+          LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "3",
+        },
+        cliOverrides,
+      })
+    ).toThrow(
+      "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483"
+    );
   });
 
   it("resolves slowCommandTimeoutSeconds: YAML beats env, env beats the 300 default", () => {
