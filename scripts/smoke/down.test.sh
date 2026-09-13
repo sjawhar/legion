@@ -159,21 +159,27 @@ grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
 # Acceptance 1 (LEGION-41): down.sh removes exactly the container up.sh recorded for this rig at
 # ${SMOKE_DIR}/nats-container. The fake docker logs every argv and reports two rigs' containers
 # plus the fixed name as existing (SMOKE_FAKE_LEGACY_ABSENT=1 hides the fixed name), so anything
-# down.sh touched is on the log; `docker port` for the fixed name prints the two lines the real
-# docker prints, IPv4 then IPv6, for the port SMOKE_FAKE_LEGACY_PORT names. Every port in these
-# fixtures is off the rig's 14222 default, so a comparison against a constant or against
-# ${NATS_PORT:-14222} cannot pass by accident.
+# down.sh touched is on the log. For the fixed name it answers the created-with binding read
+# (HostConfig.PortBindings, through the exact --format template container_published_on and
+# published_ports pass -- a drift in down.sh's copy fails these cases instead of passing) with one
+# line per word of SMOKE_FAKE_LEGACY_PORT, and reports .State.Running from SMOKE_FAKE_RUNNING
+# (default true) even though down.sh does not ask today. Every port in these fixtures is off the
+# rig's 14222 default, so a comparison against a constant or against ${NATS_PORT:-14222} cannot
+# pass by accident.
 nats_smoke_dir="${temporary_dir}/smoke-nats"
 mkdir -p "$nats_smoke_dir"
 printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
 docker_log="${temporary_dir}/docker.log"
+# shellcheck disable=SC2016 # Go template variables ($port, $bindings), not shell expansions
+ports_template='{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) "4222/tcp"}}{{range $bindings}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}'
 cat >"${fake_bin}/docker" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"${docker_log}"
 case "\$*" in
   'container inspect legion-smoke-nats-sjawhar16' | 'container inspect legion-smoke-nats-exampleorg24') exit 0 ;;
   'container inspect legion-smoke-nats') [[ -z "\${SMOKE_FAKE_LEGACY_ABSENT:-}" ]] ;;
-  'port legion-smoke-nats 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_LEGACY_PORT:?}" "\${SMOKE_FAKE_LEGACY_PORT:?}" ;;
+  'container inspect --format {{.State.Running}} legion-smoke-nats') printf '%s\n' "\${SMOKE_FAKE_RUNNING:-true}" ;;
+  'container inspect --format ${ports_template} legion-smoke-nats') printf '%s\n' \${SMOKE_FAKE_LEGACY_PORT:?} ;;
   'rm -f '*) exit 0 ;;
   *) exit 1 ;;
 esac
@@ -217,6 +223,23 @@ grep -Fxq 'rm -f legion-smoke-nats' "$docker_log" || {
   cat "$output_file" >&2
   exit 1
 }
+# The same fixed-name container stopped (a host reboot stops every container): the created-with
+# binding still names this rig's port, so it is removed -- and reached through exactly the existence
+# and binding reads plus rm -f, never a runtime port map or a start (LEGION-87 acceptance 3).
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_RUNNING=false SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
+grep -Fxq 'rm -f legion-smoke-nats' "$docker_log" || {
+  printf 'expected down.sh to remove a stopped legion-smoke-nats published on this rig'"'"'s NATS port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+if grep -qvE '^(container inspect( --format .*)? legion-smoke-nats|rm -f legion-smoke-nats)$' "$docker_log"; then
+  printf 'down.sh reached rm -f for a stopped legion-smoke-nats through an unexpected docker call; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
 # Different port: another rig's container. Nothing is removed and the message names both ports.
 : >"$docker_log"
 PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14262 bash "$down_script" >"$output_file" 2>&1
@@ -224,7 +247,7 @@ if grep -q '^rm -f ' "$docker_log"; then
   printf 'down.sh must not remove legion-smoke-nats when it is published on another port; docker log:\n%s\n' "$(<"$docker_log")" >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on port 14262 14262, not this rig's NATS port 14731: it is another rig's container; leaving it"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on port 14262, not this rig's NATS port 14731: it is another rig's container; leaving it"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
   cat "$output_file" >&2
   exit 1
 }
@@ -237,7 +260,7 @@ if grep -q '^rm -f ' "$docker_log"; then
   printf 'down.sh must not remove legion-smoke-nats when the legion.yaml port merely prefixes the published port; docker log:\n%s\n' "$(<"$docker_log")" >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *"legion-smoke-nats is published on port 14731 14731, not this rig's NATS port 1473: it is another rig's container; leaving it"* ]] || {
+[[ "$(<"$output_file")" == *"legion-smoke-nats is published on port 14731, not this rig's NATS port 1473: it is another rig's container; leaving it"* ]] || {
   cat "$output_file" >&2
   exit 1
 }

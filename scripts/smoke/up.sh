@@ -455,24 +455,39 @@ ensure_root_issue() {
   printf 'CREATED root issue %s\n' "$key"
 }
 
-# Ownership test for a NATS container, shared verbatim with down.sh: true only when
-# `docker port <container> 4222/tcp` reports at least one binding and every reported binding
-# (docker prints one line per address, `0.0.0.0:<port>` and `[::]:<port>`) carries exactly the
-# given host port -- one host port is bound by one rig, so an equal port means this rig's
-# container. Empty or unparseable output is a refusal, never a match.
+# Ownership test for a NATS container, shared verbatim with down.sh: true only when the container
+# was created publishing container port 4222/tcp on at least one host port (HostConfig.PortBindings,
+# which Docker keeps while the container is stopped -- the runtime port map is empty then, which is
+# how a rig could not restart after a host reboot, LEGION-87) and every such host port equals the
+# given one -- one host port is bound by one rig, so an equal port means this rig's container. A
+# failed inspect, no binding, or a non-numeric host port is a refusal, never a match.
 container_published_on() {
   local container="$1"
   local port="$2"
   local published
   local line
   local seen=0
-  published="$(docker port "$container" 4222/tcp 2>/dev/null)" || return 1
+  published="$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) "4222/tcp"}}{{range $bindings}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}' "$container" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    [[ "$line" =~ :([0-9]+)$ && "${BASH_REMATCH[1]}" == "$port" ]] || return 1
+    [[ "$line" =~ ^[0-9]+$ && "$line" == "$port" ]] || return 1
     seen=1
   done <<<"$published"
   ((seen))
+}
+
+# Prints the host ports the container was created to publish 4222/tcp on (HostConfig.PortBindings),
+# space-separated, or `none`. Shared verbatim with down.sh.
+published_ports() {
+  local published
+  local line
+  local ports=""
+  published="$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) "4222/tcp"}}{{range $bindings}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}' "$1" 2>/dev/null || true)"
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[0-9]+$ ]] || continue
+    ports="${ports:+${ports} }${line}"
+  done <<<"$published"
+  printf '%s\n' "${ports:-none}"
 }
 
 ensure_nats() {
@@ -480,7 +495,7 @@ ensure_nats() {
 
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
     container_published_on "$nats_name" "$nats_port" ||
-      fail "NATS container ${nats_name} is not mapped to configured port ${nats_port}"
+      fail "NATS container ${nats_name} is published on port $(published_ports "$nats_name"), not the configured NATS port ${nats_port}"
     if [[ "$(docker container inspect --format '{{.State.Running}}' "$nats_name")" == "true" ]]; then
       printf 'REUSED NATS container %s\n' "$nats_name"
     else

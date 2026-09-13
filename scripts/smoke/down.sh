@@ -60,35 +60,38 @@ rig_nats_port() {
   return 1
 }
 
-# Ownership test for a NATS container, shared verbatim with up.sh's ensure_nats: true only when
-# `docker port <container> 4222/tcp` reports at least one binding and every reported binding
-# (docker prints one line per address, `0.0.0.0:<port>` and `[::]:<port>`) carries exactly the
-# given host port -- one host port is bound by one rig, so an equal port means this rig's
-# container. Empty or unparseable output is a refusal, never a match.
+# Ownership test for a NATS container, shared verbatim with up.sh's ensure_nats: true only when the
+# container was created publishing container port 4222/tcp on at least one host port
+# (HostConfig.PortBindings, which Docker keeps while the container is stopped -- the runtime port
+# map is empty then, which is how a rig could not restart after a host reboot, LEGION-87) and every
+# such host port equals the given one -- one host port is bound by one rig, so an equal port means
+# this rig's container. A failed inspect, no binding, or a non-numeric host port is a refusal,
+# never a match.
 container_published_on() {
   local container="$1"
   local port="$2"
   local published
   local line
   local seen=0
-  published="$(docker port "$container" 4222/tcp 2>/dev/null)" || return 1
+  published="$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) "4222/tcp"}}{{range $bindings}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}' "$container" 2>/dev/null)" || return 1
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    [[ "$line" =~ :([0-9]+)$ && "${BASH_REMATCH[1]}" == "$port" ]] || return 1
+    [[ "$line" =~ ^[0-9]+$ && "$line" == "$port" ]] || return 1
     seen=1
   done <<<"$published"
   ((seen))
 }
 
-# Prints the host ports `docker port <container> 4222/tcp` reports, space-separated, or `none`.
+# Prints the host ports the container was created to publish 4222/tcp on (HostConfig.PortBindings),
+# space-separated, or `none`. Shared verbatim with up.sh.
 published_ports() {
   local published
   local line
   local ports=""
-  published="$(docker port "$1" 4222/tcp 2>/dev/null || true)"
+  published="$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) "4222/tcp"}}{{range $bindings}}{{.HostPort}}{{"\n"}}{{end}}{{end}}{{end}}' "$1" 2>/dev/null || true)"
   while IFS= read -r line; do
-    [[ "$line" =~ :([0-9]+)$ ]] || continue
-    ports="${ports:+${ports} }${BASH_REMATCH[1]}"
+    [[ "$line" =~ ^[0-9]+$ ]] || continue
+    ports="${ports:+${ports} }${line}"
   done <<<"$published"
   printf '%s\n' "${ports:-none}"
 }
