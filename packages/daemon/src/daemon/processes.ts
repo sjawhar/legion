@@ -1261,9 +1261,11 @@ export class ProcessManager {
         // verdict -- a legacy identity-less locator, a reissued pane id -- still asks the root to
         // exit over its own role-scoped socket: that path reaches exactly the process this tree
         // recorded if it is alive at all, and the runtime's destroy step is refused for a
-        // process that is not the recorded one. `probeTree` logs the decision itself.
-        const verdict = await this.probeTree(treeKey);
+        // process that is not the recorded one. `probeTree` logs the decision itself. A probe
+        // the runtime could not complete is a failure of this leg like a failed stop: the tree
+        // stays lingering for the sweep to retry, its locator untouched.
         try {
+          const verdict = await this.probeTree(treeKey);
           await this.stopProcessSerialized(architectToken, rootLocator, this.treeStopTimeoutMs, {
             skipGraceful: verdict.status === "dead" && verdict.reason === "gone",
             refuseKill: verdict.status === "dead" && verdict.reason === "not-recorded-process",
@@ -1858,7 +1860,17 @@ export class ProcessManager {
     };
 
     if (!stillUnconfirmed()) return;
-    const alive = (await this.probe(treeKey)) === "alive";
+    let alive: boolean;
+    try {
+      alive = (await this.probe(treeKey)) === "alive";
+    } catch (error) {
+      console.error(
+        `[legion] failed to probe an unconfirmed root for ${treeKey}; re-arming its registration deadline rather than deciding on a probe that did not complete:`,
+        error
+      );
+      if (stillUnconfirmed()) this.armRootRegistrationDeadline(treeKey, generation);
+      return;
+    }
     // Re-check after the probe's own await: see this method's doc comment.
     let tree = stillUnconfirmed();
     if (!tree) return;
@@ -1938,21 +1950,35 @@ export class ProcessManager {
    * case the identity check exists for, or a legacy locator with no identity -- is logged here,
    * once, with both identities (this is the decision point; the resurrection that follows hands
    * the verdict down rather than re-deciding it) and reported dead so the ordinary path resumes
-   * the root onto a fresh, fully-recorded process. The tmux runtime never reports `unknown`;
-   * when a runtime that can (LEGION-24) lands, the lifecycle policy for it lands here with it —
-   * until then it is loud, never a default. */
+   * the root onto a fresh, fully-recorded process. A probe the runtime could not complete (a
+   * failed `list-panes`) throws through, exactly as `probeLocator` documents. */
   private async probeTree(treeKey: IssueKey): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
     const tree = this.deps.state.trees[treeKey];
     const locator = tree?.locator;
     if (!locator) return { status: "dead", reason: "gone" };
+    const result = await this.probeLocator(locator, `${treeKey}`);
+    if (result.status === "dead" && result.reason === "not-recorded-process") {
+      console.error(`[legion] treating ${treeKey}'s root as dead: ${result.detail}`);
+    }
+    return result;
+  }
+
+  /** The one `Runtime.probe` call every liveness decision in this manager goes through, silent:
+   * the caller logs what it decides. The tmux runtime never reports `unknown`; when a runtime
+   * that can (LEGION-24) lands, the lifecycle policy for it lands here with it — until then it is
+   * loud, never a default. A runtime that cannot complete the probe at all (tmux: `list-panes`
+   * failed for a reason that does not prove the pane gone) throws instead of returning either
+   * verdict, and every caller's own failure handling logs and retries later -- a resync tick, a
+   * nak'd exception, a re-armed deadline -- without clearing anything. */
+  private async probeLocator(
+    locator: Locator,
+    subject: string
+  ): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
     const result = await this.runtime.probe(locator);
     if (result.status === "unknown") {
       throw new Error(
-        `Runtime probe reported an unknown status for ${treeKey}; ProcessManager has no unknown-status policy`
+        `Runtime probe reported an unknown status for ${subject}; ProcessManager has no unknown-status policy`
       );
-    }
-    if (result.status === "dead" && result.reason === "not-recorded-process") {
-      console.error(`[legion] treating ${treeKey}'s root as dead: ${result.detail}`);
     }
     return result;
   }
@@ -2163,10 +2189,12 @@ export class ProcessManager {
     return spawn;
   }
 
-  /** Awaits every currently in-flight `startRoot` call, including ones added while draining, so a shutdown's final save never races a spawn's own `saveState`. */
+  /** Awaits every currently in-flight `startRoot` call and every in-flight resurrection
+   * (`resurrect`, fired unawaited by a registration-deadline expiry or a resync probe), including
+   * ones added while draining, so a shutdown's final save never races a spawn's own `saveState`. */
   async drainSpawns(): Promise<void> {
-    while (this.spawns.size > 0) {
-      await Promise.allSettled([...this.spawns]);
+    while (this.spawns.size > 0 || this.resurrecting.size > 0) {
+      await Promise.allSettled([...this.spawns, ...this.resurrecting.values()]);
     }
   }
 
@@ -2906,9 +2934,13 @@ export class ProcessManager {
    * socket, so a still-live legacy root exits cleanly before its session is resumed elsewhere,
    * while the runtime's destroy step is refused (`refuseKill`) for a process that is not the
    * recorded one -- the caller's verdict already decided and logged that, and a stranger's
-   * process is never killed. Best-effort: a `StopFailed` here is logged and swallowed rather than
-   * blocking `resurrectDeadTree` — the probe already decided this locator is dead, so a stray
-   * cleanup failure is never a reason to refuse resurrecting the tree onto a fresh process. */
+   * process is never killed. The locator is cleared only after the stop settles, exactly like
+   * `closeTreeLocked` and `controllerAlive`: while the graceful ask waits, the root's window must
+   * stay in `recordedLocators()`, or a linger-sweep `reconcileOrphans` tick could reap an idle
+   * legacy root mid-shutdown instead of letting it exit cleanly. Best-effort: a `StopFailed` here
+   * is logged and swallowed rather than blocking `resurrectDeadTree` — the probe already decided
+   * this locator is dead, so a stray cleanup failure is never a reason to refuse resurrecting the
+   * tree onto a fresh process. */
   private async removeTreeProcess(
     tree: TreeState,
     verdict: Extract<ProbeResult, { status: "dead" }>
@@ -2917,7 +2949,6 @@ export class ProcessManager {
     const architectClaim = this.deps.state.roles[architectToken];
     this.revokeRoleClaim(architectClaim && "issue" in architectClaim ? architectClaim : undefined);
     const locator = tree.locator;
-    delete tree.locator;
     if (!locator) return;
     try {
       await this.stopProcessSerialized(architectToken, locator, this.workerStopTimeoutMs, {
@@ -2929,6 +2960,8 @@ export class ProcessManager {
         `[legion] failed to clean up ${tree.root}'s dead process before resurrection:`,
         error
       );
+    } finally {
+      if (tree.locator === locator) delete tree.locator;
     }
   }
 
@@ -3031,12 +3064,7 @@ export class ProcessManager {
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
-    const result = await this.runtime.probe(locator);
-    if (result.status === "unknown") {
-      throw new Error(
-        "Runtime probe reported an unknown status for the controller; ProcessManager has no unknown-status policy"
-      );
-    }
+    const result = await this.probeLocator(locator, "the controller");
     if (result.status === "alive") return true;
     if (result.reason === "not-recorded-process") {
       console.error(`[legion] treating the controller as dead: ${result.detail}`);
@@ -3065,14 +3093,9 @@ export class ProcessManager {
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     const verdict = tree.locator
-      ? await this.runtime.probe(tree.locator)
+      ? await this.probeLocator(tree.locator, `${treeKey}`)
       : ({ status: "dead", reason: "gone" } satisfies ProbeResult);
     if (verdict.status === "alive") return;
-    if (verdict.status === "unknown") {
-      throw new Error(
-        `Runtime probe reported an unknown status for ${treeKey}; ProcessManager has no unknown-status policy`
-      );
-    }
     const resumeSessionFile = tree.locator?.ompSessionFile;
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";

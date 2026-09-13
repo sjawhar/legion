@@ -174,10 +174,21 @@ export class WorkerBootWatchdog {
    * for its `runState`-seeding side effect; a rejection is caught and logged, never folded into
    * the liveness verdict itself. Used only to decide whether an unconfirmed boot that has
    * missed an observation interval is merely slow (never evicted for that alone) or genuinely
-   * dead (no process, no socket).
+   * dead (no process, no socket). A runtime probe that could not complete (tmux: `list-panes`
+   * itself failed) is neither: it is logged and counts as alive for this interval, so the watch
+   * re-arms and asks again rather than retiring a boot on a verdict nobody reached — the
+   * registration deadline still bounds how many such intervals a boot may spend unconfirmed.
    */
   private async probeAlive(token: string, locator: Locator): Promise<boolean> {
-    if ((await this.deps.probe(locator)).status === "alive") return true;
+    try {
+      if ((await this.deps.probe(locator)).status === "alive") return true;
+    } catch (error) {
+      console.error(
+        `[legion] worker ${token} liveness probe did not complete; re-arming the watch rather than deciding on it:`,
+        error
+      );
+      return true;
+    }
     const probe = await probeWorker(
       () => this.deps.connect(token, locator),
       this.deps.workerRpcTimeoutMs()

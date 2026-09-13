@@ -341,7 +341,10 @@ const WorkerRoleClaimSchema = z
   // A worker's tmux locator always carries its pane id and shim socket (the tmux runtime records
   // both on every spawn); one without them is a corrupt record that must fail here, at load, not
   // later at `connect`/`stop`. Tree and controller locators keep both optional: a root recorded
-  // before the pane-id field existed is a real, backfillable state (`TmuxRuntime.probe`).
+  // before the pane-id field existed is still a schema-valid record, but an identity-less one --
+  // `TmuxRuntime.verifyPaneProcess` never confirms it, so its first probe reports it dead and it
+  // is resurrected onto a fully-recorded locator, and its stop returns as already gone (the
+  // graceful shutdown still goes out over its socket; nothing is ever killed for it).
   .superRefine((claim, context) => {
     if (claim.locator?.runtime !== "tmux") return;
     for (const field of ["tmuxPaneId", "socketPath"] as const) {
