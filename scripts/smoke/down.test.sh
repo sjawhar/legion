@@ -53,6 +53,9 @@ if kill -0 "$bridge_pid" 2>/dev/null; then
 fi
 bridge_pid=""
 
+# The rig's identity for teardown is the directory's legion.yaml (up.sh's write_daemon_config
+# writes it for every rig), never SMOKE_PROJECT -- so these cases export no SMOKE_PROJECT at all.
+printf 'project: omp\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${smoke_dir}/legion.yaml"
 tmux_log="${temporary_dir}/tmux.log"
 cat >"${fake_bin}/tmux" <<EOF
 #!/usr/bin/env bash
@@ -65,7 +68,7 @@ esac
 EOF
 chmod +x "${fake_bin}/tmux"
 
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" bash "$down_script" >"$output_file" 2>&1
 [[ ! -e "$tmux_log" && "$(<"$output_file")" == *'refusing to kill unowned tmux session'* ]] || {
   cat "$output_file" >&2
   exit 1
@@ -82,7 +85,7 @@ esac
 EOF
 chmod +x "${fake_bin}/tmux"
 
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" bash "$down_script" >"$output_file" 2>&1
 # The kill must land on the daemon's private socket -- the default server never hosts a Legion
 # session, so a bare `tmux kill-session` would find nothing (or worse, an operator's own session).
 [[ "$(<"$tmux_log")" == *'-L legion-omp kill-session -t legion-omp'* ]] || {
@@ -153,6 +156,197 @@ grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
   exit 1
 }
 
+# Acceptance 1 (LEGION-41): down.sh removes exactly the container up.sh recorded for this rig at
+# ${SMOKE_DIR}/nats-container. The fake docker logs every argv and reports two rigs' containers
+# plus the fixed name as existing (SMOKE_FAKE_LEGACY_ABSENT=1 hides the fixed name), so anything
+# down.sh touched is on the log; `docker port` for the fixed name prints the two lines the real
+# docker prints, IPv4 then IPv6, for the port SMOKE_FAKE_LEGACY_PORT names. Every port in these
+# fixtures is off the rig's 14222 default, so a comparison against a constant or against
+# ${NATS_PORT:-14222} cannot pass by accident.
+nats_smoke_dir="${temporary_dir}/smoke-nats"
+mkdir -p "$nats_smoke_dir"
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
+docker_log="${temporary_dir}/docker.log"
+cat >"${fake_bin}/docker" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${docker_log}"
+case "\$*" in
+  'container inspect legion-smoke-nats-sjawhar16' | 'container inspect legion-smoke-nats-exampleorg24') exit 0 ;;
+  'container inspect legion-smoke-nats') [[ -z "\${SMOKE_FAKE_LEGACY_ABSENT:-}" ]] ;;
+  'port legion-smoke-nats 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_LEGACY_PORT:?}" "\${SMOKE_FAKE_LEGACY_PORT:?}" ;;
+  'rm -f '*) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${fake_bin}/docker"
+
+printf 'legion-smoke-nats-sjawhar16\n' >"${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >"$output_file" 2>&1
+# A repeat teardown against the same scratch directory still names this rig's container: the
+# record survives teardown, so a second down.sh never falls through to the fixed name.
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >>"$output_file" 2>&1
+grep -Fxq 'rm -f legion-smoke-nats-sjawhar16' "$docker_log" || {
+  printf 'expected down.sh to remove the recorded container legion-smoke-nats-sjawhar16; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats-sjawhar16'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+if grep -q 'exampleorg24' "$docker_log"; then
+  printf 'down.sh must never name another rig'"'"'s container; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+if grep -Eq '(inspect|rm -f) legion-smoke-nats$' "$docker_log"; then
+  printf 'down.sh must not touch the fixed name legion-smoke-nats while a record exists; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+
+# Acceptance 8: no record (a rig started before the name was derived per project) means the
+# fixed name, which every such rig shared -- so it is removed only when its published port equals
+# the NATS port this directory's legion.yaml names. Same port: this rig's container, removed.
+rm -f "${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
+grep -Fxq 'rm -f legion-smoke-nats' "$docker_log" || {
+  printf 'expected down.sh to remove legion-smoke-nats when it is published on this rig'"'"'s NATS port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on this rig's NATS port 14731, removing it"* && "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+# Different port: another rig's container. Nothing is removed and the message names both ports.
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14262 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when it is published on another port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on port 14262 14262, not this rig's NATS port 14731: it is another rig's container; leaving it"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+# The comparison is exact, not a decimal-prefix match: a legion.yaml port whose digits prefix
+# the published port (1473 vs 14731) is another rig's container too.
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:1473\n' >"${nats_smoke_dir}/legion.yaml"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when the legion.yaml port merely prefixes the published port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"legion-smoke-nats is published on port 14731 14731, not this rig's NATS port 1473: it is another rig's container; leaving it"* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+# The published port must equal the rig's on every reported line, and a suffix match is no
+# match either (14731 vs 4731).
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=4731 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when the published port is a suffix of the legion.yaml port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+# legion.yaml without a parseable nats_urls entry: the ownership test cannot run, so nothing is
+# removed and the warning names the file.
+printf 'project: sjawhar/16\n' >"${nats_smoke_dir}/legion.yaml"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when legion.yaml names no NATS port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"warning: no ${nats_smoke_dir}/nats-container record and ${nats_smoke_dir}/legion.yaml has no nats_urls entry naming this rig's NATS port; leaving legion-smoke-nats"* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+# No fixed-name container at all: a silent no-op, even when legion.yaml names no port -- the
+# container is looked for before the file is parsed.
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 SMOKE_FAKE_LEGACY_ABSENT=1 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f \|^port ' "$docker_log"; then
+  printf 'down.sh must neither probe nor remove a fixed-name container that does not exist; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" != *'leaving legion-smoke-nats'* && "$(<"$output_file")" != *'legion-smoke-nats is published'* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
+
+# A record that does not name a rig container is refused, not guessed around: nothing is removed.
+printf 'not-a-rig-container\n' >"${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove any container for a malformed record; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'refusing to remove NATS container: '*'nats-container does not name a rig container (not-a-rig-container)'* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+# Acceptance 6 (LEGION-41): down.sh acts only on a directory that started a rig -- the directory's
+# legion.yaml names the rig, never SMOKE_PROJECT (the @legion_owner marker is set by a rig's own
+# daemon and so cannot tell whose teardown this is). The fake tmux below presents a live,
+# correctly-owned session for whatever socket it is asked about; the fake docker reports the
+# fixed-name container as present.
+no_rig_dir="${temporary_dir}/never-started-a-rig"
+mkdir -p "$no_rig_dir"
+cat >"${fake_bin}/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${tmux_log}"
+socket=""
+if [[ "\$1" == "-L" ]]; then socket="\$2"; shift 2; fi
+case "\$1" in
+  has-session) exit 0 ;;
+  show-option) printf '%s\n' "\$socket" ;;
+esac
+EOF
+chmod +x "${fake_bin}/tmux"
+: >"$tmux_log"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$no_rig_dir" SMOKE_PROJECT="sjawhar/16" bash "$down_script" >"$output_file" 2>&1
+if grep -q 'kill-session' "$tmux_log"; then
+  printf 'down.sh must not kill any tmux session for a directory without legion.yaml; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+fi
+[[ ! -s "$docker_log" ]] || {
+  printf 'down.sh must not invoke docker at all for a directory without legion.yaml; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *"${no_rig_dir} has no legion.yaml naming a project: this directory never started a rig"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+# The directory's legion.yaml names the rig; an exported SMOKE_PROJECT naming another project is
+# warned about and ignored -- the directory's project is the one stopped.
+disagree_dir="${temporary_dir}/env-disagrees"
+mkdir -p "$disagree_dir"
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${disagree_dir}/legion.yaml"
+: >"$tmux_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$disagree_dir" SMOKE_PROJECT="sjawhar/99" bash "$down_script" >"$output_file" 2>&1
+grep -Fxq -- '-L legion-sjawhar16 kill-session -t legion-sjawhar16' "$tmux_log" || {
+  printf 'expected down.sh to kill the legion.yaml project'"'"'s session legion-sjawhar16; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+}
+if grep -q 'sjawhar99' "$tmux_log"; then
+  printf 'down.sh must never address the session named by SMOKE_PROJECT; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"warning: SMOKE_PROJECT=sjawhar/99 disagrees with ${disagree_dir}/legion.yaml (project: sjawhar/16); tearing down sjawhar/16"* && "$(<"$output_file")" == *'STOPPED tmux session legion-sjawhar16 on private socket legion-sjawhar16'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
 printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'
 printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\n'
+printf 'PASS: removes only the NATS container recorded for this rig and refuses a malformed record\n'
+printf 'PASS: without a record, removes legion-smoke-nats only when it is published on this directory'"'"'s legion.yaml NATS port, and otherwise leaves it as another rig'"'"'s\n'
+printf 'PASS: tears down only the rig the directory'"'"'s legion.yaml names -- a directory without one stops no tmux server and invokes no docker, and a disagreeing SMOKE_PROJECT is warned about and ignored\n'

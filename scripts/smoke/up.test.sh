@@ -117,6 +117,27 @@ write_daemon_config
   exit 1
 }
 
+# Acceptance 1 (LEGION-41): both per-rig names derive from SMOKE_PROJECT through project_slug, so
+# two rigs with different projects never share a NATS container or a listener identity (the
+# machine id keys the listener's durable JetStream consumer).
+[[ "$(SMOKE_PROJECT="sjawhar/16" nats_container_name)" == "legion-smoke-nats-sjawhar16" ]] || {
+  printf 'expected legion-smoke-nats-sjawhar16 for sjawhar/16, got %s\n' "$(SMOKE_PROJECT="sjawhar/16" nats_container_name)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="example-org/24" nats_container_name)" == "legion-smoke-nats-exampleorg24" ]] || {
+  printf 'expected legion-smoke-nats-exampleorg24 for example-org/24, got %s\n' "$(SMOKE_PROJECT="example-org/24" nats_container_name)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="sjawhar/16" listener_machine_id)" == "legion-smoke-sjawhar16" ]] || {
+  printf 'expected legion-smoke-sjawhar16 for sjawhar/16, got %s\n' "$(SMOKE_PROJECT="sjawhar/16" listener_machine_id)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="example-org/24" listener_machine_id)" == "legion-smoke-exampleorg24" ]] || {
+  printf 'expected legion-smoke-exampleorg24 for example-org/24, got %s\n' "$(SMOKE_PROJECT="example-org/24" listener_machine_id)" >&2
+  exit 1
+}
+printf 'PASS: derives the NATS container name and listener machine id from SMOKE_PROJECT\n'
+
 
 # The default-mode cases must not see an inherited SMOKE_WEBHOOK_MODE: the README's start block
 # exports it in an operator's shell, so each clears it in its own subshell, exactly as the
@@ -518,6 +539,10 @@ chmod +x "${fake_bin}/curl"
 # Stubs every other main() dependency so the boot sequence runs with no real daemon, tmux pane,
 # Docker container, or Go build -- only relative call order and the root-issue POST body matter
 # here (`ensure_root_issue` itself, and its underlying curl invocation, are left real).
+# The real assert_port_free and ensure_nats stay reachable as real_* for the port-check and
+# container-reuse cases at the end of this file; every other main() case below stubs them.
+eval "$(declare -f assert_port_free | sed '1s/^assert_port_free /real_assert_port_free /')"
+eval "$(declare -f ensure_nats | sed '1s/^ensure_nats /real_ensure_nats /')"
 require_command() { :; }
 assert_port_free() { :; }
 ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
@@ -680,3 +705,179 @@ jq -e '.force == true' >/dev/null "$actor_body_file" || {
 printf 'PASS: root-issue creation request forces past the Dispatch near-duplicate check\n'
 
 printf 'PASS: root-issue creation request carries a session actor for the bearer-authenticated POST\n'
+
+# Acceptance 1 (LEGION-41): main() records the derived NATS container name at
+# ${SMOKE_DIR}/nats-container -- the one file down.sh reads, so teardown needs no environment --
+# and hands the listener the per-rig ENVOY_MACHINE_ID. Each half runs its own main() so the block
+# does not depend on which project the case above happened to use.
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/nats-container"
+if ! (SMOKE_PROJECT="sjawhar/24" main) >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed for sjawhar/24; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/nats-container")" == "legion-smoke-nats-sjawhar24" ]] || {
+  printf 'expected main() to record legion-smoke-nats-sjawhar24 at %s; got: %s\n' "${SMOKE_DIR}/nats-container" "$(<"${SMOKE_DIR}/nats-container")" >&2
+  exit 1
+}
+grep -Fxq 'ENVOY_MACHINE_ID=legion-smoke-sjawhar24' "${SMOKE_DIR}/start_process.listener.argv" || {
+  printf 'expected the listener env block to carry ENVOY_MACHINE_ID=legion-smoke-sjawhar24; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.listener.argv")" >&2
+  exit 1
+}
+# A rig for another project derives different names from the same code path.
+rm -f "${SMOKE_DIR}"/start_process.*.argv
+if ! (SMOKE_PROJECT="example-org/7" main) >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed for example-org/7; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/nats-container")" == "legion-smoke-nats-exampleorg7" ]] || {
+  printf 'expected main() to record legion-smoke-nats-exampleorg7 for example-org/7; got: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
+  exit 1
+}
+grep -Fxq 'ENVOY_MACHINE_ID=legion-smoke-exampleorg7' "${SMOKE_DIR}/start_process.listener.argv" || {
+  printf 'expected the listener env block to carry ENVOY_MACHINE_ID=legion-smoke-exampleorg7; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.listener.argv")" >&2
+  exit 1
+}
+printf 'PASS: records the per-project NATS container name and hands the listener a per-project ENVOY_MACHINE_ID\n'
+
+# Acceptance 5 (LEGION-41): the daemon binds LEGION_DAEMON_PORT + 1 for its worker stream
+# (worker_stream_port defaults to port + 1), so that port must be free too and up.sh must refuse
+# when only that neighbour is occupied. This case runs the real assert_port_free over a fake ss
+# that reports exactly one busy port; every other main() dependency keeps the stubs above, and
+# the failure must land before any of them is reached.
+cat >"${fake_bin}/ss" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${SMOKE_SS_BUSY_PORT:-}" && "${*: -1}" == "sport = :${SMOKE_SS_BUSY_PORT}" ]]; then
+  printf 'LISTEN 0 4096 127.0.0.1:%s 0.0.0.0:*\n' "$SMOKE_SS_BUSY_PORT"
+fi
+EOF
+chmod +x "${fake_bin}/ss"
+# main() with the real port check in place of the stub above, in a subshell so the swap never
+# leaks into later cases (which keep the stub).
+main_with_real_port_check() (
+  # shellcheck disable=SC2329 # invoked by the sourced up.sh's main() (source=/dev/null above)
+  assert_port_free() { real_assert_port_free "$@"; }
+  main
+)
+# Acceptance 7: a refused start leaves neither file down.sh keys on. A record naming a container
+# that does not exist would hide down.sh's legacy-name fallback and could overwrite a live rig's
+# record; legion.yaml without a record is the shape of a rig from before the record existed, for
+# which down.sh consults the shared legacy container name.
+assert_no_rig_files() {
+  local refusal="$1"
+  [[ ! -e "${SMOKE_DIR}/nats-container" ]] || {
+    printf 'expected no nats-container record after %s; found: %s\n' "$refusal" "$(<"${SMOKE_DIR}/nats-container")" >&2
+    exit 1
+  }
+  [[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
+    printf 'expected no legion.yaml after %s; found:\n%s\n' "$refusal" "$(<"${SMOKE_DIR}/legion.yaml")" >&2
+    exit 1
+  }
+}
+clear_rig_files() {
+  rm -f "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
+}
+# shellcheck disable=SC2154 # daemon_port is a readonly of the sourced up.sh (source=/dev/null above)
+worker_stream_port="$((daemon_port + 1))"
+: >"$order_log"
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
+clear_rig_files
+neighbour_status="$(set +e; (set -e; SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check) >"$assertion_file" 2>&1; echo $?)"
+[[ "$neighbour_status" != 0 ]] || {
+  printf 'expected main() to refuse when only the worker-stream port %s is occupied; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *"Legion daemon worker stream port ${worker_stream_port} is already in use"* ]] || {
+  printf 'expected the refusal to name the worker stream and port %s; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ ! -s "$order_log" ]] || {
+  printf 'expected no process to start when the worker-stream port is occupied; order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+assert_no_rig_files 'the port check refused'
+# The same neighbour occupied by this rig's own recorded daemon is a re-run, not a collision: the
+# daemon port check's live-PID exception must cover the worker-stream check too. This harness
+# process stands in for that daemon (its pid and /proc start time go in the daemon's records).
+printf '%s\n' "$$" >"${SMOKE_DIR}/daemon.pid"
+awk '{print $22}' "/proc/$$/stat" >"${SMOKE_DIR}/daemon.start"
+: >"$order_log"
+if ! SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check >"$main_output_file" 2>&1; then
+  printf 'expected main() to reuse this rig'"'"'s own live daemon despite its worker-stream port being bound; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$main_output_file")" == *'RIG READY'* ]] || {
+  printf 'expected RIG READY on the own-daemon re-run; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
+printf 'PASS: refuses to start when only the daemon worker-stream port (LEGION_DAEMON_PORT + 1) is occupied, unless by this rig'"'"'s own recorded daemon\n'
+
+# Acceptance 7, the other refusal point: ensure_nats itself refuses (the derived container exists
+# but is mapped to another port, or the NATS port is held by something else). Neither the record
+# nor legion.yaml may exist afterwards -- both are written only once ensure_nats has returned.
+clear_rig_files
+: >"$order_log"
+# `fail` exits the subshell itself, so no `set -e` here: the inline `cd .../packages/envoy` before
+# ensure_nats has no real repo root under this harness and must stay non-fatal, as in every other
+# main() case above.
+# shellcheck disable=SC2329,SC2154 # ensure_nats is invoked by, and nats_port defined in, the sourced up.sh (source=/dev/null above)
+nats_refusal_status="$(set +e; (ensure_nats() { fail "NATS container $1 is not mapped to configured port ${nats_port}"; }; SMOKE_PROJECT="sjawhar/24" main) >"$assertion_file" 2>&1; echo $?)"
+[[ "$nats_refusal_status" != 0 ]] || {
+  printf 'expected main() to stop when ensure_nats refuses; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *"NATS container legion-smoke-nats-sjawhar24 is not mapped to configured port"* ]] || {
+  printf 'expected the ensure_nats refusal to surface; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+assert_no_rig_files 'ensure_nats refused'
+[[ ! -s "$order_log" || "$(<"$order_log")" != *'start_process:'* ]] || {
+  printf 'expected no process to start when ensure_nats refused; order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+printf 'PASS: a start refused by the port check or by ensure_nats leaves neither a nats-container record nor a legion.yaml\n'
+
+# ensure_nats reuses an existing container only when container_published_on says its published
+# port equals the configured NATS port -- the same exact test down.sh's legacy fallback runs. The
+# fake docker prints the two lines the real one prints (IPv4, IPv6) for SMOKE_FAKE_PORT; the
+# sourced up.sh fixed nats_port from NATS_PORT at source time (14222 unless the harness's caller
+# exported one), so the cases compare against that value and its decimal prefix.
+# shellcheck disable=SC2154 # nats_port is a readonly of the sourced up.sh (source=/dev/null above)
+configured_nats_port="$nats_port"
+docker_log="${fake_bin}/docker.log"
+cat >"${fake_bin}/docker" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${docker_log}"
+case "\$*" in
+  'container inspect legion-smoke-nats-sjawhar24') exit 0 ;;
+  'container inspect --format {{.State.Running}} legion-smoke-nats-sjawhar24') printf 'true\n' ;;
+  'port legion-smoke-nats-sjawhar24 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_PORT:?}" "\${SMOKE_FAKE_PORT:?}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${fake_bin}/docker"
+: >"$docker_log"
+if ! (SMOKE_FAKE_PORT="$configured_nats_port" real_ensure_nats legion-smoke-nats-sjawhar24) >"$assertion_file" 2>&1; then
+  printf 'expected ensure_nats to reuse a container published on the configured port %s; output:\n%s\n' "$configured_nats_port" "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'REUSED NATS container legion-smoke-nats-sjawhar24'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# A published port whose digits merely extend the configured port (14222 vs 142220) is not this
+# rig's container: exact comparison, not a decimal-prefix match.
+: >"$docker_log"
+if (SMOKE_FAKE_PORT="${configured_nats_port}0" real_ensure_nats legion-smoke-nats-sjawhar24) >"$assertion_file" 2>&1; then
+  printf 'expected ensure_nats to refuse a container whose published port merely extends the configured one; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"NATS container legion-smoke-nats-sjawhar24 is not mapped to configured port ${configured_nats_port}"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+if grep -q '^run \|^start ' "$docker_log"; then
+  printf 'ensure_nats must not start or create a container after refusing one; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+printf 'PASS: ensure_nats reuses an existing container only when its published port equals the configured NATS port exactly\n'

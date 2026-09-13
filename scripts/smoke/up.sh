@@ -5,7 +5,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly repo_root
 readonly smoke_dir="${SMOKE_DIR:-/tmp/legion-smoke}"
 readonly gh_config_dir="${smoke_dir}/gh-config"
-readonly nats_name="legion-smoke-nats"
 readonly nats_port="${NATS_PORT:-14222}"
 readonly listener_port="${ENVOY_PORT:-19020}"
 readonly smoke_dispatch_project="LEGSMOKE"
@@ -305,6 +304,18 @@ project_slug() {
   printf '%s\n' "$project"
 }
 
+# Both per-rig names derive from SMOKE_PROJECT so two rigs coexist on one machine: the NATS
+# container name (down.sh removes it by the record main() writes) and the listener's
+# ENVOY_MACHINE_ID, which keys its durable JetStream consumer -- two listeners sharing one id
+# collide with "consumer is already bound to a subscription".
+nats_container_name() {
+  printf 'legion-smoke-nats-%s\n' "$(project_slug)"
+}
+
+listener_machine_id() {
+  printf 'legion-smoke-%s\n' "$(project_slug)"
+}
+
 app_jwt() {
   local app_id="$1"
   local private_key_variable="$2"
@@ -426,9 +437,31 @@ ensure_root_issue() {
   printf 'CREATED root issue %s\n' "$key"
 }
 
+# Ownership test for a NATS container, shared verbatim with down.sh: true only when
+# `docker port <container> 4222/tcp` reports at least one binding and every reported binding
+# (docker prints one line per address, `0.0.0.0:<port>` and `[::]:<port>`) carries exactly the
+# given host port -- one host port is bound by one rig, so an equal port means this rig's
+# container. Empty or unparseable output is a refusal, never a match.
+container_published_on() {
+  local container="$1"
+  local port="$2"
+  local published
+  local line
+  local seen=0
+  published="$(docker port "$container" 4222/tcp 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ :([0-9]+)$ && "${BASH_REMATCH[1]}" == "$port" ]] || return 1
+    seen=1
+  done <<<"$published"
+  ((seen))
+}
+
 ensure_nats() {
+  local nats_name="$1"
+
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
-    [[ "$(docker port "$nats_name" 4222/tcp)" == *":${nats_port}"* ]] ||
+    container_published_on "$nats_name" "$nats_port" ||
       fail "NATS container ${nats_name} is not mapped to configured port ${nats_port}"
     if [[ "$(docker container inspect --format '{{.State.Running}}' "$nats_name")" == "true" ]]; then
       printf 'REUSED NATS container %s\n' "$nats_name"
@@ -591,6 +624,7 @@ main() {
   local omp_path
   local design_gate
   local dispatch_ingress
+  local nats_name
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -605,6 +639,7 @@ main() {
 
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
+  nats_name="$(nats_container_name)"
   webhook_mode="$(resolve_webhook_mode)"
   omp_path="$(resolve_omp_path)"
   printf 'GREEN OMP build: %s\n' "$omp_path"
@@ -618,17 +653,30 @@ main() {
   printf '%s\n' "$dispatch_ingress" >"${smoke_dir}/dispatch-ingress"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
-  write_daemon_config
+  # The daemon binds worker_stream_port too, which defaults to port + 1 (the generated legion.yaml
+  # leaves it at that default), so that port must be free as well. The same live-PID exception
+  # covers a re-run against this rig's own daemon.
+  assert_port_free 'Legion daemon worker stream' "$((daemon_port + 1))" "${smoke_dir}/daemon.pid"
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
   )
 
-  ensure_nats
+  ensure_nats "$nats_name"
+  # Both files down.sh keys on are written here, together, only once the container is running:
+  # the record names the container down.sh removes (so teardown needs no SMOKE_PROJECT), and
+  # legion.yaml proves this directory started a rig. From here on this directory is a started rig
+  # that down.sh tears down; every refusal point precedes these writes, so a refused start leaves
+  # neither file. The record goes first: an interruption between the two writes then leaves a
+  # record without legion.yaml (which down.sh ignores) rather than legion.yaml without a record
+  # (the shape of a rig from before the record existed, for which down.sh consults the shared
+  # legacy container name). The daemon reads legion.yaml at its start below; the listener does not.
+  printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
+  write_daemon_config
 
   start_process listener env \
     PORT="$listener_port" \
-    ENVOY_MACHINE_ID="legion-smoke" \
+    ENVOY_MACHINE_ID="$(listener_machine_id)" \
     NATS_URLS="$nats_url" \
     ENVOY_HOST_BRIDGE="127.0.0.1" \
     ENVOY_WEBHOOKS="github" \
