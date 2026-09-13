@@ -105,7 +105,7 @@ test("issue header persists its title, status, and route", async ({ browser }, t
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ title: "First decision revised" });
     await page.getByLabel("Status").selectOption("todo");
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ status: "todo" });
-    await page.getByText("Messages default to no route").click();
+    await page.getByRole("button", { name: "Messages default to no route" }).click();
     await page.getByLabel("Route").fill("role:legion-controller-core");
     await page.getByRole("button", { name: "Save route" }).click();
     await expect
@@ -113,7 +113,9 @@ test("issue header persists its title, status, and route", async ({ browser }, t
       .toMatchObject({
         route: "role:legion-controller-core",
       });
-    await page.getByText("Messages default to role:legion-controller-core").click();
+    await page
+      .getByRole("button", { name: "Messages default to role:legion-controller-core" })
+      .click();
     const routeInput = page.getByLabel("Route");
     await routeInput.fill("");
     // The field must still read "" when the earlier PATCH's response has been applied;
@@ -165,6 +167,7 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
   const page = await context.newPage();
   try {
     await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents).toContainText("e2e-session-title");
     await expect(subscribedAgents.getByText("e2e-session", { exact: true })).toHaveCount(0);
@@ -289,6 +292,7 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 
   try {
     await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
     if (!process.env.PLAYWRIGHT_BASE_URL) {

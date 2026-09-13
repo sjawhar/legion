@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
-import { badgeLow, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
+import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
 
 function safeExternalHref(value: string): string | undefined {
   try {
@@ -67,7 +67,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 
   if (href === undefined) {
     return (
-      <span className={`text-sm ${textMutedOnCanvas}`} title="Unsafe external link">
+      <span className={`text-sm ${textMutedOnSurface}`} title="Unsafe external link">
         {link.url}
       </span>
     );

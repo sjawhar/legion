@@ -51,10 +51,8 @@ import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
-/** The document chrome (version picker, Name version, Diff toggle, connection dot) used to
- * render inside this component; it now renders in the page's own header, one bar with the
- * title. `ProofDocument` reports the state that chrome needs through this bag instead of
- * rendering it itself, so the header can sit above the tabs while the document stays below. */
+/** The document chrome reports its state upward so an issue can place its controls in the Spec
+ * panel's toolbar. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
   connection: ConnectionState;
   isNamingVersion: boolean;
@@ -69,6 +67,7 @@ export interface ProofDocumentProps {
   isClosed: boolean;
   owner: MarginOwner;
   showDiff: boolean;
+  toolbar?: ReactNode;
   onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange(version: number | null): void;
   user: AuthenticatedUser;
@@ -276,6 +275,7 @@ export function ProofDocument({
   onToolbarChange,
   onVersionChange,
   showDiff,
+  toolbar,
   user,
   version,
 }: ProofDocumentProps): ReactNode {
@@ -684,6 +684,23 @@ export function ProofDocument({
           ))}
         </nav>
       ) : null}
+      {toolbar === undefined && version !== undefined ? null : (
+        <div
+          className="flex min-w-0 flex-wrap items-center gap-2"
+          data-testid={toolbar === undefined ? undefined : "spec-document-toolbar"}
+        >
+          {toolbar}
+          {version === undefined ? (
+            <button
+              className={`ml-auto min-h-11 shrink-0 rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonDisabledText} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
+              onClick={() => void copyBlockLink()}
+              type="button"
+            >
+              Copy link to block
+            </button>
+          ) : null}
+        </div>
+      )}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
       which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article
@@ -747,15 +764,6 @@ export function ProofDocument({
           <ReferenceTooltip key={reference} reference={reference} route={route} rootRef={root} />
         ))}
       </article>
-      {version === undefined ? (
-        <button
-          className={`min-h-11 rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonDisabledText} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
-          onClick={() => void copyBlockLink()}
-          type="button"
-        >
-          Copy link to block
-        </button>
-      ) : null}
       {version === undefined ? null : versionQuery.isError ? (
         <section aria-label={`Document version ${version}`} className="space-y-3">
           <p>

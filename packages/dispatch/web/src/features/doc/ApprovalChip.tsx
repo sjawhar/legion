@@ -189,10 +189,13 @@ function RequestChangesDialog({
 
 export interface ApprovalChipProps {
   artifact: Artifact;
-  /** `header`: shown on the document header, with Approve/Request changes controls.
-   *  `list` (default): shown in a compact list row (Artifacts tab, project Documents tab) —
-   *  a draft document renders nothing, staying quiet until it has something to report. */
+  /** `header`: shown on the document header, with an approval-state chip.
+   * `list` (default): shown in a compact list row. */
   variant?: "header" | "list";
+  /** The issue header exposes review actions only after an approval request exists. */
+  showActions?: boolean;
+  /** `contents` lets a parent flex group place the state chip and actions independently. */
+  layout?: "contents" | "inline";
 }
 
 /**
@@ -200,7 +203,12 @@ export interface ApprovalChipProps {
  * open a popover of every human review (`ArtifactReview`). On the document header only, it also
  * carries the Approve / Request changes actions that write a new review.
  */
-export function ApprovalChip({ artifact, variant = "list" }: ApprovalChipProps): ReactNode {
+export function ApprovalChip({
+  artifact,
+  layout = "inline",
+  variant = "list",
+  showActions = variant === "header",
+}: ApprovalChipProps): ReactNode {
   const { approval } = artifact;
   const [reviewsOpen, setReviewsOpen] = useState(false);
   const [requestChangesOpen, setRequestChangesOpen] = useState(false);
@@ -242,7 +250,9 @@ export function ApprovalChip({ artifact, variant = "list" }: ApprovalChipProps):
     approval.state === "stale" ? `Approve v${approval.latest_version}` : "Approve";
 
   return (
-    <div className="inline-flex flex-wrap items-center gap-2">
+    <div
+      className={layout === "contents" ? "contents" : "inline-flex flex-wrap items-center gap-2"}
+    >
       <button
         aria-haspopup="dialog"
         className={`rounded-full px-2.5 py-1 text-xs font-medium ${badge.bg} ${badge.text}`}
@@ -256,7 +266,7 @@ export function ApprovalChip({ artifact, variant = "list" }: ApprovalChipProps):
       >
         {approvalLabel(approval)}
       </button>
-      {variant === "header" ? (
+      {variant === "header" && showActions ? (
         <>
           {approval.state === "approved" ? null : (
             <button

@@ -367,6 +367,18 @@ export const badgePrimary = {
   bg: "bg-sky-100 dark:bg-sky-950",
   text: "text-sky-800 dark:text-sky-300",
 };
+/** The issue-status select is a neutral control: its solid dot carries the state signal while
+ * its label remains readable without requiring users to distinguish hues. */
+export const STATUS_PILL_BG = pair(P.SLATE_100, P.SLATE_800);
+export const STATUS_PILL_TEXT = pair(P.SLATE_800, P.SLATE_200);
+export const statusPill = {
+  bg: "bg-slate-100 dark:bg-slate-800",
+  text: "text-slate-800 dark:text-slate-200",
+};
+/** Decorative status-state dot inside `statusPill`; the adjacent selected value is its label. */
+export const statusPillDot = "bg-slate-500 dark:bg-slate-400";
+
+registerText("issue-status pill", STATUS_PILL_TEXT, STATUS_PILL_BG);
 
 registerText("urgency:blocking badge", BADGE_BLOCKING_TEXT, BADGE_BLOCKING_BG);
 registerText("urgency:high badge", BADGE_HIGH_TEXT, BADGE_HIGH_BG);

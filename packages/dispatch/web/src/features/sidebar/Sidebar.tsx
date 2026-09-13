@@ -16,6 +16,7 @@ import {
   railMutedText,
   railSecondaryText,
 } from "../../theme/classes";
+import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
 
 export function Sidebar({
@@ -65,6 +66,7 @@ export function Sidebar({
       </>
     );
   }
+  const needsYou = waitingOnYou(inbox.data);
 
   return (
     <>
@@ -77,11 +79,11 @@ export function Sidebar({
             to="/"
           >
             <span>Inbox</span>
-            {inbox.data.length === 0 ? null : (
+            {needsYou.length === 0 ? null : (
               <span
                 className={`rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
               >
-                {inbox.data.length}
+                Needs you {needsYou.length}
               </span>
             )}
           </Link>

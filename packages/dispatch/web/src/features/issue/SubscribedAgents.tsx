@@ -7,7 +7,7 @@ import {
   liveDotBg,
   offlineDotBg,
   secondaryButtonText,
-  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
 } from "../../theme/classes";
 import { shortSessionId } from "../conversation/conversation-model";
 import { Timestamp } from "../refs/Timestamp";
@@ -49,7 +49,7 @@ export function SubscribedAgents({
 
   return (
     <section aria-label="Subscribed agents" className="mt-2">
-      <h2 className={`text-sm font-semibold ${textSecondaryOnCanvas}`}>Subscribed agents</h2>
+      <h2 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Subscribed agents</h2>
       <ul className="mt-2 flex flex-wrap gap-2">
         {subscribers.map((subscriber) => {
           const title = subscriber.title.trim();

@@ -83,6 +83,7 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     if (!process.env.PLAYWRIGHT_BASE_URL) {
+      await page.getByRole("button", { name: "Subscribers: 1" }).click();
       const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
       await expect(subscribedAgents.getByText("Planner (e2e)", { exact: true })).toBeVisible();
       await expect(subscribedAgents.getByText("ghost-session-0000", { exact: true })).toHaveCount(

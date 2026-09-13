@@ -68,6 +68,7 @@ function renderSidebar(pathname = "/") {
       options: [],
       question: "Review?",
       state: "open",
+      last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-10T01:00:00Z" },
       urgency: "med",
     },
   ]);
@@ -94,12 +95,12 @@ function renderSidebar(pathname = "/") {
   return { getInbox, getIssue, listIssues, listProjects, view };
 }
 
-test("sidebar lists Inbox, Pinned, Projects, and Settings with open-ask badges and renders no full issue list", async () => {
+test("sidebar lists Inbox, Pinned, Projects, and Settings with a truthful Needs-you count", async () => {
   const sidebar = renderSidebar();
 
   try {
     await screen.findByRole("link", { name: /CORE.*Core/ });
-    expect(screen.getByRole("link", { name: /Inbox/ }).textContent).toContain("2");
+    expect(screen.getByRole("link", { name: /Inbox.*Needs you 1/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Pinned" })).toBeTruthy();
     expect(screen.getByRole("link", { name: /CORE-1.*Pinned work/ }).textContent).toContain("1");
     expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();
