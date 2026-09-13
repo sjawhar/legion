@@ -1,0 +1,38 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "reviewedHead": "2ec1de35f361b852cf865a5992af7244ebe468aa",
+  "codeTree": "a875b0033e7015cf4141aa065a0771168bac4f6d",
+  "review": "https://github.com/sjawhar/legion/pull/992#pullrequestreview-5189463654",
+  "reviewId": 5189463654,
+  "ci": "head 2ec1de35: Tests 34735713122 (pr-title, lint, typecheck, test) SUCCESS; Legion Envoy and Contracts 34735713128 (changes, pi-envoy) SUCCESS; path-filtered jobs SKIPPED; legion/tester status SUCCESS; MERGEABLE/BLOCKED (review required); 0 threads before this review",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 2ec1de35: neither blocking on its own scale; both corroborate the two blocking findings and supplied the non-blocking hardening items",
+  "blocking": [
+    {
+      "thread": "PRRT_kwDORFy7ds6h2PXB",
+      "file": "packages/daemon/src/daemon/processes.ts:2915 (fix lands in environment.ts resolveDaemonEnvironment)",
+      "finding": "processPath is not guaranteed free of worker-bin: a daemon started from a Legion pane inherits worker-bin-first PATH through `mise env --json` (verified from the reviewer pane: mise PATH head = <state_dir>/worker-bin, `type -a gh` -> the shim; PID 624309 is a daemon started from the legion-20 workspace), so resolveDaemonEnvironment resolves the daemon's own gh to the shim (every daemon GitHub read then fails 'LEGION_GRANT_FILE is missing') and every pane carries worker-bin twice (acceptance 4). The docstring, daemon AGENTS.md, and config-env-keys doc assert/document rather than enforce.",
+      "fix": "paneEnv.PATH = `${legionBinDir}:${pathWithoutWorkerBin(miseEnv.PATH)}` in resolveDaemonEnvironment; environment.test.ts case with a fake mise PATH starting with <x>/worker-bin asserting paneEnv.PATH has none and commands.gh is not under it; reword the docstring, the daemon AGENTS.md paragraph (and add installWorkerGhShim to its boot-ordering sentence), and the 'Reset PATH too' bullet to state the guarantee"
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6h2PXE",
+      "file": "packages/pi-envoy/scripts/grant-rig/setup.sh:53",
+      "finding": "No guard that RIG_PROFILE differs from RIG_SOURCE_PROFILE; RIG_PROFILE=legion makes lines 48/53/78 rm -rf ~/.omp/profiles/legion/{agent/extensions,plugins} — the directory only the operator may edit.",
+      "fix": "[ \"$PROFILE_DIR\" != \"$SOURCE_PROFILE_DIR\" ] || exit 2 with a message naming RIG_PROFILE, after line 25; drop the redundant mkdir of $RIG/state/worker-bin on line 90"
+    }
+  ],
+  "nonBlocking": [
+    "legion.ts:686 subagent/ambient-credential tradeoff accepted (no new exposure); document the 60 s timing behaviour for subagents",
+    "cli/index.ts:97 old-plugin ENOENT message should name cause and remedy",
+    "worker-bin.ts:13 pathWithoutWorkerBin docstring inaccurate; run.ts re-implements it",
+    "worker-bin.ts:38 shim rewritten in place at startup; use temp+rename",
+    "grant-file.ts:14 blank/relative LEGION_GRANT_FILE handling",
+    "processes.ts:2994 pruneSecretFiles return value dead; token/grant pairing duplicated",
+    "index.ts:258 and processes.ts:2939 history-describing comments",
+    "CHANGELOG.md:11 contradictory LEGION-12 line under [Unreleased]"
+  ],
+  "confirmed": "spec Errors table paths; mint-then-write order; 0600 chmod before rename; hook returns undefined with command/env untouched; LEGION-12 debug lines byte-identical to main; checkSubagentSession bail; credentialProcessEnvironment on all three spawn sites; trackProcessSecrets/liveSecretFiles/boot-prune seeding; stripDispatchEnv covers LEGION_GRANT(_FILE); installWorkerGhShim failure refuses startup; readSecretPointer 1:1 extraction; grantFrom throws before fetch; cmdGh strips worker-bin and scrubs the pointer so the 1.17.x double-redeem recursion is impossible; contracts diff empty, API version 1 both sides (acceptable without bump); rig production mode reads the legion profile only, analyzer per-command file scoring, verdict F over transcript+OMP log; docs acceptance 8 met, 1.17.4 stated; tests assert observable behaviour",
+  "nextRound": "Re-review the head that fixes the two blocking threads (CI green), then the .legion/ deletion head by SHA",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T03:52:31.028Z"
+}
