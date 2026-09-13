@@ -630,6 +630,7 @@ func main() {
 	// retention window to every subscriber.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
+		forwardRole:       client.RequestCoreTo,
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         cfg.MachineID,

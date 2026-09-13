@@ -34,7 +34,12 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 }
 
 type listenerDeliveryHandlerConfig struct {
-	client            *bus.Client
+	client *bus.Client
+	// forwardRole delivers a role-lane envelope to the holder's agent subject and
+	// waits for its empty receipt. main.go wires client.RequestCoreTo. A
+	// nats.ErrTimeout from it means the holder never answered inside timeout;
+	// any other error means the forward never reached the holder.
+	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -362,7 +367,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	forwarded := item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	if err := cfg.client.RequestCoreTo(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",

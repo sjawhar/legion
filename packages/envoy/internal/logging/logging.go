@@ -2,6 +2,7 @@ package logging
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -15,13 +16,13 @@ type Logger struct {
 
 // New creates a new structured logger with the given machine ID.
 func New(machineID string) *Logger {
-	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})
-	return &Logger{
-		machineID: machineID,
-		logger:    slog.New(handler),
-	}
+	return NewWithWriter(machineID, os.Stderr)
+}
+
+// NewWithWriter is New writing to w instead of stderr, so a test can read the lines back.
+func NewWithWriter(machineID string, w io.Writer) *Logger {
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})
+	return &Logger{machineID: machineID, logger: slog.New(handler)}
 }
 
 // LogEvent logs a structured event with required fields.

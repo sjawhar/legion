@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2370,6 +2371,28 @@ type listenerDeliveryHarness struct {
 	metrics     *metrics.Registry
 	handler     natsgo.MsgHandler
 	coreHandler natsgo.MsgHandler
+	// logs captures every listener log line the harness's delivery handlers write.
+	logs *lockedBuffer
+	// config is the handler configuration the harness built; a test copies it,
+	// overrides one seam (forwardRole), and builds its own handler from the copy.
+	config listenerDeliveryHandlerConfig
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
@@ -2396,15 +2419,22 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		deliverer.HTTPClient = &http.Client{Transport: transport}
 	}
 	met := metrics.New()
+	logs := &lockedBuffer{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("listener log:\n%s", logs.String())
+		}
+	})
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
+		forwardRole:       client.RequestCoreTo,
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         "test-machine",
 		deliverer:         &deliverer,
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
-		logger:            logging.New("test"),
+		logger:            logging.NewWithWriter("test", logs),
 		messagesReceived:  met.NewCounter("test_messages_received", "test"),
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
@@ -2417,6 +2447,8 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		metrics:     met,
 		handler:     jetStreamDeliveryHandler(deliveryConfig),
 		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
+		logs:        logs,
+		config:      deliveryConfig,
 	}
 }
 
@@ -2465,7 +2497,7 @@ func marshalListenerEnvelope(t *testing.T, item contracts.Envelope) []byte {
 	return data
 }
 
-func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) {
+func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) contracts.Envelope {
 	t.Helper()
 	message, err := probe.NextMsg(5 * time.Second)
 	if err != nil {
@@ -2524,6 +2556,7 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 	if payload.SourceSession != original.SourceSession {
 		t.Fatalf("exception source session = %q, want %q", payload.SourceSession, original.SourceSession)
 	}
+	return exception
 }
 
 func TestHealthzConsumerLag(t *testing.T) {
