@@ -5,11 +5,62 @@
 import { describe, expect, it } from "bun:test";
 import {
   type CommandRunner,
+  defaultRunner,
   GitHubAPIError,
   getCiStatusBatch,
   getPrReviewStateBatch,
   mapMergeableState,
 } from "../fetch";
+
+describe("defaultRunner", () => {
+  it("kills a command at the caller's budget and reports the kill as a timeout", async () => {
+    const startedAt = performance.now();
+    const result = await defaultRunner(["sleep", "30"], { timeoutMs: 200 });
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+    expect(result.exitCode).toBe(143);
+    expect(result.timedOut?.limitMs).toBe(200);
+    expect(result.timedOut?.elapsedMs).toBeGreaterThanOrEqual(200);
+  });
+
+  it("reports no timeout for a command that exits on its own", async () => {
+    const result = await defaultRunner(["true"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("does not report a timeout for a command that already exited when the timer fired, even if its pipes were still open", async () => {
+    // The shell exits 0 at once; the backgrounded sleep inherits the stdio pipes and holds them
+    // past the 200 ms budget, so the kill timer fires while the runner is still draining output
+    // from a child that has already exited. That is not a timeout of the command.
+    const result = await defaultRunner(["sh", "-c", "sleep 1 & exit 0"], { timeoutMs: 200 });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("does not report a timeout for a command a signal already terminated when the timer fired", async () => {
+    // The shell kills itself with SIGTERM at once (exit 143 by signal, no exit code); the
+    // backgrounded sleep keeps the pipes open past the budget exactly as above.
+    const result = await defaultRunner(["sh", "-c", "sleep 1 & kill -TERM $$"], {
+      timeoutMs: 200,
+    });
+    expect(result.exitCode).toBe(143);
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("kills a running command when the caller's signal aborts, and reports it as killed, never as a clean exit", async () => {
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const pending = defaultRunner(["sleep", "30"], {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    const result = await pending;
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.timedOut).toBeDefined();
+  });
+});
 
 // =============================================================================
 // TestGetPrReviewStateBatch

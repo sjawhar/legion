@@ -174,6 +174,7 @@ export function config(): DaemonConfig {
     workerBootRegistrationDeadlineIntervals: 3,
     workerRpcTimeoutSeconds: 5,
     workerIdleRetireSeconds: 600,
+    slowCommandTimeoutSeconds: 300,
     workerStreamPort: 13371,
     gates: { design: "root-issues" },
     githubApps: {},

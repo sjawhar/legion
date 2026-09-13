@@ -117,16 +117,17 @@ export class WorkerAdmission {
    * and removed once `launchWorker` settles (success — the claim now has a real locator — or
    * failure). */
   private readonly launching = new Set<string>();
-  /** Gates every worker-queue drain (`promoteWorkerQueue`'s fire-and-forget trigger and
-   * `reconcileWorkerAdmission`'s explicit call alike — neither bypasses this) until
-   * `enableWorkerPromotion` flips it. False from construction protects boot: `reconnectWorkers`
-   * (called before the daemon's HTTP `api` is ever assigned, since it needs no `api` reference)
-   * can synchronously trigger a chain of `get_state` -> `isStreaming: false` -> `onIdle` ->
-   * `promoteWorkerQueue` -> `launchWorker` -> `mintWorkerBootToken`, and that last step reads
-   * `api` by reference through a closure that does not exist yet at that point in boot — a
-   * queued token would otherwise mint nothing (a spurious launch failure) at every daemon
-   * restart with a non-empty queue.
-   */
+  /** Boot's launch hold on the worker side. False from construction, flipped once by
+   * `enableWorkerPromotion` (called from `ProcessManager.enableLaunches()` after the daemon's
+   * boot probes pass and its HTTP `api` is assigned). While false, two things hold: every
+   * worker-queue drain (`promoteWorkerQueue`'s fire-and-forget trigger and
+   * `reconcileWorkerAdmission`'s explicit call alike — neither bypasses this) is a logged no-op,
+   * and a fresh `launchOrQueue`/`resumeOrQueueExisting` decision treats the cap as full, so a
+   * `spawnWorker` arriving during boot queues (`worker-queued`) instead of opening a pane. The
+   * drain gate also protects boot's worker reconnect: `reconnectWorkers` can synchronously
+   * trigger a chain of `get_state` -> `isStreaming: false` -> `onIdle` -> `promoteWorkerQueue` ->
+   * `launchWorker` -> `mintWorkerBootToken`, and a launch there would open a pane the probe has
+   * not yet cleared. */
   private workerPromotionEnabled = false;
 
   constructor(private readonly deps: WorkerAdmissionDeps) {}
@@ -148,8 +149,8 @@ export class WorkerAdmission {
     return gated;
   }
 
-  /** The only way `workerPromotionEnabled` is ever set to `true`. Call once, after the
-   * daemon's HTTP `api` is assigned, before the first explicit `reconcileWorkerAdmission()` —
+  /** The only way `workerPromotionEnabled` is ever set to `true`. Called once, from
+   * `ProcessManager.enableLaunches()`, before the first explicit `reconcileWorkerAdmission()` —
    * every worker-queue drain from that point on (fire-and-forget triggers and the explicit
    * call alike) is safe to actually launch/prompt something. */
   enableWorkerPromotion(): void {
@@ -279,7 +280,7 @@ export class WorkerAdmission {
     task: string
   ): Promise<SpawnWorkerResponse> {
     const admitted = await this.withAdmissionLock(async () => {
-      if (this.runningWorkerCount() >= this.deps.config.workerCap) {
+      if (!this.workerPromotionEnabled || this.runningWorkerCount() >= this.deps.config.workerCap) {
         this.enqueueClaimForLaunch(token, issue, role, claim, task);
         return false;
       }
@@ -326,8 +327,8 @@ export class WorkerAdmission {
    * cap, or a second pane racing a concurrent same-role spawn, are exactly what that decision
    * exists to prevent). Safe to call before `enableWorkerPromotion()` — the queue push always
    * lands; `promoteWorkerQueue()` itself no-ops (logging) until promotion is enabled, so a
-   * restart-time caller (`reconnectWorkers`, run before `api` exists) leaves the token for the
-   * boot sequence's own `reconcileWorkerAdmission()` to promote once ready.
+   * restart-time caller (`reconnectWorkers`, run during boot's launch hold) leaves the token for
+   * the boot sequence's own `reconcileWorkerAdmission()` to promote once the hold releases.
    */
   async enqueueForRetry(token: string): Promise<void> {
     await this.enqueueForRetryPending(token);
@@ -360,7 +361,11 @@ export class WorkerAdmission {
     client: WorkerRpcClient
   ): Promise<{ kind: "queued" } | { kind: "resumed" }> {
     const shouldPrompt = await this.withAdmissionLock(async () => {
-      if (client.runState !== "idle" || this.runningWorkerCount() >= this.deps.config.workerCap) {
+      if (
+        client.runState !== "idle" ||
+        !this.workerPromotionEnabled ||
+        this.runningWorkerCount() >= this.deps.config.workerCap
+      ) {
         this.enqueueIdleWorker(token, claim, task);
         return false;
       }
