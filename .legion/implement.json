@@ -1,0 +1,101 @@
+{
+  "summary": "The Envoy listener now reports a forward that reached a registered, live role holder but got no acknowledgement within two seconds as receipt_timeout instead of delivery_failed; delivery_failed keeps every never-forwarded case and no_holder keeps no-claim. POST /v1/messages/publish accepts an optional dedupe_key used verbatim, mutually exclusive with idempotency_key (400 naming both, nothing published); /v1/messages/send is byte-for-byte unchanged. PR #1079 at fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72.",
+  "pr": {
+    "number": 1079,
+    "url": "https://github.com/sjawhar/legion/pull/1079",
+    "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+    "branch": "legion/LEGION-108",
+    "mergeable": "MERGEABLE at open; no rebase needed"
+  },
+  "filesChanged": [
+    "packages/envoy/cmd/listener/delivery.go",
+    "packages/envoy/cmd/listener/api.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/main_test.go",
+    "packages/envoy/cmd/listener/api_test.go",
+    "packages/envoy/internal/logging/logging.go",
+    "packages/envoy/internal/logging/logging_test.go",
+    "packages/envoy/AGENTS.md",
+    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+  ],
+  "commits": [
+    "9f30855fd044 listener: inject the role forward and log writer for tests",
+    "f63eef5bb7a2 listener: a late receipt from a live role holder is receipt_timeout, not delivery_failed (LEGION-108)",
+    "eaaf9a1edaa7 listener test: a forward publish error stays delivery_failed",
+    "d3b4d4067443 listener api: publish accepts an explicit dedupe_key, exclusive with idempotency_key (LEGION-108)",
+    "ba6086055e44 listener test: same dedupe_key is forwarded again after receipt_timeout and skipped after delivery",
+    "fc7c2ab3ae2f docs(envoy): role-lane reasons no_holder/delivery_failed/receipt_timeout and publish dedupe_key"
+  ],
+  "proof": [
+    {
+      "criterion": "1",
+      "surface": "listener package Go integration test on a real nats:2.10 Docker testcontainer the test process starts and removes: the real publishHandler over HTTP -> real core NATS -> the real coreNATSDeliveryHandler/roleTopicDelivery -> the real bus.Client.RequestCoreTo against a registered, live holder (session ses_deaf in the session registry, role claimed through the real roleSetHandler) with no subscriber on its agent subject. Not a rig (standing order 2026-09-13); the same suite CI's envoy-go job runs.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout",
+      "observed": "PASS (2.33s). Exactly one exception on notifications.envoy.exceptions.notifications.role.fresh-deaf-holder; a 250ms probe for a second one timed out. Captured exception payload: {\"original_topic\":\"notifications.role.fresh-deaf-holder\",\"event_id\":\"de0cfc860a24a9e41f68b478c6f688c6\",\"reason\":\"receipt_timeout\",\"payload_summary\":\"deaf role event\",\"payload\":\"{\\\"type\\\":\\\"worker-queued\\\"}\",\"dedupe_key\":\"publish.0e34d9346f20effdd930d047850888e6\",\"source\":\"agent\",\"source_session\":\"\"}. Listener log line: {\"level\":\"WARN\",\"msg\":\"listener role receipt timed out\",\"session_id\":\"ses_deaf\",\"topic\":\"notifications.role.fresh-deaf-holder\",\"event_id\":\"de0cfc860a24a9e41f68b478c6f688c6\",\"delivery_status\":\"receipt_timeout\",\"timeout\":\"2s\"}.",
+      "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+      "negativeControl": "Before the delivery.go change (RED, same test): exception reason = \"delivery_failed\", want \"receipt_timeout\". And with the receipt_timeout branch temporarily made unconditional (reverted), TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed failed with exception reason = \"receipt_timeout\", want \"delivery_failed\" -- the two reasons are distinguished by nats.ErrTimeout, not by the forward failing."
+    },
+    {
+      "criterion": "2",
+      "surface": "same Go integration harness on the nats:2.10 testcontainer; the forward-error case injects the error through the new forwardRole seam (cfg.forwardRole returning a non-timeout error), the stale-holder and no-claim cases run the real registry paths.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'RoleForwardPublishError|ExpiredRoleDropsClaim|RoleReleasedByReplacement|EmitsExceptionForControlTopicWithNoHolder'",
+      "observed": "All PASS: RoleForwardPublishErrorEmitsDeliveryFailed (two forwards attempted for two deliveries -- the attempt cache is cleared on a failed forward; log has 'listener role forward failed' and no 'receipt_timeout'), ExpiredRoleDropsClaimAfterException (stale holder -> delivery_failed, claim released), RoleReleasedByReplacementHasNoHolder and EmitsExceptionForControlTopicWithNoHolder (no claim -> no_holder).",
+      "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+      "negativeControl": "receipt_timeout branch made unconditional (reverted): RoleForwardPublishErrorEmitsDeliveryFailed failed with exception reason = \"receipt_timeout\", want \"delivery_failed\"."
+    },
+    {
+      "criterion": "3",
+      "surface": "publishHandler over httptest plus the envelope observed on the wire by a core NATS subscription on the topic (nats:2.10 testcontainer); sendHandler the same way for the send-unchanged lock.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'DedupeKey'",
+      "observed": "PASS: explicit dedupe_key 'publish.abc' is the envelope's dedupe_key verbatim in both the 200 response and the wire envelope; empty dedupe_key and neither key mint publish.<id>; idempotency_key alone gives publish.<key>; both keys -> 400 {\"error\":\"dedupe_key and idempotency_key are mutually exclusive\",\"expected\":[\"dedupe_key\",\"idempotency_key\"]} and the topic probe read nothing; /v1/messages/send with both keys -> 200 keyed agent.ses_target.k1 (send unchanged, architect ruling 3).",
+      "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+      "negativeControl": "Both dedupe_key and idempotency_key on publish -> 400 naming both fields, nothing published (the test's t.Logf 'both keys:' line). Before the api.go change (RED): the explicit case got a minted publish.<id> and the conflict case got 200."
+    },
+    {
+      "criterion": "4",
+      "surface": "three real publishes through publishHandler with dedupe_key publish.resend-1 against a holder whose agent-subject responder first swallows the request, then acknowledges; the role lane is the real coreNATSDeliveryHandler on the nats:2.10 testcontainer.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run ExplicitDedupeKeyForwardsAgain",
+      "observed": "PASS (2.88s): publish 1 forwarded (holder saw it with the envoy.role.forward. prefix) then receipt_timeout exception; publish 2 with the same dedupe_key forwarded again, acknowledged, no exception; publish 3 with the same dedupe_key not forwarded, no exception, 'listener role dedupe skip' logged.",
+      "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+      "negativeControl": "clearAttempt set to false on the receipt_timeout branch (reverted): the test failed with 're-publish after receipt_timeout: holder received no forward'."
+    },
+    {
+      "criterion": "5 (withdrawn)",
+      "surface": "No rig, scratch daemon, throwaway NATS container, or scratch tmux server was started (Sami's standing order 2026-09-13 via the operator; spec v4 withdraws line 5). Pre-merge proof is the Go suite above plus CI on PR #1079.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go vet ./... && mise x go@1.26 -- go build ./cmd/listener && mise x go@1.26 -- go test ./cmd/listener/... ./internal/logging/ -count=1; CI: Tests run 34812388009 (lint, typecheck, test SUCCESS), envoy-and-contracts run 34812388007 (envoy-go, the Go job with the same testcontainer suite plus internal/integration)",
+      "observed": "vet clean; build ok; ok github.com/sjawhar/envoy/cmd/listener 38.309s; ok github.com/sjawhar/envoy/internal/logging 0.007s. PR MERGEABLE at open. What only a rig or production would add, and is deferred to the parent's production hour: a real OMP holder running the pi-envoy plugin answering (or not) on its agent subject, and the daemon consuming the receipt_timeout exception (LEGION-107).",
+      "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+      "negativeControl": "The two reverted fault injections above (unconditional timeout branch; uncleared attempt cache) each failed exactly one of the new locks with the expected message."
+    }
+  ],
+  "gates": {
+    "vet": "mise x go@1.26 -- go vet ./... -> clean",
+    "build": "mise x go@1.26 -- go build ./cmd/listener -> ok",
+    "test": "mise x go@1.26 -- go test ./cmd/listener/... ./internal/logging/ -count=1 -> ok (38.3s, 0.007s)",
+    "gofmt": "gofmt -l on the touched Go files lists nothing (checked read-only; no formatter was run)",
+    "notRun": "gofmt -w, biome, bun test, go test ./... (needs Postgres), any rig"
+  },
+  "trickyParts": [
+    "The exclusion check is in publishHandler only (architect ruling 3), so validateMessageBody keeps its (string, string) signature and /v1/messages/send is unchanged; TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey locks that in.",
+    "A struct-field comment on DedupeKey broke gofmt's alignment block and would have re-aligned five untouched lines; the field carries no comment and the rule is stated in publishHandler's doc comment instead.",
+    "The bookmark legion/LEGION-108 was on the working-copy commit (which carries the untracked-on-main .omp/config.yml, ruling 5); it was moved to @- with --allow-backwards (local-only bookmark, never pushed before) and pushed from there, so .omp/config.yml is not on the branch.",
+    "gh pr create fails from the workspace with 'not a git repository: /home/ubuntu/.../worktrees/legion-108' (a stale colocated-worktree pointer); with --repo/--head/--base explicit it works from a non-git cwd (/tmp)."
+  ],
+  "deviations": [
+    "Plan task 4 put the dedupe_key/idempotency_key exclusion in the shared validateMessageBody; per architect ruling 3 it lives in publishHandler only and send is unchanged. One extra test (TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey) locks that ruling.",
+    "Task 1 also adds TestNewWithWriterWritesToTheGivenWriter in internal/logging (the TDD RED for the new constructor); it is in the Task 1 commit.",
+    "Plan task 1 named a forwardRole field comment and a lockedBuffer helper: both as planned, plus doc comments on the harness's two new fields."
+  ],
+  "openQuestions": [],
+  "fastFollow": "skills/envoy/SKILL.md 'Legion exception lane' still names two reasons; a skills/** change cuts a pi-envoy plugin release, so that sentence lands with LEGION-109's plugin PR.",
+  "outOfScope": [
+    "packages/contracts and internal/contracts/generated.go (reasons are plain strings; no gen:go)",
+    "roleReceiptTimeout stays 2s",
+    "daemon handling of receipt_timeout (LEGION-107) and the plugin's early receipt (LEGION-109)"
+  ],
+  "toolchain": "Go 1.26.8 via mise x go@1.26 (installed into mise's tool store; no mise config, legion profile, or legion.yaml touched). Docker 29.7.2; the listener tests pulled nats:2.10 through testcontainers-go without a credential-helper issue.",
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T06:14:02.661Z"
+}
