@@ -181,4 +181,52 @@ describe("legion threads resolve", () => {
     );
     expect(github.graphqlBodies).toEqual([]);
   });
+
+  it("prints exactly `no unresolved threads` and mutates nothing when every thread is already resolved", async () => {
+    const reviewer = "legion-reviewer";
+    const github = fakeGitHub(
+      {
+        null: page(
+          [
+            thread(
+              "T1",
+              1,
+              reviewer,
+              { login: reviewer, body: "Accepted: fixed in abc1234" },
+              true
+            ),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+    );
+
+    expect(lines).toEqual(["no unresolved threads"]);
+    expect(github.resolved).toEqual([]);
+  });
+
+  it("rejects a malformed --repo or --pr before redeeming any grant", async () => {
+    for (const [options, message] of [
+      [{ repo: "sjawhar", pr: "993" }, '--repo must be <owner>/<name> (got "sjawhar")'],
+      [{ repo: "sjawhar/legion", pr: "abc" }, '--pr must be a pull request number (got "abc")'],
+    ] as const) {
+      const github = fakeGitHub({}, resolvedOk);
+
+      await expect(
+        cmdThreadsResolve(options, {
+          env: { LEGION_GRANT: "grant-123" },
+          fetch: github.fetch,
+          log: () => undefined,
+        })
+      ).rejects.toEqual(expect.objectContaining({ message, code: 1 }));
+      expect(github.requests).toEqual([]);
+    }
+  });
 });

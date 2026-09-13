@@ -44,12 +44,11 @@ import {
 import { type CommandRunner, defaultRunner } from "../state/fetch";
 import { CliError } from "./errors";
 import {
-  acceptedByOpener,
   type Fetch,
-  type GitHubRepo,
   githubGraphql,
-  listUnresolvedThreads,
-  resolveThread,
+  parsePullNumber,
+  parseRepo,
+  resolveAcceptedThreads,
 } from "./review-threads";
 import {
   cmdWorkerShim,
@@ -58,17 +57,14 @@ import {
   resolveWorkerShimTarget,
 } from "./worker-shim";
 
-interface GhCommandDeps {
-  env: NodeJS.ProcessEnv;
-  fetch: Fetch;
-  spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number>;
-  daemonUrl?: string;
-}
-
 interface GrantRedemptionDeps {
   env: NodeJS.ProcessEnv;
   fetch: Fetch;
   daemonUrl?: string;
+}
+
+interface GhCommandDeps extends GrantRedemptionDeps {
+  spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number>;
 }
 
 interface ThreadsResolveCommandDeps extends GrantRedemptionDeps {
@@ -199,27 +195,14 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
 }
 
-function parseRepo(value: string): GitHubRepo {
-  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(value);
-  if (!match) throw new CliError(`--repo must be <owner>/<name> (got ${JSON.stringify(value)})`);
-  return { owner: match[1] as string, name: match[2] as string };
-}
-
-function parsePullNumber(value: string): number {
-  if (!/^\d+$/.test(value)) {
-    throw new CliError(`--pr must be a pull request number (got ${JSON.stringify(value)})`);
-  }
-  return Number(value);
-}
-
 /** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it,
  * resolves every unresolved review thread whose newest comment is its opener's own `Accepted:`
- * reply and names every other unresolved thread as left open. GitHub lets only the pull request's
- * author or an account with write (push) access to the repository resolve a thread or push to its
- * branch; the review App is neither by design (`pull_requests: write`, no `contents`), so the
- * threads it opens are resolved here by the implementer — before every push that answers a
- * review — and by the merger once more before READY. A thread GitHub refuses ends the run with
- * exit 1 naming the thread's URL and GitHub's message; nothing after it is attempted. */
+ * reply and names every other unresolved thread as left open (`resolveAcceptedThreads`). GitHub
+ * lets only the pull request's author or an account with write (push) access to the repository
+ * resolve a thread or push to its branch; the review App is neither by design (`pull_requests:
+ * write`, no `contents`), so the threads it opens are resolved here by the implementer — before
+ * every push that answers a review — and by the merger once more before READY. Both flags are
+ * validated before any grant is redeemed. */
 export async function cmdThreadsResolve(
   options: { repo: string; pr: string },
   deps: ThreadsResolveCommandDeps
@@ -227,25 +210,7 @@ export async function cmdThreadsResolve(
   const repo = parseRepo(options.repo);
   const number = parsePullNumber(options.pr);
   const graphql = githubGraphql(deps.fetch, await redeemGitHubToken(deps));
-  const threads = await listUnresolvedThreads(graphql, repo, number);
-  if (threads.length === 0) {
-    deps.log("no unresolved threads");
-    return;
-  }
-  for (const thread of threads) {
-    if (!acceptedByOpener(thread)) {
-      const by = thread.newestLogin ?? "an unknown account";
-      deps.log(`left open ${thread.url} — newest reply by ${by} is not an acceptance`);
-      continue;
-    }
-    try {
-      await resolveThread(graphql, thread.id);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new CliError(`resolveReviewThread failed for ${thread.url}: ${message}`);
-    }
-    deps.log(`resolved ${thread.url}`);
-  }
+  await resolveAcceptedThreads(graphql, repo, number, deps.log);
 }
 
 export async function cmdCredential(deps: CredentialCommandDeps): Promise<void> {
