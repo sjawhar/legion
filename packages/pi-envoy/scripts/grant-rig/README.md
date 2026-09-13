@@ -177,6 +177,8 @@ printf 'protocol=https\nhost=github.com\n' | LEGION_GRANT_FILE=$RIG/fake-grant \
 # -> Unable to redeem LEGION_GRANT (403)
 ```
 
+`--prompt-file <path>` on `drive` or `tui` replaces the built-in steps with the file's text (the LEGION-45 operation-log guard is proven this way: a prompt that asks the worker to run `jj -R "$LEGION_WORKSPACE" undo`, an `eval` and a `hub` start doing the same, and `jj op log` before and after); the A–G grant verdicts in the table then describe whatever bash calls the prompt caused and are not that run's evidence.
+
 Clear `standin.log` and `seen-grants.log` between runs; the analyzer pairs bash calls with grant
 mints in order. To score a transcript by hand (either leg):
 
