@@ -288,7 +288,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
 // instead) and publishes the envelope to NATS. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
-// exclusive with idempotency_key.
+// exclusive with idempotency_key and may not begin with roleForwardDedupePrefix,
+// the mark the role arbiter drops on sight.
 func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -321,6 +322,10 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		if request.DedupeKey != "" && request.IdempotencyKey != "" {
 			writeJSONError(w, http.StatusBadRequest, "dedupe_key and idempotency_key are mutually exclusive", "dedupe_key", "idempotency_key")
+			return
+		}
+		if strings.HasPrefix(request.DedupeKey, roleForwardDedupePrefix) {
+			writeJSONError(w, http.StatusBadRequest, "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix, "dedupe_key")
 			return
 		}
 		dedupeKey := "publish." + id.New()

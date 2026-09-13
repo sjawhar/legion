@@ -1064,12 +1064,56 @@ func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 	}
-	t.Logf("both keys: %s", recorder.Body.String())
-	if body := recorder.Body.String(); body != "{\"error\":\"dedupe_key and idempotency_key are mutually exclusive\",\"expected\":[\"dedupe_key\",\"idempotency_key\"]}\n" {
-		t.Fatalf("body = %q", body)
+	var response apiError
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode 400 body: %v", err)
+	}
+	if response.Error == "" || len(response.Expected) != 2 || response.Expected[0] != "dedupe_key" || response.Expected[1] != "idempotency_key" {
+		t.Fatalf("400 body = %+v, want expected [dedupe_key idempotency_key]", response)
 	}
 	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
 		t.Fatalf("a rejected publish must publish nothing: %v", err)
+	}
+}
+
+// The role arbiter drops an envelope whose dedupe_key already carries the
+// forward prefix (it is how a forwarded copy is kept out of the arbiter), so a
+// caller who supplies one would get a 200 for a message that vanishes: no
+// forward, no exception, no log line. The prefix is reserved at the API.
+func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	for _, topic := range []string{
+		"notifications.github.example-org.example-repo.reserved-prefix",
+		contracts.RoleTopicPrefix + "reserved-prefix-unheld",
+	} {
+		t.Run(topic, func(t *testing.T) {
+			probe, err := client.Conn.SubscribeSync(topic)
+			if err != nil {
+				t.Fatalf("subscribe topic probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode 400 body: %v", err)
+			}
+			if response.Error != "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix || len(response.Expected) != 1 || response.Expected[0] != "dedupe_key" {
+				t.Fatalf("400 body = %+v", response)
+			}
+			if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("a rejected publish must publish nothing: %v", err)
+			}
+		})
 	}
 }
 
