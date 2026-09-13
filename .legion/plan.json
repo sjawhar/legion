@@ -1,0 +1,57 @@
+{
+  "taskCount": 8,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "Single implementer, TDD per task in plan order T1-T8; one PR; tester runs smoke checkpoint 4 on the rig from this branch plus checkpoints.test.sh negative case; reviewer checks docs text against the plan's T7 wording.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker",
+      "test-driven-development",
+      "using-jj"
+    ],
+    "test": [
+      "legion-worker",
+      "verification-before-completion"
+    ],
+    "review": [
+      "legion-worker",
+      "requesting-code-review"
+    ]
+  },
+  "concerns": [
+    "Decision 1: ownership predicate liveAncestorTree treats queued/active/dead/launch-failed ancestors as owning; only lingering/closed make an orphan (sharpens spec Errors rows; same predicate in reducer and boot repair).",
+    "Decision 2: boot repair is ProcessManager.adoptQueuedChildTrees() called from index.ts before enableLaunches(); child-adopted publishes from index.ts after replayHeldRecoveries() via deps.envoyPublish (gate-off precedent), because ProcessManager has no envoyPublish dep.",
+    "Decision 3: skill gains a child-status row and a catchup-overseer clause in addition to the spec's child-adopted row, so the human-moved-to-todo Errors row and the boot 404 case are actionable.",
+    "writeStatus never updates local status on success: a second spawn_worker before the Dispatch echo writes in_progress again (idempotent; same window the corrective-implementer write accepts).",
+    "A launch-failed child tree (none live) still shadows the parent's spawn_worker via rootForIssue until the controller re-admits it; out of Design scope (queued trees only)."
+  ],
+  "planDocument": "dispatch://LEGION-57/artifact/plan-md",
+  "spec": "dispatch://LEGION-57/spec v3",
+  "tasks": [
+    "T1 legion-state.ts liveAncestorTree(state, issue)",
+    "T2 reducers.ts admitOnTodo / reduceIssueClosed own-tree linger / exported childAdopted; reducers.test A1, A2b, A4b",
+    "T3 workers.ts spawnStatus architect->in_progress from todo; api.test A7a-c and stale comment at :2432",
+    "T4 processes.test A3 sub-architect spawn env + A3-negative legacy child tree",
+    "T5 processes.ts adoptQueuedChildTrees + index.ts call/publish + issues.ts publish helper generalized; index.test A4/A5, A4-orphan, idempotence",
+    "T6 smoke checkpoints.sh checkpoint_four rewrite, checkpoints.test.sh fixture + negative case, README row 4",
+    "T7 docs: daemon AGENTS.md (/worker/spawn row, /phase/complete row, new admission bullet, boot ordering, files table) and skills/legion-architect/SKILL.md (section 2 paragraph, child-adopted + child-status rows, catchup-overseer clause)",
+    "T8 targeted verification: bun test on the four test files, tsc, biome on touched files, bash scripts/smoke/checkpoints.test.sh"
+  ],
+  "acceptanceMap": {
+    "1": "T1, T2.1; reducers.test A1",
+    "2": "T2.1; reducers.test :450 + A2b",
+    "3": "processes.test A3, A3-negative",
+    "4": "T2.2, T5; index.test A4/A5 + reducers.test A4b",
+    "5": "T5; index.test A4/A5",
+    "6": "T7; PR diff",
+    "7": "T3; api.test A7a-c",
+    "8": "T6; checkpoints.test.sh + tester's rig run of checkpoint 4"
+  },
+  "testerSurface": "Smoke rig SMOKE_WEBHOOK_MODE=envoy from this branch; checkpoint 4 after the root architect releases and spawns the child's sub-architect; negative controls: checkpoints.test.sh failing fixture and checkpoint 4 before release; boot-repair check by giving the child a queued tree in state.json and restarting the rig daemon.",
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T10:26:41.245Z"
+}
