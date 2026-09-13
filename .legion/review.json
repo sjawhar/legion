@@ -1,0 +1,88 @@
+{
+  "pr": 1025,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1025",
+  "branch": "legion/LEGION-44",
+  "headReviewed": "41adba50927e552d5fbb5ec46a35c57fcbd307e3",
+  "codeHead": "831ae69f9bf0",
+  "spec": "dispatch://LEGION-44/spec (version 7), seven acceptance criteria",
+  "verdict": "changes_requested",
+  "review": {
+    "id": 5190677894,
+    "url": "https://github.com/sjawhar/legion/pull/1025#pullrequestreview-5190677894",
+    "event": "REQUEST_CHANGES",
+    "author": "legion-reviewer[bot]",
+    "round": 1
+  },
+  "summary": "No defect in the commit-identity behaviour: all seven acceptance criteria hold against the diff and the tester's real-pane evidence, which I corroborated on GitHub (sjawhar/legion-smoke PR #41 commits: author = committer = legion-implementer[bot], Omp-Session trailers present). Four small changes requested: the metaedit's timeout budget and kill reporting, the six identity keys missing from PANE_SECRET_ENV_KEYS, one AGENTS.md clause, and the stale Hazard 1 PIN block in docs/solutions.",
+  "githubFacts": {
+    "ci": "Tests runs 34756191578 and 34756225042 (lint, pr-title, typecheck, test all success at 41adba50927e); Legion Envoy and Contracts run 34756191813 (changes, pi-envoy success; others skipped, paths untouched)",
+    "threadsBeforeReview": 0,
+    "e2eHead": "831ae69f9bf0 is an ancestor of 41adba50927e; surface = smoke-rig daemon (tmux legion-sjawhar44, LEGSMOKE-127/131/132), /proc environ reads, commits read back from GitHub"
+  },
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 831ae69f9bf0: no blocking finding; 3 should-fix from deep (env strip, stale-workspace observation, promptFailures accounting observation), quality confirmed the docs clause needs tightening; jj semantics (revset, metaedit --update-author, config list --include-overridden probe matrix, tmux -e rendering) verified by running on fork 0.45.1 and stock 0.44.0 in scratch repos",
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6h4wLR",
+      "url": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999622780",
+      "path": "packages/daemon/src/daemon/processes.ts",
+      "line": 3249,
+      "severity": "should-fix (correctness of error reporting / budget)",
+      "finding": "adoptWorkingCopy runs jj metaedit under the runner's generic 30 s budget instead of slow_command_timeout_seconds, and a runner kill is reported as 'exit 143' with empty detail (AGENTS.md invariant: no caller reports a kill with empty detail)",
+      "fix": "pass timeoutMs: slowCommandTimeoutSeconds * 1000; report result.timedOut / result.aborted (export commandFailure from @legion/workspace beside issueWorkspaceDir); add timeoutMs to the two assignment tests' recorded-command assertions"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h4wLS",
+      "url": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999622781",
+      "path": "packages/daemon/src/daemon/github-app-env.ts",
+      "line": 52,
+      "severity": "should-fix (environment hygiene; breaks the 'root/controller carry none' contract for a pane-started daemon)",
+      "finding": "JJ_USER/JJ_EMAIL/GIT_AUTHOR_*/GIT_COMMITTER_* are pane-only exports but not in PANE_SECRET_ENV_KEYS (environment.ts:113-124); a daemon started from a Legion pane forks the tmux server and root/controller panes with that pane's App identity",
+      "fix": "add the six keys to PANE_SECRET_ENV_KEYS; extend the leaked-keys case in __tests__/environment.test.ts; add them to the env -u scrub list in docs/solutions/daemon/config-env-keys-that-panes-also-carry.md; keep --include-overridden"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h4wLU",
+      "url": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999622783",
+      "path": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 90,
+      "severity": "docs accuracy",
+      "finding": "'sub-architects included; the root architect and controller panes carry none' reads as every child-issue architect carries identity; a child waves/release admits as its own tree gets its architect from spawnTree and carries none (tester's observation, confirmed by the quality audit)",
+      "fix": "replacement clause given in the thread: identity on every pane launchWorker opens (phase workers and spawn_worker sub-architects); the spawnTree architect pane of every admitted tree and the controller carry none"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h4wLW",
+      "url": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999622785",
+      "path": "skills/legion-worker/SKILL.md",
+      "line": 143,
+      "severity": "docs accuracy (a worker following the stale doc would recreate the defect)",
+      "finding": "docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md Hazard 1 (tagged LEGION-44) still says 'until they land, the defences below are the worker's job' and gives a PIN block hard-coding --config user.name=legion-implementer[bot]; --config outranks the pane env and legion-oracle sends workers there first",
+      "fix": "rewrite Hazard 1 as resolved by this change and drop the PIN block; the jj log -T author/committer check line can stay"
+    }
+  ],
+  "acceptance": {
+    "1_paneEnvironment": "PASS - launchWorker processes.ts:2763/2788; processes.test.ts pins only reviewer->review and implementer->implement, sub-architect via appRoleForLegionRole; root/controller exact-env toEqual (853-895) carry none; tester environ reads",
+    "2_noRepoConfigWrite": "PASS - workspace-helpers.ts deleted, import and LEGION_WORKSPACE read gone; grep packages/ skills/ scripts/: no jj config set call site; legion.test.ts sentinel survives boot",
+    "3_twoWorkspacesConcurrent": "PASS - tester recipe both jj builds + two real trees; corroborated on GitHub (legion-smoke PR #41)",
+    "4_ompSessionTrailer": "PASS - jj-attribution.ts not in diff; trailers on smoke commits",
+    "5_oneTimeRemoval": "PASS - probe --include-overridden, unset, log, one re-probe, throw; 4 workspace tests incl. real stock jj; rig log two lines per seeded launch",
+    "6_docs": "PASS with two threads (AGENTS.md clause; stale docs/solutions Hazard 1)",
+    "7_workingCopyAdoption": "PASS - assignment only, before prompt and state write, claim untouched on failure, catch-ups none; revset verified on both builds"
+  },
+  "scopeRulingsHeld": [
+    "no .github/workflows change (LEGION-70)",
+    "workspace.ts recovery branch and bookmark handling untouched (LEGION-70)",
+    "role->App mapping only via appRoleForLegionRole; tests pin only reviewer and implementer literally (LEGION-42-safe)"
+  ],
+  "observationsForArchitect": [
+    "Stale working copy (only an op-log rollback from another workspace - forbidden by LEGION-45 rules - makes one): jj metaedit fails at assignment; live-idle spawn_worker rejects with jj's hint each retry until idle-retire relaunch runs provisioning's update-stale. Loud and self-healing; adding update-stale before the metaedit would hide a LEGION-45 violation and can move a worker's uncommitted edits - your call, not requested.",
+    "Queued-promotion path: a jj failure in adoption counts against promptFailures and at the threshold retires a healthy pane; converges via relaunch; reachable only through the stale case.",
+    "/worker/started still awaits a token lease to return gitName/gitEmail whose only production reader was the deleted setJjIdentity; spec keeps the fields; a future daemon-API contract bump can drop them and the await.",
+    "/worker/ready adoption failure: logged with jj stderr, pendingAssignment kept, boot watchdog re-arms while the pane lives - pre-existing prompt-failure shape (loud in the daemon log, slow and cause-less at the architect)."
+  ],
+  "fastFollow": "comment/test wording: delete history parenthetical processes.ts:3231-3232; trim 'before LEGION-44' narration workspace.ts:241-244 and AGENTS.md:95; drop LEGION-42 forecast processes.test.ts:955-957; shorten removal log line; reflow promptExistingWorker doc 718-725; hoist the harness identity literal (3 copies in processes.test.ts); legion.test.ts sentinel leaves ~/.config/jj/repos/<hash>/config.toml behind (pre-existing footprint). Take the trivial ones in the corrective push.",
+  "nextSteps": "Implementer: corrective push answering the four threads; run `legion threads resolve --pr 1025 --repo sjawhar/legion` before it. Tester: bare gates (or full round if the architect judges the env-strip change warrants a rig re-check; the 'carry none' negative control is what it affects). Reviewer: re-review the new head, answer every thread with Accepted:/Still open:, then when clean the implementer pushes the .legion/ deletion at my direction and I approve that head by SHA.",
+  "reviewerPushed": false,
+  "reviewerNote": "The review App has no contents permission: .legion/review.json is committed locally on the issue branch (jj split) but not pushed; the implementer's next push carries it.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T12:36:01.383Z"
+}
