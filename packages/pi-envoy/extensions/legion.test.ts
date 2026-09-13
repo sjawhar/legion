@@ -290,9 +290,11 @@ async function createJjWorkspace(): Promise<string> {
   return directory;
 }
 
-async function jjConfig(directory: string, key: string): Promise<string> {
-  const child = Bun.spawn(["jj", "config", "get", "--repository", directory, key], {
-    cwd: directory,
+/** `key` at repository scope for the repo `directory` belongs to, as `jj config list` prints it
+ * (`user.name = "…"`), or `""` when the repository scope does not set it. `--repo` is the scope;
+ * `-R` names the repo. */
+async function jjRepoConfig(directory: string, key: string): Promise<string> {
+  const child = Bun.spawn(["jj", "config", "list", "--repo", "-R", directory, key], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -301,8 +303,19 @@ async function jjConfig(directory: string, key: string): Promise<string> {
     new Response(child.stdout as ReadableStream<Uint8Array>).text(),
     new Response(child.stderr as ReadableStream<Uint8Array>).text(),
   ]);
-  if (exitCode !== 0) throw new Error(`jj config get failed: ${stderr}`);
+  if (exitCode !== 0) throw new Error(`jj config list failed: ${stderr}`);
   return stdout.trim();
+}
+
+async function setJjRepoConfig(directory: string, key: string, value: string): Promise<void> {
+  const child = Bun.spawn(
+    ["jj", "config", "set", "--repo", "-R", directory, key, JSON.stringify(value)],
+    { stdout: "ignore", stderr: "pipe" }
+  );
+  if ((await child.exited) !== 0) {
+    const stderr = await new Response(child.stderr as ReadableStream<Uint8Array>).text();
+    throw new Error(`jj config set failed: ${stderr}`);
+  }
 }
 /** What `legion` will read from the pane's grant file after a worker's `tool_call` handler ran:
  * the trimmed contents and the file mode. Throws (ENOENT) when the hook never wrote it, so a
@@ -1798,13 +1811,18 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({ block: true, reason: denied });
   });
-  test("binds a booted worker's jj identity to LEGION_WORKSPACE", async () => {
+  test("leaves the repository-scoped jj config untouched at worker boot: identity is the pane's environment, not config", async () => {
+    // Every issue workspace is a workspace of one shared clone, and `--repo` config is one file
+    // for all of them: a boot that wrote its identity there set the author for every other tree
+    // (LEGION-44). A sentinel written before boot must survive it — neither overwritten with the
+    // daemon-reported identity nor removed (that one-time cleanup is provisioning's, daemon-side).
     const workspace = await createJjWorkspace();
+    await setJjRepoConfig(workspace, "user.name", "Sentinel Before Boot");
 
     await bootWorker({ role: "implementer", workspace });
 
-    expect(await jjConfig(workspace, "user.name")).toBe("Legion Worker");
-    expect(await jjConfig(workspace, "user.email")).toBe("worker@example.test");
+    expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
+    expect(await jjRepoConfig(workspace, "user.email")).toBe("");
   });
   test("restricts phase-worker tool access per LEGION_ROLE", async () => {
     const blockedReason = (role: LegionRole, toolName: string): string | undefined => {

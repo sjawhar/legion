@@ -26,7 +26,6 @@ import {
 import { writeGrantFile } from "../src/legion/grant-file";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import { createLegionTool } from "../src/legion/tools";
-import { setJjIdentity } from "../src/legion/workspace-helpers";
 import type {
   CommandContext,
   PiApi,
@@ -634,7 +633,6 @@ export default function legionExtension(pi: PiApi): void {
     if (bootstrap) return bootstrap;
 
     const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-    const workspace = requiredEnvironment(process.env, "LEGION_WORKSPACE");
 
     bootstrap = (async () => {
       const { sessionFile, agentId } = await persistedTranscript(context);
@@ -668,7 +666,6 @@ export default function legionExtension(pi: PiApi): void {
           sessionFile,
           requiredEnvironment(process.env, "LEGION_STATE_DIR")
         );
-        await setJjIdentity(workspace, started.gitName, started.gitEmail);
         capability = {
           kind: "phase-worker",
           sessionID,
