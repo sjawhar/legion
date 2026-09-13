@@ -25,6 +25,7 @@ import {
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
 } from "./boot-probes";
+import { createCancellableSleep } from "./cancellable-sleep";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -212,21 +213,32 @@ export async function startDaemon(
   }
 }
 
-/** The injected `sleep`, cut short the moment `signal` aborts so a probe waiting out a long
- * backoff notices the daemon's teardown at once instead of at the end of the wait. */
+/** The probe backoff sleep, cut short the moment `signal` aborts so a probe waiting out a long
+ * backoff notices the daemon's teardown at once instead of at the end of the wait. Without an
+ * injected `sleep` it is `createCancellableSleep`, whose `cancel` clears the real timer — so a
+ * pre-hold boot failure leaves no pending timer keeping the process alive. An injected sleep
+ * (tests) is raced against the signal instead. Either way an already-aborted signal returns at
+ * once. */
 function abortableSleep(
-  sleep: (ms: number) => Promise<void>,
+  injected: ((ms: number) => Promise<void>) | undefined,
   signal: AbortSignal
 ): (ms: number) => Promise<void> {
+  if (injected === undefined) {
+    const timer = createCancellableSleep();
+    signal.addEventListener("abort", () => timer.cancel(), { once: true });
+    return (ms) => (signal.aborted ? Promise.resolve() : timer.sleep(ms));
+  }
   return (ms) =>
-    new Promise<void>((resolve) => {
-      const onAbort = () => resolve();
-      signal.addEventListener("abort", onAbort, { once: true });
-      void sleep(ms).then(() => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      });
-    });
+    signal.aborted
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          const onAbort = () => resolve();
+          signal.addEventListener("abort", onAbort, { once: true });
+          void injected(ms).then(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+          });
+        });
 }
 
 async function startDaemonLocked(
@@ -259,10 +271,7 @@ async function startDaemonLocked(
   // keeps a definitive negative that lands before the hold from becoming an unhandled rejection;
   // the real handling is at the hold.
   const probeOptions = {
-    sleep: abortableSleep(
-      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
-      probeAbort.signal
-    ),
+    sleep: abortableSleep(deps.sleep, probeAbort.signal),
     timeoutMs: config.slowCommandTimeoutSeconds * 1000,
     retry: DAEMON_PROBE_RETRY,
     signal: probeAbort.signal,
