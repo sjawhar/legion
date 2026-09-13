@@ -691,8 +691,9 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await setSheet(alicePage, testInfo.project.name, true);
     const aliceCard = marginCard(alicePage, ask.id);
     await expect(aliceCard).toContainText("brown");
+    await aliceCard.getByRole("button", { name: "Answer in your own words" }).click();
     await aliceCard.getByLabel("Your answer").fill("Because it is precise.");
-    await aliceCard.getByRole("button", { name: "Answer" }).click();
+    await aliceCard.getByRole("button", { exact: true, name: "Answer" }).click();
     await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });
     await setSheet(alicePage, testInfo.project.name, false);
 
@@ -709,7 +710,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await expect(bobCard).toContainText("Answered by alice");
     await expect(bobCard).toContainText("Because it is precise.");
     const timestamps = bobCard.locator("time");
-    await expect(timestamps).toHaveCount(3);
+    await expect(timestamps).toHaveCount(2);
     for (const timestamp of await timestamps.all()) {
       await expect(timestamp).toHaveAttribute("datetime", /.+/);
     }

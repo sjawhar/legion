@@ -24,8 +24,11 @@ import { Link } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
+import { AttentionBadge, PriorityBadge } from "../../components/Badge";
+import { EmptyState } from "../../components/EmptyState";
+import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { LabelPill, Pill, StatusPill } from "../../components/Pill";
 import {
-  badgeBlocking,
   borderDefault,
   card,
   cardHoverBorder,
@@ -36,12 +39,9 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedBg,
-  surfaceMutedStrongBg,
-  textMutedOnCanvas,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { PriorityBadge } from "../issue/PriorityBadge";
 import { buildIssuePath } from "../refs/routes";
 import {
   type BoardColumn,
@@ -122,26 +122,14 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
         </button>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span
-          className={`rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
-        >
-          {statusLabel(issue.status as IssueStatus)}
-        </span>
+        <StatusPill>{statusLabel(issue.status as IssueStatus)}</StatusPill>
         <PriorityBadge priority={issue.priority} />
         {(issue.labels ?? []).map((label) => (
-          <span
-            className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
-            key={label}
-          >
-            {label}
-          </span>
+          <LabelPill key={label}>{label}</LabelPill>
         ))}
         {issue.open_asks === 0 ? null : (
-          <span
-            className={`rounded-full px-2 py-1 text-xs font-medium ${badgeBlocking.bg} ${badgeBlocking.text}`}
-            title={`${issue.open_asks} open asks`}
-          >
-            {issue.open_asks}
+          <span title={`${issue.open_asks} open asks`}>
+            <AttentionBadge count={issue.open_asks} />
           </span>
         )}
         <span aria-hidden className={`ml-auto h-1.5 w-6 rounded-full ${dragHandleBg}`} />
@@ -164,14 +152,10 @@ function BoardColumnView({ column }: { column: BoardColumn }): ReactNode {
         data-testid="board-column-header"
       >
         <div
-          className={`flex items-center justify-between gap-2 text-sm font-semibold ${textPrimaryOnSurface}`}
+          className={`flex items-center justify-between gap-2 text-base font-semibold ${textPrimaryOnSurface}`}
         >
-          <span>{statusLabel(column.status)}</span>
-          <span
-            className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
-          >
-            {column.issues.length}
-          </span>
+          <StatusPill>{statusLabel(column.status)}</StatusPill>
+          <Pill>{column.issues.length}</Pill>
         </div>
       </header>
       {column.issues.length === 0 ? null : (
@@ -237,10 +221,10 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
   };
 
   if (issues.isPending) {
-    return <p className={textMutedOnCanvas}>Loading board…</p>;
+    return <LoadingSkeleton label="Loading board" />;
   }
   if (issues.isError) {
-    return <p className={textMutedOnCanvas}>Could not load board.</p>;
+    return <p className={textSecondaryOnSurface}>Could not load board.</p>;
   }
 
   return (
@@ -254,19 +238,23 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
           {error}
         </div>
       )}
-      <DndContext
-        collisionDetection={boardCollisionDetection}
-        onDragEnd={onDragEnd}
-        sensors={sensors}
-      >
-        <div className="overflow-x-auto pb-3" data-testid="board-scroll-container">
-          <div className="flex w-max items-start gap-4">
-            {groupIssuesByStatus(issues.data ?? []).map((column) => (
-              <BoardColumnView column={column} key={column.status} />
-            ))}
+      {issues.data.length === 0 ? (
+        <EmptyState label="Empty project board" message="No issues in this project." />
+      ) : (
+        <DndContext
+          collisionDetection={boardCollisionDetection}
+          onDragEnd={onDragEnd}
+          sensors={sensors}
+        >
+          <div className="overflow-x-auto pb-3" data-testid="board-scroll-container">
+            <div className="flex w-max items-start gap-4">
+              {groupIssuesByStatus(issues.data).map((column) => (
+                <BoardColumnView column={column} key={column.status} />
+              ))}
+            </div>
           </div>
-        </div>
-      </DndContext>
+        </DndContext>
+      )}
     </section>
   );
 }

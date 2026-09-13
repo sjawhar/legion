@@ -553,9 +553,12 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
     expect(await within(needsYou).findByText(unanchoredAsk.question)).toBeTruthy();
-    const shipOption = await within(needsYou).findByRole("radio", { name: "Ship" });
+    expect(within(needsYou).getAllByRole("time")).toHaveLength(1);
+    expect(within(needsYou).queryByLabelText("Your answer")).toBeNull();
+    expect(within(needsYou).getByText("Answer in your own words", { exact: true })).toBeTruthy();
+    const shipOption = await within(needsYou).findByRole("button", { name: "Ship" });
     fireEvent.click(shipOption);
-    expect((shipOption as HTMLInputElement).checked).toBe(true);
+    expect(shipOption.getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, {
@@ -605,7 +608,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
 
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
-    fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
+    fireEvent.click(await within(needsYou).findByRole("button", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {

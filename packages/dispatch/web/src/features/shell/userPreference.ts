@@ -1,4 +1,5 @@
 export type UserPreference =
+  | "project.issue-filters"
   | "project.issue-view"
   | "shell.margin"
   | "shell.margin-width"

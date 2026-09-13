@@ -1260,3 +1260,45 @@ test("asking back from a document ask posts an artifact comment and keeps the se
     createArtifactComment.mockRestore();
   }
 });
+
+test("AskCard compact variant keeps quick options visible and reveals own words on demand", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    expect(await within(card).findByRole("button", { name: "Ship" })).toBeTruthy();
+    expect(within(card).queryByLabelText("Your answer")).toBeNull();
+
+    const ownWords = within(card).getByText("Answer in your own words", { exact: true });
+    fireEvent.click(ownWords);
+    expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard compact options preserve markdown names and descriptions", async () => {
+  const input = ask({
+    options: [{ description: "Ship immediately", label: "Ship **now**" }],
+  });
+  const full = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+  const compact = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    expect(
+      await within(full.view.container).findByRole("radio", { name: /Ship now/ })
+    ).toBeTruthy();
+    expect(
+      await within(compact.view.container).findByRole("button", { name: /Ship now/ })
+    ).toBeTruthy();
+    expect(await within(compact.view.container).findByText("Ship immediately")).toBeTruthy();
+  } finally {
+    full.view.unmount();
+    compact.view.unmount();
+  }
+});

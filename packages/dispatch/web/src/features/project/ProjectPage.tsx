@@ -103,9 +103,9 @@ export function ProjectPage(): ReactNode {
 
   return (
     <section>
-      <header className="flex flex-wrap items-center gap-3 md:min-h-12 md:flex-nowrap">
+      <header className="flex flex-wrap items-center gap-2 md:min-h-12 md:flex-nowrap">
         <h1
-          className={`order-1 min-w-0 flex-1 truncate text-lg font-semibold md:flex-none ${textPrimaryOnCanvas}`}
+          className={`order-1 min-w-0 flex-1 truncate text-[22px] font-semibold tracking-tight md:flex-none ${textPrimaryOnCanvas}`}
         >
           {project.name}
         </h1>
@@ -170,7 +170,7 @@ export function ProjectPage(): ReactNode {
       >
         {activeTab === "issues" ? (
           issueView === "list" ? (
-            <IssueList project={route.project} />
+            <IssueList login={login} project={route.project} />
           ) : (
             <IssueBoard project={route.project} />
           )

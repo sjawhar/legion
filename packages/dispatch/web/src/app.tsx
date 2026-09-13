@@ -139,7 +139,7 @@ function InboxPage(): ReactNode {
   useDocumentTitle("Inbox · Dispatch");
   return (
     <section>
-      <h1 className="mb-6 text-2xl font-semibold">Inbox</h1>
+      <h1 className="mb-6 text-[22px] font-semibold tracking-tight">Inbox</h1>
       <Inbox />
     </section>
   );

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { render, screen } from "@testing-library/react";
 
-import { PriorityBadge } from "./PriorityBadge";
+import { PriorityBadge } from "./Badge";
 
 test.each([
   [0, "P0"],

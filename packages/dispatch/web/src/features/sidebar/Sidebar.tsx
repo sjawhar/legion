@@ -14,6 +14,8 @@ import {
   railHoverBg,
   railHoverText,
   railMutedText,
+  railNeedsYouBadgeBg,
+  railNeedsYouBadgeText,
   railSecondaryText,
 } from "../../theme/classes";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
@@ -81,7 +83,7 @@ export function Sidebar({
             <span>Inbox</span>
             {needsYou.length === 0 ? null : (
               <span
-                className={`rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
+                className={`rounded-full px-1.5 py-0.5 text-xs ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
               >
                 Needs you {needsYou.length}
               </span>

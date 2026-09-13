@@ -249,7 +249,8 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     </MemoryRouter>
   );
   try {
-    await screen.findByText("Nothing needs you");
+    const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
+    expect(within(emptyState).getByText("Nothing needs you")).toBeTruthy();
     expect(screen.queryByText(/Blocked on you:/)).toBeNull();
   } finally {
     emptyView.unmount();

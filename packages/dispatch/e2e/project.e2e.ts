@@ -109,21 +109,25 @@ test("project page groups issues by status in board order; filters narrow issues
         .getByRole("link", { name: parent.key })
     ).toHaveAttribute("href", `/issues/${parent.key}`);
 
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await page.getByRole("combobox", { name: "Status" }).selectOption("testing");
     await expect(page.getByText("Child work")).toBeVisible();
     await expect(page.getByText("Triage work")).toHaveCount(0);
     await page.getByRole("combobox", { name: "Status" }).selectOption("all");
 
-    await page.getByRole("button", { name: "Needs you" }).click();
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    await page.getByRole("button", { exact: true, name: "Needs you" }).click();
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Triage work")).toHaveCount(0);
-    await page.getByRole("button", { name: "Needs you" }).click();
+    await page.getByRole("button", { exact: true, name: "Needs you" }).click();
 
-    await page.getByRole("button", { name: "Unread" }).click();
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    await page.getByRole("button", { exact: true, name: "Unread" }).click();
     await expect(page.getByText("Unread work")).toBeVisible();
     await expect(page.getByText("Needs attention")).toHaveCount(0);
-    await page.getByRole("button", { name: "Unread" }).click();
+    await page.getByRole("button", { exact: true, name: "Unread" }).click();
 
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await page.getByRole("button", { name: "frontend" }).click();
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Unread work")).toHaveCount(0);
@@ -151,6 +155,7 @@ test("project page groups issues by status in board order; filters narrow issues
       await expectTouchTarget(page.getByRole("button", { name: "New document" }));
       await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
       await page.getByRole("tab", { name: "Issues" }).click();
+      await page.getByRole("button", { name: "Filters · 0 active" }).click();
       await expectTouchTarget(page.getByRole("combobox", { name: "Status" }));
       await expectTouchTarget(page.getByRole("button", { name: "Needs you" }));
       await expectTouchTarget(page.getByRole("button", { name: "Unread" }));

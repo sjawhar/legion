@@ -2,13 +2,11 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import { copyText } from "../../lib/clipboard";
 import {
-  askUrgencyBlockingBorder,
-  askUrgencyHighBorder,
-  askUrgencyLowBorder,
-  askUrgencyMedBorder,
+  askUrgencyAccent,
   badgeBlocking,
   badgeHigh,
   badgeLow,
@@ -51,17 +49,19 @@ export interface AskCardProps {
   artifactSlug?: string;
   ask: Ask;
   thread?: "inline" | "collapsed";
+  /** `compact` keeps the answer controls appropriate for a margin or review sheet. */
+  variant?: "compact" | "full";
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 }
 
-const URGENCY_STYLES: Record<Ask["urgency"], { border: string; text: string }> = {
-  blocking: { border: askUrgencyBlockingBorder, text: badgeBlocking.text },
-  high: { border: askUrgencyHighBorder, text: badgeHigh.text },
-  low: { border: askUrgencyLowBorder, text: badgeLow.text },
-  med: { border: askUrgencyMedBorder, text: badgeMed.text },
+const URGENCY_STYLES: Record<Ask["urgency"], { text: string }> = {
+  blocking: { text: badgeBlocking.text },
+  high: { text: badgeHigh.text },
+  low: { text: badgeLow.text },
+  med: { text: badgeMed.text },
 };
 
 const URGENCY_LABELS: Record<Ask["urgency"], string> = {
@@ -75,6 +75,7 @@ export function AskCard({
   artifactSlug,
   ask,
   thread = "inline",
+  variant = "full",
   answerAsk: answer = answerAsk,
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
@@ -112,6 +113,8 @@ export function AskCard({
     getAskThread: getThread,
   });
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [ownWordsOpen, setOwnWordsOpen] = useState(false);
+  const isCompact = variant === "compact";
   const tmuxTarget =
     displayedAsk.author.kind === "session" ? displayedAsk.author.origin?.tmux : undefined;
   const hasUrgencyNotch = displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high";
@@ -151,6 +154,64 @@ export function AskCard({
       />
     );
 
+  const answerField = (
+    <label className="block" htmlFor={answerFieldId}>
+      <span className="sr-only">{isApproval ? "Reason" : "Your answer"}</span>
+      <textarea
+        className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+        disabled={isSubmitting}
+        id={answerFieldId}
+        onChange={(event) => {
+          setAnswerText(event.target.value);
+          setQuestionChoice(false);
+        }}
+        onKeyDown={submitFromKeyboard}
+        placeholder={answerPlaceholder}
+        rows={2}
+        value={answerText}
+      />
+    </label>
+  );
+  const answerActions = questionChoice ? (
+    <fieldset aria-label="Question-shaped answer" className="flex gap-2">
+      <button
+        className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        disabled={isSubmitting}
+        onClick={sendClarification}
+        ref={(node) => node?.focus()}
+        type="button"
+      >
+        {clarification.isPending ? "Sending…" : "Ask back instead"}
+      </button>
+      <button
+        className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+        disabled={isSubmitting}
+        onClick={() => sendAnswer(answerText)}
+        type="button"
+      >
+        Answer with it anyway
+      </button>
+    </fieldset>
+  ) : (
+    <div className="flex gap-2">
+      <button
+        className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        disabled={!canAnswer || isSubmitting}
+        type="submit"
+      >
+        {mutation.isPending ? "Answering…" : "Answer"}
+      </button>
+      <button
+        className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+        disabled={trimmedAnswer === "" || isSubmitting}
+        onClick={sendClarification}
+        type="button"
+      >
+        {clarification.isPending ? "Sending…" : "Ask back"}
+      </button>
+    </div>
+  );
+
   if (completed !== null) {
     return (
       <>
@@ -163,7 +224,7 @@ export function AskCard({
   return (
     <article
       aria-label={`Urgency: ${URGENCY_LABELS[displayedAsk.urgency]}`}
-      className={`relative rounded-xl border-l-4 px-4 pt-5 pb-4 shadow-sm ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${URGENCY_STYLES[displayedAsk.urgency].border}`}
+      className={`relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`}
       data-testid={`ask-${displayedAsk.id}`}
     >
       {hasUrgencyNotch ? (
@@ -195,13 +256,9 @@ export function AskCard({
             Approval requested
           </p>
         ) : isAction ? (
-          <span
-            className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
-          >
-            Action
-          </span>
+          <Pill>Action</Pill>
         ) : null}
-        <div className={`font-medium ${textPrimaryOnSurface}`}>
+        <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
           <MarkdownBody markdown={displayedAsk.question} />
         </div>
         <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
@@ -260,7 +317,47 @@ export function AskCard({
       ) : null}
       {threadNode}
       <form className="mt-4 space-y-3" onSubmit={submit}>
-        {displayedAsk.options.length === 0 ? null : (
+        {displayedAsk.options.length === 0 ? null : isCompact ? (
+          <fieldset className="space-y-2">
+            <legend className="sr-only">Quick answers</legend>
+            <div className="flex flex-wrap gap-2">
+              {displayedAsk.options.map((option) => {
+                const checked = selected.includes(option.label);
+                return (
+                  <button
+                    aria-pressed={checked}
+                    className={`flex min-h-11 items-center gap-2 rounded-full border ${borderDefault} ${cardHoverBorder}`}
+                    disabled={isSubmitting}
+                    key={option.label}
+                    onClick={() => {
+                      selectRealOption(option.label);
+                      setOwnWordsOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <Pill tone={checked ? "selected-label" : "label"}>
+                      <MarkdownBody markdown={option.label} variant="inline" />
+                    </Pill>
+                    {option.description === undefined ? null : (
+                      <span className={`pr-3 text-xs ${textMutedOnSurface}`}>
+                        <MarkdownBody markdown={option.description} variant="inline" />
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {selected.length === 0 ? null : (
+              <button
+                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+                disabled={!canAnswer || isSubmitting}
+                type="submit"
+              >
+                {mutation.isPending ? "Answering…" : "Answer"}
+              </button>
+            )}
+          </fieldset>
+        ) : (
           <fieldset className="space-y-2">
             <legend className="sr-only">Answer options</legend>
             {displayedAsk.options.map((option) => {
@@ -292,60 +389,29 @@ export function AskCard({
             })}
           </fieldset>
         )}
-        <label className="block" htmlFor={answerFieldId}>
-          <span className="sr-only">{isApproval ? "Reason" : "Your answer"}</span>
-          <textarea
-            className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-            disabled={isSubmitting}
-            id={answerFieldId}
-            onChange={(event) => {
-              setAnswerText(event.target.value);
-              setQuestionChoice(false);
-            }}
-            onKeyDown={submitFromKeyboard}
-            placeholder={answerPlaceholder}
-            rows={2}
-            value={answerText}
-          />
-        </label>
-        {questionChoice ? (
-          <fieldset aria-label="Question-shaped answer" className="flex gap-2">
+        {isCompact ? (
+          <div>
             <button
-              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-              disabled={isSubmitting}
-              onClick={sendClarification}
-              ref={(node) => node?.focus()}
+              aria-controls={`${answerFieldId}-disclosure`}
+              aria-expanded={ownWordsOpen}
+              className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
+              onClick={() => setOwnWordsOpen((open) => !open)}
               type="button"
             >
-              {clarification.isPending ? "Sending…" : "Ask back instead"}
+              Answer in your own words
             </button>
-            <button
-              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-              disabled={isSubmitting}
-              onClick={() => sendAnswer(answerText)}
-              type="button"
-            >
-              Answer with it anyway
-            </button>
-          </fieldset>
-        ) : (
-          <div className="flex gap-2">
-            <button
-              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-              disabled={!canAnswer || isSubmitting}
-              type="submit"
-            >
-              {mutation.isPending ? "Answering…" : "Answer"}
-            </button>
-            <button
-              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-              disabled={trimmedAnswer === "" || isSubmitting}
-              onClick={sendClarification}
-              type="button"
-            >
-              {clarification.isPending ? "Sending…" : "Ask back"}
-            </button>
+            {ownWordsOpen ? (
+              <div className="space-y-3 pt-3" id={`${answerFieldId}-disclosure`}>
+                {answerField}
+                {answerActions}
+              </div>
+            ) : null}
           </div>
+        ) : (
+          <>
+            {answerField}
+            {answerActions}
+          </>
         )}
         {mutation.isError ? (
           <QueryError
