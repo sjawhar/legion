@@ -170,6 +170,7 @@
   },
   "notRun": "The real up.sh was not run against this machine (tester's job per the assignment). forward mode was not run (no personal GitHub login).",
   "testerNotes": [
+    "ROUND 3 (2026-09-13): rebased onto main; default build removed; head 2df86f74. See `round3` (mise where output, harness 15/13/3, tester notes).",
     "ROUND 2 (2026-09-12, after review round 1): see the `round2` section — head is c7284e17 (merge of main into the branch); re-run the three harnesses there (expect 14 / 13 / 3) and note the two up.sh/checkpoints.sh output changes listed under round2.behaviourChangesForTester.",
     "Follow plan.json testerE2E E1-E7 as written; nothing in it is invalidated. Use a fresh SMOKE_DIR so ${SMOKE_DIR}/root-issue is absent, `unset LEGION_OMP_PATH` first (the worker pane exports one), SMOKE_PROJECT=sjawhar/24.",
     "Expected none-mode checkpoint line, exactly: `CHECKPOINT <n> SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy` then exit 3, for n in 1 2 3 4 12; checkpoint 13 OK (needs no DISPATCH_TOKEN).",
@@ -350,7 +351,97 @@
     ],
     "ci": "Tests run 34710735990 (https://github.com/sjawhar/legion/actions/runs/34710735990): pr-title, lint, typecheck, test all success at c7284e17"
   },
+  "round3": {
+    "trigger": "Architect follow-up (spec v16): rebase onto main (PR DIRTY since 2026-09-12 18:21Z), remove the hand-built default from resolve_omp_path, pin lives in packages/daemon/src/daemon/omp-pin.ts (moved by #983 to github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423).",
+    "authCheck": "legion gh -- auth status -> Logged in to github.com account legion-implementer[bot]; the grant redeemed (no plugin incident).",
+    "rebase": {
+      "command": "jj rebase -s 3f5aba4c -d trunk() (trunk = 8f0bc143, docs(envoy) #979); previous head 37b17c5a",
+      "conflictsResolved": [
+        {
+          "commit": "Task 3 (was 9a5c2bc6, now 6be89bb8)",
+          "file": "scripts/smoke/up.sh",
+          "resolution": "main deleted the literal `readonly omp_pin=...` line and reads the pin with bun from omp-pin.ts; my commit had added a stop-gap comment above that literal. Dropped both the comment and the literal; main's bun read stays."
+        },
+        {
+          "commit": "Task 4 (was e1ba78e3, now 86b61a9d)",
+          "file": "scripts/smoke/checkpoints.test.sh",
+          "resolution": "fixture block: my two comment lines + `printf 'envoy\\n'` followed by main's state.json fixture carrying `designApproved: gate-off` (#971)."
+        },
+        {
+          "commit": "Task 5 (was 4637134a, now e6b1d7dc)",
+          "file": "scripts/smoke/README.md",
+          "resolution": "line 73: main lengthened the probe-timing sentence (#980); resolved to the spec v16 opening (`mise x <pin> -- omp`, where `<pin>` is the single Oh My Pi fork pin printed by `bun packages/daemon/src/daemon/omp-pin.ts` (`OMP_FORK_PIN`)) plus main's tail, plus the `unless LEGION_OMP_PATH is set` clause pointing at the OMP-build paragraph."
+        },
+        {
+          "commit": "round-2 docs (was 81120b5d, now b49dc364)",
+          "file": "scripts/smoke/README.md",
+          "resolution": "this commit moves the bun-run code block up under the forward sentence; kept the destination's (already v16) sentence and removed the block from its old position; the block appears once."
+        },
+        {
+          "commit": "round-2 merge commit (was c7284e17, now e9818273)",
+          "file": "scripts/smoke/checkpoints.test.sh",
+          "resolution": "same fixture block, 3-sided; same resolution. The merge commit keeps e0166136 (now an ancestor of main) as its second parent and diffs against its first parent only in up.test.sh (the case-B `^gates:$` anchor) -- harmless, left as is rather than rewriting history further."
+        }
+      ],
+      "gateBeforeRound2Edits": "rebased tree, before any new edit: bash -n clean, up 14 / checkpoints 13 / down 3 PASS.",
+      "otherBookmarkConflicts": "jj reported conflicted bookmarks legion/LEGION-13, -14, -18 (other issues' local bookmarks in the shared repo) -- not touched."
+    },
+    "commit": {
+      "sha": "2df86f744c03",
+      "message": "fix(smoke): resolve_omp_path verifies the omp-pin.ts pin under mise or takes an explicit LEGION_OMP_PATH override; no hand-built default",
+      "files": [
+        "scripts/smoke/up.sh",
+        "scripts/smoke/up.test.sh",
+        "scripts/smoke/README.md"
+      ]
+    },
+    "whatChanged": {
+      "up.sh": "resolve_omp_path: LEGION_OMP_PATH set -> explicit override (absolute+file+executable guards unchanged), printed, and exported to the daemon only -- the daemon env block is now an array with LEGION_OMP_PATH appended only when the operator set it. Unset -> `mise where \"$omp_pin\"` must succeed and `<dir>/bin/omp` must be executable, else fail naming `run: mise install <pin>`; prints `<dir>/bin/omp`; exports nothing. No default path; no mention of the rpcfix build anywhere.",
+      "up.test.sh": "Explicit-override guard cases kept (missing, existing-not-executable, relative-to-existing-executable) plus a case proving a valid override never consults mise (PATH without mise). Default-branch cases replaced by a fake `mise` on the harness PATH: `where` prints a fixture install dir (resolves to its bin/omp; asserts mise was asked for exactly the omp-pin.ts pin `$omp_pin`), fixture bin/omp made non-executable (fails `is missing or not executable` + `run: mise install <pin>`), SMOKE_MISE_WHERE_FAILS=1 (fails `OMP pin <pin> is not installed` + remedy). Final section: a new main() run with LEGION_OMP_PATH unset asserts RIG READY, `GREEN OMP build: <fixture>/bin/omp`, and that no start_process argv carries LEGION_OMP_PATH; the override main() run keeps its daemon-only argv check; omp_invocation asserted as `mise x ${omp_pin} -- omp` (form, no literal). up.sh is sourced before fake_bin enters PATH, so main's top-level `bun omp-pin.ts` read runs with the real bun.",
+      "README.md": "Line 73 sentence exactly as spec v16 (pin printed by bun omp-pin.ts). 'Which OMP build the rig runs' rewritten: pinned release from omp-pin.ts, daemon resolves via mise where, up.sh verifies in preflight and names `mise install <pin>`, LEGION_OMP_PATH is an explicit override (absolute executable path), no default/no guess; the 'what retires the default' text is gone."
+    },
+    "miseWhereOnThisMachine": {
+      "pin": "github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 (bun packages/daemon/src/daemon/omp-pin.ts)",
+      "mise where": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423 (operator shell: mise 2026.8.10 at /home/ubuntu/.dotfiles/bin/mise, MISE_DATA_DIR=/home/ubuntu/.mise)",
+      "bin/omp": "-rwxr-xr-x 213682304 bytes, 2026-09-12 10:48",
+      "resolve_omp_path (no override)": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp rc=0",
+      "caveat": "A shell without MISE_DATA_DIR (e.g. bash --norc from the eval kernel) reports the pin as not installed -- mise then looks under a different data dir. up.sh uses whatever `mise` the operator's PATH provides, as the daemon does; the tester must run from a normal operator shell."
+    },
+    "mutationChecks": [
+      "up.sh: skip `mise where` (guess /opt/omp) -> up.test.sh rc=1 at the bin/omp check (`is installed at /opt/omp but /opt/omp/bin/omp is missing or not executable`)",
+      "up.sh: drop the bin/omp -x test -> rc=1 at `expected preflight to fail when the installed pin has no executable bin/omp`",
+      "up.sh: export LEGION_OMP_PATH unconditionally (`if true`) -> rc=1 (set -u: LEGION_OMP_PATH unbound in the no-override main run)"
+    ],
+    "harnessCounts": {
+      "at": "2df86f74",
+      "syntax": "bash -n clean on up.sh, checkpoints.sh, down.sh, up.test.sh, checkpoints.test.sh, down.test.sh",
+      "up.test.sh": 15,
+      "checkpoints.test.sh": 13,
+      "down.test.sh": 3,
+      "sami2026grep": "grep -rn 'sami.2026' scripts/smoke/ -> nothing"
+    },
+    "threadReplies": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052397",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3998717460",
+        "note": "default branch removed; pin lives in omp-pin.ts (already resolved)"
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/957#discussion_r3997052390",
+        "reply": "https://github.com/sjawhar/legion/pull/957#discussion_r3998717558",
+        "note": "part (c) no longer applies; names the two fake-mise cases (already resolved)"
+      }
+    ],
+    "push": "jj git push --bookmark legion/LEGION-10: move sideways from 37b17c5a9d5b to 2df86f744c03 (rebase); GitHub mergeStateStatus BLOCKED (review) mergeable=MERGEABLE -- no conflict.",
+    "prBodyEdits": "Problem item 2, Change preamble, resolve_omp_path bullet, README bullet, up.test.sh bullet, one Proof line added and the old default-path Proof line qualified as historical, CI line for the new head; Thermo and the tester's E2E sections untouched.",
+    "testerNotes": [
+      "Run from a normal operator shell (MISE_DATA_DIR=/home/ubuntu/.mise, mise on PATH); `unset LEGION_OMP_PATH`. Expect `GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp` and the controller's /proc/<pid>/exe equal to that path.",
+      "The daemon argv no longer carries LEGION_OMP_PATH in the normal case; environment.ts resolves the pin through `mise where` itself.",
+      "Negative control for acceptance 3's preflight: a fake pin cannot be injected without editing omp-pin.ts; instead `LEGION_OMP_PATH=/nonexistent bash scripts/smoke/up.sh` still refuses (`LEGION_OMP_PATH is not an absolute executable file: /nonexistent`, nothing started), and PATH without mise (`PATH=/usr/bin:/bin`) fails at require_command mise before resolve_omp_path."
+    ],
+    "ci": "Tests run 34737892878 (https://github.com/sjawhar/legion/actions/runs/34737892878): pr-title, lint, typecheck, test all success at 2df86f74"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-12T18:19:12.395Z"
+  "completed": "2026-09-13T04:29:21.654Z"
 }
