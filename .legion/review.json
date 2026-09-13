@@ -2,59 +2,80 @@
   "verdict": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 2,
-  "round": 1,
-  "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
-  "reviewCommitId": "f86d2296c66225fbb516a00f7223f93aaa1a9562",
-  "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
+  "minor": 1,
+  "round": 2,
+  "reviewedHead": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
+  "reviewCommitId": "e0326ca317db283db3fdedbb3c5537fd8cd8f463",
+  "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5197298840",
+  "previousReview": {
+    "round": 1,
+    "url": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
+    "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
+    "commitId": "f86d2296c66225fbb516a00f7223f93aaa1a9562"
+  },
   "pullRequest": {
     "number": 1088,
     "url": "https://github.com/sjawhar/legion/pull/1088"
   },
+  "threadDispositions": [
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109",
+      "opened": "round 1, IssueHeader.tsx rail `grow` squeezed the title",
+      "reply": "Accepted: fixed in 590a1251 (grow dropped; flex-auto block in 91b18e62 removes the 12rem hypothetical width)",
+      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004856746",
+      "isResolved": false,
+      "note": "the implementer resolves it with `legion threads resolve --pr 1088 --repo sjawhar/legion` before its next push"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117",
+      "opened": "round 1, GitHubLink discarded a loaded title when check-runs failed",
+      "reply": "Accepted: fixed in 590a1251",
+      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004856928",
+      "isResolved": false
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121",
+      "opened": "round 1, orphaned Route: caption while editing",
+      "reply": "Accepted: fixed in 590a1251",
+      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004857113",
+      "isResolved": false
+    }
+  ],
   "verifiedOnGitHub": {
-    "checks": "13 of 13 SUCCESS at f86d2296; run 34828956087 dispatch job ran the Playwright suite against the real Go server and Postgres: 214 passed, 12 skipped, the three new tests green on chromium (the two viewport tests skip on iphone by design).",
-    "threads": "0 threads before this review; 3 opened by it.",
-    "e2e": "E2E (implementer) and E2E (tester) both present in the PR body at head 79f4d50c (the tester wrote its line at the reviewer's request during this round); each names surface, command, observation, head and negative control; the tester line records implementer-proof verification.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 79f4d50c: no blocking finding from either; their should-fix items are the threads below."
+    "checks": "Run 34837706541 at code head 91b18e62: all jobs green, dispatch job e2e 215 passed / 13 skipped including the new issue.e2e.ts:453 title test. Run 34837764653 at tip e0326ca3: envoy-go FAILURE on TestMarkAnchorVerifiesBrowserMark and TestSettleRetriesTransientVersionWriteFailure — Go code byte-identical to 91b18e62 (jj diff --summary packages/envoy empty), so a flake; the next push re-runs it; the deletion-head approval requires it green.",
+    "threads": "3 round-one threads answered Accepted; 2 new threads opened this round (1 blocking, 1 should-fix).",
+    "e2e": "E2E (implementer) and E2E (tester) both at 91b18e62 in the PR body with surface, command, observation, negative control; tester verified the implementer's proof.",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once on the f86d2296->91b18e62 diff. Deep: one should-fix (the swallowed click below) which the reviewer reproduced independently and judges blocking as a regression against main; Quality: no blocking, should-fix on the unit test's determinism and the 2xl doc wording; nits folded into the fast-follow line."
   },
   "keyFindings": [
     {
       "severity": "important",
       "blocking": true,
       "file": "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
-      "line": 355,
-      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109",
-      "description": "`grow` on the details rail splits the row's free space with the title below xl (the title is flex-1, basis 0%, min 12rem), so at 1040-1279px with a short details line the title is squeezed and clamped where main showed it in full. Probe with the exact classes at 1024px: title block 203px and clamped with grow, 406px and fully visible without; at 1200-1279 with the real rail ~260-300px vs ~330-410px. grow is not needed for the scroll container (min-w-0 + shrink + overflow-x-auto verified at 390/1280/1536 without it). Fix: drop `grow`."
+      "line": 203,
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858060",
+      "description": "The title block's flex-basis differs between view (flex-auto, content) and edit (basis-full) below 2xl, so at 768-1279 the row re-lays out on the blur that a mousedown on any header control causes; mouseup lands on a different element and Chromium delivers the click to the common ancestor — the click on Close / Status / Priority / Approve / pin / Edit labels / Route / Subscribers / GitHub link that ends a title edit is swallowed. Reproduced with the exact classes at 1024 (Close moves (269,100)->(950,48), click target DIV) and 1279; thermo reproduced at 1200 for Close, pin, Route; control with equal basis delivers the click. Main (flex-1 min-w-[12rem] in both modes) does not have this. Fix: same basis in both modes — either `basis-full 2xl:basis-auto` unconditionally (title alone below 2xl; header unchanged at >=~900px, +1 row at 768-~900 for short titles) or a grid mirror span so the input's hypothetical width equals the text. Not by making edit basis-full at 2xl too (would move the bug to >=1536). Comment and AGENTS.md line 12 must describe the shipped rule (today both claim 'always'/'whole row' from xl, false at 2xl in both modes). Regression lock: Playwright at 1200, open title editor, mouse.down/up on Close, expect PATCH status done."
     },
     {
       "severity": "should-fix",
       "blocking": false,
-      "file": "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
-      "line": 97,
-      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117",
-      "description": "`failed = githubReference.isError || checks.isError` drops an already-loaded PR title and state when only the check-runs query fails, degrading to `#N owner/repo` with the raw URL as tooltip. Gate `reference` on githubReference.isError only; gate the checks pill on checks.isError. Requested in the same push; not blocking on its own."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
-      "line": 379,
-      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121",
-      "description": "`Route:` caption stays alone on the details line while the route form is open below; focus drops to body when the trigger unmounts. Hide the group while editing and focus the input on mount. Fast-follow acceptable."
+      "file": "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
+      "line": 509,
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858068",
+      "description": "The new partial-failure unit test never waits for the check-runs query to reach status 'error' (the toHaveBeenCalledWith and the absent-pill waitFors pass immediately), so its title/state assertions can run while checks is pending — where the pre-fix `failed` logic also showed the title. Pass a QueryClient to renderIssuePage and waitFor getQueryState([github-link-checks, url, sha]).status === 'error', then assert within(link). Same push."
     }
   ],
-  "fastFollow": "One change: shared newest-reply rule comment across inbox.go/asks.go/issue_queries.go and timestampValue(createdAt); labels.e2e.ts scroll probe instead of overflowX === 'auto'; GitHubLink non-GitHub branch truncation on an inner span (styles.css makes every <a> inline-flex below 1280 so truncate on the anchor hard-clips); vertical padding on the rail so focus rings are not clipped by the scroll container.",
+  "fastFollow": "One change: return focus to the Route trigger on Escape/Cancel/Save; one module-level focusOnMount ref callback for both inputs instead of useRef+useEffect beside an inline arrow ref; a single visible <label htmlFor=issue-route>Route:</label> instead of sr-only label + aria-hidden caption (exact getByLabelText('Route') calls take 'Route:'); drop the dead `reference === undefined &&` in GitHubLink unavailable; within(link).getByText('open') in the new unit test.",
   "confirmedSound": [
-    "Go: loadAskLastReplies orders `created_at desc, id desc` per ask exactly like the inbox lateral join and /asks/open, so header and Inbox agree on whose turn it is; distinct on + any($1::uuid[]) mirrors attachApprovals; comments_ask_id partial index covers it; explicit null (no omitempty); empty asks -> [] and nil map read is safe.",
-    "Contract: doc-comment change on the existing nullable Ask.last_reply; gen:go covers the envelope only, generated Go rightly untouched.",
-    "Client: knowsWhoseTurn distinguishes absent from null; no client path builds open_asks without last_reply (mergeIssue spreads a PATCH Issue without open_asks); SSE invalidation refetches the detail for the live flip; label popover is portalled so the scroll container does not clip it.",
-    "Header at the acceptance widths: e2e in CI green for 390 shared rows (<300px card), 1280 (<=140px), 1536, eight long labels scrolling inside the card with page scrollWidth == window; approval, issue, labels, layout, live specs green.",
-    "GitHubLink without credentials reads `#N owner/repo` with the unavailable tooltip, never the raw address; href still passes safeExternalHref.",
-    "Tests: Go test pins key-present-and-null then human then agent; IssuePage unit test pins hidden-when-missing; e2e screenshots use testInfo.outputPath (no fixed /tmp paths, LEGION-142). The Math.round(top) row equality holds because styles.css gives every a/button/select min-height 44px below 1280.",
-    "AGENTS.md edits in packages/dispatch and packages/envoy describe the shipped behaviour accurately."
+    "flex-auto + min-w-0 title block: 40-char title one unclipped line beside the busy details line at 1024/1279; 140-char unbroken token alone on its row, break-words + line-clamp-2, page never widens at 390/768/1024/1536; approval row (chip + Approve + Request changes) wraps under the title or shares only when it fits; nothing overflows the card. 2xl behaviour unchanged from main.",
+    "GitHubLink: reference gated on its own error; failed check-runs drops only the pill; unavailable tooltip only for the reference's own token error; full matrix (loading/token error/other error/data x checks disabled/loading/error/data) checked.",
+    "Route form: caption moves with the form; focus lands in the input once via the routeEditing effect; issue-writes.test.tsx reorder mirrors browser behaviour (mousedown on the route button blurs the title editor).",
+    "New Playwright test asserts behaviour (scrollHeight>clientHeight on the line-clamp-2 h1; >= half the card); fails on the old classes per tester and thermo reasoning; screenshots via testInfo.outputPath (LEGION-142).",
+    "AGENTS.md sentence otherwise accurate (below md state row full-width; rail scrolls; GitHubLink text) except the 'from xl always' / 'input takes the whole row' clause, folded into the blocking thread."
   ],
-  "nextSteps": "Implementer drops `grow` (IssueHeader.tsx:355) and decouples GitHubLink `reference` from checks.isError, runs `legion threads resolve --pr 1088 --repo sjawhar/legion` after the reviewer's Accepted replies, pushes; tester re-verifies; reviewer answers each thread, then a clean round is COMMENT while .legion/ is present, and APPROVE by SHA only for the head that removes .legion/.",
+  "designNote": "Tester's note (40-char title takes its own row at 1024, header 176 vs main 136) accepted per the architect; not a finding. Fix option 1 above would make the title alone at all widths below 2xl, which keeps 124px at 1024-1279 for short titles and costs one row only at 768-~900.",
+  "nextSteps": "Implementer picks a fix that gives the title slot one flex-basis in both modes, updates the code comment and packages/dispatch/AGENTS.md line 12, adds the mouse.down/up regression lock, makes the unit test wait on the query error state, runs `legion threads resolve --pr 1088 --repo sjawhar/legion` (three Accepted threads), pushes; tester re-verifies; reviewer answers the two new threads. Then the implementer deletes .legion/ and the reviewer approves that head by SHA.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-14T10:17:12.264Z"
+  "completed": "2026-09-14T11:54:48.539Z"
 }
