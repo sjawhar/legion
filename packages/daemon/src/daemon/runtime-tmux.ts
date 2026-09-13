@@ -20,6 +20,11 @@ import * as tmux from "./tmux";
 import { PANE_GONE_STDERR, type TmuxServer } from "./tmux";
 import type { WorkerRpcClient } from "./worker-rpc";
 
+/** Variables tmux 3.7 itself writes into a server's global environment at start (`PWD` from the
+ * server's cwd, `SHLVL=0`), whatever the client that forked it carried: present on a freshly
+ * forked server too, so they are never "left by an earlier daemon". */
+const TMUX_OWN_GLOBALS: Record<string, true> = { PWD: true, SHLVL: true };
+
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
 function treeName(issue: IssueKey): string {
@@ -419,6 +424,36 @@ export class TmuxRuntime implements Runtime {
     if (!(await this.isOmpPane(pid)))
       return { verified: false, reason: "not-omp", observedPid: pid };
     return { verified: true, pid, paneId: locator.tmuxPaneId };
+  }
+
+  /**
+   * The private server outlives the daemon and hands every pane it opens two environment tables
+   * beneath that pane's own `-e` pairs: its global table (the environment it was forked with — an
+   * earlier daemon's, plus whatever the operator's `tmux.conf` set) and the daemon's session's
+   * table (which tmux's default `update-environment` fills from every attaching client: the
+   * operator's `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, …). Removes from both every variable
+   * `paneEnv` does not carry, empties the session's `update-environment` so no later attach
+   * refills it, and returns the removed names, sorted and de-duplicated; nothing on a server this
+   * daemon forked itself (its global table is `paneEnv` by construction plus tmux's own
+   * `PWD`/`SHLVL`; a fresh session table holds only `-NAME` unset markers) and when no server or
+   * no session is running. Panes already open are untouched: a process's environment is copied at
+   * exec. Boot calls this before the launch hold releases, so no pane opens into an unscrubbed
+   * server.
+   */
+  async scrubServerEnvironment(paneEnv: NodeJS.ProcessEnv): Promise<string[]> {
+    const removed = new Set<string>();
+    const session = { session: this.deps.tmux.socket };
+    for (const table of [undefined, session] as const) {
+      const names = await tmux.environmentNames(this.deps.tmux, table);
+      if (names === undefined) continue;
+      if (table !== undefined) await tmux.disableEnvironmentUpdates(this.deps.tmux, table.session);
+      for (const name of names) {
+        if (Object.hasOwn(paneEnv, name) || TMUX_OWN_GLOBALS[name]) continue;
+        await tmux.unsetEnvironment(this.deps.tmux, table, name);
+        removed.add(name);
+      }
+    }
+    return [...removed].sort();
   }
 
   /** Alive only when `verifyPaneProcess` confirms the pane still runs the process the locator

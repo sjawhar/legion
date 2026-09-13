@@ -2171,6 +2171,168 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("removes what an earlier daemon left in the running private tmux server's environment before any pane can open, logging names only", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const nats = new FakeNats();
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const tmuxCommands: string[][] = [];
+    const warnings: string[] = [];
+    const warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => nats,
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            if (command[0] === "/tools/tmux") tmuxCommands.push(command.slice(3));
+            if (command[0] === "/tools/tmux" && command[3] === "show-environment") {
+              // The global table an earlier daemon forked the server with, and the session table
+              // an operator attach filled through tmux's default update-environment.
+              return {
+                stdout:
+                  command[4] === "-g"
+                    ? "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-agent-key\nGH_REVIEW_APP_PRIVATE_KEY_B64=leaked-review-key\nPATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
+                    : "-DISPLAY\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\n-XAUTHORITY\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      expect(tmuxCommands).toContainEqual(["show-environment", "-g"]);
+      expect(tmuxCommands).toContainEqual(["show-environment", "-t", "legion-acme1"]);
+      expect(
+        tmuxCommands.filter(
+          (command) => command[0] === "set-environment" || command[0] === "set-option"
+        )
+      ).toEqual([
+        ["set-environment", "-g", "-u", "GH_AGENT_APP_PRIVATE_KEY_B64"],
+        ["set-environment", "-g", "-u", "GH_REVIEW_APP_PRIVATE_KEY_B64"],
+        ["set-option", "-t", "legion-acme1", "update-environment", ""],
+        ["set-environment", "-t", "legion-acme1", "-u", "SSH_AUTH_SOCK"],
+      ]);
+      expect(warnings).toEqual([
+        "[legion] removed 3 variable(s) from the private tmux server environment that panes may not inherit: GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, SSH_AUTH_SOCK",
+      ]);
+      expect(warnings.join("\n")).not.toContain("leaked-");
+    } finally {
+      warnSpy.mockRestore();
+      await daemon?.stop();
+      await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("logs nothing about the private tmux server when it carries only the pane environment", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const nats = new FakeNats();
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const tmuxCommands: string[][] = [];
+    const warnings: string[] = [];
+    const warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => nats,
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            if (command[0] === "/tools/tmux") tmuxCommands.push(command.slice(3));
+            if (command[0] === "/tools/tmux" && command[3] === "show-environment") {
+              return {
+                stdout:
+                  command[4] === "-g"
+                    ? "PATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
+                    : "-DISPLAY\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          statPrompt: async () => {},
+          readPluginManifest: async () => validLegionPluginManifest,
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      expect(tmuxCommands.filter((command) => command[0] === "set-environment")).toEqual([]);
+      expect(warnings).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+      await daemon?.stop();
+      await nats.close();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("refuses to serve an installed pi-legion-envoy that omp does not actually load (disabled or unregistered): exits after closing the API and NATS it had opened", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);

@@ -525,6 +525,9 @@ describe("TmuxRuntime", () => {
     expect(harness.server.commands).toEqual([
       tmuxArgv("has-session", "-t", "legion-omp"),
       tmuxArgv("new-session", "-d", "-s", "legion-omp", "-n", "__legion_bootstrap", "sleep 3600"),
+      // Before anything can attach: no client's SSH_AUTH_SOCK/SSH_CONNECTION/DISPLAY may be copied
+      // into the session table every later pane inherits.
+      tmuxArgv("set-option", "-t", "legion-omp", "update-environment", ""),
       tmuxArgv("set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"),
       tmuxArgv(
         "new-window",

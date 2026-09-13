@@ -683,8 +683,24 @@ async function startDaemonLocked(
   // a launch prefix that fails before OMP) still refuses to serve: the daemon closes what it
   // opened — event pump, API, worker stream, NATS, the instance lock — and `startDaemon` rejects
   // with the probe's error, so `legion start` exits 1 exactly as before.
+  //
+  // Then, once they pass, the server those panes would open into. The private tmux server
+  // survives daemon restarts and hands every new pane two environment tables beneath that pane's
+  // `-e` pairs: its global table (the environment it was forked with — an earlier daemon's, not
+  // this one's `paneEnv` — plus whatever the operator's `tmux.conf` `set-environment -g`s) and the
+  // session table tmux's default `update-environment` fills from every operator attach
+  // (`SSH_AUTH_SOCK`, `SSH_CONNECTION`, …). Whatever `paneEnv` would not pass is removed from both
+  // here and the session's `update-environment` emptied (names logged, never values); a server
+  // this daemon forked itself carries exactly `paneEnv` and removes nothing. A tmux failure here
+  // is as fatal as a failed probe: no pane may open into a server this daemon could not inspect.
   try {
     await probes;
+    const removed = await runtime.scrubServerEnvironment(environment.paneEnv);
+    if (removed.length > 0) {
+      console.warn(
+        `[legion] removed ${removed.length} variable(s) from the private tmux server environment that panes may not inherit: ${removed.join(", ")}`
+      );
+    }
   } catch (error) {
     try {
       await stop();

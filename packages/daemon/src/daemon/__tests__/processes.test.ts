@@ -763,6 +763,7 @@ describe("ProcessManager", () => {
         "__legion_bootstrap",
         "sleep 3600",
       ],
+      ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "update-environment", ""],
       ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
       [
         "tmux",

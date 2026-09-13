@@ -1,8 +1,16 @@
 // Row selection in `lookupPane` over a `list-panes -F "#{pane_id} #{pane_pid}"` listing, and the
 // three-way verdict it returns: the pane's own pid, the pane provably absent, or a listing that
-// failed for some other reason and therefore proves nothing either way.
+// failed for some other reason and therefore proves nothing either way — plus the environment
+// builders the boot-time server scrub runs over.
 import { describe, expect, it } from "bun:test";
-import { lookupPane, type TmuxServer } from "../tmux";
+import {
+  disableEnvironmentUpdates,
+  environmentNames,
+  lookupPane,
+  openWindow,
+  type TmuxServer,
+  unsetEnvironment,
+} from "../tmux";
 
 // One window, three panes: the architect's pane first, then two split-in workers.
 const rows = "%1531 2363427\n%1533 3003090\n%1534 446716\n";
@@ -83,5 +91,175 @@ describe("lookupPane", () => {
       status: "present",
       pid: 3715931,
     });
+  });
+});
+
+describe("environmentNames", () => {
+  it("lists each global entry's name over the private server, skipping unset markers and value continuation lines", async () => {
+    // `BASH_FUNC__aws%%` is a bash exported function: its body continues over lines that start
+    // with a space or `}` and may themselves contain `=` — never a new entry.
+    const stdout = [
+      "-DISPATCH_TOKEN",
+      'BASH_FUNC__aws%%=() {  local use_tty="";',
+      ' [ -t 0 ] && use_tty="-it";',
+      ' "$AWSCLI_DOCKER_BIN" run --rm $use_tty --env AWS_CLI_AUTO_PROMPT=$AWS_CLI_AUTO_PROMPT',
+      "}",
+      "GH_AGENT_APP_PRIVATE_KEY_B64=abc",
+      "HOME=/h",
+      "PATH=/x:/y",
+      "npm_config_user_agent=bun/1.3",
+      "",
+    ].join("\n");
+    const commands: string[][] = [];
+    expect(await environmentNames(server({ stdout, exitCode: 0 }, commands), undefined)).toEqual([
+      "BASH_FUNC__aws%%",
+      "GH_AGENT_APP_PRIVATE_KEY_B64",
+      "HOME",
+      "PATH",
+      "npm_config_user_agent",
+    ]);
+    expect(commands).toEqual([["tmux", "-L", "legion-omp", "show-environment", "-g"]]);
+  });
+
+  it("reads a session's table with -t, where a fresh session holds only update-environment's unset markers and an attach fills in real entries", async () => {
+    // tmux 3.7: a new session's table is the `-NAME` marker for every default `update-environment`
+    // name; a client attach then sets the ones it carries.
+    const fresh =
+      "-DISPLAY\n-KRB5CCNAME\n-MSYSTEM\n-SSH_AGENT_PID\n-SSH_ASKPASS\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n-WAYLAND_DISPLAY\n-WINDOWID\n-XAUTHORITY\n-XDG_CURRENT_DESKTOP\n-XDG_SESSION_DESKTOP\n-XDG_SESSION_TYPE\n";
+    const commands: string[][] = [];
+    expect(
+      await environmentNames(server({ stdout: fresh, exitCode: 0 }, commands), {
+        session: "legion-omp",
+      })
+    ).toEqual([]);
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "show-environment", "-t", "legion-omp"],
+    ]);
+
+    const attached =
+      "-DISPLAY\nSSH_ASKPASS=/usr/bin/false\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\nSSH_CONNECTION=100.100.92.97 57158 100.113.243.90 22\n-WAYLAND_DISPLAY\n";
+    expect(
+      await environmentNames(server({ stdout: attached, exitCode: 0 }), { session: "legion-omp" })
+    ).toEqual(["SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_CONNECTION"]);
+  });
+
+  it("is undefined when no server is behind the socket (a first boot, or the server exited), or the session does not exist", async () => {
+    const gone: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({
+        stdout: "",
+        stderr: "no server running on /tmp/tmux-1000/legion-omp",
+        exitCode: 1,
+      }),
+    };
+    expect(await environmentNames(gone, undefined)).toBeUndefined();
+    const neverCreated: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({
+        stdout: "",
+        stderr: "error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)",
+        exitCode: 1,
+      }),
+    };
+    expect(await environmentNames(neverCreated, undefined)).toBeUndefined();
+    const noSession: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "no such session: legion-omp", exitCode: 1 }),
+    };
+    expect(await environmentNames(noSession, { session: "legion-omp" })).toBeUndefined();
+  });
+
+  it("throws on any other failure, carrying tmux's stderr", async () => {
+    const broken: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "server version is too old", exitCode: 1 }),
+    };
+    await expect(environmentNames(broken, undefined)).rejects.toThrow(
+      "tmux show-environment -g failed (exit 1): server version is too old"
+    );
+    await expect(environmentNames(broken, { session: "legion-omp" })).rejects.toThrow(
+      "tmux show-environment -t legion-omp failed (exit 1): server version is too old"
+    );
+  });
+});
+
+describe("unsetEnvironment", () => {
+  it("removes the name from the global or the session table with -u", async () => {
+    const commands: string[][] = [];
+    const fake = server({ stdout: "", exitCode: 0 }, commands);
+    await unsetEnvironment(fake, undefined, "FOO_SECRET");
+    await unsetEnvironment(fake, { session: "legion-omp" }, "SSH_AUTH_SOCK");
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "set-environment", "-g", "-u", "FOO_SECRET"],
+      ["tmux", "-L", "legion-omp", "set-environment", "-t", "legion-omp", "-u", "SSH_AUTH_SOCK"],
+    ]);
+  });
+
+  it("throws when tmux refuses", async () => {
+    const refusing: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "bad environment", exitCode: 1 }),
+    };
+    await expect(unsetEnvironment(refusing, undefined, "FOO_SECRET")).rejects.toThrow(
+      "tmux set-environment -g -u FOO_SECRET failed (exit 1): bad environment"
+    );
+  });
+});
+
+describe("disableEnvironmentUpdates", () => {
+  it("empties the session's update-environment option", async () => {
+    const commands: string[][] = [];
+    await disableEnvironmentUpdates(server({ stdout: "", exitCode: 0 }, commands), "legion-omp");
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "update-environment", ""],
+    ]);
+  });
+});
+
+describe("openWindow", () => {
+  it("empties update-environment on the session it creates, before anything can attach to it", async () => {
+    const commands: string[][] = [];
+    const fake: TmuxServer = {
+      socket: "legion-omp",
+      run: async (cmd) => {
+        commands.push(cmd);
+        if (cmd[3] === "has-session") return { stdout: "", stderr: "", exitCode: 1 };
+        if (cmd[3] === "new-window") return { stdout: "@42 %1 4242\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp");
+    const subcommands = commands.map((cmd) => cmd.slice(3, 4)[0]);
+    expect(subcommands.indexOf("new-session")).toBeGreaterThanOrEqual(0);
+    expect(subcommands.indexOf("set-option")).toBeGreaterThan(subcommands.indexOf("new-session"));
+    expect(subcommands.indexOf("set-option")).toBeLessThan(subcommands.indexOf("new-window"));
+    expect(
+      commands.find((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")
+    ).toEqual([
+      "tmux",
+      "-L",
+      "legion-omp",
+      "set-option",
+      "-t",
+      "legion-omp",
+      "update-environment",
+      "",
+    ]);
+  });
+
+  it("leaves an existing session's options alone", async () => {
+    const commands: string[][] = [];
+    const fake: TmuxServer = {
+      socket: "legion-omp",
+      run: async (cmd) => {
+        commands.push(cmd);
+        if (cmd[3] === "new-window") return { stdout: "@42 %1 4242\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp");
+    expect(commands.some((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")).toBe(
+      false
+    );
   });
 });
