@@ -65,7 +65,7 @@ LEGION-12's own retro and is filed as LEGION-37; the slow-push paragraph in §1 
 whose implementer, on a pane still running the pre-LEGION-12 plugin, hit §1, §3, §8, §9, and §11 across five rounds
 and confirmed each as written (the architect filed the §1 harness fix as LEGION-52). None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
-delivery fixed for good by LEGION-54 (pi-envoy 1.17.3): the workarounds are recorded only so a worker still running
+delivery fixed for good by LEGION-54 (pi-envoy 1.17.4): the workarounds are recorded only so a worker still running
 the 1.17.0 plugin recognizes them, and must not be used on the fixed one. §2's check-config leak was fixed by
 LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
 the workaround.
@@ -116,7 +116,7 @@ command is at fault; wait for the load to fall and re-run the single push. Do no
 loop that redeems a fresh grant per attempt only works because each attempt is a new bash call, and that is the
 model re-issuing the command, not a script.
 
-**The fix (pi-envoy 1.17.3; LEGION-54, after LEGION-12's pull request #974).** Before each of your bash commands
+**The fix (pi-envoy 1.17.4; LEGION-54, after LEGION-12's pull request #974).** Before each of your bash commands
 runs, the hook mints the grant and writes it to the file `$LEGION_GRANT_FILE` names — a 0600 file under
 `<state_dir>/secrets/`, written to a temp name and renamed into place — and `legion credential`, `legion gh`, and
 `legion handoff complete` read that file first (`LEGION_GRANT` is only a manual fallback when the pointer is unset).
