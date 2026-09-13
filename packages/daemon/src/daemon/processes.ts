@@ -796,6 +796,7 @@ export class ProcessManager {
     // Serialized through the same per-role queue spawnWorker/stopProcessSerialized use, so a
     // queued task can never be delivered to a worker a concurrent closeTree is mid-stopping (or
     // vice versa) -- whichever entered the queue first completes before the other starts.
+    let retiredBystander = false;
     await this.workerAdmission.mutateClaim(token, async () => {
       if (root && this.closingTrees.has(root)) {
         throw new TreeClosingError(root);
@@ -826,7 +827,8 @@ export class ProcessManager {
         // `retireIdleWorker` retires a finished worker: graceful shutdown frame (kill-pane
         // fallback), locator cleared, `ompSessionFile` carried into `resumeSessionFile` so the
         // architect's next spawn_worker resumes the same agent with `--resume`, `launchFailures`
-        // reset because the boot itself did succeed. The slot is free the moment this persists.
+        // reset because the boot itself did succeed. The slot is free the moment this persists;
+        // the drain that hands it to whatever is queued runs after this critical section (below).
         console.info(
           `[legion] dropping queued catch-up for ${token} at ready and retiring the relaunched pane: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
         );
@@ -840,6 +842,7 @@ export class ProcessManager {
         delete claim.launchFailures;
         await this.persist();
         this.cancelBootWatchdog(token, generation);
+        retiredBystander = true;
         return;
       }
       const client = await this.clientFor(token, claim.locator);
@@ -860,6 +863,13 @@ export class ProcessManager {
       }
       this.cancelBootWatchdog(token, generation);
     });
+    // A pane retired above frees a `workerCap` slot in state but nothing else drains the queue
+    // for it: `retireIdleWorker`'s retirement gets its drain from the retired client's socket
+    // close (`onWorkerClientClosed` -> `markWorkerDead` -> `promoteWorkerQueue`), but this pane
+    // was never connected through `clientFor`, so no cached client exists to close. Without this
+    // trigger a spawn already queued behind the cap would wait for the next linger sweep's
+    // `reconcileWorkerAdmission`. Outside the critical section, exactly as `markWorkerDead` does.
+    if (retiredBystander) this.workerAdmission.promoteWorkerQueue();
   }
 
   /** The inner logic behind a worker's socket being confirmed dead -- a boot-time reconnect

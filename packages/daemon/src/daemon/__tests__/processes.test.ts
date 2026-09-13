@@ -3619,7 +3619,7 @@ describe("ProcessManager", () => {
     expect(state.phases[child]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
   });
 
-  it("retires a relaunched worker at worker/ready when its only queued prompt is a bystander's catch-up, freeing its cap slot, while an assignment in the same position is delivered", async () => {
+  it("retires a relaunched worker at worker/ready when its only queued prompt is a bystander's catch-up, freeing its cap slot and promoting a spawn already queued behind it, while an assignment in the same position is delivered", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "tester-session.jsonl");
     await writeFile(sessionFile, "{}", "utf8");
@@ -3673,6 +3673,9 @@ describe("ProcessManager", () => {
       shutdown();
     };
     const reviewerClient = fakeWorkerRpcClient();
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const plannerToken = roleToken("omp", root, "planner");
+    const plannerStarted = Promise.withResolvers<void>();
     const {
       manager: processes,
       state: managedState,
@@ -3681,7 +3684,22 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/tester.sock" ? testerClient : reviewerClient,
+      natsPublish: (subject, json) => {
+        if (
+          subject === architectTopic &&
+          json === JSON.stringify({ type: "worker-started", issue: root, role: "planner" })
+        ) {
+          plannerStarted.resolve();
+        }
+      },
     });
+
+    // While the tester's relaunch is still booting, the architect spawns the planner: at
+    // workerCap 1 the booting pane holds the one slot, so the planner queues.
+    const queuedPlanner = await processes.spawnWorker(root, root, "planner", "plan #42");
+    expect(queuedPlanner).toEqual({ status: "queued", roleToken: plannerToken });
+    expect(managedState.workerAdmission.queue).toEqual([plannerToken]);
+    commands.length = 0;
 
     await processes.workerReady(root, "tester", "ses_tester", 2);
 
@@ -3702,16 +3720,23 @@ describe("ProcessManager", () => {
       sessionId: "ses_implementer",
     });
 
-    // The slot is free immediately: at workerCap 1 a spawn for another role is admitted, not
-    // queued behind a pane that would never do anything. (Left alive at `runState: unknown`,
-    // the tester's pane would be counted by runningWorkerCount and this would answer `queued`.)
-    commands.length = 0;
-    const next = await processes.spawnWorker(root, root, "planner", "plan #42");
-    expect(next).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "planner") });
+    // The retire itself drains the queue -- no linger sweep (`reconcileWorkerAdmission`) is ever
+    // called here. A retired pane has no cached client whose close could reach
+    // `onWorkerClientClosed` -> `markWorkerDead` -> `promoteWorkerQueue()`, so the ready path
+    // must trigger the drain explicitly, exactly as `markWorkerDead` does after its own
+    // critical section; otherwise the queued planner waits for the next 60 s sweep. The
+    // promotion's own `worker-started` publish is the awaited signal (the launch does real
+    // workspace I/O through the fake runner, so tick-counting is not a bound); with the drain
+    // missing nothing ever publishes it and the test times out instead of passing.
+    await plannerStarted.promise;
+    expect(managedState.workerAdmission.queue).toEqual([]);
     expect(
       commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
     ).toBeTrue();
-    expect(managedState.workerAdmission.queue).toEqual([]);
+    const planner = managedState.roles[plannerToken];
+    if (!planner || !("issue" in planner)) throw new Error("planner claim disappeared");
+    expect(planner.locator).toBeDefined();
+    expect(planner.pendingAssignment).toEqual({ kind: "assignment", task: "plan #42" });
 
     managedState.roles[reviewerToken] = reviewerClaim;
     await processes.workerReady(root, "reviewer", "ses_reviewer", 1);
