@@ -263,26 +263,18 @@ export class WorkerBootWatchdog {
       }
     };
 
-    /** `retireUnconfirmedBoot`, with a rejection -- the catch is unconditional; in practice a
-     * `ProcessStopFailed`: the pane would not die, or could not even be listed; `retireWorkerLocator`
-     * rethrows before anything clears, so the claim and its locator are untouched -- treated
-     * exactly like a probe that could not complete: the watch stays armed for one more interval
-     * and retires again then, rather than ending here with the boot unwatched until a restart.
-     * Returns whether the watch is finished. The armed entry is removed before the call, never
-     * after: the retirement's own cancel of this token's watch must not flip `cancelled` on the
-     * very watch that is retiring it. So the catch re-checks what a cancel landing during the
-     * await could not reach: a watch whose `cancelled` flag was set anyway (`cancel()` found the
-     * entry before the delete), a disposed watchdog (`cancelAll()` sets `disposed` whether or not
-     * an entry exists), or a superseded one (a newer arm already holds this token) is finished
-     * here, never looped for another interval of timers, dials, and a second retirement that
-     * would persist after the daemon's final save. A same-token `cancel()` that lands during the
-     * await finds no entry and sets nothing: that watch re-inserts and runs one more bounded
-     * interval, after which whatever cancelled it ends it -- a `/worker/ready` or a tree close
-     * fails the claim check (`readyConfirmedAt` set, or the claim gone); a retirement from
-     * another path (`retireWorkerLocator`) has cleared the locator, so `retireUnconfirmedBoot`'s
-     * `sameProcess(claim.locator, locator)` guard makes the second call a no-op -- one interval
-     * late, never a second retirement. Only a watch none of the re-check sees puts its entry back
-     * under the same generation, so a later `/worker/ready` or tree close still cancels it. */
+    /** `retireUnconfirmedBoot`, with its rejection caught unconditionally -- in practice a
+     * `ProcessStopFailed`: the pane would not die, or could not even be listed, and the claim
+     * keeps its locator -- treated like a probe that could not complete: the watch stays armed
+     * for one more interval and retires again then, rather than leaving the boot unwatched until
+     * a restart. Returns whether the watch is finished. The armed entry is removed before the
+     * call: the retirement's own `cancel` of this token must not flip `cancelled` on the watch
+     * retiring it. The catch therefore re-checks the three things a cancel landing during the
+     * await can leave behind -- `cancelled` set (the entry was found before the delete), the
+     * watchdog disposed, or a newer arm holding this token -- and finishes on any of them rather
+     * than loop another interval past `cancelAll()`. A same-token `cancel()` that found no entry
+     * set nothing, so that watch runs one more bounded interval; `retireUnconfirmedBoot`'s own
+     * re-validation of the claim it is handed (see its doc) makes the second call a no-op. */
     const retire = async (): Promise<boolean> => {
       if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
       try {

@@ -1836,12 +1836,11 @@ export class ProcessManager {
       // active and unconfirmed with its locator intact until a restart -- the resync backstop
       // probes only confirmed roots -- so re-arm this same generation's deadline, as
       // `retireUnconfirmedRoot`'s stop-failure branch does; otherwise `treeStillUnconfirmed`
-      // declines -- the tree is no longer this generation's active, unconfirmed one (a spawn
-      // failure queued or launch-failed it, a newer generation took it, it was confirmed, parked,
-      // or closed, or the daemon is disposing) -- and it is already where its own path put it.
-      // Logged here, once, with what was observed; the deadline's own catch never sees it.
-      // `treeStillUnconfirmed` is a type guard; read the tree afresh for the log so the
-      // declined branch is not narrowed to `never`.
+      // declines -- the tree is no longer this generation's active, unconfirmed one -- and it is
+      // already where its own path put it. Logged here, once, with the tree as observed; the
+      // deadline's own catch never sees it. (`treeStillUnconfirmed` is a type guard that narrows
+      // the declined tree to `never` for the rest of this method, whichever expression it is read
+      // through; `describeTreeForLog` reads it from its own scope.)
       if (this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) {
         console.error(
           `[legion] failed to resurrect an unconfirmed root for ${treeKey}; its locator is untouched and its registration deadline is re-armed:`,

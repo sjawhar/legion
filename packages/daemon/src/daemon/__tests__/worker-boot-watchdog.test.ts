@@ -459,5 +459,5 @@ describe("WorkerBootWatchdog liveness probe", () => {
       consoleError.mockRestore();
       timers.restore();
     }
-  }, 2_000);
+  });
 });

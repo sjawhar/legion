@@ -811,7 +811,7 @@ describe("legion state", () => {
     expect(await readFile(`${file}.v23.bak`, "utf8")).toBe(raw);
   });
 
-  it("migrates v25 state to v26 by classifying each persisted pendingAssignment string by its payload", async () => {
+  it("migrates v25 state to v27, classifying each persisted pendingAssignment string by its payload on the way through v26", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -871,7 +871,7 @@ describe("legion state", () => {
     expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
   });
 
-  it("composes the LEGION-33 v24 -> v25 bump with the v25 -> v26 classification: a v24 file with bare-string pendingAssignments migrates through both to v26 objects", async () => {
+  it("composes the LEGION-33 v24 -> v25 bump with the v25 -> v26 classification and the v26 -> v27 bump: a v24 file with bare-string pendingAssignments migrates through all three to v27 objects", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-through-v26-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -980,38 +980,10 @@ describe("legion state", () => {
     const migrated = await loadState(file, initialState);
 
     expect(migrated.version).toBe(27);
+    // Nothing rewritten: `current` carries the #991 shape and no pane identity anywhere, and the
+    // migrated state is equal to it.
     expect(migrated).toEqual(current);
-    // Nothing rewritten: the #991 shape survives untouched, and no locator gained an identity.
-    expect(migrated.roles[testerToken]).toEqual(current.roles[testerToken]);
-    expect(migrated.trees[issue]?.locator).not.toHaveProperty("panePid");
-    expect(migrated.controllerLocator).not.toHaveProperty("panePid");
-    const claim = migrated.roles[testerToken];
-    expect(claim && "issue" in claim ? claim.locator : undefined).not.toHaveProperty("panePid");
     expect(await readFile(`${file}.v26.bak`, "utf8")).toBe(raw);
-  });
-
-  it("migrates a v25 file through LEGION-37's v26 to v27: pendingAssignments classified, identity-less locators kept, one .v25.bak", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-through-v27-"));
-    const file = path.join(tempDir, "state.json");
-    const current = stateWithTree();
-    const testerToken = roleToken(initialState.project, issue, "tester");
-    current.roles[testerToken] = {
-      issue,
-      role: "tester",
-      generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
-    };
-    const v25State = JSON.parse(JSON.stringify({ ...current, version: 25 }));
-    v25State.roles[testerToken].pendingAssignment = "verify #41";
-    const raw = JSON.stringify(v25State);
-    await writeFile(file, raw, "utf8");
-
-    const migrated = await loadState(file, initialState);
-
-    expect(migrated.version).toBe(27);
-    expect(migrated).toEqual(current);
-    expect(migrated.trees[issue]?.locator).not.toHaveProperty("panePid");
-    expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
   });
 
   it("round-trips a tmux locator's recorded process identity on a tree, a worker claim, and the controller", async () => {
