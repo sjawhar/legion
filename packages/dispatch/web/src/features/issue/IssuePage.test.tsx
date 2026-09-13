@@ -1139,3 +1139,28 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     restore();
   }
 });
+
+test("IssuePage offers only human status destinations and the current daemon status", async () => {
+  const restore = stubIssuePage({ ...issue, status: "in_progress" });
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ ...issue, status: "backlog" });
+  const view = renderIssuePage("/issues/CORE-1/conversation");
+
+  try {
+    const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    expect(status.value).toBe("in_progress");
+    expect([...status.options].map((option) => option.value)).toEqual([
+      "triage",
+      "icebox",
+      "backlog",
+      "todo",
+      "in_progress",
+    ]);
+
+    fireEvent.change(status, { target: { value: "backlog" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "backlog" }));
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    restore();
+  }
+});

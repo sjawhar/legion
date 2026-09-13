@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 
 import type { IssueSummary } from "../../api/types";
-import { groupIssuesByStatus, isHumanSettableStatus, rankInputForInsertion } from "./board-model";
+import {
+  groupIssuesByStatus,
+  isHumanSettableStatus,
+  rankInputForInsertion,
+  selectableStatusesFor,
+} from "./board-model";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -70,4 +75,16 @@ test("identifies lifecycle columns a human can set", () => {
   expect(isHumanSettableStatus("done")).toBe(true);
   expect(isHumanSettableStatus("in_progress")).toBe(false);
   expect(isHumanSettableStatus("testing")).toBe(false);
+});
+
+test("offers only human destinations and the current lifecycle status", () => {
+  expect(selectableStatusesFor("todo")).toEqual(["triage", "icebox", "backlog", "todo"]);
+  expect(selectableStatusesFor("in_progress")).toEqual([
+    "triage",
+    "icebox",
+    "backlog",
+    "todo",
+    "in_progress",
+  ]);
+  expect(selectableStatusesFor("done")).toEqual(["triage", "icebox", "backlog", "todo", "done"]);
 });

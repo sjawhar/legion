@@ -338,11 +338,11 @@ test("IssuePage ignores a same-task duplicate status save", async () => {
 
   try {
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
-    fireEvent.change(status, { target: { value: "in_progress" } });
-    fireEvent.change(status, { target: { value: "in_progress" } });
+    fireEvent.change(status, { target: { value: "backlog" } });
+    fireEvent.change(status, { target: { value: "backlog" } });
 
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" });
   } finally {
     unmount();
     restore();
@@ -596,15 +596,15 @@ test("IssuePage drains a title draft after a different issue write settles", asy
   try {
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
     const title = await openTitleEditor();
-    fireEvent.change(status, { target: { value: "in_progress" } });
+    fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
     );
 
     fireEvent.change(title, { target: { value: "Queued title" } });
     fireEvent.blur(title);
     act(() => {
-      firstSave.resolve({ ...issue, status: "in_progress" });
+      firstSave.resolve({ ...issue, status: "backlog" });
     });
 
     await waitFor(() =>
@@ -626,14 +626,14 @@ test("IssuePage does not submit a route that was typed but never saved", async (
   try {
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
     const route = await openRouteEditor();
-    fireEvent.change(status, { target: { value: "in_progress" } });
+    fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
     );
 
     fireEvent.change(route, { target: { value: "role:legion" } });
     act(() => {
-      statusSave.resolve({ ...issue, status: "in_progress" });
+      statusSave.resolve({ ...issue, status: "backlog" });
     });
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
     expect(route.value).toBe("role:legion");
@@ -713,9 +713,9 @@ test("IssuePage retries a failed drained title before sending the queued route",
 
   try {
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
-    fireEvent.change(status, { target: { value: "in_progress" } });
+    fireEvent.change(status, { target: { value: "backlog" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
     );
 
     const title = await openTitleEditor();
@@ -730,7 +730,7 @@ test("IssuePage retries a failed drained title before sending the queued route",
     fireEvent.submit(routeForm);
 
     act(() => {
-      statusSave.resolve({ ...issue, status: "in_progress" });
+      statusSave.resolve({ ...issue, status: "backlog" });
     });
     await waitFor(() =>
       expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { title: "Queued title" })

@@ -54,7 +54,7 @@ import { ConversationTab } from "../conversation/ConversationTab";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { issueStatuses } from "../project/board-model";
+import { selectableStatusesFor } from "../project/board-model";
 import {
   buildIssuePath,
   type IssueRoute,
@@ -72,12 +72,6 @@ import { IssueLabels } from "./IssueLabels";
 import { IssueTabs } from "./IssueTabs";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueDrafts } from "./useIssueDrafts";
-
-const openIssueStatuses = issueStatuses.filter((status) => status !== "done");
-
-function selectableStatusesFor(status: string) {
-  return status === "done" ? issueStatuses : openIssueStatuses;
-}
 
 function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
   return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
