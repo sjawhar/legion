@@ -1,13 +1,14 @@
 {
-  "head": "b1a342d2228ba90c1d26ba5384828a7589c0ec8a",
+  "head": "c6796f71208877745475397775f6a6feb77bd616",
   "codeHead": "ad8ed4d9944c5a9e594c232d09749c334d739b8d",
   "pr": {
     "number": 1017,
     "url": "https://github.com/sjawhar/legion/pull/1017",
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
-    "ci": "Tests run 34750833887 — lint, pr-title, typecheck, test all success at b1a342d2228ba90c1d26ba5384828a7589c0ec8a",
-    "testerComment": "https://github.com/sjawhar/legion/pull/1017#issuecomment-5652761998"
+    "ci": "Tests run 34754210644 — lint, pr-title, typecheck, test all success at c6796f71208877745475397775f6a6feb77bd616",
+    "testerComment": "https://github.com/sjawhar/legion/pull/1017#issuecomment-5652761998",
+    "testerCommentRound2": "https://github.com/sjawhar/legion/pull/1017#issuecomment-5652957889"
   },
   "passed": 2,
   "failed": 0,
@@ -15,7 +16,7 @@
   "acceptance": {
     "1": {
       "verdict": "awaiting deployment surface",
-      "evidence": "No operator record of the tier move + relaunch on LEGION-77 (dispatch_read at 10:30Z: only the decision ask 5e3d2fa8 is open). From worker pane %381 at 2026-09-13T10:31:29Z, status only, no request opened: `secrets get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request` -> {\"key\":\"GH_AGENT_APP_PRIVATE_KEY_B64\",\"tier\":\"agent\"}; `secrets get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request` -> {\"key\":\"GH_REVIEW_APP_PRIVATE_KEY_B64\",\"tier\":\"agent\"}. Both still agent-tier. Never ran `secrets <KEY> -- <cmd>` or `secrets get <KEY>` without --no-request for either App key."
+      "evidence": "Round 2 (11:22Z): dispatch_read LEGION-77 shows no operator record of the tier move or the terminal-pane relaunch (events since round 1: daemon status writes and the spec v9 revision; decision ask 5e3d2fa8 still open). From worker pane %413 at 2026-09-13T11:22:50Z, status only, no request opened: `secrets get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request` -> {\"key\":\"GH_AGENT_APP_PRIVATE_KEY_B64\",\"tier\":\"agent\"}; `secrets get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request` -> {\"key\":\"GH_REVIEW_APP_PRIVATE_KEY_B64\",\"tier\":\"agent\"}. Round 1 (pane %381, 10:31:29Z) read the same. Never ran `secrets <KEY> -- <cmd>` or `secrets get <KEY>` without --no-request for either App key."
     },
     "2": {
       "verdict": "awaiting deployment surface",
@@ -23,26 +24,47 @@
     },
     "3": {
       "verdict": "pass",
-      "evidence": "Unit: packages/daemon `bun test src/daemon/__tests__/config.test.ts src/cli/__tests__/index.test.ts` at b1a342d2 -> 92 pass, 0 fail, 223 expect() calls. Live positive: real `legion start leg77t --config /tmp/legion77-tester/legion.yaml` from a tester-owned tmux pane (stdin /dev/pts/105), fresh state_dir + XDG_STATE_HOME, scratch NATS 14227 with ENVOY_NOTIFICATIONS, dead-port Dispatch/Envoy, omp_launch_prefix [], LEGION_* (incl. LEGION_OMP_PATH)/TMUX/GH_* scrubbed, SECRETSD_SESSION_TOKEN_FILE left exported in the launching pane, fake `secrets` first on PATH (--no-request fabricated {\"key\":NAME,\"tier\":\"human\",\"grant\":false}; --value exec'd the real binary, agent-tier today so no request opened). Log: both `[legion] requesting <NAME> from secretsd (human tier; a YubiKey tap may be needed)` lines, `legion daemon listening on 127.0.0.1:19390`, `legion worker stream listening on 127.0.0.1:19391`; GET /legion/v1/state -> {\"project\":\"leg77t\",\"version\":27,\"issues\":0,\"trees\":0}; legions.json written (launch hold passed); daemon pid fd/0 -> /dev/pts/105 with SECRETSD_SESSION_TOKEN_FILE still in its own environ; SIGTERM -> EXIT=0, ports released. Fake call log: `get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request`, `--value`, `get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request`, `--value`, each on /dev/pts/105 with SECRETSD_SESSION_TOKEN_FILE unset. Live negative: fake tier agent, fresh pane /dev/pts/75 -> exit 1, message line exactly `App private key GH_AGENT_APP_PRIVATE_KEY_B64 is readable by agent-tier callers; move it to a daemon-only store`, one --no-request call, no --value call, no port bound, state_dir never created (Bun stack trace around the message is the pre-existing `legion start` error shape, same for a failing private_key_command). `legion start leg77t --config … --check-config` with the fake first on PATH (Bun.which resolved the fake) -> `Config OK: project=leg77t`, exit 0, fake never invoked (no calls file)."
+      "evidence": "Round 2 bare gate at c6796f71: packages/daemon `bun test src/daemon/__tests__/config.test.ts src/cli/__tests__/index.test.ts` -> 92 pass, 0 fail, 223 expect() calls. `jj diff --from ad8ed4d9 --to c6796f71 --summary` outside .legion/, docs/deployment.md and packages/daemon/src/daemon/AGENTS.md is empty, so the round-1 live boot stands (code byte-identical). Round 1: Unit: packages/daemon `bun test src/daemon/__tests__/config.test.ts src/cli/__tests__/index.test.ts` at b1a342d2 -> 92 pass, 0 fail, 223 expect() calls. Live positive: real `legion start leg77t --config /tmp/legion77-tester/legion.yaml` from a tester-owned tmux pane (stdin /dev/pts/105), fresh state_dir + XDG_STATE_HOME, scratch NATS 14227 with ENVOY_NOTIFICATIONS, dead-port Dispatch/Envoy, omp_launch_prefix [], LEGION_* (incl. LEGION_OMP_PATH)/TMUX/GH_* scrubbed, SECRETSD_SESSION_TOKEN_FILE left exported in the launching pane, fake `secrets` first on PATH (--no-request fabricated {\"key\":NAME,\"tier\":\"human\",\"grant\":false}; --value exec'd the real binary, agent-tier today so no request opened). Log: both `[legion] requesting <NAME> from secretsd (human tier; a YubiKey tap may be needed)` lines, `legion daemon listening on 127.0.0.1:19390`, `legion worker stream listening on 127.0.0.1:19391`; GET /legion/v1/state -> {\"project\":\"leg77t\",\"version\":27,\"issues\":0,\"trees\":0}; legions.json written (launch hold passed); daemon pid fd/0 -> /dev/pts/105 with SECRETSD_SESSION_TOKEN_FILE still in its own environ; SIGTERM -> EXIT=0, ports released. Fake call log: `get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request`, `--value`, `get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request`, `--value`, each on /dev/pts/105 with SECRETSD_SESSION_TOKEN_FILE unset. Live negative: fake tier agent, fresh pane /dev/pts/75 -> exit 1, message line exactly `App private key GH_AGENT_APP_PRIVATE_KEY_B64 is readable by agent-tier callers; move it to a daemon-only store`, one --no-request call, no --value call, no port bound, state_dir never created (Bun stack trace around the message is the pre-existing `legion start` error shape, same for a failing private_key_command). `legion start leg77t --config … --check-config` with the fake first on PATH (Bun.which resolved the fake) -> `Config OK: project=leg77t`, exit 0, fake never invoked (no calls file)."
     },
     "4": {
       "verdict": "pass",
-      "evidence": "docs/deployment.md and the packages/daemon/src/daemon/AGENTS.md GitHub Apps paragraph: every quoted daemon message matches config.ts character for character after unwrapping markdown line breaks (`github_apps.<role> requires exactly one of private_key, private_key_command, or private_key_secret`; `App private key <NAME> is readable by agent-tier callers; move it to a daemon-only store`; `[legion] requesting <NAME> from secretsd (human tier; a YubiKey tap may be needed)`; `secrets get <NAME> --no-request` / `--value`; `-----BEGIN`; `resolveSecrets: false`). secretsd facts verified against the installed secrets 3.2.1 binary (strings): `a tokenless request came from a known agent terminal`, `there is neither a terminal tty nor a session token`, `SECRETSD_MAX_GRANT_SECS`, `secrets.human.d`, `exists in both agent and human tiers; refusing ambiguous access`; `secrets edit-human --help` = 'writes piped stdin non-interactively'; source roots match ~/.config/secretsd/config.toml (~/.dotfiles, ~/.dotfiles/.secrets); ~/.mise/shims/secrets exists; config loads before resolveDaemonEnvironment (cli/index.ts:357 -> daemon/index.ts:254). Runbook covers: where daemon-only credentials live; launcher constraints (terminal pane no agent has used, stdin on the terminal, SECRETSD_SESSION_TOKEN_FILE unset); grant scope (per (terminal, secretsd run), 12 h, ends on secretsd restart / 12 h / terminal closed / secrets lock / key rewritten); private_key_secret form + refusal meaning; rotation order 1-7 with step 4 = the quiet `secrets get <KEY> --no-request` -> \"tier\":\"human\",\"grant\":false check and the stated reason `secrets <KEY> -- <cmd>` is not used. The 12 h / 43200 s default is the planner's source reading, not re-verifiable from the binary."
+      "evidence": "Round 2 at c6796f71 (spec v9): docs/deployment.md 'Rotating the App keys' steps 5-7 are rotate + `secrets edit-human <NAME>` ('Do not revoke anything yet') -> restart the daemon from the launcher pane and confirm `legion gh -- auth status` from a fresh worker pane -> 'Only now revoke the old private keys', with the one-sentence reason (the running daemon signs every installation-token request with the key it decoded at start-up and holds in memory until it restarts; revoking first breaks `legion gh`, the `jj git push` credential and identity leases in every pane until step 6 completes, with no rollback if that restart fails). Steps 1-4 unchanged (step 4 = the quiet --no-request check with the stated reason). Every quoted daemon message in both files still matches config.ts character for character after unwrapping (exactly-one refusal, agent-tier refusal, `[legion] requesting ...` line, --no-request/--value, -----BEGIN, SECRETSD_SESSION_TOKEN_FILE, resolveSecrets: false). AGENTS.md: `grep -c 'base64-$'` -> 0; `base64-decodes` whole on line 113. Round 1: docs/deployment.md and the packages/daemon/src/daemon/AGENTS.md GitHub Apps paragraph: every quoted daemon message matches config.ts character for character after unwrapping markdown line breaks (`github_apps.<role> requires exactly one of private_key, private_key_command, or private_key_secret`; `App private key <NAME> is readable by agent-tier callers; move it to a daemon-only store`; `[legion] requesting <NAME> from secretsd (human tier; a YubiKey tap may be needed)`; `secrets get <NAME> --no-request` / `--value`; `-----BEGIN`; `resolveSecrets: false`). secretsd facts verified against the installed secrets 3.2.1 binary (strings): `a tokenless request came from a known agent terminal`, `there is neither a terminal tty nor a session token`, `SECRETSD_MAX_GRANT_SECS`, `secrets.human.d`, `exists in both agent and human tiers; refusing ambiguous access`; `secrets edit-human --help` = 'writes piped stdin non-interactively'; source roots match ~/.config/secretsd/config.toml (~/.dotfiles, ~/.dotfiles/.secrets); ~/.mise/shims/secrets exists; config loads before resolveDaemonEnvironment (cli/index.ts:357 -> daemon/index.ts:254). Runbook covers: where daemon-only credentials live; launcher constraints (terminal pane no agent has used, stdin on the terminal, SECRETSD_SESSION_TOKEN_FILE unset); grant scope (per (terminal, secretsd run), 12 h, ends on secretsd restart / 12 h / terminal closed / secrets lock / key rewritten); private_key_secret form + refusal meaning; rotation order 1-7 with step 4 = the quiet `secrets get <KEY> --no-request` -> \"tier\":\"human\",\"grant\":false check and the stated reason `secrets <KEY> -- <cmd>` is not used. The 12 h / 43200 s default is the planner's source reading, not re-verifiable from the binary."
     },
     "5": {
       "verdict": "architect-owned, not yet opened",
       "evidence": "The rotation action ask follows acceptance 1 and 2; only the decision ask 5e3d2fa8 is open on LEGION-77."
     }
   },
-  "documentationFeedback": "Docs pass. One wording nit for the Fast-follow line: packages/daemon/src/daemon/AGENTS.md line 112 wraps `base64-` / `decodes` across a line break (renders 'base64- decodes').",
+  "documentationFeedback": "Docs pass at c6796f71. The round-1 wording nit (AGENTS.md `base64-`/`decodes` wrap) is fixed in 0be9d772c8da; PR Fast-follow set to none.",
   "observations": [
-    "The head under test is b1a342d2 (ad8ed4d9 + implement: record handoff); code identical to the implementer's E2E head.",
+    "Round 2 head c6796f71 = docs-only 0be9d772 + implement handoff; code head for the live boot remains ad8ed4d9 (byte-identical under c6796f71).",
     "Pane-launched scratch daemon must scrub LEGION_OMP_PATH (inherited omp-18.1.15-sami.9bff2014-rpcfix) exactly as the implementer found; with it scrubbed the pinned 18.1.18-sami.20260912-104423 passed both boot probes.",
     "Acceptance 3's live human-tier grant path (real secretsd scoping a tokenless request to the launcher terminal, real tap) is exercised for the first time at the operator's relaunch; the fake proves the daemon's side (order, stdin inheritance, token variable drop, refusal) only.",
-    "Scratch artifacts: /tmp/legion77-tester (fake, config, logs, call logs); scratch NATS container and tester tmux server torn down; no Legion pane or private tmux server was created for project leg77t."
+    "Scratch artifacts: /tmp/legion77-tester (fake, config, logs, call logs); scratch NATS container and tester tmux server torn down; no Legion pane or private tmux server was created for project leg77t.",
+    "Working copy carries an untracked-by-intent `.omp/config.yml` (empty file OMP writes); kept out of every tester commit via path-scoped `jj split`."
   ],
-  "verifiedAt": "2026-09-13T10:40:00Z",
+  "verifiedAt": "2026-09-13T11:25:00Z",
+  "rounds": [
+    {
+      "round": 1,
+      "head": "b1a342d2228ba90c1d26ba5384828a7589c0ec8a",
+      "handoffCommit": "00f0458a21f6",
+      "comment": "https://github.com/sjawhar/legion/pull/1017#issuecomment-5652761998",
+      "ci": "Tests run 34750833887 all success"
+    },
+    {
+      "round": 2,
+      "head": "c6796f71208877745475397775f6a6feb77bd616",
+      "reviewRound": 1,
+      "correctiveCommit": "0be9d772c8da",
+      "docsOnly": true,
+      "diffSummary": "M .legion/implement.json; A .legion/review.json; M docs/deployment.md; M packages/daemon/src/daemon/AGENTS.md (00f0458a -> c6796f71); .omp/config.yml not in the diff",
+      "comment": "https://github.com/sjawhar/legion/pull/1017#issuecomment-5652957889",
+      "ci": "Tests run 34754210644 all success",
+      "liveBootRepeated": false
+    }
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T10:41:26.480Z"
+  "completed": "2026-09-13T11:25:13.074Z"
 }
