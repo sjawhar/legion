@@ -1,12 +1,15 @@
 {
-  "pr": 1021,
-  "prUrl": "https://github.com/sjawhar/legion/pull/1021",
-  "headTested": "02dc6def3159520055e5d957ad16c62de4b39f5a",
-  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
-  "specVersion": 3,
   "passed": 6,
   "failed": 0,
   "failures": [],
+  "observations": [
+    "Round-1 wording observation (role prompts quoted the REST refusal text for git push) — resolved by 9562b3a4."
+  ],
+  "pr": 1021,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1021",
+  "headTested": "9562b3a4cca61ac3650f2aad2a7d4b758664f94b",
+  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
+  "specVersion": 3,
   "acceptance": {
     "1": "PASS. github-apps.ts: one exhaustive Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (architect/planner/tester/reviewer → review; implementer/merger → implement). MODE_TO_ROLE, modeToRole, catchup's WORKER_MODE absent repo-wide (only mentioned in .legion/implement.json). github-apps.test.ts: 'maps every Legion role to exactly one App' (iterates LEGION_ROLES) and 'runs the tester as the review App, never the code-writing one'.",
     "2": "PASS. api/routes/credentials.ts (handleGitCredential, handleGhToken) and api/routes/workers.ts (/worker/started lease) import appRoleForLegionRole from ../../github-apps; catchup.ts too. api.test.ts 'reissues a daemon-registered worker session capability and keeps grants short-lived' pins gitName legion-review[bot], appLogin legion-review[bot], tokenRoles ['review','review'] and git-credential 200 for a tester; 'registers a worker session from a valid worker boot token without touching the issue's active phase' pins gitName legion-review[bot]. api/github.ts's gh() keeps a default appRole of 'implement' for the daemon's own reads — a default argument, not a role mapping.",
@@ -31,12 +34,30 @@
     "legion-implementer (3202636)": "actions:write, checks:read, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, statuses:write, workflows:write",
     "legion-reviewer (3202653)": "actions:write, checks:write, issues:write, metadata:read, packages:read, pull_requests:write"
   },
-  "observations": [
-    "roles/planner.md and roles/tester.md quote the refusal as `Resource not accessible by integration`; a git push from the review App actually fails with `remote: Repository not found.` (the REST text appears only on /git/refs). Wording only — the skill's completion gate already says the push is refused and not to retry. Fast-follow candidate, no behavior change."
-  ],
   "pushAttempted": false,
-  "prBodyE2E": "filled: tester's independent run block added before Fast-follow, with tester Legion footer",
+  "prBodyE2E": "round 1 block kept; round 2 added `E2E re-check 02dc6def → 9562b3a4: docs-only, code head 4108e121 unchanged, bare gates only` with the tester Legion footer",
+  "headTestedPrevious": "02dc6def3159520055e5d957ad16c62de4b39f5a",
+  "recheck": {
+    "kind": "docs-only re-check 02dc6def → 9562b3a4; code head 4108e121b83f425a2131e5392bc649a0b4f1bb8f unchanged; bare gates only; live sandbox proof (acceptance 3/4) not repeated",
+    "commitsAbove02dc6def": [
+      "8339595e60a3 test: record handoff (this tester's, carried by the implementer's push)",
+      "9562b3a4cca6 docs: name the real push refusal a non-pushing role sees (LEGION-42)"
+    ],
+    "filesChanged": [
+      ".legion/test.json (added)",
+      "packages/daemon/src/daemon/AGENTS.md (+3/-2)",
+      "packages/pi-envoy/roles/planner.md (+3/-2)",
+      "packages/pi-envoy/roles/tester.md (+3/-2)",
+      "skills/legion-worker/SKILL.md (+3/-2)"
+    ],
+    "noTsChanged": true,
+    "wordingVerified": "all four now say a refused git push reads `remote: Repository not found.` and attribute `Resource not accessible by integration` to the REST/GraphQL API only — matches what the sandbox run observed",
+    "ci": "9562b3a4: Tests run 34752717333 (lint, test, typecheck, pr-title success); Legion Envoy and Contracts run 34752717364 (pi-envoy success, path-filtered siblings skipped)",
+    "prState": "MERGEABLE / BLOCKED (branch protection; not CONFLICTING); not rebased",
+    "result": "PASS; observation from round 1 resolved by 9562b3a4",
+    "pushAttempted": false
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T10:43:31.874Z"
+  "completed": "2026-09-13T10:48:27.859Z"
 }
