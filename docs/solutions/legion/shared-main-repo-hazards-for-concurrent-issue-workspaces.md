@@ -87,6 +87,11 @@ back after (`cp .omp/config.yml /tmp/…; jj workspace update-stale; cp /tmp/…
 the extension's provisioning is gone until the pane relaunches. Nothing tracked was touched; the
 chain and the bookmark were exactly where the push had left them.
 
+Since LEGION-45 (#1020) the extension refuses these commands in every phase-worker pane — bash,
+eval, hub, and a worker's `task` subagents — once the pi-envoy release carrying the guard is
+installed into the profile. How the matcher is built and proven, and why it binds subagents:
+`shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md`.
+
 ## Hazard 3 — a daemon catch-up prompt can overwrite the active phase, so a real completion 409s (LEGION-37 acceptance 7)
 
 `legion handoff complete` checks `phases[issue]` names this role and this session. A
