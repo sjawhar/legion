@@ -10,14 +10,14 @@
     "repo": "sjawhar/legion",
     "number": 1029,
     "url": "https://github.com/sjawhar/legion/pull/1029",
-    "codeHead": "55a042fff733",
+    "codeHead": "cf78801fc1ce (was 55a042fff733 before the #1011 conflict-forced rebase)",
     "tier": "T4",
     "landsAfter": [
       "#1011 (LEGION-40)",
       "#1010 (LEGION-41)",
       "#1026 (LEGION-61)"
     ],
-    "ciRun": "Tests run 34756988633 at 55a042fff733: completed success — lint, test, typecheck, pr-title all success (CI does not run the shell harnesses)"
+    "ciRun": "Tests run 34758696071 at 0c2f279a2f12 (rebased head): green; earlier run 34756988633 at 55a042fff733: completed success (lint, test, typecheck, pr-title). CI does not run the shell harnesses."
   },
   "editsByTask": {
     "T1 up.sh resolve_omp_path": "mise stderr captured to a mktemp file, cat to the operator's stderr whatever the exit, file removed; on non-zero exit `not installed` in that text -> unchanged `OMP pin <pin> is not installed (mise where failed); run: mise install <pin>`, otherwise `mise where <pin> failed; mise's own message is above` (no remedy); header comment reworded per plan.",
@@ -91,7 +91,61 @@
     "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
     "docs/solutions/legion/worker-pane-shell-gotchas.md"
   ],
+  "rebases": [
+    {
+      "reason": "GitHub reported #1029 CONFLICTING against main after #1011 (LEGION-40) merged at 9a6708feb9cd (12:44Z); confirmed with `legion gh -- pr view 1029 --json mergeable,mergeStateStatus,headRefOid` -> mergeable=CONFLICTING state=DIRTY head=d542ee97fc5b. The one rebase the deployment ruling allows (Sami, 2026-09-11).",
+      "command": "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin (roots = 9a7f6fe1ded7 plan: record handoff; 5 commits rebased)",
+      "oldTip": "d542ee97fc5b (test: record handoff)",
+      "newTip": "0c2f279a2f12 (test: record handoff)",
+      "oldCodeHead": "55a042fff733",
+      "newCodeHead": "cf78801fc1ce",
+      "forkPointBefore": "5db1957059f4",
+      "forkPointAfter": "9a6708feb9cd",
+      "fingerprintBefore": "5e997e330af104ddad21ed6af7f8dcff81721826f15060edf428e05080f45059",
+      "fingerprintAfter": "15311147c7877e2aeaeb15d581d39ce4fbaa6ea9eae4dad56ab2cc389e06c373",
+      "fingerprintChanged": true,
+      "fingerprintChangeIsolation": "Excluding scripts/smoke/up.test.sh from the fileset ('~(.legion | docs/solutions | scripts/smoke/up.test.sh)'), the added/removed lines hash identically before and after: 9688970744b60be0d9ddd313ab6974a8253c22a2315030d16aa0d1e6a96e4fa6. The whole change is the resolved header hunk of up.test.sh.",
+      "conflict": {
+        "file": "scripts/smoke/up.test.sh",
+        "region": "lines 21-37 of the materialized file (the sourced-copy setup after `export SMOKE_DIR`): #1011's side renamed `source_file` -> `${source_dir}/up.sh` (`sed '$d' \"$up_script\" >\"${source_dir}/up.sh\"`) and added `cp \"${project_root}/scripts/smoke/dispatch-config.sh\" \"${source_dir}/dispatch-config.sh\"` because up.sh now sources dispatch-config.sh beside itself by BASH_SOURCE; this branch's side replaced the sed with the repo_root-pinning sed and added the fixture grep against `$source_file`.",
+        "resolution": "Kept both: the pin goes into #1011's sed writing `${source_dir}/up.sh`, the `cp` of dispatch-config.sh stays, the fixture grep reads `${source_dir}/up.sh`; comment merged into one (#1011's two lines plus the pin's reason, no claim that the copy's repository root differs from the harness's). No other conflict; `source_file` no longer appears in the file; #1011 added no success-path main() call (still the probe plus the three `(set -e; …)` forms).",
+        "squash": "resolved in the working copy, then `jj squash --from @ --into mvysqnzq scripts/smoke/up.test.sh` (path-scoped so the provisioned .omp/config.yml stayed in the working copy); 3 descendants rebased conflict-free."
+      },
+      "proofAtNewTip": {
+        "harnessesFromTmp": "at 0c2f279a2f12, `cd /tmp && bash $LEGION_WORKSPACE/scripts/smoke/<t>.test.sh`: up.test.sh exit=0 PASS=20 non-PASS-lines=0; checkpoints.test.sh exit=0 PASS=23 non-PASS-lines=0; down.test.sh exit=0 PASS=3 non-PASS-lines=0. Counts grew by #1011's own cases exactly: up +3 (`DISPATCH_URL and DISPATCH_TOKEN fall back to .dispatch.serverUrl/.dispatch.token in envoy.json`, `an exported DISPATCH_URL/DISPATCH_TOKEN wins over envoy.json`, `with neither source present, resolution stops naming the variable, the envoy.json path, and the key`); checkpoints +1 net (`checkpoints read DISPATCH_URL and DISPATCH_TOKEN from envoy.json when the variables are unset` added, the missing-token PASS line reworded).",
+        "upTestPassLines": [
+          "PASS: selects webhook ingress mode without silently falling back",
+          "PASS: an explicit LEGION_OMP_PATH override passes through; otherwise the omp-pin.ts pin must be installed under mise, and preflight names mise install when it is not",
+          "PASS: a mise failure other than not-installed stops preflight on mise's own message, without the mise install remedy",
+          "PASS: asserts a signed local GitHub ping without webhook forwarding",
+          "PASS: normalizes stored GitHub webhook secret before child processes start",
+          "PASS: SMOKE_OMP_LAUNCH_PREFIX=\"\" disables the launch prefix (omp_launch_prefix: [])",
+          "PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix",
+          "PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)",
+          "PASS: the real daemon loader rejects the retired gates.merge block",
+          "PASS: DISPATCH_URL and DISPATCH_TOKEN fall back to .dispatch.serverUrl/.dispatch.token in envoy.json",
+          "PASS: an exported DISPATCH_URL/DISPATCH_TOKEN wins over envoy.json",
+          "PASS: with neither source present, resolution stops naming the variable, the envoy.json path, and the key",
+          "PASS: records a created Dispatch root issue and reuses it on a later rerun",
+          "PASS: a missing OMP build stops up.sh in preflight before any process starts",
+          "PASS: with no override, preflight verifies the omp-pin.ts pin under mise and exports no LEGION_OMP_PATH to the daemon",
+          "PASS: an explicit LEGION_OMP_PATH override is named in the daemon env block and in no other start_process argv, and omp_invocation keeps the mise x <pin> -- omp form",
+          "PASS: records the Dispatch ingress (shared by default, rig on request) beside the other rig records and refuses any other value naming both",
+          "PASS: creates the Dispatch root issue only after the daemon and envoy bridge report ready",
+          "PASS: root-issue creation request forces past the Dispatch near-duplicate check",
+          "PASS: root-issue creation request carries a session actor for the bearer-authenticated POST"
+        ],
+        "shellcheck": "`shellcheck -S warning scripts/smoke/up.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.test.sh` -> only the pre-existing SC2155 at up.sh:22.",
+        "noPrNumbers": "`grep -n '#[0-9]'` over the four files -> no output, grep exit=1.",
+        "noBareRmRf": "`grep -n 'rm -rf' scripts/smoke/checkpoints.test.sh` -> only lines 14 and 123, the two `trap … EXIT` lines.",
+        "realMise": "The plan's `source <(sed \"\\$d\" scripts/smoke/up.sh)` form no longer works after #1011 (up.sh sources dispatch-config.sh beside itself by BASH_SOURCE, which is /dev/fd/63 under process substitution -> `/dev/fd/dispatch-config.sh: No such file or directory`). Adapted the way the harness does: `d=$(mktemp -d); sed '$d' scripts/smoke/up.sh >$d/up.sh; cp scripts/smoke/dispatch-config.sh $d/; bash -c \"source $d/up.sh; unset LEGION_OMP_PATH; …\"`. Config error (MISE_CONFIG_FILE at a non-TOML file): mise's `TOML parse error` block, `× Invalid TOML in config file: /tmp/legion71-bad-mise.toml`, then `error: mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 failed; mise's own message is above`, exit 1, no `mise install`. Non-existent pin: `mise ERROR github:sjawhar/oh-my-pi@0.0.0-nonexistent not installed`, …, `error: OMP pin github:sjawhar/oh-my-pi@0.0.0-nonexistent is not installed (mise where failed); run: mise install github:sjawhar/oh-my-pi@0.0.0-nonexistent`, exit 1.",
+        "mergeableAfterPush": "`legion gh -- pr view 1029 --json mergeable,mergeStateStatus,headRefOid` -> mergeable=MERGEABLE state=BLOCKED head=0c2f279a2f12 (BLOCKED is the checks/review gate, not a conflict). Tests run 34758696071 at that head: ci-green delivered 13:03:46Z.",
+        "prComment": "https://github.com/sjawhar/legion/pull/1029#issuecomment-5653441724 (rebase <old> → <new>; fingerprint <before> → <after>; changed; Legion footer)."
+      },
+      "noteForTester": "The fingerprint changed, so by the legion-worker rule this is a full test round, not a bare-gates re-check; the E2E line still names 55a042fff733 and is the tester's to move. #1010 (LEGION-41) and #1026 (LEGION-61) are still open; no further rebase unless GitHub reports CONFLICTING again."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T12:26:08.404Z"
+  "completed": "2026-09-13T13:04:23.083Z"
 }
