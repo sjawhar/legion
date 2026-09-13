@@ -1039,57 +1039,6 @@ describe("daemon config", () => {
     ).toThrow("dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)");
   });
 
-  it("strips every pane-secret key (Dispatch, boot token, controller secret, and their *_FILE pointers) from a private_key_command child's environment", () => {
-    const leaked: Record<string, string> = {
-      DISPATCH_TOKEN: "leaked-private-key-command-token",
-      DISPATCH_TOKEN_FILE: "/leaked/dispatch-token",
-      DISPATCH_URL: "http://leaked-private-key-command",
-      DISPATCH_MCP_URL: "http://leaked-private-key-command/mcp",
-      LEGION_BOOT_TOKEN: "leaked-boot-token",
-      LEGION_BOOT_TOKEN_FILE: "/leaked/legion-acme7-acme-7-architect",
-      LEGION_CONTROLLER_SECRET: "leaked-controller-secret",
-      LEGION_CONTROLLER_SECRET_FILE: "/leaked/legion-acme7-controller",
-      LEGION_GRANT: "leaked-grant",
-      LEGION_GRANT_FILE: "/leaked/legion-acme7-acme-7-architect-grant",
-    };
-    const saved = Object.fromEntries(Object.keys(leaked).map((key) => [key, process.env[key]]));
-    // Set directly on process.env (not resolveDaemonConfig's env param): executePrivateKeyCommand
-    // reads process.env for its spawnSync call, so its child must never see any of these keys
-    // from that environment.
-    for (const [key, value] of Object.entries(leaked)) process.env[key] = value;
-    try {
-      const file = loadConfigFromFile(
-        [
-          "project: acme/7",
-          "dispatch_project: ACME",
-          "repos:",
-          "  - acme/widgets",
-          "nats_urls:",
-          "  - nats://one:4222",
-          "github_apps:",
-          "  implement:",
-          '    app_id: "1"',
-          '    private_key_command: "env"',
-          "gates:",
-          "  design: off",
-        ].join("\n"),
-        "/tmp/legion-config"
-      );
-      const { config } = resolveDaemonConfig({ configFile: file });
-      // `env`'s stdout (the operator's real private_key_command form) becomes the "private key"
-      // here — a dump of the child's actual environment, one KEY=VALUE per line.
-      const dump = config.githubApps.implement?.privateKey ?? "";
-
-      for (const key of Object.keys(leaked)) expect(dump).not.toContain(`${key}=`);
-      expect(dump).toContain("PATH=");
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  });
-
   it("rejects missing NATS configuration instead of inventing a transport", () => {
     expect(() => loadConfig({ LEGION_ID: "acme/7" })).toThrow("ENVOY_NATS_URL");
   });

@@ -153,6 +153,7 @@ describe("real deployment instructions fragment (tmux + worker-shim, no mocks)",
         provisioningToken: async () => "installation-token",
         workerCatchup: {
           runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+          baseEnv: {},
           tokenManager: {
             getToken: async () => ({
               token: "worker-token",

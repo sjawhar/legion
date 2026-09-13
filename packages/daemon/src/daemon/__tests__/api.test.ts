@@ -191,6 +191,7 @@ describe("Legion HTTP API", () => {
     const deps: LegionApiDeps = {
       state: options?.state ?? state,
       runner,
+      baseEnv: {},
       dispatchClient: options?.dispatchClient ?? fakeDispatchClient(),
       tokenManager: {
         getToken:

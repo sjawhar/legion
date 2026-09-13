@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { stripDispatchEnv } from "./environment";
+import { isSecretLikeName } from "./environment";
 
 const SCRUBBED_ENV_KEYS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR"];
 const SCRUBBED_ENV_PREFIX = "LEGION_GITHUB_APP_";
@@ -13,19 +13,18 @@ function isolatedGhConfigDir(baseEnv: NodeJS.ProcessEnv): string {
   return path.join(stateHome, "legion", "gh");
 }
 
-/** Also strips every pane-secret key (`DISPATCH_TOKEN`/`DISPATCH_URL`, the `*_FILE` pointers, the
- * boot token and controller secret, and the retired `DISPATCH_MCP_URL` alias — see
- * `stripDispatchEnv`'s doc comment): a `gh`/git-identity child spawned for a scoped GitHub App
- * role has no legitimate use for a Dispatch bearer or a pane's boot secret, whether or not the
- * daemon's own process — or the pane this call happens to run from — carries one. */
+/** Drops every credential-shaped name (`isSecretLikeName`) — the Dispatch bearer and the `*_FILE`
+ * pointers a pane carries, the grant file pointer, provider keys, App keys — plus the gh-specific
+ * names below: a `gh`/git-identity child has no legitimate use for any of them, whether the base is
+ * the daemon's pane environment or the pane `legion gh` runs from. */
 function scrubGitHubCredentials(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const withoutDispatch = stripDispatchEnv(baseEnv);
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(withoutDispatch)) {
+  for (const [key, value] of Object.entries(baseEnv)) {
     if (
       typeof value === "string" &&
       !SCRUBBED_ENV_KEYS.includes(key) &&
-      !key.startsWith(SCRUBBED_ENV_PREFIX)
+      !key.startsWith(SCRUBBED_ENV_PREFIX) &&
+      !isSecretLikeName(key)
     ) {
       env[key] = value;
     }

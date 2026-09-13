@@ -67,6 +67,8 @@ export interface WorkerCatchupDeps {
   runner: CommandRunner;
   tokenManager: Pick<TokenManager, "getToken">;
   repo: `${string}/${string}`;
+  /** The base of every `gh` child's environment — the daemon's `paneEnv`, never `process.env`. */
+  baseEnv: NodeJS.ProcessEnv;
 }
 
 interface Artifact {
@@ -314,7 +316,7 @@ export async function workerCatchup(
   const [owner] = deps.repo.split("/") as [string, string];
   const credential = await deps.tokenManager.getToken(modeToRole(WORKER_MODE[role]), owner);
   const options: CommandRunnerOptions = {
-    env: buildRoleEnv(credential.token, credential.gitIdentity, process.env),
+    env: buildRoleEnv(credential.token, credential.gitIdentity, deps.baseEnv),
   };
   const unhandled: CatchupUnhandled[] = [];
   for (const artifact of artifactsFor(s, issue)) {

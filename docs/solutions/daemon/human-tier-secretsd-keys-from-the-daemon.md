@@ -56,8 +56,10 @@ With `SECRETSD_SESSION_TOKEN_FILE` set the client presents that token and the br
 caller descends from the registering session's process tree (`ForeignCaller` otherwise). A daemon
 started from inside an OMP session's tree would therefore *succeed* on the token path and land the
 App keys' grant on that agent session — the exposure the feature exists to close. So the two
-`secrets` children get `stripDispatchEnv(process.env)` minus exactly that one variable, and the
-request always takes the terminal path. `SECRETSD_SOCK` is the broker's socket override
+`secrets` children get the daemon's own `process.env` minus exactly that one variable (they are the
+daemon acting for itself, like `private_key_command`; panes get the allow-listed `paneEnv`
+instead — LEGION-74), and the request always takes the terminal path. `SECRETSD_SOCK` is the
+broker's socket override
 (`BrokerClient::from_environment`), not a session; dropping it would break the client. The
 runbook's `env -u SECRETSD_SESSION_TOKEN_FILE` in the launcher shell is belt to this brace.
 

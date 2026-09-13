@@ -35,6 +35,7 @@ function startApi(
   const deps: LegionApiDeps = {
     state,
     saveState: async () => {},
+    baseEnv: {},
     tokenManager: {
       getToken: async () => ({
         token: "test-token",

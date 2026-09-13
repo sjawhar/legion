@@ -95,6 +95,8 @@ export interface LegionApiDeps {
   state: LegionState;
   saveState?: () => Promise<void>;
   runner?: CommandRunner;
+  /** The base of every `gh` child's environment — the daemon's `paneEnv`, never `process.env`. */
+  baseEnv: NodeJS.ProcessEnv;
   tokenManager: GitHubTokenSource;
   dispatchClient: DispatchClient;
   processManager: LegionApiProcessManager;
@@ -199,7 +201,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const github = new GitHubService(config.repo, deps.tokenManager, runner);
+  const github = new GitHubService(config.repo, deps.tokenManager, runner, deps.baseEnv);
 
   const ctx: RouteContext = {
     config,

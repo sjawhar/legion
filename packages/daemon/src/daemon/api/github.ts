@@ -20,14 +20,16 @@ export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
 /** Fetches GitHub App tokens for Legion's single configured repo and runs `gh` under that
  * identity. Every Legion issue is a Dispatch key with no owner/repo of its own (D1/D2 of the T20
  * design) — the repo is `DaemonConfig.repo`, injected once at construction, never derived from
- * an issue key. */
+ * an issue key. `baseEnv` is the daemon's `paneEnv`: the `gh` child gets it plus the minted
+ * token and identity, never the daemon's own `process.env`. */
 export class GitHubService {
   private readonly owner: string;
 
   constructor(
     repo: `${string}/${string}`,
     private readonly tokenManager: GitHubTokenSource,
-    private readonly runner: CommandRunner
+    private readonly runner: CommandRunner,
+    private readonly baseEnv: NodeJS.ProcessEnv
   ) {
     const [owner] = repo.split("/") as [string, string];
     this.owner = owner;
@@ -40,7 +42,7 @@ export class GitHubService {
   async gh(command: string[], appRole: GitHubAppRole = "implement"): Promise<string> {
     const lease = await this.tokenForIssue(appRole);
     const result = await this.runner(command, {
-      env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+      env: buildRoleEnv(lease.token, lease.gitIdentity, this.baseEnv),
     });
     if (result.exitCode !== 0) {
       throw new Error(`GitHub command failed: ${result.stderr || result.stdout}`);

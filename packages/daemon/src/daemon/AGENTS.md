@@ -102,8 +102,9 @@ thread open with exit 0.
 
 Each App's private key comes from exactly one of three `legion.yaml` sources under
 `github_apps.<role>` (`loadGitHubApps`, `config.ts`): `private_key` (the PEM inline),
-`private_key_command` (a shell command run at config load with `stripDispatchEnv(process.env)`,
-whose stdout is the PEM), or `private_key_secret: <NAME>` — a secretsd key holding the PEM
+`private_key_command` (a shell command run at config load under the daemon's own `process.env` —
+it exists to read the key the launcher supplies, and is never a pane — whose stdout is the PEM),
+or `private_key_secret: <NAME>` — a secretsd key holding the PEM
 base64-encoded. Two or none refuse with `github_apps.<role> requires exactly one of private_key,
 private_key_command, or private_key_secret`. `private_key_secret` is the form for a shared box
 where panes run as the daemon's user (LEGION-77, `docs/deployment.md`): `resolvePrivateKeySecret`

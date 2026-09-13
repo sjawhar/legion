@@ -465,6 +465,7 @@ function manager(
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
       repo: "sjawhar/legion",
+      baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({
@@ -4281,6 +4282,7 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => client,
       workerCatchup: {
         repo: "sjawhar/legion",
+        baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
           getToken: async () => {

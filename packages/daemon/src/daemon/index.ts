@@ -115,15 +115,18 @@ function repoOwner(repo: `${string}/${string}`): string {
   return owner;
 }
 
+/** `baseEnv` is the daemon's `paneEnv`: a `gh` child gets the allow-listed environment plus its
+ * minted token and identity (`buildRoleEnv`), never the daemon's own `process.env`. */
 export function createCiStatusFetcher(
   tokenManager: Pick<TokenManager, "getToken">,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner,
+  baseEnv: NodeJS.ProcessEnv
 ): (prRefs: Record<string, GitHubPRRef>) => Promise<Record<string, CiFetchResult>> {
   return (prRefs) =>
     getCiStatusBatch(prRefs, runner, async (owner) => {
       const lease = await tokenManager.getToken("implement", owner);
       return {
-        env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+        env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
       };
     });
 }
@@ -397,7 +400,12 @@ async function startDaemonLocked(
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
-    workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
+    workerCatchup: {
+      runner,
+      tokenManager: deps.tokenManager,
+      repo: config.repo,
+      baseEnv: environment.paneEnv,
+    },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
     sleep: deps.sleep,
@@ -445,7 +453,11 @@ async function startDaemonLocked(
     config,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
-  const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
+  const fetchCiStatusBatch = createCiStatusFetcher(
+    deps.tokenManager,
+    deps.runner,
+    environment.paneEnv
+  );
 
   const emitResync = async (options?: { force?: boolean }): Promise<void> => {
     // Serialized against the shared durable mutation lane: resync reads/writes the same PrState
@@ -484,6 +496,7 @@ async function startDaemonLocked(
     state,
     saveState: save,
     runner,
+    baseEnv: environment.paneEnv,
     tokenManager: deps.tokenManager,
     processManager,
     dispatchClient: deps.dispatchClient,
