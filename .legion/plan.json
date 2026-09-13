@@ -1,0 +1,152 @@
+{
+  "taskCount": 6,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks T1-T6 in order (T4 docs may be written any time after T2). TDD: write each named test first and watch it fail, then the change. Run the whole daemon suite once at T5. The implementer runs the rig proof (T6) before handing to the tester; the tester repeats it and adds the negative control's evidence to the PR body's E2E line.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the phase contract: workspace binding, jj rules, handoff write, the PR body format, and the exact push procedure",
+      "test-driven-development — every task lists the failing test to write before the change; the fake-tmux verb sequences are the spec",
+      "verification-before-completion — the rig proof and the full daemon suite must have run, with output quoted, before implement.json claims done",
+      "using-secrets — the rig start (`secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- …`) and the panes' `omp_launch_prefix` go through secretsd"
+    ],
+    "test": [
+      "legion-worker — the tester fills the PR body's E2E section from the real surface (the rig), never from a handoff, with one negative control",
+      "verification-before-completion — quote the rig log lines and tmux listings; a green unit suite is not proof of acceptance",
+      "using-secrets — the rig start needs the same secretsd wrapper as the implementer's run"
+    ],
+    "review": [
+      "legion-worker — one review per round; verify CI, Threads, and E2E facts against GitHub; thermonuclear passes once at the reviewed head",
+      "receiving-code-review — the implementer answers every thread with exactly one of the three accepted forms before `legion threads resolve`"
+    ]
+  },
+  "concerns": [
+    "LEGION-76 (cross-issue new-session lane) edits the same has-session/new-session step inside openWindow; keep ensureSession one function so its lane can wrap it, and expect a textual conflict in openWindow's body for whichever pull request lands second.",
+    "retireAndRespawnStuckController returns without spawning when the controller is found already dead at the deadline (controllerAlive() clears the locator; `if (!stillAlive) return`), and nothing periodic calls ensureController — a dead-before-registering controller stays absent until an Envoy no-holder exception or a restart. Outside this issue; worth its own LEGION issue.",
+    "The workspace's working copy holds an untracked-by-intent `.omp/config.yml` written by provisioning; commit only your own paths with `jj split <paths>` and set the bookmark on the described commit, never the bare working copy.",
+    "A rig started from a worker pane inherits that pane's LEGION_* identity (LEGION-88) and its controller never registers; the rig recipe scrubs those variables before up.sh.",
+    "The rig's 15 s registration deadline retires every controller that has not registered within 15 s, so the retire/respawn cycle repeats until one registers first; each rig start yields at least the boot controller's cycle — restart the rig for more."
+  ],
+  "planDocument": "dispatch://LEGION-89/artifact/plan-md",
+  "summary": "When a stuck controller whose window is the private tmux session's only window is retired, tmux tears down the session and server; the respawn's has-session can still answer present and its new-window then fails on a dead server, leaving no controller. Fix in openWindow (tmux.ts): on a new-window failure after has-session said present, run the session-ensuring step again — if it had to create the session, retry new-window once and report the recovery for the runtime to log; if the session is still there, or this call created it, fail as today. Every tmux.ts failure message ends with tmux's stderr or `tmux printed nothing on stderr`.",
+  "verifiedFacts": [
+    "At incident head 9a6708fe openWindow printed stdout (empty on failure); LEGION-74 (2553ca37) already switched every tmux.ts message to stderr via failure(). The incident's tmux stderr is therefore unknown; the fix decides by re-asking tmux, not by wording.",
+    "stderr reaches failure(): state/fetch.ts defaultRunner pipes stderr and returns it; environment.ts createDaemonRunner passes the result through; index.ts hands that runner to TmuxRuntime as tmux.run.",
+    "Race window: TmuxRuntime.stop confirms a graceful stop when the shim socket closes; worker-shim stops its listener the instant OMP exits, before Bun exits, before the pane's shell exits, before tmux reaps pane -> window -> session -> server (exit-empty). kill-pane is synchronous: on tmux 3.7c has-session right after kill-pane of the last pane answers `no server running on <socket>`.",
+    "tmux 3.7c stderr shapes (measured): server gone `no server running on /tmp/tmux-1000/<socket>`; socket never created `error connecting to … (No such file or directory)`; server alive/session gone: new-window says `can't find window: <s>`, has-session says `can't find session: <s>`; second new-session `duplicate session: <s>`; new-session on a stale socket starts a fresh server (exit 0).",
+    "Baseline green: bun test tmux.test.ts runtime.contract.test.ts -> 93 pass after `bun install` in the workspace."
+  ],
+  "design": {
+    "tmux.ts": "Split openWindow into ensureSession(server, session, owner): Promise<boolean> (has-session; else the existing single-invocation new-session + set-option update-environment '' and the session owner marker; returns whether this call created it) and newWindowAttempt(server, session, name, environmentAndCommand, created) (new-window -P -F; when created, kill the bootstrap window afterwards whatever the outcome). openWindow: ensure -> attempt; on non-zero exit: if created, throw the first error as today; else created = await ensureSession(...) again — if it returns false (session still there) throw the first error as today; else attempt once more — on success return { windowId, paneId, pid, recovered: <first error text> }, on failure throw `tmux new-window failed (exit N)<stderr> on the second attempt, after has-session reported <session> present and then gone (first attempt: <first error>)`. failure() returns `: <stderr>` or `: tmux printed nothing on stderr`. Export interface OpenedWindow { windowId; paneId; pid; recovered?: string }.",
+    "runtime-tmux.ts": "Private openWindow(name, paneArgv) helper used by spawnIssueProcess and spawnController: calls tmux.openWindow(this.deps.tmux, session, name, paneArgv, session) and, when recovered is set, console.error(`[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${recovered}); recreated it and opened the window on a second attempt`).",
+    "processes.ts": "No product change: the `[legion] failed to retire and respawn a stuck controller:` line prints the thrown Error, whose message now always ends with stderr or the explicit empty-stderr note. Tests only.",
+    "rejected": [
+      "Blind retry on any new-window failure (doubles attempt counts existing processes tests pin; re-runs unrelated failures).",
+      "Waiting in stop() for the pane to vanish (spec asks for the fall-back; a poll on every stop; misses a server that died for another reason).",
+      "Classifying by stderr wording (differs by case/version; asking tmux again is the direct test).",
+      "Logging from tmux.ts (module returns details, runtime logs — lookupPane precedent).",
+      "Re-arming a timer in retireAndRespawnStuckController on a failed respawn (new state; spec rules it out; second failure is an error by the spec's table)."
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "failure() says when tmux printed nothing on stderr",
+      "files": [
+        "packages/daemon/src/daemon/tmux.ts",
+        "packages/daemon/src/daemon/__tests__/tmux.test.ts"
+      ],
+      "steps": [
+        "tmux.test.ts: change the pin in 'throws on any other failure, carrying tmux's stderr and never its stdout' from toBe('tmux show-environment -s -g failed (exit 1)') to the new suffix `: tmux printed nothing on stderr` (keep its not.toContain('leaked-value')).",
+        "tmux.test.ts openWindow: add 'says so when tmux printed nothing on stderr' — has-session 0, new-window { stdout: '', stderr: '', exitCode: 1 } -> rejection message exactly `tmux new-window failed (exit 1): tmux printed nothing on stderr`. Run; both fail.",
+        "tmux.ts failure(): return detail ? `: ${detail}` : ': tmux printed nothing on stderr'; update its doc comment (stderr only, never stdout; explicit when empty).",
+        "bun test src/daemon/__tests__/tmux.test.ts -> green."
+      ],
+      "commit": "fix(daemon): tmux failure messages say when tmux printed nothing on stderr (LEGION-89)"
+    },
+    {
+      "id": "T2",
+      "title": "openWindow recreates a session that died between has-session and new-window",
+      "files": [
+        "packages/daemon/src/daemon/tmux.ts",
+        "packages/daemon/src/daemon/__tests__/tmux.test.ts"
+      ],
+      "tests": [
+        "race recovered: has-session answers 0 on its first call, then 1 with stderr 'no server running on /tmp/tmux-1000/legion-omp' until a new-session has run; new-window answers { stdout: '', stderr: 'no server running on /tmp/tmux-1000/legion-omp', exitCode: 1 } first and '@7 %9 4242\\n' second. Expect { windowId: '@7', paneId: '%9', pid: 4242, recovered: 'tmux new-window failed (exit 1): no server running on /tmp/tmux-1000/legion-omp' } and cmd[3] sequence exactly [has-session, new-window, has-session, new-session, set-option, new-window, kill-window, set-option] (the last set-option carries -w; the kill-window targets legion-omp:__legion_bootstrap).",
+        "other failure, session present: has-session always 0; new-window always { stderr: 'create window failed: fork failed', exitCode: 1 } -> rejects 'tmux new-window failed (exit 1): create window failed: fork failed'; exactly one new-window, zero new-session, two has-session.",
+        "failure inside a session this call created: has-session 1 until new-session then 0; new-window fails with stderr 'X' -> rejects 'tmux new-window failed (exit 1): X'; exactly one new-window, one has-session; the bootstrap kill-window still ran.",
+        "second attempt fails too: as the race case but the second new-window fails with stderr 'Y' -> rejection message starts 'tmux new-window failed (exit 1): Y', contains 'on the second attempt', 'after has-session reported legion-omp present and then gone', and 'first attempt: tmux new-window failed (exit 1): no server running'; exactly two new-window, one new-session."
+      ],
+      "steps": [
+        "Write the four tests; run; they fail on current code.",
+        "Implement ensureSession / newWindowAttempt / the retry and OpenedWindow as described in design.tmux.ts.",
+        "bun test src/daemon/__tests__/tmux.test.ts src/daemon/__tests__/runtime.contract.test.ts -> green (the contract test's first-spawn command-sequence pin stays exact: the success path issues no extra command)."
+      ],
+      "commit": "fix(daemon): openWindow recreates a tmux session that died between has-session and new-window (LEGION-89)"
+    },
+    {
+      "id": "T3",
+      "title": "runtime logs the recovery; stuck-controller path proven end to end",
+      "files": [
+        "packages/daemon/src/daemon/runtime-tmux.ts",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts"
+      ],
+      "tests": [
+        "processes.test.ts 'respawns a stuck controller whose window was the session's last one even when the private server dies between the respawn's has-session and its new-window (LEGION-89)': copy the fixture of 'ensureController retires a stuck controller pane and spawns a fresh one once its registration deadline elapses with no role claim' (alive list-panes via livePanes, connectWorkerRpc throwing ECONNREFUSED, gated sleep, saveState resolving controllerRelaunched on window @44, paneIdentity). Script run: kill-pane -> exit 0; has-session -> 0 on its first call, afterwards { stderr: 'no server running on /tmp/tmux-1000/legion-omp', exitCode: 1 } until new-session ran, then 0; new-session -> 0; new-window -> first { stderr: 'no server running on /tmp/tmux-1000/legion-omp', exitCode: 1 }, second '@44 %3 65432\\n'. Spy console.error (vi.spyOn(console,'error').mockImplementation(() => {})). After controllerRelaunched: managedState.controllerLocator equals { runtime: 'tmux', tmuxSession: 'legion-omp', tmuxWindowId: '@44', tmuxPaneId: '%3', socketPath: <stateDir>/workers/controller.sock, ...paneIdentity(65432) }; commands has exactly two new-window and one new-session; one logged line contains 'tmux new-window for controller failed after has-session reported legion-omp present' and 'no server running on /tmp/tmux-1000/legion-omp'; no logged line contains 'failed to retire and respawn'.",
+        "processes.test.ts 'a controller respawn whose new-window fails while the session still exists is logged with tmux's stderr (LEGION-89)': same fixture; has-session always 0; new-window always { stderr: 'create window failed: fork failed', exitCode: 1 }; resolve a Promise.withResolvers from the console.error mock when a call's first argument includes 'failed to retire and respawn a stuck controller'. Expect that call's second argument to be an Error with message 'tmux new-window failed (exit 1): create window failed: fork failed'; managedState.controllerLocator undefined; exactly one new-window; zero new-session."
+      ],
+      "steps": [
+        "Write both tests; run; the first fails (no recovery), the second fails on the message shape only if T1 is missing — it should pass already and stays as the acceptance-3 lock.",
+        "runtime-tmux.ts: add the private openWindow(name, paneArgv) helper from design.runtime-tmux.ts; spawnIssueProcess and spawnController call it instead of tmux.openWindow directly.",
+        "bun test src/daemon/__tests__/processes.test.ts (whole file; several existing tests make new-window fail with the session present and must keep their attempt counts — e.g. 'attempts each queued tree once in a bounded promotion sweep when launches keep failing' expects exactly 2)."
+      ],
+      "commit": "fix(daemon): log a controller respawn that had to recreate the private tmux session (LEGION-89)"
+    },
+    {
+      "id": "T4",
+      "title": "document the invariant in the daemon AGENTS.md",
+      "files": [
+        "packages/daemon/src/daemon/AGENTS.md"
+      ],
+      "steps": [
+        "Files table, tmux.ts row: openWindow re-checks the session when new-window fails after has-session reported it present and, when it is gone (the last window's process exited and tmux tore session and server down between the two commands — the stuck-controller retirement when the controller's window is the session's only one, LEGION-89), creates it again and opens the window on one second attempt, the runtime logging that recovery with the first attempt's stderr; a new-window failure with the session still present, or inside a session the call itself created, throws as before; every tmux.ts failure message ends in tmux's stderr or `tmux printed nothing on stderr`.",
+        "Operational invariants, the controller registration-deadline bullet: one sentence that the retirement's respawn survives the session dying under it for that reason."
+      ],
+      "commit": "docs(daemon): openWindow's session-gone retry and the stderr rule (LEGION-89)"
+    },
+    {
+      "id": "T5",
+      "title": "repository gates, push, pull request",
+      "steps": [
+        "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit && bun test (whole daemon suite once).",
+        "jj log -r 'ancestors(@, 5)' to confirm only LEGION-89 commits; jj bookmark set legion/LEGION-89 -r <tip>; jj git push --bookmark legion/LEGION-89.",
+        "legion gh -- pr create with the READY-format body and the line `Dispatch: LEGION-89`; PR title in conventional-commit form (the repo's pr-title check)."
+      ]
+    },
+    {
+      "id": "T6",
+      "title": "production-like proof on a scratch rig",
+      "surface": "scripts/smoke/up.sh in SMOKE_WEBHOOK_MODE=none (controller is the private session's only window), real tmux server, real NATS, real Envoy listener, real headless OMP from ~/.omp/profiles/legion/plugins; LEGION_TMUX_PATH names a wrapper around the real tmux that injects one flag-armed fault (the stale has-session answer); LEGION_WORKER_BOOT_TIMEOUT_SECONDS=15 LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS=1 make the boot controller be retired alive.",
+      "recipe": "See the plan document (dispatch://LEGION-89/artifact/plan-md, task T6) for the wrapper script and the exact export/up.sh lines. Scrub LEGION_TREE/ISSUE/GENERATION/WORKSPACE/PROJECT/ROLE/STATE_DIR/DAEMON_URL/GRANT_FILE/BOOT_TOKEN_FILE with env -u before up.sh (LEGION-88). Rig values: SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/8989 SMOKE_DIR=/tmp/legion-89-smoke LEGION_DAEMON_PORT=19489 ENVOY_PORT=19089 NATS_PORT=14289; slug legion-sjawhar8989.",
+      "cycles": [
+        "0: `tmux -L legion-sjawhar8989 list-windows -t legion-sjawhar8989` prints exactly one window (controller); GET /legion/v1/state .controllerLocator names its pane.",
+        "1 (no fault; acceptance 1 baseline): ~15 s later the controller is retired; a new controller window appears, state has a new controllerLocator, `list-panes -a` works (the server exists).",
+        "2 (`echo has-session-lie > /tmp/legion-89-rig/fault.flag`, armed once cycle 1's replacement is up; acceptance 1, 2, 3 positive): the daemon log has exactly one `[legion] tmux new-window for controller failed after has-session reported legion-sjawhar8989 present, and the session was gone by the time the window opened (tmux new-window failed (exit 1): no server running on /tmp/tmux-1000/legion-sjawhar8989); recreated it and opened the window on a second attempt` line and no `failed to retire and respawn`; fault.log shows one `lied present` entry; list-windows shows the controller; state has a fresh controllerLocator; the private server answers list-panes -a.",
+        "3 (`echo bad-flag > /tmp/legion-89-rig/fault.flag`; acceptance 3 negative control: a non-race failure fails as today naming real stderr): log shows `[legion] failed to retire and respawn a stuck controller:` with an error whose message begins `tmux new-window failed (exit 1): usage: new-window`, and no recovery line; the controller is absent afterwards (pre-existing behaviour, outside this issue) — so this cycle is last.",
+        "teardown: bash scripts/smoke/down.sh; rm -rf /tmp/legion-89-rig /tmp/legion-89-smoke. Never touch the production daemon, ~/.omp/profiles/legion, or ~/.config/legion."
+      ],
+      "evidence": "Attach legion-89-rig-proof.md to the issue via dispatch_artifact (Summary first, plain words; quote the log lines, tmux listings, state excerpts, fault.log) and link it from the PR body's E2E line. The empty-stderr wording (silent-fail mode) is proven by T1's unit test and need not run on the rig. If a replacement registers before its 15 s deadline the loop ends; restart the rig for another cycle."
+    }
+  ],
+  "acceptanceCoverage": {
+    "1": "T3 first processes test (present at the check, gone at the open, controller respawned) + rig cycles 1 and 2.",
+    "2": "T2 race test (verb sequence has-session, new-window, has-session, new-session, …) + rig cycle 2 (real new-session on a real dead server; real stderr in the recovery line).",
+    "3": "T3 second processes test + T1 empty-stderr test + rig cycle 3 (real `usage: new-window` stderr in the failure line)."
+  },
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T18:39:43.845Z"
+}
