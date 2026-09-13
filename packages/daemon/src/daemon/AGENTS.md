@@ -96,9 +96,22 @@ workspace is a `jj workspace` of the one shared clone, and jj's repository-scope
 single file for all of them (`~/.config/jj/repos/<hash>/config.toml`), so an identity written
 there — as the extension did at every worker boot before LEGION-44 — set the author and
 committer for every tree's commits at once. Provisioning (`packages/workspace`,
-`provisionIssueWorkspace`) probes that scope on every launch and removes a leftover `user.name`
-or `user.email` once, with a `[legion] removing repository-scoped jj …` log line; nothing writes
-them again.
+`provisionIssueWorkspace`) probes that scope on every launch — `jj config list --repo
+--include-overridden`, since a daemon whose own environment carries `JJ_USER`/`JJ_EMAIL` (one
+started from inside a Legion pane) would otherwise be shown nothing for a value the repo file
+holds — and removes a leftover `user.name` or `user.email` once, with a
+`[legion] removing repository-scoped jj …` log line; nothing writes them again. The environment
+settles the committer; the author needs one more step, because jj keeps a rewritten commit's
+author: `jj split`/`jj describe` carve a phase's work out of the issue's working-copy commit, which
+the daemon's own `jj workspace add` created under the daemon's identity and which a split never
+recreates while `.omp/config.yml` sits in it. So every assignment delivery
+(`promptExistingWorker`, the one write of the active phase — a fresh launch's `/worker/ready`, a
+`--resume`, or a live idle worker prompted over its socket; never a catch-up) first adopts the
+working copy for the role (`adoptWorkingCopy`: `jj metaedit --update-author -r '@ &
+description(exact:"")' -R <workspaceDir>` under the same six variables), before the prompt frame
+and before any state write; a described working copy is a previous phase's work and keeps its
+author, and a failing `metaedit` fails the delivery with jj's stderr so no worker is prompted
+whose commits would carry the wrong author.
 
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it

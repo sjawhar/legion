@@ -10,7 +10,7 @@ import {
   type SpawnWorkerResponse,
   sanitizeToken,
 } from "@legion/contracts";
-import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
+import { issueWorkspaceDir, provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
@@ -849,7 +849,11 @@ export class ProcessManager {
    * of admission bookkeeping) since only the caller knows whether this prompt represents a new
    * admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a queue promotion) or none at
    * all (`/worker/ready` resuming a worker whose slot was already counted via its locator from
-   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking). */
+   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking).
+   * For an `assignment` the issue's working copy is first adopted for the role
+   * (`adoptWorkingCopy`), before the prompt frame and before any state write, so a working copy
+   * that cannot be adopted leaves the worker unprompted and the claim untouched; a rejecting
+   * `adoptWorkingCopy` propagates like a refused prompt, having committed nothing. */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -859,6 +863,7 @@ export class ProcessManager {
     pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
+    if (pending.kind === "assignment") await this.adoptWorkingCopy(issue, role);
     const receipt = await client.prompt(pending.task);
     const outcome = await this.awaitTurnStart(client, receipt);
     if (!outcome.started) {
@@ -3563,6 +3568,37 @@ export class ProcessManager {
       owner
     );
     return gitIdentityEnv(lease.gitIdentity);
+  }
+
+  /** Makes `issue`'s working-copy commit — the commit every `jj split`/`jj describe` of the phase
+   * about to run carves its work out of — authored by `role`'s App identity. jj keeps a rewritten
+   * commit's author and refreshes only the committer, and the working copy is created by the
+   * daemon's own `jj workspace add` under the daemon's identity and never recreated by a split
+   * while `.omp/config.yml` sits in it; the pane environment alone would therefore leave every
+   * commit in the workspace authored by the daemon for the workspace's whole life (before
+   * LEGION-44: by whichever role last wrote the shared repo config when the workspace was added).
+   * Runs at every assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`,
+   * a `--resume`, or a live idle worker prompted over its socket — under the same lease-derived
+   * variables the pane carries. `@ & description(exact:"")` touches only an undescribed working
+   * copy: a described one is a previous phase's work and keeps its author. "Nothing changed." and
+   * "No revisions to modify." are exit 0; a failure is the assignment's failure, so no worker is
+   * prompted whose commits would carry the wrong author. */
+  private async adoptWorkingCopy(issue: IssueKey, role: LegionRole): Promise<void> {
+    const command = [
+      "jj",
+      "metaedit",
+      "--update-author",
+      "-r",
+      '@ & description(exact:"")',
+      "-R",
+      issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue),
+    ];
+    const result = await this.deps.run(command, { env: await this.workerIdentityEnv(role) });
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `Could not adopt ${issue}'s working copy for ${role} (exit ${result.exitCode}): ${command.join(" ")}\n${result.stderr ?? ""}`
+      );
+    }
   }
 
   /** The credential environment a root, worker, or controller pane carries for life — never per

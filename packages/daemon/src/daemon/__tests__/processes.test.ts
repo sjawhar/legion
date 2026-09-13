@@ -8111,6 +8111,167 @@ describe("ProcessManager", () => {
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
   });
 
+  // jj keeps a rewritten commit's author: `jj split`/`jj describe` carve a phase's work out of the
+  // issue's working-copy commit and only refresh the committer, so whoever created that commit —
+  // the daemon's own `jj workspace add`, never recreated by a split while `.omp/config.yml` sits in
+  // it — would author every commit in the workspace. Delivering an assignment therefore adopts an
+  // undescribed working copy for the role, under the same six variables the pane carries
+  // (LEGION-44). The recorded command's own env is asserted, never re-derived.
+  const adoptWorkingCopy = (workspaceDir: string) => [
+    "jj",
+    "metaedit",
+    "--update-author",
+    "-r",
+    '@ & description(exact:"")',
+    "-R",
+    workspaceDir,
+  ];
+  const harnessIdentityEnv = {
+    JJ_USER: "legion-implement[bot]",
+    JJ_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+    GIT_AUTHOR_NAME: "legion-implement[bot]",
+    GIT_AUTHOR_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+    GIT_COMMITTER_NAME: "legion-implement[bot]",
+    GIT_COMMITTER_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+  };
+  /** Records every `jj metaedit` the daemon runs, with the command's env and how many prompts the
+   * worker had received when it ran (0 = before the assignment frame). */
+  function recordingMetaedits(client: FakeWorkerRpcClient) {
+    const metaedits: Array<{ command: string[]; env: NodeJS.ProcessEnv; promptsBefore: number }> =
+      [];
+    const run: ProcessManagerDeps["run"] = async (command, options) => {
+      if (command[0] === "jj" && command[1] === "metaedit") {
+        metaedits.push({ command, env: options?.env ?? {}, promptsBefore: client.prompts.length });
+        return { stdout: "", stderr: "Nothing changed.\n", exitCode: 0 };
+      }
+      return { stdout: "", exitCode: 0 };
+    };
+    return { metaedits, run };
+  }
+
+  it("adopts the issue's undescribed working copy for the role before prompting an assignment into a live idle worker", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    const { metaedits, run } = recordingMetaedits(client);
+    const { manager: processes } = manager(state, { connectWorkerRpc: async () => client, run });
+
+    await processes.spawnWorker(root, root, "tester", "verify #55");
+
+    expect(client.prompts).toEqual(["verify #55"]);
+    expect(metaedits).toHaveLength(1);
+    expect(metaedits[0]?.command).toEqual(
+      adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
+    );
+    expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    expect(metaedits[0]?.promptsBefore).toBe(0);
+  });
+
+  it("adopts the working copy for the role when /worker/ready delivers its pending assignment, and a failing metaedit prompts nothing", async () => {
+    const state = newLegionState("omp", 1);
+    const token = roleToken("omp", root, "tester");
+    const claimAtRest: WorkerRoleClaim = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.roles[token] = structuredClone(claimAtRest);
+    const client = fakeWorkerRpcClient();
+    const { metaedits, run } = recordingMetaedits(client);
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async () => client,
+      run,
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 1);
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(metaedits).toHaveLength(1);
+    expect(metaedits[0]?.command).toEqual(
+      adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
+    );
+    expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    expect(metaedits[0]?.promptsBefore).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+
+    // A working copy that cannot be adopted is never prompted: nothing is written, the ready call
+    // fails with jj's own stderr, and the claim is exactly as it was for the next ready attempt.
+    const failing = newLegionState("omp", 1);
+    failing.roles[token] = structuredClone(claimAtRest);
+    const failingClient = fakeWorkerRpcClient();
+    const { manager: failingProcesses, state: failingState } = manager(failing, {
+      connectWorkerRpc: async () => failingClient,
+      run: async (command) =>
+        command[0] === "jj" && command[1] === "metaedit"
+          ? { stdout: "", stderr: "Error: The working copy is stale\n", exitCode: 1 }
+          : { stdout: "", exitCode: 0 },
+    });
+
+    await expect(failingProcesses.workerReady(root, "tester", "ses_tester", 1)).rejects.toThrow(
+      "The working copy is stale"
+    );
+
+    expect(failingClient.prompts).toEqual([]);
+    expect(failingState.phases[root]).toBeUndefined();
+    expect(failingState.roles[token]).toEqual(claimAtRest);
+  });
+
+  it("runs no author adoption for a catch-up: recovery plumbing changes neither the phase nor the working copy", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    const { metaedits, run } = recordingMetaedits(client);
+    const { manager: processes } = manager(state, { connectWorkerRpc: async () => client, run });
+
+    await processes.handleException(exception(token, exception(token).original));
+
+    expect(client.prompts).toEqual([JSON.stringify({ type: "catchup-worker", unhandled: [] })]);
+    expect(metaedits).toEqual([]);
+  });
+
   it("treats a same-role spawn during an in-flight boot as resumed-pending, never launching a second pane", async () => {
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
