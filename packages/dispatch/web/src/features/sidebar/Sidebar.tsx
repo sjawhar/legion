@@ -88,6 +88,20 @@ export function Sidebar({
             )}
           </Link>
         </section>
+        <section>
+          <Link
+            aria-current={location.pathname === "/agents" ? "page" : undefined}
+            className={
+              location.pathname === "/agents"
+                ? `mt-1 flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
+                : `mt-1 flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`
+            }
+            onClick={onNavigate}
+            to="/agents"
+          >
+            Agents
+          </Link>
+        </section>
         {pinned.data.length === 0 ? null : (
           <section>
             <h2 className={`px-2 text-xs font-semibold tracking-wide uppercase ${railMutedText}`}>

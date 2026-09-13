@@ -13,9 +13,10 @@ export function useAgents(
   agents: readonly Agent[];
   error: string | undefined;
   isError: boolean;
+  isPending: boolean;
   titles: ReadonlyMap<string, string>;
 } {
-  const { data, error, isError } = useQuery({
+  const { data, error, isError, isPending } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
@@ -34,8 +35,9 @@ export function useAgents(
       agents,
       error: error instanceof Error ? error.message : isError ? "network error" : undefined,
       isError,
+      isPending,
       titles,
     }),
-    [agents, error, isError, titles]
+    [agents, error, isError, isPending, titles]
   );
 }

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   type Actor,
+  type Agent,
   type Anchor,
   type AnchorInput,
   type ArtifactBlock,
@@ -18,6 +19,22 @@ import {
   MessageEventPayloadSchema,
 } from "./dispatch-api";
 
+test("models Agent activity and open-ask aggregates", () => {
+  const agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/planner",
+    last_activity: "2026-09-13T13:00:00Z",
+    last_seen: 1_726_231_200_000,
+    machine_id: "host-a",
+    open_asks: 2,
+    roles: ["planner"],
+    session_id: "planner-session",
+    title: "Planner",
+  } satisfies Agent;
+
+  expect(agent.open_asks).toBe(2);
+  expect(agent.last_activity).toBe("2026-09-13T13:00:00Z");
+});
 test("accepts the typed artifact version event payload", () => {
   const event = {
     actor: { id: "session-1", kind: "session" },

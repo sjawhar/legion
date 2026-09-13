@@ -6,6 +6,7 @@ import {
   type SyntheticEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -27,6 +28,7 @@ import { type Recipient, RecipientPicker, recipientForRoute } from "./RecipientP
 
 export function ConversationComposer({
   agents = [],
+  defaultDelivery,
   envoyError,
   issueKey,
   onPickerOpenChange,
@@ -35,6 +37,7 @@ export function ConversationComposer({
   route,
 }: {
   agents?: readonly Agent[];
+  defaultDelivery?: "btw" | "steer";
   envoyError?: string;
   issueKey: string;
   onPickerOpenChange?: (open: boolean) => void;
@@ -54,18 +57,26 @@ export function ConversationComposer({
         : { target: route, title: route, capabilities: [], detail: "Envoy unavailable" }),
     [agents, route]
   );
+  const previousDefaultDelivery = useRef(defaultDelivery);
   useEffect(() => {
+    const deliveryChanged = previousDefaultDelivery.current !== defaultDelivery;
+    previousDefaultDelivery.current = defaultDelivery;
     if (
       defaultRecipient !== undefined &&
       (recipient === null ||
+        deliveryChanged ||
         (recipient.target === defaultRecipient.target &&
           recipient.detail === "Envoy unavailable" &&
           defaultRecipient.detail !== "Envoy unavailable"))
     ) {
       setRecipient(defaultRecipient);
-      setDelivery(defaultRecipient.capabilities.includes("btw") ? "btw" : "steer");
+      setDelivery(
+        defaultDelivery === "steer" || !defaultRecipient.capabilities.includes("btw")
+          ? "steer"
+          : "btw"
+      );
     }
-  }, [defaultRecipient, recipient]);
+  }, [defaultDelivery, defaultRecipient, recipient]);
   const guard = useSubmitGuard();
   const mutation = useMutation({
     mutationFn: (text: string) =>
