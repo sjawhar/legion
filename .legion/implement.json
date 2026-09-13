@@ -1,7 +1,7 @@
 {
   "pr": 1022,
   "prUrl": "https://github.com/sjawhar/legion/pull/1022",
-  "headSha": "4a5208172c5c",
+  "headSha": "f5f007c842c5",
   "bookmark": "legion/LEGION-43",
   "ciRun": 34751868899,
   "filesChanged": [
@@ -50,12 +50,11 @@
     "The reviewer's Minors (fast-follow) landed in this push (39e85806c355) rather than being deferred."
   ],
   "verification": {
-    "bunTest": "cd packages/daemon && bun test on the cutover head (main's daemon, untouched): 1247 pass, 10 skip, 0 fail (60 files)",
+    "bunTest": "cd packages/daemon && bun test at f5f007c842c5 (main's suite untouched): 1260 pass, 10 skip, 0 fail",
     "biome": "bunx biome check src/: Checked 152 files, No fixes applied",
     "tsc": "bunx tsc --noEmit: exit 0",
-    "checkpointsHarness": "bash scripts/smoke/checkpoints.test.sh: 34 PASS (main's 25 + our 5 checkpoint-13 cases + 4 shared), including 'checkpoint 13 fails naming the pid and variable 20/20 times when the planted secret heads a 70 KB environment'",
-    "shellcheck": "shellcheck -S warning checkpoints.sh checkpoints.test.sh: clean",
-    "diffFromMain": "jj diff --from main@origin --summary: exactly the two smoke scripts, the gotchas note, and .legion/"
+    "checkpointsHarness": "timeout 30 bash scripts/smoke/checkpoints.test.sh | tail -n 1: rc 0, 3.4 s; 34 PASS lines; fingerprinted sleep 300 growth 0",
+    "shellcheck": "shellcheck -S warning checkpoints.sh checkpoints.test.sh: clean"
   },
   "testerNotes": [
     "Acceptance 6 negative control: a pre-LEGION-74 main daemon, e.g. af42abbae23d (LEGION-74's parent on main), whose server is forked with OMP_SESSION_ID and whose panes carry it; then the branch daemon (= main's daemon) against the surviving server: main's scrub log line is '[legion] removed N variable(s) from the private tmux server environment that panes may not inherit: …' (a warn, index.ts:708), not the old 'survived an earlier daemon' line; show-environment -g -> 0; checkpoints.sh 13 -> NOTE (server frozen environ) + CHECKPOINT 13 OK.",
@@ -63,18 +62,19 @@
     "The branch is state v28 / contract 2 like main; live legion profile works for both daemons."
   ],
   "openQuestions": [],
-  "round": 4,
+  "round": 5,
   "reviewRound1": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5190677584 (REQUEST_CHANGES; one defect, two threads)",
   "threads": {
-    "r3999622479": "resolved (round 3); the code it referred to is now main's LEGION-74 environment.ts",
-    "r3999622481": "resolved (round 3); gotchas §10 rewritten again on main's LEGION-74 wording",
-    "r4000347721": "environment.ts:127 — cutover: main's environment.ts taken wholesale (241caf9fe5e9 carries no daemon change)",
-    "r4000347725": "runtime-tmux.ts:184 — cutover: main's runtime-tmux.ts / tmux.ts / index.ts / tests taken wholesale; scrubSurvivingServer dropped"
+    "r3999622479": "resolved (round 3)",
+    "r3999622481": "resolved (round 3)",
+    "r4000347721": "Accepted: fixed in 241caf9fe5e9 (now f85844ea343b); resolved by threads resolve at round 5",
+    "r4000347725": "Accepted: fixed in 241caf9fe5e9 (now f85844ea343b); resolved by threads resolve at round 5",
+    "r4000539101": "harness orphans — fixed in f5f007c842c5 (9a36f3e51610 pre-rebase); reply posted"
   },
   "fixingCommits": {
-    "241caf9fe5e9": "smoke: checkpoint 13 covers OMP_SESSION_ID, judges the surviving server by its tmux tables, and reads /proc without a pipe race (LEGION-43) — replaces 4156e5f5445c, 43bfbdbbdf31, 7cfb6b92c6f4 and the checkpoint half of 562bb5ccb9d8 from the old chain",
-    "4a5208172c5c": "docs: worker-pane gotchas §10 credits LEGION-74 for the daemon fix and LEGION-43 for the smoke-rig proof — replaces ec82d1202449 from the old chain",
-    "dropped": "025d0200b4b6 (scrub), 1f7e7cb29935 (strip list rename), the Minors and rename-catch-up commits — superseded by LEGION-74 on main"
+    "f85844ea343b": "smoke: checkpoint 13 covers OMP_SESSION_ID, judges the surviving server by its tmux tables, and reads /proc without a pipe race (cutover; Accepted: as 241caf9fe5e9)",
+    "0354d4ebaf2c": "docs: worker-pane gotchas §10 credits LEGION-74 for the daemon fix and LEGION-43 for the proof (cutover)",
+    "f5f007c842c5": "smoke: one EXIT trap for every planted process; proc_has (round 5)"
   },
   "tmuxExperiment": "tmux 3.7c, scratch server forked with OMP_SESSION_ID=stale: set-environment -g -u KEY exits 0 whether or not KEY is set, removes it from show-environment -g, and a new-window pane's environ lacks it; -r also keeps it out of new panes but leaves a -KEY marker show-environment -g still lists (grep -c would read 1), so -u. No server: stderr 'error connecting to <socket> (No such file or directory)', exit 1 = PANE_GONE_STDERR. A fork-inherited variable is in the global env only; show-environment -t <session> never lists it, so no session-level unset. The server's own /proc/<pid>/environ is frozen: still 1 after -u while new panes read 0.",
   "acceptance6Live": {
@@ -102,12 +102,9 @@
   "threadsResolveOutput": "resolved https://github.com/sjawhar/legion/pull/1022#discussion_r3999622479\nresolved https://github.com/sjawhar/legion/pull/1022#discussion_r3999622481",
   "fastFollowRemaining": "Reviewer round-2 Minors not taken this round (wording/duplication only): environment.ts 'Shared by' enumeration → delete, keep the catch-all; 'carried' → 'carries'; AGENTS.md private-server paragraph 'on the first key' → 'on any key' and 'before any probe' → 'before any pane probe'; docs/solutions/testing/driving-a-real-omp-worker-against-a-stand-in-daemon.md:96 still says the pane's $OMP_SESSION_ID is the daemon's inherited id; gotchas §10 mechanism paragraph → two sentences + pointer to daemon AGENTS.md; index.ts call-site comment trims to ordering + failure rationale; tmux.ts 'tmux 3.7c verified' → behaviour, PANE_GONE_STDERR doc clause for no-pane-target commands; checkpoints.test.sh run_checkpoint_13 helper table, single unset after the trap; index.test.ts toThrow('cannot remove OMP_SESSION_ID') instead of the full message; unsetGlobalEnvironment surfaces the runner's timedOut marker. Items 1 (server message _FILE clause) and the -g-regex-from-array clause of 8 landed in 646a1f54235d.",
   "onBranchShas": {
-    "scrub": "025d0200b4b6 (change id rotpyuop; was 3af673309cbf pre-rebase-1, 0eb79db084eb pre-rebase-2 — the SHA the reviewer's Accepted: replies name)",
-    "checkpointServerRule": "4156e5f5445c (was 0bbeee2af916 / a786548b5b81)",
-    "checkpointSecretCorrection": "43bfbdbbdf31 (was c14edad1c3b0 / 540ada384368)",
-    "checkpointGrepZ": "7cfb6b92c6f4 (was 646a1f54235d before rebase 2)",
-    "minors": "4a1260583f1c (was 39e85806c355 / 44dd82f20a62)",
-    "renameCatchUp": "0f0c6bfd2c0b (was 563fb3551dd4)"
+    "checkpointCutover": "f85844ea343b (was 241caf9fe5e9 — the SHA the reviewer's Accepted: replies name; same change id ruwpozsr)",
+    "gotchas": "0354d4ebaf2c (was 4a5208172c5c)",
+    "harnessFix": "f5f007c842c5 (was 9a36f3e51610)"
   },
   "reviewRound3": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191608245 (REQUEST_CHANGES: cutover onto main after LEGION-74; the round-3 change itself was judged correct)",
   "cutover": {
@@ -148,7 +145,52 @@
     "rebase2": "6e5c0f4ca1a7 -> 90de58e82720 onto main 1c7499430c5d (conflict: AGENTS.md boot-ordering bullet)",
     "cutover": "e000c391a28e (old chain tip) -> fresh stack on main 178909e05b1e; no rebase, hand-applied"
   },
+  "reviewRound4": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191807758 (REQUEST_CHANGES: harness orphans; both round-3 threads Accepted: fixed in 241caf9fe5e9)",
+  "harnessFix": {
+    "commit": "f5f007c842c5 (pushed as 9a36f3e51610 before the rebase)",
+    "thread": "https://github.com/sjawhar/legion/pull/1022#discussion_r4000539101",
+    "defect": "checkpoints.test.sh set its EXIT trap three times; the last (main's, after the App-key spawn) named only main's four pids, so the planted OMP_SESSION_ID and 70 KB sleep-300 processes were orphaned on every run and, inheriting the harness's stdout, held a piped invocation open until they died (timeout 30 -> hung past 90 s in the reproduction).",
+    "fix": "one planted_pids array, appended at every spawn via planted() (never inside a $(…) — a subshell's append would be lost), and exactly one EXIT trap set before the first spawn (grep -c '^trap ' = 1, line 18).",
+    "proof": "timeout 30 bash scripts/smoke/checkpoints.test.sh | tail -n 1 -> rc 0 in 5.2 s (post-fix), 3.4 s on the rebased head; harness-fingerprinted sleep 300 processes (LARGE_PAD / OMP_SESSION_ID=01a083dd… / FOO_SECRET=leaked-canary / DISPATCH_TOKEN=leaked in environ) before=3 after=3 (growth 0) on both runs. The pre-fix reproduction leaked exactly two (pids 3515158/3515159, PPid 1, started 18:56:32); killed those two by pid — no pkill.",
+    "fastFollowTaken": "proc_entry -> proc_has: grep -a -z -q on the file, no pipe, same 0/1/2 with 2 failing as unreadable; the three hit-test idioms collapse to one; secret_names dropped (names += canaries OMP_SESSION_ID); header cites only TmuxRuntime.scrubServerEnvironment; harness drops the unreachable _FILE and NOTE guards and stops calling the deterministic 70 KB miss a race. Old vs new checkpoint on a 70033-byte pane, 50 runs: OLD 50/50 missed (OK printed), NEW 0/50."
+  },
+  "rebase": {
+    "from": "9a36f3e51610 (18b780a8e506 + review/test ledger + harness fix)",
+    "to": "f5f007c842c5",
+    "base": "a197cdc0a8ad99c2e59d230a74a9fe9612544449",
+    "reason": "GitHub CONFLICTING: LEGION-53 (98a10e97e31e) edited the gotchas title and related_issues this PR also edits",
+    "conflicts": [
+      "docs/solutions/legion/worker-pane-shell-gotchas.md — title line (LEGION-53 appended the `(divergent)` change clause; ours tagged the OMP_SESSION_ID clause '(fixed in LEGION-74, proved in LEGION-43)') and related_issues (LEGION-53 + sjawhar/legion#1028 appended; ours LEGION-74/#1007, LEGION-43/#1022). Both clauses kept in each; resolved at the docs commit so it flowed through the five descendants."
+    ],
+    "diffFromMainSummary": [
+      "A .legion/implement.json",
+      "A .legion/review.json",
+      "A .legion/test.json",
+      "M docs/solutions/legion/worker-pane-shell-gotchas.md",
+      "M scripts/smoke/checkpoints.sh",
+      "M scripts/smoke/checkpoints.test.sh"
+    ]
+  },
+  "standingOrder": "Sami, 19:00Z via the architect and the PO: no smoke rig of any kind for LEGION-43 (no up.sh, stand-in/scratch daemon, throwaway NATS container, or scratch tmux server). Acknowledged. Round 5 ran none; the spec/skill rig steps (acceptance 2/6 live checks) are overridden and the PR E2E line says so. Proofs below exercise the changed artifacts on their own real surface: the harness and checkpoint scripts run directly against real local processes.",
+  "proof": [
+    {
+      "criterion": "Review round-4 blocking thread r4000539101: the harness kills every planted process and a piped invocation returns promptly",
+      "surface": "scripts/smoke/checkpoints.test.sh itself, invoked the way CI and a worker invoke it (piped through timeout | tail) — the changed artifact is the harness, so running it is its real surface; fake tmux + six real local sleep processes, no rig",
+      "command": "timeout 30 bash scripts/smoke/checkpoints.test.sh | tail -n 1; before/after count of sleep-300 processes whose environ carries the harness fingerprint (LARGE_PAD / OMP_SESSION_ID=01a083dd… / FOO_SECRET=leaked-canary / DISPATCH_TOKEN=leaked)",
+      "observed": "rc 0 in 3.4 s (5.2 s pre-rebase), 34 PASS lines, fingerprinted sleep-300 count before=3 after=3 (growth 0); exactly one trap statement in the file (line 18)",
+      "headSha": "f5f007c842c5",
+      "negativeControl": "the pre-fix harness (head 18b780a8e506 + review ledger): the same piped invocation hung past 90 s (timeout 30 reported rc 124 in the reviewer’s run) and left exactly two sleep-300 orphans (pids 3515158/3515159, PPid 1, planted OMP_SESSION_ID / LARGE_PAD environs), which I then killed by pid"
+    },
+    {
+      "criterion": "Checkpoint 13 (acceptance 2’s checkpoint contract) still catches a planted secret heading a 70 KB environment after the grep -q simplification",
+      "surface": "scripts/smoke/checkpoints.sh checkpoint 13 run 50 times against a real 70033-byte sleep process through the fake tmux (throwaway probe /tmp/legion43-impl/old-vs-new-cp13.sh); no rig",
+      "command": "bash /tmp/legion43-impl/old-vs-new-cp13.sh <old checkpoints.sh> <new checkpoints.sh> <harness> 50",
+      "observed": "NEW checkpoint: FAILED (correct) 50/50, OK (secret missed) 0/50",
+      "headSha": "f5f007c842c5",
+      "negativeControl": "OLD checkpoints.sh (the tr|grep -m1 read, pre-round-3): FAILED 0/50, printed CHECKPOINT 13 OK 50/50 with the planted DISPATCH_TOKEN present"
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T18:02:02.999Z"
+  "completed": "2026-09-13T19:19:38.978Z"
 }
