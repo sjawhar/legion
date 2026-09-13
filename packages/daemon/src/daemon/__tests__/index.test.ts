@@ -19,7 +19,7 @@ import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
 import type { WorkerRpcClient } from "../worker-rpc";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 
 const { startDaemon } = daemonIndex;
 
@@ -46,7 +46,7 @@ async function flushEventLoopUntil(condition: () => boolean, maxTicks = 20_000):
 /** A `/proc/<pid>/stat` line for whatever pid the fake tmux reported: every pane a daemon under
  * test launches must record a process identity, and no real process exists behind these pids. */
 async function fakeProcStat(pid: number): Promise<string> {
-  return `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 4242 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+  return procStatLine(pid, 4242);
 }
 
 class FakeNats {
@@ -525,6 +525,11 @@ describe("startDaemon", () => {
             if (command[0]?.endsWith("/tmux") && command[3] === "split-window") {
               return { stdout: "%2 4243", stderr: "", exitCode: 0 };
             }
+            // The root's just-opened pane is live and still its recorded process (pid 4242, the
+            // identity `fakeProcStat` reports), so the worker splits into the root's window.
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-panes") {
+              return { stdout: "%1 4242\n", stderr: "", exitCode: 0 };
+            }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           sleep: (ms) => {
@@ -561,6 +566,11 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
+          // No real process exists behind the fake tmux's pid 4242; the identity check's last step
+          // reads its command line, and the worker below splits into the root's window only if
+          // the root's pane verifies end to end.
+          readProcessCmdline: async () => "omp\0",
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,

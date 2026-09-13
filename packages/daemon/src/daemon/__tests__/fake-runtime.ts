@@ -104,8 +104,6 @@ export class FakeRuntime implements Runtime {
     locator: Locator;
     timeoutMs: number;
     options: { skipGraceful?: boolean; refuseKill?: boolean } | undefined;
-    /** Whether the destroy step ran: never for a handle a stranger occupies. */
-    destroyed: boolean;
   }> = [];
   readonly reconciled: Array<{ known: ReadonlySet<string>; graceMs: number }> = [];
   readonly connects: Locator[] = [];
@@ -186,9 +184,10 @@ export class FakeRuntime implements Runtime {
     if (process?.client && !options?.skipGraceful && stranger?.reachable !== false) {
       await awaitShutdown(process.client, timeoutMs, this.options.sleep);
     }
-    const destroyed = !options?.refuseKill && !this.strangers.has(uid) && this.processes.has(uid);
-    this.stopped.push({ locator, timeoutMs, options, destroyed });
-    if (destroyed) this.processes.delete(uid);
+    // Never destroys what a stranger holds, and never anything when the caller refused the kill.
+    const destroy = !options?.refuseKill && !stranger && this.processes.has(uid);
+    this.stopped.push({ locator, timeoutMs, options });
+    if (destroy) this.processes.delete(uid);
   }
 
   async reconcileOrphans(known: ReadonlySet<string>, graceMs: number): Promise<void> {

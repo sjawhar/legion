@@ -4,7 +4,7 @@
 // for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
 // watching a persistently borderline-slow worker), the registration deadline, and the
 // runtime-probe-then-socket fallback behind `probeAlive`.
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { Locator } from "../runtime";
 import {
@@ -283,17 +283,7 @@ describe("WorkerBootWatchdog registration deadline", () => {
 });
 
 describe("WorkerBootWatchdog liveness probe", () => {
-  it.each([
-    ["gone", { status: "dead", reason: "gone" } as const],
-    [
-      "not the recorded process",
-      {
-        status: "dead",
-        reason: "not-recorded-process",
-        detail: "pane %7 now runs pid 999 (recorded pid 12345 start 4242)",
-      } as const,
-    ],
-  ])("retires a boot only after the runtime reports it dead (%s) and its socket refuses a connection", async (_case, verdict) => {
+  it("retires a boot only after the runtime reports it dead and its socket refuses a connection", async () => {
     const events: string[] = [];
     const watchdog = new WorkerBootWatchdog(
       baseDeps({
@@ -302,7 +292,7 @@ describe("WorkerBootWatchdog liveness probe", () => {
         yield: async () => {},
         probe: async (probed) => {
           events.push(`probe:${probed.runtime === "tmux" ? probed.tmuxPaneId : probed.podUid}`);
-          return verdict;
+          return { status: "dead", reason: "gone" };
         },
         connect: async () => {
           events.push("connect");
@@ -317,9 +307,57 @@ describe("WorkerBootWatchdog liveness probe", () => {
     watchdog.arm(root, child, role, token, locator, 1);
     for (let i = 0; i < 200 && !events.includes("retire"); i += 1) await Promise.resolve();
 
-    // `probeAlive` asks the runtime about the watched locator itself, then — finding it dead
-    // either way — falls through to the socket probe (refused) and retires the boot. The
-    // connect-retry loop's own attempts precede the probe; only the tail after it is ordered.
+    // `probeAlive` asks the runtime about the watched locator itself, then — finding it dead —
+    // falls through to the socket probe (refused) and retires the boot. The connect-retry loop's
+    // own attempts precede the probe; only the tail after it is ordered here.
     expect(events.slice(events.indexOf("probe:%7"))).toEqual(["probe:%7", "connect", "retire"]);
+  });
+
+  it("re-arms, never retires, a boot whose runtime probe could not complete -- even with its socket refusing -- and still honors the registration deadline", async () => {
+    // A probe the runtime cannot complete (tmux: `list-panes` itself failed) is not a dead
+    // verdict: the watch treats the interval as alive-but-unconfirmed and asks again. The
+    // deadline still bounds how many such intervals a boot may spend; here it is 2.
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.01,
+          registrationDeadlineIntervals: () => 2,
+          sleep: async () => {},
+          yield: async () => {},
+          probe: async () => {
+            events.push("probe");
+            throw new Error("cannot verify pane %7: list-panes -t %7 exited 1");
+          },
+          connect: async () => {
+            events.push("connect");
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            events.push("retire");
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      for (let i = 0; i < 400 && !events.includes("retire"); i += 1) await Promise.resolve();
+
+      // Two probes that could not complete, each counted as alive-but-unconfirmed; only the
+      // registration deadline ends the watch. A dead verdict would have gone
+      // `probe -> connect -> retire` at the first interval (the socket fallback, refused); the
+      // deadline retires straight after the last probe, no socket consulted, and never after
+      // the first one. (The `connect` events before each probe are the connect-retry loop's own.)
+      expect(events.filter((event) => event === "probe")).toHaveLength(2);
+      expect(events.filter((event) => event === "retire")).toHaveLength(1);
+      expect(events.slice(events.lastIndexOf("probe"))).toEqual(["probe", "retire"]);
+      expect(
+        consoleError.mock.calls.filter((call) =>
+          String(call[0]).includes("liveness probe did not complete")
+        )
+      ).toHaveLength(2);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

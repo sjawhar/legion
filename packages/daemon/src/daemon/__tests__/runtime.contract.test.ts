@@ -18,6 +18,7 @@ import {
 } from "../runtime";
 import { TmuxRuntime } from "../runtime-tmux";
 import type { WorkerRpcClient } from "../worker-rpc";
+import { procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
 const issue: IssueKey = "LEGION-42";
@@ -119,6 +120,8 @@ class FakeTmuxServer {
   sessionExists = false;
   /** Overrides the next `kill-pane`'s result (exit code and stderr) when set. */
   killPaneResult: { exitCode: number; stderr?: string } | undefined;
+  /** Overrides the next per-pane `list-panes -t <pane>` result (exit code and stderr) when set. */
+  listPanesResult: { exitCode: number; stderr?: string } | undefined;
   private nextWindow = 42;
   private nextPane = 1;
   private nextPid = 12345;
@@ -181,7 +184,7 @@ class FakeTmuxServer {
         }
       );
     }
-    return `${pid} (legion worker-shim) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 ${pane.startTicks} 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+    return procStatLine(pid, pane.startTicks, "legion worker-shim");
   }
 
   /** The process in `paneId` exits and tmux hands the very same pane id to a new process (a
@@ -256,6 +259,11 @@ class FakeTmuxServer {
             }
           }
           return { stdout: `${rows.join("\n")}\n`, exitCode: 0 };
+        }
+        if (this.listPanesResult) {
+          const result = this.listPanesResult;
+          this.listPanesResult = undefined;
+          return { stdout: "", ...result };
         }
         const windowId = target.startsWith("%") ? this.windowOf(target) : target;
         const window = windowId === undefined ? undefined : this.windows.get(windowId);
@@ -486,11 +494,11 @@ describe.each(harnesses)("Runtime contract: %s", (_name, makeHarness) => {
 
 describe("TmuxRuntime", () => {
   const tmuxArgv = (...rest: string[]): string[] => ["tmux", "-L", "legion-omp", ...rest];
-  /** The round trips `verifyPaneProcess` makes for a pane that verifies: the watched pane's
-   * own pid from its window listing, then the `kill -0` existence check before its cmdline. */
-  const verifyArgv = (paneId: string, pid: number): string[][] => [
+  /** The one tmux round trip `verifyPaneProcess` makes for a pane that verifies: the watched
+   * pane's own pid from its window listing. Existence and identity come from the `/proc` reads
+   * that follow, never from a signal probe. */
+  const verifyArgv = (paneId: string): string[][] => [
     tmuxArgv("list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}"),
-    ["kill", "-0", String(pid)],
   ];
   const socketFor = (stateDir: string, name: string): string =>
     path.join(stateDir, "workers", `${name}.sock`);
@@ -563,7 +571,7 @@ describe("TmuxRuntime", () => {
     const worker = await harness.runtime.spawn("worker", harness.makeSpec("implementer"));
     const socketPath = socketFor(harness.stateDir, "implementer-9e2fb104");
     expect(harness.server.commands).toEqual([
-      ...verifyArgv("%1", 12345),
+      ...verifyArgv("%1"),
       tmuxArgv(
         "split-window",
         "-t",
@@ -742,10 +750,13 @@ describe("TmuxRuntime", () => {
       panePid: recorded.pid,
       paneStartTicks: recorded.startTicks,
     };
+    // Pid and start ticks match the sibling's own row (never the architect's), so the read chain
+    // runs to the OMP check and fails there: one stat read and one cmdline read, both for the
+    // worker's pid. The detail carries both identities; the reads are the contract.
     expect(await harness.runtime.probe(locator)).toEqual({
       status: "dead",
       reason: "not-recorded-process",
-      detail: `pane ${worker} pid 12346 is not running OMP (recorded pid 12346 start ${recorded.startTicks})`,
+      detail: expect.stringMatching(/pid 12346 .*recorded pid 12346 start/),
     });
     expect(harness.statReads).toEqual([12346]);
     expect(harness.cmdlineReads).toEqual([12346]);
@@ -757,20 +768,29 @@ describe("TmuxRuntime", () => {
     if (locator.runtime !== "tmux" || !locator.tmuxPaneId) throw new Error("tmux locator");
     expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
 
-    // The same pane id, a new process behind it: pid differs.
+    // The same pane id, a new process behind it: pid differs. The detail carries both identities
+    // (what the pane reports now, what the locator recorded); the sentence around them is not
+    // the contract -- the reads `statReads`/`cmdlineReads` record are.
     const reissued = harness.server.reissuePane(locator.tmuxPaneId);
+    const recorded = `recorded pid 12345 start ${locator.paneStartTicks}`;
+    const bothIdentities = (observed: string) =>
+      expect.stringMatching(new RegExp(`${observed}.*${recorded}`));
     expect(await harness.runtime.probe(locator)).toEqual({
       status: "dead",
       reason: "not-recorded-process",
-      detail: `pane %1 now runs pid ${reissued.pid} (recorded pid 12345 start ${locator.paneStartTicks})`,
+      detail: bothIdentities(`pid ${reissued.pid}`),
     });
+    // No stat read past a pid mismatch: the two so far are the launch's and the alive probe's.
+    expect(harness.statReads).toEqual([12345, 12345]);
     // Pid reused by a different process: start ticks tell them apart.
     harness.server.pane("%1").pid = 12345;
     expect(await harness.runtime.probe(locator)).toEqual({
       status: "dead",
       reason: "not-recorded-process",
-      detail: `pane %1 runs pid 12345 started at ${reissued.startTicks} (recorded pid 12345 start ${locator.paneStartTicks})`,
+      detail: bothIdentities(`pid 12345 started at ${reissued.startTicks}`),
     });
+    // The pid matched, so the stat was read once more -- and disagreed.
+    expect(harness.statReads).toEqual([12345, 12345, 12345]);
     // Nothing verified past the identity check: OMP's command line was never consulted.
     expect(harness.cmdlineReads).toEqual([12345]);
 
@@ -801,7 +821,7 @@ describe("TmuxRuntime", () => {
     expect(client?.negotiated).toBe(false);
     expect(client?.shutdowns).toBe(1);
     expect(harness.server.commands).toEqual([
-      ...verifyArgv("%1", 12345),
+      ...verifyArgv("%1"),
       tmuxArgv("kill-pane", "-t", "%1"),
     ]);
   });
@@ -822,7 +842,7 @@ describe("TmuxRuntime", () => {
     await harness.runtime.stop(locator, 50);
     expect(harness.dials()).toBe(1);
     expect(harness.server.commands).toEqual([
-      ...verifyArgv("%1", 12345),
+      ...verifyArgv("%1"),
       tmuxArgv("kill-pane", "-t", "%1"),
     ]);
 
@@ -831,7 +851,7 @@ describe("TmuxRuntime", () => {
     await harness.runtime.stop({ ...socketless, socketPath: undefined } as Locator, 50);
     expect(harness.dials()).toBe(1);
     expect(harness.server.commands).toEqual([
-      ...verifyArgv("%2", 12346),
+      ...verifyArgv("%2"),
       tmuxArgv("kill-pane", "-t", "%2"),
     ]);
   });
@@ -911,16 +931,109 @@ describe("TmuxRuntime", () => {
       "kill-pane %1 exited 1: tmux: server not responding"
     );
     expect((failure as ProcessStopFailed).locator).toBe(locator);
+  });
 
-    const paneless = await harness.runtime
-      .stop({ ...locator, tmuxPaneId: undefined } as Locator, 50, { skipGraceful: true })
-      .then(
+  it("stop on a locator without a pane id never throws: the graceful shutdown still goes out over its socket, the kill is refused as for any identity-less locator", async () => {
+    // B4: a pane-id-less record is an identity-less locator like any other. `probe` already says
+    // so without touching tmux; `stop` must agree instead of throwing above the gate and leaving
+    // a closing tree lingering forever.
+    const harness = await tmuxHarness({ hangSleep: true });
+    const spawned = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    if (spawned.runtime !== "tmux") throw new Error("tmux locator");
+    const { tmuxPaneId: _pane, panePid: _pid, paneStartTicks: _ticks, ...paneless } = spawned;
+    expect(await harness.runtime.probe(paneless)).toEqual({
+      status: "dead",
+      reason: "not-recorded-process",
+      detail: "pane @42 has no recorded process identity (locator predates identity tracking)",
+    });
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      harness.server.commands.length = 0;
+      // The shim accepts the shutdown and closes: a confirmed graceful stop, nothing to kill.
+      await expect(harness.runtime.stop(paneless, 50)).resolves.toBeUndefined();
+      expect(harness.clients()[0]?.shutdowns).toBe(1);
+      expect(harness.server.commands).toEqual([]);
+      expect(consoleError).not.toHaveBeenCalled();
+
+      // The caller's own probe already decided: nothing to verify, nothing to log again.
+      await expect(
+        harness.runtime.stop(paneless, 50, { skipGraceful: true, refuseKill: true })
+      ).resolves.toBeUndefined();
+      expect(harness.server.commands).toEqual([]);
+      expect(consoleError).not.toHaveBeenCalled();
+
+      // Deciding itself: refused once, logged once, no tmux command issued for a pane it cannot name.
+      await expect(
+        harness.runtime.stop(paneless, 50, { skipGraceful: true })
+      ).resolves.toBeUndefined();
+      expect(harness.server.commands).toEqual([]);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(String(consoleError.mock.calls[0]?.[0])).toContain("no recorded process identity");
+    } finally {
+      consoleError.mockRestore();
+    }
+    // The pane the paneless record could not name is untouched.
+    expect(harness.server.windowOf("%1")).toBe("@42");
+  });
+
+  it("stop throws ProcessStopFailed, killing nothing, when list-panes itself fails for a reason that does not prove the pane gone", async () => {
+    // B3: a failed listing is not a missing pane. Before this, `stop` returned normally here and
+    // the caller cleared the locator of a possibly-live process.
+    const harness = await tmuxHarness();
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    for (const [listing, message] of [
+      [{ exitCode: 1, stderr: "" }, "list-panes -t %1 exited 1"],
+      [
+        { exitCode: 1, stderr: "tmux: server not responding" },
+        "list-panes -t %1 exited 1: tmux: server not responding",
+      ],
+    ] as const) {
+      harness.server.listPanesResult = listing;
+      harness.server.commands.length = 0;
+      const failure = await harness.runtime.stop(locator, 50, { skipGraceful: true }).then(
         () => undefined,
         (error: unknown) => error
       );
-    expect(paneless).toBeInstanceOf(Error);
-    expect(paneless).not.toBeInstanceOf(ProcessStopFailed);
-    expect((paneless as Error).message).toMatch(/missing a pane id/);
+      expect(failure).toBeInstanceOf(ProcessStopFailed);
+      expect((failure as ProcessStopFailed).message).toBe(message);
+      expect((failure as ProcessStopFailed).locator).toBe(locator);
+      expect(harness.server.commands).toEqual([
+        tmuxArgv("list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_pid}"),
+      ]);
+    }
+    // The pane and its process are exactly as they were.
+    expect(harness.server.pane("%1").pid).toBe(12345);
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
+  });
+
+  it.each([
+    ["can't find pane: %1"],
+    ["no server running on /tmp/tmux-1000/legion-omp"],
+    ["error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)"],
+  ])("stop treats a list-panes failure whose stderr proves the pane gone as an already-gone pane: %s", async (stderr) => {
+    const harness = await tmuxHarness();
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    harness.server.listPanesResult = { exitCode: 1, stderr };
+    harness.server.commands.length = 0;
+    await expect(
+      harness.runtime.stop(locator, 50, { skipGraceful: true })
+    ).resolves.toBeUndefined();
+    expect(harness.server.commands).toEqual([
+      tmuxArgv("list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_pid}"),
+    ]);
+    harness.server.listPanesResult = { exitCode: 1, stderr };
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "dead", reason: "gone" });
+  });
+
+  it("probe throws, never alive and never gone, when list-panes fails for a reason that proves nothing", async () => {
+    const harness = await tmuxHarness();
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    harness.server.listPanesResult = { exitCode: 1, stderr: "tmux: server not responding" };
+    await expect(harness.runtime.probe(locator)).rejects.toThrow(
+      "cannot verify pane %1: list-panes -t %1 exited 1: tmux: server not responding"
+    );
+    // Nothing about the pane changed; the next successful listing verifies it again.
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
   });
 
   it("refuses to operate a kubernetes locator", async () => {
@@ -994,16 +1107,16 @@ describe("TmuxRuntime", () => {
 describe("ProcessManager stays runtime-agnostic", () => {
   const source = readFileSync(path.resolve(import.meta.dir, "../processes.ts"), "utf8");
 
+  // Every name here is a tmux-side symbol that exists today (`runtime-tmux.ts`/`tmux.ts`) and
+  // must never migrate back into the manager; a name nothing defines proves nothing.
   it.each([
     "tmux.",
     "prepareSocket",
-    "writePaneSecret",
-    "launchShimmedProcess",
-    "workerClient(",
-    "recordedWindowId",
-    "rewriteIssueWindowId",
+    "preparePane",
+    "verifyPaneProcess",
     "probedWindowId",
-    "reconcileTmuxWindows",
+    "lookupPane",
+    "PANE_GONE_STDERR",
   ])("processes.ts never references %s", (symbol) => {
     expect(source.split(symbol).length - 1).toBe(0);
   });

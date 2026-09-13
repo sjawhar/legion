@@ -35,7 +35,7 @@ import type { Effect } from "../reducers";
 import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
 const root = "LEGION-42";
@@ -82,6 +82,38 @@ async function flushEventLoopUntil(condition: () => boolean, maxTicks = 5_000): 
   for (let tick = 0; tick < maxTicks && !condition(); tick += 1) {
     await onceEventLoop();
   }
+}
+
+/** Counts a fake tmux's `new-window` launches and lets a test await the Nth one as a real event.
+ * `spawnRoot` does real fs I/O (workspace provisioning, secret files) before it ever reaches
+ * tmux, so a `setImmediate` budget racing it is load-sensitive; a waiter resolved from inside the
+ * fake runner the moment the launch is issued is not. A wait that never resolves fails the test
+ * on bun's own timeout with the assertion still unreached, never a false green. */
+function windowCounter(): {
+  readonly count: number;
+  increment(): void;
+  reached(n: number): Promise<void>;
+} {
+  let count = 0;
+  const waiters: Array<{ n: number; resolve: () => void }> = [];
+  return {
+    get count() {
+      return count;
+    },
+    increment() {
+      count += 1;
+      for (const waiter of waiters.splice(0)) {
+        if (count >= waiter.n) waiter.resolve();
+        else waiters.push(waiter);
+      }
+    },
+    reached(n) {
+      if (count >= n) return Promise.resolve();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      waiters.push({ n, resolve });
+      return promise;
+    },
+  };
 }
 
 async function temporaryDir(): Promise<string> {
@@ -161,6 +193,10 @@ async function idleWorkerFixture(options: {
       tmuxPaneId: "%7",
       socketPath: `/state/workers/${options.role}.sock`,
       ompSessionFile: sessionFile,
+      // The identity the fixture's default `list-panes`/`readProcessStat` report, so the pane
+      // verifies: a "no kill-pane" assertion below then means the graceful stop confirmed, not
+      // that an identity-less locator had its kill refused.
+      ...paneIdentity(),
     },
     ...options.claim,
   };
@@ -308,13 +344,21 @@ function livePanes(command: string[], pid = 12345): { stdout: string; exitCode: 
   return { stdout: `${target} ${pid}\n`, exitCode: 0 };
 }
 
+/** Answers a per-pane `list-panes -t <pane>` probe for a pane that is gone the way real tmux
+ * does: exit 1 with `can't find pane` on stderr (`PANE_GONE_STDERR`). A bare exit 1 with no
+ * stderr is NOT a gone pane -- it is a failed listing that proves nothing, and `TmuxRuntime`
+ * refuses to read it as either alive or gone. */
+function paneGone(): { stdout: string; stderr: string; exitCode: number } {
+  return { stdout: "", stderr: "can't find pane", exitCode: 1 };
+}
+
 /** Start ticks the fixture's default `readProcessStat` reports for every pid, so a locator
  * seeded with `paneIdentity()` verifies against the default fake tmux (pid 12345). */
 const DEFAULT_START_TICKS = 4242;
 
 /** A `/proc/<pid>/stat` line whose field 22 (starttime) is `startTicks`. */
 function procStat(pid: number, startTicks = DEFAULT_START_TICKS): string {
-  return `${pid} (sh) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 ${startTicks} 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+  return procStatLine(pid, startTicks);
 }
 
 /** The process identity a seeded locator needs to verify: `pid` must be what the test's fake
@@ -366,7 +410,7 @@ function manager(
         command[3] === "list-panes" &&
         command.includes("#{pane_id} #{pane_pid}")
       ) {
-        if (!launchedAnyWindow) return { stdout: "", exitCode: 1 };
+        if (!launchedAnyWindow) return paneGone();
         return livePanes(command);
       }
       if (command[0] === "tmux" && command[3] === "split-window") {
@@ -1411,9 +1455,12 @@ describe("ProcessManager", () => {
     const releaseSecondLaunch = Promise.withResolvers<void>();
     const commands: string[][] = [];
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    // No injected `sleep`: the manager's root-registration deadline must stay a real (long) timer
+    // here, or it would fire the moment generation 2's locator lands and start retiring that
+    // never-confirmed root -- killing `%2`, clearing its locator, and pruning the very secret file
+    // the assertions below read -- racing them on real fs I/O. `dispose()` (afterEach) cancels it.
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
-      sleep: async () => {},
       mintBootToken: async (_issue, generation) => `boot-gen-${generation}`,
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
@@ -2487,10 +2534,10 @@ describe("ProcessManager", () => {
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
         if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
-          return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : paneGone();
         }
         if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
-          return windows > 0 ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return windows > 0 ? livePanes(command) : paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2910,11 +2957,12 @@ describe("ProcessManager", () => {
     expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
   });
 
-  it("throws StopFailed and leaves the tree lingering (not closed) when a root locator is a corrupt record missing a pane id", async () => {
+  it("closes a tree whose root locator has no pane id: the graceful shutdown still goes out over its socket, nothing is killed, nothing throws", async () => {
     // A tree locator's `tmuxPaneId` is optional (a pre-pane-id legacy record), so this is a
-    // real, loadable state for a root. The tmux runtime treats it as a corrupt record rather
-    // than degrading: `stop` rejects (`missing a pane id`) without any kill, `ProcessManager`
-    // surfaces that as `StopFailed`, and the tree stays lingering with its locator intact.
+    // real, loadable state for a root. It is an identity-less locator like any other: `probe`
+    // reports it not-recorded-process without touching tmux, and `stop` must agree -- the
+    // shutdown is asked over the root's own socket, the kill is refused, and the tree closes --
+    // instead of throwing above the gate and leaving the tree lingering for every sweep tick.
     const state = newLegionState("omp", 1);
     tree(state);
     if (!state.trees[root]?.locator) throw new Error("test root is missing a locator");
@@ -2927,16 +2975,65 @@ describe("ProcessManager", () => {
     };
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const commands: string[][] = [];
+    const shutdowns: string[] = [];
     const { manager: processes } = manager(state, {
       sleep: async () => {},
       run: async (command) => {
         commands.push(command);
-        if (
-          command[0] === "tmux" &&
-          command[3] === "list-panes" &&
-          command.includes("#{pane_id} #{pane_pid}")
-        ) {
-          return livePanes(command);
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown.bind(client);
+        client.shutdown = () => {
+          shutdowns.push(socketPath);
+          shutdown();
+        };
+        return client;
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(shutdowns).toEqual(["/state/workers/architect.sock"]);
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+    ).toEqual([]);
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[3] === "kill-window")
+    ).toEqual([]);
+    expect(state.trees[root].status).toBe("closed");
+    expect(state.trees[root].locator).toBeUndefined();
+    // The decision was logged once, at the probe, with what the record lacks.
+    const logged = errorLog.mock.calls.map((call) => call.map(String).join(" "));
+    expect(logged.filter((line) => line.includes("treating LEGION-42's root as dead"))).toEqual([
+      "[legion] treating LEGION-42's root as dead: pane @42 has no recorded process identity (locator predates identity tracking)",
+    ]);
+    expect(logged.filter((line) => line.includes("failed to stop"))).toEqual([]);
+    errorLog.mockRestore();
+  });
+
+  it("throws StopFailed and leaves the tree lingering with its locator intact when list-panes itself fails while closing, killing nothing", async () => {
+    // B3: a failed listing proves nothing about the pane. The root's shim never confirms the
+    // shutdown, so the stop reaches the kill gate; there tmux's `list-panes` fails for a reason
+    // that is not "the pane is gone" (a client killed by the runner's timeout: nonzero exit,
+    // empty stderr). The stop must throw, not return as if the pane were gone -- a possibly-live
+    // root's locator is never cleared on a verdict nobody reached.
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const seededLocator = structuredClone(state.trees[root]?.locator);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: string[][] = [];
+    let listings = 0;
+    const { manager: processes } = manager(state, {
+      sleep: async () => {},
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          listings += 1;
+          // The first listing is `probeTree`'s: the pane is live and verifies. The second is the
+          // kill gate's, after the shim ignored the shutdown -- and it fails.
+          return listings === 1 ? livePanes(command) : { stdout: "", exitCode: 1 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -2949,22 +3046,54 @@ describe("ProcessManager", () => {
 
     await expect(processes.closeTree(root)).rejects.toThrow(StopFailed);
 
-    expect(commands.filter((command) => command[3] === "kill-pane")).toEqual([]);
-    expect(commands.filter((command) => command[3] === "kill-window")).toEqual([]);
+    expect(
+      commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
+    ).toEqual([]);
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining(`root process failed to stop while closing ${root}`),
-      expect.objectContaining({ message: expect.stringContaining("missing a pane id") })
+      expect.objectContaining({ message: "list-panes -t %0 exited 1" })
     );
-    // Never marked closed while a possibly-live process's locator couldn't be confirmed
-    // stopped: the tree is left lingering (with a fresh retry deadline) for the sweep.
+    // Never marked closed while the process could not be confirmed stopped: the tree is left
+    // lingering, locator untouched, for the sweep to retry.
     expect(state.trees[root].status).toBe("lingering");
-    expect(state.trees[root].locator).toEqual({
-      runtime: "tmux",
-      tmuxSession: "legion-omp",
-      tmuxWindowId: "@42",
-      socketPath: "/state/workers/architect.sock",
-    });
+    expect(state.trees[root].locator).toEqual(seededLocator);
     errorLog.mockRestore();
+  });
+
+  it("probe rejects, clearing nothing and resurrecting nothing, when list-panes itself fails for a reason that proves nothing", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const seededLocator = structuredClone(state.trees[root]?.locator);
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return { stdout: "", stderr: "tmux: server not responding", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Exactly the composition index.ts's `onProbe` runs on a resync tick: a rejected probe
+    // never reaches `resurrect`, and the resync loop logs and retries next interval.
+    await expect(
+      (async () => {
+        if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+      })()
+    ).rejects.toThrow(
+      "cannot verify pane %0: list-panes -t %0 exited 1: tmux: server not responding"
+    );
+    expect(state.trees[root]).toMatchObject({ status: "active", generation: 1 });
+    expect(state.trees[root].locator).toEqual(seededLocator);
+    expect(
+      commands.filter(
+        (command) =>
+          command[0] === "tmux" && (command[3] === "new-window" || command[3] === "kill-pane")
+      )
+    ).toEqual([]);
   });
 
   it("tolerates killing a pane tmux already reaped without logging it as a failure", async () => {
@@ -3152,7 +3281,7 @@ describe("ProcessManager", () => {
           command[3] === "list-panes" &&
           command.includes("#{pane_id} #{pane_pid}")
         ) {
-          return { stdout: "", exitCode: 1 };
+          return paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -4311,7 +4440,15 @@ describe("ProcessManager", () => {
       50_000
     );
 
-    expect(commands.some((command) => command[0] === "kill")).toBe(true);
+    // The watchdog probed the pane itself (its own row, by pane id) before retiring the boot.
+    expect(
+      commands.some(
+        (command) =>
+          command[0] === "tmux" &&
+          command[3] === "list-panes" &&
+          command.includes("#{pane_id} #{pane_pid}")
+      )
+    ).toBe(true);
     expect(publications).toContainEqual({
       subject: roleTopic(roleToken("omp", root, "architect")),
       json: JSON.stringify({ type: "worker-died", issue: child, role }),
@@ -4439,7 +4576,7 @@ describe("ProcessManager", () => {
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "list-panes") {
-          return { stdout: "", exitCode: 1 };
+          return paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -4484,8 +4621,10 @@ describe("ProcessManager", () => {
       // The production default (120s): with `now` left at the fixture's fixed clock, the
       // watchdog's connect-retry loop can never reach its own deadline on its own — only
       // `dispose()`'s cancellation stops it, so a continuing rise in `connectAttempts` after
-      // dispose() unambiguously means a live loop survived it.
-      config: config(stateDir),
+      // dispose() unambiguously means a live loop survived it. The registration deadline is
+      // pinned out of reach: this test is about the loop stopping, and a retirement the loop
+      // reached on its own before dispose() would count a launch failure that is not the point.
+      config: config(stateDir, { workerBootRegistrationDeadlineIntervals: 1_000 }),
       connectWorkerRpc: async () => {
         connectAttempts += 1;
         throw new Error("shim not listening yet");
@@ -4559,7 +4698,7 @@ describe("ProcessManager", () => {
           };
         }
         if (command[3] === "list-panes") {
-          return controllerSpawned ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return controllerSpawned ? livePanes(command) : paneGone();
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -4607,7 +4746,7 @@ describe("ProcessManager", () => {
           return { stdout: controllerLive ? "controller\n" : "", exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return controllerLive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return controllerLive ? livePanes(command) : paneGone();
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -4798,10 +4937,15 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const firstSleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
-    let windowCount = 0;
+    const windows = windowCounter();
     const launchedPids = new Map<string, number>();
+    const controllerRelaunched = Promise.withResolvers<void>();
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
+      saveState: async () => {
+        if (tmuxFields(state.controllerLocator)?.tmuxWindowId === "@52")
+          controllerRelaunched.resolve();
+      },
       // Only the very first armed deadline (for the from-scratch spawn this test is about) is
       // under this test's control; the *second* fresh spawn (once the first is retired) arms its
       // own deadline too, which must stay pending so this test's own assertions see a stable
@@ -4823,9 +4967,12 @@ describe("ProcessManager", () => {
           return livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]));
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          launchedPids.set(`%${windowCount}`, Number(`8765${windowCount}`));
-          return { stdout: `@5${windowCount} %${windowCount} 8765${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          launchedPids.set(`%${windows.count}`, Number(`8765${windows.count}`));
+          return {
+            stdout: `@5${windows.count} %${windows.count} 8765${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
@@ -4837,16 +4984,18 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     const firstLocator = managedState.controllerLocator;
     expect(firstLocator).toBeDefined();
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
 
     // The freshly-spawned controller never registers either -- its own armed deadline elapses.
     firstSleepGate.resolve();
-    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    await windows.reached(2);
+    // The relaunched controller's locator is recorded and then persisted: that save is the event.
+    await controllerRelaunched.promise;
 
     expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       true
     );
-    expect(windowCount).toBe(2);
+    expect(windows.count).toBe(2);
     expect(tmuxFields(managedState.controllerLocator)?.tmuxWindowId).not.toBe(
       tmuxFields(firstLocator)?.tmuxWindowId
     );
@@ -4889,7 +5038,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") {
-          return panesAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return panesAlive ? livePanes(command) : paneGone();
         }
         if (command[3] === "new-window") {
           windowCount += 1;
@@ -5045,7 +5194,7 @@ describe("ProcessManager", () => {
     const firstGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    let windowCount = 0;
+    const windows = windowCounter();
     let paneAlive = true;
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
@@ -5072,11 +5221,14 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5086,14 +5238,16 @@ describe("ProcessManager", () => {
     });
 
     await processes.spawnRoot(root);
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
 
     // The pane dies on its own before the deadline elapses.
     paneAlive = false;
     firstGate.resolve();
-    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    await windows.reached(2);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
 
-    expect(windowCount).toBe(2);
+    expect(windows.count).toBe(2);
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
   });
 
@@ -5107,7 +5261,7 @@ describe("ProcessManager", () => {
     const firstGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    let windowCount = 0;
+    const windows = windowCounter();
     let paneAlive = true;
     const launchedPids = new Map<string, number>();
     const { manager: processes, state: managedState } = manager(state, {
@@ -5131,14 +5285,17 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          launchedPids.set(`%${windowCount}`, Number(`1000${windowCount}`));
-          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          launchedPids.set(`%${windows.count}`, Number(`1000${windows.count}`));
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[3] === "list-panes") {
           return paneAlive
             ? livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]))
-            : { stdout: "", exitCode: 1 };
+            : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           // A real kill-pane actually kills the pane -- the resurrect that follows must see it
@@ -5151,16 +5308,18 @@ describe("ProcessManager", () => {
     });
 
     await processes.spawnRoot(root);
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
 
     // The pane never confirms via `/process/ready` and is still alive when the deadline elapses.
     firstGate.resolve();
-    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    await windows.reached(2);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
 
     expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       true
     );
-    expect(windowCount).toBe(2);
+    expect(windows.count).toBe(2);
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
     // The retirement counts toward `launchFailures` itself -- `spawnRoot`'s own success path no
     // longer resets it on a mere pane-open, only a confirmed `/process/ready` does
@@ -5210,7 +5369,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5396,7 +5555,7 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes") {
           listPanesCalls += 1;
           if (listPanesCalls === 1) await probeGate.promise;
-          return { stdout: "", exitCode: 1 };
+          return paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5439,7 +5598,7 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const commands: string[][] = [];
     let sessionExists = false;
-    let windowCount = 0;
+    const windows = windowCounter();
     let paneAlive = true;
     const {
       manager: processes,
@@ -5470,11 +5629,14 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5484,18 +5646,22 @@ describe("ProcessManager", () => {
     });
 
     await processes.spawnRoot(root);
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
 
     // The pane never confirms and dies before every one of the first two deadlines: each one
     // resurrects (a fresh generation, its own fresh deadline) and counts a failure.
     paneAlive = false;
     gates[0].resolve();
-    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    await windows.reached(2);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
     expect(managedState.trees[root]?.launchFailures).toBe(1);
 
     gates[1].resolve();
-    await flushEventLoopUntil(() => windowCount >= 3, 20_000);
+    await windows.reached(3);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
     expect(managedState.trees[root]).toMatchObject({ generation: 3, status: "active" });
     expect(managedState.trees[root]?.launchFailures).toBe(2);
 
@@ -5504,7 +5670,7 @@ describe("ProcessManager", () => {
     gates[2].resolve();
     await flushEventLoopUntil(() => managedState.trees[root]?.status === "launch-failed", 20_000);
 
-    expect(windowCount).toBe(3);
+    expect(windows.count).toBe(3);
     expect(managedState.trees[root]?.launchFailures).toBe(3);
     expect(managedState.trees[root]?.locator).toBeUndefined();
     expect(managedState.admission.active).toEqual([]);
@@ -5558,7 +5724,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5623,7 +5789,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5692,7 +5858,7 @@ describe("ProcessManager", () => {
           return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
         }
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5745,7 +5911,7 @@ describe("ProcessManager", () => {
     state.trees[child] = { root: child, generation: 0, status: "queued", launchFailures: 0 };
     const sleepGate = Promise.withResolvers<void>();
     let sleepCalls = 0;
-    let windowCount = 0;
+    const windows = windowCounter();
     const {
       manager: processes,
       state: managedState,
@@ -5766,12 +5932,15 @@ describe("ProcessManager", () => {
       run: async (command) => {
         if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
-          windowCount += 1;
-          return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          return {
+            stdout: `@5${windows.count} %${windows.count} 2000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         // root's own recorded pane always reads dead -- the only real spawn this test drives is
         // the queued child's promotion.
-        if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+        if (command[3] === "list-panes") return paneGone();
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
         }
@@ -5787,10 +5956,10 @@ describe("ProcessManager", () => {
     // The deadline elapses against a dead pane, reaching MAX_LAUNCH_FAILURES: escalates instead
     // of resurrecting, and the queued child must be promoted into the slot this frees.
     sleepGate.resolve();
-    await flushEventLoopUntil(
-      () => managedState.trees[root]?.status === "launch-failed" && windowCount >= 1,
-      20_000
-    );
+    // The freed slot's promotion is a real `startRoot` spawn: the child's launch is the event,
+    // and `drainSpawns` awaits that spawn to completion (locator recorded, persisted).
+    await windows.reached(1);
+    await processes.drainSpawns();
 
     expect(managedState.trees[root]).toMatchObject({
       status: "launch-failed",
@@ -5820,7 +5989,7 @@ describe("ProcessManager", () => {
     const secondGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    let windowCount = 0;
+    const windows = windowCounter();
     let killPaneShouldFail = true;
     let killPaneSucceeded = false;
     const launchedPids = new Map<string, number>();
@@ -5849,13 +6018,16 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          launchedPids.set(`%${windowCount}`, Number(`1000${windowCount}`));
-          return { stdout: `@4${windowCount} %${windowCount} 1000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          launchedPids.set(`%${windows.count}`, Number(`1000${windows.count}`));
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[3] === "list-panes") {
           return killPaneSucceeded
-            ? { stdout: "", exitCode: 1 }
+            ? paneGone()
             : livePanes(command, launchedPids.get(command[command.indexOf("-t") + 1]));
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
@@ -5870,7 +6042,7 @@ describe("ProcessManager", () => {
     });
 
     await processes.spawnRoot(root);
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
 
     // The first deadline elapses against an alive-but-unconfirmed pane whose kill-pane fails --
     // it re-arms the same generation's deadline instead of stranding it with nothing left to
@@ -5878,14 +6050,16 @@ describe("ProcessManager", () => {
     firstGate.resolve();
     await flushEventLoopUntil(() => sleepCalls >= 2, 20_000);
 
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
     expect(managedState.trees[root]?.launchFailures).toBe(0);
 
     // The re-armed deadline elapses; this time the stop succeeds, so it retires and resurrects.
     killPaneShouldFail = false;
     secondGate.resolve();
-    await flushEventLoopUntil(() => windowCount >= 2, 20_000);
+    await windows.reached(2);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
 
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
     expect(managedState.trees[root]?.launchFailures).toBe(1);
@@ -5915,7 +6089,7 @@ describe("ProcessManager", () => {
     const sleepGate = Promise.withResolvers<void>();
     let sleepCalls = 0;
     const commands: string[][] = [];
-    let windowCount = 0;
+    const windows = windowCounter();
     let paneAlive = true;
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
@@ -5933,11 +6107,14 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[3] === "list-panes") {
-          return paneAlive ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return paneAlive ? livePanes(command) : paneGone();
         }
         if (command[3] === "new-window") {
-          windowCount += 1;
-          return { stdout: `@5${windowCount} %${windowCount} 2000${windowCount}\n`, exitCode: 0 };
+          windows.increment();
+          return {
+            stdout: `@5${windows.count} %${windows.count} 2000${windows.count}\n`,
+            exitCode: 0,
+          };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -5953,9 +6130,11 @@ describe("ProcessManager", () => {
     // the restart intact.
     paneAlive = false;
     sleepGate.resolve();
-    await flushEventLoopUntil(() => windowCount >= 1, 20_000);
+    await windows.reached(1);
+    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+    await processes.drainSpawns();
 
-    expect(windowCount).toBe(1);
+    expect(windows.count).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
     expect(managedState.trees[root]?.launchFailures).toBe(1);
   });
@@ -6128,7 +6307,7 @@ describe("ProcessManager", () => {
           };
         }
         if (command[3] === "list-panes") {
-          return controllerSpawned ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return controllerSpawned ? livePanes(command) : paneGone();
         }
         if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
@@ -6217,10 +6396,10 @@ describe("ProcessManager", () => {
           return { stdout: "%2 12345\n", exitCode: 0 };
         }
         if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
-          return launched ? { stdout: "%1\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+          return launched ? { stdout: "%1\n", exitCode: 0 } : paneGone();
         }
         if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
-          return launched ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return launched ? livePanes(command) : paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -6367,7 +6546,9 @@ describe("ProcessManager", () => {
           new Response(child.stderr).text(),
           child.exited,
         ]);
-        return { stdout: `${stdout}${stderr}`, exitCode };
+        // Exactly `defaultRunner`'s shape: stderr stays separate, so `lookupPane` can read a real
+        // `can't find pane` as the pane being gone rather than as a listing that failed.
+        return { stdout, stderr, exitCode };
       };
       const { manager: processes } = manager(state, {
         config: config(stateDir, { legionId: project }),
@@ -6419,7 +6600,9 @@ describe("ProcessManager", () => {
           new Response(child.stderr).text(),
           child.exited,
         ]);
-        return { stdout: `${stdout}${stderr}`, exitCode };
+        // Exactly `defaultRunner`'s shape: stderr stays separate, so `lookupPane` can read a real
+        // `can't find pane` as the pane being gone rather than as a listing that failed.
+        return { stdout, stderr, exitCode };
       };
       const { manager: processes } = manager(state, {
         config: config(stateDir, { legionId: project }),
@@ -6475,7 +6658,9 @@ describe("ProcessManager", () => {
           new Response(child.stderr).text(),
           child.exited,
         ]);
-        return { stdout: `${stdout}${stderr}`, exitCode };
+        // Exactly `defaultRunner`'s shape: stderr stays separate, so `lookupPane` can read a real
+        // `can't find pane` as the pane being gone rather than as a listing that failed.
+        return { stdout, stderr, exitCode };
       };
       const { manager: processes } = manager(state, {
         config: config(stateDir, { legionId: project }),
@@ -6505,7 +6690,10 @@ describe("ProcessManager", () => {
       } finally {
         await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
       }
-    }
+    },
+    // A real tmux server and real `/proc` reads: the same per-test budget the other real-process
+    // tests (`real-shutdown-e2e.test.ts`) run under, never bun's 5 s default.
+    30_000
   );
 
   it("runs a root's whole lifecycle over a non-tmux Runtime: spawn, probe alive, close, reconcile", async () => {
@@ -6638,17 +6826,12 @@ describe("ProcessManager", () => {
 
     // B2: the graceful ask still went out (the socket is role-scoped, so it reaches exactly the
     // recorded process if it is alive at all), and the runtime was told not to destroy what now
-    // holds the handle.
-    expect(runtime.stopped).toEqual([
-      {
-        locator,
-        timeoutMs: 60_000,
-        options: { skipGraceful: false, refuseKill: true },
-        destroyed: false,
-      },
+    // holds the handle -- the `options` are ProcessManager's decision; what the runtime does with
+    // them is the runtime contract tests' business.
+    expect(runtime.stopped.map((stop) => [stop.locator, stop.timeoutMs, stop.options])).toEqual([
+      [locator, 60_000, { skipGraceful: false, refuseKill: true }],
     ]);
     expect(client.runState).toBe("idle"); // the fake shim closed after its shutdown frame
-    expect(runtime.strangers.size).toBe(1); // the other process is still there
     expect(state.trees[root]?.status).toBe("closed");
     expect(state.trees[root]?.locator).toBeUndefined();
     expect(logged.filter((line) => line.includes("treating LEGION-42's root as dead"))).toEqual([
@@ -6656,7 +6839,7 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("resurrects a root whose handle now belongs to another process: asks the recorded process to exit, never destroys the other one, resumes onto a fresh process, and logs the decision once", async () => {
+  it("resurrects a root whose handle now belongs to another process: asks the recorded process to exit with the destroy step refused, resumes onto a fresh process, and logs the decision once", async () => {
     const { processes, state, runtime, locator } = await fakeRuntimeTree();
     runtime.occupyHandle(locator, { detail: "pane %1 now runs pid 999 (recorded pid 1 start 2)" });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -6669,8 +6852,9 @@ describe("ProcessManager", () => {
       errors.mockRestore();
     }
 
-    expect(runtime.stopped.map((stop) => [stop.options, stop.destroyed])).toEqual([
-      [{ skipGraceful: false, refuseKill: true }, false],
+    // What ProcessManager decided: the graceful ask still goes out, the destroy step is refused.
+    expect(runtime.stopped.map((stop) => stop.options)).toEqual([
+      { skipGraceful: false, refuseKill: true },
     ]);
     expect(runtime.spawned.map((spawn) => spawn.kind)).toEqual(["root", "root"]);
     expect(state.trees[root]?.locator).toBeDefined();
@@ -6700,8 +6884,8 @@ describe("ProcessManager", () => {
       errors.mockRestore();
     }
 
-    expect(runtime.stopped).toEqual([
-      { locator: first, timeoutMs: 10_000, options: { refuseKill: true }, destroyed: false },
+    expect(runtime.stopped.map((stop) => [stop.locator, stop.timeoutMs, stop.options])).toEqual([
+      [first, 10_000, { refuseKill: true }],
     ]);
     expect(runtime.spawned.map((spawn) => spawn.kind)).toEqual(["controller", "controller"]);
     expect(state.controllerLocator).toBeDefined();
@@ -6711,7 +6895,7 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("retires an unconfirmed worker boot at the first watchdog interval once its handle belongs to another process and its socket refuses, destroying nothing", async () => {
+  it("retires an unconfirmed worker boot at the first watchdog interval once its handle belongs to another process and its socket refuses, relaunching the same role", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
@@ -6749,12 +6933,14 @@ describe("ProcessManager", () => {
       );
     }, 50_000);
 
-    // Whatever now holds the retired boot's handle was never destroyed: the runtime's destroy
-    // step ran for no stop of that locator, and the fake still lists the occupant.
+    // The retirement stopped exactly the old locator, once, letting the runtime decide the kill
+    // (no `skipGraceful`: the graceful ask is still attempted; no verdict handed down -- the
+    // watchdog reached the boot through the socket refusal, not a probe verdict of its own).
     expect(
-      runtime.stopped.filter((stop) => sameProcess(stop.locator, workerLocator) && stop.destroyed)
-    ).toEqual([]);
-    expect(runtime.strangers.size).toBe(1);
+      runtime.stopped
+        .filter((stop) => sameProcess(stop.locator, workerLocator))
+        .map((stop) => stop.options)
+    ).toEqual([undefined]);
     // The retry relaunched the same role onto a fresh process, still carrying its assignment.
     const relaunched = managedState.roles[token];
     if (!relaunched || !("issue" in relaunched)) throw new Error("relaunched claim missing");
@@ -6987,7 +7173,7 @@ describe("ProcessManager", () => {
           return { stdout: "%201 67890\n", exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "list-panes") {
-          return windowsOpened > 0 ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return windowsOpened > 0 ? livePanes(command) : paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -7395,7 +7581,7 @@ describe("ProcessManager", () => {
           // The panes recorded in the dead `@42` are gone; the fresh window's `%201` is live and
           // still the process the tester's locator recorded.
           const target = command[command.indexOf("-t") + 1];
-          return target === "%201" ? livePanes(command) : { stdout: "", exitCode: 1 };
+          return target === "%201" ? livePanes(command) : paneGone();
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -7717,7 +7903,7 @@ describe("ProcessManager", () => {
       run: async (command) => {
         commands.push(command);
         if (command[0] === "tmux" && command[3] === "list-panes") {
-          return command.includes("%7") ? { stdout: "", exitCode: 1 } : livePanes(command);
+          return command.includes("%7") ? paneGone() : livePanes(command);
         }
         if (command[0] === "tmux" && command[3] === "split-window") {
           return { stdout: "%301 23456\n", exitCode: 0 };
@@ -8220,8 +8406,9 @@ describe("ProcessManager", () => {
             windows += 1;
             return { stdout: `@${windows} %${windows} ${12345 + windows}\n`, exitCode: 0 };
           }
-          // Nothing recorded is alive: the root's pane is dead, no controller pane exists.
-          if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+          // Nothing recorded is alive: the root's pane is gone (tmux says so), no controller pane
+          // exists.
+          if (command[3] === "list-panes") return paneGone();
           return { stdout: "", exitCode: 0 };
         },
       },
@@ -10603,7 +10790,7 @@ describe("ProcessManager", () => {
             // Reports the original dead pane as gone (drives the first, restart-time
             // retirement decision); the freshly-launched pane's own later liveness is never
             // queried by this test.
-            return { stdout: "", exitCode: 1 };
+            return paneGone();
           }
           if (command[0] === "tmux" && command[3] === "new-window") {
             return { stdout: "@50 %50 54321\n", exitCode: 0 };
@@ -10663,6 +10850,7 @@ describe("ProcessManager", () => {
           tmuxPaneId: `%${index + 1}`,
           socketPath: `/state/workers/${role}.sock`,
           ompSessionFile: `/state/sessions/${role}.json`,
+          ...paneIdentity(),
         },
       };
     });
@@ -10678,8 +10866,9 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[3] === "list-panes")
-          return { stdout: "", exitCode: 1 };
+        // Every pane is live and still its recorded process (pid 12345, the fixture identity),
+        // so a dead-socket retirement's kill is a real kill of the recorded pane.
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -10802,7 +10991,7 @@ describe("ProcessManager", () => {
         },
         run: async (command) => {
           if (command[0] === "tmux" && command[3] === "list-panes") {
-            return { stdout: "", exitCode: 1 };
+            return paneGone();
           }
           return { stdout: "", exitCode: 0 };
         },
@@ -10888,7 +11077,7 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (command[0] === "tmux" && command[3] === "list-panes") {
           // The recorded pane is gone in every liveness probe throughout this test.
-          return { stdout: "", exitCode: 1 };
+          return paneGone();
         }
         if (
           command[0] === "tmux" &&
@@ -10967,8 +11156,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[3] === "list-panes")
-          return { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -11050,8 +11238,7 @@ describe("ProcessManager", () => {
       },
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "tmux" && command[3] === "list-panes")
-          return { stdout: "", exitCode: 1 };
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
         return { stdout: "", exitCode: 0 };
       },
     });
@@ -11641,7 +11828,7 @@ describe("ProcessManager", () => {
         // The root's original pane ("%0", from `tree()`) is gone; the untouched second tree's
         // pane ("%1") is still live and running OMP (the default `readProcessCmdline`).
         if (command[0] === "tmux" && command[3] === "list-panes" && command[5] === "%0") {
-          return { stdout: "", exitCode: 1 };
+          return paneGone();
         }
         if (command[0] === "tmux" && command[3] === "list-panes" && command[5] === "%1") {
           return { stdout: "%1 12345\n", exitCode: 0 };
@@ -11870,7 +12057,7 @@ describe("ProcessManager", () => {
           return { stdout: "", exitCode: 0 };
         },
       },
-      { skipEnablePromotion: true }
+      { skipEnableLaunches: true }
     );
     try {
       await processes.reconnectWorkers();
@@ -11956,9 +12143,7 @@ describe("ProcessManager", () => {
         if (command[0] === "tmux" && command[3] === "list-panes") {
           const target = command[command.indexOf("-t") + 1];
           const pid = panes.get(target);
-          return pid === undefined
-            ? { stdout: "", exitCode: 1 }
-            : { stdout: `${target} ${pid}\n`, exitCode: 0 };
+          return pid === undefined ? paneGone() : { stdout: `${target} ${pid}\n`, exitCode: 0 };
         }
         if (command[0] === "tmux" && command[3] === "kill-pane") {
           return { stdout: "", exitCode: 0 };
@@ -12152,9 +12337,7 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes") {
           const target = command[command.indexOf("-t") + 1];
           const pid = panes.get(target);
-          return pid === undefined
-            ? { stdout: "", exitCode: 1 }
-            : { stdout: `${target} ${pid}\n`, exitCode: 0 };
+          return pid === undefined ? paneGone() : { stdout: `${target} ${pid}\n`, exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
@@ -12334,33 +12517,29 @@ describe("ProcessManager", () => {
     let reissued = false;
     const commands: string[][] = [];
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { manager: processes, state: managedState } = manager(
-      state,
-      {
-        config: config(stateDir, {
-          workerBootTimeoutSeconds: 1,
-          workerBootRegistrationDeadlineIntervals: 1_000,
-        }),
-        now: () => currentTime,
-        sleep: async (ms) => {
-          currentTime += ms;
-          await onceEventLoop();
-        },
-        connectWorkerRpc: async () => {
-          throw new Error("ECONNREFUSED");
-        },
-        run: async (command) => {
-          commands.push(command);
-          if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
-          if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
-          if (command[3] === "list-panes") {
-            return reissued ? { stdout: "%1 777\n", exitCode: 0 } : livePanes(command);
-          }
-          return { stdout: "", exitCode: 0 };
-        },
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, {
+        workerBootTimeoutSeconds: 1,
+        workerBootRegistrationDeadlineIntervals: 1_000,
+      }),
+      now: () => currentTime,
+      sleep: async (ms) => {
+        currentTime += ms;
+        await onceEventLoop();
       },
-      { skipEnablePromotion: true }
-    );
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
+        if (command[3] === "list-panes") {
+          return reissued ? { stdout: "%1 777\n", exitCode: 0 } : livePanes(command);
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
 
     try {
       await processes.spawnWorker(root, child, role, "do the work");
