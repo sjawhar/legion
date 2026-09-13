@@ -8134,14 +8134,23 @@ describe("ProcessManager", () => {
     GIT_COMMITTER_NAME: "legion-implement[bot]",
     GIT_COMMITTER_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
   };
-  /** Records every `jj metaedit` the daemon runs, with the command's env and how many prompts the
-   * worker had received when it ran (0 = before the assignment frame). */
+  /** Records every `jj metaedit` the daemon runs, with the command's env and timeout budget and how
+   * many prompts the worker had received when it ran (0 = before the assignment frame). */
   function recordingMetaedits(client: FakeWorkerRpcClient) {
-    const metaedits: Array<{ command: string[]; env: NodeJS.ProcessEnv; promptsBefore: number }> =
-      [];
+    const metaedits: Array<{
+      command: string[];
+      env: NodeJS.ProcessEnv;
+      timeoutMs: number | undefined;
+      promptsBefore: number;
+    }> = [];
     const run: ProcessManagerDeps["run"] = async (command, options) => {
       if (command[0] === "jj" && command[1] === "metaedit") {
-        metaedits.push({ command, env: options?.env ?? {}, promptsBefore: client.prompts.length });
+        metaedits.push({
+          command,
+          env: options?.env ?? {},
+          timeoutMs: options?.timeoutMs,
+          promptsBefore: client.prompts.length,
+        });
         return { stdout: "", stderr: "Nothing changed.\n", exitCode: 0 };
       }
       return { stdout: "", exitCode: 0 };
@@ -8181,6 +8190,9 @@ describe("ProcessManager", () => {
       adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
     );
     expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    // `metaedit` snapshots the working copy: the slow budget, like every other daemon jj command
+    // against a working copy, never the runner's generic one.
+    expect(metaedits[0]?.timeoutMs).toBe(300_000);
     expect(metaedits[0]?.promptsBefore).toBe(0);
   });
 
@@ -8217,29 +8229,51 @@ describe("ProcessManager", () => {
       adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
     );
     expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    expect(metaedits[0]?.timeoutMs).toBe(300_000);
     expect(metaedits[0]?.promptsBefore).toBe(0);
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
 
     // A working copy that cannot be adopted is never prompted: nothing is written, the ready call
-    // fails with jj's own stderr, and the claim is exactly as it was for the next ready attempt.
-    const failing = newLegionState("omp", 1);
-    failing.roles[token] = structuredClone(claimAtRest);
-    const failingClient = fakeWorkerRpcClient();
-    const { manager: failingProcesses, state: failingState } = manager(failing, {
-      connectWorkerRpc: async () => failingClient,
-      run: async (command) =>
-        command[0] === "jj" && command[1] === "metaedit"
-          ? { stdout: "", stderr: "Error: The working copy is stale\n", exitCode: 1 }
-          : { stdout: "", exitCode: 0 },
-    });
-
-    await expect(failingProcesses.workerReady(root, "tester", "ses_tester", 1)).rejects.toThrow(
-      "The working copy is stale"
+    // fails naming the command and why, and the claim is exactly as it was for the next ready
+    // attempt. A jj error carries jj's own stderr; a kill by the runner at the budget carries the
+    // runner's report (`timedOut`), never a bare `exit 143` with empty detail.
+    const metaeditCommand = adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42").join(
+      " "
     );
+    for (const [result, expectedMessage] of [
+      [
+        { stdout: "", stderr: "Error: The working copy is stale\n", exitCode: 1 },
+        `Could not adopt ${root}'s working copy for tester: Command failed (exit 1): ${metaeditCommand}\nError: The working copy is stale`,
+      ],
+      [
+        {
+          stdout: "",
+          stderr: "",
+          exitCode: 143,
+          timedOut: { limitMs: 300_000, elapsedMs: 300_412 },
+        },
+        `Could not adopt ${root}'s working copy for tester: Command timed out after 300 s (ran 300.4 s): ${metaeditCommand}`,
+      ],
+    ] as const) {
+      const failing = newLegionState("omp", 1);
+      failing.roles[token] = structuredClone(claimAtRest);
+      const failingClient = fakeWorkerRpcClient();
+      const { manager: failingProcesses, state: failingState } = manager(failing, {
+        connectWorkerRpc: async () => failingClient,
+        run: async (command) =>
+          command[0] === "jj" && command[1] === "metaedit"
+            ? { ...result }
+            : { stdout: "", exitCode: 0 },
+      });
 
-    expect(failingClient.prompts).toEqual([]);
-    expect(failingState.phases[root]).toBeUndefined();
-    expect(failingState.roles[token]).toEqual(claimAtRest);
+      await expect(failingProcesses.workerReady(root, "tester", "ses_tester", 1)).rejects.toThrow(
+        expectedMessage
+      );
+
+      expect(failingClient.prompts).toEqual([]);
+      expect(failingState.phases[root]).toBeUndefined();
+      expect(failingState.roles[token]).toEqual(claimAtRest);
+    }
   });
 
   it("runs no author adoption for a catch-up: recovery plumbing changes neither the phase nor the working copy", async () => {

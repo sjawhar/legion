@@ -159,7 +159,8 @@ describe("resolveDaemonEnvironment", () => {
     // The spec's scenario: a daemon launched with the two GitHub App private keys, listener and
     // Dispatch secrets, a provider key, an arbitrary FOO_SECRET, and the operator session's own
     // state (its secretsd token file, a pane's boot-token/grant pointers, JJ_CONFIG overlay,
-    // OMP_SESSION_ID, outer tmux, SSH agent, OMP tuning) in its environment.
+    // OMP_SESSION_ID, outer tmux, SSH agent, OMP tuning, and a worker pane's six commit-identity
+    // variables) in its environment.
     const environment = await resolveDaemonEnvironment(
       `mise x ${OMP_PIN} -- omp`,
       dependencies({
@@ -183,6 +184,14 @@ describe("resolveDaemonEnvironment", () => {
           LEGION_BOOT_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer",
           LEGION_GRANT_FILE: "/leaked/legion-omp-legion-6-implementer-grant",
           LEGION_DAEMON_URL: "http://127.0.0.1:13370",
+          // a phase-worker pane's GitHub App commit identity (LEGION-44): set by that pane's own
+          // `-e` pairs, never inherited — the root-architect and controller panes carry none
+          JJ_USER: "legion-implementer[bot]",
+          JJ_EMAIL: "1+legion-implementer[bot]@users.noreply.github.com",
+          GIT_AUTHOR_NAME: "legion-implementer[bot]",
+          GIT_AUTHOR_EMAIL: "1+legion-implementer[bot]@users.noreply.github.com",
+          GIT_COMMITTER_NAME: "legion-implementer[bot]",
+          GIT_COMMITTER_EMAIL: "1+legion-implementer[bot]@users.noreply.github.com",
           JJ_CONFIG:
             "/home/legion/.config/jj/config.toml:/home/legion/.cache/omp/jj/omp-attribution-x.toml",
           OMP_SESSION_ID: "operator-session",

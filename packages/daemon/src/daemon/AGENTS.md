@@ -89,10 +89,16 @@ A phase worker's commit identity is its pane environment, never a config write. 
 sets `JJ_USER`/`JJ_EMAIL` — which jj reads over every config scope — and
 `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` for plain git
 (`gitIdentityEnv` in `github-app-env.ts`, the same mapping `buildRoleEnv` uses for the daemon's
-own commands) on every pane the worker spawn path opens, sub-architects included; the root
-architect and controller panes, which never commit, carry none. A token-manager failure fails
-the launch (counted in `launchFailures`): no pane opens without an identity. Every issue
-workspace is a `jj workspace` of the one shared clone, and jj's repository-scoped config is a
+own commands) on every pane `launchWorker` opens — the phase workers and the sub-architects
+`spawn_worker` opens on child issues; the architect pane `spawnTree` opens for every admitted
+tree (a root issue's, or a child `waves/release` admitted as its own tree) and the controller
+pane never commit and carry none. Those six variables are pane-only exports like the boot token:
+none of them is in `PANE_ENV_ALLOW_LIST` (`environment.ts`), so a daemon started from inside a
+worker pane never hands that pane's App identity to anything it spawns — the private tmux server,
+the architect and controller panes — and `buildRoleEnv`/`adoptWorkingCopy` set them explicitly on
+the children that do commit as an App. A token-manager
+failure fails the launch (counted in `launchFailures`): no pane opens without an identity. Every
+issue workspace is a `jj workspace` of the one shared clone, and jj's repository-scoped config is a
 single file for all of them (`~/.config/jj/repos/<hash>/config.toml`), so an identity written
 there — as the extension did at every worker boot before LEGION-44 — set the author and
 committer for every tree's commits at once. Provisioning (`packages/workspace`,

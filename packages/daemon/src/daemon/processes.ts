@@ -10,7 +10,12 @@ import {
   type SpawnWorkerResponse,
   sanitizeToken,
 } from "@legion/contracts";
-import { issueWorkspaceDir, provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
+import {
+  commandFailure,
+  issueWorkspaceDir,
+  provisionIssueWorkspace,
+  type WorkspaceSpec,
+} from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
@@ -3577,12 +3582,16 @@ export class ProcessManager {
    * while `.omp/config.yml` sits in it; the pane environment alone would therefore leave every
    * commit in the workspace authored by the daemon for the workspace's whole life (before
    * LEGION-44: by whichever role last wrote the shared repo config when the workspace was added).
-   * Runs at every assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`,
-   * a `--resume`, or a live idle worker prompted over its socket — under the same lease-derived
-   * variables the pane carries. `@ & description(exact:"")` touches only an undescribed working
-   * copy: a described one is a previous phase's work and keeps its author. "Nothing changed." and
-   * "No revisions to modify." are exit 0; a failure is the assignment's failure, so no worker is
-   * prompted whose commits would carry the wrong author. */
+   * Runs at every
+   * assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`, a `--resume`,
+   * or a live idle worker prompted over its socket — under the same lease-derived variables the
+   * pane carries and under `slow_command_timeout_seconds`, like every other daemon command that
+   * snapshots a working copy (`metaedit` snapshots it first). `@ & description(exact:"")` touches
+   * only an undescribed working copy: a described one is a previous phase's work and keeps its
+   * author. "Nothing changed." and "No revisions to modify." are exit 0; a failure is the
+   * assignment's failure, so no worker is prompted whose commits would carry the wrong author,
+   * and a kill by the runner is reported as the runner saw it (`commandFailure`: the budget and
+   * wall time, or the abort), never as a bare `exit 143`. */
   private async adoptWorkingCopy(issue: IssueKey, role: LegionRole): Promise<void> {
     const command = [
       "jj",
@@ -3593,11 +3602,13 @@ export class ProcessManager {
       "-R",
       issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue),
     ];
-    const result = await this.deps.run(command, { env: await this.workerIdentityEnv(role) });
+    const result = await this.deps.run(command, {
+      env: await this.workerIdentityEnv(role),
+      timeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
+    });
     if (result.exitCode !== 0) {
-      throw new Error(
-        `Could not adopt ${issue}'s working copy for ${role} (exit ${result.exitCode}): ${command.join(" ")}\n${result.stderr ?? ""}`
-      );
+      const failure = commandFailure({ ...result, stderr: result.stderr ?? "" }, command);
+      throw new Error(`Could not adopt ${issue}'s working copy for ${role}: ${failure.message}`);
     }
   }
 

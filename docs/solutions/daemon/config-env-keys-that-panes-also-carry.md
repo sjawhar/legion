@@ -84,7 +84,12 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
   -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u LEGION_OMP_PATH
   -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN
-  -u GITHUB_TOKEN -u GH_HOST …`. The checkpoints script must run under the same scrub
+  -u GITHUB_TOKEN -u GH_HOST -u JJ_USER -u JJ_EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL
+  -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL …`. The daemon strips the pane-secret family and the
+  six commit-identity variables itself (`PANE_SECRET_ENV_KEYS` in `environment.ts`) before anything
+  it spawns sees them — a worker pane's App identity must not reach the private tmux server, the
+  root-architect pane, or the controller pane — so the scrub is belt and braces for the daemon and
+  load-bearing for the checkpoints script, which must run under the same scrub
   (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
 - `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
   carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see

@@ -53,8 +53,10 @@ export interface ProvisionIssueWorkspaceDeps {
 
 /** Neither kill is an ordinary `Command failed (exit N)`: the runner's own report is what the
  * operator needs — the budget and wall time for a timeout, the fact of the abort for a command
- * the caller gave up on. */
-function commandFailure(result: RunResult, cmd: string[]): Error {
+ * the caller gave up on. Shared with the daemon's own working-copy commands
+ * (`ProcessManager.adoptWorkingCopy`), so every jj command against the shared clone reports a
+ * kill the same way. */
+export function commandFailure(result: RunResult, cmd: string[]): Error {
   if (result.aborted) {
     const message = `Command aborted: ${cmd.join(" ")}`;
     return new Error(result.stderr ? `${message}\n${result.stderr}` : message);
