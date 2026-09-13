@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, and a `(divergent)` change left behind by `jj squash` on the shared operation log"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, a `(divergent)` change left behind by `jj squash` on the shared operation log, and — after the daemon moved to its own user — a workspace `.git` pointer that breaks `gh` from inside the workspace and a signing config that drops every signature"
 category: legion
 tags:
   - legion
@@ -46,6 +46,8 @@ related_issues:
   - "sjawhar/legion#1011"
   - "LEGION-53"
   - "sjawhar/legion#1028"
+  - "LEGION-84"
+  - "sjawhar/legion#1080"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -495,3 +497,24 @@ commands. This is not the two-editors-in-one-working-copy divergence of
 [one-jj-actor-per-shared-workspace](../delegation/one-jj-actor-per-shared-workspace.md), whose recovery is to squash
 the stale copy into `@`: here the twin holds content the branch already carries, and squashing it in would re-add the
 lines the earlier squash removed.
+
+## 16. After the daemon moved to its own user, `gh` inside an issue workspace fails with `not a git repository`, and worker commits are unsigned (from LEGION-84)
+
+On 2026-09-13 the operator moved the daemon and every pane to the user `legion` (`HOME=/home/legion`,
+state dir `/home/legion/.local/state/legion/…`). Two consequences a worker meets on its first command:
+
+- **`gh` run from inside a pre-existing workspace fails**: `failed to run git: fatal: not a git repository:
+  /home/ubuntu/.local/state/legion/…/.git/worktrees/legion-84`. The workspace's colocated `.git` is a *file*
+  whose `gitdir:` pointer still names the old absolute path; jj is unaffected (its `.jj/repo` pointer is
+  relative) but git — and therefore `gh`, which resolves the repository from cwd — is not. Run `legion gh` from
+  `/tmp` (or any non-repository directory) with `--repo <owner>/<repo>` and, for `pr create`, `--head <branch>
+  --base main`. `jj git push` still works: it goes through jj.
+- **Nothing signs.** `/home/legion/.config/jj/config.toml` sets `signing.behavior = "drop"` and the user holds no
+  signing key, so every worker commit is unsigned and GitHub shows it Unverified. `jj sign` would fail on a missing
+  backend; do not run it, do not write a signing config, and say "commits are unsigned (the worker user's
+  `signing.behavior = "drop"`)" in the PR body. Author and committer are still the role's bot from the pane's
+  `JJ_USER`/`JJ_EMAIL` (LEGION-44); a commit born before the move under another committer can be re-stamped with
+  `jj metaedit --update-author-timestamp <change>`, which rewrites the committer under the current identity.
+
+Both are box facts, not defects of your branch; a plan step that says "confirm a fresh commit signs before the
+first push" is satisfied by recording why it cannot.
