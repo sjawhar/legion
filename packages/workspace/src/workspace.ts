@@ -19,6 +19,9 @@ export interface RunResult {
 export interface WorkspaceSpec {
   readonly repoCloneDir: string;
   readonly workspaceDir: string;
+  /** `legion/<KEY>`: created with the workspace by `createWorkspace`, moved only by the
+   * implementer's push, and absent on a workspace whose pull request has merged (the fetch deletes
+   * it and provisioning never re-creates it). The daemon does not read this field. */
   readonly bookmark: string;
 }
 
@@ -75,9 +78,10 @@ async function runChecked(
   deps: ProvisionIssueWorkspaceDeps,
   cmd: string[],
   opts?: WorkspaceCommandOptions
-): Promise<void> {
+): Promise<RunResult> {
   const result = await run(deps, cmd, opts);
   if (result.exitCode !== 0) throw commandFailure(result, cmd);
+  return result;
 }
 
 const PROVISIONING_TOKEN_ENV = "LEGION_PROVISIONING_TOKEN";
@@ -167,6 +171,20 @@ async function ensureRepoClone(
   }
 }
 
+/** Adds the issue workspace at `main` and creates its bookmark `legion/<KEY>` on the fresh working
+ * copy. This is the one place provisioning creates or moves that bookmark. A workspace that already
+ * exists gets no `jj bookmark` command at all (see `provisionIssueWorkspace`): after a pull request
+ * merges and GitHub deletes its branch, the fetch drops the tracked local bookmark that still
+ * matched it, and creating it again would put the issue's branch on whatever the working copy
+ * holds (LEGION-28); a bookmark a worker left elsewhere stays there. The implementer's push step
+ * (`jj bookmark set` + `jj git push --bookmark`) owns every later move.
+ *
+ * When jj still registers the workspace but its directory is gone, the registration is forgotten
+ * and the workspace re-added at the bookmark when `jj bookmark list` shows one (no bookmark
+ * command), or at `main` when it shows nothing — the work merged or was deleted on purpose — with
+ * the bookmark created there and one log line saying so. The lookup runs before the add because a
+ * `--revision legion/<KEY>` add for a gone bookmark still registers the workspace, on the root
+ * commit, before jj reports the missing revision. */
 async function createWorkspace(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
@@ -178,7 +196,7 @@ async function createWorkspace(
 
   const gitDir = path.join(repoCloneDir, ".git");
   const pruneArgs = ["git", `--git-dir=${gitDir}`, "worktree", "prune"];
-  const initialWorkspaceArgs = [
+  const addArgs = (revision: string) => [
     "jj",
     "workspace",
     "add",
@@ -186,49 +204,47 @@ async function createWorkspace(
     "--name",
     workspaceName,
     "--revision",
-    "main",
+    revision,
     "-R",
     repoCloneDir,
   ];
+  const createBookmarkArgs = ["jj", "bookmark", "set", bookmark, "-r", "@"];
 
   try {
     await run(deps, pruneArgs);
   } catch {}
 
+  const initialWorkspaceArgs = addArgs("main");
   const result = await run(deps, initialWorkspaceArgs);
-  if (result.exitCode === 0) return;
+  if (result.exitCode === 0) {
+    await runChecked(deps, createBookmarkArgs, { cwd: workspaceDir });
+    return;
+  }
   if (!/already (?:registered|exists)/.test(result.stderr)) {
     throw commandFailure(result, initialWorkspaceArgs);
   }
 
-  await runChecked(deps, [
-    "jj",
-    "workspace",
-    "forget",
-    workspaceName,
-    "--cleanup",
-    "--force",
-    "-R",
-    repoCloneDir,
-  ]);
+  // `jj workspace forget` takes only workspace names (jj 0.44 and 0.45); the `git worktree prune`
+  // that follows is what cleans the colocated worktree.
+  await runChecked(deps, ["jj", "workspace", "forget", workspaceName, "-R", repoCloneDir]);
   try {
     await run(deps, pruneArgs);
   } catch {}
 
-  const recoveryWorkspaceArgs = [
-    "jj",
-    "workspace",
-    "add",
-    workspaceDir,
-    "--name",
-    workspaceName,
-    "--revision",
-    bookmark,
-    "-R",
-    repoCloneDir,
-  ];
-  const retry = await run(deps, recoveryWorkspaceArgs);
-  if (retry.exitCode !== 0) throw commandFailure(retry, recoveryWorkspaceArgs);
+  // jj prints nothing on stdout for a name that matches no bookmark (its `No matching bookmarks`
+  // note is stderr, exit 0) — verified on jj 0.44 and 0.45. Any stdout at all — a local row, a
+  // `(deleted)` tombstone with its remote rows, a conflicted list — means the name exists, and the
+  // add below asks jj to resolve it, failing loudly if it cannot. Nothing is guessed.
+  const listed = await runChecked(deps, ["jj", "bookmark", "list", bookmark, "-R", repoCloneDir]);
+  if (listed.stdout.trim() !== "") {
+    await runChecked(deps, addArgs(bookmark));
+    return;
+  }
+  console.error(
+    `[legion] bookmark ${bookmark} is gone (its pull request merged or the branch was deleted); re-adding the forgotten workspace ${workspaceDir} at main and creating the bookmark on its fresh working copy`
+  );
+  await runChecked(deps, addArgs("main"));
+  await runChecked(deps, createBookmarkArgs, { cwd: workspaceDir });
 }
 
 async function writeOmpConfig(workspaceDir: string): Promise<void> {
@@ -247,7 +263,9 @@ export async function provisionIssueWorkspace(
   const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, workspaceName);
   const gitDir = path.join(repoCloneDir, ".git");
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
-  // matches exactly this pattern for a Dispatch key).
+  // matches exactly this pattern for a Dispatch key). `createWorkspace` alone creates it, with the
+  // workspace; a workspace that already exists gets no bookmark command here — present or absent,
+  // the bookmark is left exactly as the fetch and the workers left it.
   const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);
@@ -272,9 +290,6 @@ export async function provisionIssueWorkspace(
     await createWorkspace(deps, repoCloneDir, workspaceDir, workspaceName, bookmark);
   }
 
-  await runChecked(deps, ["jj", "bookmark", "set", bookmark, "--allow-backwards"], {
-    cwd: workspaceDir,
-  });
   await runChecked(deps, [
     "git",
     `--git-dir=${gitDir}`,

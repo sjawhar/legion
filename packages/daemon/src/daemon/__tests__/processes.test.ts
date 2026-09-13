@@ -720,7 +720,7 @@ describe("ProcessManager", () => {
         "-R",
         repo,
       ],
-      ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
+      ["jj", "bookmark", "set", "legion/LEGION-42", "-r", "@"],
       ...[
         ["git", `--git-dir=${repo}/.git`, "config", "--replace-all", "credential.helper", ""],
         [
@@ -831,7 +831,7 @@ describe("ProcessManager", () => {
     // Every provisioning command carries the configured slow budget (300 s), not the runner's
     // generic default.
     expect(workspaceCalls).toContainEqual({
-      command: ["jj", "bookmark", "set", "legion/LEGION-42", "--allow-backwards"],
+      command: ["jj", "bookmark", "set", "legion/LEGION-42", "-r", "@"],
       opts: { cwd: workspace, timeoutMs: 300_000 },
     });
     expect(workspaceCalls).toContainEqual({
