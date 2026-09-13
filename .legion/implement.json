@@ -14,7 +14,9 @@
     "7d2da882 daemon: bound the no-turn retire cycle in one worker-died (LEGION-93)",
     "320e8b5f daemon: a started turn clears promptRetires (LEGION-93)",
     "913714d3 docs(daemon): the no-turn retire cycle is bounded and ends in worker-died (LEGION-93)",
-    "87844f7d test(daemon): await the relaunch's worker-started in the LEGION-93 fixture; biome formatting"
+    "87844f7d test(daemon): await the relaunch's worker-started in the LEGION-93 fixture; biome formatting",
+    "1fea1513 implement: record handoff (first push; PR #1082 opened at this head)",
+    "89dcb800 test(daemon): the real prompt-delivery e2e follows the bounded accounting (LEGION-93)"
   ],
   "tdd": [
     "Acceptance 1 test RED on the base (bea296aa): `expect(relaunchedClaim.promptRetires).toBe(1)` received undefined; with the counter assertions stripped (throwaway copy) the base relaunched a second time (two `respawning LEGION-42` lines) and published zero worker-died. GREEN after Task 1: 1 pass, one `respawning` line.",
@@ -55,7 +57,8 @@
   "trickyParts": [
     "The relaunch does real filesystem work, so the fixture must await the relaunch's own worker-started publish (a resolver inside the fake publishRole) rather than a setImmediate tick budget: the first full-suite run failed one LEGION-93 test because flushEventLoopUntil's 5000 ticks ran out before launchWorker wrote the fresh claim, so /worker/ready saw generation 1. Same pattern the ready-time relaunch tests at the bottom of the LEGION-60 block already use.",
     "Verdict ordering: retireDeadClaim (the stop) runs before promptRetires/promptFailures are written and before removeFromQueue, so a StopFailed leaves locator, counters, and queue entry untouched; the close handler's markWorkerDead then finds the locator already cleared (no second retirement) and its promoteWorkerQueue finds no queue entry (no relaunch).",
-    "Log wording follows the spec amendment (`3 prompts with no turn started`, `(bound 2)`), not the plan's literal strings, because promptFailures also counts refused prompts (LEGION-60)."
+    "Log wording follows the spec amendment (`3 prompts with no turn started`, `(bound 2)`), not the plan's literal strings, because promptFailures also counts refused prompts (LEGION-60).",
+    "The CI test job runs the real e2e suites under LEGION_E2E=1 (10 skips locally); real-prompt-delivery-e2e.test.ts asserts the prompt-failure accounting on a real tmux pane + worker-shim and had to follow the new zero-at-retire rule. It is deliberately not run on this box (scratch tmux server), so its proof is the pull request's CI run."
   ],
   "deviations": [
     "Plan Task 4 (scripts/smoke/swallow-prompts.ts and the scripts/smoke/README.md section) and Task 6 (the smoke-rig run) were not done: Sami's standing order of 2026-09-13 19:00Z (\"Please shutdown the goddamn legion smoke...\"), relayed by the architect, forbids starting any rig; acceptance 5 is withdrawn in the spec and pre-merge proof is the unit/integration suite plus CI.",
@@ -63,7 +66,11 @@
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1082",
+  "ci": [
+    "Tests run 34814773502/34814773720 at 1fea1513: PR Title success, lint success, typecheck success, test FAILURE — real-prompt-delivery-e2e.test.ts:358 (`LEGION_E2E=1` only, skipped locally) still asserted the LEGION-60 accounting (promptFailures 3 at the third failure); fixed in 89dcb800 to expect 0 + promptRetires 1 + the retire line, no worker-died. Not run locally: that suite starts a scratch tmux server, which Sami's standing order forbids; CI on the pull request is its surface."
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T06:44:12.308Z"
+  "completed": "2026-09-14T07:02:52.124Z"
 }
