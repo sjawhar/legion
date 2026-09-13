@@ -1,34 +1,72 @@
 {
-  "round": 4,
+  "round": 5,
   "passed": 8,
   "failed": 0,
-  "build": "PR sjawhar/legion #1088, branch legion/LEGION-62, code head 91b18e62dabf47706af17beda44135bbf3ee5ee9 (branch tip e0326ca317db adds only the updated .legion/implement.json); compared against a build of main@origin 7238fdd8b6e0 served beside it",
+  "build": "PR sjawhar/legion #1088, branch legion/LEGION-62, code head 518300780a53a5cacf4a68763cbaed3d4f5afae4 (branch tip 2bf4e24ac989 adds only the updated .legion/implement.json); compared against a build of main@origin 7238fdd8b6e0 served beside it",
   "pullRequest": {
     "number": 1088,
     "url": "https://github.com/sjawhar/legion/pull/1088",
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
     "reviewDecision": "REVIEW_REQUIRED",
-    "headRefOid": "e0326ca317db283db3fdedbb3c5537fd8cd8f463",
-    "checks": "Not CONFLICTING. 12 of 13 checks SUCCESS at e0326ca3 (changes, pr-title x2, lint, contracts, typecheck, envoy-plugin, test, envoy-client, pi-envoy, dispatch, claude-envoy-bridge); envoy-go FAILURE (run 34837764653: TestMarkAnchorVerifiesBrowserMark in internal/dispatch/api and TestSettleRetriesTransientVersionWriteFailure in internal/dispatch/docs, both outside this PR's Go diff and both green 5/5 locally on this head; see observations). BLOCKED on the required review and that red check."
+    "headRefOid": "2bf4e24ac989e8732890c2a3d46ea9b4d7406825",
+    "checks": "Not CONFLICTING. 13 of 13 checks SUCCESS at 2bf4e24a (changes, pr-title x2, lint, contracts, typecheck, envoy-plugin, test, envoy-client, pi-envoy, dispatch, claude-envoy-bridge, envoy-go — the envoy-go flake from round four did not recur); the daemon's ci-green notice for 2bf4e24a arrived at 12:24:59Z. BLOCKED only on the required review."
   },
   "surfaces": {
-    "local": "packages/dispatch e2e harness on the PR head: bun install --frozen-lockfile; go build ./cmd/dispatch (Go 1.26.8); VITE_DISPATCH_E2E=1 bun run build:web (fresh; no bun test run in this round); bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, header identity alice) against an isolated Postgres 16 container on 127.0.0.1:55462 (55432 is the production dispatch-pg on this box). Beside it, the same head's Go binary on 8763 served main@origin 7238fdd8's web bundle (packages/dispatch/web + packages/contracts/src exported to a scratch tree, same vite config), and briefly on 8764 a bundle of this head with the previous head's title-block classes restored (flex-1 min-w-[12rem]) for the regression-red check. Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR. A throwaway spec e2e/legion62-verify4.e2e.ts drove the title comparison and the bare gates and was removed; the four LEGION-142 specs were copied with a writable screenshot path (e2e/legion62-tmpfix-*.e2e.ts, removed) and run beside the originals. Harness note: starting two Dispatch servers against an empty database at the same instant races on the schema-migrations table (one exits 1 with a duplicate-key error); start them one after the other.",
-    "go": "DISPATCH_TEST_DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55462/dispatch_gotest go test ./internal/dispatch/api -count=1 -> ok (148.2s). The two tests CI reported red at e0326ca3 (TestMarkAnchorVerifiesBrowserMark in api, TestSettleRetriesTransientVersionWriteFailure in docs) pass -count=5 each locally on this head."
+    "local": "packages/dispatch e2e harness on the PR head: bun install --frozen-lockfile; go build ./cmd/dispatch (Go 1.26.8); VITE_DISPATCH_E2E=1 bun run build:web (fresh; the only bun test runs afterwards were single-file IssuePage.test.tsx runs, which do not rebuild web/dist); bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, header identity alice) against an isolated Postgres 16 container on 127.0.0.1:55462 (55432 is the production dispatch-pg on this box); servers started one after another to avoid the schema-migration race seen in round four. Beside it, the same head's Go binary served main@origin 7238fdd8's web bundle on 8763 and, on 8764, a bundle of this head's sources with 91b18e62's IssueHeader.tsx swapped in (the reviewed head's title-slot classes) for the regression-red check. Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR. A throwaway spec e2e/legion62-verify5.e2e.ts drove the swallowed-click check, the height table, the title widths and the bare gates and was removed; the four LEGION-142 specs were copied with a writable screenshot path (e2e/legion62-tmpfix-*.e2e.ts, removed) and run beside the originals.",
+    "unit": "bun test web/src/features/issue/IssuePage.test.tsx -t 'check-runs lookup fails': 3/3 pass on this head; with 79f4d50c's GitHubLink.tsx (const failed = githubReference.isError || checks.isError) copied over the workspace file, 5/5 fail; the head file was restored and `jj diff -- packages/dispatch/web` is empty.",
+    "go": "DISPATCH_TEST_DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55462/dispatch_gotest go test ./internal/dispatch/api -count=1 -> ok (144.1s)."
   },
-  "titleMeasurements": {
-    "verdict": "verified",
-    "method": "Title h1 box measured with getBoundingClientRect on the PR bundle and on main's bundle in the same Chromium session at each width; clipped = scrollHeight > clientHeight or scrollWidth > clientWidth; half = (header clientWidth - horizontal padding) / 2.",
-    "busyLine": "badge + one label + Route + Subscribers + GitHub link, 40-character title 'Migrate the issue header to a single row'. head/main: 1024 820/388, 1200 606/564, 1230 636/594, 1260 666/624, 1265 671/629, 1271 677/635, 1279 685/643, 1280 384/384, 1536 640/640 — every head number equals the implementer's report; head never clipped; head above half the card at every width (475/563/578/593/596/599/603/251/379). At 1024 the title takes its own row (state and details beneath); at 1200-1279 the state controls share the title row and the details line wraps beneath (as on main); at 1280 and 1536 the two builds coincide.",
-    "noLinkLine": "badge + one label + Route + Subscribers (the line that squeezed to 70-104px before). head identical to the busy line at every width (820/606/636/666/671/677/685/384/640), never clipped, above half; main 388/564/594/624/629/635/62(clipped, two lines, 'Rot at...')/384/640 — main itself squeezes this line at 1279, the head does not.",
-    "shortLine": "reviewer's bare 41-character fixture at 1024/1200/1279: head 820/606/685 (one line, unclipped) versus main 388 (two lines) / 168 (clipped) / 247 (clipped). The implementer reported 430/606/685 for this line; 430 was the round-three value for 590a1251 — on 91b18e62 the title takes its own row at 1024 and measures 820, wider still, so the claim holds with margin.",
-    "regressionTest": "issue.e2e.ts 'issue header gives the title the row's free space beside a short details line' (extended: 31-character title at 1024/1200/1279, then the 40-character title with the badge + label + Route + Subscribers line, without and with the GitHub link, at 1265 and 1279, asserting not clipped and width >= half the card) passes on this head. With the previous head's title-block classes restored in a scratch copy of this head's sources (flex-1 min-w-[12rem], xl:basis-full 2xl:basis-auto) and rebuilt, the same test fails with 'title clipped at 1265px without the GitHub link' — exactly the implementer's negative control."
+  "reviewAnswers": [
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858060 (a click that ends a title edit is swallowed at 768-1279)",
+      "verdict": "verified",
+      "evidence": "On the head at 1024, 1200 and 1279 (800 high): open the title editor (heading click, input focused), then page.mouse.move/down/up on the control. Pin: box (943,82)/(1119,82)/(1198,82) identical before and after the mousedown, aria-pressed flips to true on the first press and back to false on the next. Close: (316,135) identical before and after the mousedown at all three widths, the Reopen control appears and GET /issues/{key} reads status done on the first press. The editor is already closed by the time the mousedown has been processed (blur), and nothing moved. View-to-edit layout: Close (316,135) and Status (66,135) are at the same coordinates with the heading shown and with the input open at all three widths, so the row does not re-lay out on the blur. The implementer's regression lock issue.e2e.ts 'delivers the click that ends a title edit to the control under the pointer' passes on this head and fails on the 8764 bundle with 91b18e62's IssueHeader.tsx (Unpin issue never gets aria-pressed=true: the first press is swallowed), exactly as claimed. Screenshots verified5-title-edit-close-1024/-1279, verified5-title-editing-1024/-1279."
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858068 (the GitHub link unit test waits for the checks lookup to fail)",
+      "verdict": "verified",
+      "evidence": "The test now renders with its own QueryClient, waits for getQueryState(['github-link-checks', url, 'abcdef']).status === 'error', then asserts within the link. bun test -t 'check-runs lookup fails': 3/3 pass on the head; with 79f4d50c's GitHubLink.tsx swapped in (the pre-fix `failed` coupling) 5/5 fail — the lock is now red on the code it is meant to catch, where the previous form could pass. Workspace file restored afterwards (no diff)."
+    }
+  ],
+  "heights": {
+    "verdict": "verified, every number matches",
+    "method": "Header card getBoundingClientRect height and title h1 width on the PR bundle and main's bundle in the same Chromium session; a 40-character one-line title ('Migrate the issue header to a single row'); for the two-line rows a 108/113-character title that wraps on the head too (a 65-70-character title stays on one line on the head, which now gives the title the whole row); the busy line is whose-turn badge + one label + Route + Subscribers (+ GitHub link).",
+    "table_head_over_main": {
+      "busy line with link, one-line title": {
+        "1200": "176/124",
+        "1279": "124/124"
+      },
+      "busy line with link, two-line title": {
+        "1200": "190/136",
+        "1279": "138/136"
+      },
+      "busy line without link, one-line title": {
+        "1200": "124/124",
+        "1279": "124/84"
+      },
+      "busy line without link, two-line title": {
+        "1200": "138/136",
+        "1279": "138/84"
+      },
+      "bare issue, short title": {
+        "1200": "124/72",
+        "1279": "124/72"
+      }
+    },
+    "busyLineTitleWidths_head_over_main": {
+      "1024": "820/388",
+      "1200": "996/564",
+      "1265": "1061/629",
+      "1279": "1075/643"
+    },
+    "notes": "Head title unclipped at every width; main clips the two-line titles at 1200 (564px) and squeezes the no-link line to 62px at 1279. The head's extra rows are the option-1 cost the reviewer named: the title always has its own row below 1536, so a bare short title costs one row (124 vs 72) and the busy line with a link needs a third row at 1200 (176 vs 124) where the 382px state box and the 738px details line no longer fit together beneath the title; at 1279 they do (124/124)."
   },
   "acceptance": [
     {
       "line": 1,
       "verdict": "passed",
-      "note": "1280: 134px with a one-line title (plain two-label baseline and the fixture with GitHub link + open ask); title y37-69, state row y77-109, details line y117-145; no Draft/chip/Approve before a request. 1536: 94px. With the 40-character title and the busy line the header is 160px at 1280 (two-line title) and 134px at 1536; at 1200-1279 it is 124px and at 1024 176px (title row + state row + details line)."
+      "note": "1280: 134px with a one-line title (fixture with GitHub link + open ask, and the plain two-label baseline); rows title+pin y37-69, state y77-109, details y117-145; no Draft/chip/Approve before a request. 1536: 94px (state joins the title row at 2xl)."
     },
     {
       "line": 2,
@@ -53,7 +91,7 @@
     {
       "line": 6,
       "verdict": "passed",
-      "note": "Badge in view at 1280 (x357 y118), 1536 (x357 y78), 390 (x37 y237); human reply -> 'Waiting on agents (1)' live in 184-220ms and after reload; agent reply -> 'Waiting on you (1)' live and after reload; last_reply follows null -> user -> session."
+      "note": "Badge in view at 1280 (x357 y118), 1536 (x357 y78), 390 (x37 y237); human reply -> 'Waiting on agents (1)' live in 185-233ms and after reload; agent reply -> 'Waiting on you (1)' live and after reload."
     },
     {
       "line": 7,
@@ -63,47 +101,46 @@
     {
       "line": 8,
       "verdict": "passed",
-      "note": "chromium 115 passed / 6 skipped / 5 failed; iphone 114 passed / 7 skipped / 5 failed. Every failure is LEGION-142's EACCES on a fixed /tmp/<name>.png owned by another user: agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14; copies of those four specs with a writable path pass 12/12 per project. The doc.e2e.ts two-user flake did not recur. Go internal/dispatch/api ok; the two CI-red Go tests pass 5/5 locally."
+      "note": "chromium 116 passed / 6 skipped / 5 failed; iphone 114 passed / 8 skipped / 5 failed. Every failure is LEGION-142's EACCES on a fixed /tmp/<name>.png owned by another user: agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14; copies of those four specs with a writable path pass 12/12 per project. The doc.e2e.ts two-user flake did not recur. Go internal/dispatch/api ok."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the fifth proof entry on an independent build, database and browser with main's bundle served beside the PR's: all nine busy-line head numbers (820/606/636/666/671/677/685/384/640) and main numbers (388/564/594/624/629/635/643/384/640) reproduce exactly; no clipping on the head at any width; head above half the card at every width; the no-link line measures the same as the busy line on the head and exposes main's own 62px squeeze at 1279; the short line measures 820/606/685 (the reported 430 at 1024 was the previous head's value — this head is wider there). The extended regression test is green on this head and red ('title clipped at 1265px without the GitHub link') with the old classes restored, as claimed. The round-two and round-three certified numbers all hold unchanged."
+    "how": "Re-ran the sixth proof entry on an independent build, database and browser with main's bundle and a 91b18e62-classes bundle served beside the PR's: the swallowed-click check reproduces (Close at (316,135) stays put on the mousedown and closes on the first press at 1024/1200/1279 — same coordinates the implementer reported; the pin toggles too), the regression lock is green on the head and red with the reviewed head's IssueHeader.tsx, every height in the table and every busy-line title width (820/996/1061/1075 vs main 388/564/629/643) matches to the pixel, and the unit test is red 5/5 on 79f4d50c's GitHubLink.tsx and green on this head. Every earlier certified number holds unchanged."
   },
   "proof": [
     {
-      "criterion": "Round-three finding: the title is never squeezed by the state controls or the details line; with the busy line and a 40-character title the title box is at or above main and above half the card at 1024, 1200, 1230, 1260, 1265, 1271, 1279, 1280 and 1536, with no clipping; the extended regression test is red with the previous head's title classes.",
-      "surface": "Local VITE_DISPATCH_E2E=1 build of 91b18e62 served by the real Go server (8762) beside main 7238fdd8's bundle (8763) and a scratch bundle with the old title classes (8764), isolated Postgres 16, Chromium at each width.",
-      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh && MAIN_BASE_URL=http://127.0.0.1:8763 env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify4 --grep 'title box' (throwaway spec, removed); bunx playwright test --project=chromium issue.e2e.ts --grep 'free space' (green on head); PLAYWRIGHT_BASE_URL=http://127.0.0.1:8764 bunx playwright test --project=chromium issue.e2e.ts --grep 'free space' (red with the old classes)",
-      "observed": "Busy line head/main: 820/388, 606/564, 636/594, 666/624, 671/629, 677/635, 685/643, 384/384, 640/640; no-link line head identical, main 62px clipped at 1279; short line head 820/606/685 vs main 388/168/247. Extended regression test: passes on the head; fails 'title clipped at 1265px without the GitHub link' with the old classes. Screenshots dispatch://LEGION-62/artifact/verified4-title-busy-1265-head-png, -1265-main-png, -1279-head-png, -1279-main-png, verified4-title-nolink-1279-head-png, -main-png, verified4-title-short-1024-head-png.",
-      "headSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
-      "negativeControl": "The old title classes restored on a copy of this head's sources: issue.e2e.ts 'free space' test red at 1265px without the GitHub link; main's own bundle at 1279 with the no-link line: title 62px, clipped."
+      "criterion": "Review round two: the first click after a title edit reaches the control under the pointer at 768-1279 (the header must not re-lay out on the blur); the GitHub link unit test fails on the pre-fix code.",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of 51830078 served by the real Go server (8762) beside main 7238fdd8's bundle (8763) and a bundle with 91b18e62's IssueHeader.tsx (8764); isolated Postgres 16; Chromium at 1024x800, 1200x800, 1279x800; bun test for the unit lock.",
+      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh && env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify5 --grep 'review answer 1' (throwaway spec, removed); bunx playwright test --project=chromium issue.e2e.ts --grep 'ends a title edit' against 8762 (green) and PLAYWRIGHT_BASE_URL=http://127.0.0.1:8764 (red); bun test web/src/features/issue/IssuePage.test.tsx -t 'check-runs lookup fails' on the head (3/3 pass) and with 79f4d50c's GitHubLink.tsx swapped in (5/5 fail)",
+      "observed": "Pin and Close boxes identical before and after the mousedown at all three widths; pin toggles and the issue closes on the first press; view and edit mode share the same rows (Close (316,135), Status (66,135) in both). Regression lock green on head, red on the 91b18e62 classes ('Unpin issue' never aria-pressed=true). Unit lock green on head, red on 79f4d50c's GitHubLink. Screenshots dispatch://LEGION-62/artifact/verified5-title-edit-close-1024-png, -1279-png, verified5-title-editing-1024-png, -1279-png.",
+      "headSha": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+      "negativeControl": "The reviewed head's IssueHeader.tsx (basis-full only while editing) in an otherwise identical bundle: the first press after a title edit is swallowed and the implementer's lock fails; 79f4d50c's GitHubLink.tsx: the unit lock fails 5/5."
     },
     {
-      "criterion": "Bare gates, lines 1-7: 134px at 1280; 238px at 390 with nothing but the title alone on a row and the link as number + title; eight labels scroll inside the card with the title box and page width unchanged; badge in view and flipping live and after reload at 390/1280/1536; version controls only with Spec; label popover and the 41-character refusal; statuses from the header confirmed on the board.",
-      "surface": "Same stack, Chromium 1280x900, 1536x900, 390x844 as alice.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify4 --grep 'bare gate'",
-      "observed": "All certified numbers hold: 134/94/238px headers; 390 rows title+pin / Status|Priority|Close / one details line; link '#1051 sjawhar/legion'; title boxes identical with eight labels and document scrollWidth 1280/1536/390 = clientWidth (rail 502/758/316 of 2037/2037/2125); badge in view and flipping live (184-220ms) and after reload; Version/Name version only with Spec; one PATCH on popover close, 41-char refused; four statuses confirmed on the board. Screenshots verified4-header-390-png, verified4-labels-1280-png, verified4-labels-390-png, verified4-whose-turn-agents-1280-png.",
-      "headSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
-      "negativeControl": "PATCH {labels:[Frontend,<41 x>]} -> 400 LABELS_INPUT; PATCH {status:'shipped'} -> 400 INVALID_STATUS."
+      "criterion": "Header heights and busy-line title widths on this head versus main at 1200/1279 (heights) and 1024/1200/1265/1279 (widths), title unclipped.",
+      "surface": "Same stack, Chromium 1200x900, 1279x900, 1024x900, 1265x900; head and main bundles in the same browser session.",
+      "command": "MAIN_BASE_URL=http://127.0.0.1:8763 env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify5 --grep 'heights and title|wraps to two lines'",
+      "observed": "Heights head/main: busy+link one-line 176/124 @1200, 124/124 @1279; busy+link two-line 190/136, 138/136; busy no-link one-line 124/124, 124/84; busy no-link two-line 138/136, 138/84; bare short 124/72 at both. Widths head/main: 820/388, 996/564, 1061/629, 1075/643; head never clipped; main clips at 1200 (two-line) and squeezes to 62px at 1279 (no link). All equal to the implementer's numbers. Screenshot verified5-title-busy-1279-head-png.",
+      "headSha": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+      "negativeControl": "Main's own bundle measured in the same run gives the 'before' column of every row (title clipped at 1200 for two-line titles, 62px at 1279 without the link)."
     },
     {
-      "criterion": "Line 8: the browser suite and the Go API tests pass on this head.",
-      "surface": "Full Playwright suite (chromium and iphone) against the real Go server on this head; go test ./internal/dispatch/api against an isolated database.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify4 (log /tmp/legion62-e2e-chromium4.log); same with --project=iphone (/tmp/legion62-e2e-iphone4.log); DISPATCH_TEST_DATABASE_URL=<isolated> go test ./internal/dispatch/api -count=1; go test ./internal/dispatch/api -run 'TestMarkAnchorVerifiesBrowserMark$' -count=5; go test ./internal/dispatch/docs -run 'TestSettleRetriesTransientVersionWriteFailure$' -count=5",
-      "observed": "chromium 115 passed / 6 skipped / 5 failed (agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14 — each EACCES on /tmp/agents-1280.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-1280.png, /tmp/polish-project-list-1280.png owned by user ubuntu; the same four specs with a writable path 12/12). iphone 114 passed / 7 skipped / 5 failed (the same five specs, EACCES on /tmp/agents-390.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-390.png, /tmp/polish-project-list-390.png; writable-path copies 12/12). Go: ok (148.2s); both CI-red tests 5/5 ok.",
-      "headSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
-      "negativeControl": "The EACCES failures are the same five files as every previous round and vanish with a writable path."
+      "criterion": "Bare gates, lines 1-7, and line 8: the browser suite on chromium and iphone plus the Go API tests pass on this head.",
+      "surface": "Same stack, Chromium 1280x900 / 1536x900 / 390x844 as alice for the gates; the full Playwright suite on both projects; go test ./internal/dispatch/api against an isolated database.",
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify5 --grep 'bare gate'; env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify5 (log /tmp/legion62-e2e-chromium5.log); same with --project=iphone (/tmp/legion62-e2e-iphone5.log); DISPATCH_TEST_DATABASE_URL=<isolated> go test ./internal/dispatch/api -count=1",
+      "observed": "All certified numbers hold (134/94/238px headers; 390 rows title+pin / Status|Priority|Close / one details line; link '#1051 sjawhar/legion'; title boxes identical with eight labels and document scrollWidth 1280/1536/390 = clientWidth; badge in view and flipping live 185-233ms and after reload; Version/Name version only with Spec; one PATCH on popover close, 41-char refused; four statuses on the board). chromium 116 passed / 6 skipped / 5 failed (agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14 — each EACCES on /tmp/agents-1280.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-1280.png, /tmp/polish-project-list-1280.png owned by user ubuntu; the same four specs with a writable path 12/12). iphone 114 passed / 8 skipped / 5 failed (the same five specs, EACCES on /tmp/agents-390.png, /tmp/specchrome-1770.png, /tmp/specchrome-malformed-1280.png, /tmp/askcard-390.png, /tmp/polish-project-list-390.png; writable-path copies 12/12). Go: ok (144.1s). Screenshots verified5-header-390-png, verified5-labels-1280-png, verified5-labels-390-png, verified5-whose-turn-agents-1280-png.",
+      "headSha": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+      "negativeControl": "PATCH {labels:[Frontend,<41 x>]} -> 400 LABELS_INPUT; PATCH {status:'shipped'} -> 400 INVALID_STATUS; the EACCES failures are the same five files as every previous round and vanish with a writable path."
     }
   ],
   "observations": [
-    "CI at the branch tip e0326ca3: envoy-go failed (TestMarkAnchorVerifiesBrowserMark in internal/dispatch/api: 'browser-mark projection = nil found=false, want m-1 record'; TestSettleRetriesTransientVersionWriteFailure in internal/dispatch/docs: 'versions after transient settlement failure = 1, want 2 after retry'). Neither test reads anything this PR changed (the PR's Go diff from its fork point 7a178581 is issue_queries.go, issues_test.go, model.go — unchanged since 79f4d50c, on which envoy-go passed at 590a1251 and e6add4c0); 91b18e62 changed only .tsx, .md and one e2e spec. Locally both tests pass 5/5 on this head and the full api package is ok. This reads as a CI-runner timing flake in two settlement-retry paths; a rerun of the failed job (legion gh -- run rerun 34837764653 --failed) is the implementer's call per the skill, never a new commit.",
-    "Design note for the reviewer: with flex-auto the title block's basis is its full text width, so at 1024 a 40-character title takes its own row and the header grows to 176px (state row and details line beneath) where main showed 136px with the title on two lines beside the state controls. At 1200-1279 the header is 124px on both builds. Below 1280 with a long title the head trades one extra row for a never-squeezed title; at 1280+ nothing changes.",
-    "The implementer's short-line figure '430 at 1024' is the round-three value for 590a1251; on this head the same fixture measures 820 (title on its own row). Wider, not narrower, so the claim holds.",
-    "Line 4 placement unchanged: Version / Name version share the tab row from 1536 and wrap under the tabs at 1280 with both rails open and at 390.",
-    "The isolated toolchain, the two scratch bundles, servers, Postgres container, throwaway specs and e2e/test-results were removed after the run; web/dist stays untracked."
+    "Height cost of option 1 for the reviewer/architect, measured: below 1536 the title always owns its row, so a bare issue with a short title is 124px at 1200-1279 where main was 72px (one row), and the busy line with a GitHub link needs a third row at 1200 (176px vs 124) but not at 1279 (124/124). With a two-line title the head is 138-190px against main's 136 — where main's 136 was clipping the title. At 1280+ nothing changes (134/94px certified numbers hold).",
+    "The unit-lock check was done by copying 79f4d50c's GitHubLink.tsx over the workspace file for five bun test runs and copying the head's file back; `jj diff -- packages/dispatch/web` was empty afterwards, and the handoff commit below touches only .legion/test.json.",
+    "The scratch bundles (packages/.legion62-main-scratch, packages/.legion62-old-scratch) sit inside the workspace while they exist and jj snapshots them into the working-copy commit; they were removed before the handoff split, so no commit carries them.",
+    "The isolated toolchain, servers, Postgres container, throwaway specs and e2e/test-results were removed after the run; web/dist stays untracked."
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-14T11:38:00.511Z"
+  "completed": "2026-09-14T12:31:13.806Z"
 }
