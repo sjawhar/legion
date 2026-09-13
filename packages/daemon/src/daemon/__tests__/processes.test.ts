@@ -5075,7 +5075,12 @@ describe("ProcessManager", () => {
     });
     const finalClaim = managedState.roles[token];
     expect(finalClaim && "issue" in finalClaim ? finalClaim.launchFailures : undefined).toBe(3);
-  });
+    // Three retire cycles, two of them real relaunches through `launchWorker`'s
+    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above) and
+    // `new-window`: the await above resolves only once that I/O has completed, which under a
+    // CPU/IO-starved host can legitimately take longer than bun's default 5000ms per-test
+    // budget even though every timer/clock the test itself controls is fake.
+  }, 20_000);
 
   it("never evicts a slow-but-alive boot across repeated observation intervals; a later confirmation stops the watch", async () => {
     const state = newLegionState("omp", 1);
