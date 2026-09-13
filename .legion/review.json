@@ -1,0 +1,67 @@
+{
+  "summary": "Round 1 clean at PR head 2f1df1d683c5 (fix head 2332e1e8 plus the implement and test handoff commits; packages/pi-envoy identical). Scope is packages/pi-envoy only (five files) plus .legion/; no daemon change, per the spec's Rejected section. The four Design branches are visible in secretAfterRefusal (newer-known → retry with it; in-flight → await and retry; neither → start the one /worker-session recovery; one retry per request, second refusal propagated), a settled recovery clears the in-flight slot, and onRecovered runs before the secret is cached. roleDaemon() is memoized to one client per session and every capability-bearing caller goes through it. Both test files 65/0 at head; all four pre-fix quotes reproduced independently in a scratch copy with the parent's daemon-client.ts and legion.ts. CI green at the head, zero review threads, E2E head e2f45cbc is the direct parent and its evidence artifact matches the PR body. Thermo (deep-review + code-quality) once at 2f1df1d683c5: no blocking findings, four cleanup nits batched into the PR body's Fast-follow. One COMMENT review posted (5190990694). The .legion/ deletion is the only remaining work; I will APPROVE the head that differs from 2f1df1d683c5 by that deletion alone.",
+  "verdict": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "reviewedHead": "2f1df1d683c572870c730d7bf45b6cc4a2261016",
+  "fixHead": "2332e1e82916",
+  "githubReview": {
+    "id": 5190990694,
+    "event": "COMMENT",
+    "url": "https://github.com/sjawhar/legion/pull/1032#pullrequestreview-5190990694",
+    "why": "Head still carries .legion/; APPROVE is reserved for the head that differs from 2f1df1d683c5 by the .legion/ deletion alone, named by SHA."
+  },
+  "mergeState": {
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BLOCKED",
+    "reason": "review required; not CONFLICTING, so no rebase"
+  },
+  "verifiedOnGitHub": {
+    "ci": "Tests run 34761065291 (lint, pr-title, typecheck, test) and Legion Envoy and Contracts run 34761065295 (pi-envoy) both success at 2f1df1d683c5",
+    "threads": "0 review threads",
+    "e2e": "E2E line names the scratch-daemon surface, both architect sessions, tool_use ids, and head e2f45cbc (direct parent of 2f1df1d683c5); dispatch://LEGION-73/artifact/e2e-rig-evidence-md exists and its ids match"
+  },
+  "testsRun": {
+    "head": "cd packages/pi-envoy && bun test src/legion/daemon-client.test.ts extensions/legion.test.ts → 65 pass / 0 fail",
+    "prefixReproduced": "scratch copy under /tmp (never a jj restore in the workspace) with c8faafec's daemon-client.ts and legion.ts: test 1 'POST /legion/v1/waves/release failed with 403: {\"error\":\"Invalid session secret\"}'; tests 2–3 'Expected: 1 / Received: 2'; extension test with client fix alone: isError '- undefined / + true'; 7 pass / 4 fail with both files, 65 / 0 restored"
+  },
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/src/legion/daemon-client.ts",
+      "description": "L156 `if (current.inFlight === inFlight)` is always true (only this finally clears the slot); fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/src/legion/daemon-client.ts",
+      "description": "L135–139/L144 `let record` + `const current` alias collapse to `const record = recoveries.get(sessionId) ?? {}; recoveries.set(sessionId, record);`; fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/src/legion/daemon-client.ts",
+      "description": "L120–123 SessionRecoveryRecord declared inside the factory; every sibling interface is module-level; fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/extensions/legion.ts",
+      "description": "L228 comment 'Every capability-bearing call' is over-broad (bootstrap processStarted/workerStarted and the controller use throwaway clients); the enumerated list is accurate; fast-follow."
+    }
+  ],
+  "observations": [
+    "Spec-consistent corner, not requested: a request still carrying the pre-recovery secret S0 when a second daemon restart's recovery R2 is already in flight takes the 'newer secret known' branch (L140) and retries with S1 — the secret R2 exists because it was refused — instead of awaiting R2. The spec orders those branches this way; reaching it needs two restarts inside one request's window. Awaiting an in-flight recovery before returning latestSecret would dominate if the spec is ever revisited.",
+    "The workspace's @ carries an untracked-then-snapshotted .omp/config.yml that predates this phase (tester noted it too); left alone, not in the handoff commit.",
+    "The reviewer's PR-body edit (Thermo and Fast-follow lines) succeeded through the review App; the review handoff commit is local only — this role cannot push."
+  ],
+  "learningsInjected": [
+    "docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md",
+    "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
+    "docs/solutions/daemon/omp-pin-bump-behavioral-proof.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:18:36.302Z"
+}
