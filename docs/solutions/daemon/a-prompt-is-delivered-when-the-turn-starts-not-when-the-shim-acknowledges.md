@@ -1,5 +1,5 @@
 ---
-title: "A prompt is delivered when the turn starts, not when the shim acknowledges: the receipt pattern, one handler per not-started reason, and the two limits it accepts"
+title: "A prompt is delivered when the turn starts, not when the shim acknowledges: the receipt pattern, one handler per not-started reason, and the three limits it accepts"
 category: daemon
 tags:
   - worker-rpc
@@ -97,17 +97,21 @@ whether the socket closed) rather than letting two downstream handlers infer it 
   "Helping" a swallowed prompt retry at once would re-widen the window in which a merely slow
   worker receives the task twice.
 
-## The two limits this change accepts (filed for the controller, not fixed here)
+## The three limits this change accepts (filed for the controller, not fixed here)
 
 1. **Turn attribution is by order.** The first `agent_start` after a prompt is credited to that
    prompt. A turn started by a message another role sent through Envoy in the same window would be
    credited to the daemon's task. Oh My Pi does emit a definitive negative — `prompt_result` with
    `agentInvoked: false`, and a late `success: false` for a busy worker — that the client could
    consume to attribute by id.
-2. **No terminal escalation for a worker that always swallows.** Three unanswered prompts retire it;
-   the relaunch starts at `launchFailures: 0`; its first ready-time prompt fails again; the cycle
-   repeats every few minutes with alternating `worker-queued`/`worker-started` and no `worker-died`.
-   The same loop pre-existed for a worker that refuses prompts; this is the missing ceiling.
+2. **No terminal escalation for a worker that always swallows.** Three unanswered prompts
+   (`promptFailures`, judged against `MAX_LAUNCH_FAILURES`) retire it; the cold relaunch writes a
+   fresh claim that carries `launchFailures` over but has no `promptFailures` at all, so the
+   three-strikes count restarts — and `launchFailures` never climbs either, because the no-turn
+   ready path still confirms the boot and `confirmBoot` deletes it; its first ready-time prompt
+   fails again; the cycle repeats every few minutes with alternating `worker-queued`/`worker-started`
+   and no `worker-died`. The same loop pre-existed for a worker that refuses prompts; this is the
+   missing ceiling.
 3. **A slower corner, not a new class.** A ready-time socket close whose shim then *accepts* the
    reconnect (the shim keeps listening while its Oh My Pi child lives) leaves the claim unconfirmed
    with the task on it and a live socket; nothing delivers the task until the boot watchdog's

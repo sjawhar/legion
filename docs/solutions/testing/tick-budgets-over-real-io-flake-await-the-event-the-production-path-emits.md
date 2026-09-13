@@ -69,8 +69,9 @@ green. The same file already had this idiom (`windowCounter` for `new-window` la
 `publishRole` hook in the queued-promotion tests); reuse it rather than adding a wall-clock poll,
 which is a third convention and still a guess.
 
-Ten whole-file runs at loadavg 100–123 (the tester's failing range) passed after the change; the
-assertions were untouched.
+After the change the file passed 10 of 10 whole-file runs at loadavg 97–101 and, after the
+conflict-forced rebase, 10 of 10 more at loadavg 116–123 (the tester's failing range); the tester's
+own round then ran it 20 of 20 at loadavg 130–139. The assertions were untouched.
 
 ## Two fake-client rules from the same tree
 

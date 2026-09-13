@@ -31,21 +31,27 @@ applies_when:
 
 # Role notices go through the listener's publish API
 
-## What was wrong, for months
+## What was wrong (since the Oh My Pi rebuild, #753, 2026-08-26)
 
 `ProcessManager` published its own architect and controller notices — `worker-queued`,
 `worker-started`, `worker-died`, `launch-failed`, `revive-failed`, and a redelivered exception
 payload — with a bare `nats.publish(subject, json)` on the role subject. The Envoy listener validates
 every role-lane message as an **envelope** (`event_id`, `source`, `topic`, `payload_summary`, …) and
 drops a bare JSON payload with `listener invalid envelope: event_id is required`. None of those
-notices ever reached a holder. Every other daemon notice (`phase-complete`, the catch-ups, `resync`)
-already travelled through the listener and was fine — the bug hid in one dependency used by one
-class.
+notices ever reached a holder, for the whole life of the bare publish: the `natsPublish` dependency
+arrived with the Oh My Pi rebuild (#753, `9278a29c50bc`, 2026-08-26 — eighteen days before the
+fix), carrying `launch-failed` and `revive-failed`; `worker-queued` and `worker-started` arrived with
+the running-worker cap (#821, `9330f7b407b6`, 2026-09-09 — four days before). The listener's
+envelope validation (#171, 2026-04-02) and role routing (#401, 2026-04-10) predate both, so no
+version of these publishes was ever delivered — but the span is days to two and a half weeks, not
+longer. Every other daemon notice (`phase-complete`, the catch-ups, `resync`) already travelled
+through the listener and was fine — the bug hid in one dependency used by one class.
 
-It surfaced only because the LEGION-60 smoke rig had a real listener in the loop: at the exact
-second the daemon committed a promoted prompt, `listener.log` showed the rejection, and the
-architect's transcript showed no `worker-started`. Unit tests could not have caught it — the fake
-`natsPublish` recorded the JSON and every assertion on "what was published" passed.
+It surfaced only because the LEGION-60 smoke rig had a real listener in the loop, and quickly: the
+first rig that queued a task behind a full cap caught a four-day-old bug. At the exact second the
+daemon committed a promoted prompt, `listener.log` showed the rejection, and the architect's
+transcript showed no `worker-started`. Unit tests could not have caught it — the fake `natsPublish`
+recorded the JSON and every assertion on "what was published" passed.
 
 ## The rule
 
