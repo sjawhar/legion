@@ -2698,8 +2698,9 @@ describe("Legion HTTP API", () => {
   }
 
   it("writes nothing when the architect spawns a worker for an issue a human moved back to todo", async () => {
-    // A released child is admitted as its own tree and gets `in_progress` from its own spawnTree,
-    // so an active issue at `todo` is only ever a human's doing; the spawn must not override it.
+    // A root gets `in_progress` from `spawnTree` and a child from its first sub-architect spawn, so
+    // a phase worker spawned on an issue at `todo` is answering a human's move; the spawn must not
+    // override it.
     const dispatch = recordingDispatchClient();
     await start({ dispatchClient: dispatch.client });
     state.issues[root].status = "todo";
@@ -2716,6 +2717,113 @@ describe("Legion HTTP API", () => {
 
     expect(spawn.response.status).toBe(200);
     expect(spawn.body.status).toBe("spawned");
+    expect(dispatch.statusWrites).toEqual([]);
+  });
+
+  it("writes in_progress once when the architect spawns a released child's sub-architect", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    const secret = await architectSecret();
+
+    const spawn = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "own this child",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(spawn.body).toEqual({
+      status: "spawned",
+      roleToken: roleToken(state.project, child, "architect"),
+    });
+    expect(spawnedWorkers).toEqual([
+      { tree: root, issue: child, role: "architect", task: "own this child" },
+    ]);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+
+    // Dispatch echoes the write back through the durable lane; the next spawn for the same live
+    // sub-architect (a new task for it) writes nothing.
+    state.issues[child].status = "in_progress";
+    const again = await json<{ status: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "re-scope the child",
+    });
+    expect(again.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+  });
+
+  it("writes in_progress again when a human moved a child back to todo and its sub-architect is spawned again", async () => {
+    // For a child, a sub-architect spawn is its admission: unlike a phase-worker spawn on an
+    // active issue, this one is the parent architect starting the child over.
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    state.roles[roleToken(state.project, child, "architect")] = {
+      issue: child,
+      role: "architect",
+      generation: 1,
+      sessionId: "ses_child_architect",
+    };
+    const secret = await architectSecret();
+
+    const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "the human re-released you",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+  });
+
+  it("writes nothing when the architect spawns a phase worker on a child at in_progress", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "in_progress",
+      children: [],
+    };
+    const secret = await architectSecret();
+
+    const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "planner",
+      task: "plan the child",
+    });
+
+    expect(spawn.response.status).toBe(200);
     expect(dispatch.statusWrites).toEqual([]);
   });
 
@@ -3139,6 +3247,69 @@ describe("Legion HTTP API", () => {
 
     expect(complete.response.status).toBe(200);
     expect(statusWrites).toEqual([{ issue: root, status: "testing" }]);
+  });
+
+  it("advances a child started by its sub-architect to testing when its implementer completes", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    const secret = await architectSecret();
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "own this child",
+    });
+    expect(spawn.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+    state.issues[child].status = "in_progress";
+
+    state.roles[roleToken(state.project, child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/child-implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, child, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: child,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_child_implementer",
+      agentId: "agt_child_implementer",
+      ompSessionFile: "/tmp/child-implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[child] = { phase: "implementer", sessionId: "ses_child_implementer" };
+    const grantId = await mintGrant(child, "ses_child_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the child",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([
+      { issue: child, status: "in_progress" },
+      { issue: child, status: "testing" },
+    ]);
   });
 
   it("writes no status when an implementer completes from retro (the .legion deletion push or retro itself)", async () => {

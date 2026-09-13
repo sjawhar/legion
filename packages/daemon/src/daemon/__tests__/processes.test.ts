@@ -8562,6 +8562,91 @@ describe("ProcessManager", () => {
     );
   });
 
+  it("spawns a released child's sub-architect as a phase worker of the parent tree", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: [child],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    tree(state);
+    state.admission.active = [root];
+    const admissionBefore = structuredClone(state.admission);
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@7 %71 4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const result = await processes.spawnWorker(root, child, "architect", "own this child");
+
+    expect(result).toEqual({ status: "spawned", roleToken: roleToken("omp", child, "architect") });
+    const windowCommand = commands.find(
+      (command) => command[0] === "tmux" && command[3] === "new-window" && command.includes("-n")
+    );
+    if (!windowCommand) throw new Error("sub-architect spawn did not open a tmux window");
+    expect(tmuxWindowEnvironment(windowCommand)).toMatchObject({
+      LEGION_TREE: root,
+      LEGION_ISSUE: child,
+      LEGION_ROLE: "architect",
+    });
+    expect(windowCommand.at(-1)).toContain(path.join("roles", "architect.md"));
+    // A worker claim with a locator: what `runningWorkerCount` counts against `worker_cap`.
+    const claim = managedState.roles[roleToken("omp", child, "architect")];
+    if (!claim || !("issue" in claim)) throw new Error("sub-architect claim was not recorded");
+    expect(claim.issue).toBe(child);
+    expect(claim.locator).toMatchObject({ tmuxWindowId: "@7", tmuxPaneId: "%71" });
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "own this child" });
+    // The child is a member of the parent's tree, never a tree or admission entry of its own.
+    expect(managedState.trees[child]).toBeUndefined();
+    expect(managedState.admission).toEqual(admissionBefore);
+  });
+
+  it("refuses the parent's sub-architect spawn while a pre-LEGION-57 root tree shadows the child", async () => {
+    // The shape the boot repair `adoptOwnerlessChildTrees` removes: a child a pre-LEGION-57 daemon
+    // admitted as a root of its own, so `rootForIssue(child)` is the child itself.
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: [child],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    tree(state);
+    state.trees[child] = { root: child, generation: 1, status: "queued", launchFailures: 0 };
+    state.admission.active = [root];
+    state.admission.queue = [child];
+    const { manager: processes } = manager(state, { config: config("/state") });
+
+    await expect(processes.spawnWorker(root, child, "architect", "own this child")).rejects.toThrow(
+      /does not belong to Legion tree/
+    );
+  });
+
   it("queues a second spawnWorker call at the running-worker cap and publishes worker-queued to the architect", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
