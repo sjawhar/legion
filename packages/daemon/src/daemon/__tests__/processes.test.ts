@@ -12373,10 +12373,25 @@ describe("ProcessManager", () => {
       closeAfterAcknowledging(client);
       const shim = connectOnce(client);
       const tmuxFake = relaunchingTmux();
-      const { processes, managedState, publications } = await workerCapFixture(workerCap, {
+      // The relaunch does real filesystem work (the session-file `stat`, the boot-token secret
+      // file, the workspace config, the socket dir) before and after its tmux call, so a
+      // `setImmediate` budget racing it is load-sensitive. `worker-started` is published only
+      // once `launchWorker` has written the fresh claim, dequeued the token, and persisted — the
+      // last step of the chain under test — so a waiter resolved from inside the fake publish is
+      // the observable end itself, exactly as the queued-promotion tests above await it. A wait
+      // that never resolves fails on bun's own timeout with the assertions unreached, never a
+      // false green.
+      const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+      const publications: Array<{ subject: string; json: string }> = [];
+      const promoted = Promise.withResolvers<void>();
+      const { processes, managedState } = await workerCapFixture(workerCap, {
         sleep: clock.sleep,
         connectWorkerRpc: shim.connect,
         run: tmuxFake.run,
+        publishRole: (subject, json) => {
+          publications.push({ subject, json });
+          if (subject === architectTopic && json.includes("worker-started")) promoted.resolve();
+        },
       });
       const claimOf = (): WorkerRoleClaim => {
         const claim = managedState.roles[token];
@@ -12401,8 +12416,8 @@ describe("ProcessManager", () => {
       try {
         await processes.workerReady(root, "planner", "ses_planner", 1);
         // The close handler's reconnect (refused), the retirement, the requeue and the relaunch
-        // all run detached from `workerReady`; the relaunched pane is the observable end.
-        await flushEventLoopUntil(() => tmuxFields(claimOf().locator)?.tmuxPaneId === "%302");
+        // all run detached from `workerReady`; the relaunch's `worker-started` is the observable end.
+        await promoted.promise;
       } finally {
         errorLines = errorLog.mock.calls.map((call) => String(call[0]));
         errorLog.mockRestore();
