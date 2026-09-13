@@ -277,7 +277,7 @@ export function useMarginItems(
   });
   const answeredAsks = useAnsweredAsks(owner, visibleArtifact?.id);
   const needsYou = useMemo(() => {
-    const openAsks = new Map(inboxOpenAsks.map((ask) => [ask.id, ask]));
+    const openAsks = new Map<string, Ask>(inboxOpenAsks.map((ask) => [ask.id, ask]));
     for (const ask of answeredAsks.asks) {
       if (ask.state === "open") {
         openAsks.set(ask.id, ask);

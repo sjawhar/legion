@@ -8,6 +8,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     key: "CORE-1",
     title: "Core work",
     status: "todo",
+    priority: null,
     rank: "U",
     labels: [],
     parent: null,
@@ -18,7 +19,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   };
 }
 
-test("groups the server-ordered issue list into every lifecycle column", () => {
+test("groups issues by lifecycle with each board column in rank order", () => {
   const columns = groupIssuesByStatus([
     issue({ key: "CORE-3", status: "todo", rank: "k" }),
     issue({ key: "CORE-1", status: "triage", rank: "U" }),
@@ -38,7 +39,18 @@ test("groups the server-ordered issue list into every lifecycle column", () => {
   ]);
   expect(
     columns.find((column) => column.status === "todo")?.issues.map((item) => item.key)
-  ).toEqual(["CORE-3", "CORE-2"]);
+  ).toEqual(["CORE-2", "CORE-3"]);
+});
+
+test("orders a board column by rank even when the server list is priority ordered", () => {
+  const columns = groupIssuesByStatus([
+    issue({ key: "CORE-1", priority: 0, rank: "U" }),
+    issue({ key: "CORE-2", priority: 2, rank: "F" }),
+  ]);
+
+  expect(
+    columns.find((column) => column.status === "todo")?.issues.map((item) => item.key)
+  ).toEqual(["CORE-2", "CORE-1"]);
 });
 
 test("derives before and after keys from the final insertion position", () => {

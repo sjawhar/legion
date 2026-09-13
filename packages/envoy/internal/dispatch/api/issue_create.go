@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,19 +53,31 @@ _Map every acceptance line to the proof that exercises it._
 _List each considered alternative and the reason it was rejected._
 `
 
+func parseIssuePriority(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return nil, nil
+	}
+	var priority int
+	if err := json.Unmarshal(raw, &priority); err != nil || priority < 0 || priority > 3 {
+		return nil, errorf(http.StatusBadRequest, "INVALID_PRIORITY", "priority must be an integer from 0 to 3 or null")
+	}
+	return &priority, nil
+}
+
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	var input struct {
-		Project  string       `json:"project"`
-		Title    string       `json:"title"`
-		Parent   *string      `json:"parent"`
-		External string       `json:"external"`
-		Force    bool         `json:"force"`
-		Spec     *string      `json:"spec"`
-		Labels   []string     `json:"labels"`
-		Actor    *model.Actor `json:"actor"`
+		Project  string          `json:"project"`
+		Title    string          `json:"title"`
+		Parent   *string         `json:"parent"`
+		External string          `json:"external"`
+		Force    bool            `json:"force"`
+		Spec     *string         `json:"spec"`
+		Labels   []string        `json:"labels"`
+		Priority json.RawMessage `json:"priority"`
+		Actor    *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -121,6 +134,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		input.Labels = append(input.Labels, repoLabelPrefix+externalRepo)
 	}
 	labels, err := normalizeIssueLabels(input.Labels)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	priority, err := parseIssuePriority(input.Priority)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -187,9 +205,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	issueRank := rank.Between(lastRank, "")
 
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, rank)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, issueRank); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

@@ -29,6 +29,7 @@ import type {
   EditArtifactResponse,
   EditCommentInput,
   Event,
+  InboxRow,
   Issue,
   IssueDetails,
   IssueReferences,
@@ -119,7 +120,7 @@ export interface RequestArtifactApprovalResponse {
   version: number;
 }
 
-function normalizeAsk(ask: Ask): Ask {
+function normalizeAsk<T extends Ask>(ask: T): T {
   return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
 }
 
@@ -264,8 +265,8 @@ export class DispatchApiClient {
     );
   }
 
-  async getInbox(project?: string): Promise<Ask[]> {
-    const asks = await this.json<Ask[]>(pathWithQuery("/api/v1/inbox", { project }));
+  async getInbox(project?: string): Promise<InboxRow[]> {
+    const asks = await this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
     return asks.map(normalizeAsk);
   }
 

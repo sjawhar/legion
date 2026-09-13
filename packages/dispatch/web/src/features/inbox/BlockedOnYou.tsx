@@ -1,26 +1,26 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Ask } from "../../api/types";
+import type { InboxRow } from "../../api/types";
 import { linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
 import { formatAskAge } from "./ask-age";
 
-function openedAt(ask: Ask): number {
-  const value = Date.parse(ask.created_at);
-  return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value;
-}
-
 /** Open asks whose latest reply is not a human's are waiting for the viewer. */
-export function waitingOnYou(asks: readonly Ask[]): Ask[] {
-  return asks
-    .filter((ask) => ask.last_reply?.author.kind !== "user")
-    .sort((left, right) => openedAt(left) - openedAt(right));
+export function waitingOnYou(asks: readonly InboxRow[]): InboxRow[] {
+  return asks.filter((ask) => ask.last_reply?.author.kind !== "user");
 }
 
-export function BlockedOnYou({ asks }: { asks: readonly Ask[] }): ReactNode {
+export function BlockedOnYou({ asks }: { asks: readonly InboxRow[] }): ReactNode {
   const waiting = waitingOnYou(asks);
-  const oldest = waiting[0];
-  if (oldest === undefined) return null;
+  if (waiting.length === 0) return null;
+  const oldest = waiting.reduce((earlier, ask) => {
+    const earlierAt = Date.parse(earlier.created_at);
+    const askAt = Date.parse(ask.created_at);
+    return (Number.isNaN(askAt) ? Number.POSITIVE_INFINITY : askAt) <
+      (Number.isNaN(earlierAt) ? Number.POSITIVE_INFINITY : earlierAt)
+      ? ask
+      : earlier;
+  });
 
   const count = waiting.length;
   return (

@@ -18,6 +18,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { PriorityBadge } from "../issue/PriorityBadge";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { issueStatuses } from "./board-model";
@@ -52,6 +53,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        <PriorityBadge priority={issue.priority} />
         {(issue.labels ?? []).map((label) => (
           <span
             className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}

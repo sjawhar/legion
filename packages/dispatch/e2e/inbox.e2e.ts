@@ -100,7 +100,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
 
   const inboxCards = alicePage.locator("[data-testid^=ask-]");
   await expect(inboxCards).toHaveCount(3);
-  await expect(inboxCards.nth(0)).toContainText("First ask");
+  await expect(inboxCards.nth(0)).toContainText("Newest ask");
   await expect(alicePage.getByTestId(`ask-${newestAsk.id}`).locator("time")).toHaveAttribute(
     "dateTime",
     newestAsk.created_at
@@ -294,7 +294,7 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await expect(thread.getByText("Ship what, exactly?")).toBeVisible();
     await expect(card).toBeVisible();
 
-    // The clarification now waits on its asker, below the older ask still waiting on Alice.
+    // The clarification now waits on its asker in the separate Waiting on agents section.
     await page.reload();
     await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
@@ -304,7 +304,7 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
     await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
 
-    // The agent replies in the thread: the ask is back in front of her, on top.
+    // The agent reply returns the clarification to the server-ordered Waiting on you section.
     await createComment(
       issue.key,
       { ask_id: clarifying.id, body: "The release candidate." },
@@ -313,8 +313,8 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await page.reload();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
     await expect(page.getByText("e2e-session-title replied")).toBeVisible();
-    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
-    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
+    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
+    await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
 
     const questionShaped = await createAsk(
       issue.key,
@@ -334,6 +334,42 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
         ask: { answer: null, state: "open" },
         replies: [{ body: "How does this fit our release plan?" }],
       });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const p2Issue = await createIssue({ project: "CORE", title: "Earlier P2 issue" });
+  await patchIssue(p2Issue.key, { priority: 2 });
+  const p2Ask = await createAsk(p2Issue.key, { question: "Earlier P2 ask" }, session);
+  const p0Issue = await createIssue({ project: "CORE", title: "Later P0 issue" });
+  const p0Ask = await createAsk(p0Issue.key, { question: "Later P0 ask" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${p0Issue.key}`);
+    const priority = page.getByLabel("Priority");
+    await priority.selectOption("0");
+    await expect(priority).toHaveValue("0");
+    await page.goto("/");
+    for (const ask of [p2Ask, p0Ask]) {
+      const card = page.getByTestId(`ask-${ask.id}`);
+      await card.getByLabel("Your answer").fill(`Clarify ${ask.id}`);
+      await card.getByRole("button", { name: "Ask back" }).click();
+    }
+
+    await page.reload();
+    const waitingOnAgents = page.getByRole("heading", { name: "Waiting on agents" }).locator("..");
+    await expect(waitingOnAgents.getByTestId(`ask-${p0Ask.id}`)).toBeVisible();
+    await expect(waitingOnAgents.getByTestId(`ask-${p2Ask.id}`)).toBeVisible();
+    expect(
+      await waitingOnAgents
+        .locator("[data-testid^=ask-]")
+        .evaluateAll((cards) => cards.map((card) => card.dataset.testid))
+    ).toEqual([`ask-${p0Ask.id}`, `ask-${p2Ask.id}`]);
   } finally {
     await alice.close();
   }

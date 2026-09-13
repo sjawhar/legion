@@ -270,6 +270,7 @@ test("ProofDocument sets a hover title and navigates in-app for a dispatch:// li
     project: "CORE",
     route: null,
     status: "testing",
+    priority: null,
     rank: "U",
     title: "Ship the release",
     open_asks: [],

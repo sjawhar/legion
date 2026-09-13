@@ -42,6 +42,11 @@ test("preserves labels on an issue update event payload", () => {
   });
 });
 
+test("preserves a coarse priority on an issue update event payload", () => {
+  expect(IssueEventPayloadSchema.parse({ priority: 0 })).toEqual({ priority: 0 });
+  expect(IssueEventPayloadSchema.parse({ priority: null })).toEqual({ priority: null });
+});
+
 test("models every supported typed-block content rule", () => {
   const types: readonly BlockTypeSchema[] = [
     { attributes: {}, content: "paragraph+", name: "paragraphs", render: "host" },

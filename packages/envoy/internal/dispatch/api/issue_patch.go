@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -13,6 +14,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		Status        *string               `json:"status"`
 		Rank          *rankInput            `json:"rank"`
 		Labels        *[]string             `json:"labels"`
+		Priority      json.RawMessage       `json:"priority"`
 		Route         *string               `json:"route"`
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
 		Actor         *model.Actor          `json:"actor"`
@@ -56,6 +58,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	priority, err := parseIssuePriority(input.Priority)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	priorityProvided := len(input.Priority) > 0
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -87,8 +95,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.ClosedAt != nil {
-		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && input.Route == nil && input.ExternalLinks == nil
-		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || input.Route != nil || input.ExternalLinks != nil) {
+		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && !priorityProvided && input.Route == nil && input.ExternalLinks == nil
+		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
@@ -119,6 +127,13 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := tx.Exec(r.Context(), `update issues set rank = $2, updated_at = now() where key = $1`, key, issueRank); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		changed = true
+	}
+	if priorityProvided {
+		if _, err := tx.Exec(r.Context(), `update issues set priority = $2, updated_at = now() where key = $1`, key, priority); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

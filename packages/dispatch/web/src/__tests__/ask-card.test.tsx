@@ -12,6 +12,7 @@ import type {
   AskRead,
   Comment,
   CreateCommentInput,
+  InboxRow,
 } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
@@ -655,15 +656,18 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   const { queryClient, view } = renderCard(
     <AskCard ask={input} answerAsk={() => pendingAnswer} getAskThread={emptyThread(input)} />
   );
-  queryClient.setQueryData<Ask[]>(["inbox"], [input]);
+  const inboxInput: InboxRow = { ...input, priority: null };
+  queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
 
   try {
     fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
     fireEvent.click(view.getByRole("button", { name: "Answer" }));
 
-    await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([]));
+    await waitFor(() => expect(queryClient.getQueryData<InboxRow[]>(["inbox"])).toEqual([]));
     rejectAnswer(new Error("offline"));
-    await waitFor(() => expect(queryClient.getQueryData<Ask[]>(["inbox"])).toEqual([input]));
+    await waitFor(() =>
+      expect(queryClient.getQueryData<InboxRow[]>(["inbox"])).toEqual([inboxInput])
+    );
   } finally {
     view.unmount();
   }
@@ -1076,7 +1080,7 @@ test("a document ask links its project and document page", async () => {
     document: { name: "Design notes", project: "CORE", slug: "design-notes" },
     issue_key: null,
   });
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([input]);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([{ ...input, priority: null }]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter>

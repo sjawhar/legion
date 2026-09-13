@@ -37,6 +37,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  priority: null,
   rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
@@ -342,6 +343,70 @@ test("IssuePage ignores a same-task duplicate status save", async () => {
 
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
     expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "in_progress" });
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage submits the selected priority through the issue mutation", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    expect([...priority.options].map((option) => option.value)).toEqual(["", "0", "1", "2", "3"]);
+    fireEvent.change(priority, { target: { value: "0" } });
+
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage keeps an optimistic priority selection while its save is pending", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const save = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => save.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    fireEvent.change(priority, { target: { value: "0" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+
+    expect(priority.value).toBe("0");
+    expect(priority.disabled).toBe(true);
+
+    await act(async () => {
+      save.resolve({ ...issue, priority: 0 });
+      await save.promise;
+    });
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage restores the previous priority after a failed save", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const save = Promise.withResolvers<Issue>();
+  patchIssue.mockImplementationOnce(() => save.promise);
+  const { unmount } = renderIssuePage();
+
+  try {
+    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    fireEvent.change(priority, { target: { value: "0" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    expect(priority.value).toBe("0");
+
+    act(() => {
+      save.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    expect(priority.value).toBe("");
+    expect(priority.disabled).toBe(false);
   } finally {
     unmount();
     restore();

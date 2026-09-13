@@ -38,6 +38,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "open",
+  priority: null,
   rank: "U",
   title: "Review the spec",
   open_asks: [],

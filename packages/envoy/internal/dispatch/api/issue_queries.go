@@ -29,7 +29,7 @@ var issueStatusCase = issueStatusOrderSQL()
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
 var listIssuesQuery = `
-	select i.key, i.title, i.status, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
 	left join asks a on a.issue_key = i.key and a.state = 'open'
@@ -39,11 +39,11 @@ var listIssuesQuery = `
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	group by i.key
-	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
+	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
 `
 
 var listPinnedIssuesQuery = `
-	select i.key, i.title, i.status, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
 	join user_issue_state s on s.issue_key = i.key and s.login = $6 and s.pinned
@@ -54,7 +54,7 @@ var listPinnedIssuesQuery = `
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	group by i.key
-	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
+	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
 `
 
 const (
@@ -131,7 +131,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Rank, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
+		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -186,14 +186,14 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	var issue model.Issue
 	var createdBy []byte
 	if err := q.QueryRow(ctx, `
-		select i.key, i.project_key, i.number, i.title, i.status, i.rank, i.labels, i.parent_key, i.route,
+		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 		       i.last_seq
 		from issues i
 		where i.key = $1
 	`, key).Scan(
-		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Rank, &issue.Labels,
+		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
 		&issue.PrimaryArtifactID, &issue.LastSeq,
 	); err != nil {

@@ -15,6 +15,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     open_asks: 0,
     parent: null,
     status: "todo",
+    priority: null,
     rank: "U",
     title: "Core work",
     updated_at: "2026-09-10T00:00:00Z",
