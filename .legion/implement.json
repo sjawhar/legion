@@ -1,0 +1,31 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/worker-admission.ts",
+    "packages/daemon/src/daemon/reducers.ts",
+    "packages/daemon/src/daemon/api/routes/workers.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "skills/legion-architect/SKILL.md"
+  ],
+  "trickyParts": [
+    "Sub-architect exemption in resumeWorker: `role === \"architect\"` bypasses the not-active-phase skip (mirrors retireIdleWorker). A child issue's architect is never phases[child].phase once it has spawned a planner and resumeWorker is its ONLY recovery path (handleException sends only the root architect to resurrect); without the exemption every dead sub-architect would be stranded. Lock: processes.test.ts 'resumes a sub-architect ...' now seeds phases[child]=planner and asserts the catch-up is still prompted and the phase untouched.",
+    "Race guard placement: resumeWorker's pre-check (assignment pending -> drop; bystander -> skip) runs BEFORE workerCatchup's GitHub fetch, outside the role lock. The invariant lives inside deliverToWorker's mutateClaim callback: `if (pending.kind === \"catchup\" && claim?.pendingAssignment?.kind === \"assignment\")` drop -- covering all three pendingAssignment write sites (booting branch, enqueueIdleWorker, enqueueClaimForLaunch/launchWorker) when an architect spawn_worker lands during the fetch. Tested deterministically by mutating the claim from the test's workerCatchup.tokenManager.getToken hook (processes.test.ts 'drops a catch-up inside the role lock ...').",
+    "Live evidence for Acceptance 8: this very issue's implementer claim (LEGION-37) had its queued architect task overwritten by {\"type\":\"catchup-worker\",\"unhandled\":[]} at 2026-09-13 01:00 UTC after a role-lane delivery exception, so the resumed worker received a bare catch-up instead of its assignment -- exactly the overwrite the lock-side guard now refuses.",
+    "PendingAssignment is a discriminated object, not a sibling kind field or a second slot: every reader is forced by the type to say which kind it handles, and the spec's 'a catch-up is DROPPED when an assignment is pending' has no precedence rule to encode. v24->v25 migration classifies each persisted string by payload (JSON.parse in try/catch; only a record with type === \"catchup-worker\" is a catchup). Proven on the rig against a state.json the main checkout wrote: state.json.v24.bak holds the bare string, state.json is v25 with {kind:\"assignment\", task}.",
+    "/state does NOT expose phases (api/state.ts redacts to the documented keys), so the plan's tester lever 'observe via legion state that phases[issue] is unchanged' has to read the daemon's own state.json on disk (the rig did) -- worth knowing before the tester plans E2E.",
+    "Rig observation, not changed here: a `--resume` relaunch of a killed worker did not answer negotiate_protocol within worker_rpc_timeout_seconds (5 s) at /worker/ready, so the catch-up stayed queued until the boot watchdog's 3x120 s retire-and-retry relaunched it (then delivered). Pre-existing behaviour on the untouched ready path; the tester may hit it on resumed sessions.",
+    "Boot-time reconnect TypeError seen on the rig is LEGION-11 / pull request #955's fix; not changed here."
+  ],
+  "deviations": [
+    "Smoke rig ran in SMOKE_WEBHOOK_MODE=none as requested, with root/child issues and a queued tree seeded into state.json (none mode has no Dispatch ingress, and resync heals only issues already in state.issues). The root-architect and controller panes were inert (sleep) and their HTTP calls driven by hand, per docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md; every phase worker was a real omp --mode rpc process on production's 18.1.18-sami.20260912-203541 invocation.",
+    "The rig daemon listened on up.sh's default 19370/19371 (rig-env.sh scrubbed its own LEGION_DAEMON_PORT export) instead of the intended 19437; production is 13370/13371 and no other rig was running, so isolation held."
+  ],
+  "openQuestions": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T02:35:52.118Z"
+}
