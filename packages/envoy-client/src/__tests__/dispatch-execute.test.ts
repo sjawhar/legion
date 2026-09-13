@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts";
+import {
+  dispatchDocumentSubject,
+  dispatchIssueSubject,
+  dispatchToolSpecs,
+  zodSchemaApi,
+} from "@legion/contracts";
+import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
 import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
@@ -23,6 +29,19 @@ function repoExec(repo: string): ExecFn {
 }
 
 const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+
+function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
+  return executeDispatchTool({
+    tool: "dispatch_ask",
+    args,
+    cwd: "/workspace",
+    host: "omp",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl,
+  });
+}
 
 describe("executeDispatchTool", () => {
   test("prefills an omitted issue from LEGION_ISSUE using the cwd repository", async () => {
@@ -77,6 +96,201 @@ describe("executeDispatchTool", () => {
       topic: dispatchIssueSubject("DSP-41", ">"),
       ask: "ask-1",
     });
+  });
+
+  test("appends an ask ref to the question sent to Dispatch", async () => {
+    const requests: unknown[] = [];
+    const ref = "dispatch://DSP-41/message/message-1";
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-41/asks");
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return response({ id: "ask-1", issue_key: "DSP-41", question: body.question });
+    };
+
+    const result = await executeAsk(
+      { issue: "DSP-41", question: "Ship this change?", ref },
+      fetchImpl as typeof fetch
+    );
+
+    expect(requests).toEqual([
+      expect.objectContaining({ question: `Ship this change?\n\nRef: ${ref}` }),
+    ]);
+    expect(result.text).toBe(`Opened ask ask-1: Ship this change?\n\nRef: ${ref}`);
+  });
+
+  test("does not duplicate an ask ref already in the question", async () => {
+    const requests: unknown[] = [];
+    const ref = "dispatch://DSP-41/message/message-1";
+    const question = `Ship this change?\n\nRef: ${ref}`;
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return response({ id: "ask-1", issue_key: "DSP-41", question: body.question });
+    };
+
+    await executeAsk({ issue: "DSP-41", question, ref }, fetchImpl as typeof fetch);
+
+    expect(requests).toEqual([expect.objectContaining({ question })]);
+  });
+
+  test("rejects an ask ref that would exceed Dispatch's question limit", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeAsk(
+        {
+          issue: "DSP-41",
+          question: "x".repeat(800),
+          ref: "dispatch://DSP-41/message/message-1",
+        },
+        fetchImpl
+      )
+    ).rejects.toThrow("question plus ref must be at most 800 characters");
+  });
+
+  test("rejects an ask ref outside the dispatch scheme", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeAsk(
+        {
+          issue: "DSP-41",
+          question: "Ship this change?",
+          ref: "https://dispatch.test/issues/DSP-41",
+        },
+        fetchImpl
+      )
+    ).rejects.toThrow("ref must be a dispatch:// reference");
+  });
+
+  test("consumes every declared dispatch_ask argument", async () => {
+    const fields = [
+      "issue",
+      "project",
+      "artifact",
+      "ref",
+      "question",
+      "kind",
+      "options",
+      "multiple",
+      "urgency",
+      "anchor",
+    ] as const;
+    type Field = (typeof fields)[number];
+    interface ArgumentCase {
+      readonly args: Record<string, unknown>;
+      readonly assert: (request: { body: Record<string, unknown>; path: string }) => void;
+    }
+    const cases: Record<Field, ArgumentCase> = {
+      issue: {
+        args: { issue: "DSP-41", question: "Question" },
+        assert: ({ path }) => expect(path).toBe("/api/v1/issues/DSP-41/asks"),
+      },
+      project: {
+        args: { project: "CORE", artifact: "notes", question: "Question" },
+        assert: ({ path }) => expect(path).toBe("/api/v1/artifacts/artifact-CORE-notes/asks"),
+      },
+      artifact: {
+        args: { project: "CORE", artifact: "architecture", question: "Question" },
+        assert: ({ path }) =>
+          expect(path).toBe("/api/v1/artifacts/artifact-CORE-architecture/asks"),
+      },
+      ref: {
+        args: {
+          issue: "DSP-41",
+          question: "Question",
+          ref: "dispatch://DSP-41/message/message-1",
+        },
+        assert: ({ body }) =>
+          expect(body.question).toBe("Question\n\nRef: dispatch://DSP-41/message/message-1"),
+      },
+      question: {
+        args: { issue: "DSP-41", question: "A distinct question" },
+        assert: ({ body }) => expect(body.question).toBe("A distinct question"),
+      },
+      kind: {
+        args: { issue: "DSP-41", question: "Complete this", kind: "action" },
+        assert: ({ body }) => expect(body.kind).toBe("action"),
+      },
+      options: {
+        args: {
+          issue: "DSP-41",
+          question: "Choose",
+          options: [{ label: "Ship", description: "Deploy it." }],
+        },
+        assert: ({ body }) =>
+          expect(body.options).toEqual([{ label: "Ship", description: "Deploy it." }]),
+      },
+      multiple: {
+        args: { issue: "DSP-41", question: "Choose", multiple: true },
+        assert: ({ body }) => expect(body.multiple).toBe(true),
+      },
+      urgency: {
+        args: { issue: "DSP-41", question: "Choose", urgency: "high" },
+        assert: ({ body }) => expect(body.urgency).toBe("high"),
+      },
+      anchor: {
+        args: {
+          issue: "DSP-41",
+          question: "Review this",
+          anchor: { artifact: "spec", occurrence: 1, quote: "The passage" },
+        },
+        assert: ({ body }) =>
+          expect(body.anchor).toEqual({
+            artifact: "artifact-spec",
+            occurrence: 1,
+            quote: "The passage",
+          }),
+      },
+    };
+    const askSpec = dispatchToolSpecs.find((spec) => spec.name === "dispatch_ask");
+    if (askSpec === undefined) throw new Error("dispatch_ask spec is missing");
+    expect(Object.keys(askSpec.arguments(zodSchemaApi(z))).sort()).toEqual([...fields].sort());
+
+    for (const [field, testCase] of Object.entries(cases) as Array<[Field, ArgumentCase]>) {
+      let request: { body: Record<string, unknown>; path: string } | undefined;
+      const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-41") {
+          return response({
+            artifacts: [{ id: "artifact-spec", primary: true }],
+            key: "DSP-41",
+            primary_artifact_id: "artifact-spec",
+          });
+        }
+        const document = target.pathname.match(
+          /^\/api\/v1\/projects\/([^/]+)\/artifacts\/([^/]+)$/
+        );
+        if (document !== null) {
+          const [, project, artifact] = document;
+          return response({
+            id: `artifact-${project}-${artifact}`,
+            project,
+            slug: artifact,
+          });
+        }
+        if (target.pathname.endsWith("/asks")) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          request = { body, path: target.pathname };
+          return response({
+            artifact_id: target.pathname.startsWith("/api/v1/artifacts/") ? "artifact-1" : null,
+            id: "ask-1",
+            issue_key: target.pathname.startsWith("/api/v1/issues/") ? "DSP-41" : null,
+            question: body.question,
+          });
+        }
+        throw new Error(`unexpected request for ${field}: ${target.pathname}`);
+      };
+
+      await executeAsk(testCase.args, fetchImpl as typeof fetch);
+      if (request === undefined) throw new Error(`dispatch_ask did not create an ask for ${field}`);
+      testCase.assert(request);
+    }
   });
   test("prefills an omitted issue from a native LEGION_ISSUE without resolving cwd repo", async () => {
     const requests: string[] = [];

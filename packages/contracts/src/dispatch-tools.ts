@@ -125,7 +125,12 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
-      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+        )
+        .optional(),
       question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
       kind: z.enum(["action"]).describe("Optional human to-do ask kind.").optional(),
       options: z
