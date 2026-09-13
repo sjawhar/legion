@@ -1,0 +1,101 @@
+{
+  "summary": "Provisioning now reads the clone's per-repo `git.abandon-unreachable-commits` setting between the clone step and the fetch and writes it to `false` only when the read does not already say so (clone → read → write if needed → fetch), so the fetch that deletes a merged branch's bookmark no longer abandons the branch's commits under a live issue workspace or rewrites its working copy. Fail-first on both jj binaries; the #1023 fast-follow and the docs landed in the same PR (#1080).",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1080",
+  "branch": "legion/LEGION-84",
+  "headSha": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+  "commits": [
+    {
+      "changeId": "zvrtpnvo",
+      "commit": "865a5872ae31",
+      "subject": "fix(workspace): keep a merged branch's commits when the fetch deletes its bookmark (LEGION-84)"
+    },
+    {
+      "changeId": "pyrmxwty",
+      "commit": "a29572987aba",
+      "subject": "refactor(workspace): fast-follow from #1023 — comment wording and one workspaceAddCommand test helper (LEGION-84)"
+    },
+    {
+      "changeId": "owqurnxk",
+      "commit": "b30a301eed3d",
+      "subject": "docs(daemon): record the post-merge workspace contract and where jj keeps a repo's settings (LEGION-84)"
+    }
+  ],
+  "filesChanged": [
+    "packages/workspace/src/workspace.ts",
+    "packages/workspace/src/workspace.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md"
+  ],
+  "tests": {
+    "workspace": "packages/workspace after the rebase onto main@origin cc88ed01db4f: 25 pass / 0 fail (21 pre-existing + 3 from LEGION-44 on main + this PR's Errors-row test; the merged-branch test rewritten as the contract test iterating both binaries)",
+    "daemon": "packages/daemon processes.test.ts after the rebase: 281 pass / 0 fail / 3 skipped; the spawn pin now expects `jj config get` and `jj config set --repo … false` before the fetch",
+    "lint": "bunx biome check --error-on-warnings src/ clean in packages/workspace and packages/daemon; bunx tsc --noEmit clean in both",
+    "redFirst": {
+      "newContractTest": {
+        "jj045": "error: jj status / Error: The working copy is stale (not updated since operation 6761f91eb1b6). — Expected: 0, Received: 1 (workspace.test.ts:197 via :749)",
+        "jj044": "error: mise x github:jj-vcs/jj@0.44.0 -- jj status / Error: The working copy is stale (not updated since operation 6978cae74cf1). — Expected: 0, Received: 1 (iteration temporarily reversed for this run only; reversal reverted, no `.reverse()` remains)"
+      },
+      "argvPins": "workspace 9 fail / 12 pass on today's code (eight fake-runner pins on the missing config entries plus the contract test); daemon 1 fail at processes.test.ts:718",
+      "errorsRowTest": "stops before the fetch when the settings write fails — `Expected promise that rejects / Received promise that resolved` on today's code"
+    }
+  },
+  "proof": [
+    {
+      "criterion": "A worker resumed after its issue's pull request merged and its branch was deleted finds its workspace not stale, every file still on disk, its pushed commits still beneath the working copy, and the bookmark gone (spec Requirements row 1; acceptance 2).",
+      "surface": "The real jj binaries the daemon and every pane run — jj 0.45.1-sami.20260910 (this box) and stock jj 0.44.0 (CI) — driving `provisionIssueWorkspace` from this branch against a real scratch remote, colocated clone, and issue workspace under /tmp: push legion/WIDGETS-42, delete the remote branch (`git branch -D`, what GitHub does at merge), provision again. The live-daemon resume was NOT run: Sami withdrew the smoke rig on 2026-09-13; no scratch daemon, tmux server, or NATS was started.",
+      "command": "cd packages/workspace && bun /tmp/legion-84-e2e.ts 045 fix ; bun /tmp/legion-84-e2e.ts 044 fix (driver text in the PR description context; scratch left at /tmp/legion-84-e2e-045-fix and /tmp/legion-84-e2e-044-fix)",
+      "observed": "Both binaries: `jj status` in the workspace exit 0 (`A .omp/config.yml`, `A feature.txt`, @ = the pushed commit); feature.txt on disk: true; pushed commit still beneath @: true; `jj bookmark list legion/WIDGETS-42` empty; `jj config get git.abandon-unreachable-commits` prints `false` with -R <clone> and from inside the workspace; provisioning #1 ran `config get | config set | git fetch`, provisioning #2 ran `update-stale | config get | git fetch` (no write). `jj op log --op-diff` of the fetch shows only `Changed local bookmarks` (legion/WIDGETS-42: + (absent) / - <pushed>) and `Changed remote bookmarks` (legion/WIDGETS-42@origin: + untracked (absent) / - tracked <pushed>) — no `Changed commits`, no `Changed working copy`. 0.45.1 pushed commit 5c81894a4f42…, 0.44.0 facd22bdd3ad…; both op-diffs quoted verbatim in the PR body. Taken at 7b0a7d6439f9 before the rebase; the production files' diffs are byte-identical at b30a301eed3d (rebase re-check), so the evidence stands for this head.",
+      "headSha": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+      "negativeControl": "The same driver with main's workspace.ts (main@origin cc88ed01db4f, which includes LEGION-44 and predates this fix) copied to /tmp/legion-84-old-workspace.ts: on both binaries `jj status` exit 1 `Error: The working copy is stale (not updated since operation 1e8cd1674ecf / 00af1f65d2d6).`, pushed commit still beneath @: false, `config get` prints `true`, and the fetch's op-diff additionally shows `Changed commits` (+ <new empty> / - <pushed> (hidden)) and `Changed working copy widgets-42@`. Scope control: `env HOME=/tmp/legion-84-e2e-<binary>-fix/foreign-home jj config get git.abandon-unreachable-commits -R <clone>` prints `true` with `Warning: Per-repo config not found. Generating an empty one.` on both binaries — the setting lives in the user's config directory, not the clone."
+    }
+  ],
+  "verifiedFacts": [
+    "Both binaries (probe /tmp/legion-84-probe-get-v2.sh, scratch left at /tmp/legion-84-probe-get-045 and -044): `jj config get git.abandon-unreachable-commits -R <clone>` exits 0, prints `true` by default, records no operation (op log identical before and after) and takes no snapshot (an unsnapshotted loose.txt stayed unsnapshotted per `jj status --ignore-working-copy`); so the read runs WITHOUT --ignore-working-copy. `jj config set --repo … false -R <clone>` likewise records no operation and snapshots nothing; the read afterwards prints `false`.",
+    "`jj config path --repo -R <clone>` → `/home/legion/.config/jj/repos/<config-id>/config.toml` on both binaries (the daemon and panes now run as user `legion`); after the write the file holds `[git]` / `abandon-unreachable-commits = false`.",
+    "Live sighting of the window the guarded write exists for: at 19:30Z on 2026-09-13 the production clone's per-repo file `~/.config/jj/repos/834789e1326b209850cb/config.toml` read as exactly `[user]` with nothing under it (an in-place rewrite caught between truncate and write), and at 19:31:55Z it held legion-reviewer[bot]'s user.* — the shared-identity race since fixed as LEGION-44. The production clone's per-repo file today holds only user.* for legion-implementer[bot] and no git.* key, so the first provisioning after this deploys is the one that writes the key.",
+    "The workspace's colocated `.git` file still reads `gitdir: /home/ubuntu/.local/state/legion/…/.git/worktrees/legion-84` after the state dir moved to /home/legion, so `gh` (and any git command) run from inside an issue workspace fails with `not a git repository`; `gh pr create` was run from /tmp with --repo/--head/--base. jj itself is unaffected (relative .jj/repo pointer). Reported to the architect as a box fact.",
+    "PR #1080 opened MERGEABLE at 7b0a7d64 against main@origin cc88ed01db4f, but the merge ref's tests were red on four LEGION-44 tests (a semantic conflict git did not flag); rebased once with the architect's approval, green at b30a301eed3d."
+  ],
+  "deviations": [
+    "Spec v4/v5 divergence from the plan, applied: the setting is read first and written only when the read is not `false` (plan Task 1 Step 5 wrote unconditionally). Test consequences applied exactly as briefed: fake-runner pins expect read then write between clone/update-stale and the fetch (the fake answers empty stdout); the real-jj contract test's second provisioning expects `update-stale`, the read, then the fetch with no write; the Errors-row test fails the write (the read answers `true\\n`).",
+    "Plan Task 4 Step 3 (live scratch-rig proof) NOT run: Sami's standing order of 2026-09-13 withdrew the smoke rig; the PR body's E2E line says so plainly. Task 4 Step 6 (post-merge production check on the live daemon) still stands and is the implementer's after the merge.",
+    "Commits are unsigned: the pane now runs as user `legion` whose jj config sets `signing.behavior = \"drop\"` with no signing key, so `confirm a fresh commit signs` could not be met; the architect's fallback (push unsigned, say so in the PR body) is applied. All four commits carry legion-implementer[bot] as author and committer (zvrtpnvo's committer was re-stamped with `jj metaedit --update-author-timestamp` after being born under the pre-separation pane with committer sami@trajectorylabs.net).",
+    "One wording adjustment beyond the plan's AGENTS.md text: the per-repo file is described as holding nothing else once a repository-scoped user.* has been removed (identity rides JJ_USER/JJ_EMAIL), because LEGION-44 landed on main between the plan and this PR and removes user.* from that file; the plan's text said it holds the bot's user.*.",
+    "The 2026-09-13 17:52Z incident (a probe script's `rm -rf \"$work\" \"$HOME\"` against the real home) is recorded on LEGION-84 (messages c974ccb1, 462067ef, 41f94d19, 1f0f1763); all later probes and the driver use literal /tmp paths, never delete anything, and never reference $HOME except as an `env HOME=<literal fresh dir>` assignment for the negative control.",
+    "One conflict-forced rebase (7b0a7d64 → b30a301e) although GitHub's CONFLICTING flag stayed down: the merge ref's tests were red on LEGION-44 lines that exist only on main, and fixing them needed main in the history; approved by the architect (Envoy 11a5b094) before the push, fingerprints and the four test names in the PR comment."
+  ],
+  "trickyParts": [
+    "The new-contract test's behavioural assertions (jj status, ancestors, file on disk, bookmark) are ordered before the argv assertions on purpose, so RED fails on the real symptom (`The working copy is stale`) rather than on a missing argv entry; the first provisioning's argv is captured into `firstProvisioning` and asserted at the end.",
+    "processes.test.ts's spawn pin and the fake-runner pins both expect the write because the fake runner answers empty stdout to `config get`; a real clone answers `true` (default) or `false` (already set), which is why the real-jj tests see the write once and then never."
+  ],
+  "openQuestions": [
+    "The Kubernetes worker image (LEGION-24) runs under its own HOME; it needs the same config directory or its own write to see this setting — noted in the AGENTS.md bullet's scope sentence, not addressed here."
+  ],
+  "learningsInjected": [
+    "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
+    "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
+    "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md",
+    "docs/solutions/testing/smoke-rig-from-a-worker-pane-mains-scripts-env-u-app-keys-and-a-session-actor.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md",
+    "docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md"
+  ],
+  "ci": {
+    "tests": "run 34814232552: lint, typecheck, test all success at b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+    "prTitle": "run 34814232529: pr-title success at the same head",
+    "firstHeadRed": "7b0a7d6439f9 run 34813893086 red on test — four packages/workspace tests on the merge ref, all on LEGION-44 lines that exist only on main (see rebase below)"
+  },
+  "rebase": {
+    "reason": "GitHub reported MERGEABLE but the merge ref's `test` job was red: four tests on lines that exist only on main since LEGION-44 — (1) the clone test's `never sets a key` assertion (now `never sets a user.* key`), (2)+(3) the two identity tests' `jj config` filters (now exclude the get/set subcommands), (4) the contract test's final pin (now appends identityProbeCommands). Editing main's lines needs main in the history; CI had to re-run either way. Architect approved (11a5b094) before the push.",
+    "from": "7b0a7d6439f932ee08eb947f7f05d70c699cafee",
+    "to": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+    "fingerprintBefore": "b416d82c0a8f8ef551dd7915a410655fdfaa5f6dc512b490cb8ec537480437e3",
+    "fingerprintAfter": "50e2b6e028b91aedd3c23baa2d763bd640d14c8dcd342dbbcd6ebfcb6ebe605a",
+    "verdict": "changed — by exactly the four test edits, folded into the fix commit; per-file fingerprints of workspace.ts (e8b5e4a806f95205…), processes.test.ts (0b7c4ec902729055…), and AGENTS.md (5b714bb6060ae5d6…) are identical before and after, so the production diff is unchanged. PR comment: https://github.com/sjawhar/legion/pull/1080#issuecomment-5660025992"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T06:39:35.630Z"
+}
