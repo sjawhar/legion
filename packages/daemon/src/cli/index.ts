@@ -15,6 +15,7 @@ import {
   IMAGE_PROBE_TIMEOUT_MS,
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
+  verifySessionStorageSetting,
 } from "../daemon/boot-probes";
 import {
   type DaemonConfig,
@@ -352,11 +353,13 @@ export async function cmdHandoffComplete(
   console.log("[handoff] Reported phase completion");
 }
 
-/** The daemon's two boot probes (boot-probes.ts) against one OMP executable, with no launch prefix
- * — an image carries no `secrets` wrapper. The worker image build runs this as its last step; a
- * failure is the daemon's own probe message, exit 1, so a broken image never publishes. The retry
- * is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no supervisor and must
- * finish. */
+/** The three launch probes (boot-probes.ts) against one OMP executable, with no launch prefix — an
+ * image carries no `secrets` wrapper: the daemon's two boot probes, then the session-storage
+ * probe, which the image runs unconditionally so no worker image publishes on a build that would
+ * silently keep a `sql` deployment's sessions on files. The worker image build runs this as its
+ * last step; a failure is the daemon's own probe message, exit 1, so a broken image never
+ * publishes. The retry is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no
+ * supervisor and must finish. */
 export async function cmdProbeImage(
   omp: string | undefined,
   deps: ProbeImageCommandDeps
@@ -375,6 +378,7 @@ export async function cmdProbeImage(
   try {
     await verifyOmpAgentsCapability(ompPath, [], deps.runner, options);
     await verifyLegionPluginLoaded(ompPath, [], deps.runner, deps.readPluginManifest, options);
+    await verifySessionStorageSetting(ompPath, [], deps.runner, options);
   } catch (error) {
     throw new CliError(error instanceof Error ? error.message : String(error));
   }

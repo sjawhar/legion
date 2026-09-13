@@ -30,8 +30,11 @@ version.
 ### The image is probed before it publishes
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
-(`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs the same two probes through
-`legion probe-image`, so a build whose OMP or plugin is broken fails instead of publishing. The in-cluster
+(`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs those two probes plus a third
+— the build must carry the `session.storage` setting the [Session store](#session-store) depends on, proven by
+starting it with a nonsense `OMP_SESSION_STORAGE` and requiring the refusal; an older build accepts the value
+and fails the probe — through `legion probe-image`, so a build whose OMP or plugin is broken, or whose OMP
+would silently keep a `sql` deployment's sessions on files, fails instead of publishing. The in-cluster
 daemon (LEGION-25, planned) is to run `legion probe-image` in a one-shot pod against the configured digest.
 To run it yourself: `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
@@ -164,7 +167,7 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 | the named file is blank after trimming                            | `… names <path>, which is empty`                                                                                                                                                       |
 | the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)` — the driver's error, never the connection string                     |
 | any other `OMP_SESSION_STORAGE` value                             | `OMP_SESSION_STORAGE is "<value>"; expected "file" or "sql"`                                                                                                                           |
-| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files; the second child refuses to enable `session_store: postgres` on a pin older than the release carrying the setting          |
+| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`; see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)) fails on such a build, so `legion probe-image` refuses to publish the worker image, and the second child runs the same probe at daemon start whenever `session_store: postgres` is on |
 
 ### What stays on the pod's disk
 

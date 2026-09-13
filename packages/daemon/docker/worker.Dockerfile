@@ -9,7 +9,7 @@
 # credential, gh, handoff, probe-image); the pinned OMP fork build the daemon's default
 # `omp_invocation` names, resolved with mise's github backend exactly as the daemon resolves it;
 # @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and linked into the isolated OMP
-# profile `legion`; jj; git; gh. The last RUN executes the daemon's two boot probes (`legion probe-image`)
+# profile `legion`; jj; git; gh. The last RUN executes the daemon's three launch probes (`legion probe-image`)
 # as the runtime user, so a broken image never publishes.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
@@ -119,9 +119,11 @@ WORKDIR /home/legion
 # 1. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
 #    OMP's first run in the image, so it also downloads OMP's native modules (~345 MB) into
 #    /home/legion/.omp/natives/<version>/; this layer ships them and a pod never fetches them.
-# 2. Run the daemon's two boot probes. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills
-#    any single omp invocation after 30 s, so a natives download inside the first probe would read as a
-#    definitive "does not expose pi.agents" failure. Step 1 must have already fetched them.
+# 2. Run the daemon's three launch probes (pi.agents, the plugin load, and the session-storage setting
+#    — the last so no image ships an OMP that would silently keep a `sql` deployment's sessions on
+#    files). The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any single omp
+#    invocation after 30 s, so a natives download inside the first probe would read as a definitive
+#    "does not expose pi.agents" failure. Step 1 must have already fetched them.
 # Any failure fails the build: a broken image never publishes.
 RUN omp plugin install /opt/legion/pi-legion-envoy \
     && legion probe-image \
