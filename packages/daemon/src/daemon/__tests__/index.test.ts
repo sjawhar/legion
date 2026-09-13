@@ -800,6 +800,16 @@ describe("startDaemon", () => {
       status: "launch-failed",
       launchFailures: 3,
     };
+    // The claim `/process/started` wrote for a generation of that root that registered but never
+    // reached ready: a `sessionId`, no locator, no session file. Left in place, its `sessionId`
+    // would become the `expectedSessionId` of the parent's first sub-architect spawn.
+    const staleWidgets6Architect = roleToken(project, "WIDGETS-6", "architect");
+    state.roles[staleWidgets6Architect] = {
+      issue: "WIDGETS-6",
+      role: "architect",
+      sessionId: "ses_widgets6_failed_root",
+      agentId: "agt_widgets6_failed_root",
+    };
     state.issues["WIDGETS-7"] = {
       key: "WIDGETS-7",
       title: "Child promoted as a root whose spawn never completed",
@@ -841,13 +851,13 @@ describe("startDaemon", () => {
     const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       logged.push(args.map(String).join(" "));
     });
-    let saved = 0;
+    const saved: LegionState[] = [];
     const boot = () =>
       startDaemon(daemonConfig, {
         deps: {
           loadState: async () => state,
-          saveState: async () => {
-            saved += 1;
+          saveState: async (_file, snapshot) => {
+            saved.push(structuredClone(snapshot));
           },
           createNatsTransport: async () => new FakeNats(),
           runner: async (command) => {
@@ -905,8 +915,15 @@ describe("startDaemon", () => {
       expect(state.trees["WIDGETS-5"]).toMatchObject({ status: "queued" });
       expect(state.admission.active).toEqual(["WIDGETS-1", "WIDGETS-3"]);
       expect(state.admission.queue).toEqual(["WIDGETS-5"]);
+      expect(state.roles[staleWidgets6Architect]).toBeUndefined();
       expect(statusWrites).toEqual([]);
-      expect(saved).toBeGreaterThan(0);
+      // The repair reached disk through `reconcileAdmission`'s closing persist, not only memory.
+      const persisted = saved.at(-1);
+      if (!persisted) throw new Error("boot never saved state");
+      expect(Object.keys(persisted.trees).sort()).toEqual(["WIDGETS-1", "WIDGETS-3", "WIDGETS-5"]);
+      expect(persisted.admission.active).toEqual(["WIDGETS-1", "WIDGETS-3"]);
+      expect(persisted.admission.queue).toEqual(["WIDGETS-5"]);
+      expect(persisted.roles[staleWidgets6Architect]).toBeUndefined();
       const removed = logged.filter((line) => line.includes("LEGION-57"));
       expect(removed).toHaveLength(3);
       for (const child of ["WIDGETS-2", "WIDGETS-6", "WIDGETS-7"]) {
