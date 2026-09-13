@@ -98,6 +98,38 @@ further window.
    state dir, and tmux server are never touched.
 8. Put the listings, log lines, and launch line in the PR body's **E2E** section with the head SHA.
 
+## Proving a negative: a logging proxy in front of Dispatch
+
+LEGION-59 (PR #998) needed the rig to prove the daemon did **not** do something — that an
+implementer completion at `retro` sends no PATCH to Dispatch — and, in round 2, to settle a
+design question about *who* writes a status. A daemon log line and a `GET` of the issue afterwards
+are weak evidence of absence: a write can fail silently, land late, or come from another writer.
+The tester's answer was a logging reverse proxy between the rig daemon and Dispatch:
+
+- the rig daemon's `DISPATCH_URL` pointed at `http://127.0.0.1:19580`, a small forwarder to the
+  real Dispatch (`http://sami-agents:8766`) that appends one line per request — timestamp, method,
+  path, body — to a file;
+- BEFORE/AFTER snapshots around each driven call recorded the proxy line count next to the daemon
+  log line count, `state.issues[key].status`, and `pendingStatusWrites`;
+- the whole proxy log for the run was quoted in the PR body's `E2E` section, every line
+  attributed to its writer.
+
+What it settled that nothing else could:
+
+- **Absence, at request level.** For the completion at `retro`: `proxy log lines added: NONE`,
+  Dispatch still `retro`, one daemon log line (the no-holder catch-up record). The negative control
+  — the same completion from `in_progress` — added exactly one line, `PATCH … {"status":"testing"}`.
+- **Attribution of a write nobody had traced.** The round-2 design assumed a child released to
+  `todo` needed a spawn-time `in_progress` write. The proxy log showed `PATCH LEGSMOKE-98 todo` from
+  `/waves/release` at 06:25:25 and `PATCH LEGSMOKE-98 in_progress` at 06:25:27 with **no spawn
+  involved** — `spawnTree` had admitted the child as its own tree. One log, one look, and a
+  spec row plus three documents were corrected
+  (`../daemon/dispatch-status-writes-one-writer-per-transition-and-the-pending-write-fence.md`).
+
+When a criterion is phrased as "does not call", "never PATCHes", or "writes nothing", put the
+proxy in from the start and quote its complete log; a `GET` after the fact and a unit test's fake
+client are the regression lock, not the proof.
+
 ## Gotchas met on the way
 
 - A resumed launch is `omp --resume=<file> --mode rpc`, so a `pgrep -f '/omp --mode rpc'`

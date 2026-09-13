@@ -109,6 +109,9 @@ shared IP rate-limits the latter within minutes, and a `null` body looks like "n
 
 - `../github/conflicting-pr-gets-no-pull-request-ci.md` — why a conflicting PR gets no CI and
   the `pr view --json mergeable,mergeStateStatus` check.
+- `unchanged-diff-fingerprint-one-fileset-verified-by-a-pair.md` — the `legion-worker` skill's
+  hashed form of this identity check (LEGION-59), the jj fileset-union trap in it, and the case
+  where a merged-prose resolution changes the hash with no code change.
 - `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for
   `.legion/` files.
 - `../daemon/api-read-by-closure-before-assignment-boot-order-audit.md` — the change these
