@@ -730,6 +730,226 @@ describe("startDaemon", () => {
     }
   });
 
+  it("boot moves every ownerless child tree back into its parent's tree, leaves a live one alone, wakes each parent once per child, and writes no Dispatch status", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    // Cap 2 with two live trees: the orphan queued below stays queued instead of launching.
+    const daemonConfig = { ...config(stateDir), admissionCap: 2 };
+    const project = daemonConfig.project;
+    const liveLocator = (windowId: string) => ({
+      runtime: "tmux" as const,
+      tmuxSession: `legion-${project}`,
+      tmuxWindowId: windowId,
+      tmuxPaneId: `%${windowId.slice(1)}`,
+      socketPath: `/state/workers/${windowId}.sock`,
+    });
+    const state = newLegionState(project, daemonConfig.admissionCap);
+    // The live deployment's shape (LEGION-19 with LEGION-25 queued and LEGION-24/-31 active),
+    // plus the two other no-process shapes a pre-LEGION-57 daemon can leave behind.
+    state.issues["WIDGETS-1"] = {
+      key: "WIDGETS-1",
+      title: "Root",
+      status: "in_progress",
+      children: ["WIDGETS-2", "WIDGETS-3", "WIDGETS-6", "WIDGETS-7"],
+    };
+    state.trees["WIDGETS-1"] = {
+      root: "WIDGETS-1",
+      generation: 1,
+      locator: liveLocator("@1"),
+      status: "active",
+      launchFailures: 0,
+      readyConfirmedAt: 1,
+    };
+    state.issues["WIDGETS-2"] = {
+      key: "WIDGETS-2",
+      title: "Released child, queued as a root",
+      parent: "WIDGETS-1",
+      status: "todo",
+      children: [],
+    };
+    state.trees["WIDGETS-2"] = {
+      root: "WIDGETS-2",
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+    };
+    state.issues["WIDGETS-3"] = {
+      key: "WIDGETS-3",
+      title: "Child already running as a root",
+      parent: "WIDGETS-1",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees["WIDGETS-3"] = {
+      root: "WIDGETS-3",
+      generation: 1,
+      locator: liveLocator("@3"),
+      status: "active",
+      launchFailures: 0,
+      readyConfirmedAt: 1,
+    };
+    state.issues["WIDGETS-6"] = {
+      key: "WIDGETS-6",
+      title: "Child whose root launch failed",
+      parent: "WIDGETS-1",
+      status: "todo",
+      children: [],
+    };
+    state.trees["WIDGETS-6"] = {
+      root: "WIDGETS-6",
+      generation: 3,
+      status: "launch-failed",
+      launchFailures: 3,
+    };
+    state.issues["WIDGETS-7"] = {
+      key: "WIDGETS-7",
+      title: "Child promoted as a root whose spawn never completed",
+      parent: "WIDGETS-1",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees["WIDGETS-7"] = {
+      root: "WIDGETS-7",
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    // An orphan: its parent has no tree, so it admits as a root of its own, as before.
+    state.issues["WIDGETS-4"] = {
+      key: "WIDGETS-4",
+      title: "Parent with no tree",
+      status: "todo",
+      children: ["WIDGETS-5"],
+    };
+    state.issues["WIDGETS-5"] = {
+      key: "WIDGETS-5",
+      title: "Orphan child",
+      parent: "WIDGETS-4",
+      status: "todo",
+      children: [],
+    };
+    state.trees["WIDGETS-5"] = {
+      root: "WIDGETS-5",
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+    };
+    state.admission.active = ["WIDGETS-1", "WIDGETS-3", "WIDGETS-7"];
+    state.admission.queue = ["WIDGETS-2", "WIDGETS-5"];
+    const statusWrites: Array<{ issue: string; status: string }> = [];
+    const published: Array<{ topic: string; payload: string }> = [];
+    const logged: string[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
+    let saved = 0;
+    const boot = () =>
+      startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {
+            saved += 1;
+          },
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          readPluginManifest: async () => validLegionPluginManifest,
+          statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
+          envoyPublish: async (topic, payload) => {
+            published.push({ topic, payload });
+          },
+          dispatchClient: fakeDispatchClient({
+            setStatus: async (issue, status) => {
+              statusWrites.push({ issue, status });
+            },
+          }),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await boot();
+
+      expect(state.trees["WIDGETS-2"]).toBeUndefined();
+      expect(state.trees["WIDGETS-6"]).toBeUndefined();
+      expect(state.trees["WIDGETS-7"]).toBeUndefined();
+      expect(state.trees["WIDGETS-3"]).toMatchObject({
+        status: "active",
+        locator: liveLocator("@3"),
+      });
+      expect(state.trees["WIDGETS-5"]).toMatchObject({ status: "queued" });
+      expect(state.admission.active).toEqual(["WIDGETS-1", "WIDGETS-3"]);
+      expect(state.admission.queue).toEqual(["WIDGETS-5"]);
+      expect(statusWrites).toEqual([]);
+      expect(saved).toBeGreaterThan(0);
+      const removed = logged.filter((line) => line.includes("LEGION-57"));
+      expect(removed).toHaveLength(3);
+      for (const child of ["WIDGETS-2", "WIDGETS-6", "WIDGETS-7"]) {
+        expect(
+          removed.filter((line) => line.includes(child) && line.includes("WIDGETS-1"))
+        ).toHaveLength(1);
+      }
+      const architect = roleTopic(roleToken(project, "WIDGETS-1", "architect"));
+      expect(published.filter((p) => p.payload.includes("child-adopted"))).toEqual([
+        {
+          topic: architect,
+          payload: JSON.stringify({ type: "child-adopted", child: "WIDGETS-2", remaining: 4 }),
+        },
+        {
+          topic: architect,
+          payload: JSON.stringify({ type: "child-adopted", child: "WIDGETS-6", remaining: 4 }),
+        },
+        {
+          topic: architect,
+          payload: JSON.stringify({ type: "child-adopted", child: "WIDGETS-7", remaining: 4 }),
+        },
+      ]);
+
+      // Idempotent: a second boot on the repaired state removes nothing, logs nothing, wakes nobody.
+      await daemon.stop();
+      daemon = undefined;
+      published.length = 0;
+      logged.length = 0;
+      daemon = await boot();
+      expect(state.admission).toMatchObject({
+        active: ["WIDGETS-1", "WIDGETS-3"],
+        queue: ["WIDGETS-5"],
+      });
+      expect(logged.filter((line) => line.includes("LEGION-57"))).toEqual([]);
+      expect(published.filter((p) => p.payload.includes("child-adopted"))).toEqual([]);
+      expect(statusWrites).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("arms a restored root's registration deadline before boot-time admission reconciliation settles", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
