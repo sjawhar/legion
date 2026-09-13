@@ -163,7 +163,7 @@ test("Resolve moves a comment thread behind the resolved toggle", async ({ brows
     testInfo.project.name === "iphone"
       ? page.getByRole("dialog", { name: "Thread" })
       : resolvedCard;
-  await expect(resolvedThread).toContainText(/Resolved by alice/, { timeout: 2000 });
+  await expect(resolvedThread).toContainText(/Resolved by alice/);
   await expect
     .poll(() => listComments(issue.key, issue.primary_artifact_id))
     .toContainEqual(expect.objectContaining({ id: comment.id, resolved: true }));

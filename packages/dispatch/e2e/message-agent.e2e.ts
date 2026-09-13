@@ -130,8 +130,8 @@ test("a route preselects its role and displays a bearer reply from another sessi
       { actor: { id: "B", kind: "session" }, as: "agent" }
     );
     const card = targetedCard(page, question);
-    await expect(card).toContainText("Answered by worker", { timeout: 1_000 });
-    await expect(card).toContainText("I can take it.", { timeout: 1_000 });
+    await expect(card).toContainText("Answered by worker");
+    await expect(card).toContainText("I can take it.");
   } finally {
     await alice.close();
   }

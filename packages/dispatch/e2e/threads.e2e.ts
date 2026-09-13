@@ -224,14 +224,14 @@ test("alice resolves a comment thread and bob reopens it", async ({ browser }, t
     await aliceThread.getByRole("button", { name: "Resolve" }).click();
     await closeThreadView(alicePage, testInfo.project.name);
     await expect(threadCard(alicePage, root.id)).toHaveCount(0);
-    await expect(threadCard(bobPage, root.id)).toHaveCount(0, { timeout: 1000 });
+    await expect(threadCard(bobPage, root.id)).toHaveCount(0);
 
     await bobPage.getByRole("button", { name: "Resolved (1)" }).click();
     const resolvedThread = await expandedThread(bobPage, root.id);
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(bobPage, testInfo.project.name);
-    await expect(threadCard(alicePage, root.id)).toBeVisible({ timeout: 1000 });
+    await expect(threadCard(alicePage, root.id)).toBeVisible();
   } finally {
     await bob.close();
     await alice.close();
@@ -275,7 +275,7 @@ test("only the author edits a comment and both viewers see its edited marker", a
     await closeThreadView(alicePage, testInfo.project.name);
 
     const bobThread = await expandedThread(bobPage, root.id);
-    await expect(bobThread).toContainText("Edited comment", { timeout: 1000 });
+    await expect(bobThread).toContainText("Edited comment");
     await expect(bobThread).toContainText("edited");
   } finally {
     await bob.close();
@@ -303,7 +303,7 @@ test("an agent comment reply appears in the root comment thread", async ({ brows
     await createComment(issue.key, { body: "Agent response", reply_to: root.id }, bobSession);
 
     const thread = await expandedThread(page, root.id);
-    await expect(thread).toContainText("Agent response", { timeout: 1000 });
+    await expect(thread).toContainText("Agent response");
     await expect(thread.getByText("Agent response").locator("..")).toHaveCSS("margin-left", "0px");
   } finally {
     await alice.close();

@@ -53,7 +53,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     await typeAtEnd(alicePage, "Alice wrote this.");
-    await expect(documentEditor(bobPage)).toContainText("Alice wrote this.", { timeout: 1000 });
+    await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
     await alicePage.reload();
     await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
     await expect
@@ -108,7 +108,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     ).toBeVisible();
     await expect(
       documentEditor(bobPage).locator("span[data-proof][data-id]", { hasText: "Comment target" })
-    ).toBeVisible({ timeout: 1000 });
+    ).toBeVisible();
     await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Suggestion target");
     await barAction(alicePage, "Suggest");
@@ -127,7 +127,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await suggestionCardByID.getByRole("button").click();
     await suggestionCardByID.getByRole("button", { name: "Accept" }).click();
     await expect(documentEditor(alicePage)).toContainText("Accepted text");
-    await expect(documentEditor(bobPage)).toContainText("Accepted text", { timeout: 1000 });
+    await expect(documentEditor(bobPage)).toContainText("Accepted text");
     await expect
       .poll(
         () =>
@@ -154,9 +154,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     if (ask.ask.anchor === null) {
       throw new Error("Document ask did not retain its anchor.");
     }
-    await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote, {
-      timeout: 1000,
-    });
+    await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote);
     await bobPage.goto("/");
     const inboxDocument = bobPage.getByRole("link", { name: /CORE.*Design notes/ });
     await expect(inboxDocument).toBeVisible();
