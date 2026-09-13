@@ -1,69 +1,74 @@
 {
   "verdict": "changes_requested",
-  "round": 2,
+  "round": 3,
   "githubReview": {
-    "id": 5190477985,
-    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190477985",
+    "id": 5190943102,
+    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190943102",
     "state": "CHANGES_REQUESTED",
-    "commitId": "13ffb563ed460735de1330e487f34be389fec8b2",
-    "codeHead": "ef9116b6a64c",
-    "why": "One blocking item (below); everything else accepted. I would deploy this head as-is (production has no triggering value), but the item is a documented invariant the code does not hold in a reachable configuration, and the standing rule is nothing left for later."
+    "commitId": "7fbfc22ac6f86c3407d37a8942fccb62c434d735",
+    "codeHead": "0bee94f8ecdc",
+    "why": "Round-2 item nearly closed; its fix has two defects of one root cause (tmux re-tokenises the candidate argv token), one of which unsets the wrong variable. Plus two AGENTS.md sentences misstating the daemon-internal process.env boundary after the #1017 rebase. I would deploy this head as-is (production's table triggers neither); blocking under no-deferrals."
   },
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/src/daemon/tmux.ts:35 (ENVIRONMENT_ENTRY) / runtime-tmux.ts:447-451 / index.ts:700-702",
-      "description": "A multi-line value's continuation line that contains '=' and does not start with space/'}'/'-' is parsed as a name (a phantom). The -u on it is a harmless exit-0 no-op and the real entry is removed by its own name, but the phantom is added to `removed` and printed in the boot log line, which promises names-never-values; the count is off by one. Reproduced through the real TmuxRuntime.scrubServerEnvironment on a scratch 3.7c -L server with a fake PEM-shaped value: the log printed the key body's padded last base64 line. bash-exported functions are not a trigger (leading-space body lines, verified via the real binary and via the bash guard-shim `which tmux` resolves to); a raw multi-line secret exported into the daemon env is (only the '='-padded last base64 line of a PEM). Production today: 3 continuation lines in the server table, all canonical function-body lines -> no phantom. Not a regression of the round-2 widening (the old charset matched alphanumeric fragments too); my round-1 note called the phantom a harmless no-op and missed the log. Fix: confirm each candidate with `show-environment <-g|-t s> <name>` (exit 0 present; exit 1 + `unknown variable: <name>` absent -> skip; other refusal throws) before -u and before recording; +1 tmux call per non-allow-listed candidate (66 on production); the probe's stdout is the value and must never be interpolated (failure() is stderr-only). Alternative: parse `show-environment -s` ('\"; export NAME;' anchors) — fiddlier escaping; I'd take the probe. Test: the reproduction (continuation line `ZmFr…=`), asserting the phantom is neither -u'd nor returned. Thread: Still open on PRRT_kwDORFy7ds6h3zpW."
+      "file": "packages/daemon/src/daemon/tmux.ts:101-106 (environmentHas), :117 (unsetEnvironment)",
+      "description": "tmux strips a trailing ';' from an argv token (command separator; '\\;' is the literal). Candidate 'HOME;' from a continuation line 'HOME;=…' -> show-environment -g 'HOME;' runs as '… HOME' -> exit 0 -> confirmed -> set-environment -g -u 'HOME;' runs as '-u HOME' -> the real allow-listed HOME is removed from the global table; log records 'HOME;'. Reproduced through the real scrub (deep audit) and at the has/-u level (me) on scratch 3.7c servers. Siblings: 'plain;' -> 'unknown variable: plain' != expected -> throw -> boot refusal; ';' alone -> exit 0 then 'too few arguments' throw. Second shape: trailing whitespace — candidate 'key ' (from 'key = value') -> tmux echoes 'unknown variable: key \\n'; line 103 trims stderr only -> mismatch -> throw -> boot refusal whose message names a value fragment (parent entry already unset, so the supervisor's next boot succeeds). Neither reachable from a PEM or a bash function body; both need a raw multi-line value with such a continuation line; production has none. Fix (local): escape a trailing ';' as '\\;' in both argv sites (verified tmux echoes the literal back exactly) and compare stderr with only the final newline stripped (or trim both sides); tests: 'key = value' line refused/not thrown/not -u'd; 'HOME;=x' with HOME in paneEnv refused, HOME never -u'd; 'X;' as a real entry confirmed and unset under its own name. Alternative (structural): parse `show-environment -s` — entries close on an unescaped '\"; export <NAME>;' matching the opener; exact names, zero probes, no fragments in tmux's own show-messages log (deep audit finding 4), no 66x2 tmux calls."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:~259-261",
-      "description": "'a server without the daemon's session ... is not [fatal] (nothing to scrub or configure — …)' over-generalises: on such a server the global table IS scrubbed (runtime-tmux.ts:453-457, pinned by the 'server without the session' runtime test); only the session table has nothing to scrub or configure. Say 'there'. Fold into the same round; no thread of its own."
+      "file": "packages/daemon/src/daemon/AGENTS.md:118-119 (thread anchored on L105)",
+      "description": "'Both secrets children run with the same stripped environment as private_key_command minus SECRETSD_SESSION_TOKEN_FILE' — inherited #1017 wording not reconciled by the rebase: private_key_command now runs on the daemon's own unstripped process.env (config.ts:553-557; L105 says so), stripDispatchEnv is gone. Say: both secrets children run under the daemon's own process.env, like private_key_command, minus exactly SECRETSD_SESSION_TOKEN_FILE (the LEGION-77 learning L59-61 already has it right)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/AGENTS.md:200-201",
+      "description": "'read only by private_key_command, the one child that runs under the daemon's own process.env on purpose' — PR-authored; since #1017 runSecretsGet (config.ts:579-586) is a second such child. Name both."
     }
   ],
   "threads": {
-    "accepted": [
-      "PRRT_kwDORFy7ds6h3zoI tmux.ts stderr-only (02b5257192e7, ef9116b6a64c)",
-      "PRRT_kwDORFy7ds6h3zo9 chained new-session (02b5257192e7)",
-      "PRRT_kwDORFy7ds6h3zqY src/index deleted (02b5257192e7)",
-      "PRRT_kwDORFy7ds6h3zqy AGENTS.md revocation paragraph (96248aad7046)",
-      "PRRT_kwDORFy7ds6h3zre config-key rule split (96248aad7046)",
-      "PRRT_kwDORFy7ds6h3z3R Object.hasOwn(TMUX_OWN_GLOBALS) (02b5257192e7)",
-      "PRRT_kwDORFy7ds6h3z4u disable-before-read (02b5257192e7)",
-      "PRRT_kwDORFy7ds6h3z5f widened isSecretLikeName (02b5257192e7)"
+    "resolved": [
+      "PRRT_kwDORFy7ds6h3zoI",
+      "PRRT_kwDORFy7ds6h3zo9",
+      "PRRT_kwDORFy7ds6h3zqY",
+      "PRRT_kwDORFy7ds6h3zqy",
+      "PRRT_kwDORFy7ds6h3zre",
+      "PRRT_kwDORFy7ds6h3z3R",
+      "PRRT_kwDORFy7ds6h3z4u",
+      "PRRT_kwDORFy7ds6h3z5f"
     ],
     "stillOpen": [
-      "PRRT_kwDORFy7ds6h3zpW ENVIRONMENT_ENTRY phantom names reach the boot log"
+      "PRRT_kwDORFy7ds6h3zpW ENVIRONMENT_ENTRY / environmentHas (reply 3999802873)"
     ],
-    "resolved": 0,
-    "note": "Newest comment on every thread is mine (verified via GraphQL after posting); the implementer's `legion threads resolve` will close the eight Accepted ones on its next push."
+    "new": [
+      "PRRT_kwDORFy7ds6h5N4y AGENTS.md:105 (L118-119 sentence)",
+      "PRRT_kwDORFy7ds6h5N40 AGENTS.md:200"
+    ],
+    "note": "Newest comment on every open thread is mine."
   },
   "verifiedAgainstGitHub": {
-    "ci": "Tests green at ef9116b6a64c (34751729788) and at PR head 13ffb563ed46 (34752389406); green at 96248aad, 61438e41, 103c12e4, db86babd.",
-    "e2e": "Round-2 rig at 96248aad (test.json: sjawhar/742 stale server 137 names removed incl. dashed / //registry/:_authToken / constructor plants; sjawhar/743 fresh server no scrub line, CHECKPOINT 13 OK) stands for ef9116b6 — I re-ran `jj diff --from 96248aad --to ef9116b6 --summary`: only tmux.ts, tmux.test.ts, the placement doc and .legion/.",
-    "rebase": "Conflict-forced onto main@52c5e03e (#981). Fingerprint at 7154712f (8c4e6105…) != at d2d0d983 (38b4e5bb…) because #981 rewrote runtime-tmux.ts/tmux.ts, so a new round by the rule: thermo re-run, one review."
+    "ci": "Tests green at 0bee94f8ecdc (34756544036/34756541750) and PR head 7fbfc22ac6f8 (34757798277/34757782046).",
+    "e2e": "Round-4 rig at 0bee94f8 (test.json): 137 removed, zero fragments, exact count; reproduction under UTF-8 and C client locales; ~12 ms x 2 tmux calls per removed name.",
+    "rebase": "Conflict-forced onto main@c8faafec (#1017). Fingerprint at ef9116b6 (100a36ba…) != rebased 63210a5a (712bf461…): the runSecretsGet cut-over squashed into the root commit. New round by the rule."
   },
   "thermo": {
-    "deep": "non-blocking only; independently found the phantom-name log case and rated it non-blocking (I rate it blocking). Verified clean: predicate 0 false positives on 45 allow-listed names and real mise env; scrub order and wiring after `await probes` before enableLaunches(); every tmux.ts throw stderr-only (lookupPane:340 is #981, out of scope); `;` chained argv verified live; src/index unreferenced; no hidden errors.",
-    "quality": "non-blocking only; found the same phantom case; also: Set instead of Record for TMUX_OWN_GLOBALS, a TmuxResult type, runtime-tmux.test.ts pinning exact -u order, AGENTS.md 'nothing to scrub or configure' over-generalisation (raised by me, above), allow-list enumerated in prose. I declined the Set/TmuxResult/order-pin items as taste — churn for no behaviour; recorded here, not deferred."
+    "deep": "non-blocking-only by its rating; independently reproduced the trailing-';' HOME removal through the real scrub; found the show-messages residue (probe argv + 'unknown variable: <fragment>' recorded in the private server's message log, same-uid readable like its environ) and the C-locale non-ASCII-name silent-keep (pathological, pre-existing); confirmed #1017 boundary sound and no other process.env spawn site.",
+    "quality": "blocking on the two AGENTS.md sentences; found the trailing-';' shape; noted entriesOf fixture heuristics and exact probe/write order pins (taste, declined); 'vis-encodes' should read utf8_sanitize (nit)."
   },
   "ownReview": {
-    "mergedScrub": "runtime-tmux.ts:444-464 after #981: every argv still `tmux -L <socket>`; global read -> unset -> disableEnvironmentUpdates (returns false on `no such session`/no server, verified on 3.7c: `set-option -t nosuch` says `no such session: nosuch`) -> session read -> unset; wired index.ts:697-698 inside the `await probes` try, before enableLaunches() at :723; failures throw -> stop() -> startDaemon rejects. Object.hasOwn on TMUX_OWN_GLOBALS at :448.",
-    "chainedArgv": "tmux.ts:218-231: `;` as its own argv element; Bun.spawn without a shell (state/fetch.ts). Verified live: option empty immediately after creation; session table markers only.",
-    "parser": "ENVIRONMENT_ENTRY /^([^\\s=}-][^=]*)=/ correct for canonical bash function bodies (leading space / `}`) and -NAME markers; the phantom residual is the blocking item.",
-    "predicate": "Judged the pattern: _PAT anchored so _PATH never matches; 0 hits on allow-list and mise output; JAVA_HOME GOPATH PKG_CONFIG_PATH LD_LIBRARY_PATH NODE_OPTIONS VIRTUAL_ENV AWS_ACCESS_KEY_ID pass; GOOGLE_APPLICATION_CREDENTIALS CARGO_REGISTRY_TOKEN GITHUB_TOKEN dropped correctly; PGPASSWORD (no underscore) a second-line false negative, fine.",
-    "deletedIndex": "No LSP server in this workspace; repo-wide grep over packages/, scripts/, skills/, docs/, AGENTS.md, package.json, biome.json, tsconfig for src/index/, CodebaseIndexManager, buildChangeHotspots, buildDependencyGraph, codebase-index: only the placement learning (past tense). package.json's `src/cli/index.ts` and `src/daemon/index.ts` are unrelated files.",
-    "tests": "bun test tmux.test.ts runtime-tmux.test.ts environment.test.ts -> 43 pass / 0 fail at this head. Every delta test fails on the bug it names (silent stdout leak, prototype names, order, chained argv, malformed report, _PATH/_KEYBOARD negatives, allow-list loop).",
-    "docs": "AGENTS.md revocation paragraph, predicate list, config-key rule split, placement doc past tense: accurate; one over-generalised clause (minor above)."
+    "item1": "environmentCandidates + environmentHas verified on the head and live: PEM case correct (three -u's, no fragment, exact count); stdout of the probe never read; throws inside the await-probes try -> boot fatal. Two defects above.",
+    "item2Locale": "UTF-8 client: literal newlines -> phantoms -> refused by the probe. C client: one line per entry, '_' per non-printable byte -> no phantoms. paneEnv carries production LANG=en_US.UTF-8. tmux.ts:34-35 comment accurate on behaviour.",
+    "item3Boundary": "runSecretsGet: process.env minus SECRETSD_SESSION_TOKEN_FILE is the right and minimal subtraction (secrets reads SECRETSD_SOCK/SECRETSD_CONFIG/XDG_CONFIG_HOME/HOME; PATH for lookup; the token would let a daemon started inside an OMP session tree land the App-key grant on that agent session; tokenless -> launcher tty scope via inherited stdin). PEM confined to generateJwt via GitHubAppRoleConfig.privateKey; no log/error carries it; --check-config resolves nothing. Sweep: only executePrivateKeyCommand and runSecretsGet spawn on process.env; every raw deps.runner use supplies an env (mise env/where, CI fetcher; API/catchup get the paneEnv runner). Learning accurate; AGENTS.md two sentences stale (threads).",
+    "item4Doc": "Scrub paragraph correct now: no server -> nothing to scrub; server without the session -> global scrubbed, session step skipped."
   },
-  "outOfScopeAgreed": "lookupPane unparseable-pid detail (#981 row, no value possible) — agree; placement doc's config.legionDir/workers.json staleness — agree, retro; LEGION-77 secretsd tier; LEGION-76 new-session race; tmux.conf set-environment -g on a fresh fork — agree with the Rejected reasoning.",
-  "nextForArchitect": "Implementer: presence probe + test + AGENTS.md clause (one code commit; the scrub's tmux call pattern changes, so a rig run is warranted — the tester should see `show-environment -g <name>` calls precede each `-u` and the log line's count equal the real names). Then I re-review (thermo again if the diff is more than the probe), and APPROVE follows by SHA on the head that differs from the re-reviewed head by the .legion/ deletion alone.",
-  "handoffNote": "The review App cannot push; this handoff is committed locally on legion/LEGION-74 in the issue workspace for the implementer to push with its next commit (sha in the phase-complete summary). Round-1 handoff commit adab7c2623cb (rebased from 7475904c) is already on origin.",
+  "declined": "Set/TmuxResult/order-pin/entriesOf fixture items from thermo (taste, no behaviour); C-locale non-ASCII name residual (pathological); show-messages residue is non-blocking — closed for free by the -s parse if taken, else one AGENTS.md clause noting the probes name candidates in the private server's message log (same-uid, like its environ).",
+  "nextForArchitect": "Implementer: escape trailing ';' + compare without trimming the name side (or the -s parse), the three tests, the two AGENTS.md sentences. Tester: rig re-run with a multi-line value carrying 'key = value' and 'HOME;=x' continuation lines; assert HOME survives in show-environment -g and the boot log count is exact. Then I re-review; APPROVE by SHA on the .legion/-less head.",
+  "handoffNote": "Committed locally on legion/LEGION-74 in the issue workspace (the review App cannot push); sha in the phase-complete summary. Round-2 handoff (611cd46939b8 after rebase) is already on origin.",
   "reviewerSession": "01a099ec-baf9-7000-b397-e5b21462ed3b",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T11:09:08.370Z"
+  "completed": "2026-09-13T13:57:51.836Z"
 }
