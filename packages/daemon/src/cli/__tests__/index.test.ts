@@ -1,10 +1,11 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../state/fetch";
 import {
   cmdCheckConfig,
+  cmdCredential,
   cmdGh,
   cmdHandoffComplete,
   cmdProbeImage,
@@ -12,6 +13,104 @@ import {
   resolveControllerSecret,
 } from "../index";
 
+const grantDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-grant-"));
+afterAll(() => fs.rmSync(grantDir, { recursive: true, force: true }));
+
+/** A `LEGION_GRANT_FILE` as the pi-envoy extension leaves it on a pane: a 0600 file holding the
+ * grant minted for the command that is about to run. */
+function grantFile(contents: string): string {
+  const file = path.join(grantDir, `grant-${crypto.randomUUID()}`);
+  fs.writeFileSync(file, contents, { mode: 0o600 });
+  return file;
+}
+
+describe("grant resolution", () => {
+  const credentialDeps = (env: NodeJS.ProcessEnv, onFetch: (request: Request) => void) => ({
+    env,
+    readStdin: async () => "protocol=https\nhost=github.com\n",
+    write: () => {},
+    fetch: async (input: string | URL | Request, init?: RequestInit) => {
+      onFetch(new Request(String(input), init));
+      return new Response("username=x-access-token\npassword=ghs_token\n");
+    },
+  });
+
+  it("reads LEGION_GRANT_FILE (trimmed) ahead of LEGION_GRANT", async () => {
+    let request: Request | undefined;
+    await cmdCredential(
+      credentialDeps(
+        { LEGION_GRANT_FILE: grantFile("  file-grant\n"), LEGION_GRANT: "env-grant" },
+        (r) => {
+          request = r;
+        }
+      )
+    );
+    expect(new URL(request?.url ?? "").pathname).toBe("/legion/v1/git-credential");
+    expect(await request?.json()).toEqual({ grantId: "file-grant" });
+  });
+
+  it("errors naming LEGION_GRANT_FILE and the path when the file is missing or blank, without falling back", async () => {
+    let fetched = false;
+    const missing = path.join(grantDir, "missing-grant");
+    await expect(
+      cmdCredential(
+        credentialDeps({ LEGION_GRANT_FILE: missing, LEGION_GRANT: "env-grant" }, () => {
+          fetched = true;
+        })
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          `LEGION_GRANT_FILE names ${missing}, which could not be read`
+        ),
+        code: 1,
+      })
+    );
+    const blank = grantFile(" \n");
+    await expect(
+      cmdCredential(
+        credentialDeps({ LEGION_GRANT_FILE: blank, LEGION_GRANT: "env-grant" }, () => {
+          fetched = true;
+        })
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: `LEGION_GRANT_FILE names ${blank}, which is empty`,
+        code: 1,
+      })
+    );
+    expect(fetched).toBe(false);
+  });
+
+  it("names both variables when neither is set", async () => {
+    let fetched = false;
+    await expect(
+      cmdCredential(
+        credentialDeps({}, () => {
+          fetched = true;
+        })
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset)"
+        ),
+        code: 1,
+      })
+    );
+    expect(fetched).toBe(false);
+  });
+
+  it("falls back to LEGION_GRANT only when no LEGION_GRANT_FILE is set on the pane", async () => {
+    let request: Request | undefined;
+    await cmdCredential(
+      credentialDeps({ LEGION_GRANT: "env-grant" }, (r) => {
+        request = r;
+      })
+    );
+    expect(await request?.json()).toEqual({ grantId: "env-grant" });
+  });
+});
 describe("legion gh", () => {
   it("redeems the worker-extension grant only into the gh child environment", async () => {
     let request: Request | undefined;
@@ -23,7 +122,7 @@ describe("legion gh", () => {
     try {
       await cmdGh(["api", "user"], {
         env: {
-          LEGION_GRANT: "grant-123",
+          LEGION_GRANT_FILE: grantFile("grant-123"),
           GITHUB_TOKEN: "personal-github-token",
         },
         fetch: async (input, init) => {
@@ -51,7 +150,29 @@ describe("legion gh", () => {
     }
   });
 
-  it("fails loudly when the worker extension did not inject a grant", async () => {
+  it("spawns the real gh, never the pane's worker-bin shim: the child PATH drops every worker-bin entry", async () => {
+    // A pane's PATH puts <state_dir>/worker-bin (the `gh` shim that execs `legion gh`) first for
+    // the pane's life. Left in place, `legion gh`'s own `gh` child would resolve to that shim and
+    // re-enter `legion gh` under a child env whose grant pointer is already scrubbed.
+    let childEnvironment: NodeJS.ProcessEnv | undefined;
+    await cmdGh(["--version"], {
+      env: {
+        LEGION_GRANT_FILE: grantFile("grant-123"),
+        LEGION_STATE_DIR: "/state",
+        PATH: `/state/worker-bin${path.delimiter}/state/bin${path.delimiter}/usr/bin`,
+      },
+      fetch: async () =>
+        Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" }),
+      spawnGh: async (_args, env) => {
+        childEnvironment = env;
+        return 0;
+      },
+    });
+    expect(childEnvironment?.PATH).toBe(`/state/bin${path.delimiter}/usr/bin`);
+    expect(childEnvironment?.LEGION_GRANT_FILE).toBeUndefined();
+  });
+
+  it("fails loudly when the pane carries no grant file and no grant", async () => {
     await expect(
       cmdGh(["api", "user"], {
         env: {},
@@ -60,7 +181,7 @@ describe("legion gh", () => {
       })
     ).rejects.toEqual(
       expect.objectContaining({
-        message: expect.stringContaining("worker extension"),
+        message: expect.stringContaining("LEGION_GRANT_FILE is missing"),
         code: 1,
       })
     );
@@ -148,7 +269,7 @@ describe("legion gh", () => {
     let spawnArgs: string[] | undefined;
 
     await cmdGh(["pr", "view", "merge-fix"], {
-      env: { LEGION_GRANT: "grant-123" },
+      env: { LEGION_GRANT_FILE: grantFile("grant-123") },
       fetch: async () =>
         Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" }),
       spawnGh: async (args) => {
@@ -281,11 +402,11 @@ describe("legion start --check-config", () => {
 });
 
 describe("legion handoff complete", () => {
-  it("posts the phase-complete request built from LEGION_GRANT", async () => {
+  it("posts the phase-complete request built from the grant in LEGION_GRANT_FILE", async () => {
     let request: Request | undefined;
 
     await cmdHandoffComplete("Verified the acceptance criteria end to end.", {
-      env: { LEGION_GRANT: "grant-123" },
+      env: { LEGION_GRANT_FILE: grantFile("grant-123") },
       fetch: async (input, init) => {
         request = new Request(String(input), init);
         return Response.json({});
@@ -299,7 +420,7 @@ describe("legion handoff complete", () => {
     });
   });
 
-  it("fails loudly when the worker extension did not inject a grant", async () => {
+  it("fails loudly when the pane carries no grant file and no grant", async () => {
     await expect(
       cmdHandoffComplete("smoke", {
         env: {},
@@ -307,7 +428,7 @@ describe("legion handoff complete", () => {
       })
     ).rejects.toEqual(
       expect.objectContaining({
-        message: expect.stringContaining("worker extension"),
+        message: expect.stringContaining("LEGION_GRANT_FILE is missing"),
         code: 1,
       })
     );
@@ -316,7 +437,7 @@ describe("legion handoff complete", () => {
   it("fails loudly when the daemon rejects the request", async () => {
     await expect(
       cmdHandoffComplete("smoke", {
-        env: { LEGION_GRANT: "grant-123" },
+        env: { LEGION_GRANT_FILE: grantFile("grant-123") },
         fetch: async () => new Response("Stale worker generation", { status: 409 }),
       })
     ).rejects.toEqual(
@@ -333,7 +454,7 @@ describe("legion handoff complete", () => {
     console.log = (message: string) => messages.push(message);
     try {
       await cmdHandoffComplete("smoke", {
-        env: { LEGION_GRANT: "grant-123" },
+        env: { LEGION_GRANT_FILE: grantFile("grant-123") },
         fetch: async () => new Response(JSON.stringify({}), { status: 202 }),
       });
     } finally {
