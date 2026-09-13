@@ -179,9 +179,15 @@
     "observations": [
       "This tester pane (1.17.0 plugin) again imitated the hook's write-back on several bash calls; the `legion gh` calls were routed through eval's tool.bash as in round 1.",
       "run.ts's own pathWithoutWorkerBin strip means the rig's verdict G proves the pane-level invariant; the daemon-level fix is proven by the two new unit tests and the from-pane resolveDaemonEnvironment probe above, which is why all three are recorded."
-    ]
+    ],
+    "prArtifacts": {
+      "handoffCommit": "363270f3b10d8b1e470256ecc9a224e5013459ab (test: record round-2 handoff; only .legion/test.json)",
+      "comment": "https://github.com/sjawhar/legion/pull/992#issuecomment-5651195604",
+      "prBody": "CI line rewritten (green at fa521041; no run possible at 7c2dcb27/363270f3 — CONFLICTING); 'E2E (tester, round 2 …)' section inserted before the implementer's E2E; 69936 chars",
+      "commitStatus": "legion/tester = failure on 7c2dcb27 (id 54063243185) and 363270f3 (id 54063243702): 'both blocking fixes PASS (rig A-G x2); FAIL: docs name 1.17.4 but main released 1.18.0 -> 1.18.1; PR CONFLICTING, rebase' (an earlier success status on each SHA, ids 54063237551/54063238045, is superseded by the later failure)."
+    }
   },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T04:39:53.447Z"
+  "completed": "2026-09-13T04:42:59.927Z"
 }
