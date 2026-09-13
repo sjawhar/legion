@@ -140,6 +140,15 @@ rule itself lives once in `flushEventLoop`'s doc), so `grep -n -B1 'flushEventLo
 the whole file in one read. One drain over nothing in flight at all (`armIdleRetire` no-ops at
 `workerIdleRetireSeconds: 0`) was deleted, not commented.
 
+The marker is load-bearing for the audit, not decoration: `grep -B1` reads exactly one line above
+the call, so the `// Negative wait:` line must be the line **directly** above `flushEventLoop(…)`,
+and a rationale that needs more than one line goes above the marker, not between it and the call.
+LEGION-93's terminal test (#1082, `e7e0b7ed`) wrote a three-line comment with the `Negative wait:`
+line first and two explanatory lines under it, which the audit misses — 21 of 22 sites matched at
+that head; the fold to one line is a LEGION-146 item. A branch that predates this conversion and
+carries its own `flushEventLoopUntil`/`onceEventLoop` waits must adopt the marker form when it
+adapts to the new harness (see `../legion/mains-test-fixture-change-is-a-conflict-mergeable-does-not-see.md`).
+
 Two assertions became tautologies once the wait was exact (`attemptsBeforeDispose > 0` right
 after `connects.reached(10)`; `listPanesCalls >= 2` right after
 `runs("list-panes").completed.reached(2)`) and were deleted — an exact await subsumes the
