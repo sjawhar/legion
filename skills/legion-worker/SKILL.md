@@ -334,26 +334,24 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   the PR body).
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
+- **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
+  cleaned head, retro commits its learnings under `docs/solutions/` on top of it; that commit
+  stays, the approval stands, and the tree goes to the merger — never back to the tester or
+  reviewer. Anything else above the approved head does void it, and the merger tells the
+  architect the head must return to review instead of publishing. A conflict-forced rebase
+  after retro moves those documents with the branch; retro never re-runs.
 - The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
   code-writing App as the implementer; resolving a thread changes no commit, so this run never
   invalidates the approval), does not publish while any `left open` line remains or the command
   exits 1 (report the thread to the architect instead), then
-  confirms the current head is the reviewer-approved head, or that head plus
-  commits that change only `docs/solutions/` (retro's learnings):
-  `jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` is quoted in
-  READY (an empty output is quoted as `no commits above the approved head`), and
-  `jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary '~docs/solutions'`
-  must print nothing. Then it publishes `READY #<n> at <tip-sha>` naming the approved head,
-  the tip, and that summary, plus the PR body's gate facts, to the merge queue's role
-  (`notifications.role.pr-queue`) with `envoy_publish`. A retro commit that changes only
-  `docs/solutions/` does not void the reviewer's approval; anything else above the approved
-  head does, and the merger tells the architect the head must return to review instead of
-  publishing. The merger never merges; the queue merges under its own authority.
-- **Retro's commit does not void the approval.** After the reviewer approves the cleaned head,
-  retro commits its learnings under `docs/solutions/` on top of it; that commit stays, the
-  approval stands, and the tree goes to the merger — never back to the tester or reviewer. A
-  conflict-forced rebase after retro moves those documents with the branch; retro never
-  re-runs.
+  proves that rule with two commands and publishes. First
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`,
+  whose output is quoted in READY (an empty output is quoted as
+  `no file changes above the approved head`); then the same with `'~docs/solutions'` appended,
+  which must print nothing. Then it publishes `READY #<n> at <tip-sha>` naming the approved
+  head, the tip, and that summary, plus the PR body's gate facts, to the merge queue's role
+  (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
+  merges under its own authority.
 - **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the
@@ -366,13 +364,13 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 
 ## The unchanged-diff check
 
-The fingerprint every role compares after a conflict-forced rebase (every flag verified on jj
-0.45.1):
+The fingerprint every role compares after a conflict-forced rebase (every flag and the fileset
+verified on jj 0.45.1):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
   jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
-    --git --context 0 '~.legion' '~docs/solutions' \
+    --git --context 0 '~(.legion | docs/solutions)' \
   | sed -e '/^@@/d' -e '/^index /d' | sha256sum
 ```
 
@@ -387,12 +385,14 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
   on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
-- `'~.legion'` and `'~docs/solutions'` leave out the handoff ledger and retro's learnings:
-  process artifacts the rules above already exempt from re-review, which change between one
-  role's verified head and the next without changing the product. This is what lets each role
-  compare against *its own* last verified head instead of trusting another role's numbers.
-  Once `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the
-  hash is unaffected.
+- The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
+  learnings: process artifacts the rules above already exempt from re-review, which change
+  between one role's verified head and the next without changing the product. This is what lets
+  each role compare against *its own* last verified head instead of trusting another role's
+  numbers. It must be one expression: jj unions positional filesets, so two separate
+  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Once
+  `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
+  unaffected.
 
 Where each role gets its two heads: the implementer — the tip before and after its own rebase;
 the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
@@ -436,7 +436,8 @@ Do not report phase completion until the write, existence check, and handoff com
 succeed; when an issue branch exists, its push is also required. This is the committed
 copy the next phase reads after revival. It is removed once, at the end of a clean review: the
 implementer pushes that deletion at the reviewer's direction. No other phase removes it — and
-once it is gone (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing), this
+once it is gone (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout;
+jj warns on stderr), this
 gate no longer applies: a later rebase, bare-gate re-check, confirmation, or retro writes no
 `.legion/<phase>.json`, commits no handoff, and reports with `legion handoff complete` alone
 (below). Recreating `.legion/` after its deletion changes the approved head and restarts the
