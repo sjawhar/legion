@@ -1,6 +1,6 @@
 {
   "pr": "https://github.com/sjawhar/legion/pull/1087",
-  "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+  "headSha": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
   "filesChanged": [
     "packages/workspace/src/workspace.ts",
     "packages/workspace/src/workspace.test.ts",
@@ -24,6 +24,16 @@
       "change": "lxzvqovo",
       "commit": "0658feec27896a1c5bf3480ccef713632d8030d6",
       "subject": "docs(daemon): record when a finished issue's workspace is removed and the jj facts it rests on (LEGION-104)"
+    },
+    {
+      "change": "xmxkznon",
+      "commit": "21a77dc48a03",
+      "subject": "fix(daemon): hand a close's freed slot to the promotion sweep only after closingTrees forgets the tree; keep every workspace while the tree holds a slot (LEGION-104)"
+    },
+    {
+      "change": "rpnxwzkw",
+      "commit": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
+      "subject": "docs(workspace): provisioning writes git.abandon-unreachable-commits itself since LEGION-84; drop the removal test's redundant write (LEGION-104)"
     }
   ],
   "redMessages": {
@@ -38,10 +48,10 @@
   },
   "tests": {
     "workspace": "cd packages/workspace && bun test src/workspace.test.ts → 28 pass, 0 fail (24 after LEGION-84 landed + 3 new, each on both JJ_BINARIES + LEGION-84's own); also green with an empty JJ_CONFIG and XDG_CONFIG_HOME (the CI runner's shape)",
-    "daemon": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test → 1303 pass, 0 fail (5 new); no existing exact-command pin needed extending",
+    "daemon": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test → 1305 pass, 0 fail (7 new: 5 from round 0, 2 from the corrective round); no existing exact-command pin needed extending",
     "lint": "bunx biome check --error-on-warnings src/ clean in packages/daemon and packages/workspace",
     "typecheck": "bunx tsc --noEmit clean in packages/daemon and packages/workspace",
-    "ci": "Tests run 34828675157 (lint, typecheck, test all success) and PR title run 34828675152 (pr-title success) at 0658feec27896a1c5bf3480ccef713632d8030d6"
+    "ci": "Tests run 34833996472 (lint, typecheck, test all success) and PR title run 34833996466 (pr-title success) at 7de8ef078bb996859435888f9e3a92ea4ae1c756; round 0's runs 34828675157/34828675152 at 0658feec"
   },
   "rebase": "GitHub reported CONFLICTING after LEGION-84 (#1080) and LEGION-15 (#1027) merged. Rebased the whole chain once: 266f64d73be34f3455876af668f32aadc0e600d2 → 0658feec27896a1c5bf3480ccef713632d8030d6; fingerprint 2d8c5c2aa9d9f8c5e91c7a8b3a4d47493399d30eee3842727e00c6a91c4d8476 → d1de1d24a9ff70f221c83e47d4413c668a011efc03e30629f9a95be38071392b (changed: the fifth daemon test's waits rewritten to LEGION-15's convention and the console spies restored in a finally; no production file changed). Two append-append conflicts resolved: workspace.test.ts (LEGION-84's test kept before this branch's three) and AGENTS.md (main's rewritten Workspace clone bullet kept, Workspace removal inserted after it). Posted as https://github.com/sjawhar/legion/pull/1087#issuecomment-5661947372.",
   "jjFacts": {
@@ -73,12 +83,12 @@
   "driver": {
     "script": "/tmp/legion-104-driver.ts (bun; JJ_BIN selects the binary; argv[2] selects the module under test)",
     "outputs": [
-      "/tmp/legion-104-driver-0451-r2.txt",
-      "/tmp/legion-104-driver-0440-r2.txt",
-      "/tmp/legion-104-driver-control-r2.txt"
+      "/tmp/legion-104-driver-0451-r3.txt",
+      "/tmp/legion-104-driver-0440-r3.txt",
+      "/tmp/legion-104-driver-control-r3.txt"
     ],
     "before": "jj workspace list names default, widgets-42 (empty) (no description set), widgets-43 legion/WIDGETS-43 | b work; B's jj log -r 'all()' shows widgets-42@ and 'a work' beside 'b work'; A directory exists: true; git worktree list names A's directory on 0.45.1 only",
-    "result": "{ workspaceDir: …/widgets-42, removed: true, abandoned: [2 ids] } — 0.45.1: 3d4ec6a2…, 9b63f14d…; 0.44.0: 84af664c…, 1c3a4ae1…",
+    "result": "{ workspaceDir: …/widgets-42, removed: true, abandoned: [2 ids] } — at 7de8ef07: 0.45.1: d4052021…, 92c7720a…; 0.44.0: 031beaa1…, ad29f9c2…",
     "after": "jj workspace list names default and widgets-43 only; git worktree list without A; B's log shows b work, main, root() and nothing of A; A directory exists: false; second call { removed: false, abandoned: [] }; re-provisioned A: @- = main and legion/WIDGETS-42 = A's @ on both binaries",
     "control": "main@origin's workspace.ts (617b778e, LEGION-84 merged): same BEFORE, then TypeError: removeIssueWorkspace is not a function, exit 1"
   },
@@ -118,16 +128,34 @@
     {
       "criterion": "Acceptance 6 — before the merge the real code is exercised outside the test runner against a scratch clone with two workspaces on both binaries; BEFORE/AFTER quoted in the pull request; no rig, no daemon",
       "surface": "bun /tmp/legion-104-driver.ts: the branch's packages/workspace/src/workspace.ts imported directly, driving provisionIssueWorkspace and removeIssueWorkspace against a colocated scratch clone with a local remote, on jj 0.45.1-sami.20260910 and stock 0.44.0",
-      "command": "cd packages/workspace && bun /tmp/legion-104-driver.ts   and   JJ_BIN=\"mise x github:jj-vcs/jj@0.44.0 -- jj\" bun /tmp/legion-104-driver.ts   (outputs /tmp/legion-104-driver-0451-r2.txt, /tmp/legion-104-driver-0440-r2.txt)",
-      "observed": "BEFORE: jj workspace list names widgets-42 (empty working copy) beside default and widgets-43; B's jj log -r 'all()' shows widgets-42@ and 'a work'; A directory exists: true; git worktree list names A on 0.45.1. removeIssueWorkspace → { removed: true, abandoned: [2 ids] }. AFTER: widgets-42 gone from jj workspace list and git worktree list; B's log shows only b work, main, root(); A directory exists: false; second call { removed: false, abandoned: [] }; re-provisioned A has @- = main and legion/WIDGETS-42 = A's @ (identical shape on both binaries; quoted with the ids in the PR body's E2E line).",
-      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
-      "negativeControl": "The same driver against main@origin's workspace.ts (jj file show -r main@origin packages/workspace/src/workspace.ts > /tmp/legion-104-old-workspace.ts; bun /tmp/legion-104-driver.ts /tmp/legion-104-old-workspace.ts): prints the same BEFORE leftover and then exits 1 with TypeError: removeIssueWorkspace is not a function (/tmp/legion-104-driver-control-r2.txt)."
+      "command": "cd packages/workspace && bun /tmp/legion-104-driver.ts   and   JJ_BIN=\"mise x github:jj-vcs/jj@0.44.0 -- jj\" bun /tmp/legion-104-driver.ts   (outputs /tmp/legion-104-driver-0451-r3.txt, /tmp/legion-104-driver-0440-r3.txt; re-run at the corrective head, whose workspace.ts is unchanged since 0658feec)",
+      "observed": "BEFORE: jj workspace list names widgets-42 (empty working copy) beside default and widgets-43; B's jj log -r 'all()' shows widgets-42@ and 'a work'; A directory exists: true; git worktree list names A on 0.45.1. removeIssueWorkspace → { removed: true, abandoned: [2 ids] }. AFTER: widgets-42 gone from jj workspace list and git worktree list; B's log shows only b work, main, root(); A directory exists: false; second call { removed: false, abandoned: [] }; re-provisioned A has @- = main and legion/WIDGETS-42 = A's @ (identical shape on both binaries; at 7de8ef07 the abandoned ids were d4052021…/92c7720a… on 0.45.1 and 031beaa1…/ad29f9c2… on 0.44.0; quoted in the PR body's E2E line).",
+      "headSha": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
+      "negativeControl": "The same driver against main@origin's workspace.ts (jj file show -r main@origin packages/workspace/src/workspace.ts > /tmp/legion-104-old-workspace.ts; bun /tmp/legion-104-driver.ts /tmp/legion-104-old-workspace.ts): prints the same BEFORE leftover and then exits 1 with TypeError: removeIssueWorkspace is not a function (/tmp/legion-104-driver-control-r3.txt)."
+    },
+    {
+      "criterion": "Review round 1 blocking finding (r4004189654) — a close whose freed slot promotes a queued child of the closing tree settles, and the child is provisioned without ever waiting on that close",
+      "surface": "ProcessManager.closeTree / admit through the fake tmux runtime and command recorder: lingering T with a live root pane, a queued child D holding its own `queued` tree record with launchFailures 1 in admission.queue (moved to todo while T lingered, first launch failed), T re-admitted mid-close by `admit` while the root's graceful stop is parked on its timeout sleep",
+      "command": "cd packages/daemon && LEGION_E2E=1 bun test src/daemon/__tests__/processes.test.ts -t \"freed slot promotes a queued child\"",
+      "observed": "1 pass: `await closeTree(T)` settles; D's launch ran `jj workspace add <D dir> --name legion-43 …` and D's tree record reads active with a locator; the log carries `launch of LEGION-42 waits for the close of tree LEGION-42 to finish` (the re-admitted T) and no `launch of LEGION-43 waits …` line — D was promoted only once `closingTrees` had forgotten T. The reopened root's own fate after the close is LEGION-143's and is not pinned.",
+      "headSha": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
+      "negativeControl": "The same test text against the review head's processes.ts (3d5928bf's copy, swapped in for one run): `this test timed out after 5000ms` — the close never settled, exactly the reviewer's measurement on their scratch copy."
+    },
+    {
+      "criterion": "Thermo fold-in (spec version 4, Design) — the sweep's retry of a close whose first attempt threw StopFailed after the root was re-admitted removes nothing, because the tree holds an admission slot even though the record reads lingering again",
+      "surface": "ProcessManager.closeTree / admit through the fake tmux runtime: lingering T re-admitted while the root's graceful stop is parked; the root's kill-pane then fails once (`lost server`), so the first close throws StopFailed and rewrites `lingering` over admit's `active`; the re-admitted launch runs to completion; the second closeTree is the sweep's retry",
+      "command": "cd packages/daemon && LEGION_E2E=1 bun test src/daemon/__tests__/processes.test.ts -t \"retries a close whose first attempt failed\"",
+      "observed": "1 pass: the first close rejects with StopFailed leaving status lingering and admission.active [LEGION-42]; the retry close settles, ran no `jj workspace forget` and no `jj abandon`, left the directory in place, and logged `[legion] kept every workspace of tree LEGION-42 at its close: the tree holds an admission slot`.",
+      "headSha": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
+      "negativeControl": "The same test text against the review head's processes.ts (status-only guard): the retry close ran `jj workspace forget legion-42` — `expect(received).toBeFalse() Received: true` — i.e. it removed the re-admitted root's workspace."
     }
   ],
   "trickyParts": [
     "The rebase GitHub's CONFLICTING forced: LEGION-15 removed flushEventLoopUntil, so the fifth daemon test now awaits the root stop arming its timeout sleep through a gate its own sleep fake resolves, and its one remaining tick-budget drain carries the required '// Negative wait:' line; the three console.error spies now restore in a finally, because a later test (LEGION-107's receipt_timeout) counts console.error calls and a spy left in place made it inherit this branch's three lines.",
     "workspaceCommandRunner is a class field (the daemon runner with stderr normalised), shared by provisionWorkspace and removeWorkspace, typed as the workspace package's own run so both functions accept it unchanged.",
-    "removeIssueWorkspace asks jj only when <clone>/.jj exists, so a tree that closes without ever having provisioned logs nothing; every existing daemon close test under config('/state') therefore records no new command and no pin needed extending."
+    "removeIssueWorkspace asks jj only when <clone>/.jj exists, so a tree that closes without ever having provisioned logs nothing; every existing daemon close test under config('/state') therefore records no new command and no pin needed extending.",
+    "The fifth daemon test's 'after the close' instrument now reads the tree record at each jj command (every provisioning command must see `closed`): closeTree's returned promise spans the promotion sweep that follows the close, so a flag set on that promise no longer marks the close's end.",
+    "Both new fakes answer `split-window` (the re-admitted root's spawn splits into the tree's recorded window); without it the spawn fails, spawnRoot's catch re-queues the tree, and the retry close exercises a spawn-failure path instead of the scenario."
   ],
   "deviations": [
     "The plan expected 5 daemon tests to fail before the implementation; 4 did. 'runs no workspace removal at linger start' passes on today's code because beginLinger has never removed anything — it is a guard against moving the removal there, which the spec's acceptance 5 names explicitly, so it is kept.",
@@ -135,7 +163,17 @@
   ],
   "openQuestions": [],
   "productionCheck": "Acceptance 7 is pending the merge and the operator's restart of the live daemon on this box: the first tree close's 'removed the workspace of …' log line, jj workspace list -R <clone> without the issue, the absent directory, and another workspace's jj log without that issue's commits, to be quoted on the PR and the issue when the architect resumes this session.",
+  "reviewRound1": {
+    "review": "https://github.com/sjawhar/legion/pull/1087#pullrequestreview-5196476433",
+    "blocking": "r4004189654 — closeTreeLocked(T) reached releaseSlot(T) → beginPromotionSweep → advancePromotionSweep → await startRoot(D) → spawnRoot(D) → awaitClosingTrees(D) while closingTrees still named T: D (a queued child of T with its own queued record) waited on the very close promoting it; neither settled. Reproduced by the reviewer (5 s timeout) and by the new regression against the previous processes.ts.",
+    "fix": "closeTreeLocked splices the slot out of admission.active without sweeping and returns whether it did (Promise<boolean>; closingTrees is Map<IssueKey, Promise<boolean>>); closeTree awaits the close (whose .finally deletes the map entry) and only then, when a slot was released, awaits beginPromotionSweep(). releaseSlot's other callers (beginLinger, recordRootExit, spawnTree's human-parked rollback) are unchanged. A StopFailed close releases no slot and sweeps nothing.",
+    "foldIn": "removeTreeWorkspaces keeps every workspace while state.admission.active includes the tree (reason `the tree holds an admission slot`), beside the not-lingering check: the StopFailed path rewrites the record lingering over a mid-close admit's active, so the sweep's retry close would otherwise remove the re-admitted root's fresh workspace. Spec version 4 records both decisions in Design.",
+    "minors": "r4004189663 marker folded directly above flushEventLoop(50); r4004189668 the code's kept-every line drops ` (re-admitted while closing)` (AGENTS.md now quotes both reasons verbatim); r4004189672 docs/solutions bullet reworded (provisioning writes the setting since LEGION-84) and the removal test's redundant `jj config set` dropped.",
+    "threads": "Replied `Accepted: fixed in <commit> — …` on all four; `legion threads resolve --pr 1087 --repo sjawhar/legion` before the push printed `left open … newest reply by legion-implementer is not an acceptance` for each, as expected: the command acts on the opener's own `Accepted:`, which the reviewer writes on re-review.",
+    "mergeable": "MERGEABLE / BLOCKED before the push — no rebase."
+  },
+  "fastFollow": "Landed in this push (21a77dc48a03, 7de8ef078bb9): the Negative-wait marker fold, the dropped log-line parenthetical, the docs/solutions reword and the removal test's redundant jj config set. Nothing outstanding.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T09:37:52.453Z"
+  "completed": "2026-09-14T10:38:56.800Z"
 }
