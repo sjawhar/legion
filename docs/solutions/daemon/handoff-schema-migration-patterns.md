@@ -13,10 +13,14 @@ module: daemon
 related_issues:
   - "#239"
   - "#218"
+  - "LEGION-53"
+  - "sjawhar/legion#1028"
 symptoms:
   - "z.discriminatedUnion requires ZodObject not ZodEffects"
   - "how to add fields to all handoff phases"
   - "how to rename a handoff field with backward compatibility"
+  - "how to make one handoff field required only when another is absent (cross-field rule)"
+  - "legion handoff write: Invalid implement handoff: proof: Invalid input: expected array, received undefined"
 ---
 
 # Handoff Schema Migration and Cross-Cutting Field Patterns
@@ -39,7 +43,7 @@ This works because each phase schema is defined as `baseHandoffSchema.extend({ p
 
 When renaming a field (e.g., `learningsUsed` → `learningsInjected`), the Zod discriminated union constrains your approach:
 
-**The constraint:** `z.discriminatedUnion("phase", [...])` requires all members to be `ZodObject` types. Adding `.transform()` to a member converts it to `ZodEffects`, which the discriminated union rejects at compile time.
+**The constraint (Zod 3 only — see the next section for Zod 4):** `z.discriminatedUnion("phase", [...])` requires all members to be `ZodObject` types. On Zod 3, adding `.transform()` to a member converts it to `ZodEffects`, which the discriminated union rejects at compile time.
 
 **The solution:**
 
@@ -60,6 +64,62 @@ if (data.phase === "plan" && "learningsUsed" in data) {
 4. **Precedence rule**: New field wins if both exist (safe for mixed-state files on branches)
 
 **The type cast chain** (`as Record<string, unknown>` → `as unknown as PhaseHandoff`) is necessary because Zod's inferred type still includes the deprecated field from the schema, while the TypeScript interface doesn't. This is a known friction point when schema and interface diverge intentionally.
+
+## Cross-field rules on one phase (Zod 4): `.refine()` stays a `ZodObject`
+
+LEGION-53 (`sjawhar/legion#1028`) needed "a test handoff must carry the tester's own `proof`
+unless it reports a failure" — a rule across three fields of `testSchema`. The section above
+would have sent that into `validatePhaseHandoff()`. It does not have to go there any more: the
+repository is on Zod 4 (4.3.6 in the workspace lockfile), and on Zod 4 `.refine()` returns the
+`ZodObject` itself — `refined.constructor.name === "ZodObject"`, `_zod.def.type === "object"` —
+not a wrapper. Verified at runtime in `packages/contracts` with `bun -e`:
+
+- `z.discriminatedUnion("phase", [testSchema.refine(...), ...])` builds and routes `phase: "test"`
+  to the refined member; the refinement's issue comes back with the `path` you gave it
+  (`proof: a passing test handoff needs the tester's own production-like proof`).
+- `.passthrough()` and `.refine()` compose in either order: `refine().passthrough()` keeps the
+  refinement and the unknown keys, and so does `passthrough().refine()`. The `.passthrough()`
+  that used to sit at the union site (`implementSchema.passthrough()` inside the array) now sits
+  on each phase schema's own definition and the union takes the five schemas directly — a
+  readability choice, not a constraint.
+
+The rule that decides whether a handoff is "passing" is written once, on the schema, as data:
+
+```typescript
+.refine(
+  (handoff) =>
+    (handoff.failures?.length ?? 0) > 0 ||
+    (handoff.failed ?? 0) > 0 ||
+    (handoff.proof?.length ?? 0) > 0,
+  { path: ["proof"], message: "a passing test handoff needs the tester's own production-like proof" }
+);
+```
+
+Two things follow for the ledger. **Name the field in every refusal:** `describePhaseHandoffProblems()`
+(`handoff-schema.ts`) maps each Zod issue to `<path joined by .>: <message>` (`<root>` when the
+path is empty), and both the write refusal (`Invalid <phase> handoff: proof: …`, thrown before
+`ensureLegionDir`, so nothing is created) and the read warning (`[handoff] Ignoring <file>: …`
+on stderr before the existing `return null`) print that same list — one formatter, two surfaces.
+**Every fixture that writes the stricter phase changes in the same commit:** `ledger.test.ts`,
+`cli/__tests__/handoff.test.ts`, and the two `knowledge/__tests__` files all wrote proof-less
+implement handoffs; two of the ledger fixtures existed to isolate a *different* invalid field
+(`trickyParts: "not an array"`, `completed: "Tuesday"`), so each had to gain a valid `proof` or
+its `null` would stop proving what the test name says.
+
+What did **not** change: `HANDOFF_SCHEMA_VERSION` stays 1 (a pre-change `implement.json` on an
+in-flight branch simply fails validation and reads as missing, with the stderr line saying which
+field), and the daemon never reads a handoff, so the enforcement point is the CLI every
+implementer runs.
+
+**Inventory every reader before tightening a phase schema, not only the write/read pair you edit.**
+`readPhaseHandoff`/`readAllHandoffs` have three callers: `cli/index.ts` (`legion handoff read`),
+`knowledge/collector.ts` (`collectLearningFeedback`), and `knowledge/feedback-logger.ts`. The last two
+are what `legion knowledge consolidate` runs, and a handoff that now reads as `null` silently drops
+its `learningsInjected`/`learningsHelpful` from the consolidation. LEGION-53's Deployment section
+named the first consequence (the stderr line) and missed the second until the reviewer added it;
+the operator note became "run the consolidate once on the old build before restarting the daemon
+on the merged `main` if that feedback is wanted". `grep -rn 'readPhaseHandoff\|readAllHandoffs'
+packages/daemon/src` and write one sentence per caller about what it does with `null`.
 
 ## Testing Schema Migrations
 
