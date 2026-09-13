@@ -123,6 +123,28 @@ Loop over the set the label claims, and add the boundary case (checkpoint 8 unde
 must report its own branch-protection reason and no ingress reason at all). An overclaiming
 label is a coverage gap even when no mutation is tried.
 
+## 5. A fixture must be a state the real system can reach; check a checkpoint's precondition against its own assertion (LEGION-20)
+
+Smoke checkpoint 3 with the design gate armed asserted two things about the root: the spec
+document is *awaiting* approval (the architect asked), and the tree has *moved past the gate*
+(a child issue exists or a phase worker is claimed). Those cannot both be true of a compliant
+architect: it parks the moment it asks, and once a human approves the document is no longer
+awaiting. The assertion had been ruled in by the architect and the harness case passed — on a
+fixture whose daemon state showed a planner claimed on the root while the document still awaited,
+a state no compliant agent produces. The tester ran the real armed-gate exercise on the rig and
+checkpoint 3 could never pass (#975, tester round 1, acceptance 7). The corrected checkpoint
+asserts the opposite: with the gate armed and the document awaiting, *nothing* has moved
+(`architect_parked`: no child at `todo` or later, no non-architect claim on the root or a child),
+and it fails naming the early move; the progress assertion belongs to checkpoint 4, after the
+approval. The harness now carries the reachable states — parked single-issue, parked with a
+`triage` child — plus the two early-move negatives.
+
+Two checks before a fixture is written: (a) walk the state machine the checkpoint tests and
+confirm the precondition and the assertion can hold at the same instant for a compliant agent;
+(b) ask where the fixture's state came from — a real run's `state.json`, or a hand-typed record
+shaped to make the assertion true? The second kind proves only that the script parses. A ruling
+can be wrong; the fixture is where a wrong ruling gets laundered into a green PASS line.
+
 ## Running the mutations in a bash rig
 
 Same discipline as the daemon's TypeScript tests, in shell:

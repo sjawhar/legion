@@ -100,6 +100,25 @@ architect's role topic with `envoy_publish` and say the daemon refused the compl
 retry in a loop; the phase will be re-pointed or the message suffices. Later rounds on the same
 issue completed normally once the phase was the implementer's again.
 
+## Hazard 4 — two roles editing one issue workspace at once: `jj workspace update-stale` hides the other's snapshot (LEGION-20)
+
+A tree with a tester round and an implementer fix in flight at the same time has two live
+sessions in one jj workspace. On #975 the tester committed its handoff (`.legion/test.json`
+only) while the implementer had uncommitted code edits in the same working copy; the
+implementer's next snapshot made the working copy stale, and the tester ran the documented
+remedy, `jj workspace update-stale`, which moved the working copy to a fresh empty commit. The
+implementer's edits were not lost: jj had snapshotted them into a now-*hidden* commit whose
+parent was the tester's handoff. `jj log` and `jj edit <change id>` cannot see a hidden commit
+(`Revision doesn't exist`); `jj edit <full commit id>` can, and revives it. Check with
+`jj log -r <commit id> -T 'change_id ++ " hidden=" ++ hidden'`.
+
+Defence, in order: (a) the two roles agree who holds the workspace before either commits, and the
+one that yields says so in a message (the tester did — that message is how the implementer knew
+the commit id); (b) the role that runs `update-stale` reports the hidden commit's id and file list
+to the other; (c) the other resumes with `jj edit <commit id>`, never by re-typing the edits.
+The skill assumes one active phase per workspace; a corrective round breaks that assumption, so
+say who has the workspace out loud.
+
 ## Also from this issue
 
 **A rationale that sounds right can be contradicted by code.** The first three drafts of the

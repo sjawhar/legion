@@ -114,6 +114,26 @@ and the hidden `legion probe-image` subcommand (the worker image's last build st
 identical code. The contract gate moved there with them on rebase, for the same reason: a worker
 image that carries a plugin at the wrong contract should fail its build, not its first boot.
 
+## The bump is a step the author must take; the gate only catches its absence at deploy (LEGION-20)
+
+LEGION-20 (#975) changed `register_gate`'s request from `{askId}` to `{artifactId, version}` and
+the gate record in the state response — a `LegionDaemonApi` shape change on both sides. Neither
+the plan nor the first implementation bumped `LEGION_DAEMON_API_VERSION` or the plugin manifest's
+`legion.daemonApiVersion`; the architect caught it in review and the bump landed as a follow-up
+commit ("daemon API contract 2 — register_gate and the gate record changed shape"). Nothing
+automatic could have caught it: `daemon-api-version.test.ts` pins the two numbers *equal*, not
+*changed*, and the gate itself only fires at boot against an installed plugin. Two habits now:
+
+- **Any diff that touches `packages/contracts/src/legion-daemon-api.ts` bumps the constant and
+  the manifest in the same commit as the shape change**, and the pull request body says so —
+  the contract number, not a `!` marker, is how this repository signals the incompatibility
+  (Sami's rule). Put "grep the diff for `LegionDaemonApi`" on the planner's checklist and the
+  reviewer's.
+- **A serial number claimed on a long-lived branch is re-checked against main at every rebase.**
+  Two branches that each change a shape will both bump 1 → 2; see
+  `docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`,
+  where the same thing happened to the state version on this branch.
+
 ## Related
 
 - `packages/daemon/src/daemon/AGENTS.md`, "OMP invocation and daemon tools": the gate, the bump
