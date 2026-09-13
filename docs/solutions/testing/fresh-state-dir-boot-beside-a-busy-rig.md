@@ -35,7 +35,11 @@ cannot find.
 
 Run under `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --` (the rig's
 `legion.yaml` resolves App keys through `private_key_command`), from a pane environment scrubbed
-of the inherited `LEGION_*` family (`docs/solutions/daemon/config-env-keys-that-panes-also-carry.md`).
+of the inherited `LEGION_*` family — `LEGION_OMP_PATH` included, or the probe at the launch hold
+dies on the inherited hand-built OMP (`docs/solutions/daemon/config-env-keys-that-panes-also-carry.md`).
+To boot the branch against a `private_key_secret` config with a fake `secrets` on PATH instead, see
+`fake-cli-on-path-outputs-from-files-and-a-call-log.md` §4 (the fake must delegate `--value` to
+the real binary; boot mints a real JWT before it listens).
 
 1. **Config from the rig's own yaml, edited by `sed`:** `port` and `daemon_url` to a free pair
    (19380 → the daemon binds 19381 for the stream), `state_dir` to a scratch directory,

@@ -79,10 +79,18 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   `env -u LEGION_DAEMON_URL -u LEGION_STATE_DIR -u LEGION_TREE -u LEGION_ISSUE -u LEGION_ROLE
   -u LEGION_GENERATION -u LEGION_WORKSPACE -u LEGION_ROOT_WORKSPACE -u LEGION_PROJECT
   -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
-  -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER
+  -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u LEGION_OMP_PATH
   -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST …`, with
   `DISPATCH_URL`/`DISPATCH_TOKEN` re-supplied deliberately. The checkpoints script must run under
   the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
+- `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
+  carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see
+  `omp-pin-bump-behavioral-proof.md`, "One operator observation"), every pane inherits it, and a
+  scratch daemon started from a pane honours it as its OMP override. That hand-built binary's
+  `pi_natives` addon no longer matches its loader (`does not expose the … version sentinel`), so the
+  `pi.agents` probe fails **definitively** at the launch hold — after config loaded and the App keys
+  resolved, before the listening lines — and `legion start` exits 1 with `Configured OMP invocation
+  does not expose pi.agents`. Scrubbed, the daemon resolves the pinned mise release and boots.
 - `PATH` needs no scrub. Since LEGION-54 a pane's `PATH` starts with `<state_dir>/worker-bin` for
   the pane's life (the `gh` shim that execs `legion gh`), and `mise env` keeps an inherited PATH
   head, so a daemon started from inside a pane would otherwise resolve its own `gh` to the shim

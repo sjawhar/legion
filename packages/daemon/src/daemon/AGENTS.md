@@ -100,6 +100,30 @@ thread GitHub refuses; any newest comment that is not the opener's own `Accepted
 `Still open:` reply, a reply by another account, or the opener's own later follow-up — leaves the
 thread open with exit 0.
 
+Each App's private key comes from exactly one of three `legion.yaml` sources under
+`github_apps.<role>` (`loadGitHubApps`, `config.ts`): `private_key` (the PEM inline),
+`private_key_command` (a shell command run at config load with `stripDispatchEnv(process.env)`,
+whose stdout is the PEM), or `private_key_secret: <NAME>` — a secretsd key holding the PEM
+base64-encoded. Two or none refuse with `github_apps.<role> requires exactly one of private_key,
+private_key_command, or private_key_secret`. `private_key_secret` is the form for a shared box
+where panes run as the daemon's user (LEGION-77, `docs/deployment.md`): `resolvePrivateKeySecret`
+runs `secrets get <NAME> --no-request`, parses `{"key","tier"}`, and refuses start-up with exactly
+`App private key <NAME> is readable by agent-tier callers; move it to a daemon-only store` unless
+`tier` is `human` — the check never costs a tap; then logs `[legion] requesting <NAME> from
+secretsd (human tier; a YubiKey tap may be needed)`, runs `secrets get <NAME> --value`,
+base64-decodes stdout, and refuses unless it begins `-----BEGIN`; the PEM is held in memory like
+command output. A missing `secrets` on the launcher's PATH, an unknown key, an unparsable status,
+a non-PEM value, or any secretsd refusal names `github_apps.<role>.private_key_secret` and the key,
+never the material. Both `secrets` children run with the same stripped environment as
+`private_key_command` minus `SECRETSD_SESSION_TOKEN_FILE` (only that variable: `SECRETSD_SOCK` is
+the broker's socket path, not a session), and inherit the daemon's stdin: secretsd scopes a
+tokenless caller by `isatty(0)` plus `/proc/self/fd/0`, so the daemon must be started with stdin
+on its launcher pane's terminal and its grant is that pane's, never an agent session's. There is no
+daemon-imposed timeout; secretsd's own approval window is the failure. `legion start
+--check-config` (`resolveSecrets: false`) validates the name (one whitespace-free token) and never
+runs `secrets`. Config loads before `resolveDaemonEnvironment`, so `secrets` resolves on the
+launcher shell's PATH exactly as the `sh -c` of `private_key_command` does.
+
 ## OMP invocation and daemon tools
 
 Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required `mise x <tool> -- omp` command that launches the root architect and controller. The default is `DEFAULT_OMP_INVOCATION` in `omp-pin.ts`:

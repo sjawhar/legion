@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { loadConfig, loadConfigFromFile, resolveDaemonConfig } from "../config";
 
@@ -1195,5 +1197,232 @@ describe("daemon config", () => {
         },
       })
     ).toThrow("LEGION_INSTRUCTIONS must not be empty");
+  });
+
+  describe("github_apps.<role>.private_key_secret", () => {
+    const baseYaml = [
+      "project: acme/7",
+      "dispatch_project: ACME",
+      "repos:",
+      "  - acme/widgets",
+      "nats_urls:",
+      "  - nats://one:4222",
+      "gates:",
+      "  design: off",
+    ];
+
+    function secretYaml(name = "GH_AGENT_APP_PRIVATE_KEY_B64"): string {
+      return [
+        ...baseYaml,
+        "github_apps:",
+        "  implement:",
+        '    app_id: "1"',
+        `    private_key_secret: ${name}`,
+      ].join("\n");
+    }
+
+    /** A fake `secrets` first on PATH. `status` is what `get <NAME> --no-request` prints on
+     * stdout; `value` is what `get <NAME> --value` prints; `statusExit`/`valueExit` and `stderr`
+     * shape the failure cases. Every invocation appends one line to `<dir>/calls`:
+     * `<argv>\t<readlink /proc/self/fd/0>\t<SECRETSD_SESSION_TOKEN_FILE or "unset">`. Like the
+     * private_key_command leak test above, this mutates `process.env` (the resolver reads it for
+     * its spawnSync call) and restores it in `finally`. */
+    function withFakeSecrets(
+      fake: {
+        status?: string;
+        statusExit?: number;
+        value?: string;
+        valueExit?: number;
+        stderr?: string;
+      },
+      run: (calls: () => string[][]) => void
+    ): void {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-fake-secrets-"));
+      const callsFile = path.join(dir, "calls");
+      // Outputs live in files the script `cat`s, so no fixture text is ever shell-quoted.
+      fs.writeFileSync(path.join(dir, "status"), `${fake.status ?? ""}\n`);
+      fs.writeFileSync(path.join(dir, "value"), `${fake.value ?? ""}\n`);
+      fs.writeFileSync(
+        path.join(dir, "stderr"),
+        fake.stderr === undefined ? "" : `${fake.stderr}\n`
+      );
+      const script = [
+        "#!/bin/sh",
+        `printf '%s\\t%s\\t%s\\n' "$*" "$(readlink /proc/self/fd/0)" "\${SECRETSD_SESSION_TOKEN_FILE:-unset}" >> '${callsFile}'`,
+        `cat '${path.join(dir, "stderr")}' >&2`,
+        'case "$*" in',
+        `  *--no-request) cat '${path.join(dir, "status")}'; exit ${fake.statusExit ?? 0} ;;`,
+        `  *--value) cat '${path.join(dir, "value")}'; exit ${fake.valueExit ?? 0} ;;`,
+        "esac",
+        "exit 2",
+      ].join("\n");
+      fs.writeFileSync(path.join(dir, "secrets"), `${script}\n`, { mode: 0o755 });
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+      try {
+        run(() =>
+          fs.existsSync(callsFile)
+            ? fs
+                .readFileSync(callsFile, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => line.split("\t"))
+            : []
+        );
+      } finally {
+        process.env.PATH = savedPath;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    const FAKE_PEM =
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----\n";
+    const FAKE_PEM_B64 = Buffer.from(FAKE_PEM).toString("base64");
+
+    it("accepts the key as known and validates the name only under --check-config (resolveSecrets: false)", () => {
+      withFakeSecrets(
+        { status: '{"key":"GH_AGENT_APP_PRIVATE_KEY_B64","tier":"agent"}' },
+        (calls) => {
+          const file = loadConfigFromFile(secretYaml(), "/tmp/legion-config", {
+            resolveSecrets: false,
+          });
+          const { config } = resolveDaemonConfig({ configFile: file });
+          expect(config.githubApps.implement?.privateKey).toBe("(not executed)");
+          expect(calls()).toEqual([]);
+        }
+      );
+    });
+
+    it("rejects a name with whitespace: a pasted command, not a secretsd key name", () => {
+      expect(() =>
+        loadConfigFromFile(
+          secretYaml('"secrets get GH_AGENT_APP_PRIVATE_KEY_B64"'),
+          "/tmp/legion-config",
+          {
+            resolveSecrets: false,
+          }
+        )
+      ).toThrow(
+        "github_apps.implement.private_key_secret must be a single secretsd key name (no whitespace)"
+      );
+    });
+
+    it("rejects two private-key sources, naming all three", () => {
+      expect(() =>
+        loadConfigFromFile(
+          [
+            ...baseYaml,
+            "github_apps:",
+            "  implement:",
+            '    app_id: "1"',
+            '    private_key_command: "printf key"',
+            "    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64",
+          ].join("\n"),
+          "/tmp/legion-config",
+          { resolveSecrets: false }
+        )
+      ).toThrow(
+        "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret"
+      );
+    });
+
+    it("refuses an agent-tier key naming it, without ever fetching the value", () => {
+      withFakeSecrets(
+        { status: '{"key":"GH_AGENT_APP_PRIVATE_KEY_B64","tier":"agent"}' },
+        (calls) => {
+          expect(() => loadConfigFromFile(secretYaml(), "/tmp/legion-config")).toThrow(
+            "App private key GH_AGENT_APP_PRIVATE_KEY_B64 is readable by agent-tier callers; move it to a daemon-only store"
+          );
+          expect(calls().map((row) => row[0])).toEqual([
+            "get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request",
+          ]);
+        }
+      );
+    });
+
+    it("resolves a human-tier key to the decoded PEM: status before value, on the daemon's own stdin, without a session token", () => {
+      const savedToken = process.env.SECRETSD_SESSION_TOKEN_FILE;
+      process.env.SECRETSD_SESSION_TOKEN_FILE = "/leaked/agent-session-token";
+      try {
+        withFakeSecrets(
+          {
+            status: '{"key":"GH_AGENT_APP_PRIVATE_KEY_B64","tier":"human","grant":false}',
+            value: FAKE_PEM_B64,
+          },
+          (calls) => {
+            const file = loadConfigFromFile(secretYaml(), "/tmp/legion-config");
+            const { config } = resolveDaemonConfig({ configFile: file });
+            expect(config.githubApps.implement?.privateKey).toBe(FAKE_PEM.trim());
+            const rows = calls();
+            expect(rows.map((row) => row[0])).toEqual([
+              "get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request",
+              "get GH_AGENT_APP_PRIVATE_KEY_B64 --value",
+            ]);
+            // secretsd finds a tokenless caller's terminal through isatty(stdin) plus
+            // /proc/self/fd/0, so both children must run on the daemon's own fd 0, not a pipe.
+            const ownStdin = fs.readlinkSync("/proc/self/fd/0");
+            for (const row of rows) expect(row[1]).toBe(ownStdin);
+            // The grant is the launcher pane's (tty scope), never an agent session's.
+            for (const row of rows) expect(row[2]).toBe("unset");
+          }
+        );
+      } finally {
+        if (savedToken === undefined) delete process.env.SECRETSD_SESSION_TOKEN_FILE;
+        else process.env.SECRETSD_SESSION_TOKEN_FILE = savedToken;
+      }
+    });
+
+    it("refuses an unknown key with secretsd's own message, naming the setting and key", () => {
+      withFakeSecrets({ statusExit: 1, stderr: "secrets: secret 'GH_NOPE' not found" }, () => {
+        expect(() => loadConfigFromFile(secretYaml("GH_NOPE"), "/tmp/legion-config")).toThrow(
+          "github_apps.implement.private_key_secret: secrets get GH_NOPE --no-request failed (exit 1): secrets: secret 'GH_NOPE' not found"
+        );
+      });
+    });
+
+    it("refuses an unparsable status naming the setting and key", () => {
+      withFakeSecrets({ status: "not json" }, () => {
+        expect(() => loadConfigFromFile(secretYaml(), "/tmp/legion-config")).toThrow(
+          'github_apps.implement.private_key_secret: secrets get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request printed an unparsable status (expected {"key","tier"})'
+        );
+      });
+    });
+
+    it("refuses a human-tier value that does not decode to a PEM, without printing the material", () => {
+      const junk = Buffer.from("definitely-not-a-key").toString("base64");
+      withFakeSecrets(
+        {
+          status: '{"key":"GH_AGENT_APP_PRIVATE_KEY_B64","tier":"human","grant":true}',
+          value: junk,
+        },
+        () => {
+          let message = "";
+          try {
+            loadConfigFromFile(secretYaml(), "/tmp/legion-config");
+          } catch (error) {
+            message = (error as Error).message;
+          }
+          expect(message).toBe(
+            "github_apps.implement.private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64 did not decode to a PEM private key (expected base64 of a -----BEGIN block)"
+          );
+          expect(message).not.toContain(junk);
+          expect(message).not.toContain("definitely-not-a-key");
+        }
+      );
+    });
+
+    it("refuses when the secrets command is not on PATH, naming the setting and key", () => {
+      const empty = fs.mkdtempSync(path.join(os.tmpdir(), "legion-no-secrets-"));
+      const savedPath = process.env.PATH;
+      process.env.PATH = empty;
+      try {
+        expect(() => loadConfigFromFile(secretYaml(), "/tmp/legion-config")).toThrow(
+          "github_apps.implement.private_key_secret: the secrets command is not on PATH, so GH_AGENT_APP_PRIVATE_KEY_B64 cannot be read"
+        );
+      } finally {
+        process.env.PATH = savedPath;
+        fs.rmSync(empty, { recursive: true, force: true });
+      }
+    });
   });
 });
