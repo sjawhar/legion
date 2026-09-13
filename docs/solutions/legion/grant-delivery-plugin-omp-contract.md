@@ -1,5 +1,5 @@
 ---
-title: "pi-legion-envoy 1.17.1 delivers LEGION_GRANT as a bash env field, and the OMP build a pane runs decides whether the shell ever sees it"
+title: "pi-legion-envoy 1.17.1 delivers LEGION_GRANT as a bash env field that neither fork release in service applied to the shell"
 category: legion
 tags:
   - legion
@@ -21,7 +21,7 @@ related_issues:
   - "LEGION-52"
 ---
 
-# pi-legion-envoy 1.17.1 delivers `LEGION_GRANT` as a bash `env` field, and the OMP build a pane runs decides whether the shell ever sees it
+# pi-legion-envoy 1.17.1 delivers `LEGION_GRANT` as a bash `env` field that neither fork release in service applied to the shell
 
 This records what was observed and what was checked. LEGION-52 owns the durable fix (a contract
 check comparing the installed plugin against the resolved OMP build); nothing here is one.
@@ -66,10 +66,14 @@ byte-identical between `v18.1.18-sami.20260912-104423` and `v18.1.18-sami.202609
 `packages/agent` has no diff either (the 22-file diff between the tags is mcp, registry, collab,
 docs, and changelog). At *both* tags `bashSchemaBase` declares `"env?": type({ "[string]": "string" })`
 and `BashTool.execute` destructures `env: rawEnv` and applies `normalizeBashEnv(rawEnv)`. So the
-statement "203541's bash tool accepts `env`, 104423's does not" is not supported by `bash.ts`; the
-mechanism that dropped the field in the 104423 pane above — a model-facing schema without `env`, a
-tool-call hook result validated against it, a profile setting — was not located and is LEGION-52's to
-find. Record the symptom, not a theory.
+statement "203541's bash tool accepts `env`, 104423's does not" is not supported by `bash.ts`, and it
+was then disproved directly: LEGION-37's implementer, the first worker resumed on OMP 203541 with
+plugin 1.17.1, ran the check and posted it on LEGION-52 at 00:51Z on 2026-09-13 — zero `LEGION_GRANT`
+in the shell's environment, an empty expansion, and `legion gh` failing with `LEGION_GRANT is missing`,
+exactly as on 104423. Moving OMP between these two releases does not fix it. The mechanism that drops
+the field — on the fork side (a model-facing schema without `env`, a `tool_call` hook result validated
+against it, a profile setting) or on the plugin side — was not located and is LEGION-52's to find.
+Record the symptom, not a theory.
 
 ## What the deployment did
 
@@ -78,8 +82,13 @@ find. Record the symptom, not a theory.
 11:00Z on 2026-09-12. At 00:35Z on 2026-09-13 (file mtime) the operator moved it to
 `github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541` alongside plugin 1.17.1, with the yaml comment
 "203541: bash tool accepts `env` (needed by plugin ≥1.17.1 / #974); carries the rpc fix like 104423".
-The daemon's built-in default (`OMP_FORK_PIN`) stayed at 104423, the crash-fix release LEGION-32 was
-filed for; moving it again is LEGION-52's decision.
+The direct check above showed 203541 does not deliver the field either, so at 00:52:55Z the operator
+rolled the plugin back (the `legion` profile's installed copy is now 1.17.0, the last release before
+#974, whose `dist/legion.js` still prepends `export LEGION_GRANT=…` to the command text; the operator's
+own record says 1.16.0 — the on-disk version is what a pane loads) and left the deployment on OMP
+203541. So as of 00:53Z: OMP 203541, plugin 1.17.0, preamble-shape delivery, gotchas §1 applies. The
+daemon's built-in default (`OMP_FORK_PIN`) stayed at 104423, the crash-fix release LEGION-32 was filed
+for; moving it again, and the plugin/OMP contract check, are LEGION-52's.
 
 ## What `probe-image` does and does not check
 
@@ -95,8 +104,9 @@ rate_limit` from its pane.
 ## Recognizing which shape your pane is under
 
 Look at the echoed arguments of your own last bash call. A `command` that begins
-`export LEGION_GRANT='…'` is the preamble shape (≤ 1.16.x; read gotchas §1). An `env` object with
-`LEGION_GRANT` is 1.17.1; if `legion gh` then says `LEGION_GRANT is missing`, the build you are on is
-not applying it — report the build (`readlink /proc/$$/exe`) and the plugin version
+`export LEGION_GRANT='…'` is the preamble shape (≤ 1.17.0; read gotchas §1). An `env` object with
+`LEGION_GRANT` is 1.17.1; if `legion gh` then says `LEGION_GRANT is missing`, the field is not reaching
+the shell on this build either — do not expect a different OMP release to change that (104423 and
+203541 both fail). Report the build (`readlink /proc/$$/exe`) and the plugin version
 (`jq -r .version ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json`)
-to the architect rather than debugging the shell.
+to the architect, cite LEGION-52, and do not debug the shell.
