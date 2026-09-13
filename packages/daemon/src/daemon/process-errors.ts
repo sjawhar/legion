@@ -25,3 +25,24 @@ export class StopFailed extends Error {
     this.name = "StopFailed";
   }
 }
+
+/** Thrown by `ProcessManager.promptExistingWorker` when a live worker's shim acknowledged a
+ * prompt but no turn was observed to start (`agent_start`, or `get_state` reporting a stream)
+ * within `boundMs`. The acknowledgement alone is not delivery: OMP answers it before the turn
+ * begins and can accept a message that starts none. Every prompt site treats this exactly like a
+ * refused prompt — counted, retried on the next drain, retired at the threshold — so it lives in
+ * this shared module for the same reason `TreeClosingError`/`StopFailed` do (both `processes.ts`
+ * and `worker-admission.ts` import it). `observation` names the second signal's answer:
+ * `get_state: isStreaming=false`, `get_state failed: <message>`, or `socket closed`. */
+export class PromptNotStarted extends Error {
+  constructor(
+    readonly token: string,
+    readonly boundMs: number,
+    observation: string
+  ) {
+    super(
+      `worker ${token} acknowledged the prompt but started no turn within ${boundMs}ms (${observation})`
+    );
+    this.name = "PromptNotStarted";
+  }
+}

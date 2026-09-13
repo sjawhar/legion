@@ -86,11 +86,12 @@ export function createLegionTool(deps: {
       "`version` fields of dispatch_request_approval's result — never the slug or file name you " +
       "passed to that tool. " +
       'spawn_worker\'s response "status" means: "spawned" — a fresh pane just opened and is ' +
-      'running now; "resumed" — an existing worker was prompted directly over its live socket, ' +
-      "or (if its boot has not confirmed yet) its task was recorded to deliver once that boot " +
-      'completes; "queued" — the running-worker cap is full, the task was recorded and this ' +
-      'role will start on its own once a slot frees. Never re-spawn a role after "resumed" or ' +
-      '"queued" — wait for the worker-started notification instead.',
+      'running now; "resumed" — an existing worker was prompted directly over its live socket ' +
+      "and its turn started, or (if its boot has not confirmed yet) its task was recorded to " +
+      'deliver once that boot completes; "queued" — the task was recorded and this role will ' +
+      "start on its own: either the running-worker cap is full, or the live worker acknowledged " +
+      "the task without starting a turn and the daemon is retrying it. Never re-spawn a role " +
+      'after "resumed" or "queued" — wait for the worker-started notification instead.',
     defaultInactive: true,
     parameters: legionToolSchema(pi),
     execute: async (_id, parameters, _signal, _onUpdate, context) => {

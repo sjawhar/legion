@@ -20,6 +20,7 @@ import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { fakeWorkerRpcClient } from "./fake-runtime";
 
 const { startDaemon } = daemonIndex;
 
@@ -195,7 +196,11 @@ function daemonTestDependencies(
           closed: closed.promise,
           runState: "idle",
           negotiate: async () => {},
-          prompt: async () => {},
+          prompt: async () => ({
+            turnStarted: Promise.resolve(),
+            hasStarted: true,
+            abandonWait() {},
+          }),
           getState: async () => ({}),
           shutdown: () => {},
           close: () => closed.resolve(),
@@ -621,6 +626,114 @@ describe("startDaemon", () => {
       expect(workerLaunch).toContain(`--resume=${resumeSessionFile}`);
     } finally {
       errorSpy.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("redrives a queued promotion whose prompt was in flight when the daemon restarted, prompting the idle live worker on boot's first drain", async () => {
+    // The LEGION-10 candidate cause: a restart between the shim's acknowledgement and the
+    // daemon's commit. The contract defended here is that the entry is still queued with its
+    // task after the restart and boot delivers it — `reconnectWorkers` seeds the surviving
+    // worker idle from `get_state`, then the first `reconcileWorkerAdmission` prompts it.
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const issue = "WIDGETS-42";
+    const testerToken = roleToken(daemonConfig.project, issue, "tester");
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[issue] = {
+      key: issue,
+      title: "Restarted mid-promotion",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+    state.roles[testerToken] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: `legion-${daemonConfig.project}`,
+        tmuxWindowId: "@7",
+        tmuxPaneId: "%78",
+        socketPath: path.join(stateDir, "workers", "tester.sock"),
+      },
+    };
+    state.workerAdmission.queue.push(testerToken);
+    const client = fakeWorkerRpcClient();
+    // What `reconnectWorkers`' probe does to a real idle worker: `get_state` reports no stream
+    // and seeds the fresh client idle.
+    client.getStateImpl = async () => {
+      client.emitRunState("idle");
+      return { data: { isStreaming: false } };
+    };
+    const commands: string[][] = [];
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          loadState: async () => state,
+          saveState: async () => {},
+          createNatsTransport: async () => new FakeNats(),
+          runner: async (command) => {
+            commands.push(command);
+            if (command[0] === "sh") {
+              return {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          connectWorkerRpc: async () => client,
+          resolveDaemonEnvironment: async () => daemonEnvironment,
+          readPluginManifest: async () => validLegionPluginManifest,
+          statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
+          envoyPublish: async () => {},
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => ({
+              token: "test-token",
+              expiresAt: "2026-08-25T00:00:00.000Z",
+              gitIdentity: {
+                name: "legion-implement[bot]",
+                email: "1+legion-implement[bot]@users.noreply.github.com",
+              },
+            }),
+          },
+          setTimeout: () => 1 as never,
+          clearTimeout: () => {},
+          setInterval: () => 1 as never,
+          clearInterval: () => {},
+          onSignal: () => {},
+          exit: () => {},
+          now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        },
+      });
+
+      expect(client.getStateCalls).toBeGreaterThanOrEqual(1);
+      expect(client.prompts).toEqual(["verify #41"]);
+      expect(state.workerAdmission.queue).toEqual([]);
+      const claim = state.roles[testerToken];
+      if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+      expect(claim.pendingAssignment).toBeUndefined();
+      expect(claim.promptFailures).toBe(0);
+      expect(state.phases[issue]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      // Prompted in place: no pane was opened for it.
+      expect(
+        commands.filter(
+          (command) =>
+            command[0]?.endsWith("/tmux") &&
+            (command[3] === "new-window" || command[3] === "split-window")
+        )
+      ).toEqual([]);
+    } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }

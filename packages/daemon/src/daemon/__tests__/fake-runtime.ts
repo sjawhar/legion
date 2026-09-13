@@ -5,7 +5,7 @@ import {
   type Runtime,
   type SpawnSpec,
 } from "../runtime";
-import type { WorkerRpcClient } from "../worker-rpc";
+import type { PromptReceipt, WorkerRpcClient } from "../worker-rpc";
 
 export type FakeWorkerRpcClient = WorkerRpcClient & {
   prompts: string[];
@@ -13,6 +13,12 @@ export type FakeWorkerRpcClient = WorkerRpcClient & {
   getStateCalls: number;
   getStateImpl?: () => Promise<Record<string, unknown>>;
   idleFireCount: number;
+  /** Whether `prompt()` starts the turn the moment it is acknowledged (the default: a healthy
+   * worker's `agent_start` follows the acknowledgement). A test sets it `false` to model an
+   * acknowledgement no turn follows; `emitRunState("running")` then plays the `agent_start`. */
+  turnStartsOnPrompt: boolean;
+  /** `"running"` models the worker's `agent_start` frame: it also settles the last prompt's
+   * pending receipt. `"idle"` models `agent_end`, firing `onIdle` on a genuine transition. */
   emitRunState(state: "running" | "idle"): void;
   /** Sets `runState` directly, bypassing the idle trigger entirely — models a real client's
    * post-rejection restore (an undo, never a transition; see `WorkerRpcClient.prompt`'s doc
@@ -25,6 +31,13 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
   const closed = Promise.withResolvers<void>();
   let idleCallback: (() => void) | undefined;
   let runState: "unknown" | "running" | "idle" = "unknown";
+  /** The last prompt's not-yet-started receipt, exactly like the real client's one slot. */
+  let pendingTurnStart: { start(): void } | undefined;
+  const observeTurnStart = (): void => {
+    const slot = pendingTurnStart;
+    pendingTurnStart = undefined;
+    slot?.start();
+  };
   const client = {
     closed: closed.promise,
     get runState() {
@@ -35,16 +48,53 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
     getStateCalls: 0,
     getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
     idleFireCount: 0,
+    turnStartsOnPrompt: true,
     async negotiate() {
       client.negotiated = true;
     },
-    async prompt(message: string) {
+    async prompt(message: string): Promise<PromptReceipt> {
+      const previousRunState = runState;
       runState = "running";
       client.prompts.push(message);
+      let hasStarted = false;
+      const started = Promise.withResolvers<void>();
+      const slot = {
+        start() {
+          hasStarted = true;
+          runState = "running";
+          started.resolve();
+        },
+      };
+      pendingTurnStart = slot;
+      if (client.turnStartsOnPrompt) observeTurnStart();
+      return {
+        turnStarted: started.promise,
+        get hasStarted() {
+          return hasStarted;
+        },
+        abandonWait() {
+          if (hasStarted || pendingTurnStart !== slot || runState !== "running") return;
+          runState = previousRunState;
+        },
+      };
     },
     async getState() {
       client.getStateCalls += 1;
-      return client.getStateImpl ? client.getStateImpl() : {};
+      const response = client.getStateImpl ? await client.getStateImpl() : {};
+      // Mirrors the real client: a stream in progress is a turn observed to start. An
+      // `isStreaming: false` answer is left to the test-supplied `getStateImpl` to model (an
+      // explicit `emitRunState("idle")`), exactly as the idle-worker fixtures already do.
+      const data = response.data;
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "isStreaming" in data &&
+        data.isStreaming === true
+      ) {
+        runState = "running";
+        observeTurnStart();
+      }
+      return response;
     },
     shutdown() {
       // Mirrors the real shim: the frame alone never closes the socket — the shim closes it only
@@ -69,6 +119,7 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
     emitRunState(state: "running" | "idle") {
       const wasIdle = runState === "idle";
       runState = state;
+      if (state === "running") observeTurnStart();
       if (state === "idle" && !wasIdle) {
         client.idleFireCount += 1;
         idleCallback?.();

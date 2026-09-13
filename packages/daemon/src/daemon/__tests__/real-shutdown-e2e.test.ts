@@ -306,7 +306,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       closed: closed.promise,
       runState: "idle" as const,
       negotiate: async () => {},
-      prompt: async () => {},
+      prompt: async () => ({ turnStarted: Promise.resolve(), hasStarted: true, abandonWait() {} }),
       getState: async () => ({}),
       shutdown: () => {
         // Resolves gracefully on the next microtask, exactly like the shared fake client used

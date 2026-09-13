@@ -29,7 +29,7 @@ import {
   type TreeState,
   type WorkerRoleClaim,
 } from "./legion-state";
-import { StopFailed, TreeClosingError } from "./process-errors";
+import { PromptNotStarted, StopFailed, TreeClosingError } from "./process-errors";
 import {
   awaitShutdown,
   boundedWait,
@@ -53,7 +53,7 @@ import {
 import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
 import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
-import type { WorkerRpcClient } from "./worker-rpc";
+import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -813,29 +813,27 @@ export class ProcessManager {
     return running;
   }
 
-  /** Prompts an already-connected, already-live worker client with `pending.task` — the shared
-   * implementation behind every "resume an existing worker" path (`WorkerAdmission`'s
-   * `resumeOrQueueExisting` admitted branch, its `"prompt"` queue-promotion decision, and
-   * `/worker/ready`), as opposed to `launchWorker`, which spawns a fresh process. Does not touch the
-   * running-worker admission count itself — the caller owns reserving and releasing that slot
-   * (mirroring `launchWorker`, which is likewise unaware of admission bookkeeping) since only
-   * the caller knows whether this prompt represents a new admission (`resumeOrQueueExisting`'s
-   * below-cap idle-resume, or a queue promotion) or none at all (`/worker/ready` resuming a
-   * worker whose slot was already counted via its locator from the moment `launchWorker` wrote
-   * it, so nothing here needs releasing or re-checking). This is the one place a new active phase
-   * is written (`state.phases[issue]`, which `phase/complete` and `routeActive` read; `phase/complete`
-   * itself only deletes, restores, or marks that record completed), and it is written only for an
-   * architect `assignment` -- a `catchup` prompt is recovery plumbing and leaves the phase exactly
-   * as it was, so a relaunched worker whose phase already finished never becomes the active phase
-   * again. Clears the claim's `pendingAssignment` if it was
-   * still set. Throws (without touching phases/`pendingAssignment`/persisting) only if
-   * `prompt()` itself rejects — the caller decides what "the prompt failed" means for its own
-   * bookkeeping. A `persist` failure *after* `prompt()` already succeeded is a durable-state
-   * persistence issue, not a prompt failure: the worker is already working, mirroring
-   * `launchWorker`'s post-locator-write save handling. Retries the persist once; if that also
-   * fails, logs it and returns normally — never rethrown, since the caller (and, transitively,
-   * the architect) would otherwise see a failure for a worker that is actually already running
-   * the task. */
+  /** Prompts an already-connected, already-live worker client with `pending.task` and commits the
+   * delivery only once the worker's turn is observed to start — the shared implementation behind
+   * every "resume an existing worker" path (`WorkerAdmission`'s `resumeOrQueueExisting` admitted
+   * branch, its `"prompt"` queue-promotion decision, and `/worker/ready`), as opposed to
+   * `launchWorker`, which spawns a fresh process. Delivery means a started turn, never the shim's
+   * `{success:true}` acknowledgement: OMP answers that before the turn begins and can accept a
+   * message that starts none (see `PromptReceipt`), which is how LEGION-10's queued task vanished
+   * with the phase written and the worker idle. After `client.prompt()` resolves, the receipt's
+   * `turnStarted` is raced against `workerRpcTimeoutMs` on the injectable clock
+   * (`awaitTurnStart`); a started turn runs `commitPromptDelivery`; no turn within the bound
+   * throws `PromptNotStarted` having committed nothing — every caller treats it exactly like a
+   * refused prompt (count, retry on the next drain, retire at the threshold) — and leaves a
+   * continuation on the same receipt (`commitLateStart`) so a turn that starts after the bound is
+   * committed as this same delivery and the task is never prompted a second time. A refused
+   * prompt (`client.prompt()` itself rejecting) propagates exactly as before, likewise having
+   * committed nothing. Does not touch the running-worker admission count itself — the caller
+   * owns reserving and releasing that slot (mirroring `launchWorker`, which is likewise unaware
+   * of admission bookkeeping) since only the caller knows whether this prompt represents a new
+   * admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a queue promotion) or none at
+   * all (`/worker/ready` resuming a worker whose slot was already counted via its locator from
+   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking). */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -845,23 +843,100 @@ export class ProcessManager {
     pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
-    await client.prompt(pending.task);
+    const receipt = await client.prompt(pending.task);
+    const outcome = await this.awaitTurnStart(client, receipt);
+    if (!outcome.started) {
+      receipt.turnStarted
+        .then(() => this.commitLateStart(token, issue, role, sessionId, pending))
+        .catch((error) => {
+          console.error(`[legion] late-start commit for ${token} failed:`, error);
+        });
+      throw new PromptNotStarted(token, this.workerRpcTimeoutMs, outcome.observation);
+    }
+    await this.commitPromptDelivery(token, issue, role, sessionId, pending, afterPrompt);
+  }
+
+  /** Waits, bounded by `workerRpcTimeoutMs` on the injectable clock, for the turn `receipt`
+   * describes to start. A start already observed (an `agent_start` that preceded the
+   * acknowledgement) is answered without building a timer. Otherwise the receipt is raced against
+   * the socket closing (`socket closed`: the socket is gone, `onWorkerClientClosed` owns what
+   * happens next — no `get_state` is attempted) and the bound. At the bound the receipt is
+   * abandoned FIRST — a silent restore of the client's pre-prompt `runState`, so the answer that
+   * follows is never an idle *transition* on a worker that was idle before the prompt (a
+   * transition-fired restore would re-enter promotion synchronously mid-failure) — THEN the
+   * spec's second signal is asked for once: a `get_state` answer reporting a stream in progress
+   * is a started turn (the client settles the receipt from it); `isStreaming: false` or a failed
+   * call is not. That `get_state` is also, for `/worker/ready` (whose fresh client sits at
+   * `"unknown"` — `clientFor` never asks `get_state`), the one thing that seeds the client idle so
+   * the queued retry is promotable at all. */
+  private async awaitTurnStart(
+    client: WorkerRpcClient,
+    receipt: PromptReceipt
+  ): Promise<{ started: true } | { started: false; observation: string }> {
+    if (receipt.hasStarted) return { started: true };
+    const { timedOut, cancel } = boundedWait(this.workerRpcTimeoutMs, this.deps.sleep);
+    const outcome = await Promise.race([
+      receipt.turnStarted.then(() => "started" as const),
+      client.closed.then(
+        () => "closed" as const,
+        () => "closed" as const
+      ),
+      timedOut.then(() => "timeout" as const),
+    ]);
+    cancel();
+    if (outcome === "started") return { started: true };
+    if (outcome === "closed") return { started: false, observation: "socket closed" };
+    receipt.abandonWait();
+    try {
+      await client.getState(this.workerRpcTimeoutMs);
+    } catch (error) {
+      return {
+        started: false,
+        observation: `get_state failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (receipt.hasStarted) return { started: true };
+    return { started: false, observation: "get_state: isStreaming=false" };
+  }
+
+  /** The one commit block a delivered prompt runs — shared by the in-bound path and the late
+   * start (`commitLateStart`), so the two can never drift. This is the one place a new active
+   * phase is written (`state.phases[issue]`, which `phase/complete` and `routeActive` read;
+   * `phase/complete` itself only deletes, restores, or marks that record completed), and it is
+   * written only for an architect `assignment` -- a `catchup` prompt is recovery plumbing and
+   * leaves the phase exactly as it was, so a relaunched worker whose phase already finished never
+   * becomes the active phase again. Clears the claim's `pendingAssignment`, resets
+   * `promptFailures` (a started turn confirms this worker is responsive again — any accumulated
+   * count from a prior transient failure must never carry into a future one), runs the caller's
+   * `afterPrompt`, removes the token's queue entry (a no-op when it was never queued), and
+   * persists. A `persist` failure here is a durable-state persistence issue, not a prompt
+   * failure: the worker is already working, mirroring `launchWorker`'s post-locator-write save
+   * handling. Retries the persist once; if that also fails, logs it and returns normally — never
+   * rethrown, since the caller (and, transitively, the architect) would otherwise see a failure
+   * for a worker that is actually already running the task. */
+  private async commitPromptDelivery(
+    token: string,
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    pending: PendingAssignment,
+    afterPrompt?: () => void
+  ): Promise<void> {
     if (pending.kind === "assignment") {
       this.deps.state.phases[issue] = { phase: role, sessionId };
     }
     const claim = this.deps.state.roles[token];
     if (claim && "issue" in claim) {
       delete claim.pendingAssignment;
-      // A successful prompt confirms this worker is responsive again — any accumulated
-      // rejection count from a prior transient failure must never carry into a future one.
       claim.promptFailures = 0;
     }
     afterPrompt?.();
+    await this.workerAdmission.removeFromQueue(token);
     try {
       await this.persist();
     } catch (persistError) {
       console.error(
-        `[legion] failed to persist ${token}'s phase/pendingAssignment after a successful prompt (worker is already working regardless):`,
+        `[legion] failed to persist ${token}'s phase/pendingAssignment after its turn started (worker is already working regardless):`,
         persistError
       );
       try {
@@ -873,6 +948,49 @@ export class ProcessManager {
         );
       }
     }
+  }
+
+  /** The continuation `promptExistingWorker` leaves on a receipt whose bound expired: the turn
+   * started after all, so this is the same delivery, committed now — never a second prompt.
+   * Inside the token's critical section the claim is re-read and the commit runs only while it
+   * still describes the prompt this receipt belongs to: the same session, a locator still
+   * recorded, the same task still pending (compared by value — `kind` and `task` — since identity
+   * is not reliable across the three prompt sites and a re-sent identical task is the same
+   * task), and a tree that is not gone. Anything else (the task replaced or already delivered by
+   * a retry, the worker retired, the tree closed) commits nothing, silently: the newer task stays
+   * queued and is delivered once the worker is idle again. A commit publishes `worker-started`
+   * (the architect was told `worker-queued` when the retry was queued) and, after the lock,
+   * re-checks the queue — the head moved, so the tokens behind it get their turn. */
+  private async commitLateStart(
+    token: string,
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    pending: PendingAssignment
+  ): Promise<void> {
+    const committed = await this.workerAdmission.mutateClaim(token, async () => {
+      const claim = this.deps.state.roles[token];
+      const treeKey = this.rootForIssue(issue);
+      if (
+        !claim ||
+        !("issue" in claim) ||
+        claim.sessionId !== sessionId ||
+        claim.locator === undefined ||
+        claim.pendingAssignment?.kind !== pending.kind ||
+        claim.pendingAssignment.task !== pending.task ||
+        treeKey === undefined ||
+        this.isTreeGone(treeKey, issue)
+      ) {
+        return false;
+      }
+      console.info(
+        `[legion] ${token} started its turn after the prompt wait expired; delivering the queued task now`
+      );
+      await this.commitPromptDelivery(token, issue, role, sessionId, pending);
+      this.publishArchitect(treeKey, { type: "worker-started", issue, role });
+      return true;
+    });
+    if (committed) this.workerAdmission.promoteWorkerQueue();
   }
 
   /** Re-evaluates the running-worker queue against the current `config.workerCap` — called at
@@ -971,19 +1089,49 @@ export class ProcessManager {
         return;
       }
       const client = await this.clientFor(token, claim.locator);
-      if (pending) {
-        await this.promptExistingWorker(client, token, issue, role, sessionId, pending, () => {
-          claim.readyConfirmedAt = this.deps.now();
-          // A durably confirmed boot is the one moment this counter resets -- never a mere
-          // `/worker/started` registration, which a worker that keeps registering but never
-          // reaching this point could otherwise reset every generation, masking a persistent
-          // post-registration failure from ever escalating to `worker-died` (see
-          // `retireUnconfirmedBoot`'s own increment).
-          delete claim.launchFailures;
-        });
-      } else {
+      const confirmBoot = (): void => {
         claim.readyConfirmedAt = this.deps.now();
+        // A durably confirmed boot is the one moment this counter resets -- never a mere
+        // `/worker/started` registration, which a worker that keeps registering but never
+        // reaching this point could otherwise reset every generation, masking a persistent
+        // post-registration failure from ever escalating to `worker-died` (see
+        // `retireUnconfirmedBoot`'s own increment).
         delete claim.launchFailures;
+      };
+      if (pending) {
+        try {
+          await this.promptExistingWorker(
+            client,
+            token,
+            issue,
+            role,
+            sessionId,
+            pending,
+            confirmBoot
+          );
+        } catch (error) {
+          if (!(error instanceof PromptNotStarted) || root === undefined) throw error;
+          // The boot DID succeed -- registered, ready, socket answering -- so it is confirmed
+          // exactly as a delivered prompt would have confirmed it. Left unconfirmed, the claim
+          // would be stranded: `promoteQueuedWorker` stops on `readyConfirmedAt === undefined`
+          // and every later `spawn_worker` would queue behind a boot that never confirms again.
+          // `queueUnstartedPrompt` persists, so the confirmation lands in the same save. The
+          // task stays on the claim and the role joins the promotion queue, so the same retry,
+          // count, and retire accounting the queued idle-resume path has applies here; the retry
+          // is the next drain (an idle/dead event, the 60 s sweep, or the late start), never an
+          // immediate re-prompt of a worker that may merely be slow to start its turn. The
+          // confirming `get_state` inside `awaitTurnStart` has already seeded this fresh client
+          // from `"unknown"` to `"idle"`, so that drain finds it promotable.
+          confirmBoot();
+          this.cancelBootWatchdog(token, generation);
+          console.error(
+            `[legion] ${token}: ${error.message}; boot confirmed, task queued for promotion`
+          );
+          await this.workerAdmission.queueUnstartedPrompt(token, root, issue, role, claim, pending);
+          return;
+        }
+      } else {
+        confirmBoot();
         await this.persist();
       }
       this.cancelBootWatchdog(token, generation);
