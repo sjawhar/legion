@@ -1,0 +1,154 @@
+{
+  "pr": 1022,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1022",
+  "headSha": "4a5208172c5c",
+  "bookmark": "legion/LEGION-43",
+  "ciRun": 34751868899,
+  "filesChanged": [
+    "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
+    "docs/solutions/integration-patterns/secret-file-pointer-precedence.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/environment.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/runtime-tmux.test.ts",
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/environment.ts",
+    "packages/daemon/src/daemon/github-app-env.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/runtime-tmux.ts",
+    "packages/daemon/src/daemon/tmux.ts",
+    "packages/daemon/src/index/hotspots.ts",
+    "scripts/smoke/checkpoints.sh",
+    "scripts/smoke/checkpoints.test.sh"
+  ],
+  "inheritedOmpVariables": [
+    "OMP_PROFILE",
+    "OMP_SESSION_ID"
+  ],
+  "stripped": [
+    "OMP_SESSION_ID"
+  ],
+  "rename": {
+    "PANE_SECRET_ENV_KEYS": "NON_INHERITABLE_ENV_KEYS",
+    "stripDispatchEnv": "stripNonInheritableEnv"
+  },
+  "acceptance3": "The pinned OMP build (github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423, tag v18.1.18-sami.20260912-104423 = dec271b099) does not export its own session id to the commands its bash tool runs: zero OMP_SESSION_ID references in the tag's source and in the 213 MB binary's strings; buildSpawnEnv (packages/utils/src/procmgr.ts) is filterChildShellEnv(Bun.env) plus SHELL/GIT_EDITOR/GPG_TTY/OMPCODE/CLAUDECODE/CI. Consequence: in a pane launched by the fixed daemon $OMP_SESSION_ID is unset, never another session's id. The deployment's build 18.1.18-sami.20260912-203541 (this pane) shares byte-identical buildSpawnEnv; its printenv OMP_SESSION_ID=01a083dd-4579-7000-8202-9898ac713e12 vs envoy_whoami 01a09a3f-3f07-7000-8901-b7855eec6491 is that code running.",
+  "trickyParts": [
+    "No LSP server was available for the rename; it was applied structurally with ast_edit (identifier nodes) across the four TS files, then confirmed by grep (only docs/plans keeps the old name, as design history) and tsc.",
+    "The checkpoint harness's clean planted process must -u OMP_SESSION_ID: from a worker pane the harness inherits the id, and without the scrub the clean case fails on this branch.",
+    "The fresh workspace had no node_modules; one pre-existing environment.test.ts case (--help smoke) needs `bun install --frozen-lockfile` first.",
+    "A hand-opened keep-alive WINDOW inside the legion-<slug> session inherits the session-level @legion_owner and is reaped by boot's reconcileOrphans(0); use a separate SESSION on the same server as the keep-alive.",
+    "Killing the only pane closes the session and tmux (exit-empty on) exits the server, degrading the scenario to acceptance 2; the keep-alive session prevents that.",
+    "checkpoint 13 could never pass on a surviving server because it read the server's /proc environ (frozen); fixed in 0bbeee2af916.",
+    "The redacted /legion/v1/state hides panePid; read state.json for pane pids."
+  ],
+  "deviations": [
+    "Two extra docs/solutions notes (config-env-keys-that-panes-also-carry.md, secret-file-pointer-precedence.md) got name-only edits because they named the renamed symbols; docs/plans/2026-09-11-dispatch-token-file-delivery.md deliberately keeps stripDispatchEnv as design history.",
+    "The Legion deployment's panes run OMP 18.1.18-sami.20260912-203541, not the repo pin 18.1.18-sami.20260912-104423; the acceptance-3 evidence was gathered on the pinned tag and confirmed identical on the deployed tag.",
+    "Negative-control daemon is main at the branch's fork point 52c5e03e (state v27), not main HEAD 9a6708fe (state v28): the branch daemon cannot load a v28 state file, and rebasing without a conflict is disallowed. The scrub is absent either way.",
+    "The reviewer's Minors (fast-follow) landed in this push (39e85806c355) rather than being deferred."
+  ],
+  "verification": {
+    "bunTest": "cd packages/daemon && bun test on the cutover head (main's daemon, untouched): 1247 pass, 10 skip, 0 fail (60 files)",
+    "biome": "bunx biome check src/: Checked 152 files, No fixes applied",
+    "tsc": "bunx tsc --noEmit: exit 0",
+    "checkpointsHarness": "bash scripts/smoke/checkpoints.test.sh: 34 PASS (main's 25 + our 5 checkpoint-13 cases + 4 shared), including 'checkpoint 13 fails naming the pid and variable 20/20 times when the planted secret heads a 70 KB environment'",
+    "shellcheck": "shellcheck -S warning checkpoints.sh checkpoints.test.sh: clean",
+    "diffFromMain": "jj diff --from main@origin --summary: exactly the two smoke scripts, the gotchas note, and .legion/"
+  },
+  "testerNotes": [
+    "Acceptance 6 negative control: a pre-LEGION-74 main daemon, e.g. af42abbae23d (LEGION-74's parent on main), whose server is forked with OMP_SESSION_ID and whose panes carry it; then the branch daemon (= main's daemon) against the surviving server: main's scrub log line is '[legion] removed N variable(s) from the private tmux server environment that panes may not inherit: …' (a warn, index.ts:708), not the old 'survived an earlier daemon' line; show-environment -g -> 0; checkpoints.sh 13 -> NOTE (server frozen environ) + CHECKPOINT 13 OK.",
+    "Main's checkpoint 13 fails a secret in ANY process incl. the server's frozen environ; ours NOTEs OMP_SESSION_ID there and FAILs secrets — the pre-LEGION-74 rig's daemon shell has DISPATCH_TOKEN scrubbed by the wrapper, so only OMP_SESSION_ID lands in the server's frozen environ.",
+    "The branch is state v28 / contract 2 like main; live legion profile works for both daemons."
+  ],
+  "openQuestions": [],
+  "round": 4,
+  "reviewRound1": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5190677584 (REQUEST_CHANGES; one defect, two threads)",
+  "threads": {
+    "r3999622479": "resolved (round 3); the code it referred to is now main's LEGION-74 environment.ts",
+    "r3999622481": "resolved (round 3); gotchas §10 rewritten again on main's LEGION-74 wording",
+    "r4000347721": "environment.ts:127 — cutover: main's environment.ts taken wholesale (241caf9fe5e9 carries no daemon change)",
+    "r4000347725": "runtime-tmux.ts:184 — cutover: main's runtime-tmux.ts / tmux.ts / index.ts / tests taken wholesale; scrubSurvivingServer dropped"
+  },
+  "fixingCommits": {
+    "241caf9fe5e9": "smoke: checkpoint 13 covers OMP_SESSION_ID, judges the surviving server by its tmux tables, and reads /proc without a pipe race (LEGION-43) — replaces 4156e5f5445c, 43bfbdbbdf31, 7cfb6b92c6f4 and the checkpoint half of 562bb5ccb9d8 from the old chain",
+    "4a5208172c5c": "docs: worker-pane gotchas §10 credits LEGION-74 for the daemon fix and LEGION-43 for the smoke-rig proof — replaces ec82d1202449 from the old chain",
+    "dropped": "025d0200b4b6 (scrub), 1f7e7cb29935 (strip list rename), the Minors and rename-catch-up commits — superseded by LEGION-74 on main"
+  },
+  "tmuxExperiment": "tmux 3.7c, scratch server forked with OMP_SESSION_ID=stale: set-environment -g -u KEY exits 0 whether or not KEY is set, removes it from show-environment -g, and a new-window pane's environ lacks it; -r also keeps it out of new panes but leaves a -KEY marker show-environment -g still lists (grep -c would read 1), so -u. No server: stderr 'error connecting to <socket> (No such file or directory)', exit 1 = PANE_GONE_STDERR. A fork-inherited variable is in the global env only; show-environment -t <session> never lists it, so no session-level unset. The server's own /proc/<pid>/environ is frozen: still 1 after -u while new panes read 0.",
+  "acceptance6Live": {
+    "rig": "smoke rig, none mode, own ports NATS 14243 / listener 19043 / daemon 19430, container legion-smoke-nats-legion43i, SMOKE_DIR /tmp/legion43-smoke-c, root LEGSMOKE-144; pane trigger = the tester's replay helper (LEGSMOKE-144 issue.created from production JetStream seq 791822); OMP_PROFILE=legion43-impl (scratch copy of legion52-neg's plugins: pi-legion-envoy 1.22.2 / contract 1) because this branch is contract 1 while the live legion profile is contract 2",
+    "negativeControl": "daemon from main at the branch's fork point 52c5e03e7cb3 (state v27; current main 9a6708fe is state v28, which this branch's strict loader cannot load, and a rebase is not allowed without a conflict; 52c5e03e lacks the scrub exactly like 9a6708fe). Server pid 1185683 forked 13:14:26; show-environment -g grep -c OMP_SESSION_ID = 1; controller pane %1 pid 1187114 environ = 1; checkpoints.sh 13 -> FAILED: pid 1187114 environ carries OMP_SESSION_ID",
+    "restart": "kill -TERM <daemon pid> only (server 1185683 and pane 1187114 survived, -g still 1); a keep-alive SESSION legion43-keepalive on the same server stood in for production's other live panes; branch daemon started via /tmp/legion43-impl/start-branch-daemon.sh against the same state dir and legion.yaml",
+    "branchDaemonFirstLogLine": "[legion] private tmux server legion-sjawhar24 survived an earlier daemon; removed every never-inherited variable from its global environment",
+    "afterRestart": "same server pid 1185683; show-environment -g grep -c OMP_SESSION_ID = 0 (0 for every never-inherited key); pre-fix pane %1 still 1 (frozen, launched before the restart); killed %1 and replayed LEGSMOKE-141 issue.created -> controller delivery_failed exception -> ensureController -> new controller %4 pid 1258808 (13:16:13) environ 0; the live controller then triaged LEGSMOKE-141 -> root architect %5 pid 1266133 environ 0 and worker %6 pid 1393781 environ 0; every process in those subtrees 0; checkpoints.sh 13 -> NOTE (server frozen record) + 'CHECKPOINT 13 OK: 3 panes on legion-sjawhar24 carry no bearer, boot secret, or inherited OMP_SESSION_ID, and its global environment has none'",
+    "evidenceFiles": "/tmp/legion43-impl/{daemon.log,daemon-branch.log,cp13.out,trace.log,state-after.json,main-up.log,start-branch-daemon.sh,rig/}; /tmp/legion43-smoke-c logs and state kept; scratch profile and main clone removed",
+    "checkpointRuleAtHead": "The live run's server 1185683 carried only OMP_SESSION_ID in its frozen environ (no secret: the rig daemon's shell had DISPATCH_TOKEN scrubbed before up.sh and the secrets travel as _FILE pointers), so at c14edad1c3b0 the same run prints the same NOTE + CHECKPOINT 13 OK; a secret there would now FAIL naming the kill-server remedy."
+  },
+  "architectCorrection": "c14edad1c3b0: checkpoint 13 keeps a bearer or boot secret (DISPATCH_TOKEN, LEGION_BOOT_TOKEN, LEGION_CONTROLLER_SECRET) found in /proc/<server pid>/environ a FAILURE naming the remedy (stop the daemon, tmux -L legion-<slug> kill-server once, start the daemon) — readable for the server's lifetime and the boot scrub cannot remove it (LEGION-6 guarantee); only OMP_SESSION_ID there is a NOTE. Header comment states both rules. Harness gains the planted-secret server case; the pane-planted cases name the clean process as the server stand-in.",
+  "reviewRound2": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191189098 (COMMENT, clean; one Low finding fixed this round by architect decision)",
+  "round3": {
+    "finding": "checkpoint 13 read /proc/<pid>/environ and cmdline with `tr '\\0' '\\n' <file | grep -m1` under set -o pipefail; grep exiting on its match before tr finished writing a large environment killed tr with SIGPIPE, the pipeline reported 141, and `if entry=\"$(…)\"` read the hit as a miss. Five sites (LEGION-6's pane environ+cmdline loop, this PR's server cmdline loop, server secret loop, and OMP_SESSION_ID NOTE probe).",
+    "fix": "proc_entry() { grep -z -m1 -- \"^${name}=\" /proc/<pid>/<file> | tr -d '\\0'; } — grep reads the file and is the only early-exiting process; tr is downstream draining a closed pipe, so no writer is ever killed. Applied at all five sites. Also: the server-secret failure message drops the `expected only ${name}_FILE` clause (server must carry neither; reviewer fast-follow item 1) and the show-environment -g regex is built from the names array.",
+    "experiment": {
+      "probe": "/tmp/legion43-impl/environ-read-probe.sh <kb> 50 — real `sleep` with DISPATCH_TOKEN heading a padded environment; 50 iterations each of the old construct and the new",
+      "bareConstruct": "12 KB: old 25/50, new 50/50 · 70 KB: old 1/50, new 50/50 · 120 KB: old 2/50, new 50/50 (new: 50/50 exact `DISPATCH_TOKEN=leaked` value at every size). Reviewer's own probe (/tmp/legion43-pipefail-probe.sh) reproduced 26/50 at 70 KB, 19/50 at 120 KB.",
+      "onTheCheckpoint": "/tmp/legion43-impl/old-vs-new-cp13.sh, 50 runs of checkpoint 13 against a fake tmux whose pane is the 70033-byte process: OLD checkpoints.sh (bac09da97a1b) FAILED 38/50, printed CHECKPOINT 13 OK 12/50 (secret missed); NEW 646a1f54235d FAILED 50/50, OK 0/50.",
+      "raceNotThreshold": "The miss is a scheduling race, not a size threshold: 25/50 even at 12 KB on one run, 50/50 on another. Hence the harness runs its large case 20 times."
+    },
+    "harness": "checkpoints.test.sh: fourth planted process `env -i DISPATCH_TOKEN=… LARGE_PAD=$(head -c 70000 /dev/zero | tr '\\0' x) sleep 300`; checkpoint 13 run 20 times against it must fail naming the pid and DISPATCH_TOKEN every time (PASS line reports the environ byte count, 70051). Server-secret case asserts the remedy and no `_FILE`. 27 PASS lines; shellcheck clean."
+  },
+  "threadsResolveOutput": "resolved https://github.com/sjawhar/legion/pull/1022#discussion_r3999622479\nresolved https://github.com/sjawhar/legion/pull/1022#discussion_r3999622481",
+  "fastFollowRemaining": "Reviewer round-2 Minors not taken this round (wording/duplication only): environment.ts 'Shared by' enumeration → delete, keep the catch-all; 'carried' → 'carries'; AGENTS.md private-server paragraph 'on the first key' → 'on any key' and 'before any probe' → 'before any pane probe'; docs/solutions/testing/driving-a-real-omp-worker-against-a-stand-in-daemon.md:96 still says the pane's $OMP_SESSION_ID is the daemon's inherited id; gotchas §10 mechanism paragraph → two sentences + pointer to daemon AGENTS.md; index.ts call-site comment trims to ordering + failure rationale; tmux.ts 'tmux 3.7c verified' → behaviour, PANE_GONE_STDERR doc clause for no-pane-target commands; checkpoints.test.sh run_checkpoint_13 helper table, single unset after the trap; index.test.ts toThrow('cannot remove OMP_SESSION_ID') instead of the full message; unsetGlobalEnvironment surfaces the runner's timedOut marker. Items 1 (server message _FILE clause) and the -g-regex-from-array clause of 8 landed in 646a1f54235d.",
+  "onBranchShas": {
+    "scrub": "025d0200b4b6 (change id rotpyuop; was 3af673309cbf pre-rebase-1, 0eb79db084eb pre-rebase-2 — the SHA the reviewer's Accepted: replies name)",
+    "checkpointServerRule": "4156e5f5445c (was 0bbeee2af916 / a786548b5b81)",
+    "checkpointSecretCorrection": "43bfbdbbdf31 (was c14edad1c3b0 / 540ada384368)",
+    "checkpointGrepZ": "7cfb6b92c6f4 (was 646a1f54235d before rebase 2)",
+    "minors": "4a1260583f1c (was 39e85806c355 / 44dd82f20a62)",
+    "renameCatchUp": "0f0c6bfd2c0b (was 563fb3551dd4)"
+  },
+  "reviewRound3": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191608245 (REQUEST_CHANGES: cutover onto main after LEGION-74; the round-3 change itself was judged correct)",
+  "cutover": {
+    "reason": "LEGION-74 (PR #1007, commit 2553ca37c517) landed on main while this PR was in review and solves the daemon half by a stronger mechanism: PANE_ENV_ALLOW_LIST + paneEnvironment() (OMP_SESSION_ID excluded by construction; main's environment.test.ts asserts it) and TmuxRuntime.scrubServerEnvironment(paneEnv) at the launch hold, scrubbing both tmux tables (global + session) and emptying update-environment. Our deny-list + scrubSurvivingServer was a global-only eleven-name subset; kept alongside it broke tsc (deleted symbols), main's index.test.ts (exact set-environment sequence), and duplicated the scrub. Architect decision: main wins for the whole daemon side; this PR keeps only the smoke-rig coverage and the gotchas note.",
+    "mainSha": "178909e05b1e2db34e96c2141a78545f5e0a0ba5",
+    "mainShaShort": "178909e05b1e",
+    "method": "fresh two-commit stack on main (jj new main@origin), not a rebase of the 18-commit chain: main's checkpoints.sh / checkpoints.test.sh / gotchas note re-read and our additions re-applied by hand onto them; the ledger restored from the old tip e000c391a28e",
+    "oldTip": "e000c391a28e (7e315e7f3967 + the round-3 review handoff commit)",
+    "dropped": [
+      "packages/daemon/src/daemon/environment.ts (NON_INHERITABLE_ENV_KEYS / stripNonInheritableEnv — main has PANE_ENV_ALLOW_LIST / paneEnvironment)",
+      "packages/daemon/src/daemon/tmux.ts (unsetGlobalEnvironment — main has unsetEnvironment(server, table, name) with nameToken escaping)",
+      "packages/daemon/src/daemon/runtime-tmux.ts (scrubSurvivingServer — main has scrubServerEnvironment)",
+      "packages/daemon/src/daemon/index.ts (scrub call after the state load — main calls scrubServerEnvironment at the launch hold)",
+      "packages/daemon/src/daemon/config.ts, github-app-env.ts (rename callers — main's run under process.env / import isSecretLikeName)",
+      "packages/daemon/src/index/hotspots.ts (deleted on main; stays deleted)",
+      "packages/daemon/src/daemon/__tests__/environment.test.ts, runtime-tmux.test.ts, index.test.ts (main's versions, untouched)",
+      "packages/daemon/src/daemon/AGENTS.md (main's; its pane-environment and private-server paragraphs describe the allow-list and two-table scrub)",
+      "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md, docs/solutions/integration-patterns/secret-file-pointer-precedence.md, docs/solutions/daemon/human-tier-secretsd-keys-from-the-daemon.md (main's, already rewritten to the allow-list wording)"
+    ],
+    "kept": [
+      "scripts/smoke/checkpoints.sh — checkpoint 13 on main's version: OMP_SESSION_ID joins main's names (secrets, App keys, canaries) in pane environ/argv and the -g table; server/pane split (NOTE for OMP_SESSION_ID in the server's frozen /proc environ, FAIL + kill-server remedy for anything else); proc_entry (grep -a -z -m1 on the file, set -e-safe, exit 2 fails as unreadable) for every /proc read incl. main's two; header comment cites TmuxRuntime.scrubServerEnvironment at the launch hold in startDaemonLocked and the two-table scrub — verified against main's index.ts:695-711 and runtime-tmux.ts:451",
+      "scripts/smoke/checkpoints.test.sh — main's checkpoint_thirteen_against helper extended with server pid ($3, defaults to the clean process) and global-env line ($4); FAKE_TMUX_SERVER_PID / FAKE_TMUX_GLOBAL_ENV in the fake tmux; -u OMP_SESSION_ID in scrubbed; planted OMP_SESSION_ID and 70 KB processes; five cases beside main's four (OMP_SESSION_ID pane, 70 KB x20 with a >65536-byte assertion, server NOTE+OK, server secret FAIL+remedy, global table FAIL)",
+      "docs/solutions/legion/worker-pane-shell-gotchas.md — main's version plus: title tag '(fixed in LEGION-74, proved in LEGION-43)'; related_issues += LEGION-74, sjawhar/legion#1007, LEGION-43, sjawhar/legion#1022; §10 credits LEGION-74 (allow-list + two-table scrub) for the daemon and LEGION-43 for the smoke proof, states $OMP_SESSION_ID in a fixed pane is unset (acceptance-3 evidence), and that a value means the pane predates the fixed daemon's boot"
+    ],
+    "diffFromMainSummary": [
+      "M docs/solutions/legion/worker-pane-shell-gotchas.md",
+      "M scripts/smoke/checkpoints.sh",
+      "M scripts/smoke/checkpoints.test.sh",
+      "A .legion/implement.json",
+      "A .legion/review.json",
+      "A .legion/test.json"
+    ],
+    "noteTextVerifiedAgainstMain": "checkpoint 13's header names TmuxRuntime.scrubServerEnvironment, called from startDaemonLocked (index.ts) once the OMP probes pass and before enableLaunches(), removing from both the global and the session table every name paneEnv does not carry — read from main's runtime-tmux.ts doc comment (lines 432-450) and index.ts (695-711). The NOTE says 'new panes inherit the scrubbed tmux environment tables checked below, not this record'; the secret FAIL says 'the daemon's boot scrub edits tmux's tables, never a process's initial environment'. Neither names scrubSurvivingServer.",
+    "reviewerFastFollowTaken": "(1) grep exit 2 -> fail 'cannot read /proc/<pid>/<file> (grep exited 2)'; (2) grep -a; (3) harness asserts the 70 KB fixture exceeds 65536 bytes instead of printing its size; (4) proc_entry comment is present-tense invariant only, SIGPIPE history and numbers dropped; (5) one loop+case idiom on both server and pane sides; (6) main's checkpoint_thirteen_against helper extended rather than a second helper. Remaining round-2 wording Minors on daemon files are moot (files are main's)."
+  },
+  "rebaseHistory": {
+    "rebase1": "d8695dbc5bf0 -> 563fb3551dd4 onto main 9a3bb41b694f (conflict: gotchas title)",
+    "rebase2": "6e5c0f4ca1a7 -> 90de58e82720 onto main 1c7499430c5d (conflict: AGENTS.md boot-ordering bullet)",
+    "cutover": "e000c391a28e (old chain tip) -> fresh stack on main 178909e05b1e; no rebase, hand-applied"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T18:02:02.999Z"
+}

@@ -1,0 +1,72 @@
+{
+  "verdict": "changes_requested",
+  "round": 3,
+  "pr": 1022,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1022",
+  "reviewedHead": "7e315e7f3967fe174a165dacc2dc132ae7a62a7b",
+  "codeHead": "90de58e82720",
+  "rebaseBase": "1c7499430c5d",
+  "reviewEvent": "REQUEST_CHANGES",
+  "reviewId": 5191608245,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191608245",
+  "reviewerSession": "01a09a7b-b4cf-7000-997b-6dc303c2ba5a",
+  "specVersion": 11,
+  "verifiedOnGitHub": {
+    "ci": "Tests run 34768195483 at 7e315e7f3967: lint, pr-title, typecheck, test all SUCCESS",
+    "threads": "round-1 threads PRRT_kwDORFy7ds6h4wIT / PRRT_kwDORFy7ds6h4wIV both isResolved: true (newest comment my Accepted:); two new threads opened this round, unresolved",
+    "e2e": "tester round-3 comment https://github.com/sjawhar/legion/pull/1022#issuecomment-5654461864 at head 544eb8865d67 (parent of reviewed head): main 1c749943 daemon forked server 2854831 with the id, branch checkpoint 13 FAILED 10/10 naming pane 2855626; daemon-only kill; branch daemon scrub first, same server, -g 0, post-restart controller 2877568 environ 0, NOTE + OK; /tmp/legion43-smoke-f/daemon-restart.log line 1 agrees. Reviewer ran checkpoints.test.sh on this head: 32 PASS, 70 KB case 20/20.",
+    "mergeable": "CONFLICTING / DIRTY against main@origin d35e8b5934c6 (17 main commits since the rebase base, incl. LEGION-74 2553ca37c517)"
+  },
+  "round3DeltaVerdict": "correct — proc_entry (grep -z upstream, sole early-exiter, no SIGPIPE possible; -z anchors ^ per NUL record so the old tr form's newline false-match is also gone), all five /proc reads routed, -g pattern from names array (IFS scoped, set -u safe), 70 KB harness case is a real >64 KiB process with the secret first, 20x, cannot pass for the wrong reason; AGENTS.md boot bullet coherent; scrubSurvivingServer still the first tmux command on this head",
+  "blockingFindings": [
+    {
+      "id": "main-legion-74-collision",
+      "summary": "PR is CONFLICTING against main. LEGION-74 (2553ca37c517, merged after this branch's base) deleted stripNonInheritableEnv/NON_INHERITABLE_ENV_KEYS and hotspots.ts, replaced them with PANE_ENV_ALLOW_LIST + paneEnvironment (OMP_SESSION_ID excluded by construction; main's environment.test.ts already plants and asserts it), and added TmuxRuntime.scrubServerEnvironment (global + session tables, update-environment emptied, post-scrub verification, called at the launch hold; failure -> stop()). main's config.ts runs runSecretsGet/private_key_command under process.env deliberately. This branch's deny-list + scrubSurvivingServer is a global-only unverified 11-name subset. Keeping both after the rebase: tsc fails (github-app-env.ts/config.ts import a deleted symbol), hotspots.ts modify/delete, main's index.test.ts toEqual on the exact set-environment sequence fails on 11 extra calls, two scrubs at two boot points with a false log line, AGENTS.md session-table sentence contradicts main. main's gotchas §10 already credits LEGION-74; main's three docs/solutions daemon notes already rewritten to allow-list wording.",
+      "threads": [
+        {
+          "path": "packages/daemon/src/daemon/environment.ts",
+          "line": 127,
+          "url": "https://github.com/sjawhar/legion/pull/1022#discussion_r4000347721",
+          "threadId": "PRRT_kwDORFy7ds6h6oEq"
+        },
+        {
+          "path": "packages/daemon/src/daemon/runtime-tmux.ts",
+          "line": 184,
+          "url": "https://github.com/sjawhar/legion/pull/1022#discussion_r4000347725",
+          "threadId": "PRRT_kwDORFy7ds6h6oEt"
+        }
+      ],
+      "requiredResolution": "Conflict-forced rebase as a cutover: take main wholesale for packages/daemon/** (environment.ts, runtime-tmux.ts, tmux.ts, index.ts, config.ts, github-app-env.ts, hotspots.ts stays deleted, AGENTS.md, environment.test.ts, index.test.ts, runtime-tmux.test.ts) and the three docs/solutions daemon notes. Keep: (1) checkpoints.sh — OMP_SESSION_ID in pane checks and -g pattern merged into main's names/pattern (which now also carry the GH App keys + SMOKE_CANARY_ENV); server/pane split so frozen server OMP_SESSION_ID is a NOTE and a secret FAILS with kill-server remedy (main iterates the server pid with the same list — naive union breaks the NOTE contract); proc_entry routing main's two remaining tr|grep -m1 reads; header cites scrubServerEnvironment. (2) checkpoints.test.sh — FAKE_TMUX_SERVER_PID/FAKE_TMUX_GLOBAL_ENV in the fake tmux (main lacks both), planted OMP_SESSION_ID process, the four OMP_SESSION_ID/server cases, 70 KB x20 case, -u OMP_SESSION_ID in main's scrubbed array. (3) gotchas §10 + title — only what main's §10 lacks: $OMP_SESSION_ID unset in a pane launched after a fixed daemon's boot (OMP never exports it, acceptance 3), a value proves the pane predates the boot; credit LEGION-74 for the daemon fix, LEGION-43 for the smoke coverage."
+    }
+  ],
+  "forArchitect": "Spec v12: Design rows for environment.ts and tmux.ts/runtime-tmux.ts/index.ts and acceptance 6's unit check now describe code LEGION-74 delivered and tested on main; record them as satisfied by main; this issue's deliverable becomes the smoke-level proof (acceptance 2 and 6 rig checks, unique to this PR) plus gotchas text. Tester re-runs the acceptance-6 rig cycle on the rebased head against main's scrubServerEnvironment. Fingerprint changes entirely -> round 4 is a full round (thermo again, one review). Dispatch status follows the REQUEST_CHANGES back to in_progress, which is the truthful state.",
+  "thermo": {
+    "head": "7e315e7f3967fe174a165dacc2dc132ae7a62a7b",
+    "deepReview": "FAIL on the branch as a whole (High H1: collision with main's LEGION-74, hazards enumerated file by file); the round-3 delta itself PASS with Minors — Low: proc_entry call sites collapse grep exit 2 (pid vanished between [[ -r ]] and read) into 'absent'; Minors: grep -a for locale-invalid bytes in a leaked value, assert the 70 KB fixture > 65536 bytes. Confirmed: SIGPIPE impossible, -z anchoring, trailing NUL strip, all five reads routed, harness cannot pass for the wrong reason, EXIT trap covers the fourth sleep, boot ordering on this head, nothing in this branch's mechanism stronger than main's for OMP_SESSION_ID.",
+    "codeQuality": "PASS with Minors — Lows: proc_entry doc comment sentence 3 and the two harness comments retell the SIGPIPE history three times with a misattributed number ('review round 2 reproduced 1/50' — round 2 measured 30/50; 1/50 was the implementer's), the 70 KB premise printed not asserted, server-side loop+if vs pane-side loop+case idiom (unifying deletes secret_names); Minor: 20 hard-coded twice. Confirmed: proc_entry right abstraction size, 20x loop is the right shape (0.6^20 pass-by-luck), checkpoint 13 size proportionate, AGENTS.md boot bullet readable and accurate in order.",
+    "prBodyThermoLine": "updated by the reviewer via `legion gh -- pr edit`"
+  },
+  "fastFollow": "LEGION-43 checkpoint-13 cleanup (may ride the rebase): proc_entry exit-2 -> fail 'cannot read'; grep -a; assert fixture > 65536; drop history + numbers from proc_entry doc comment and both harness comments, keep the present-tense invariant; unify server-side idiom to loop+case (deletes secret_names); run_checkpoint_13 helper for the seven blocks; plus the round-2 wording items already in the PR body's Fast-follow line.",
+  "verifiedCorrect": [
+    "proc_entry: grep -z upstream is the only early-exiter and the writer; tr drains to EOF; no SIGPIPE; -z anchors ^ per NUL record; trailing NUL stripped; -- harmless",
+    "grep -n 'grep -m1' checkpoints.sh -> proc_entry doc comment (history sentence) and the -g line only",
+    "harness 70 KB fixture real (70051 bytes), DISPATCH_TOKEN first, 20/20 observed by reviewer and both thermo agents",
+    "index.ts on this head: scrubSurvivingServer at 349 before NATS 394 / ProcessManager 397 / API 526 / adoptOwnerlessChildTrees 705",
+    "PR body round-2 corrections done (CI runs at 544eb886, Threads section clean with on-branch SHAs, Fast-follow named)"
+  ],
+  "handoffCommit": "not committed or pushed: the review App holds no contents permission; .legion/review.json sits in the shared workspace working copy; the implementer's rebase commit supersedes it",
+  "nextForReviewer": "round 4 after the cutover rebase: full round (fingerprint changes) — thermo again, one review; answer the two new threads with Accepted:/Still open:; verify main's checkpoint-13 merge keeps the NOTE contract and proc_entry; COMMENT if clean while .legion/ remains, APPROVE only the deletion head by SHA",
+  "round2": {
+    "reviewedHead": "d785d3ae8c6e0f9b9389c3a21a5d4db61e699ec3",
+    "reviewEvent": "COMMENT",
+    "reviewUrl": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5191189098"
+  },
+  "round1": {
+    "reviewedHead": "6ce3c5a38ccffd3717963a34022b79d00785212f",
+    "reviewEvent": "REQUEST_CHANGES",
+    "reviewUrl": "https://github.com/sjawhar/legion/pull/1022#pullrequestreview-5190677584"
+  },
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T17:44:55.450Z"
+}
