@@ -65,11 +65,30 @@ test("project page groups issues by status in board order; filters narrow issues
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ width: 1280, height: 800 });
+  }
 
   try {
     await page.goto("/projects/CORE");
     await expect(page).toHaveTitle("CORE · Core · Dispatch");
     await expect(page.getByRole("heading", { name: "Core" })).toBeVisible();
+    const blockedOnYou = page.getByRole("link", { name: "Blocked on you · 1" });
+    await expect(blockedOnYou).toHaveAttribute("href", "/");
+    if (testInfo.project.name === "chromium") {
+      const issueList = page.getByRole("region", { name: "Project issues" });
+      const issueListBox = await issueList.boundingBox();
+      if (issueListBox === null) {
+        throw new Error("project issue list is not visible");
+      }
+      expect(issueListBox.y).toBeLessThanOrEqual(120);
+      const blockerBox = await blockedOnYou.boundingBox();
+      const mainBox = await page.getByTestId("main-content").boundingBox();
+      if (blockerBox === null || mainBox === null) {
+        throw new Error("project header is not visible");
+      }
+      expect(blockerBox.x + blockerBox.width).toBeLessThanOrEqual(mainBox.x + mainBox.width);
+    }
     await expect(page.getByRole("tab", { name: "Issues" })).toHaveAttribute(
       "aria-selected",
       "true"

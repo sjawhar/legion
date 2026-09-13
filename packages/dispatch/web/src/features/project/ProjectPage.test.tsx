@@ -4,13 +4,38 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
+import type { InboxRow } from "../../api/types";
 import { ProjectPage } from "./ProjectPage";
+
+function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
+  return {
+    anchor: null,
+    answer: null,
+    author: { id: "session-1", kind: "session" },
+    created_at: "2026-09-11T00:00:00Z",
+    edited_at: null,
+    id: "ask-1",
+    issue: { key: "CORE-1", title: "Fix the thing" },
+    issue_key: "CORE-1",
+    kind: "question",
+    multiple: false,
+    opened_event_id: 1,
+    options: [],
+    priority: null,
+    question: "Which approach?",
+    state: "open",
+    urgency: "med",
+    ...overrides,
+  };
+}
 
 function renderPage(
   path: string,
   projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
-  login = "alice"
+  login = "alice",
+  inboxRows: InboxRow[] = []
 ) {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login });
 
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);
@@ -25,7 +50,7 @@ function renderPage(
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { getMyState, listIssues, listProjectArtifacts, listProjects, view, whoAmI };
+  return { getInbox, getMyState, listIssues, listProjectArtifacts, listProjects, view, whoAmI };
 }
 
 test("renders header, tabs, and the Issues panel; /documents selects Documents", async () => {
@@ -43,6 +68,7 @@ test("renders header, tabs, and the Issues panel; /documents selects Documents",
     );
     expect(screen.getByRole("tabpanel", { name: "Documents" })).toBeTruthy();
   } finally {
+    page.getInbox.mockRestore();
     page.view.unmount();
     page.getMyState.mockRestore();
     page.listIssues.mockRestore();
@@ -58,6 +84,7 @@ test("renders header, tabs, and the Issues panel; /documents selects Documents",
       "true"
     );
   } finally {
+    documents.getInbox.mockRestore();
     documents.view.unmount();
     documents.getMyState.mockRestore();
     documents.listIssues.mockRestore();
@@ -67,12 +94,48 @@ test("renders header, tabs, and the Issues panel; /documents selects Documents",
   }
 });
 
+test("shows a compact blocker link only when asks await the viewer", async () => {
+  const waiting = renderPage("/projects/CORE", undefined, "alice", [inboxRow()]);
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.getByRole("link", { name: "Blocked on you · 1" }).getAttribute("href")).toBe("/");
+    expect(screen.queryByText(/oldest/)).toBeNull();
+  } finally {
+    waiting.getInbox.mockRestore();
+    waiting.getMyState.mockRestore();
+    waiting.listIssues.mockRestore();
+    waiting.listProjectArtifacts.mockRestore();
+    waiting.listProjects.mockRestore();
+    waiting.view.unmount();
+    waiting.whoAmI.mockRestore();
+  }
+
+  const clear = renderPage("/projects/CORE", undefined, "alice", [
+    inboxRow({
+      last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T01:00:00Z" },
+    }),
+  ]);
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.queryByRole("link", { name: /Blocked on you/ })).toBeNull();
+  } finally {
+    clear.getInbox.mockRestore();
+    clear.getMyState.mockRestore();
+    clear.listIssues.mockRestore();
+    clear.listProjectArtifacts.mockRestore();
+    clear.listProjects.mockRestore();
+    clear.view.unmount();
+    clear.whoAmI.mockRestore();
+  }
+});
+
 test("unknown project shows the not-found view", async () => {
   const page = renderPage("/projects/MISSING", []);
 
   try {
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeTruthy();
   } finally {
+    page.getInbox.mockRestore();
     page.view.unmount();
     page.getMyState.mockRestore();
     page.listIssues.mockRestore();
@@ -93,6 +156,7 @@ test("keeps the issue view preference separate for each signed-in user", async (
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
+    alice.getInbox.mockRestore();
     alice.view.unmount();
     alice.getMyState.mockRestore();
     alice.listIssues.mockRestore();
@@ -106,6 +170,7 @@ test("keeps the issue view preference separate for each signed-in user", async (
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
+    bob.getInbox.mockRestore();
     bob.view.unmount();
     bob.getMyState.mockRestore();
     bob.listIssues.mockRestore();
