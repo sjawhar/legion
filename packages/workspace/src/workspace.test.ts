@@ -747,11 +747,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
-    expect(
-      calls.filter(
-        (cmd) => cmd[0] === "jj" && cmd[1] === "config" && cmd[2] !== "get" && cmd[2] !== "set"
-      )
-    ).toEqual([
+    // Every `jj config` command, pinned: the LEGION-84 read and write (the fake runner answers the
+    // read with empty stdout, so the write always follows), then the identity probes and unsets —
+    // any other identity write in provisioning fails this list.
+    expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
       identityProbe(repoCloneDir, "user.email"),
@@ -801,11 +802,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     } finally {
       errorSpy.mockRestore();
     }
-    expect(
-      calls.filter(
-        (cmd) => cmd[0] === "jj" && cmd[1] === "config" && cmd[2] !== "get" && cmd[2] !== "set"
-      )
-    ).toEqual([
+    // Every `jj config` command, pinned: the LEGION-84 read and write (the fake runner answers the
+    // read with empty stdout, so the write always follows), then the identity probes and unset —
+    // any other identity write in provisioning fails this list.
+    expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
       identityProbe(repoCloneDir, "user.name"),
