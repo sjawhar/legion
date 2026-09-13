@@ -196,13 +196,12 @@ export function IssueHeader({
     }
   };
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
-  // The title block's flex-basis is its full text width (flex-auto), so the state controls and
-  // the details line share its row only when they fit beside the whole title; otherwise they
-  // wrap beneath it and the title is never squeezed. Below md the state row is full-width, and
-  // from xl the title always has its own row; while editing, the input takes the whole row too.
-  const titleBlockBasis = editingTitle
-    ? "basis-full 2xl:basis-auto"
-    : "xl:basis-full 2xl:basis-auto";
+  // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
+  // title always takes its own row (basis-full) and the state controls and details line share
+  // the row beneath it; from 2xl the slot is content-sized (basis-auto) so they join the title's
+  // row when they fit. A basis that changed between view and edit mode would move every other
+  // control on the blur a mousedown causes, and Chromium would deliver the mouseup — and so the
+  // click — to a different element, swallowing the first click after a title edit.
 
   return (
     <header className={`mb-3 min-w-0 rounded-xl border p-3 ${card}`} data-testid="issue-header">
@@ -224,9 +223,7 @@ export function IssueHeader({
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <div
-          className={`flex min-w-0 flex-auto flex-col gap-2 sm:flex-row sm:items-start ${titleBlockBasis}`}
-        >
+        <div className="flex min-w-0 grow basis-full flex-col gap-2 sm:flex-row sm:items-start 2xl:basis-auto">
           <p
             className={`self-start shrink-0 rounded-md px-2.5 py-1.5 font-mono text-sm font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
           >

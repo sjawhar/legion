@@ -498,22 +498,31 @@ test("IssuePage keeps a pull request's title and state when only its check-runs 
     }
     throw new Error("check-runs unavailable");
   });
-  const view = renderIssuePage();
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = renderIssuePage("/issues/CORE-1", undefined, undefined, queryClient);
 
   try {
-    await screen.findByText("Keep the title when checks vanish");
+    // Only once the check-runs query has failed does the assertion mean anything: while it is
+    // still pending the pre-fix code showed the title too.
     await waitFor(() =>
-      expect(githubRest).toHaveBeenCalledWith("repos/owner/repository/commits/abcdef/check-runs")
+      expect(
+        queryClient.getQueryState([
+          "github-link-checks",
+          "https://github.com/owner/repository/pull/7",
+          "abcdef",
+        ])?.status
+      ).toBe("error")
     );
     // The failed check-runs read drops only the checks pill; the loaded title and state stay.
-    await waitFor(() => expect(screen.queryByText(/^checks:/)).toBeNull());
-    expect(screen.getByText("Keep the title when checks vanish")).toBeDefined();
-    expect(screen.getByText("open")).toBeDefined();
-    expect(
-      screen
-        .getByRole("link", { name: /#7 Keep the title when checks vanish/ })
-        .getAttribute("title")
-    ).toBe("owner/repository#7: Keep the title when checks vanish");
+    const link = screen.getByRole("link", { name: /#7 Keep the title when checks vanish/ });
+    expect(within(link).getByText("Keep the title when checks vanish")).toBeDefined();
+    expect(within(link).getByText("open")).toBeDefined();
+    expect(within(link).queryByText(/^checks:/)).toBeNull();
+    expect(link.getAttribute("title")).toBe(
+      "owner/repository#7: Keep the title when checks vanish"
+    );
   } finally {
     view.unmount();
     githubRest.mockRestore();

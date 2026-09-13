@@ -531,3 +531,62 @@ test("issue header gives the title the row's free space beside a short details l
     await context.close();
   }
 });
+
+test("issue header delivers the click that ends a title edit to the control under the pointer", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the viewports are set explicitly in the desktop browser project"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Short title" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // A real click is mousedown then mouseup: the mousedown blurs the title editor, and the header
+  // must not re-lay out on that blur, or the mouseup lands on a different element and the
+  // browser delivers no click to the control the user pressed.
+  const pressWhileEditingTitle = async (control: Locator) => {
+    await page.getByRole("heading", { level: 1 }).click();
+    await expect(page.getByLabel("Issue title")).toBeFocused();
+    const box = await control.boundingBox();
+    if (box === null) {
+      throw new Error("the control must be visible while the title is being edited");
+    }
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+  };
+  try {
+    for (const width of [1024, 1279]) {
+      await page.setViewportSize({ height: 800, width });
+      await page.goto(`/issues/${issue.key}`);
+      await expect(page.getByRole("heading", { level: 1, name: "Short title" })).toBeVisible();
+
+      const pin = page.getByRole("button", { name: "Pin issue" });
+      await pressWhileEditingTitle(pin);
+      await expect(page.getByRole("button", { name: "Unpin issue" })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      );
+      await pressWhileEditingTitle(page.getByRole("button", { name: "Unpin issue" }));
+      await expect(pin).toHaveAttribute("aria-pressed", "false");
+
+      await pressWhileEditingTitle(page.getByRole("button", { name: "Close issue" }));
+      await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ status: "done" });
+      if (width === 1024) {
+        const shot = testInfo.outputPath("issue-header-title-edit-click-1024.png");
+        await page.screenshot({ path: shot });
+        await testInfo.attach("close clicked straight out of a title edit (1024px)", {
+          contentType: "image/png",
+          path: shot,
+        });
+      }
+      await patchIssue(issue.key, { status: "triage" });
+    }
+  } finally {
+    await context.close();
+  }
+});
