@@ -137,6 +137,46 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
   ];
 }
 
+const JJ_BINARIES = [
+  { name: "local Sami JJ", command: ["jj"] },
+  { name: "stock JJ 0.44", command: STOCK_JJ },
+] as const;
+
+/** A colocated scratch remote, a colocated clone of it at the daemon's repo path with `main` set
+ * and `origin` pointing at the remote, and a `provisionIssueWorkspace` dependency set that runs
+ * `jj` as `command` and records every command line it is asked to run. */
+async function realJjRig(command: readonly string[], stateDir: string) {
+  const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+  const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+  const remoteDir = path.join(stateDir, "remote");
+  const calls: string[][] = [];
+  const jj = async (args: string[], options?: RunCall["opts"]) => {
+    const result = await runCommand([...command, ...args], options);
+    expect(result.exitCode, `${command.join(" ")} ${args.join(" ")}\n${result.stderr}`).toBe(0);
+    return result;
+  };
+  const commitOf = async (revision: string, cwd: string = repoCloneDir) =>
+    (await jj(["log", "-r", revision, "--no-graph", "-T", "commit_id"], { cwd })).stdout.trim();
+  const deps = {
+    extensionPackage,
+    repo: "acme/widgets" as const,
+    stateDir,
+    provisioningToken: async () => "installation-token",
+    credentialHelper,
+    commandTimeoutMs,
+    run: (cmd: string[], opts?: RunCall["opts"]) => {
+      calls.push(cmd);
+      return runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts);
+    },
+  };
+  await mkdir(path.dirname(repoCloneDir), { recursive: true });
+  await jj(["git", "init", "--colocate", remoteDir]);
+  await jj(["git", "init", "--colocate", repoCloneDir]);
+  await jj(["bookmark", "set", "main"], { cwd: repoCloneDir });
+  await jj(["git", "remote", "add", "origin", remoteDir], { cwd: repoCloneDir });
+  return { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps };
+}
+
 describe("provisionIssueWorkspace", () => {
   test("clones a missing repository into a temporary sibling, renames it into place, then fetches and provisions its issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
@@ -480,44 +520,25 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     ]);
   });
 
-  test("repairs a stale reused workspace after its remote issue branch is deleted", async () => {
-    for (const { name, command } of [
-      { name: "local Sami JJ", command: ["jj"] },
-      { name: "stock JJ 0.44", command: STOCK_JJ },
-    ]) {
+  test("leaves an existing bookmark that points at another workspace's commit untouched after its remote branch is deleted", async () => {
+    for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
-      const issue = "WIDGETS-42";
-      const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-      const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
-      const remoteDir = path.join(stateDir, "remote");
+      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
       const siblingDir = path.join(stateDir, "sibling");
       const bookmark = "legion/WIDGETS-42";
       process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
-      const runSuccessfully = async (args: string[], options?: RunCall["opts"]) => {
-        const result = await runCommand([...command, ...args], options);
-        expect(result.exitCode, `${name}: ${args.join(" ")}\n${result.stderr}`).toBe(0);
-        return result;
-      };
-      const deps = {
-        extensionPackage,
-        repo: "acme/widgets" as const,
-        stateDir,
-        provisioningToken: async () => "installation-token",
-        credentialHelper,
-        commandTimeoutMs,
-        run: (cmd: string[], opts?: RunCall["opts"]) =>
-          runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts),
-      };
-
-      await mkdir(path.dirname(repoCloneDir), { recursive: true });
-      await runSuccessfully(["git", "init", "--colocate", remoteDir]);
-      await runSuccessfully(["git", "init", "--colocate", repoCloneDir]);
-      await runSuccessfully(["bookmark", "set", "main"], { cwd: repoCloneDir });
-      await runSuccessfully(["git", "remote", "add", "origin", remoteDir], { cwd: repoCloneDir });
-
-      await provisionIssueWorkspace(issue, deps);
-      await runSuccessfully([
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      // The worker's first jj command snapshots the `.omp/config.yml` provisioning wrote, moving the
+      // bookmark with `@` on the main operation line. Without it, the second provision's
+      // `update-stale` snapshots on a divergent operation (jj loads the repo at the workspace's last
+      // recorded operation), moves the bookmark there too, and the reconciliation conflicts it with
+      // the `sibling-advance` move below — a jj behaviour, not a bookmark this code touched.
+      await jj(["status"], { cwd: workspaceDir });
+      await jj([
         "workspace",
         "add",
         siblingDir,
@@ -528,36 +549,135 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         "-R",
         repoCloneDir,
       ]);
-      await runSuccessfully(["new", "-m", "sibling advancement"], { cwd: siblingDir });
-      await runSuccessfully(["bookmark", "set", "sibling-advance"], { cwd: siblingDir });
-      await runSuccessfully(
+      await jj(["new", "-m", "sibling advancement"], { cwd: siblingDir });
+      await jj(["bookmark", "set", "sibling-advance"], { cwd: siblingDir });
+      await jj(
         ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
         { cwd: repoCloneDir }
       );
-      await runSuccessfully(["bookmark", "delete", bookmark], { cwd: repoCloneDir });
-      await runSuccessfully(
-        ["git", "push", "--remote", "origin", "--deleted", "--allow-empty-description"],
-        { cwd: repoCloneDir }
-      );
+      await jj(["bookmark", "delete", bookmark], { cwd: repoCloneDir });
+      await jj(["git", "push", "--remote", "origin", "--deleted", "--allow-empty-description"], {
+        cwd: repoCloneDir,
+      });
       expect(
-        (await runCommand([...command, "bookmark", "list", bookmark], { cwd: remoteDir })).stdout
+        (await runCommand([...command, "bookmark", "list", bookmark], { cwd: remoteDir })).stdout,
+        name
       ).not.toContain(bookmark);
-      await runSuccessfully(
+      await jj(
         ["bookmark", "set", "--revision", "sibling-advance", "--allow-backwards", bookmark],
-        { cwd: repoCloneDir }
+        {
+          cwd: repoCloneDir,
+        }
       );
+      const siblingCommit = await commitOf("sibling-advance");
 
-      await expect(provisionIssueWorkspace(issue, deps)).resolves.toEqual({
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
         repoCloneDir,
         workspaceDir,
         bookmark,
       });
       expect(
-        (await runCommand([...command, "bookmark", "list", bookmark], { cwd: workspaceDir })).stdout
-      ).toContain(bookmark);
+        calls.filter((cmd) => cmd.includes("bookmark")),
+        name
+      ).toEqual([]);
+      // Before this change the second provision moved the bookmark onto this workspace's `@`.
+      expect(await commitOf(bookmark), name).toBe(siblingCommit);
     }
     // Two real jj binaries (one resolved through mise) and ~30 subprocesses: well past bun's 5 s
     // default on a loaded host.
+  }, 60_000);
+
+  test("leaves the bookmark missing after its merged pull request's branch is deleted", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      // Snapshot the `.omp/config.yml` provisioning wrote, so the commit pushed below is the
+      // bookmark's final target: jj deletes a local bookmark on fetch only while it still points
+      // where the deleted remote branch did.
+      await jj(["status"], { cwd: workspaceDir });
+      await jj(
+        ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+      // GitHub deletes the branch when the pull request merges.
+      const deleted = await runCommand([
+        SYSTEM_GIT,
+        `--git-dir=${remoteDir}/.git`,
+        "branch",
+        "-D",
+        bookmark,
+      ]);
+      expect(deleted.exitCode, `${name}: ${deleted.stderr}`).toBe(0);
+
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(
+        calls.filter((cmd) => cmd.includes("bookmark")),
+        name
+      ).toEqual([]);
+      expect((await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout, name).toBe(
+        ""
+      );
+
+      // LEGION-28 was re-prompted twice after its merge: the next resume finds the bookmark still
+      // gone and, through its own `update-stale`, a usable working copy — the fetch above abandoned
+      // the merged branch's commits and left the workspace stale until then.
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toMatchObject({
+        workspaceDir,
+      });
+      expect((await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout, name).toBe(
+        ""
+      );
+      await jj(["status"], { cwd: workspaceDir });
+    }
+  }, 60_000);
+
+  test("leaves an existing bookmark where it was when the working copy has moved on", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      // The worker's shape: the pushed head carries the bookmark, `@` is new work on top of it.
+      await jj(["new", "-m", "later work"], { cwd: workspaceDir });
+      await jj(
+        ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+      const bookmarkCommit = await commitOf(bookmark);
+      const workingCopy = await commitOf("@", workspaceDir);
+      expect(workingCopy, name).not.toBe(bookmarkCommit);
+
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(
+        calls.filter((cmd) => cmd.includes("bookmark")),
+        name
+      ).toEqual([]);
+      expect(await commitOf(bookmark), name).toBe(bookmarkCommit);
+      expect(await commitOf("@", workspaceDir), name).toBe(workingCopy);
+    }
   }, 60_000);
 
   test("re-adds a forgotten issue workspace at its bookmark when the bookmark still exists", async () => {
