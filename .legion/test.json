@@ -3,14 +3,14 @@
   "passed": 7,
   "failed": 0,
   "failures": [],
-  "headSha": "246f5e7c1600ec41ec0250458e030fcf5df89067",
+  "headSha": "883cd3dfcff0564f4c469683e3e8816b20712f64",
   "codeCommit": "a3f40d856997 daemon: a failed list-panes proves nothing about the pane -- never alive, never gone",
   "testsCommit": "5f795f98f796 daemon tests: a fake gone pane must say so on stderr; waits on real events",
-  "mergeBase": "abaf08175c9b (chore: release pi-envoy v1.17.3) -- #973, #980, #983 included",
-  "previousHeadSha": "5a3e715c567563106fca9db15bfd3075a4bec4ec",
+  "mergeBase": "195674ab0592 (chore: release pi-envoy v1.18.1) -- #956, #994, #995, #996 included; earlier: #973, #980, #983",
+  "previousHeadSha": "246f5e7c1600ec41ec0250458e030fcf5df89067",
   "pr": "https://github.com/sjawhar/legion/pull/981",
   "reviewRound": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188762941 (CHANGES_REQUESTED at ccf037d5: B3, B4, rebase, four non-blocking)",
-  "ci": "pr-checks-result at 246f5e7c: lint/pr-title/test/typecheck all SUCCESS across runs 34736977820, 34737357703, 34737426879 (`legion gh -- pr view 981 --json statusCheckRollup`). GitHub mergeStateStatus at verification time: DIRTY -- main has moved past the merge base (#956, #994, #995, #996 and release commits; overlap with this branch: packages/daemon/src/daemon/{AGENTS.md,index.ts,processes.ts,__tests__/index.test.ts,__tests__/processes.test.ts}); a merger/reviewer decision, not a test finding.",
+  "ci": "pr-checks-result at 883cd3df: lint/pr-title/test/typecheck all SUCCESS across runs 34739339255 and 34739406529; GitHub mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required), read via `legion gh -- pr view 981 --json mergeable,mergeStateStatus,statusCheckRollup`.",
   "blocking": {
     "B3": {
       "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125105",
@@ -164,14 +164,65 @@
     "caveats": "(1) The rig ran the branch's daemon 'when the branch sat on main 4d516a1f' and the artifact says the later rebase onto abaf0817 changed no src/daemon file; jj's evolog shows the branch was rebased more than once between 03:29Z and the 04:01Z code-commit split, so that equivalence is the implementer's word -- the independent proof for the pushed head is this round's unit/contract suites (1032/0) and my real-tmux driver at 246f5e7c. (2) The artifact's state excerpts are hand-trimmed JSON (the S1 excerpts omit `readyConfirmedAt`/status), fine for the identity fields they cite. (3) `failed to connect architect shim socket on ready ... negotiate_protocol timed out` after each resurrection is noted as pre-existing best-effort behaviour under load ~200; not identity-related. (4) The two rig adaptations (NATS container name / machine id parameterization, Dispatch event relay) were made outside the PR in a throwaway main checkout and are named for the architect -- appropriate scoping."
   },
   "observations": [
-    "GitHub reports the PR DIRTY against the moved main (c71dbe4c): #956/#994/#995/#996 touched processes.ts, index.ts, both test files, and AGENTS.md after the abaf0817 merge base. CI is green at 246f5e7c; a rebase is the merger/reviewer's call under Sami's conflict-only rule.",
+    "Delta at 883cd3df: see delta_883cd3df. The 246f5e7c verdict and evidence below it are carried forward unchanged for everything the rebase did not touch (src byte-identical across the rebase).",
     "Test-quality gap (non-blocking): the r3998125119 fix -- a non-ENOENT/ESRCH /proc read error propagates from probe/stop instead of reading as gone -- is verified here by code and a throwaway run, but no committed test pins it; exact test proposed under nonBlocking[1].",
     "worker-boot-watchdog.test.ts 're-arms, never retires, a boot whose runtime probe could not complete ...' counts `liveness probe did not complete` log lines (2) beside its discriminating event-sequence assertions; the wording count is redundant with `probe` x2 and could be dropped without loss.",
     "A resync tick in which one tree's probe throws rejects `runResync` as a whole (`Promise.all` over the probe effects): the other trees' probes already in flight still complete, but that tick's resync payload is not published to the controller and `reportRootAnomalies` for that tick is lost until the next interval. Acceptable for a transient tmux failure (the daemon logs `resync failed:` and reschedules); noted for the reviewer.",
     "Throwaway drivers (/tmp/legion27-test/r4/*.ts, a /tmp copy of 5a3e715c's runtime-tmux.ts for the B3 repro) not committed; throwaway servers legion-smoke54884 and legion-smoke71941 killed (`ls` -> no server running); deployment server legion-sjawharlegion untouched; `.omp/config.yml` left as provisioned."
   ],
   "documentationFeedback": "AGENTS.md (tmux.ts row, trust invariant, graceful-stop bullet with the B3/B4 clauses, watchdog bullet) and docs/solutions/daemon/tmux-list-panes-target-is-its-window.md read true against the code at this head.",
+  "delta_883cd3df": {
+    "scope": "Narrow re-verification after the rebase onto main 195674ab. The PASS at 246f5e7c stands for everything the rebase did not touch; the six items below are what it did touch.",
+    "verdict": "pass",
+    "items": [
+      {
+        "item": 1,
+        "check": "no change under packages/daemon/src outside __tests__ and AGENTS.md",
+        "method": "Compared the branch's delta against its base before the rebase (`jj diff --git -r abaf0817..2219c53f <file>`) with its delta against the new base after (`jj diff --git -r 195674ab..883cd3df <file>`), hunk headers/index lines stripped, per src file.",
+        "result": "Identical file sets (proc-stat.ts added; index.ts, legion-state.ts, processes.ts, runtime-tmux.ts, runtime.ts, tmux.ts, worker-boot-watchdog.ts, AGENTS.md modified). The diff-of-diffs is byte-identical for all 8 src files -- context lines included, so the rebase neither changed a branch line nor landed a branch hunk on different surrounding code. Zero source conflicts confirmed.",
+        "status": "confirmed"
+      },
+      {
+        "item": 2,
+        "check": "AGENTS.md conflict resolution",
+        "method": "grep for conflict markers; sorted line-set diff of head vs main's AGENTS.md; sentence-level md5 of the bullets main changed since the old base; `aborted: true` sentence read against packages/daemon/src/state/fetch.ts.",
+        "result": "0 conflict markers. Lines in head not in main = exactly this branch's 7 identity lines (runtime-tmux.ts row, tmux.ts row with lookupPane's three-way verdict, trust invariant, graceful-stop bullet incl. the B3 listing-failed and B4 pane-id-less clauses, phase-worker bullet, watchdog bullet, PANE_GONE_STDERR pointer moved to tmux.ts); lines in main not in head = exactly their 7 predecessors. Main's #995 DaemonConfig bullet (`... comes back with timedOut: {limitMs, elapsedMs} (exit 143) ...; one it killed because the caller's signal aborted comes back with aborted: true instead ... At most one of the two is present, the first kill to land deciding which.`), the Workspace-clone bullet, and the deployment-instructions.ts row are byte-identical to main (md5 3d4189f0 / 8f109d13 / 0e50f59d). The `aborted: true` sentence reads true against fetch.ts (`aborted?: true` set on a signal abort, `timedOut` on the budget kill, doc: at most one present). The graceful-stop bullet reads true against runtime-tmux.ts stop/probe at this head (src unchanged since 246f5e7c, see item 1).",
+        "status": "confirmed"
+      },
+      {
+        "item": 3,
+        "check": "f20c3072: #956's real-deployment-instructions e2e builds TmuxRuntime without the deleted `persist` dep",
+        "method": "Read the one-line diff; read main's runtime-tmux.ts for every `persist` use; read the test's assertions; ran it under LEGION_E2E=1.",
+        "result": "The commit deletes only `persist: async () => {},` from the TmuxRuntimeDeps literal. On main, `TmuxRuntimeDeps.persist` existed solely for the pane-id backfill (`runtime-tmux.ts:262` in the probe), which this branch removes; the e2e test supplied a no-op and asserted nothing through it -- its assertions are the controller's argv (`--mode rpc`, the two `--append-system-prompt` fragments in order, the deployment-instructions fragment last) and the controller locator shape. No asserted behaviour was dropped. `LEGION_E2E=1 bun test src/daemon/__tests__/real-deployment-instructions-e2e.test.ts` -> 1 pass / 0 fail (real tmux + real worker-shim + argv-recorder OMP).",
+        "status": "confirmed"
+      },
+      {
+        "item": 4,
+        "check": "80c9cfb1: the isProcessGoneError contract rows are discriminating",
+        "method": "Read the two it.each rows; ran them on the real tree; ran them against a MUTANT copy of runtime-tmux.ts (isProcessGoneError widened to `return true`) in /tmp with the workspace untouched.",
+        "result": "Rows: `probe and stop propagate a %s from the /proc stat read instead of reading it as a verdict, and stop issues no kill` over EACCES/EIO/EMFILE (asserts `rejects.toBe(fault)` -- the very error object -- for probe AND stop, tmux commands exactly two `verifyArgv('%1')` listings and no kill-pane, pane pid unchanged, and the same locator probes alive again once the fault clears) and `probe reads a %s from the /proc stat read as the recorded process being gone, with both identities` over ENOENT/ESRCH (not-recorded-process with `pid 12345.*recorded pid 12345 start <ticks>`). Real tree: 5 pass / 0 fail. Mutant (catch widened): the three EACCES/EIO/EMFILE rows FAIL with `Expected promise that rejects / Received promise that resolved`; the two ENOENT/ESRCH rows still pass -- the row fails exactly when the catch is widened and only then. Mutant directory removed; `jj status` shows the workspace untouched (only the provisioned .omp/config.yml).",
+        "status": "confirmed"
+      },
+      {
+        "item": 5,
+        "check": "#956's other new fixtures pass unchanged under the identity contract",
+        "method": "Listed #956's (0c0bdd8e) test additions; diff-of-diffs of every branch-touched test file across the rebase; read the #956 tests' fixtures and assertions.",
+        "result": "#956 added `appends the deployment instructions file as the last --append-system-prompt for root, worker, and controller windows when configured` (processes.test.ts) and `refuses to boot on an unreadable instructions path ...` + `materializes the instructions file under state_dir at boot ...` (index.test.ts), plus config/deployment-instructions/cli tests and the e2e. The branch's delta to processes.test.ts and index.test.ts is byte-identical across the rebase (so the #956 tests arrived verbatim from main and were not edited); runtime.contract.test.ts differs only by 80c9cfb1's added rows. The processes.test.ts one asserts only launch command strings (its fake `list-panes` answers exit 0 / empty stdout, which lookupPane reads as `absent`, so the worker opens a fresh window -- the test does not assert split vs new-window, and passes either way); the two index tests go through `daemonTestDependencies`, which supplies `readProcessStat: fakeProcStat` (index.test.ts:205). None of them carry a kill-pane-absence, locator-clearing, or --resume assertion, so none could have been weakened; all pass in the package run.",
+        "status": "confirmed"
+      },
+      {
+        "item": 6,
+        "check": "package checks and GitHub state",
+        "result": "cd packages/daemon && bunx biome check --error-on-warnings src/ -> Checked 154 files, no fixes, exit 0; bunx tsc --noEmit -> exit 0; LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test -> 1051 pass / 0 fail / 0 skip, Ran 1051 tests across 61 files [63.02s] (matches the implementer's 1051/1051, 61 files). No LEGION-15/35 flake fired. GitHub at 883cd3df: mergeable=MERGEABLE, mergeStateStatus=BLOCKED (awaiting review), lint/pr-title/test/typecheck SUCCESS on runs 34739339255 and 34739406529.",
+        "status": "confirmed"
+      }
+    ],
+    "observations": [
+      "The two #956 index tests reach identity only through the shared `daemonTestDependencies` default (`readProcessStat: fakeProcStat`); fine as long as that default stays, noted for anyone later building daemon deps by hand in that file.",
+      "No throwaway server was opened this round (nothing tmux-facing changed); the LEGION_TMUX_LIVE/LEGION_E2E suites ran on their own sockets inside the package run. The mutant copy under /tmp/legion27-test/r5/mutant was removed."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T04:53:00.436Z"
+  "completed": "2026-09-13T05:12:23.748Z"
 }
