@@ -1,0 +1,129 @@
+{
+  "verdict": "pass",
+  "passed": 25,
+  "failed": 0,
+  "failures": [],
+  "pr": {
+    "number": 1003,
+    "url": "https://github.com/sjawhar/legion/pull/1003",
+    "headTested": "08700ee7fcfaeec5f4cc480fc11f22cea98ff27c",
+    "codeHead": "caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "ciAtHeadTested": {
+      "Tests": 34741250440,
+      "Legion Envoy and Contracts": 34741250416,
+      "conclusion": "success (lint, typecheck, test, pr-title, changes, pi-envoy SUCCESS; path-filtered jobs SKIPPED)"
+    }
+  },
+  "unitTests": {
+    "command": "cd packages/daemon && bun test src/cli/__tests__/review-threads.test.ts src/cli/__tests__/index.test.ts",
+    "result": "25 pass, 0 fail, 74 expect() calls (3 new in review-threads.test.ts + 22 existing in index.test.ts)",
+    "lint": "bunx biome check --error-on-warnings src/ → Checked 153 files, no fixes applied, exit 0",
+    "typecheck": "bunx tsc --noEmit → exit 0",
+    "pins": [
+      "T1 opener `Accepted: fixed in …` → resolved; T5 opener `\\n  Accepted: not a defect …` (leading whitespace) → resolved; github.resolved === [\"T1\",\"T5\"] — exactly one resolveReviewThread per accepted-by-opener thread",
+      "T2 opener `Still open: …` → left open, no mutation",
+      "T3 `Accepted:` by legion-implementer on a legion-reviewer thread → left open, no mutation",
+      "T4 already isResolved → no output line, no mutation",
+      "T6 `Accepted (round 2): …` (PR #966 wording) → left open, no mutation",
+      "pagination: reviewThreads requested with after: null then after: \"CURSOR\"; grant redeemed once at /legion/v1/gh-token with {grantId}; every GraphQL request to https://api.github.com/graphql with `authorization: Bearer scoped-token`",
+      "refused mutation (FORBIDDEN `Resource not accessible by integration`) → rejects CliError `resolveReviewThread failed for <T1 url>: Resource not accessible by integration`, code 1, resolved === [\"T1\"] (T2 never attempted), no output lines",
+      "grant redemption 403 → rejects `Unable to redeem LEGION_GRANT (403)`, code 1, zero GraphQL requests"
+    ],
+    "codeOrder": "cmdThreadsResolve (cli/index.ts) calls parseRepo and parsePullNumber before redeemGitHubToken; acceptedByOpener (cli/review-threads.ts) requires openerLogin === newestLogin and body.trimStart().startsWith(\"Accepted:\")"
+  },
+  "liveRuns": {
+    "surface": "branch CLI `cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion` from the tester pane (session 01a09951-3685-7000-a433-77ebb9ace252, implement App: every tester comment is authored legion-implementer[bot]) against the real daemon /legion/v1/gh-token and real GitHub GraphQL, at head 08700ee7fcfaeec5f4cc480fc11f22cea98ff27c",
+    "baselineBeforeTesterThread": {
+      "PRRT_kwDORFy7ds6h2yAp": {
+        "isResolved": true,
+        "newest": "Accepted: not a defect — implementer live check A."
+      },
+      "PRRT_kwDORFy7ds6h2yBh": {
+        "isResolved": true,
+        "newest": "Accepted: not a defect — negative control complete."
+      }
+    },
+    "testerThread": {
+      "commentId": 3998894390,
+      "threadId": "PRRT_kwDORFy7ds6h220J",
+      "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998894390",
+      "openedWith": "legion gh -- api --method POST repos/sjawhar/legion/pulls/1003/comments -f commit_id=08700ee7… -f path=packages/daemon/src/cli/review-threads.ts -F line=3 -f side=RIGHT",
+      "body": "Tester negative control: this thread must be reported left open.",
+      "replies": [
+        {
+          "id": 3998894806,
+          "body": "Still open: tester negative control."
+        },
+        {
+          "id": 3998895529,
+          "body": "Accepted: not a defect — tester control complete."
+        }
+      ]
+    },
+    "run1_negative_control_after_still_open": {
+      "output": [
+        "left open https://github.com/sjawhar/legion/pull/1003#discussion_r3998894390 — newest reply by legion-implementer is not an acceptance"
+      ],
+      "exit": 0,
+      "github": {
+        "PRRT_kwDORFy7ds6h220J": {
+          "isResolved": false
+        },
+        "PRRT_kwDORFy7ds6h2yAp": {
+          "isResolved": true
+        },
+        "PRRT_kwDORFy7ds6h2yBh": {
+          "isResolved": true
+        }
+      }
+    },
+    "run2_positive_after_accepted": {
+      "output": [
+        "resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998894390"
+      ],
+      "exit": 0,
+      "github": {
+        "PRRT_kwDORFy7ds6h220J": {
+          "isResolved": true,
+          "newest": "legion-implementer: Accepted: not a defect — tester control complete."
+        },
+        "PRRT_kwDORFy7ds6h2yAp": {
+          "isResolved": true
+        },
+        "PRRT_kwDORFy7ds6h2yBh": {
+          "isResolved": true
+        }
+      }
+    },
+    "run3_empty": {
+      "output": [
+        "no unresolved threads"
+      ],
+      "exit": 0
+    },
+    "malformedRepo": {
+      "command": "threads resolve --pr 1003 --repo nope",
+      "stderr": "--repo must be <owner>/<name> (got \"nope\")",
+      "exit": 1,
+      "noCredentialRedeemed": "same invocation with `env -u LEGION_GRANT LEGION_DAEMON_URL=http://127.0.0.1:1` prints the identical --repo message (exit 1); the well-formed control in that environment fails `LEGION_GRANT is missing: the Legion worker extension injects it before credential commands run` instead — the flag is validated before any grant redemption"
+    },
+    "graphqlQuery": "legion gh -- api graphql -F owner=sjawhar -F name=legion -F number=1003 -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{url author{login}}} last:comments(last:1){nodes{author{login} body}}}}}}}'"
+  },
+  "acceptance": {
+    "1": "Met at 08700ee7: unit file pins one resolveReviewThread per accepted-by-opener thread and none otherwise (see unitTests.pins); live run resolved exactly the accepted thread and left the Still-open one open, confirmed by GitHub isResolved.",
+    "2": "Not proven by the tester and not claimed: the cross-App case (a thread the review App opened, accepted by the reviewer, resolved by the implementer's run) is proven in the review round (plan step 5). Every thread on PR #1003 so far was opened and accepted by the implement App.",
+    "3": "Recorded in the spec's Requirements table and the PR body (ruleset 12331919, required_review_thread_resolution: false); not re-read by the tester.",
+    "4": "Read the diff of caa02ad2 (jj diff --git -r caa02ad2). skills/legion-worker/SKILL.md: who (implementer before every push that answers a review — corrective and .legion/ deletion; merger once more before READY), when, the three reply forms verbatim, and why (GitHub grants resolve and push only to the PR author, the comment author, or push access; review App can reply but neither resolve nor push) — in the Threads bullet, the reviewer bullet, and the merger bullet; template gains the command output lines. packages/daemon/src/daemon/AGENTS.md: new `## GitHub Apps` section — role→App mapping via appRoleForLegionRole, the GitHub rule, `Resource not accessible by integration` for both push and resolve, widening does not help, implementer pushes the .legion/ deletion and runs the command, merger runs it before READY, output/exit contract, `Still open:` and other-account replies leave open with exit 0. roles/reviewer.md: three forms verbatim, cannot resolve (refused exactly like its push, pointer to AGENTS.md), implementer runs the command, approve only with isResolved: true from gh api graphql. roles/implementer.md: when (before every push answering a review), what it resolves, why (review App cannot resolve or push, pointer), exit 1 → report to the architect. roles/merger.md: run before READY (step 3), same code-writing App, resolving changes no commit, do not publish on left open/exit 1. skills/legion-architect/SKILL.md: action ask on exit 1, merger does not publish while open, review App cannot resolve. docs/solutions §3: GitHub rule, three forms verbatim, command replaces the raw GraphQL mutation, exit contract, ruleset note. Root AGENTS.md command line and pi-envoy CHANGELOG (three forms) added."
+  },
+  "documentationFeedback": "Acceptance 4 met for the two documents it names (worker skill, daemon AGENTS.md) and for the reviewer role prompt and solutions doc. Observation, not a defect: the three reply forms are enumerated verbatim in the worker skill, reviewer.md, the solutions doc, and the CHANGELOG; implementer.md and merger.md name only the `Accepted:` trigger (they consume, never write, the reply), and the daemon AGENTS.md names `Accepted:` and `Still open:` without the fixed-in / not-a-defect variants. The architect-skill paragraph covers its spec'd scope (the action ask) and says the review App cannot resolve, without restating the GitHub rule or the push limitation. Every statement checked matches the running code: acceptedByOpener requires the newest comment to be the opener's and to start `Accepted:` after trimStart, so `a later reply by anyone else puts the thread back to left open` (worker skill) is exactly what the code does.",
+  "observations": [
+    "The daemon on 127.0.0.1:13370 was unreachable for about a minute mid-phase (every bash call blocked with `Unable to connect` because the installed plugin's tool_call hook mints a grant before each command); it returned on its own and this session's capability survived the restart — grants minted afterwards redeemed normally.",
+    "The installed pi-legion-envoy build prepends `export LEGION_GRANT=…` to the bash command text; this tester imitated that line on several calls, which shadowed the real grant and answered `Unable to redeem LEGION_GRANT (403)` — the same failure the planner and implementer recorded. Running commands through script files via the eval kernel's tool.bash bridge kept the command text clean. The workspace extension (env-injected grant) already fixes this; nothing in this PR.",
+    "The .omp/config.yml the extension provisions sits in the working copy (`A .omp/config.yml`); the handoff was committed with `jj split` on the single file and the bookmark advanced with `-r @- --allow-backwards`, so it never entered a commit.",
+    "prBodyEdits: 1 (Threads count 2→3 with the tester thread's line, and the E2E section overwritten, in one `legion gh -- pr edit --body-file`)."
+  ],
+  "prBodyEdits": 1,
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T06:09:30.730Z"
+}
