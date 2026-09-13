@@ -1,0 +1,131 @@
+{
+  "pr": {
+    "number": 1007,
+    "url": "https://github.com/sjawhar/legion/pull/1007",
+    "codeHead": "7154712f09ed24aed6f969bbaafdee5b37121462",
+    "handoffHead": "the `implement: record handoff` commit pushed after CI went green at 7154712f (its own CI run is `.legion/`-only)",
+    "base": "main@origin a0d0f33f5952 (post-#991, rebased once by architect authorisation)",
+    "ci": "run 34746510981 — lint, pr-title, typecheck, test all pass at code head 7154712f (https://github.com/sjawhar/legion/actions/runs/34746510981); the earlier red run 34745935213 at ec196bad was #991's fixture vs the required baseEnv on GitHub's merge commit",
+    "tier": "T1 (live credential exposure / deploy correctness)"
+  },
+  "commits": [
+    {
+      "sha": "7154712f09ed",
+      "title": "feat(smoke): checkpoint 13 covers the GitHub App keys and an operator-planted canary (LEGION-74)",
+      "tasks": "6"
+    },
+    {
+      "sha": "5e4eb19bab9c",
+      "title": "docs(daemon): pane environment is an allow-list; name the variables and the boot-time tmux server scrub (LEGION-74)",
+      "tasks": "5"
+    },
+    {
+      "sha": "70ed92876d3a",
+      "title": "feat(daemon): at boot, scrub the private tmux server's global and session environment of anything panes may not inherit, and stop attaches refilling it (LEGION-74)",
+      "tasks": "7 (architect upgrade: active fix) + spec v5 session-table door"
+    },
+    {
+      "sha": "232280d88e1a",
+      "title": "fix(daemon): panes, probes, and daemon children inherit an allow-listed environment, never the GitHub App keys (LEGION-74)",
+      "tasks": "1-4 (+ #991's fixture given baseEnv after the rebase)"
+    },
+    {
+      "sha": "92512d514f2e",
+      "title": "plan: record handoff",
+      "tasks": "planner's commit, rebased once onto main@origin"
+    }
+  ],
+  "filesChanged": [
+    "[daemon] packages/daemon/src/daemon/environment.ts (PANE_ENV_ALLOW_LIST, isSecretLikeName, paneEnvironment; stripDispatchEnv/PANE_SECRET_ENV_KEYS deleted; resolveOmpInvocation now takes daemon env AND paneEnv so LEGION_OMP_PATH keeps working)",
+    "[daemon] packages/daemon/src/daemon/github-app-env.ts (scrub uses isSecretLikeName)",
+    "[daemon] packages/daemon/src/daemon/index.ts (createCiStatusFetcher(tokenManager, runner, baseEnv); workerCatchup/apiDeps baseEnv: environment.paneEnv; boot-time runtime.scrubServerEnvironment after the probes pass, before enableLaunches)",
+    "[daemon] packages/daemon/src/daemon/catchup.ts (WorkerCatchupDeps.baseEnv)",
+    "[daemon] packages/daemon/src/daemon/api.ts + api/github.ts (LegionApiDeps.baseEnv -> GitHubService)",
+    "[daemon] packages/daemon/src/daemon/config.ts (private_key_command: env: process.env on purpose)",
+    "[daemon] packages/daemon/src/index/hotspots.ts (jj child inherits)",
+    "[tests] environment.test.ts (TEST A exact-equality allow-list scenario incl. createDaemonRunner tmux new-session env; TEST B bootstrap mise env/where envs; TEST C mise-emitted credential names; isSecretLikeName table; LEGION_OMP_PATH honoured from daemon env)",
+    "[tests] github-apps.test.ts (credential-shaped scrub)",
+    "[tests] index.test.ts (CI fetcher base env; both probes under paneEnv - fail/pass pair proven by leaking process.env into boot-probes.ts:175 then reverting; boot scrub logs names only + issues set-environment -g -u; fresh server logs nothing)",
+    "[tests] config.test.ts (private_key_command strip test deleted - pinned the removed strip)",
+    "[tests] fixtures: api.test.ts, api.thermo-auth.test.ts, catchup.test.ts, processes.test.ts, processes.thermo-ops.test.ts, real-deployment-instructions-e2e.test.ts, real-shutdown-e2e.test.ts, worker-stream-e2e.test.ts get baseEnv: {}",
+    "[docs] packages/daemon/src/daemon/AGENTS.md (allow-list paragraph naming every variable; tmux-server paragraph; new boot-scrub paragraph: plain restart is enough, no kill-server)",
+    "[docs] docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
+    "[docs] docs/solutions/integration-patterns/secret-file-pointer-precedence.md",
+    "[docs] docs/solutions/legion/worker-pane-shell-gotchas.md",
+    "[smoke] scripts/smoke/checkpoints.sh (checkpoint 13: fixed names + SMOKE_CANARY_ENV)",
+    "[smoke] scripts/smoke/checkpoints.test.sh (planted App key, canary-only pid, SMOKE_CANARY_ENV gating)",
+    "[smoke] scripts/smoke/README.md (row 13; 'Pane-environment proof' recipe incl. the hand-forked stale server and its two consequences)",
+    "[daemon] packages/daemon/src/daemon/tmux.ts (NO_SERVER_STDERR; EnvironmentTable = global | {session}; environmentNames(server, table), unsetEnvironment(server, table, name), disableEnvironmentUpdates(server, session); openWindow sets update-environment '' right after new-session)",
+    "[daemon] packages/daemon/src/daemon/runtime-tmux.ts (PANE_GONE_STDERR built on NO_SERVER_STDERR; TmuxRuntime.scrubServerEnvironment scrubs the global AND the session table, empties the session's update-environment, returns sorted de-duplicated names; TMUX_OWN_GLOBALS = PWD, SHLVL)",
+    "[tests] tmux.test.ts (environmentNames -g/-t argv + parsing incl. -NAME markers, bash-function continuation lines, %% names, fresh-session marker-only table, 'no such session' -> undefined; unsetEnvironment both tables; disableEnvironmentUpdates argv; openWindow sets the option after new-session and before new-window, never on an existing session)",
+    "[tests] runtime-tmux.test.ts (both tables: -u only for disallowed names, -t <session> forms, option set on an existing session; fresh server -> option only; no server -> nothing; server without the session -> global only)",
+    "[tests] runtime.contract.test.ts + processes.test.ts (exact spawn argv now includes set-option -t legion-omp update-environment '' between new-session and the owner marker)",
+    "[tests] processes.test.ts:4072 (#991's workerCatchup fixture gets baseEnv: {} — the semantic conflict that made the merge commit fail typecheck)"
+  ],
+  "verification": {
+    "unit": "After the rebase and the session-table change: bun test packages/daemon 1061 pass / 6 skip / 0 fail; bunx tsc --noEmit clean; biome check --error-on-warnings src/ clean; bash scripts/smoke/checkpoints.test.sh 15 PASS lines. CI at code head 7154712f: run 34746510981 all green.",
+    "notVerified": [
+      "Acceptance 3 and 5 (post-release: production server/controller/fresh-worker environ, live grant, key rotation) - deliberately left for the wake after the operator relaunches on merged code.",
+      "up.test.sh case (spec acceptance 8 mentions one): up.sh is unchanged - the daemon does the work - so no up.sh case was added; the rig pane environment is quoted instead."
+    ]
+  },
+  "smokeProof": {
+    "startCommand": "cd -- \"$LEGION_WORKSPACE\" && env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p') -u TMUX -u TMUX_PANE -u OMP_SESSION_ID -u JJ_CONFIG -u SECRETSD_SESSION_TOKEN_FILE MISE_DATA_DIR=\"$HOME/.mise\" SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/74 SMOKE_WEBHOOK_MODE=envoy SMOKE_DIR=/tmp/legion74-rig SMOKE_OMP_LAUNCH_PREFIX='env OMP_PROFILE=legion secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --' DISPATCH_URL=\"$DISPATCH_URL\" DISPATCH_TOKEN=\"$(cat \"$DISPATCH_TOKEN_FILE\")\" FOO_SECRET=canary-legion-74 SMOKE_CANARY_ENV=FOO_SECRET secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'  (default ports 19370/19371/19020/14222 were free; NATS container legion-smoke-nats created and removed by this run)",
+    "phaseA_stalePreforkedServer": "=== PHASE A: stale pre-forked server (pid 990713, forked with FOO_SECRET=stale GH_AGENT_APP_PRIVATE_KEY_B64=stale-fake-agent-key GH_REVIEW_APP_PRIVATE_KEY_B64=stale-fake-review-key) ===\ndaemon head: 529d7494a028 (rig daemon started at 597eaba4..e7e4054e series; source read at start)\n--- daemon.log scrub line:\n[legion] removed 4 variable(s) an earlier daemon left in the tmux server environment: FOO_SECRET, GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, TMUX_PLUGIN_MANAGER_PATH\n--- show-environment -g names after boot:\nHOME PATH PWD SHELL SHLVL TMUX_TMPDIR \n--- panes:\nstale-bootstrap %0 991817\ncontroller %1 1023540\nlegsmoke-101 %2 1060696\nlegsmoke-102 %3 1280388\nlegsmoke-102 %4 1329945\ncontroller pane %1 pid=1023540: tr '\\0' '\\n' < /proc/1023540/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\n   omp child 1023822 -> 0\nroot-architect(LEGSMOKE-101) pane %2 pid=1060696: tr '\\0' '\\n' < /proc/1060696/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\n   omp child 1061020 -> 0\nsub-architect(LEGSMOKE-102) pane %3 pid=1280388: tr '\\0' '\\n' < /proc/1280388/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\n   omp child 1280998 -> 0\nplanner(LEGSMOKE-102) pane %4 pid=1329945: tr '\\0' '\\n' < /proc/1329945/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\n   omp child 1330623 -> 0\n--- planner %4 capture-pane tail (turn in progress):\ntool_execution_start read {\"path\":\"xd://dispatch_doc_read\"}\ntool_execution_start bash {\"command\":\"cd -- \\\"$LEGION_WORKSPACE\\\" && jj -R \\\"$LE\nGION_WORKSPACE\\\" status &&\ntool_execution_start write {\"path\":\"xd://dispatch_doc_read\",\"content\":\"{\\\"issue\\\n\": \\\"LEGSMOKE-102\\\"}\"}\ntool_execution_start bash {\"command\":\"cd -- \\\"$LEGION_WORKSPACE\\\" && jj -R \\\"$LE\nGION_WORKSPACE\\\" file list\ntool_execution_start bash {\"command\":\"cd -- \\\"$LEGION_WORKSPACE\\\" && stat -c '%s\n bytes %n' .omp/config.yml\ntool_execution_start bash {\"command\":\"cd -- \\\"$LEGION_WORKSPACE\\\" && jj split --\nhelp | sed -n '1,40p' && e\n--- CHECKPOINT 3:\nCHECKPOINT 3 OK: posted spec artifact, daemon-approved design gate (ask resolved), and child issue observed\n--- CHECKPOINT 13 (expected to fail on the pre-forked server pid by construction):\nCHECKPOINT 13 FAILED: pid 990713 environ carries GH_AGENT_APP_PRIVATE_KEY_B64=… (no Legion pane may carry it)\n",
+    "phaseB_daemonForkedServer": "=== PHASE B: server forked by the daemon itself (daemon pid 1435187; its own environ carries GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, FOO_SECRET=canary-legion-74) ===\ndaemon.log: no 'removed ... variable(s)' line (fresh boot: no server yet at scrub time) — 0 matches\nserver pid=1757487: tr '\\0' '\\n' < /proc/1757487/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\nserver /proc environ names (== paneEnv + tmux's PWD/SHLVL): AGENT_EVAL_VERSION CARGO_HOME GOBIN GOROOT HOME LANG LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER LC_TELEPHONE LC_TIME MISE_DATA_DIR OMP_PROFILE PATH PI_PROFILE PWD RUSTUP_HOME RUSTUP_TOOLCHAIN SHELL SHLVL TERM TMUX_TMPDIR USER XDG_DATA_HOME XDG_RUNTIME_DIR XDG_STATE_HOME \nroot-architect(LEGSMOKE-101, resumed) pane %1 pid=1757742: tr '\\0' '\\n' < /proc/1757742/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET -> 0\nroot pane names: AGENT_EVAL_VERSION CARGO_HOME COLORTERM DISPATCH_TOKEN_FILE DISPATCH_URL ENVOY_NATS_URL ENVOY_URL GH_CONFIG_DIR GH_HOST GH_TOKEN GITHUB_TOKEN GIT_CONFIG_COUNT GIT_TERMINAL_PROMPT GOBIN GOROOT HOME LANG LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_MONETARY LC_NAME LC_NUMERIC LC_PAPER LC_TELEPHONE LC_TIME LEGION_BOOT_TOKEN_FILE LEGION_CONTROL_SUBJECT LEGION_CREDENTIAL_HELPER LEGION_DAEMON_URL LEGION_GENERATION LEGION_GRANT_FILE LEGION_ISSUE LEGION_MAX_RECURSION_DEPTH LEGION_PROJECT LEGION_ROLE LEGION_ROOT_WORKSPACE LEGION_STATE_DIR LEGION_TREE MISE_DATA_DIR OLDPWD OMP_PROFILE PATH PI_PROFILE PWD RUSTUP_HOME RUSTUP_TOOLCHAIN SHELL SHLVL TERM TERM_PROGRAM TERM_PROGRAM_VERSION TMUX TMUX_PANE TMUX_PLUGIN_MANAGER_PATH TMUX_TMPDIR USER XDG_DATA_HOME XDG_RUNTIME_DIR XDG_STATE_HOME _ \n   omp child 1758005 -> 0\n--- CHECKPOINT 13 (SMOKE_CANARY_ENV=FOO_SECRET):\nCHECKPOINT 13 OK: 3 processes on legion-sjawhar74 carry none of DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 FOO_SECRET; default server hosts no legion-sjawhar74\n",
+    "negativeControl": "production panes spawned before the operator's 06:10 UTC hand-mitigation on the old daemon, e.g. legion-37 %159 pid=2020452: tr '\\0' '\\n' < /proc/2020452/environ | grep -c PRIVATE_KEY -> 2 (also legion-12 %160, legion-54 %172, legion-16 %178, legion-33 %185, legion-32 %194 -> 2 each). This pane (spawned 06:46, after the mitigation) shows 0.",
+    "acceptance4": "the rig daemon minted its implementer token at boot from GH_*_APP_PRIVATE_KEY_B64 in its own environ (boot refuses otherwise) and provisioned the LEGSMOKE-101/-102 workspaces through the credential helper; the daemon's own environ carried both key names + FOO_SECRET throughout (names verified, never printed).",
+    "rigTeardown": "down.sh run twice (phase A left the hand-forked, unowned session which I killed with tmux -L legion-sjawhar74 kill-server; phase B's daemon-owned session was killed by down.sh). Nothing of mine remains: no legion-sjawhar74 server, no legion-smoke-nats container, ports free.",
+    "phaseC_sessionTable": "=== PHASE C: session-table leak, scratch tmux 3.7c server legion-l74proof (never production), real TmuxRuntime.scrubServerEnvironment ===\n$ env -i HOME PATH TMUX_TMPDIR FOO_SECRET=stale tmux -L legion-l74proof new-session -d -s legion-l74proof \"sleep 900\"\n$ SSH_AUTH_SOCK=/tmp/operator-agent.sock tmux -L legion-l74proof attach -t legion-l74proof \\; detach-client   (an operator attach, under a pty)\n$ tmux -L legion-l74proof show-environment -t legion-l74proof | grep -v \"^-\"\nSSH_ASKPASS=/usr/bin/false\nSSH_AUTH_SOCK=/tmp/operator-agent.sock\nSSH_CONNECTION=100.100.92.97 57158 100.113.243.90 22\n$ pid=$(tmux -L legion-l74proof split-window -d -P -F \"#{pane_pid}\" \"sleep 900\"); tr \"\\0\" \"\\n\" < /proc/$pid/environ | grep -c -e SSH_AUTH_SOCK -e FOO_SECRET   (pane BEFORE the scrub)\n2\n$ bun /tmp/legion74-session-proof.ts legion-l74proof   (TmuxRuntime.scrubServerEnvironment with paneEnv = {HOME, PATH, TMUX_TMPDIR})\n[legion] removed 5 variable(s) from the private tmux server environment that panes may not inherit: FOO_SECRET, SSH_ASKPASS, SSH_AUTH_SOCK, SSH_CONNECTION, TMUX_PLUGIN_MANAGER_PATH\n$ tmux -L legion-l74proof show-environment -t legion-l74proof | grep -v \"^-\"   (session table after the scrub; empty = nothing real left)\n(exit 1)\n$ tmux -L legion-l74proof show-options -t legion-l74proof update-environment   (empty = attaches copy nothing)\nupdate-environment\n$ pid=$(tmux -L legion-l74proof split-window -d -P -F \"#{pane_pid}\" \"sleep 900\"); tr \"\\0\" \"\\n\" < /proc/$pid/environ | grep -c -e SSH_AUTH_SOCK -e FOO_SECRET   (pane AFTER the scrub)\n0\n(grep exit 1 = zero matches)\n$ SSH_AUTH_SOCK=/tmp/operator-agent-2.sock tmux -L legion-l74proof attach ... \\; detach-client   (a second operator attach)\n$ tmux -L legion-l74proof show-environment -t legion-l74proof | grep -c SSH_AUTH_SOCK=   (after the second attach)\n0\n$ tmux -L legion-l74proof kill-server\n",
+    "rigRerun": "Checkpoint 13 was NOT re-run on the rig for the second pass: the changes are confined to tmux.ts/runtime-tmux.ts/index.ts boot wiring and their tests (plus docs/README), exactly the architect's criterion; the first pass's phase A/B rig proofs stand for the global table and the scratch-server phase C proves the session table through the same runtime code path."
+  },
+  "trickyParts": [
+    "Start point: rebased the plan commit once onto main@origin (1639fb6b, post-#992) before any PR existed. main moved 7 more commits during the work (through 45f33bd8); the two files both sides touch (daemon AGENTS.md, worker-pane-shell-gotchas.md) have non-overlapping hunks, GitHub reports MERGEABLE, so no second rebase.",
+    "LEGION_OMP_PATH: on main resolveOmpInvocation read it from the env it was handed, which is paneEnv; under the allow-list paneEnv no longer carries LEGION_*, so the override would have silently stopped working. Split the parameters: daemon env for configuredPath, paneEnv for the mise where call; environment.test.ts pins it.",
+    "gh children: createCiStatusFetcher, workerCatchup and GitHubService spread buildRoleEnv(..., process.env) over the runner's paneEnv - the whole daemon environment incl. the keys. Now every one takes baseEnv (required, no default) = environment.paneEnv.",
+    "Scrub semantics verified on a scratch tmux 3.7c server: `set-environment -g -u` removes the entry (absent from show-environment -g), `-r` leaves a -NAME marker; both keep the name out of a subsequently created pane (verified via /proc/<pane pid>/environ). Used -u. -u on a missing name exits 0 and creates no marker; -u on a BASH_FUNC_x%% name works.",
+    "tmux itself writes PWD and SHLVL into the global environment at server start (verified with env -i); they are exempt (TMUX_OWN_GLOBALS). The operator's tmux.conf runs TPM, which set-environment -g's TMUX_PLUGIN_MANAGER_PATH on every fresh fork; it is removed and named like any other variable on the next restart (seen in phase A). The log wording was generalised to 'from the private tmux server environment that panes may not inherit' because of it.",
+    "show-environment -g parsing: bash exported functions (production has BASH_FUNC__aws%%) print multi-line values whose continuation lines start with a space or '}'; an entry is a line starting `NAME=` with NAME matching [A-Za-z_][A-Za-z0-9_%]*; -NAME markers are skipped (production already has -DISPATCH_TOKEN, -GH_AGENT_APP_PRIVATE_KEY_B64, -GH_REVIEW_APP_PRIVATE_KEY_B64 from the 06:10 mitigation, so those two names will NOT appear in the production scrub log; ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, LEGION_OMP_PATH, OMP_SESSION_ID, JJ_CONFIG, SSH_AUTH_SOCK, SECRETSD_SESSION_TOKEN_FILE, GIT_CONFIG_*, TMUX, TMUX_PANE and ~60 operator-shell names will).",
+    "checkpoint 13 inspects the server's own /proc/<pid>/environ, which is fork-time: a hand-forked stale server fails it by construction even after the scrub (phase A: 'pid 990713 environ carries GH_AGENT_APP_PRIVATE_KEY_B64='), and down.sh refuses to kill a session without @legion_owner. Both documented in the README; phase B (daemon-forked) is the green run.",
+    "Reusing SMOKE_DIR for phase B: boot never resurrects trees, so the daemon-forked server appeared only at the first resync (T+10 min); two roots resurrecting concurrently raced on the first new-session (see observations).",
+    "Scrub ordering: it runs AFTER `await probes` (a definitive probe negative must stay the first and only runner call) and before enableLaunches(); a tmux failure reading/writing either table is fatal exactly like a probe failure.",
+    "tmux 3.7c session-table facts (scratch server, verified): a fresh session's table is only the -NAME markers of the default update-environment list; an `attach` copies the client's SSH_ASKPASS/SSH_AUTH_SOCK/SSH_CONNECTION in (and the operator's DISPLAY etc. when set); `set-option -t <session> update-environment ''` makes a later attach copy nothing; `set-environment -t <session> -u NAME` removes the entry and a pane created afterwards no longer carries it; `-u` on a -NAME marker exits 0; `show-environment -t`/`set-option -t`/`set-environment -t` on a missing session say `no such session: <name>` (exit 1).",
+    "Rebase: main gained #991 between my two CI runs; its new workerCatchup fixture (processes.test.ts:4072) lacked the now-required baseEnv, so GitHub's merge commit failed typecheck and #991's new test threw on the undefined spread while the branch itself stayed green. Rebased once onto main@origin (architect-authorised; the deployment rule forbids pointless reruns, and a red run must rerun regardless); no textual conflicts."
+  ],
+  "observationsForArchitect": [
+    "Session-environment leak path (not in scope, not fixed): tmux's default `update-environment` copies SSH_AUTH_SOCK/SSH_CONNECTION/DISPLAY/... from an attaching client into the SESSION environment; the production private session already carries SSH_AUTH_SOCK and SSH_CONNECTION (tmux -L legion-sjawharlegion show-environment -t legion-sjawharlegion, names only) from operator attaches, and panes opened afterwards inherit the operator's SSH agent socket. The scrub covers the global table only. Remedy if wanted: `set-option -t legion-<project> update-environment ''` at session creation plus a session-table scrub - a separate change.",
+    "Pre-existing race (seen in phase B): two trees resurrected by one resync both saw has-session=false on a not-yet-forked server and both ran new-session; the second failed 'tmux new-session failed (exit 1)' and counted a launch failure. openWindow serialises per issue, not across issues, for session creation. Unrelated to this change; remedy: serialise session creation in TmuxRuntime across issues.",
+    "Same-uid /proc reads remain possible (spec Rejected already accepts this): a pane can read the daemon's or the old server's /proc/<pid>/environ. The old production server (pid 2023008) keeps the key material in its fork-time environ until it exits; rotation (acceptance 5) is what retires that material.",
+    "Full daemon suite: 1 unnamed failure in the first of 6 runs, during the rig's concurrent start at load average 110+; 5 clean runs. Likely a timing-sensitive e2e test; not reproduced."
+  ],
+  "deployment": [
+    "1. legion stop sjawhar-legion",
+    "2. Start the daemon on merged main through the same `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- ...` launcher (the daemon still needs the keys). No kill-server: the boot log must show `[legion] removed N variable(s) from the private tmux server environment that panes may not inherit: ...`.",
+    "3. Tell the implementer (LEGION-74) so it runs the production check."
+  ],
+  "postRelease": [
+    "[ ] (a) pid=$(tmux -L legion-sjawharlegion display-message -p '#{pid}') -> still 2023008 is expected (no kill-server); `tmux -L legion-sjawharlegion show-environment -g | grep -c -e PRIVATE_KEY -e ANTHROPIC_API_KEY -e OMP_SESSION_ID` -> 0; `tmux -L legion-sjawharlegion show-environment -t legion-sjawharlegion | grep -c -e SSH_AUTH_SOCK= -e SSH_CONNECTION=` -> 0 (today: 2); `tmux -L legion-sjawharlegion show-options -t legion-sjawharlegion update-environment` prints the bare option name (empty list).",
+    "[ ] (b) controller pane spawned after the relaunch: tr '\\0' '\\n' < /proc/<pid>/environ | grep -c PRIVATE_KEY -> 0.",
+    "[ ] (c) one worker pane with readyConfirmedAt later than the relaunch -> 0.",
+    "[ ] (d) acceptance 4: from that fresh worker `legion gh -- api repos/sjawhar/legion --jq .full_name` -> sjawhar/legion (a live grant minted from the keys the daemon alone holds).",
+    "[ ] Quote (a)-(d) as a PR comment with the Legion footer and in a dispatch_message on LEGION-74.",
+    "[ ] Acceptance 5: rotation message to Sami as a plain dispatch_message (never an ask), then verify a grant after rotation."
+  ],
+  "deviations": [
+    "Task 7 delivered as the architect's upgraded active fix (boot-time set-environment -g -u of every name not in paneEnv), not the plan's warning; log line worded 'removed N variable(s) from the private tmux server environment that panes may not inherit: NAMES' (provenance-neutral: tmux.conf variables such as TPM's TMUX_PLUGIN_MANAGER_PATH are removed too).",
+    "The scrub runs after `await probes`, not before: a definitive probe negative must remain the first and only runner call (existing index.test.ts contract).",
+    "resolveOmpInvocation gained a separate daemonEnv parameter so LEGION_OMP_PATH (daemon config) keeps working now that paneEnv no longer carries LEGION_*; the plan did not anticipate this.",
+    "No up.test.sh case (spec acceptance 8): up.sh is unchanged; the rig pane environment is quoted instead.",
+    "The proof run used two rig phases with one SMOKE_DIR: A (hand-forked stale server, scrub proof, controller/root/sub-architect/planner panes) and B (daemon-forked server, checkpoint 13 OK).",
+    "No Runtime interface change: scrubServerEnvironment stays a TmuxRuntime method (index.ts holds the concrete TmuxRuntime; kubernetes has no tmux server).",
+    "Session-table door (spec v5): update-environment is emptied with a separate `set-option -t <session>` command right after new-session (tmux 3.7c new-session has no inline option form) and again on every boot against an existing session; the session scrub uses the same parser, -u form, and PWD/SHLVL exemption as the global one; the removed names of both tables are folded into the one existing log line (de-duplicated, sorted) — wording unchanged.",
+    "A server that is up without the daemon's session ('no such session') is treated like no server for the session table: nothing to scrub or configure; new-session creates it with the option set."
+  ],
+  "openQuestions": [
+    "Should TmuxRuntime serialise first-ever session creation across issues (two concurrent resurrections raced on new-session in phase B; pre-existing)?"
+  ],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T07:59:37.017Z"
+}
