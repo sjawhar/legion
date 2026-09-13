@@ -1,0 +1,46 @@
+{
+  "verdict": "changes_requested",
+  "round": 1,
+  "reviewId": 5189754771,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/998#pullrequestreview-5189754771",
+  "commitId": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+  "prHeadAtReview": "9b06ae6cfa5fa3cf5800e7d4fff88ed04b594e2d",
+  "critical": 1,
+  "important": 1,
+  "minor": 9,
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "skills/legion-worker/SKILL.md:333",
+      "description": "Unchanged-diff fingerprint: two positional filesets '~.legion' '~docs/solutions' are unioned by jj (~A | ~B = everything), so neither path is excluded. Verified: fingerprint at dd224351 c88658b3… vs 9b06ae6c 18e62757… (heads differ only by .legion/) as written; f06ac0c1… at both with the single fileset '~(.legion | docs/solutions)'. Consequence: every post-retro rebase reads 'changed' → full round — the loop this PR exists to end. Fix: single fileset in the code block and the bullet at :348. plan.json unchangedDiffCheck.command has the same form; the architect should use the corrected one on this tree."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/api/routes/workers.ts:42",
+      "description": "Architect decision, spec-literal: child issues (released at todo; only spawnTree writes in_progress, for tree.root) and a corrective round off a human's pr-review changes_requested wake never sit at in_progress, so their implementer completion now writes nothing where it wrote testing. Options: write in_progress on first spawn_worker for a todo issue + architect skill sets in_progress before a corrective spawn off a human review; or accept and document in AGENTS.md."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/api.test.ts:2605",
+      "description": "Positive test relies on fixture default in_progress; set it explicitly like the retro twin."
+    },
+    {
+      "severity": "minor",
+      "file": "fast-follow (wording/duplication, batched in the review body)",
+      "description": "SKILL.md:306-314 rule 1 twice; tester.md:28 annotation lacks the two SHAs SKILL.md:274 requires; reviewer.md:93 'For an approved review, write that handoff' (clean round is COMMENT); architect SKILL.md:183-184 'change the reviewer-approved head' → 'rewrite'; merger.md:43/SKILL.md:302 empty --summary = no file changes, not no commits; SKILL.md:301 merger bullet lacks jj git fetch; SKILL.md:397 stdout vs stderr; architect SKILL.md:251 pr-review row retro-not-run case."
+    }
+  ],
+  "verifiedOnGitHub": {
+    "ci": "statusCheckRollup SUCCESS at 9b06ae6c: Tests run 34740651601 (lint, typecheck, test, pr-title), Legion Envoy and Contracts run 34740651605 (pi-envoy; rest skipped)",
+    "threads": "0 total before this review; this review added 3 inline comments (ids 3998885581, 3998885586, 3998885590) at dd224351",
+    "mergeable": "MERGEABLE / BLOCKED (review required)",
+    "e2e": "PR body E2E names throwaway daemon sjawhar/5959 from the PR head, LEGSMOKE-96, logging proxy at code head dd224351 (ancestor of 9b06ae6c); LEGSMOKE-96 Dispatch events #3-#6 match the rig timeline (no daemon event between tester retro 05:24:21 and tester in_progress 05:25:27)"
+  },
+  "daemonChange": "Correct against the spec: state.issues[issue]?.status === 'in_progress' ? 'testing' : undefined; state.issues[key].status is fed only by the Dispatch reducers (writeStatus never sets it). bun test -t 'implementer completes' → 2 pass locally.",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at dd224351: no blocking finding from either; both confirmed the fileset-union bug; PR body Thermo line filled.",
+  "nextRound": "Implementer fixes SKILL.md:333/:348 (single fileset) and whatever the architect rules on workers.ts:42; if workers.ts changes, tester re-runs the unit tests and greps at the new head (E2E rig unaffected unless daemon behavior changes); reviewer round 2 at the new head. Fingerprint for any conflict-forced rebase on this tree must use '~(.legion | docs/solutions)'.",
+  "handoffCommit": "committed locally as 'review: record handoff'; the reviewer App cannot push — it rides the implementer's next push of legion/LEGION-59.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T05:57:54.450Z"
+}
