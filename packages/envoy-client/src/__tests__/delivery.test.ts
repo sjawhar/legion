@@ -184,6 +184,25 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("keeps rendering a targeted Dispatch message when its payload grows", () => {
+    const extendedPayload = JSON.parse(targetedDispatchPayload) as {
+      event: { payload: Record<string, unknown> };
+    };
+    extendedPayload.event.payload.future_field = "added by a newer Dispatch";
+    const unchanged = renderInbound(
+      JSON.stringify(envelope({ source: "dispatch", payload: targetedDispatchPayload })),
+      reader
+    );
+    const rendered = renderInbound(
+      JSON.stringify(envelope({ source: "dispatch", payload: JSON.stringify(extendedPayload) })),
+      reader
+    );
+
+    expect(rendered.malformedDelivery).toBeUndefined();
+    expect(rendered.content).toBe(unchanged.content);
+    expect(rendered.delivery).toEqual(unchanged.delivery);
+  });
+
   test("renders ask.answered's free-text answer even with no selected option", () => {
     const textOnlyAnswered = {
       ...openAsk,

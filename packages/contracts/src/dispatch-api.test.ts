@@ -12,6 +12,7 @@ import {
   type CreateProjectInput,
   type DispatchEvent,
   DispatchEventSchema,
+  DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
   IssueEventPayloadSchema,
   MessageEventPayloadSchema,
@@ -294,6 +295,24 @@ test("parses a message reply's in_reply_to and reply_body preview", () => {
     MessageEventPayloadSchema.parse({ id: "message-1", author: actor, body: "Root message." })
       .in_reply_to
   ).toBeUndefined();
+});
+
+test("accepts complete targeted-message payloads while ignoring future fields", () => {
+  const payload = {
+    id: "message-1",
+    issue_key: "DSP-1",
+    author: { id: "alice", kind: "user" },
+    body: "Can this ship?",
+    target: "session:ses_target",
+    in_reply_to: null,
+    deliveries: [],
+    created_at: "2026-09-12T00:00:00Z",
+  };
+
+  expect(DispatchTargetedMessagePayloadSchema.parse(payload)).toEqual(payload);
+  expect(DispatchTargetedMessagePayloadSchema.parse({ ...payload, future_field: true })).toEqual(
+    payload
+  );
 });
 
 test("preserves ask edit history in the event payload", () => {

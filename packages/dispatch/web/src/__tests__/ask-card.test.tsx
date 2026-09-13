@@ -992,9 +992,11 @@ test("a resolved ask keeps its question and options and carries a resolution bad
     expect(await view.findByText(input.question)).toBeTruthy();
     expect(view.getByRole("list", { name: "Options" }).children).toHaveLength(2);
     expect(view.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
-    const resolution = "Retracted by session-1 - Superseded.";
-    await waitFor(() => expect(view.getByTestId("ask-ask-1").textContent).toContain(resolution));
-    expect(view.getByTestId("thread-ask-1").textContent).not.toContain(resolution);
+    const resolution = input.resolution;
+    if (resolution === undefined) {
+      throw new Error("resolved Ask fixture is missing its resolution");
+    }
+    await waitFor(() => expect(view.getAllByText(resolution.reason)).toHaveLength(1));
     expect(view.queryByRole("button", { name: "Reply" })).toBeNull();
   } finally {
     view.unmount();

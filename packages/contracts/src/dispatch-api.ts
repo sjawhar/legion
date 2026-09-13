@@ -1024,6 +1024,17 @@ export const MessageEventPayloadSchema = z.object({
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
 });
 
+export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
+  id: z.string(),
+  issue_key: z.string(),
+  author: z.object({ kind: z.string(), id: z.string() }),
+  body: z.string(),
+  target: z.string(),
+  in_reply_to: z.string().nullable(),
+  deliveries: z.array(z.unknown()),
+  created_at: z.string(),
+});
+
 export const MessageDeliveryEventPayloadSchema = z.object({
   message_id: z.string().optional(),
   attempt: z.number().int().positive().optional(),

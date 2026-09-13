@@ -24,6 +24,16 @@ export function isHumanSettableStatus(status: IssueStatus): boolean {
   );
 }
 
+const humanSettableOpenStatuses = issueStatuses.filter(
+  (status) => status !== "done" && isHumanSettableStatus(status)
+);
+
+export function selectableStatusesFor(status: string): readonly string[] {
+  return humanSettableOpenStatuses.includes(status as IssueStatus)
+    ? humanSettableOpenStatuses
+    : [...humanSettableOpenStatuses, status];
+}
+
 export interface BoardColumn {
   readonly status: IssueStatus;
   readonly issues: IssueSummary[];

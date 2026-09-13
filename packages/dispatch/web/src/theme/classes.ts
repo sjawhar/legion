@@ -63,7 +63,6 @@ export const SURFACE_MUTED_STRONG = pair(P.SLATE_200, P.SLATE_700);
 /** An input recessed inside a `SURFACE` card needs to read as a level below it. */
 export const SURFACE_RECESSED = pair(P.WHITE, P.SLATE_950);
 
-export const canvasBg = "bg-slate-50 dark:bg-slate-950";
 export const surfaceBg = "bg-white dark:bg-slate-900";
 export const surfaceMutedBg = "bg-slate-100 dark:bg-slate-800";
 export const surfaceMutedHoverBg = "hover:bg-slate-100 dark:hover:bg-slate-800";
@@ -97,7 +96,6 @@ export const textPrimaryOnSurfaceMuted = "text-slate-900 dark:text-slate-100";
 export const textSecondaryOnSurfaceMuted = "text-slate-700 dark:text-slate-300";
 export const textMutedOnSurfaceMuted = "text-slate-600 dark:text-slate-400";
 export const textMutedOnSelectedCard = "text-slate-600 dark:text-slate-400";
-export const textDisabled = "text-slate-400 dark:text-slate-600";
 /** A dialog/composer "Close" button: secondary at rest, primary-emphasis on hover. Not
  * registered separately — both ends reuse `TEXT_SECONDARY`/`TEXT_PRIMARY`'s own checks. */
 export const dismissButtonText =
@@ -112,9 +110,6 @@ export const textMutedHoverToSecondary =
  * placeholder-affordance button). */
 export const textSecondaryHoverToPrimary =
   "text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100";
-/** A muted affordance that jumps straight to primary-emphasis on hover. */
-export const textMutedHoverToPrimary =
-  "text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100";
 /** `SURFACE_MUTED` used as a disabled-state background (e.g. a `<select>` that greys out rather
  * than just dimming its text). */
 export const surfaceMutedDisabledBg = "disabled:bg-slate-100 dark:disabled:bg-slate-800";
@@ -226,7 +221,6 @@ export const INLINE_WARNING_TEXT = pair(P.AMBER_800, P.AMBER_300);
 
 export const calloutDangerBorder = "border-rose-200 dark:border-rose-900";
 export const calloutDangerBg = "bg-rose-50 dark:bg-rose-950";
-export const calloutDangerText = "text-rose-950 dark:text-rose-300";
 export const calloutWarningBorder = "border-amber-200 dark:border-amber-900";
 export const calloutWarningBg = "bg-amber-50 dark:bg-amber-950";
 export const calloutWarningText = "text-amber-950 dark:text-amber-300";
@@ -272,7 +266,6 @@ export const dragHandleBg = "bg-slate-300 dark:bg-slate-700";
 export const textPrimaryOnSuccessCallout = "text-slate-900 dark:text-slate-100";
 export const calloutInfoBorder = "border-sky-200 dark:border-sky-900";
 export const calloutInfoBg = "bg-sky-50 dark:bg-sky-950";
-export const calloutInfoHoverBg = "hover:bg-sky-50 dark:hover:bg-sky-950";
 export const calloutInfoTitleText = "text-sky-950 dark:text-sky-300";
 export const inlineWarningText = "text-amber-800 dark:text-amber-300";
 
@@ -394,34 +387,27 @@ export const STATUS_CONNECTING_TEXT = pair(P.AMBER_800, P.AMBER_300);
 export const STATUS_OFFLINE_BG = SURFACE_MUTED_STRONG;
 export const STATUS_OFFLINE_TEXT = TEXT_SECONDARY;
 
-export const statusConnected = {
-  bg: "bg-emerald-100 dark:bg-emerald-950",
-  text: "text-emerald-800 dark:text-emerald-300",
-};
 export const statusConnecting = {
   bg: "bg-amber-100 dark:bg-amber-950",
   text: "text-amber-800 dark:text-amber-300",
-};
-export const statusOffline = {
-  bg: "bg-slate-200 dark:bg-slate-700",
-  text: "text-slate-700 dark:text-slate-300",
 };
 
 registerText("connected pill", STATUS_CONNECTED_TEXT, STATUS_CONNECTED_BG);
 registerText("connecting pill", STATUS_CONNECTING_TEXT, STATUS_CONNECTING_BG);
 registerText("offline pill", STATUS_OFFLINE_TEXT, STATUS_OFFLINE_BG);
 
-/** A live connection-status dot: fixed, solid fill per state, unlike the pale `statusConnected`-
- * family pills above (a pill holds text and needs a light background for contrast; a dot holds
- * no text and needs a solid fill to stay visible at a few pixels wide). Decorative — no contrast
- * check applies, since the adjacent `sr-only` text carries the accessible label. */
+/** A live connection-status dot: fixed, solid fill per state, unlike the pale
+ * `STATUS_CONNECTED_BG`/`STATUS_OFFLINE_BG` pill palettes above (a pill holds text and needs a
+ * light background for contrast; a dot holds no text and needs a solid fill to stay visible at a
+ * few pixels wide). Decorative — no contrast check applies, since the adjacent `sr-only` text
+ * carries the accessible label. */
 export const connectionDotConnected = "bg-emerald-500 dark:bg-emerald-400";
 export const connectionDotConnecting = "bg-amber-500 dark:bg-amber-400";
 export const connectionDotOffline = "bg-slate-400 dark:bg-slate-500";
 
 /** A small circular status dot inline next to a subscribed session's name — unlike the
- * `statusConnected`/`statusOffline` pills above, it has no label text of its own, so it
- * uses a bolder, more saturated fill to stay legible at that size. Purely decorative — no
+ * `STATUS_CONNECTED_BG`/`STATUS_OFFLINE_BG` pill palettes above, it has no label text of its own,
+ * so it uses a bolder, more saturated fill to stay legible at that size. Purely decorative — no
  * contrast check applies. */
 export const liveDotBg = "bg-emerald-500 dark:bg-emerald-400";
 export const offlineDotBg = "bg-slate-400 dark:bg-slate-600";
@@ -569,4 +555,3 @@ export const newDividerLine = "bg-sky-200 dark:bg-sky-900";
 
 export const card = "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900";
 export const canvasText = "bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100";
-export const surfaceText = "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100";

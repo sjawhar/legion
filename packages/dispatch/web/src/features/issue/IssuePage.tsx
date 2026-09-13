@@ -54,6 +54,7 @@ import { ConversationTab } from "../conversation/ConversationTab";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { selectableStatusesFor } from "../project/board-model";
 import {
   buildIssuePath,
   type IssueRoute,
@@ -71,17 +72,6 @@ import { IssueLabels } from "./IssueLabels";
 import { IssueTabs } from "./IssueTabs";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueDrafts } from "./useIssueDrafts";
-
-const issueStatuses = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-];
 
 function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
   return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
@@ -271,7 +261,7 @@ function IssueHeader({
   const drafts = useIssueDrafts(issue, updateIssue);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
-  const selectableStatuses = issue.status === "done" ? [...issueStatuses, "done"] : issueStatuses;
+  const selectableStatuses = selectableStatusesFor(issue.status);
   const staleOpenAsk = issue.open_asks.find(
     (ask) => Date.parse(ask.created_at) < Date.now() - 60 * 60 * 1000
   );

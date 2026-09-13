@@ -150,8 +150,8 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   await expect
     .poll(() => getIssue(firstIssue.key))
     .toMatchObject({ title: "First decision revised" });
-  await alicePage.getByLabel("Status").selectOption("testing");
-  await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ status: "testing" });
+  await alicePage.getByLabel("Status").selectOption("todo");
+  await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ status: "todo" });
   await alicePage.getByText("Messages default to no route").click();
   await alicePage.getByLabel("Route").fill("role:legion-controller-core");
   await alicePage.getByRole("button", { name: "Save route" }).click();
