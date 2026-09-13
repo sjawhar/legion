@@ -6,11 +6,11 @@
   "pr": {
     "number": 1003,
     "url": "https://github.com/sjawhar/legion/pull/1003",
-    "headTested": "2b01e897df973e917aa0d67962795818fe478d3a",
-    "codeHead": "92a66d47c28c (docs) on dc38ca668ee8 (CLI + test), rebased onto main 0f744bc8811e; pre-rebase code head caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "headTested": "c1a8ba1430e3725367cdbf248d1b61b3302c1cfc",
+    "codeHead": "5e0f6a0e663d (docs-only fix after review 5189854058) on 92a66d47c28c (docs) on dc38ca668ee8 (CLI + test), on main 0f744bc8811e",
     "ciAtHeadTested": {
-      "Tests": 34742377726,
-      "conclusion": "success (reported by the architect; head 2b01e897 MERGEABLE on GitHub)"
+      "Tests": 34743246861,
+      "conclusion": "success (reported by the architect)"
     },
     "fullVerificationHead": "08700ee7fcfaeec5f4cc480fc11f22cea98ff27c"
   },
@@ -111,9 +111,9 @@
   },
   "acceptance": {
     "1": "Met at 08700ee7: unit file pins one resolveReviewThread per accepted-by-opener thread and none otherwise (see unitTests.pins); live run resolved exactly the accepted thread and left the Still-open one open, confirmed by GitHub isResolved.",
-    "2": "Not proven by the tester and not claimed: the cross-App case (a thread the review App opened, accepted by the reviewer, resolved by the implementer's run) is proven in the review round (plan step 5). Every thread on PR #1003 so far was opened and accepted by the implement App.",
+    "2": "Observed read-only at c1a8ba14 (round 3): PRRT_kwDORFy7ds6h3A8X, opened by legion-reviewer with its own `Accepted:` as newest comment, is isResolved: true after the implementer's run — the cross-App case. The reviewer's approval body is where acceptance 2 is recorded per the spec; the tester observed the state, it did not produce it.",
     "3": "Recorded in the spec's Requirements table and the PR body (ruleset 12331919, required_review_thread_resolution: false); not re-read by the tester.",
-    "4": "Read the diff of caa02ad2 (jj diff --git -r caa02ad2). skills/legion-worker/SKILL.md: who (implementer before every push that answers a review — corrective and .legion/ deletion; merger once more before READY), when, the three reply forms verbatim, and why (GitHub grants resolve and push only to the PR author, the comment author, or push access; review App can reply but neither resolve nor push) — in the Threads bullet, the reviewer bullet, and the merger bullet; template gains the command output lines. packages/daemon/src/daemon/AGENTS.md: new `## GitHub Apps` section — role→App mapping via appRoleForLegionRole, the GitHub rule, `Resource not accessible by integration` for both push and resolve, widening does not help, implementer pushes the .legion/ deletion and runs the command, merger runs it before READY, output/exit contract, `Still open:` and other-account replies leave open with exit 0. roles/reviewer.md: three forms verbatim, cannot resolve (refused exactly like its push, pointer to AGENTS.md), implementer runs the command, approve only with isResolved: true from gh api graphql. roles/implementer.md: when (before every push answering a review), what it resolves, why (review App cannot resolve or push, pointer), exit 1 → report to the architect. roles/merger.md: run before READY (step 3), same code-writing App, resolving changes no commit, do not publish on left open/exit 1. skills/legion-architect/SKILL.md: action ask on exit 1, merger does not publish while open, review App cannot resolve. docs/solutions §3: GitHub rule, three forms verbatim, command replaces the raw GraphQL mutation, exit contract, ruleset note. Root AGENTS.md command line and pi-envoy CHANGELOG (three forms) added."
+    "4": "Read the diff of caa02ad2 (jj diff --git -r caa02ad2). skills/legion-worker/SKILL.md: who (implementer before every push that answers a review — corrective and .legion/ deletion; merger once more before READY), when, the three reply forms verbatim, and why (GitHub grants resolve and push only to the PR author, the comment author, or push access; review App can reply but neither resolve nor push) — in the Threads bullet, the reviewer bullet, and the merger bullet; template gains the command output lines. packages/daemon/src/daemon/AGENTS.md: new `## GitHub Apps` section — role→App mapping via appRoleForLegionRole, the GitHub rule, `Resource not accessible by integration` for both push and resolve, widening does not help, implementer pushes the .legion/ deletion and runs the command, merger runs it before READY, output/exit contract, `Still open:` and other-account replies leave open with exit 0. roles/reviewer.md: three forms verbatim, cannot resolve (refused exactly like its push, pointer to AGENTS.md), implementer runs the command, approve only with isResolved: true from gh api graphql. roles/implementer.md: when (before every push answering a review), what it resolves, why (review App cannot resolve or push, pointer), exit 1 → report to the architect. roles/merger.md: run before READY (step 3), same code-writing App, resolving changes no commit, do not publish on left open/exit 1. skills/legion-architect/SKILL.md: action ask on exit 1, merger does not publish while open, review App cannot resolve. docs/solutions §3: GitHub rule, three forms verbatim, command replaces the raw GraphQL mutation, exit contract, ruleset note. Root AGENTS.md command line and pi-envoy CHANGELOG (three forms) added. Round 3: the 'why' now reads GitHub's rule as the PR author or a repository writer (no comment-author clause) at all four sites the reviewer named; sweep for leftovers clean."
   },
   "documentationFeedback": "Acceptance 4 met for the two documents it names (worker skill, daemon AGENTS.md) and for the reviewer role prompt and solutions doc. Observation, not a defect: the three reply forms are enumerated verbatim in the worker skill, reviewer.md, the solutions doc, and the CHANGELOG; implementer.md and merger.md name only the `Accepted:` trigger (they consume, never write, the reply), and the daemon AGENTS.md names `Accepted:` and `Still open:` without the fixed-in / not-a-defect variants. The architect-skill paragraph covers its spec'd scope (the action ask) and says the review App cannot resolve, without restating the GitHub rule or the push limitation. Every statement checked matches the running code: acceptedByOpener requires the newest comment to be the opener's and to start `Accepted:` after trimStart, so `a later reply by anyone else puts the thread back to left open` (worker skill) is exactly what the code does.",
   "observations": [
@@ -121,9 +121,10 @@
     "The installed pi-legion-envoy build prepends `export LEGION_GRANT=…` to the bash command text; this tester imitated that line on several calls, which shadowed the real grant and answered `Unable to redeem LEGION_GRANT (403)` — the same failure the planner and implementer recorded. Running commands through script files via the eval kernel's tool.bash bridge kept the command text clean. The workspace extension (env-injected grant) already fixes this; nothing in this PR.",
     "The .omp/config.yml the extension provisions sits in the working copy (`A .omp/config.yml`); the handoff was committed with `jj split` on the single file and the bookmark advanced with `-r @- --allow-backwards`, so it never entered a commit.",
     "prBodyEdits: 1 (Threads count 2→3 with the tester thread's line, and the E2E section overwritten, in one `legion gh -- pr edit --body-file`).",
-    "Round 2 (rebase re-verification): the daemon and eval bridge were reachable throughout; no 403s once every command ran as a single clean line through tool.bash."
+    "Round 2 (rebase re-verification): the daemon and eval bridge were reachable throughout; no 403s once every command ran as a single clean line through tool.bash.",
+    "Round 3 (review round 1 fix): GitHub reported `mergeable=UNKNOWN` for the minute after the c1a8ba14 push (still recomputing); not a finding."
   ],
-  "prBodyEdits": 2,
+  "prBodyEdits": 3,
   "rounds": [
     {
       "n": 1,
@@ -165,9 +166,54 @@
         "newThreads": "none opened this round"
       },
       "prBodyEdits": 1
+    },
+    {
+      "n": 3,
+      "head": "c1a8ba1430e3725367cdbf248d1b61b3302c1cfc",
+      "verdict": "pass",
+      "reason": "Review round 1 (review 5189854058) requested changes: the 'why' rationale wrongly included a comment-author clause in four places; the implementer fixed it docs-only in 5e0f6a0e.",
+      "checks": {
+        "workspace": "jj git fetch → Nothing changed; @- = c1a8ba14 = legion/LEGION-34@origin = GitHub headRefOid",
+        "fixDiff": "jj diff --summary -r 5e0f6a0e → M docs/solutions/daemon/external-red-and-phase-ownership.md, M packages/daemon/src/cli/index.ts (cmdThreadsResolve doc comment only, lines 215-222), M packages/daemon/src/daemon/AGENTS.md, M skills/legion-worker/SKILL.md; no code statement changed",
+        "ruleWording": "each of the four sites now reads: GitHub lets only the pull request's author or an account with write (push) access to the repository resolve a review thread or push to its branch; the review App is neither by design; widening the review App is rejected by design, not because it would not work. No comment-author clause remains.",
+        "leftoverSweep": "case-insensitive grep for `comment's author` / `comment author` / `push access` across skills/, packages/pi-envoy/roles/, packages/daemon/src/daemon/AGENTS.md, docs/solutions/, packages/daemon/src/cli/, root AGENTS.md, packages/pi-envoy/CHANGELOG.md → no matches",
+        "unitTests": "bun test src/cli/__tests__/review-threads.test.ts src/cli/__tests__/index.test.ts → 30 pass, 0 fail, 84 expect() calls",
+        "lint": "bunx biome check --error-on-warnings src/ → Checked 156 files, no fixes applied, exit 0",
+        "typecheck": "bunx tsc --noEmit → exit 0",
+        "acceptance2ReadOnly": {
+          "PRRT_kwDORFy7ds6h3A8X": {
+            "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998955772",
+            "opener": "legion-reviewer",
+            "newest": "legion-reviewer: Accepted: not a defect — acceptance-2 probe; isAcceptance is exact and pinned by the unit test. …",
+            "isResolved": true,
+            "meaning": "a thread the review App opened, accepted by the reviewer, resolved by the implementer App's run — the cross-App case acceptance 2 names"
+          },
+          "PRRT_kwDORFy7ds6h3A8V": {
+            "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998955769",
+            "opener": "legion-reviewer",
+            "newest": "legion-implementer: Fixed in 5e0f6a0e (`docs(legion): the review App cannot resolve threads because it is neither the PR author nor a repository writer`): …",
+            "isResolved": false,
+            "meaning": "the blocking thread; the reviewer has not yet replied Accepted:, so it stays open"
+          },
+          "implementAppThreads": {
+            "PRRT_kwDORFy7ds6h2yAp": true,
+            "PRRT_kwDORFy7ds6h2yBh": true,
+            "PRRT_kwDORFy7ds6h220J": true
+          }
+        },
+        "liveRun": {
+          "command": "bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion",
+          "output": [
+            "left open https://github.com/sjawhar/legion/pull/1003#discussion_r3998955769 — newest reply by legion-implementer is not an acceptance"
+          ],
+          "exit": 0
+        },
+        "newThreads": "none opened or replied to this round"
+      },
+      "prBodyEdits": 1
     }
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T06:21:37.310Z"
+  "completed": "2026-09-13T06:43:40.578Z"
 }
