@@ -3922,6 +3922,9 @@ describe("ProcessManager", () => {
         tmuxPaneId: "%2",
         socketPath: "/state/workers/tester.sock",
         ompSessionFile: sessionFile,
+        // The pane still runs the recorded process (what the fake `list-panes` reports): only a
+        // verified pane is ever killed, so the kill below is attempted and its failure surfaces.
+        ...paneIdentity(),
       },
     };
     state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
@@ -7138,7 +7141,7 @@ describe("ProcessManager", () => {
     // The retry relaunched the same role onto a fresh process, still carrying its assignment.
     const relaunched = managedState.roles[token];
     if (!relaunched || !("issue" in relaunched)) throw new Error("relaunched claim missing");
-    expect(relaunched.pendingAssignment).toBe("implement #41");
+    expect(relaunched.pendingAssignment).toEqual({ kind: "assignment", task: "implement #41" });
     expect(relaunched.locator).toBeDefined();
     expect(relaunched.locator).not.toEqual(workerLocator);
   });
@@ -12203,7 +12206,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "implementer",
       generation: 1,
-      pendingAssignment: "implement #41",
+      pendingAssignment: { kind: "assignment", task: "implement #41" },
       locator: {
         ...sharedPane,
         socketPath: "/state/workers/live.sock",
@@ -12214,7 +12217,7 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: "verify #41",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
       locator: {
         ...sharedPane,
         socketPath: "/state/workers/stale.sock",
