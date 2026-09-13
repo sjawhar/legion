@@ -1,0 +1,77 @@
+{
+  "verdict": "pass",
+  "pr": "https://github.com/sjawhar/legion/pull/1015",
+  "prNumber": 1015,
+  "head": "1928fe1b767bd957278ac59dcad6ca21a12ca8dc",
+  "ci": {
+    "workflow": "Tests",
+    "run": 34750398381,
+    "url": "https://github.com/sjawhar/legion/actions/runs/34750398381",
+    "headSha": "1928fe1b767bd957278ac59dcad6ca21a12ca8dc",
+    "conclusion": "success",
+    "jobs": {
+      "pr-title": "success",
+      "lint": "success",
+      "typecheck": "success",
+      "test": "success"
+    }
+  },
+  "regressionLock": {
+    "command": "cd packages/daemon && bun test src/cli/__tests__/index.test.ts",
+    "result": "55 pass, 0 fail, 142 expect() calls",
+    "issueWriteTests": "13 `issue <verb>` refusals, 6 raw-API refusals, 8 forwards, the --repo bypass, and the generic-name case without LEGION_ISSUE"
+  },
+  "e2e": {
+    "surface": "legion gh CLI in a worker pane; a pane's `legion` is <state_dir>/bin/legion which re-execs `bun <daemon checkout>/packages/daemon/src/cli/index.ts` (verified: /home/ubuntu/.local/state/legion/sjawhar-legion/bin/legion execs /home/ubuntu/legion-ws-RunDaemon/packages/daemon/src/cli/index.ts), so the pre-merge proof ran the workspace entry over the identical cmdGh path (plan D9)",
+    "head": "1928fe1b767bd957278ac59dcad6ca21a12ca8dc",
+    "env": "LEGION_ISSUE=LEGION-78; tester's own bash calls",
+    "steps": [
+      "bun packages/daemon/src/cli/index.ts gh -- api repos/sjawhar/legion/issues/1015/comments --jq length -> 0, exit=0 (GET on an /issues path forwards)",
+      "bun packages/daemon/src/cli/index.ts gh -- issue comment 1015 --repo sjawhar/legion --body smoke -> stderr `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on LEGION-78`, stdout empty, exit=1",
+      "bun packages/daemon/src/cli/index.ts gh -- api -X POST repos/sjawhar/legion/issues/1015/comments -f body=smoke -> same message, exit=1",
+      "bun packages/daemon/src/cli/index.ts gh -- api repos/sjawhar/legion/issues/1015/comments -f body=smoke (implicit POST) -> same message, exit=1",
+      "bun packages/daemon/src/cli/index.ts gh -- api repos/sjawhar/legion/issues/1015/comments --jq length -> 0, exit=0 (count unchanged: nothing reached GitHub)",
+      "bun packages/daemon/src/cli/index.ts gh -- pr view 1015 --repo sjawhar/legion --json number -> {\"number\":1015}, exit=0 (positive control)"
+    ],
+    "refusalPrecedesCredential": "env -u LEGION_GRANT LEGION_GRANT_FILE=/nonexistent/grant bun … gh -- issue comment 1015 … -> the refusal message, exit=1; the same env on `pr view 1015` fails on the unreadable grant file instead, so the guard runs before redeemGitHubToken",
+    "extraRefused": [
+      "issue --repo sjawhar/legion comment 1015 --body smoke",
+      "api --method=patch repos/sjawhar/legion/issues/1015 -F state=closed",
+      "api -XPUT repos/sjawhar/legion/issues/1015/lock",
+      "api repos/sjawhar/legion/issues/1015/labels --input /dev/null",
+      "api -X DELETE repos/sjawhar/legion/issues/comments/5652558869",
+      "issue close 1015 --repo sjawhar/legion"
+    ],
+    "extraForwarded": [
+      "api --method GET repos/sjawhar/legion/issues -f state=open -f per_page=1 --jq length -> 1",
+      "issue list --repo sjawhar/legion --limit 1 --json number --jq length -> 1",
+      "api repos/sjawhar/legion/pulls/1015/comments --jq length -> 0",
+      "api graphql -f query=…pullRequest(number:1015){number} -> 1015",
+      "pr comment 1015 --repo sjawhar/legion --delete-last --yes -> Comment deleted"
+    ],
+    "negativeControl": "the refused `issue comment 1015 --body smoke` itself"
+  },
+  "acceptanceGreps": {
+    "grep -rn 'gh -- issue\\|gh issue\\|issue comment <' skills/ packages/pi-envoy/roles/": "(nothing) exit=1",
+    "grep -rn 'issue comment' skills/legion-*/ packages/pi-envoy/roles/": "(nothing) exit=1",
+    "grep -rn 'gh issue' skills/ packages/pi-envoy/roles/": "(nothing) exit=1"
+  },
+  "acceptance": {
+    "1": "pass — skills/legion-retro/SKILL.md lines 82-95 are a dispatch_message({ issue: \"<KEY>\", body }) call ending in the `<!-- legion: {\"session\":\"<session-id>\",\"phase\":\"retro\"} -->` footer; frontmatter example lists \"LEGION-123\" (Dispatch issue) and \"owner/repo#456\" (pull request); skills/legion-architect/SKILL.md step 5 (lines 174-195) says `post the retro message on the Dispatch issue with dispatch_message`; greps 1 and 2 print nothing",
+    "2": "pass — grep 3 prints nothing; gh pr / gh api …/pulls uses untouched (pr comment --delete-last, api …/pulls/1015/comments, api graphql all forwarded live)",
+    "3": "pass — 20 refusal tests + 8 forward tests in packages/daemon/src/cli/__tests__/index.test.ts; live smoke of every listed form refused with the Errors-table message, exit 1, before any credential is read, and no GitHub call (comment count unchanged)",
+    "4": "pass — LEGION-38 (#1008, merge 82757405f4db) and LEGION-59 (#998, merge 0cfe857dbc8c) are ancestors of the branch base 52c5e03e7cb3; main@origin == base; GitHub reports mergeable: MERGEABLE, mergeStateStatus BLOCKED only on REVIEW_REQUIRED; no rebase"
+  },
+  "prBody": "E2E section rewritten at the head with the tester's evidence, CI line updated to run 34750398381 at 1928fe1b767b, Acceptance 1/2 grep block re-run at the head, Acceptance 4 line added; Threads/Thermo/Fast-follow/Chain untouched",
+  "deviations": [
+    "The tester ran `legion gh -- issue comment 1015 --repo sjawhar/legion --body smoke` once through the pane's own `legion` (the pre-merge daemon checkout) to show the launcher path; that shim forwards, and it posted a `smoke` comment (id 5652558869, legion-implementer[bot]) on PR #1015's conversation. Deleted within the same minute with `bun packages/daemon/src/cli/index.ts gh -- pr comment 1015 --repo sjawhar/legion --delete-last --yes`; the conversation-comment count is back to 0. Recorded in the PR body's E2E section as the live demonstration of the hazard and of D9 — the daemon checkout must carry the merge before panes refuse."
+  ],
+  "observations": [
+    "Not blocking, by the plan's own scope (a stale template followed in good faith, not evasion): pflag's combined short flags let `gh api -if body=x <issues path>` carry a body flag as the trailing letter of a combined token; ghApiMethod does not see `-if` as `-f`, so that spelling would forward. No skill or template writes it.",
+    "`.omp/config.yml` (OMP's own project config) sits untracked-in-working-copy above the pushed head, as the implementer noted; not committed."
+  ],
+  "blockers": [],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T10:00:08.425Z"
+}
