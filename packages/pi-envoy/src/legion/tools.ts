@@ -1,4 +1,4 @@
-import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
+import { LEGION_ROLES, LegionDaemonApi, type LegionRole } from "@legion/contracts";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -33,9 +33,13 @@ function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[
   return (LIFECYCLE_STATUSES as readonly string[]).includes(value);
 }
 
-/** A Dispatch artifact id (Postgres `gen_random_uuid()`): what `artifact.approved` and its
- * siblings carry as `artifact_id`, and therefore the only value `register_gate` may record. */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A Dispatch artifact id: what `artifact.approved` and its siblings carry as `artifact_id`, and
+ * therefore the only value `register_gate` may record. The daemon's contract owns the
+ * definition (`LegionDaemonApi.GatesRegister.request`'s `artifactId`, a UUID); this check exists
+ * to fail with a message that says where the id comes from, before the round trip. */
+function isDispatchArtifactId(value: string): boolean {
+  return LegionDaemonApi.GatesRegister.request.shape.artifactId.safeParse(value).success;
+}
 
 // pi.zod exposes only object/string/number/array/enum/unknown (no union or
 // discriminatedUnion), so per-op typing cannot be expressed as a discriminated
@@ -130,7 +134,7 @@ export function createLegionTool(deps: {
               throw new Error("register_gate requires a positive integer version");
             }
             const artifactId = stringInput("artifactId");
-            if (!UUID_PATTERN.test(artifactId)) {
+            if (!isDispatchArtifactId(artifactId)) {
               throw new Error(
                 `register_gate requires artifactId to be the document id (a UUID) from dispatch_request_approval's result, not "${artifactId}"`
               );
