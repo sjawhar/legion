@@ -2,8 +2,8 @@
   "passed": 8,
   "failed": 0,
   "failures": [],
-  "headSha": "9a1b816fc757885c1251db828846b97a95ae5e52",
-  "codeHeadSha": "7924c7f1256fab1802aada6f6375c0a2fadf471f",
+  "headSha": "babb84c418ddc8a2a27e062ca8f82cb3914ffc68",
+  "codeHeadSha": "ee30986021a9",
   "spec": "dispatch://LEGION-57/spec v5",
   "report": "dispatch://LEGION-57/artifact/tester-report-md",
   "verdicts": {
@@ -47,9 +47,29 @@
       "daemonTests": "not re-run: the four daemon test files are unchanged since the round-1 PASS at cf7ad333 (450 pass, 0 fail); CI at 9a1b816f green on lint, pr-title, typecheck, test (runs 34760593195, 34760614257); GitHub MERGEABLE",
       "rig": "not run this round: no daemon code change, and the fixture harness proves the fallback condition (fails on the previous script, passes on the head)",
       "workspaceNote": "implementer left @ on the pushed handoff commit 9a1b816f; my session's zero-byte .omp/config.yml was snapshotted into it locally (6f170640, same change id). Not pushed (would move the head sideways). Round-2 working copy started on legion/LEGION-57@origin; the stray variant was given a fresh change id (jj metaedit --update-change-id -> xwsloukt 38773df9) to end divergence and is left bookmark-less for the architect to abandon (worker skill forbids jj abandon)."
+    },
+    {
+      "round": 3,
+      "headSha": "babb84c418ddc8a2a27e062ca8f82cb3914ffc68",
+      "codeCommits": [
+        "e18b8d2f71c2 daemon: the boot repair also removes and revokes the child's stale root-architect claim (LEGION-57 review)",
+        "ee30986021a9 review round: skill rows spawn only open released children; routeActive drops its dead envelope; checkpoint 4, docs, and test minors (LEGION-57)"
+      ],
+      "trigger": "reviewer REQUEST_CHANGES https://github.com/sjawhar/legion/pull/1024#pullrequestreview-5191080569 (3 blocking, 11 minor); .legion/review.json at 4ac89fb25cda",
+      "filesChanged": "jj diff --from dc1224cc --to babb84c4 --summary: 16 paths = e18b8d2f's 3 + ee309860's 12 + .legion/implement.json + .legion/review.json; nothing outside the fourteen threads' files",
+      "verdicts": {
+        "1_r3999941341_staleClaimRevoke": "PASS: implementer's index.test WIDGETS-6 and processes.test table test red on pre-fix processes.ts (4ac89fb2), green at head; behavioural probe (real ProcessManager + real startLegionApi, launch-failed child tree with root-architect claim sessionId ses_child_failed_root, boot repair, spawnWorker(root, child, architect) -> spawned, POST /worker/started from a fresh session): pre-fix 409 'Worker respawn must resume the same agent session' with expectedSessionId=ses_child_failed_root; head 200 with a minted secret and expectedSessionId undefined",
+        "2_r3999941377_envelopeCutover": "PASS: tsc --noEmit -p packages/daemon exit 0; bun test reducers/events/resync/api/index/processes 521 pass, 3 skip, 0 fail; routeActive never read _envelope; events.ts and resync.ts only drop the settleCiVerdict argument and still pass their envelope to applyEffects (which reads it); no effect built differently",
+        "3_r3999941364_fenceTest": "PASS: test asserts the observable (testing PATCH after a failed in_progress with no echo; pendingStatusWrites[child] recorded); mutation replacing knownIssueStatus's fence with `return echoed` fails exactly this test and the pre-existing root-path twin (64 pass / 2 fail), restored both pass",
+        "4_r3999941374_checkpoint4Todo": "PASS: bash scripts/smoke/checkpoints.test.sh 25 PASS exit 0; new case runs against the default fixture with the child flipped to todo and expects 'released child LEGSMOKE-2 has a sub-architect worker pane on LEGSMOKE-1 but Dispatch still reports it todo'; pending clause ordered after owned and before unowned, so the round-2 missing-claim case still fires",
+        "5_skillRows": "PASS: child-adopted 'remaining counts exactly [todo..retro]' = openChildren (not done); catchup-overseer childCounts[LEGION_ISSUE].open exists in catchup.ts overseerCatchup (open = children not done); child-status backlog/icebox 'daemon stops nothing' true (reducer lingers only state.trees[child] when active; a LEGION-57 child has none); done children get nothing",
+        "6_scopeAndHistory": "PASS: 4ac89fb2 (.legion/review.json, verdict changes_requested, review URL) is an ancestor of the pushed head; CI green on lint/pr-title/typecheck/test at babb84c4 (runs 34765119566, 34765144642); MERGEABLE; AGENTS.md orphan clause now 'nearest ancestor with a tree' matching liveAncestorTree"
+      },
+      "rig": "not run: item 1 proven end to end in the unit harness (real ProcessManager + real API), the rest are tests, docs, and harness"
     }
   ],
+  "round2HeadSha": "9a1b816fc757885c1251db828846b97a95ae5e52",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T14:08:42.339Z"
+  "completed": "2026-09-13T15:24:33.693Z"
 }
