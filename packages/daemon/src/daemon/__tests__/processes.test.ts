@@ -39,7 +39,7 @@ import type { Effect } from "../reducers";
 import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
-import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
 const root = "LEGION-42";
@@ -9744,16 +9744,18 @@ describe("ProcessManager", () => {
   });
 
   it("rotates a below-threshold launch failure to the tail instead of blocking the queue behind it", async () => {
-    const failingToken = roleToken("omp", root, "planner");
+    // A reviewer outranks a tester (`workerPriority`), so the failing token is the head the drain
+    // attempts first; the point of the test is what happens to the token behind it.
+    const failingToken = roleToken("omp", root, "reviewer");
     const okToken = roleToken("omp", root, "tester");
     const { processes, state, managedState, stateDir } = await workerCapFixture(1);
     state.roles[failingToken] = {
       issue: root,
-      role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      role: "reviewer",
+      pendingAssignment: { kind: "assignment", task: "review #41" },
       // A deterministic, permanent failure (missing session file, never appears on retry) — but
       // launchFailures starts at 0, so one attempt stays *below* MAX_LAUNCH_FAILURES (3).
-      resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
+      resumeSessionFile: path.join(stateDir, "missing-reviewer-session.json"),
     };
     state.roles[okToken] = {
       issue: root,
@@ -9771,12 +9773,107 @@ describe("ProcessManager", () => {
     // blocking the head, and okToken — now at the head — launched successfully in the same pass.
     expect(managedState.workerAdmission.queue).toEqual([failingToken]);
     const failingClaim = managedState.roles[failingToken];
-    if (!failingClaim || !("issue" in failingClaim)) throw new Error("planner claim missing");
+    if (!failingClaim || !("issue" in failingClaim)) throw new Error("reviewer claim missing");
     expect(failingClaim.launchFailures).toBe(1);
     expect(failingClaim.locator).toBeUndefined();
     const okClaim = managedState.roles[okToken];
     if (!okClaim || !("issue" in okClaim)) throw new Error("tester claim missing");
     expect(okClaim.locator).toBeDefined();
+  });
+
+  it("promotes work that finishes an open pull request before work that opens a new one, whatever order it was queued in", async () => {
+    // Queued in the worst arrival order: a fresh implementer (no PR yet) first, then the phases
+    // that would finish existing PRs. One slot: exactly one token launches per drain, so the
+    // order the queue is left in is the order the daemon will run them.
+    const otherRoot = "LEGION-99";
+    const newImplementer = roleToken("omp", root, "implementer");
+    const tester = roleToken("omp", otherRoot, "tester");
+    const reviewer = roleToken("omp", root, "reviewer");
+    const merger = roleToken("omp", otherRoot, "merger");
+    const { processes, state, managedState } = await workerCapFixture(1);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    for (const [token, issue, role] of [
+      [newImplementer, root, "implementer"],
+      [tester, otherRoot, "tester"],
+      [reviewer, root, "reviewer"],
+      [merger, otherRoot, "merger"],
+    ] as const) {
+      state.roles[token] = { issue, role, pendingAssignment: { kind: "assignment", task: role } };
+      state.workerAdmission.queue.push(token);
+    }
+
+    await processes.reconcileWorkerAdmission();
+
+    const mergerClaim = managedState.roles[merger];
+    if (!mergerClaim || !("issue" in mergerClaim)) throw new Error("merger claim missing");
+    expect(mergerClaim.locator).toBeDefined();
+    expect(managedState.workerAdmission.queue).toEqual([reviewer, tester, newImplementer]);
+  });
+
+  it("ranks an implementer whose issue already has a pull request with the finishing work, ahead of planners and fresh implementers", async () => {
+    const otherRoot = "LEGION-99";
+    const correctiveImplementer = roleToken("omp", root, "implementer");
+    const planner = roleToken("omp", otherRoot, "planner");
+    const { processes, state, managedState } = await workerCapFixture(1);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    state.prs["acme/widgets#7"] = checkPr(root, { number: 7 });
+    for (const [token, issue, role] of [
+      [planner, otherRoot, "planner"],
+      [correctiveImplementer, root, "implementer"],
+    ] as const) {
+      state.roles[token] = { issue, role, pendingAssignment: { kind: "assignment", task: role } };
+      state.workerAdmission.queue.push(token);
+    }
+
+    await processes.reconcileWorkerAdmission();
+
+    const implementerClaim = managedState.roles[correctiveImplementer];
+    if (!implementerClaim || !("issue" in implementerClaim)) throw new Error("claim missing");
+    expect(implementerClaim.locator).toBeDefined();
+    expect(managedState.workerAdmission.queue).toEqual([planner]);
+  });
+
+  it("retries a token that already failed to launch behind every clean token, whatever its tier", async () => {
+    const otherRoot = "LEGION-99";
+    const retryingMerger = roleToken("omp", root, "merger");
+    const cleanImplementer = roleToken("omp", otherRoot, "implementer");
+    const { processes, state, managedState } = await workerCapFixture(1);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
+    state.roles[retryingMerger] = {
+      issue: root,
+      role: "merger",
+      pendingAssignment: { kind: "assignment", task: "merge #41" },
+      launchFailures: 1,
+    };
+    state.roles[cleanImplementer] = {
+      issue: otherRoot,
+      role: "implementer",
+      pendingAssignment: { kind: "assignment", task: "implement #99" },
+    };
+    // Arrival order and tier both favour the merger; its unresolved launch failure decides.
+    state.workerAdmission.queue.push(retryingMerger, cleanImplementer);
+
+    await processes.reconcileWorkerAdmission();
+
+    const cleanClaim = managedState.roles[cleanImplementer];
+    if (!cleanClaim || !("issue" in cleanClaim)) throw new Error("implementer claim missing");
+    expect(cleanClaim.locator).toBeDefined();
+    expect(managedState.workerAdmission.queue).toEqual([retryingMerger]);
   });
 
   it("stops the drain after one below-threshold failure on a single-item queue instead of burning every MAX_LAUNCH_FAILURES attempt in one pass", async () => {
@@ -12804,9 +12901,18 @@ describe("ProcessManager", () => {
   });
 
   it("stops the drain after one below-threshold failure each for two queued tokens instead of burning every MAX_LAUNCH_FAILURES attempt on both in one pass", async () => {
+    // Two planners on two trees: the same `workerPriority` tier, so the queue order below is
+    // arrival order and the rotation arithmetic in the comment holds.
+    const otherRoot = "LEGION-99";
     const failingTokenA = roleToken("omp", root, "planner");
-    const failingTokenB = roleToken("omp", root, "tester");
+    const failingTokenB = roleToken("omp", otherRoot, "planner");
     const { processes, state, managedState, stateDir } = await workerCapFixture(1);
+    state.trees[otherRoot] = {
+      root: otherRoot,
+      generation: 1,
+      status: "active",
+      launchFailures: 0,
+    };
     state.roles[failingTokenA] = {
       issue: root,
       role: "planner",
@@ -12816,10 +12922,10 @@ describe("ProcessManager", () => {
       resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
     };
     state.roles[failingTokenB] = {
-      issue: root,
-      role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
-      resumeSessionFile: path.join(stateDir, "missing-tester-session.json"),
+      issue: otherRoot,
+      role: "planner",
+      pendingAssignment: { kind: "assignment", task: "plan #99" },
+      resumeSessionFile: path.join(stateDir, "missing-planner-99-session.json"),
     };
     state.workerAdmission.queue.push(failingTokenA, failingTokenB);
 
@@ -12837,14 +12943,15 @@ describe("ProcessManager", () => {
     expect(claimA.launchFailures).toBe(1);
     expect(claimA.locator).toBeUndefined();
     const claimB = managedState.roles[failingTokenB];
-    if (!claimB || !("issue" in claimB)) throw new Error("tester claim missing");
+    if (!claimB || !("issue" in claimB)) throw new Error("second planner claim missing");
     expect(claimB.launchFailures).toBe(1);
     expect(claimB.locator).toBeUndefined();
   });
 
   it("treats a saveState failure after a successful launch as a persistence issue, not a launch failure: keeps the locator and pendingAssignment, never bumps launchFailures, never re-queues", async () => {
-    const token = roleToken("omp", root, "planner");
-    const secondToken = roleToken("omp", root, "tester");
+    // The tester outranks the planner (`workerPriority`), so it is the token attempted first.
+    const token = roleToken("omp", root, "tester");
+    const secondToken = roleToken("omp", root, "planner");
     let saveStateCalls = 0;
     const saveStateCalled = Promise.withResolvers<void>();
     const releaseSave = Promise.withResolvers<void>();
@@ -12864,29 +12971,29 @@ describe("ProcessManager", () => {
     });
     state.roles[token] = {
       issue: root,
-      role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      role: "tester",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
     };
     state.roles[secondToken] = {
       issue: root,
-      role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      role: "planner",
+      pendingAssignment: { kind: "assignment", task: "plan #41" },
     };
     state.workerAdmission.queue.push(token, secondToken);
 
     const reconciling = processes.reconcileWorkerAdmission();
     await saveStateCalled.promise;
 
-    // Planner's failing save is still gated. `launchWorker` already spliced planner out of the
+    // Tester's failing save is still gated. `launchWorker` already spliced tester out of the
     // queue (in memory) before calling this gated save — proving the second queued token is
-    // completely untouched while planner's own attempt is in flight: `drainWorkerQueue`'s loop
+    // completely untouched while tester's own attempt is in flight: `drainWorkerQueue`'s loop
     // awaits each token's own `promoteQueuedWorker` call fully before peeking the next one.
     expect(managedState.workerAdmission.queue).toEqual([secondToken]);
-    const untouchedTester = managedState.roles[secondToken];
-    if (!untouchedTester || !("issue" in untouchedTester)) {
-      throw new Error("tester claim missing");
+    const untouchedPlanner = managedState.roles[secondToken];
+    if (!untouchedPlanner || !("issue" in untouchedPlanner)) {
+      throw new Error("planner claim missing");
     }
-    expect(untouchedTester.locator).toBeUndefined();
+    expect(untouchedPlanner.locator).toBeUndefined();
 
     releaseSave.resolve();
     await reconciling;
@@ -12903,11 +13010,11 @@ describe("ProcessManager", () => {
     // `/worker/ready` handshake calls back into the daemon independent of this save.
     expect(saveStateCalls).toBe(2);
     const claim = managedState.roles[token];
-    if (!claim || !("issue" in claim)) throw new Error("planner claim missing");
+    if (!claim || !("issue" in claim)) throw new Error("tester claim missing");
     expect(claim.launchFailures).toBe(0);
     expect(claim.locator).toBeDefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "plan #41" });
-    // Planner's own (never-rolled-back) locator keeps cap 1 fully occupied, so the second
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    // Tester's own (never-rolled-back) locator keeps cap 1 fully occupied, so the second
     // queued token correctly never promotes either.
     expect(managedState.workerAdmission.queue).toEqual([secondToken]);
   });
