@@ -2,9 +2,9 @@
   "passed": 8,
   "failed": 0,
   "failures": [],
-  "headSha": "85b6e098fed88d918f7e60cd46e46e65e8679944",
+  "headSha": "9a1b816fc757885c1251db828846b97a95ae5e52",
   "codeHeadSha": "7924c7f1256fab1802aada6f6375c0a2fadf471f",
-  "spec": "dispatch://LEGION-57/spec v4",
+  "spec": "dispatch://LEGION-57/spec v5",
   "report": "dispatch://LEGION-57/artifact/tester-report-md",
   "verdicts": {
     "1": "PASS: reducers.test.ts child-todo-under-live-root test is red on main's reducers.ts, green on the branch; rig child LEGSMOKE-2 at todo left trees=[LEGSMOKE-1], queue=[]",
@@ -32,7 +32,24 @@
     "processes.test.ts's two new tests also pass on main: regression locks for the spawn path, not bug catchers (the bug is in the reducer, covered by reducers.test.ts)"
   ],
   "documentationFeedback": "Docs match the spec. Consider correcting the AGENTS.md idle-retire sentence that an architect is never phases[issue].phase (a sub-architect is, once its assignment is delivered).",
+  "round1HeadSha": "85b6e098fed88d918f7e60cd46e46e65e8679944",
+  "rounds": [
+    {
+      "round": 2,
+      "headSha": "9a1b816fc757885c1251db828846b97a95ae5e52",
+      "correctiveCommit": "35fabe0db389 smoke: checkpoint 4's single-issue fallback applies only while no child is released; docs: the idle-retire architect exclusion is a role check (LEGION-57 tester round)",
+      "trigger": "round-1 Observations 3 and 4; spec v5 Design row for checkpoint 4 and docs row",
+      "filesChanged": "jj diff --from cf7ad33367fa --to 9a1b816fc757 --summary: scripts/smoke/checkpoints.sh, scripts/smoke/checkpoints.test.sh, scripts/smoke/README.md, packages/daemon/src/daemon/AGENTS.md, .legion/implement.json (no TypeScript)",
+      "verdicts": {
+        "checkpoint4Fallback": "PASS: bash scripts/smoke/checkpoints.test.sh at head -> 24 PASS, exit 0; the head harness run against cf7ad333's checkpoints.sh (only the reworded case-5 expectation swapped back) stops at 'checkpoint 4 passed on the root planner while a released child had no sub-architect' -- the old script prints the single-issue OK on the todo-child-plus-planner fixture (round-1 Observation 4's false green), the head script fails it naming 'released child LEGSMOKE-2 (todo) holds no sub-architect role claim with a worker pane on LEGSMOKE-1 (LEGION-57: ...)'; the triage-child-plus-planner fixture still takes the fallback; the no-child-is-a-tree assertion is untouched; unowned query reuses released_statuses",
+        "agentsMdIdleRetire": "PASS: every claim true of processes.ts at this head -- retireIdleWorker line 1799 `if (claim.role === \"architect\") return;` separate from the isActivePhase/pendingAssignment check at 1802-1804; promptExistingWorker lines 812-813 write state.phases[issue]={phase: role} for every assignment (sub-architect becomes phases[child].phase until the child's first phase-worker assignment overwrites the key); isActivePhase (legion-state.ts 502) compares phase.phase === role; the root architect never receives a phase (spawn_worker refuses role architect on the root, 400)"
+      },
+      "daemonTests": "not re-run: the four daemon test files are unchanged since the round-1 PASS at cf7ad333 (450 pass, 0 fail); CI at 9a1b816f green on lint, pr-title, typecheck, test (runs 34760593195, 34760614257); GitHub MERGEABLE",
+      "rig": "not run this round: no daemon code change, and the fixture harness proves the fallback condition (fails on the previous script, passes on the head)",
+      "workspaceNote": "implementer left @ on the pushed handoff commit 9a1b816f; my session's zero-byte .omp/config.yml was snapshotted into it locally (6f170640, same change id). Not pushed (would move the head sideways). Round-2 working copy started on legion/LEGION-57@origin; the stray variant was given a fresh change id (jj metaedit --update-change-id -> xwsloukt 38773df9) to end divergence and is left bookmark-less for the architect to abandon (worker skill forbids jj abandon)."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T12:45:45.904Z"
+  "completed": "2026-09-13T14:08:42.339Z"
 }
