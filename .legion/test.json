@@ -1,19 +1,26 @@
 {
+  "round": 2,
   "verdict": "PASS",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1023",
   "branch": "legion/LEGION-70",
-  "head": "190c68719d4019a728ddd628564343ae62dd42c4",
-  "spec": "dispatch://LEGION-70/spec (version 6)",
+  "head": "14a6e93056fb730d4f3ed9e876f04b0e3f0599a4",
+  "spec": "dispatch://LEGION-70/spec (version 8)",
+  "prState": {
+    "headRefOid": "14a6e93056fb730d4f3ed9e876f04b0e3f0599a4",
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BLOCKED",
+    "note": "read at the start of this round via `legion gh -- pr view 1023 --json mergeable,mergeStateStatus,headRefOid`; BLOCKED is branch protection awaiting review, not a conflict"
+  },
   "passed": 5,
   "failed": 0,
   "failures": [],
   "statusCheck": {
     "context": "legion/tester",
     "state": "success",
-    "sha": "190c68719d4019a728ddd628564343ae62dd42c4",
-    "targetUrl": "https://github.com/sjawhar/legion/pull/1023#issuecomment-5653137964"
+    "sha": "14a6e93056fb730d4f3ed9e876f04b0e3f0599a4",
+    "targetUrl": "https://github.com/sjawhar/legion/pull/1023#issuecomment-5653690500"
   },
-  "evidenceComment": "https://github.com/sjawhar/legion/pull/1023#issuecomment-5653137964",
+  "evidenceComment": "https://github.com/sjawhar/legion/pull/1023#issuecomment-5653690500",
   "binaries": [
     "jj 0.45.1-sami.20260910-043938 (this box's PATH jj)",
     "jj 0.44.0 (mise x github:jj-vcs/jj@0.44.0 -- jj)"
@@ -21,7 +28,7 @@
   "gates": {
     "workspace": {
       "cwd": "packages/workspace",
-      "bunTest": "16 pass / 0 fail, run twice: PATH jj = 0.45.1 (rig's local slot) and PATH jj = 0.44.0 via a /tmp shim (CI shape; Bun.spawn(['jj','--version']) under that PATH printed 0.44.0)",
+      "bunTest": "20 pass / 0 fail with PATH jj = 0.45.1; 20 pass / 0 fail with PATH jj = 0.44.0 (/tmp/legion-70-jj044 shim; Bun.spawn(['jj','--version']) printed 0.44.0)",
       "biome": "bunx biome check --error-on-warnings src/ → clean",
       "tsc": "bunx tsc --noEmit → clean"
     },
@@ -32,34 +39,54 @@
       "tsc": "clean"
     },
     "ci": {
-      "run": "https://github.com/sjawhar/legion/actions/runs/34752973595",
-      "head": "190c68719d40",
+      "run": "https://github.com/sjawhar/legion/actions/runs/34758122541",
+      "head": "14a6e93056fb",
       "conclusion": "success",
       "jobs": {
-        "lint": "success (step Lint workspace=success)",
-        "typecheck": "success (step Typecheck workspace=success)",
-        "test": "success (step Test workspace=success; 16 pass / 0 fail, all three real-jj tests (pass))",
+        "lint": "success (Lint workspace=success)",
+        "typecheck": "success (Typecheck workspace=success)",
+        "test": "success (Test workspace=success; 20 pass / 0 fail, all five real-jj tests (pass))",
         "pr-title": "success"
       }
     }
   },
-  "driver": "/tmp/legion-70-e2e.ts — outside the repository, never committed. Imports workspace.ts by path (E2E_SOURCE), substitutes the jj argv (E2E_JJ), selects a shape (E2E_SHAPE): moved-on (acceptance 3), merged (acceptance 2, with `jj status` snapshot before the push and a third provision), recover-present / recover-gone (acceptance 5), divergent-move / divergent-delete (handoff observation). Sets JJ_USER/JJ_EMAIL on every jj call; pushes with --allow-empty-description as the suite does. Branch file = `jj file show -r 190c68719d40 packages/workspace/src/workspace.ts`; negative control = `jj file show -r main@origin …`.",
+  "drivers": {
+    "e2e": "/tmp/legion-70-e2e.ts — never committed; E2E_SOURCE=<workspace.ts path> (head: `jj file show -r 14a6e93056fb packages/workspace/src/workspace.ts`; round 1: -r 2ac3d28b26de; control: -r main@origin), E2E_JJ=<jj argv>, E2E_SHAPE in {moved-on, merged, recover-present, recover-gone, forget-surviving (E2E_SNAPSHOT=0 skips the jj status), conflicted, conflicted-keep-registration, divergent-move, divergent-delete}; sets JJ_USER/JJ_EMAIL on every jj call; pushes with --allow-empty-description; prints op log, bookmark list, workspace list, @ and parents, main, console.error lines, and per-attempt outcome/dir/registration for the conflicted shapes",
+    "resolve": "/tmp/legion-70-resolve.sh '<jj argv>' — builds missing / longer-name-only / normal / deleted-local-with-remote-row / conflicted (base present, two divergent sets via --at-op) in a scratch clone and runs `jj log -r <revset> --no-graph -T 'commit_id ++ \"\\n\"' --ignore-working-copy -R <clone>` for bookmarks(exact:) and present() on each"
+  },
+  "resolutionCommand": {
+    "identicalOnBoth": true,
+    "bookmarksExact": {
+      "missing": "exit 0, 0 lines",
+      "onlyLongerName legion/WIDGETS-421": "exit 0, 0 lines",
+      "normal": "exit 0, 1 line (40-hex id)",
+      "deletedLocalRemoteRowSurvives": "exit 0, 0 lines (list --all: `legion/WIDGETS-42 (deleted)` + `@origin: …`)",
+      "conflicted": "exit 0, 2 lines (list --all: `(conflicted): - base + A + B`)"
+    },
+    "present": {
+      "missing": "exit 0, 0 lines",
+      "onlyLongerName": "exit 0, 0 lines",
+      "normal": "exit 0, 1 line",
+      "deletedLocalRemoteRowSurvives": "exit 0, 0 lines",
+      "conflicted": "exit 1, 0 lines, stderr `Error: Name \\`legion/WIDGETS-42\\` is conflicted` + hints — the reason the spec swapped commands, confirmed"
+    },
+    "constructionNote": "a conflict needs a common base: two sets from a missing bookmark where one target is an ancestor of the other reconcile to the descendant (no conflict) — observed on 0.45.1 before fixing the script"
+  },
   "acceptance": {
-    "1": "PASS — no provision of an existing workspace ran a jj bookmark operation in any real-jj run (op logs below); suite test `does not add a second workspace or run a bookmark command when an issue is reactivated` passes (fake runner, argv list has no bookmark line).",
-    "2": "PASS — merged shape, both binaries: provision, `jj status` in the workspace, `jj git push --bookmark legion/WIDGETS-42 --allow-empty-description`, `git --git-dir=<remote>/.git branch -D legion/WIDGETS-42`, provision #2 ok, provision #3 ok; `jj -R <clone> bookmark list legion/WIDGETS-42` stdout '' (stderr `Warning: No matching bookmarks for names: legion/WIDGETS-42`) after both; op log: `fetch from git remote(s) origin` newest, no point bookmark after it, `operations: 1`. Negative control (main@origin file, both binaries): provision #2 THREW `Command failed (exit 1): jj bookmark set legion/WIDGETS-42 --allow-backwards / Error: The working copy is stale`; provision #3 ok and `bookmark list` → `legion/WIDGETS-42: syvvstpy d96cf6d7 (empty) (no description set)` re-created at the workspace's @ on an unrelated empty commit, `operations: 2` (LEGION-28 shape). Deviation from the handoff's prediction noted: main's code crashes on the immediate re-provision rather than printing the bookmark at @; it prints it on the following one.",
-    "3": "PASS — moved-on shape. Branch file, jj 0.45.1 op log (newest first): `new empty commit / snapshot working copy / point bookmark legion/WIDGETS-42 to commit 440aa3ea1caa8194956cb410a109e79734f99aea / create initial working-copy commit in workspace widgets-42 / add workspace 'widgets-42' / add git remote origin / point bookmark main to commit 77950fc1… / add workspace 'default'` → `operations: 1`; bookmark 791861e2, @ f67dd9e2 (later work) parent 791861e2. jj 0.44.0: `operations: 1`, bookmark 80d4c2fc, @ bdd6aff9 parent 80d4c2fc. Negative control (main@origin file): 0.45.1 `point bookmark legion/WIDGETS-42 to commit 9438db4a… / new empty commit / snapshot working copy / point bookmark legion/WIDGETS-42 to commit d292825e… / create initial working-copy commit …` → `operations: 2`, bookmark on `9438db4a (empty) later work`; 0.44.0 `operations: 2`, bookmark on `d0ebcb0c (empty) later work`.",
-    "4": "PASS — fork-point (52c5e03e) diff: packages/daemon/src/daemon/AGENTS.md changes only the 'Workspace clone' bullet (2 lines), stating: created exactly once when the workspace is created (`jj bookmark set legion/<KEY> -r @` on the fresh working copy); provisioning never runs a jj bookmark command on an existing workspace (neither moves nor re-creates, LEGION-28 named); the implementer's push step owns every later move; recovery rule (forget takes only the workspace name — jj has no --cleanup/--force; `jj bookmark list legion/<KEY>` any stdout → re-add at the bookmark with no bookmark command, empty stdout → re-add at main, create bookmark, log `[legion] bookmark legion/<KEY> is gone (…)`; lookup before add because a --revision add for a gone bookmark still registers on the root commit; failing list fails loudly). `WorkspaceSpec.bookmark` (workspace.ts:22-24), `createWorkspace` (174-187), and the `provisionIssueWorkspace` bookmark comment (265-268) state the same contract.",
-    "5": "PASS on real jj, both binaries, both branches. Present: provision, rm -rf <workspaceDir> (jj workspace list still lists widgets-42), provision → op log `create initial working-copy commit in workspace widgets-42 / add workspace 'widgets-42' / forget workspace widgets-42 / point bookmark legion/WIDGETS-42 to commit 9a22bd75… / …` → `operations: 1`, no bookmark op after the forget, new @ 29d064e0 parent 9a22bd75 = bookmark, no stderr line (0.44.0: @ 0b3b261d parent 51bac546 = bookmark). Gone: provision, jj status, push, delete remote branch, rm -rf <workspaceDir>, provision → `point bookmark legion/WIDGETS-42 to commit f2609be0… / create initial working-copy commit … / add workspace 'widgets-42' / forget workspace widgets-42 / fetch from git remote(s) origin / …` → `operations: 2`, @ 2ce76da0 parent 980fb9c0 = main, bookmark on @, exactly one stderr line `[legion] bookmark legion/WIDGETS-42 is gone (its pull request merged or the branch was deleted); re-adding the forgotten workspace … at main and creating the bookmark on its fresh working copy` (0.44.0 identical). Negative control (main@origin file, present, both binaries): `Command failed (exit 2): jj workspace forget widgets-42 --cleanup --force -R …` / `error: unexpected argument '--cleanup' found`. Diff's forget argv: `[\"jj\", \"workspace\", \"forget\", workspaceName, \"-R\", repoCloneDir]`; grep of the fork-point diff finds --cleanup/--force only on removed lines."
+    "1": "PASS — real jj both binaries, `forget-surviving`: provision, jj status, `jj workspace forget widgets-42 -R <clone>`, rm -rf, bookmark survives (e199b692 / d01c540a), provision → @ parent = bookmark commit, `bookmark unmoved: true`, op log `create initial working-copy commit / add workspace / forget workspace (mine) / snapshot working copy (mine) / point bookmark … (original)` → operations: 1, no stderr. Also with no snapshot (@ parent a3bb6da8 = bookmark). Fake runner: `creates a workspace on top of a resolving bookmark and runs no bookmark command` and the reactivation test pass. Control (round-1 file 2ac3d28b, both binaries): workspace created at main then `jj bookmark set legion/WIDGETS-42 -r @` → `Refusing to move bookmark backwards or sideways`.",
+    "2": "PASS — real jj both binaries, `merged`: provision, jj status, `jj git push --bookmark legion/WIDGETS-42 --allow-empty-description`, `git --git-dir=<remote>/.git branch -D legion/WIDGETS-42`, provision #2 ok, #3 ok; `jj -R <clone> bookmark list legion/WIDGETS-42` stdout '' after each (stderr `Warning: No matching bookmarks`); op log newest `fetch from git remote(s) origin`, no point bookmark after it, operations: 1.",
+    "3": "PASS — real jj both binaries, `moved-on` (provision, `jj new -m 'later work'`, provision): op log `new empty commit / snapshot working copy / point bookmark legion/WIDGETS-42 to commit 31e1636e… / create initial working-copy commit in workspace widgets-42 / …` → operations: 1; bookmark 90806f98, @ b88ff0f7 parent 90806f98; fresh workspace console.error: (none). 0.44.0 identical shape. Control (main@origin file, both binaries): operations: 2, newest `point bookmark … cae56648 (empty) later work` above `new empty commit`.",
+    "4": "PASS — fork-point (52c5e03e) diff: AGENTS.md changes only the 'Workspace clone' bullet, which states the v8 rule end to end (touched only by createWorkspace; resolution command first with none/one/several per binary and the deleted-local case; throw naming the bookmark before prune/add/registration and why; add by commit id, main when none; brand-new and forgotten share the start; flag-free forget; set -r @ only when nothing resolved; one log line only when forgotten). WorkspaceSpec.bookmark (workspace.ts:22-26): 'never re-created on an existing workspace'. createWorkspace doc (176-198) and provisionIssueWorkspace comment (291-296) match the code.",
+    "5": "PASS — real jj both binaries. Conflicted (`conflicted`: provision, jj new, `bookmark set -r @` in ws + `--at-op <op> bookmark set -r main --allow-backwards -R <clone>`, `workspace forget widgets-42`, rm -rf; list → `(conflicted): - 3e68d8d0 + 652f29f4 + d46417cd`; resolution 2 ids): attempts 1 and 2 both THREW `Bookmark legion/WIDGETS-42 is conflicted (652f29f4ed7d…, d46417cd027a…); workspace … was not created. Resolve it with \\`jj bookmark set legion/WIDGETS-42 -r <commit> -R …\\``; names bookmark and both ids; directory exists: false; widgets-42 registered: false; op log newest = my own `forget workspace` (provisioning wrote nothing). Same with the stale registration kept (directory absent both times, nothing new registered). Resolved (`recover-present`): forget/add/create, operations: 1, @ parent = bookmark c92f94d3, raw stderr 0 lines. Gone (`recover-gone`): re-added at main (@ parent = main), one new point bookmark, raw stderr exactly 1 line `[legion] bookmark legion/WIDGETS-42 is gone (its pull request merged or the branch was deleted); re-added the forgotten workspace … at main, creating the bookmark on its fresh working copy`. Forget argv `[\"jj\",\"workspace\",\"forget\",workspaceName,\"-R\",repoCloneDir]`, flag-free. Fake-runner `refuses to create a workspace on a conflicted bookmark, before any workspace add` and `fails provisioning when the bookmark resolution fails, before any workspace add` assert argv toEqual([fetch, resolution]) and dir absent; real-jj conflicted test asserts cmd[1] === ['git','log'] per attempt. Controls (round-1 file, both binaries): registration kept → attempt 1 `jj workspace add … --revision legion/WIDGETS-42` prints `Created workspace` then `Error: Name … is conflicted`, leaves widgets-42 registered with @ parent 0000000000000000000000000000000000000000, attempt 2 RESOLVED silently (adopts it); registration forgotten → attempt 1 RESOLVED silently: fresh path added at main and `bookmark set -r @` resolved the conflict onto the main-child (jj permits setting a conflicted bookmark anywhere), discarding the `later work` target — a silent LEGION-28-class move the handoff did not predict for this construction."
   },
   "observations": [
-    "Handoff observation reproduced on 0.45.1 and 0.44.0 (shapes divergent-move / divergent-delete): fresh provision (bookmark on an unsnapshotted @), then `jj bookmark set legion/WIDGETS-42 -r main --allow-backwards -R <clone>` or `jj bookmark delete … -R <clone>` on the main line, then provision again → op log ends `snapshot working copy / point bookmark … (or delete bookmark …) / reconcile divergent operations`; `bookmark list` → `legion/WIDGETS-42 (conflicted): - <hidden base> + <main-line target> + <rewritten @>` (delete variant: `- base + rewritten @`); `jj status` in the workspace shows `legion/WIDGETS-42??`. Verdict: no acceptance line is affected (2 and 3 are defined on a snapshotted working copy, 1 holds — provisioning ran no bookmark command, 5 runs no update-stale) and the daemon's spawn/resume path cannot reach it: the only main-line operation provisioning performs is `jj git fetch -R <clone>`, and a bookmark just created on a fresh workspace tracks no remote branch, so the fetch can neither move nor delete it; the window needs a hand-run bookmark move on the shared clone before the issue's first worker command. Outcome where it happens: a visible conflicted bookmark the implementer's own `jj bookmark set legion/<KEY>` resolves, instead of the old code's silent force-move. Not changed; not widened.",
-    "Live clone (read-only look, this box): `jj bookmark list legion/LEGION-38 legion/LEGION-77` are both `(conflicted): - <merged retro head> + <undescribed working-copy commit>`, `@origin (not created yet)` — the old code's post-merge re-creation, i.e. LEGION-28's class is present in production today under main's code. Not touched.",
-    "The old code's merged-branch behaviour differs from the implementer's forTester note: the immediate re-provision throws (`jj bookmark set … --allow-backwards` on a working copy the fetch's abandon left stale) rather than printing the bookmark at @; the bookmark appears at @ on the provision after that. The fix's contract holds on both provisions.",
-    "Driver notes: `jj git push --allow-new` does not exist on either binary (`error: unexpected argument '--allow-new'`); `--bookmark` publishes a new bookmark by itself. jj refuses to push an undescribed commit without `--allow-empty-description`, which the suite also passes.",
+    "Round-1 file on the conflicted construction with the registration forgotten does not fail loudly as the implementer's forTester note predicted for the registration-kept shape — it silently resolves the conflict onto a fresh main-child via the fresh path's `bookmark set -r @`. Both shapes are refused at the head; recorded so nobody re-derives the round-1 behaviour from the handoff alone.",
+    "GitHub commit-status descriptions cap at 140 characters (422 `Description is too long`); the round-2 status was reposted at 115 characters.",
+    "`jj git push --allow-new` is not a flag on either binary; `--bookmark` publishes a new bookmark itself. An undescribed commit needs `--allow-empty-description` to push (the suite passes it too).",
     "Plan Task 5 Step 3 (production op-log check on the live daemon's clone) remains post-merge for the implementer; not run."
   ],
-  "workspaceState": ".omp/config.yml sits unsnapshotted in the undescribed working copy above the bookmark (as the implementer left it); the only tracked-file change this phase commits is .legion/test.json.",
+  "workspaceState": ".omp/config.yml sits unsnapshotted in the undescribed working copy above the bookmark; the only tracked-file change this phase commits is .legion/test.json.",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T12:04:52.562Z"
+  "completed": "2026-09-13T13:54:19.983Z"
 }
