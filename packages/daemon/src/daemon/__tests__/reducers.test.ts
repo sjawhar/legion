@@ -176,6 +176,29 @@ function attachChild(state: LegionState): void {
   state.issues[child] = issueNode(child, "Child", "triage", root);
 }
 
+/** A root waiting for an admission slot: its issue `todo`, an `admission.queue` entry, and the
+ * `queued` tree record `ProcessManager.admit` leaves behind a full cap. */
+function queuedState(key: IssueKey = root): LegionState {
+  const state = newLegionState("omp", 4);
+  state.issues[key] = issueNode(key, "Root", "todo");
+  state.trees[key] = { root: key, generation: 0, status: "queued", launchFailures: 0 };
+  state.admission.queue.push(key);
+  return state;
+}
+
+/** `fixture` with its payload status replaced -- for a transition the captures under
+ * `fixtures/dispatch/` do not include (Dispatch emits `triage` exactly as it emits `backlog`). */
+function dispatchIssueWithStatus(
+  fixture: DispatchFixture,
+  status: IssueStatus
+): DispatchIssueEvent {
+  const event = dispatch(fixture);
+  if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload)) {
+    throw new Error("issue fixture payload must be an object");
+  }
+  return { ...event, payload: { ...event.payload, status } };
+}
+
 function addPr(state: LegionState, overrides: Partial<PrState> = {}): void {
   const {
     ciSettlementGeneration = null,
@@ -400,6 +423,11 @@ const REPLAY_ONCE_CASES: ReadonlyArray<{
     event: () => dispatch(issueClosed as unknown as DispatchFixture),
   },
   {
+    name: "issue.closed root waiting in the admission queue",
+    setup: () => queuedState(),
+    event: () => dispatch(issueClosed as unknown as DispatchFixture),
+  },
+  {
     name: "issue.closed child (last-child completion)",
     setup: () => {
       const state = rootState();
@@ -557,6 +585,85 @@ describe("reduceDispatchEvent", () => {
       expect(active.issues[root].status).toBe(status);
     });
   }
+
+  const LEAVING_THE_LINE: ReadonlyArray<readonly [IssueStatus, () => DispatchIssueEvent]> = [
+    ["backlog", () => dispatch(issueUpdatedBacklog as unknown as DispatchFixture)],
+    ["icebox", () => dispatch(issueUpdatedIcebox as unknown as DispatchFixture)],
+    [
+      "triage",
+      () => dispatchIssueWithStatus(issueUpdatedBacklog as unknown as DispatchFixture, "triage"),
+    ],
+    ["done", () => dispatch(issueClosed as unknown as DispatchFixture)],
+  ];
+  for (const [status, event] of LEAVING_THE_LINE) {
+    it(`dequeues a waiting root that Dispatch moves to ${status}, never lingers it, and admits it afresh on a later todo`, () => {
+      const state = queuedState();
+
+      expect(reduceDispatchEvent(state, event(), config)).toEqual([
+        { kind: "dequeue", issue: root },
+      ]);
+      expect(state.issues[root].status).toBe(status);
+
+      // The state as `ProcessManager.dequeue` leaves it: a later `todo` admits the issue exactly
+      // like a never-seen root.
+      state.admission.queue = [];
+      delete state.trees[root];
+      expect(
+        reduceDispatchEvent(
+          state,
+          { ...dispatch(issueUpdatedTodo as unknown as DispatchFixture), seq: 99 },
+          config
+        )
+      ).toEqual([{ kind: "admit", issue: root }]);
+    });
+  }
+
+  for (const [status, fixture] of DAEMON_STATUS_FIXTURES) {
+    it(`leaves a waiting root queued when Dispatch echoes the daemon-owned ${status}`, () => {
+      const state = queuedState();
+
+      expect(reduceDispatchEvent(state, dispatch(fixture), config)).toEqual([]);
+    });
+  }
+
+  it("leaves an active root alone when Dispatch moves it back to triage", () => {
+    const state = rootState();
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        dispatchIssueWithStatus(issueUpdatedBacklog as unknown as DispatchFixture, "triage"),
+        config
+      )
+    ).toEqual([]);
+    expect(state.issues[root].status).toBe("triage");
+  });
+
+  it("dequeues a waiting child on close and still routes child-closed and children-complete to the parent", () => {
+    // A child admitted as a root by a daemon that predates LEGION-57 and still waiting for a slot.
+    const state = rootState();
+    attachChild(state);
+    state.issues[child].status = "todo";
+    state.trees[child] = { root: child, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(child);
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+        config
+      )
+    ).toEqual([
+      { kind: "dequeue", issue: child },
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-closed", child, remaining: 0 },
+      },
+      { kind: "publish", role: architect, payload: { type: "children-complete" } },
+    ]);
+  });
 
   it("lingers an active root when Dispatch closes it", () => {
     const state = rootState();
