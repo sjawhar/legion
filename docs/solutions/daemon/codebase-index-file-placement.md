@@ -22,10 +22,11 @@ symptoms:
 
 ## Context
 
-The `CodebaseIndexManager` was writing its index to `{legionDir}/.legion/daemon/index.json` —
+The `CodebaseIndexManager` (`packages/daemon/src/index/`, removed in LEGION-74: it had no caller
+outside its own tests) was writing its index to `{legionDir}/.legion/daemon/index.json` —
 inside the user's tracked repo. This caused the file to appear as untracked in `jj status` /
 `git status`, and was in a location no worker workspace could reference (workers live under
-`~/.local/share/legion/workspaces/`).
+`~/.local/share/legion/workspaces/`). The placement rule below outlives the module.
 
 ## Rule: Tracked vs State Directory
 

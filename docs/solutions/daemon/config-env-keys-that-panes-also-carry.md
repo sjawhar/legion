@@ -125,11 +125,12 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
 ## Rule for the next config key
 
 Before adding a `LEGION_*` environment key to `resolveDaemonConfig`, grep the pane env builders
-in `processes.ts` for the same name. If the daemon exports it to panes, decide up front which
-treatment applies — nothing: a `LEGION_*` key is never inherited by a pane (allow-list) — the
-remaining hazards are refusing an inherited value (a per-daemon address) or requiring the file key
-in every rig — and name the hazard in the `config.ts` row of
-`packages/daemon/src/daemon/AGENTS.md`, as the `daemon_url` row now does.
+in `processes.ts` for the same name. A `LEGION_*` key is never inherited by a pane (the allow-list
+in `environment.ts` passes none of them), so there is no strip decision to make. What remains, when
+the daemon exports the key to panes, is to decide up front between refusing an inherited value (a
+per-daemon address, as `daemon_url` does) and requiring the file key in every rig — and to name
+the hazard in the `config.ts` row of `packages/daemon/src/daemon/AGENTS.md`, as the `daemon_url`
+row now does.
 
 ## Related
 
