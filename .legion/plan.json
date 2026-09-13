@@ -1,0 +1,173 @@
+{
+  "summary": "Two files change, no production code. The OpenCode Envoy plugin's Dispatch-tools test stops hand-typing the tool-name list and reads it from the shared contract's dispatchToolSpecs, keeps one required-argument expectation per tool as a map keyed by tool name (corrected to what the contract requires today, plus the two new tools with empty lists), and leaves the ask-execution assertions alone. The envoy-plugin CI job gains a Test envoy plugin step between Typecheck and Pack so the next stale expectation fails the pull request instead of landing on main.",
+  "taskCount": 2,
+  "independentTasks": 2,
+  "routingHints": {
+    "complexity": "trivial",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, one pull request, one push. Do both edits, run the local gates, take the three proofs, commit with jj split, push, open the PR. Rebase only if GitHub reports CONFLICTING (Sami, 2026-09-11). A single red CI job is re-run with `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit.",
+  "discoveredScope": {
+    "title": "Five of the twelve existing required-argument expectations are stale too, not just the two missing tools",
+    "detail": "The spec's Requirements table says the per-tool required-argument expectations 'gain entries for dispatch_request_approval and dispatch_open_asks' and otherwise stay. They cannot stay as written: the test never reached the required-argument loop on main (the name comparison fails first), and once the names pass, the loop fails on dispatch_ask because the contract has made `issue` optional on every tool that also accepts a project document (issue-or-project+artifact; the exactly-one rule is `documentOwnerValidation`, applied at execution by executeDispatchTool through dispatchToolSchema, so the plugin is correct). Dumped from the plugin's registered schemas via tool.schema.toJSONSchema on 2026-09-14 at main a197cdc0: dispatch_ask ['question'] (was ['issue','question']); dispatch_comment ['body'] (was ['issue','body']); dispatch_suggest ['quote','replace_with'] (was ['issue','artifact','quote','replace_with']); dispatch_doc_edit ['ops'] (was ['issue','artifact','ops']); dispatch_artifact ['name'] (was ['issue','name']). The other seven are unchanged. Still test-file only; still no production code. Reported to the architect by envoy_publish for the spec's Requirements table.",
+    "verified": "Prototyped the full change in the workspace, ran the acceptance-1 command green (1 pass, 32 expect calls) and the whole plugin suite green (61 pass across 7 files), ran both negative controls (each failed exactly as the spec says), then restored both files with jj restore; the working copy holds only .omp/config.yml again."
+  },
+  "steps": [
+    {
+      "order": 1,
+      "title": "Bind and install",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" status",
+        "cd -- \"$LEGION_WORKSPACE\" && bun install --frozen-lockfile"
+      ],
+      "note": "A fresh issue workspace has no node_modules; without the install, `bun test` fails with `Cannot find module '@opencode-ai/plugin/tool'` before any assertion runs. The install is the same command CI runs and is offline-safe once the bun cache is warm (it was 0.5 s here)."
+    },
+    {
+      "order": 2,
+      "title": "Reproduce the failure on main first",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts"
+      ],
+      "expected": "exit 1; the toEqual diff shows `+ dispatch_request_approval` and `+ dispatch_open_asks` (Received + 2). Record this output: it is the pre-fix half of the regression proof."
+    },
+    {
+      "order": 3,
+      "title": "Rewrite packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+      "file": "packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+      "edits": [
+        "Line 2: `import { dispatchIssueSubject, dispatchToolSpecs } from \"@legion/contracts\";` — the same export server.ts loops over at its line 176.",
+        "Replace the `expectedDispatchTools` tuple array (lines 7-20) with a map keyed by tool name, typed `Record<string, readonly string[]>` — NOT `Record<(typeof dispatchToolSpecs)[number][\"name\"], …>`: the spec's Rejected section forbids an exhaustive type, because a new contract tool would then fail the plugin's typecheck, contradicting acceptance 2. Contents (verified against the registered schemas): dispatch_issue [project, title]; dispatch_ask [question]; dispatch_edit_ask [ask]; dispatch_resolve_ask [ask, kind, reason]; dispatch_comment [body]; dispatch_suggest [quote, replace_with]; dispatch_message [issue, body]; dispatch_doc_edit [ops]; dispatch_doc_read []; dispatch_request_approval []; dispatch_artifact [name]; dispatch_read []; dispatch_search [query]; dispatch_open_asks []. Add a two-line comment saying why these are not derived from the contract (the plugin builds its schemas from the contract, so deriving them would compare the adapter with itself) and that a contract tool absent from the map must still register.",
+        "Names assertion (was lines 72-74): `expect(Object.keys(tools).filter((name) => name.startsWith(\"dispatch_\"))).toEqual(dispatchToolSpecs.map((spec) => spec.name));` — ordered toEqual is correct: server.ts fills `dispatchTools` in dispatchToolSpecs order and spreads it first into `hooks.tool` (server.ts line 300-301), so insertion order is the contract's order.",
+        "Loop header (was line 75): `for (const [name, required] of Object.entries(requiredArguments)) {` — keep `expect(registered).toBeDefined()` inside so a typo'd map key fails instead of silently passing on an undefined schema; keep the toJSONSchema/required assertion unchanged.",
+        "Lines 86-114 (the dispatch_ask execute call, its result/received/warn assertions, and the finally block): unchanged."
+      ],
+      "doNot": [
+        "Do not touch packages/envoy-plugin/src/server.ts or anything under packages/contracts — the spec's fourth requirement is no production code.",
+        "Do not add a required-argument expectation derived from the contract, and do not assert that every dispatchToolSpecs name has a map entry (both rejected by the spec)."
+      ]
+    },
+    {
+      "order": 4,
+      "title": "Add the CI step to .github/workflows/envoy-and-contracts.yaml",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "edits": [
+        "In the `envoy-plugin` job (lines 89-109), insert between the `Typecheck envoy plugin` step (lines 100-102) and the `Pack envoy plugin` step (lines 103-105), same indentation:\n      - name: Test envoy plugin\n        run: bun run test\n        working-directory: packages/envoy-plugin"
+      ],
+      "contractsBuildStep": {
+        "needed": false,
+        "reason": "No `Build contracts` step is needed before the test step. (a) `@legion/contracts` and every `@legion/envoy-client/*` subpath declare a `\"bun\"` export condition pointing at `./src/*.ts`; Bun's test runner selects it, so the source is loaded and `dist/` is never consulted. (b) Empirically: with packages/contracts/dist and packages/envoy-client/dist both absent in this workspace, `bun run test` in packages/envoy-plugin ran 61 tests across 7 files (only the stale assertion failed, before the fix; all 61 green after). (c) The job's existing `Typecheck envoy plugin` step already runs today without a contracts build and is green, because the plugin's tsconfig `paths` map `@legion/contracts` and the envoy-client subpaths to `../*/src/*.ts`. The `Build contracts for Envoy client` step in the envoy-client job is that job's own concern (its `Build Envoy client` step bundles against it); it is not a precondition the plugin job is missing. The LEGION-76 tester's root `bun test` reached this test's assertions for the same reason."
+      },
+      "trigger": "The pull request touches packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts, which matches `on.pull_request.paths` (`packages/envoy-plugin/**`) and the `changes.plugin` filter, so the envoy-plugin job runs on the PR. For pull_request events GitHub runs the workflow file from the PR's merge ref, so the new step appears on this PR's own run — which is how acceptance 3 is observed."
+    },
+    {
+      "order": 5,
+      "title": "Local gates (the same three scripts the CI job runs, in its order, plus the new one)",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE/packages/envoy-plugin\" && bun run lint",
+        "cd -- \"$LEGION_WORKSPACE/packages/envoy-plugin\" && bun run typecheck",
+        "cd -- \"$LEGION_WORKSPACE/packages/envoy-plugin\" && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun run test"
+      ],
+      "expected": "lint: `Checked 14 files … No fixes applied.` exit 0; typecheck: exit 0 (about 11 s); test: `61 pass, 0 fail` across 7 files, exit 0. Baseline on main a197cdc0 was 60 pass / 1 fail. `bunx` resolves biome and tsc from packages/envoy-plugin/node_modules/.bin, no network needed once installed."
+    },
+    {
+      "order": 6,
+      "title": "Take the three proofs (acceptance 1, 2, 3) — see verification[]; record each in implement.json as a Proof {criterion, surface, command, observed, headSha, negativeControl}",
+      "note": "Acceptance 1 and 2 proofs are taken before the commit at the working-copy state and re-stated at the pushed head SHA; the acceptance-3 proof can only be taken after the push (step 8) once the PR's workflow run finishes."
+    },
+    {
+      "order": 7,
+      "title": "Commit exactly the two logical paths, then the handoff",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --stat",
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"test(envoy-plugin): derive the expected Dispatch tools from the contract and run plugin tests in CI\" packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts .github/workflows/envoy-and-contracts.yaml",
+        "cd -- \"$LEGION_WORKSPACE\" && legion handoff write --phase implement --data '<implement handoff JSON with proofs>' && test -f \"$LEGION_WORKSPACE/.legion/implement.json\" && jj -R \"$LEGION_WORKSPACE\" split -m \"implement: record handoff\" .legion/implement.json"
+      ],
+      "expected": "`jj diff --stat` before the split lists exactly .omp/config.yml (0 lines, provisioned, never committed), the test file, and the workflow file — nothing else; server.ts must NOT appear (see the NC1 revert). A `test(…)` subject is a `none` bump in .github/scripts/release-bump.sh, so merging cuts no plugin release; use the same subject as the PR title (pr-and-main.yaml's pr-title job requires `type(scope): summary`)."
+    },
+    {
+      "order": 8,
+      "title": "Push and open the PR",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-96 && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-96",
+        "cd -- \"$LEGION_WORKSPACE\" && legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-96 --title \"test(envoy-plugin): derive the expected Dispatch tools from the contract and run plugin tests in CI\" --body-file <READY-format body containing the line `Dispatch: LEGION-96`>"
+      ],
+      "note": "Only the implementer pushes (the review App has no contents permission). The PR body starts in the merge queue's READY format (Verification / CI / Threads / Thermo / E2E / Fast-follow / Chain) per skills/legion-worker; Thermo is not omitted — this is a test+CI change, not docs-only."
+    }
+  ],
+  "verification": [
+    {
+      "acceptance": "1. `bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts` passes from the repository root with no Dispatch variables in the environment.",
+      "surface": "The repository's own Bun test runner from the root of the issue workspace (the exact command the spec names), with the Legion pane's DISPATCH_URL/DISPATCH_TOKEN_FILE scrubbed for the command — the pane exports them and the spec says none may be set.",
+      "skill": "legion-worker (completion gate and proof discipline); AGENTS.md `bun test` convention.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+      "expected": "`1 pass, 0 fail, 32 expect() calls`, exit 0 (verified on the prototype). Pre-fix at main a197cdc0 the same command exits 1 with `Received + 2` naming dispatch_request_approval and dispatch_open_asks.",
+      "negativeControl": {
+        "what": "A throwaway edit that skips one contract tool in the plugin's registration loop makes the test fail naming that tool (spec Testing 1).",
+        "apply": "In packages/envoy-plugin/src/server.ts, insert `if (spec.name === \"dispatch_search\") continue;` as the first line inside `for (const spec of dispatchToolSpecs) {` (after line 176).",
+        "run": "cd -- \"$LEGION_WORKSPACE\" && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+        "expected": "exit 1; the toEqual diff shows `-   \"dispatch_search\",` under `Expected - 1` (verified).",
+        "revert": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" restore packages/envoy-plugin/src/server.ts — safe because server.ts carries no real change in this issue; then re-run the positive command and confirm `jj -R \"$LEGION_WORKSPACE\" diff --stat` no longer lists server.ts."
+      }
+    },
+    {
+      "acceptance": "2. The test derives its expected tool list from the shared contract (dispatchToolSpecs) rather than a hand-typed list.",
+      "surface": "The test file itself plus the same Bun runner: the positive half is a source check (no literal list of tool names remains; the expected names come from dispatchToolSpecs), the negative half is a run.",
+      "skill": "legion-worker; verification-before-completion (the reviewer reads the file, not the handoff).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -n 'dispatchToolSpecs' packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts && ! grep -n 'expectedDispatchTools' packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+      "expected": "Two hits for dispatchToolSpecs (the import on line 2 and the `.map((spec) => spec.name)` in the names assertion), and no `expectedDispatchTools`; the only place tool names are spelled out is the requiredArguments map's keys, which the spec keeps by design (explicit per-tool required-argument expectations).",
+      "negativeControl": {
+        "what": "A throwaway extra entry pushed onto the expected-name list at test time makes the comparison fail, proving the list is what the test compares against (spec Testing 2).",
+        "apply": "In the test file, change the names assertion's expected value to `[...dispatchToolSpecs.map((spec) => spec.name), \"dispatch_bogus\"]`.",
+        "run": "cd -- \"$LEGION_WORKSPACE\" && env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts",
+        "expected": "exit 1; the toEqual diff shows `-   \"dispatch_bogus\",` under `Expected - 1` (verified).",
+        "revert": "Edit the line back by hand to `dispatchToolSpecs.map((spec) => spec.name)`. NEVER `jj restore` the test file for this control — the test file IS the change; restoring it would erase the real edit. Re-run the positive command afterwards."
+      }
+    },
+    {
+      "acceptance": "3. On this issue's pull request, the `envoy-plugin` job of the \"Legion Envoy and Contracts\" workflow shows a `Test envoy plugin` step that runs `bun run test` in packages/envoy-plugin, and that step is green.",
+      "surface": "GitHub Actions on the pull request itself — the only place a workflow step exists; read through `legion gh` (the review App can read runs).",
+      "skill": "legion-worker (`legion gh --` for every GitHub read; CI facts verified against GitHub, never from a handoff).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && legion gh -- run list --repo sjawhar/legion --branch legion/LEGION-96 --workflow 'Legion Envoy and Contracts' --json databaseId,headSha,status,conclusion,event --jq '.[] | select(.event==\"pull_request\")' ; then with the run id for the PR head: legion gh -- run view <run-id> --repo sjawhar/legion --json jobs --jq '.jobs[] | select(.name==\"envoy-plugin\") | {conclusion, steps: [.steps[] | {name, conclusion}]}'",
+      "expected": "The envoy-plugin job's steps list contains `Test envoy plugin` with conclusion `success`, positioned after `Typecheck envoy plugin` and before `Pack envoy plugin`; the run's headSha equals the pushed tip. To prove the step ran the suite rather than a no-op, `legion gh -- run view <run-id> --repo sjawhar/legion --log --job <job-id>` (job id from `--json jobs --jq '.jobs[] | select(.name==\"envoy-plugin\") | .databaseId'`) shows Bun's `61 pass` / `Ran 61 tests across 7 files` line under that step.",
+      "negativeControl": {
+        "what": "The spec names no negative control for this line, and none is added: deliberately pushing a red head to watch the step fail would spend a CI slot on a queue Sami has said is too long and slow (2026-09-11). The evidence that the step gates is the pre-fix run of the same script: at main a197cdc0, `bun run test` in packages/envoy-plugin exits 1 (60 pass / 1 fail) — that is what the step would have reported on any PR before this change.",
+        "record": "Quote the pre-fix `bun run test` exit and counts from step 2 as the negativeControl field of the acceptance-3 proof."
+      }
+    }
+  ],
+  "testerNotes": [
+    "Re-run all three verification commands at the PR head SHA; the E2E line of the PR body names the surface for each: the root Bun runner (1, 2) and the PR's GitHub Actions run (3).",
+    "The implementer's negative controls are throwaway edits; re-apply and revert them yourself the same way (NC1 revert via `jj restore packages/envoy-plugin/src/server.ts`, NC2 revert by hand). After each, `jj -R \"$LEGION_WORKSPACE\" diff --stat` must show no working-copy change beyond .omp/config.yml before you write test.json.",
+    "The tester's own commit (test.json) stays on the shared workspace; only the implementer pushes."
+  ],
+  "reviewerNotes": [
+    "Confirm no production code changed: the PR diff is exactly two files (plus .legion/*.json handoffs until the cleanup push).",
+    "Confirm the map is typed `Record<string, readonly string[]>`, not an exhaustive key type — the spec's Rejected section rules the exhaustive form out.",
+    "Confirm the five corrected required lists against the contract (packages/contracts/src/dispatch-tools.ts): `issue` is `.optional()` on dispatch_ask (line 125), dispatch_comment (219), dispatch_suggest (255), dispatch_doc_edit (303), dispatch_artifact (380), and `artifact` is optional on dispatch_suggest and dispatch_doc_edit.",
+    "Thermo pass applies (not docs-only)."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — shared-workspace binding, jj split of only the two logical paths, the READY-format PR body with `Dispatch: LEGION-96`, and the Proof record (criterion/surface/command/observed/headSha/negativeControl) for each acceptance line; it is also the skill whose completion gate names the handoff write/commit/push order.",
+      "verification-before-completion — the handoff claims (61 pass, step green) must be pasted from real command output at the pushed head, never asserted from memory.",
+      "test-driven-development — reproduce the red test on main first (step 2), then make it green; the two negative controls are the fail-first proof that each assertion bites."
+    ],
+    "test": [
+      "legion-worker — the tester re-runs the implementer's proofs at the PR head, writes its own, and fills the E2E section of the PR body; it also fixes what a negative control's revert must look like on a shared jj workspace.",
+      "verification-before-completion — read the CI step's conclusion and log from GitHub via `legion gh`, not from implement.json."
+    ],
+    "review": [
+      "legion-worker — one review per round through the pulls/{n}/reviews API with the Legion footer, thermo pass at the head, approve only the .legion/-free head.",
+      "receiving-code-review / requesting-code-review — the reviewer verifies the five corrected required lists against the contract source rather than accepting the handoff's list."
+    ]
+  },
+  "concerns": [
+    "Discovered scope: five existing required-argument lists are stale (see discoveredScope); the spec's Requirements row 'gain entries for the two new tools' understates the test-file change. Reported to the architect; no production code and no new file is involved, so the PR shape is unchanged.",
+    "The PR modifies a workflow file; if the repository's Actions settings ever required approval for workflow changes from bots, acceptance 3 could not be observed until a human approves the run. Today `legion-implementer[bot]` PRs run CI normally (every prior Legion PR did), so this is noted, not expected."
+  ],
+  "learningsInjected": [],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-14T06:04:55.928Z"
+}
