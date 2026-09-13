@@ -62,7 +62,7 @@ export interface BootProbeOptions {
 }
 
 /** The probe chain was cancelled by the daemon's own teardown while waiting to retry. */
-export class ProbeAbortedError extends Error {
+class ProbeAbortedError extends Error {
   constructor(name: string) {
     super(`[legion] ${name} probe abandoned: the daemon stopped while it was waiting to retry`);
     this.name = "ProbeAbortedError";
@@ -279,6 +279,7 @@ export async function verifyLegionPluginLoaded(
   try {
     await writeFile(probePath, LEGION_LOAD_PROBE, "utf8");
     let lastExitCode = 0;
+    let answeredNotLoaded = false;
     await retryBootProbe(
       "pi-legion-envoy load",
       async () => {
@@ -300,6 +301,9 @@ export async function verifyLegionPluginLoaded(
         if (result.exitCode === 0 && output.includes(LEGION_LOADED_MARKER)) {
           return { passed: true, definitive: false, detail: "" };
         }
+        // The probe answered "not loaded": that diagnosis stands whatever the exit code — a
+        // runner kill after the marker still exits non-zero, and must not read as a launch failure.
+        answeredNotLoaded = output.includes(LEGION_NOT_LOADED_MARKER);
         // Transient only when omp loaded the plugin (marker present) and then died under load. A
         // non-zero exit without the marker is the launch command (the configured
         // `omp_launch_prefix` plus the OMP invocation) failing before or inside omp — e.g.
@@ -315,7 +319,7 @@ export async function verifyLegionPluginLoaded(
             `[legion] pi-legion-envoy load probe never completed within its retry budget (${options.retry.maxAttempts} attempts) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
           );
         }
-        if (lastExitCode !== 0) {
+        if (lastExitCode !== 0 && !answeredNotLoaded) {
           return new Error(
             `[legion] OMP launch probe failed (exit ${lastExitCode}) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
           );

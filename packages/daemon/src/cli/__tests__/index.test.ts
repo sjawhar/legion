@@ -430,9 +430,7 @@ describe("legion probe-image", () => {
 
   it.each([
     ["pi.agents", "LEGION_OMP_AGENTS=missing\n", "does not expose pi.agents", 1],
-    // A plugin that answered `no` and was then killed exits non-zero, so the launch-failure
-    // wording carries the marker; the point is that it is final and not retried.
-    ["plugin load", "LEGION_PLUGIN_LOADED=no\n", "LEGION_PLUGIN_LOADED=no", 2],
+    ["plugin load", "LEGION_PLUGIN_LOADED=no\n", "is installed but not loaded by omp", 2],
   ])("treats a %s probe that prints its negative marker and then hangs past the budget as definitive: no retry", async (_probe, stderr, message, expectedAttempts) => {
     let attempts = 0;
     const sleeps: number[] = [];
