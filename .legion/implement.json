@@ -1,0 +1,45 @@
+{
+  "pr": 1011,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1011",
+  "branch": "legion/LEGION-40",
+  "headSha": "30eb67e1f6b40fb5e4fff08454d9fe083979ee7d",
+  "baseMeasured": "main@origin dd6a8d4e (chore: release cli v1.8.4); the plan's six anchor files were unchanged between dd6a8d4e and main@origin a95a2846 at implement time, so no rebase",
+  "commits": [
+    "b05b6fe567fc fix(smoke): up.sh resolves DISPATCH_URL/DISPATCH_TOKEN from envoy.json when unset (LEGION-40)",
+    "cda1034560e7 fix(smoke): checkpoints.sh resolves DISPATCH_URL/DISPATCH_TOKEN through the shared envoy.json resolver (LEGION-40)",
+    "30eb67e1f6b4 docs(smoke): README command blocks take DISPATCH_TOKEN from envoy.json; document the fallback and its failure message (LEGION-40)"
+  ],
+  "filesChanged": [
+    "scripts/smoke/dispatch-config.sh",
+    "scripts/smoke/up.sh",
+    "scripts/smoke/up.test.sh",
+    "scripts/smoke/checkpoints.sh",
+    "scripts/smoke/checkpoints.test.sh",
+    "scripts/smoke/README.md",
+    "docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md"
+  ],
+  "deviations": [
+    "Task 1 Step 3: the plan's two 'environment wins' cases (`export DISPATCH_URL=… DISPATCH_TOKEN=…; resolve_dispatch_config` inside `$(…)`) trip shellcheck 0.11.0 SC2030/SC2031 (info) at the subshell and again at the harness's own later `export DISPATCH_URL=` lines, breaking the plan's own 'no new findings' gate. They now run the resolver in a fresh bash whose environment carries the pair as given (`resolved_from_environment` in up.test.sh: a prefix assignment on the child, the exact path an operator's export takes); assertions and PASS lines unchanged; shellcheck prints only the two pre-existing up.sh findings.",
+    "Task 3 Step 7: the plan's grep gate expected no matches, but its third pattern (`secrets .*DISPATCH_TOKEN`) matches the README sentence the plan itself wrote in Step 3 (`…`secrets` wrapper…; `DISPATCH_TOKEN` needs no wrapper…`) and its second matches the notes bullet Step 6 wrote (`no longer name a `secrets DISPATCH_TOKEN` key`). Both are prose saying the token is NOT a secrets key. An invocation-shaped grep (`secrets( [A-Z0-9_]+)* DISPATCH_TOKEN( [A-Z0-9_]+)* --`) over scripts/smoke and the notes finds nothing; `require_dispatch_token` is gone from scripts/ and docs/solutions/.",
+    "Task 4 Step 3: the first verbatim run (CREATED root issue LEGSMOKE-106, RIG READY, exit 0) inherited this pane's LEGION_OMP_PATH (the …-rpcfix build), which the LEGION-10 scrub list does not clear; the rig's daemon then died at its OMP probe because ~/.omp/natives/18.1.15/*.node momentarily did not match that binary's loader (rewritten 08:45; `omp --version` on it passed again a minute later). Torn down, run-1 SMOKE_DIR moved to /tmp/legion-smoke.legion40-run1, and rerun with `-u LEGION_OMP_PATH` added to the scrub so the rig ran its own pin (GREEN OMP build: …/18.1.18-sami.20260912-104423/bin/omp; CREATED root issue LEGSMOKE-107). Testers should add -u LEGION_OMP_PATH to the pane scrub.",
+    "Commits were made path-scoped (`jj commit … scripts/smoke docs/solutions`) because OMP writes an empty `.omp/config.yml` into every Legion workspace at session start (present in all 29 workspaces, never in main); it stays uncommitted in the working copy."
+  ],
+  "trickyParts": [
+    "up.test.sh sources a stripped copy of up.sh from a mktemp directory, so the harness copies dispatch-config.sh beside that copy; BASH_SOURCE-relative sourcing works unchanged for checkpoints.sh, which the harness runs in place.",
+    "`jq -r '.dispatch.token? // empty'`: the trailing `?` is load-bearing under jaq (the `jq` on this box's PATH), which raises a type error for a missing `.dispatch` where jq 1.7 prints nothing.",
+    "Another agent's rig (root LEGSMOKE-108, actor legion-smoke-20260913T084809Z) started during the run; because both rigs bridge every LEGSMOKE Dispatch event, this daemon admitted that root too. Left alone; only LEGSMOKE-106 and LEGSMOKE-107 (mine) were set to done."
+  ],
+  "verification": {
+    "harnesses": "up.test.sh exit 0 (18 PASS), checkpoints.test.sh exit 0 (14 PASS), down.test.sh exit 0 (3 PASS) at 30eb67e1; shellcheck -x on the five shell files prints only the pre-existing up.sh SC2155/SC2086",
+    "realServer": "env -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE + resolve_dispatch_config → DISPATCH_URL=http://sami-agents:8766, authenticated GET /api/v1/issues?project=LEGSMOKE → HTTP 200; XDG_CONFIG_HOME=/nonexistent → the exact 'does not exist' message, exit 1, no request",
+    "readmeStartBlock": "byte-identical scratch copy run from the repo root under the pane scrub plus -u LEGION_OMP_PATH -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE: CREATED root issue LEGSMOKE-107, RIG READY, exit 0, default ports/SMOKE_DIR (free at run time)",
+    "readmeCheckpointsBlock": "CHECKPOINT 13 OK (both variables unset); CHECKPOINT 1 OK: Dispatch tracks LEGSMOKE-107 past triage; controller locator is live (40 s after RIG READY); negative control XDG_CONFIG_HOME=/nonexistent → CHECKPOINT 1 FAILED: DISPATCH_URL is unset and /nonexistent/opencode/envoy.json does not exist; …, exit 1",
+    "teardown": "down.sh → RIG DOWN; NATS container gone, ports 14222/19020/19370 free, pids gone, private tmux server gone; LEGSMOKE-106 and LEGSMOKE-107 PATCHed to done with a session actor"
+  },
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "discoveredComplexity": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T08:51:38.688Z"
+}
