@@ -11,10 +11,10 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { spawnCapabilityKey } from "../api/auth";
-import { appRoleForLegionRole } from "../api/github";
 import type { DaemonConfig } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
+import { appRoleForLegionRole } from "../github-apps";
 import {
   type LegionState,
   loadState as legionStateLoadState,
