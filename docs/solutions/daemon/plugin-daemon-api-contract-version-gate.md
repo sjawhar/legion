@@ -36,9 +36,9 @@ design and, more usefully, the two alternatives that were rejected and why.
 
 ## The gate
 
-- `packages/contracts/src/legion-daemon-api.ts` exports `LEGION_DAEMON_API_VERSION = 1`, a
+- `packages/contracts/src/legion-daemon-api.ts` exports `LEGION_DAEMON_API_VERSION` (an integer; `2` since the design gate's `register_gate` request and gate record changed shape), a
   plain integer beside the schemas it versions.
-- `packages/pi-envoy/package.json` carries `"legion": { "daemonApiVersion": 1 }`;
+- `packages/pi-envoy/package.json` carries `"legion": { "daemonApiVersion": <the same integer> }`;
   `packages/pi-envoy/src/legion/daemon-api-version.test.ts` pins the two equal, so a bump on
   one side without the other fails the plugin's own suite.
 - `verifyLegionPluginContract` (`packages/daemon/src/daemon/boot-probes.ts`) reads the installed

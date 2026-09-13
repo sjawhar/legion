@@ -11,7 +11,7 @@ import { LEGION_ROLES } from "./legion-roles";
  * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
  * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
  */
-export const LEGION_DAEMON_API_VERSION = 1;
+export const LEGION_DAEMON_API_VERSION = 2;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);

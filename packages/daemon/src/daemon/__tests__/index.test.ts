@@ -2333,7 +2333,9 @@ describe("startDaemon", () => {
           },
         })
       ).rejects.toThrow(
-        /pi-legion-envoy manifest at .* could not be read \(ENOENT: no such file or directory\); this daemon requires a plugin speaking daemon API contract 1\./
+        new RegExp(
+          `pi-legion-envoy manifest at .* could not be read \\(ENOENT: no such file or directory\\); this daemon requires a plugin speaking daemon API contract ${LEGION_DAEMON_API_VERSION}\\.`
+        )
       );
     } finally {
       await rm(stateDir, { recursive: true, force: true });
