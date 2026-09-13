@@ -2,14 +2,15 @@
   "pr": 1024,
   "prUrl": "https://github.com/sjawhar/legion/pull/1024",
   "branch": "legion/LEGION-57",
-  "headSha": "7924c7f1256fab1802aada6f6375c0a2fadf471f",
+  "headSha": "35fabe0db389d1d4fecdc69648dee8e3a1353f17",
   "spec": "dispatch://LEGION-57/spec v4",
   "commits": [
     "d7fd0d7e0404 daemon: a released child stays in its parent's tree; only an orphan admits as a root (T1, T2)",
     "cd2d32161174 daemon: the first sub-architect spawn is a child's admission and writes its in_progress (T3, T4)",
     "14d6c1b4557d daemon: boot removes ownerless child trees and wakes their parents with child-adopted (T5)",
     "c1ac73212ba3 smoke: checkpoint 4 asserts a released child is owned inside its parent's tree (T6)",
-    "7924c7f1256f docs: children never take admission slots; the first sub-architect spawn starts the child (T7)"
+    "7924c7f1256f docs: children never take admission slots; the first sub-architect spawn starts the child (T7)",
+    "35fabe0db389 smoke: checkpoint 4 single-issue fallback only while no child is released; docs: idle-retire architect exclusion is a role check (tester round)"
   ],
   "filesChanged": [
     "packages/daemon/src/daemon/legion-state.ts",
@@ -63,7 +64,7 @@
     "Skill changes (T7) ship with the plugin/skill install, not the daemon; the rig's architect follows the existing release-then-spawn flow, so acceptance 8 does not depend on T7."
   ],
   "openQuestions": [],
-  "headShaNote": "code head (docs commit) after the conflict-forced rebase onto main c8faafecc6a7; .legion/implement.json sits in its own commit on top",
+  "headShaNote": "code head after the tester round (one corrective commit on top of the tester handoff cf7ad33367fa); .legion/implement.json sits in its own commit on top",
   "rebase": {
     "reason": "PR #1024 reported CONFLICTING/DIRTY against main before testing; architect asked for a rebase",
     "onto": "main@origin c8faafecc6a7 (LEGION-20 #975 design gate -> document approval; LEGION-77 #1017)",
@@ -84,7 +85,20 @@
       "AGENTS.md, reducers.ts, legion-state.ts, processes.ts, workers.ts, the four test files: merged without conflict; main added 11 tests to the four files."
     ]
   },
+  "rounds": [
+    {
+      "trigger": "tester report dispatch://LEGION-57/artifact/tester-report-md (acceptance 1-8 PASS; observations 3 and 4); spec v5 records both",
+      "changes": [
+        "scripts/smoke/checkpoints.sh checkpoint 4: the root_phase_worker fallback applies only while no child of the root is at todo or later on Dispatch; a released child without a sub-architect claim fails naming the child and the missing claim whatever runs on the root (message: released child <KEY> (<status>) holds no sub-architect role claim with a worker pane on <ROOT> (LEGION-57 ...)). The no-child-is-a-tree assertion stays unconditional. Deviation from the assignment wording: the failure uses a child-naming message rather than the neither...nor message, because that one would falsely say no phase worker is claimed when a planner is; the neither...nor message stays for the no-child-released, no-worker case.",
+        "scripts/smoke/checkpoints.test.sh: released-no-claim case now expects the child-naming message; new cases -- todo child + planner on the root, no sub-architect claim -> FAILED naming the missing claim; triage child + planner on the root -> OK single-issue.",
+        "scripts/smoke/README.md row 4: the fallback condition.",
+        "packages/daemon/src/daemon/AGENTS.md idle-retire bullet: the exclusion is claim.role === \"architect\" in retireIdleWorker (explicit role check, not the phase record); a sub-architect is phases[child].phase from its assignment (promptExistingWorker writes the phase for every assignment) until it spawns the child's first phase worker; both architects park by design between wakes."
+      ],
+      "notTouched": "processes.ts:2268 (resumeWorker doc comment) carries the same phrasing with the qualifier \"once it has spawned a planner\", which keeps it true; left alone per the two-changes scope.",
+      "verification": "bash scripts/smoke/checkpoints.test.sh: 24 PASS lines, exit 0; bash -n on both scripts; no TypeScript touched, so no biome/tsc/bun test run this round."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T12:01:50.309Z"
+  "completed": "2026-09-13T13:41:57.327Z"
 }
