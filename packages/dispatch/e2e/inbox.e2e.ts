@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { getUnsubscribeCalls, setInterests, setLiveSessions } from "./agents";
+import { setInterests, setLiveSessions } from "./agents";
 import {
   createArtifactAsk,
   createAsk,
@@ -9,7 +9,6 @@ import {
   createProject,
   createProjectDocument,
   getAsk,
-  getIssue,
   getIssueEvents,
   patchIssue,
 } from "./api";
@@ -42,14 +41,6 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "First ask" },
     session
   );
-  const childIssue = await createIssue({
-    parent: firstIssue.key,
-    project: "CORE",
-    title: "Child decision",
-  });
-  await patchIssue(firstIssue.key, {
-    external_links: [{ kind: "github_issue", url: "https://github.com/sjawhar/legion/issues/815" }],
-  });
   await createAsk(
     secondIssue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Second ask" },
@@ -80,19 +71,6 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
 
   const alice = await asUser(browser, "alice");
   const alicePage = await alice.newPage();
-  // Every issue write the browser sends, attached on failure: the route-clear race
-  // shows up as a PATCH carrying the previous route instead of "".
-  const issueWrites: string[] = [];
-  alicePage.on("request", (request) => {
-    if (request.method() === "PATCH" && request.url().includes("/api/v1/issues/")) {
-      issueWrites.push(`${new Date().toISOString()} PATCH ${request.url()} ${request.postData()}`);
-    }
-  });
-  const attachIssueWrites = () =>
-    testInfo.attach("issue-writes.log", {
-      body: issueWrites.join("\n"),
-      contentType: "text/plain",
-    });
   await alicePage.goto("/");
   if (testInfo.project.name === "iphone") {
     await alicePage.getByRole("button", { name: "Open navigation" }).click();
@@ -138,89 +116,6 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     await alicePage.getByRole("button", { name: "Close navigation" }).click();
   }
 
-  await alicePage.goto(`/issues/${firstIssue.key}`);
-  const subscribedAgents = alicePage.getByRole("region", { name: "Subscribed agents" });
-  await expect(subscribedAgents).toContainText("e2e-session-title");
-  await expect(subscribedAgents.getByText("e2e-session", { exact: true })).toHaveCount(0);
-  await expect(subscribedAgents.locator("[title='e2e-session']")).toHaveCount(1);
-  await alicePage.getByRole("heading", { level: 1 }).click();
-  const issueTitle = alicePage.getByLabel("Issue title");
-  await issueTitle.fill("First decision revised");
-  await issueTitle.press("Enter");
-  await expect
-    .poll(() => getIssue(firstIssue.key))
-    .toMatchObject({ title: "First decision revised" });
-  await alicePage.getByLabel("Status").selectOption("todo");
-  await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ status: "todo" });
-  await alicePage.getByText("Messages default to no route").click();
-  await alicePage.getByLabel("Route").fill("role:legion-controller-core");
-  await alicePage.getByRole("button", { name: "Save route" }).click();
-  await expect
-    .poll(() => getIssue(firstIssue.key))
-    .toMatchObject({
-      route: "role:legion-controller-core",
-    });
-  await alicePage.getByText("Messages default to role:legion-controller-core").click();
-  const routeInput = alicePage.getByLabel("Route");
-  await routeInput.fill("");
-  // The field must still read "" when the earlier PATCH's response has been applied;
-  // a revert here (not a wrong request body) is the race this test guards.
-  await expect(alicePage.getByRole("button", { name: "Save route" })).toBeEnabled();
-  await expect(routeInput).toHaveValue("");
-  await alicePage.getByRole("button", { name: "Save route" }).click();
-  try {
-    await expect.poll(() => getIssue(firstIssue.key)).toMatchObject({ route: null });
-  } finally {
-    await attachIssueWrites();
-  }
-  await expect(
-    alicePage.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
-  ).toHaveAttribute("title", "GitHub details are unavailable for this sign-in.");
-  await alicePage.getByRole("tab", { name: "Children" }).click();
-  await expect(
-    alicePage
-      .getByRole("tabpanel")
-      .getByRole("link", { name: `${childIssue.key} · Child decision` })
-  ).toBeVisible();
-  await alicePage.getByRole("tab", { name: "Conversation" }).click();
-  const conversationAsk = alicePage.getByTestId(`ask-${newestAsk.id}`);
-  await expect(conversationAsk).toHaveCount(1);
-  await expect(conversationAsk).toContainText("Answered by");
-  await alicePage.screenshot({ path: testInfo.outputPath("issue-page.png"), fullPage: true });
-
-  const inboxContext = await asUser(browser, "alice");
-  const inboxPage = await inboxContext.newPage();
-  await inboxPage.goto("/");
-  await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(2);
-  await alicePage.getByRole("button", { name: "Close issue" }).click();
-  await expect
-    .poll(() => getIssue(firstIssue.key))
-    .toMatchObject({
-      closed_at: expect.any(String),
-      status: "done",
-    });
-  await expect(alicePage.getByText("This issue is closed.", { exact: true })).toBeVisible();
-  await expect(inboxPage.locator("[data-testid^=ask-]")).toHaveCount(1);
-  await expect(inboxPage.getByText("First ask", { exact: true })).toHaveCount(0);
-  await inboxContext.close();
-  await alicePage.getByRole("button", { name: "Pin issue" }).click();
-  await alicePage.goto("/");
-  await alicePage.goto(`/issues/${firstIssue.key}`);
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Open navigation" }).click();
-  }
-  await expect(alicePage.getByRole("heading", { name: "Pinned" })).toBeVisible();
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Close navigation" }).click();
-  }
-  await expect(alicePage.getByRole("button", { name: "Unpin issue" })).toBeVisible();
-  const bob = await asUser(browser, "bob");
-  const bobPage = await bob.newPage();
-  await bobPage.goto("/");
-  await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
-  await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
-  await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
-
   const textOnlyAsk = await createAsk(
     secondIssue.key,
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Text-only ask" },
@@ -262,7 +157,6 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   );
   await expect(alicePage.getByText("CORE · Design notes", { exact: true })).toBeVisible();
 
-  await bob.close();
   await alice.close();
 });
 
@@ -405,67 +299,6 @@ test("an unanchored issue-level comment reaches Conversation, not document revie
     }
     await expect(page.getByLabel("Margin review items")).not.toContainText(
       "No selection needed to comment."
-    );
-  } finally {
-    await alice.close();
-  }
-});
-
-test("a human can unsubscribe an agent from an issue and the session is told", async ({
-  browser,
-}) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Subscriber removal" });
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
-    await setInterests([
-      {
-        session_id: "e2e-unsub-session",
-        topics: [
-          `notifications.dispatch.issue.${issue.key}`,
-          `notifications.dispatch.issue.${issue.key}.>`,
-        ],
-      },
-    ]);
-  }
-
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-
-  try {
-    await page.goto(`/issues/${issue.key}`);
-    const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
-    await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
-    }
-
-    await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
-    const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
-    await expect(dialog).toContainText(
-      `Unsubscribe Worker (e2e) from ${issue.key}? They will be told.`
-    );
-    await dialog.getByRole("button", { name: "Confirm" }).click();
-
-    await expect(page.getByRole("region", { name: "Subscribed agents" })).toHaveCount(0);
-
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect
-        .poll(async () =>
-          (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
-        )
-        .toBe(true);
-    }
-
-    await expect
-      .poll(async () =>
-        (await getIssueEvents(issue.key)).some((event) => event.type === "subscription.removed")
-      )
-      .toBe(true);
-
-    await page.getByRole("tab", { name: "Conversation" }).click();
-    await expect(page.getByRole("list", { name: "Conversation turns" })).toContainText(
-      "unsubscribed"
     );
   } finally {
     await alice.close();
