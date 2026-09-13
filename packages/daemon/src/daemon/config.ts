@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { stripDispatchEnv } from "./environment";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 
 export type GitHubAppRole = "implement" | "review";
@@ -557,10 +556,13 @@ function readSecretName(value: unknown, field: string): string | undefined {
   return name;
 }
 
+/** Runs with the daemon's own environment on purpose: this child exists to read the App key the
+ * operator's launcher supplies (`GH_*_APP_PRIVATE_KEY_B64`); it is never a pane. Panes and every
+ * other child get the allow-listed `paneEnv` (`environment.ts`). */
 function executePrivateKeyCommand(command: string, field: string): string {
   const result = spawnSync("sh", ["-c", command], {
     encoding: "utf8",
-    env: stripDispatchEnv(process.env),
+    env: process.env,
   });
   if (result.error || result.status !== 0) {
     const status = result.status === null ? "unknown" : String(result.status);
@@ -574,17 +576,17 @@ function executePrivateKeyCommand(command: string, field: string): string {
 
 const SecretsStatusSchema = z.object({ key: z.string(), tier: z.string() }).passthrough();
 
-/** Runs one `secrets get …` for `name`. Two deliberate differences from
- * `executePrivateKeyCommand`'s `sh -c` child: the child inherits the daemon's stdin — secretsd
- * identifies a tokenless caller by `isatty(0)` plus `/proc/self/fd/0`, so a piped stdin would be
- * refused as "neither a terminal tty nor a session token" — and `SECRETSD_SESSION_TOKEN_FILE` is
- * dropped (only that one: `SECRETSD_SOCK` is the broker's socket path, not a session), so the
- * request is always scoped to the launcher pane's terminal and the App key's grant never lands
- * on an agent session the daemon happened to be started from. No daemon-imposed timeout:
- * secretsd's own approval window is the failure, reported with the child's stderr. */
+/** Runs one `secrets get …` for `name`. Like `executePrivateKeyCommand` this is the daemon acting
+ * for itself, never a pane, so it runs under the daemon's own environment. Two deliberate
+ * differences from that `sh -c` child: the child inherits the daemon's stdin — secretsd identifies
+ * a tokenless caller by `isatty(0)` plus `/proc/self/fd/0`, so a piped stdin would be refused as
+ * "neither a terminal tty nor a session token" — and `SECRETSD_SESSION_TOKEN_FILE` is dropped
+ * (only that one: `SECRETSD_SOCK` is the broker's socket path, not a session), so the request is
+ * always scoped to the launcher pane's terminal and the App key's grant never lands on an agent
+ * session the daemon happened to be started from. No daemon-imposed timeout: secretsd's own
+ * approval window is the failure, reported with the child's stderr. */
 function runSecretsGet(name: string, flag: "--no-request" | "--value", field: string): string {
-  const env = stripDispatchEnv(process.env);
-  delete env.SECRETSD_SESSION_TOKEN_FILE;
+  const { SECRETSD_SESSION_TOKEN_FILE: _session, ...env } = process.env;
   const args = ["get", name, flag];
   const result = spawnSync("secrets", args, {
     encoding: "utf8",

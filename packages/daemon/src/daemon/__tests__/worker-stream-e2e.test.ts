@@ -37,6 +37,7 @@ function startApi(): { api: LegionApi; state: LegionState } {
   };
   const deps: LegionApiDeps = {
     state,
+    baseEnv: {},
     tokenManager: { getToken: inert },
     dispatchClient: fakeDispatchClient(),
     processManager: {

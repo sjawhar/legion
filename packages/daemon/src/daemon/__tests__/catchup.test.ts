@@ -207,6 +207,7 @@ describe("derived catch-up", () => {
     expect(
       await workerCatchup(state, root, "implementer", {
         runner,
+        baseEnv: {},
         tokenManager: tokenManager(),
         repo: "acme/widgets",
       })
@@ -283,6 +284,7 @@ describe("derived catch-up", () => {
     expect(
       await workerCatchup(state, root, "implementer", {
         runner,
+        baseEnv: {},
         tokenManager: tokenManager(),
         repo: "acme/widgets",
       })

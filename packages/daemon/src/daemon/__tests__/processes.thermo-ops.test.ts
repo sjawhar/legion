@@ -76,6 +76,7 @@ function manager(
     statPrompt: async () => {},
     workerCatchup: {
       repo: "sjawhar/legion",
+      baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({

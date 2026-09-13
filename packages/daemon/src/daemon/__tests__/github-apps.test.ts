@@ -600,13 +600,16 @@ describe("buildRoleEnv", () => {
     expect(result.LEGION_ID).toBe("team-1");
   });
 
-  it("scrubs the pane-only DISPATCH_TOKEN/DISPATCH_URL/DISPATCH_MCP_URL from the base environment", () => {
+  it("drops credential-shaped names from the base environment before adding the minted token", () => {
     const baseEnv: Record<string, string> = {
       PATH: "/usr/bin",
-      LEGION_ID: "team-1",
+      HOME: "/home/user",
       DISPATCH_TOKEN: "some-dispatch-token",
-      DISPATCH_URL: "http://localhost:8766",
-      DISPATCH_MCP_URL: "http://localhost:8766/mcp",
+      DISPATCH_TOKEN_FILE: "/state/secrets/dispatch-token",
+      LEGION_BOOT_TOKEN_FILE: "/state/secrets/legion-acme-ACME-7-implementer",
+      LEGION_GRANT_FILE: "/state/secrets/legion-acme-ACME-7-implementer-grant",
+      GH_AGENT_APP_PRIVATE_KEY_B64: "leaked-agent-key",
+      ANTHROPIC_API_KEY: "leaked-provider-key",
     };
 
     const identity = {
@@ -615,12 +618,18 @@ describe("buildRoleEnv", () => {
     };
     const result = buildRoleEnv("ghs_token", identity, baseEnv);
 
-    expect(result.DISPATCH_TOKEN).toBeUndefined();
-    expect(result.DISPATCH_URL).toBeUndefined();
-    expect(result.DISPATCH_MCP_URL).toBeUndefined();
-
-    // Non-dispatch keys preserved
     expect(result.PATH).toBe("/usr/bin");
-    expect(result.LEGION_ID).toBe("team-1");
+    expect(result.HOME).toBe("/home/user");
+    expect(result.GH_TOKEN).toBe("ghs_token");
+    for (const name of [
+      "DISPATCH_TOKEN",
+      "DISPATCH_TOKEN_FILE",
+      "LEGION_BOOT_TOKEN_FILE",
+      "LEGION_GRANT_FILE",
+      "GH_AGENT_APP_PRIVATE_KEY_B64",
+      "ANTHROPIC_API_KEY",
+    ]) {
+      expect(result).not.toHaveProperty(name);
+    }
   });
 });

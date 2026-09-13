@@ -242,6 +242,7 @@ function processManagerDeps(
     provisioningToken: async () => "installation-token",
     workerCatchup: {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+      baseEnv: {},
       tokenManager: {
         getToken: async () => ({
           token: "worker-token",
@@ -330,6 +331,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     try {
       const apiDeps: LegionApiDeps = {
         state,
+        baseEnv: {},
         processManager: processes,
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
@@ -531,6 +533,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
         const processes = new ProcessManager(deps);
         const apiDeps: LegionApiDeps = {
           state,
+          baseEnv: {},
           processManager: processes,
           dispatchClient: fakeDispatchClient(),
           tokenManager: {

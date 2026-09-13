@@ -88,45 +88,120 @@ function parseMiseEnvironment(stdout: string): FullMiseEnvironment {
   return environment as FullMiseEnvironment;
 }
 
-/** `DISPATCH_URL` and `DISPATCH_TOKEN_FILE` are configured pane-only exports: the only place they
- * belong is the explicit, config-driven `-e` pairs `processes.ts` adds to a spawned pane's own
- * tmux environment, and the token itself is never exported at all — panes read it from the 0600
- * file `DISPATCH_TOKEN_FILE` names (see `secrets.ts`), so no `-e` argv ever carries the bearer.
- * `DISPATCH_TOKEN` in the daemon's own environment is startup configuration only.
- * `DISPATCH_MCP_URL` is a retired alias with no legitimate destination. The same holds for the
- * per-pane secret family — `LEGION_BOOT_TOKEN_FILE` / `LEGION_CONTROLLER_SECRET_FILE` and the
- * plain variables they replaced, and `LEGION_GRANT_FILE` (the grant file the pi-envoy extension
- * writes before each of the pane's bash commands) with the `LEGION_GRANT` it replaced: each is set
- * by exactly one pane's own `-e` pair, so any copy in the daemon's environment (a daemon started
- * from inside a Legion pane inherits that pane's) is a leak every other pane would otherwise
- * inherit. The tmux server that hosts every Legion pane is
- * forked by the daemon's own first `tmux -L legion-<project>` command and so inherits this
- * stripped environment — which is what makes stripping here sufficient: an `-e` pair can only add
- * or override a key for a new pane, never remove one the pane would otherwise inherit from the
- * server. Every other child process the daemon spawns (mise/tool resolution here,
- * `executePrivateKeyCommand`'s `sh -c` in `config.ts`, GitHub App role/`gh` CLI children in
- * `github-app-env.ts`, and any other daemon subprocess) must never see any of these either, even
- * when the daemon's own process (or mise's) happens to carry one for unrelated reasons. Shared by
- * `fullMiseEnvironment`/`resolveOmpInvocation` below, by `config.ts`'s `executePrivateKeyCommand`,
- * and by `github-app-env.ts`'s base-env copy, so every consumer strips the same keys the same
- * way. */
-const PANE_SECRET_ENV_KEYS = [
-  "DISPATCH_TOKEN",
-  "DISPATCH_TOKEN_FILE",
-  "DISPATCH_URL",
-  "DISPATCH_MCP_URL",
-  "LEGION_BOOT_TOKEN",
-  "LEGION_BOOT_TOKEN_FILE",
-  "LEGION_CONTROLLER_SECRET",
-  "LEGION_CONTROLLER_SECRET_FILE",
-  "LEGION_GRANT",
-  "LEGION_GRANT_FILE",
-] as const;
+/** Every variable a pane process reads from the daemon's own environment: Oh My Pi and its plugins
+ * (HOME, the XDG base dirs, OMP_PROFILE/PI_PROFILE), jj/git/gh, the `legion` CLI launcher, mise (the
+ * shims panes execute), the configured `omp_launch_prefix` (`secrets` needs HOME and, optionally,
+ * SECRETSD_SOCK/XDG_RUNTIME_DIR), tmux itself (TMUX_TMPDIR, SHELL), locale and proxy policy. Nothing
+ * else the daemon was started with reaches a pane, the private tmux server that hosts every pane
+ * (forked by the daemon's first `tmux -L legion-<project>` command under exactly this environment),
+ * a start-up probe, or any other daemon child that runs through `createDaemonRunner`: the GitHub App
+ * private keys, provider keys, Dispatch/Envoy secrets, the operator session's OMP_SESSION_ID,
+ * JJ_CONFIG overlay, TMUX, SSH agent, and every `LEGION_*` and `DISPATCH_*` value (those are explicit
+ * per-pane `-e` pairs in `processes.ts`/`runtime-tmux.ts`, never inherited). Add a name here only
+ * with the process that reads it named in the group comment; never a prefix or wildcard. */
+export const PANE_ENV_ALLOW_LIST: readonly string[] = [
+  // identity, locale, terminal (SHELL: tmux's default-shell for the pane's shell-command)
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TERM",
+  "TZ",
+  "LANG",
+  "LANGUAGE",
+  "LC_ADDRESS",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_IDENTIFICATION",
+  "LC_MEASUREMENT",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NAME",
+  "LC_NUMERIC",
+  "LC_PAPER",
+  "LC_TELEPHONE",
+  "LC_TIME",
+  // directories: temp, the tmux socket dir the daemon's own tmux commands use, XDG base dirs (OMP
+  // DirResolver, `legion gh`'s GH_CONFIG_DIR, the secretsd socket)
+  "TMPDIR",
+  "TMUX_TMPDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_STATE_HOME",
+  // OMP profile selection (DirResolver)
+  "OMP_PROFILE",
+  "PI_PROFILE",
+  // mise: where the tool store lives, for `mise env`/`mise where` here and the shims panes run
+  "MISE_CACHE_DIR",
+  "MISE_CONFIG_DIR",
+  "MISE_DATA_DIR",
+  "MISE_STATE_DIR",
+  // secretsd socket override honoured by the `secrets` client and the secretsd OMP extension
+  "SECRETSD_SOCK",
+  // outbound network policy honoured by OMP/Bun, gh, git, jj
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "NODE_EXTRA_CA_CERTS",
+  // the PATH `mise env` extends; mise's own PATH replaces it in paneEnv
+  "PATH",
+];
 
-export function stripDispatchEnv<T extends NodeJS.ProcessEnv>(env: T): T {
-  const stripped = { ...env };
-  for (const key of PANE_SECRET_ENV_KEYS) delete stripped[key];
-  return stripped;
+/** Second line of defence behind the allow-list: a credential-shaped name never reaches a child even
+ * when an allowed source carries it (`mise env` output, or an allow-list entry added by mistake). Also
+ * the scrub `github-app-env.ts` applies to a `gh` child's base environment — in a pane, where no
+ * allow-list precedes it, this predicate is the only line. A trailing segment `_SECRET`, `_TOKEN`,
+ * `_GRANT`, `_KEY` (so `_API_KEY`, `_CLIENT_KEY`, `_ACCESS_KEY`, `_SESSION_KEY`), `_PASSWORD`,
+ * `_PASSWD`, `_PAT`, or `_CREDENTIALS`, optionally followed by `_FILE` (the pointer twin), or
+ * `PRIVATE_KEY` anywhere; case-insensitive, so a lowercase spelling is caught too. The segment must
+ * end the name: `TOKENIZER`, `X_PATH`, `X_KEYBOARD` are not credentials. */
+const SECRET_LIKE_NAME =
+  /(?:_SECRET|_TOKEN|_GRANT|_KEY|_PASSWORD|_PASSWD|_PAT|_CREDENTIALS)(?:_FILE)?$|PRIVATE_KEY/i;
+
+export function isSecretLikeName(name: string): boolean {
+  return SECRET_LIKE_NAME.test(name);
+}
+
+function withoutSecretLikeNames(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && !isSecretLikeName(key)) kept[key] = value;
+  }
+  return kept;
+}
+
+/** The allow-listed subset of the daemon's own environment: what the bootstrap `mise env` call runs
+ * under, and the daemon-side half of `paneEnvironment`. */
+function allowedDaemonEnvironment(daemonEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const picked: NodeJS.ProcessEnv = {};
+  for (const key of PANE_ENV_ALLOW_LIST) {
+    const value = daemonEnv[key];
+    if (value !== undefined) picked[key] = value;
+  }
+  return withoutSecretLikeNames(picked);
+}
+
+/** The environment every pane, the private tmux server, both start-up probes, and every daemon child
+ * run through `createDaemonRunner` inherit: the allow-listed daemon variables under the complete
+ * `mise env --json` output (PATH and toolchain variables), minus any credential-shaped name. Per-pane
+ * values (`LEGION_*`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, the `*_FILE` secret pointers, GH_*) are
+ * NOT part of it — `processes.ts` and `runtime-tmux.ts` add them as explicit tmux `-e` pairs. */
+export function paneEnvironment(
+  daemonEnv: NodeJS.ProcessEnv,
+  miseEnv: FullMiseEnvironment
+): FullMiseEnvironment {
+  return withoutSecretLikeNames({
+    ...allowedDaemonEnvironment(daemonEnv),
+    ...miseEnv,
+  }) as FullMiseEnvironment;
 }
 
 async function fullMiseEnvironment(
@@ -134,7 +209,7 @@ async function fullMiseEnvironment(
   env: NodeJS.ProcessEnv,
   run: CommandRunner
 ): Promise<FullMiseEnvironment> {
-  const result = await run([mise, "env", "--json"], { env: stripDispatchEnv(env) });
+  const result = await run([mise, "env", "--json"], { env: allowedDaemonEnvironment(env) });
   if (result.exitCode !== 0) {
     // stdout is `mise`'s env dump on partial success — never interpolated here, only stderr.
     const detail = result.stderr.trim();
@@ -142,21 +217,20 @@ async function fullMiseEnvironment(
       `[legion] Could not load the full mise environment (exit ${result.exitCode})${detail ? `: ${detail}` : ""}`
     );
   }
-  const merged: NodeJS.ProcessEnv = {
-    ...env,
-    ...parseMiseEnvironment(result.stdout),
-  };
-  return stripDispatchEnv(merged) as FullMiseEnvironment;
+  return paneEnvironment(env, parseMiseEnvironment(result.stdout));
 }
 
 function miseToolFromInvocation(invocation: string): string | undefined {
   return /^mise x (\S+) -- omp$/.exec(invocation)?.[1];
 }
 
+/** `LEGION_OMP_PATH` is daemon configuration, read from the daemon's own `env`; the `mise where`
+ * lookup runs under `paneEnv` (the finished pane environment) like every other daemon child. */
 async function resolveOmpInvocation(
   invocation: string,
   mise: string,
   env: NodeJS.ProcessEnv,
+  paneEnv: FullMiseEnvironment,
   resolveExecutable: ResolveExecutable,
   run: CommandRunner
 ): Promise<string> {
@@ -174,7 +248,7 @@ async function resolveOmpInvocation(
     );
   }
 
-  const result = await run([mise, "where", tool], { env: stripDispatchEnv(env) });
+  const result = await run([mise, "where", tool], { env: paneEnv });
   const installDir = result.stdout.trim();
   const resolved =
     result.exitCode === 0 ? resolveExecutable(path.join(installDir, "bin", "omp")) : undefined;
@@ -238,7 +312,8 @@ async function installLegionCliLauncher(stateDir: string): Promise<string> {
  * that pane's `<state_dir>/worker-bin`-first PATH — left in place, the daemon's own `gh` would
  * resolve to the shim (every GitHub read failing `LEGION_GRANT_FILE is missing`) and every pane
  * would carry worker-bin twice once `ProcessManager.credentialProcessEnvironment` prepends its own.
- * Stripped here, at the daemon boundary, exactly like the inherited pane secrets (`stripDispatchEnv`).
+ * Stripped here, at the daemon boundary, where the rest of the daemon's own environment is
+ * reduced to `PANE_ENV_ALLOW_LIST` (`paneEnvironment`).
  */
 export async function resolveDaemonEnvironment(
   ompInvocation: string,
@@ -281,6 +356,7 @@ export async function resolveDaemonEnvironment(
     ompInvocation: await resolveOmpInvocation(
       ompInvocation,
       mise,
+      env,
       paneEnv,
       resolveExecutable,
       deps.run

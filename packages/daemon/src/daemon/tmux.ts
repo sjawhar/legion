@@ -7,7 +7,7 @@ export type TmuxRun = (
 
 /** The private tmux server this daemon owns. Every argv this module builds starts
  * `tmux -L <socket>`, so the server is forked by the daemon's own first command and inherits the
- * runner's stripped `paneEnv` (never a human's shell that may carry `DISPATCH_TOKEN`), and no
+ * runner's allow-listed `paneEnv` (never a human's shell that may carry `DISPATCH_TOKEN`), and no
  * Legion pane ever shares a server with the operator's own sessions. The socket name equals the
  * session name (`legion-<project>`): attach with `tmux -L legion-<project> attach -t legion-<project>`. */
 export interface TmuxServer {
@@ -15,8 +15,174 @@ export interface TmuxServer {
   readonly socket: string;
 }
 
+/** stderr shapes meaning no server is behind the daemon's own socket: `no server running` (a
+ * socket file left behind by an exited server) or `error connecting to … (No such file or
+ * directory)` (the socket was never created — a first boot, or a reboot cleared `TMUX_TMPDIR`). */
+export const NO_SERVER_STDERR =
+  /no server running|error connecting to .*\(No such file or directory\)/;
+
 function argv(server: TmuxServer, ...rest: string[]): string[] {
   return ["tmux", "-L", server.socket, ...rest];
+}
+
+/** A pane inherits two tmux environment tables beneath its own `-e` pairs: the server's global
+ * table (`-g`, the environment the server was forked with) and its session's table (`-t
+ * <session>`, which `update-environment` fills from every attaching client — the operator's
+ * `SSH_AUTH_SOCK`/`SSH_CONNECTION`/`DISPLAY` by default). `undefined` names the global table. */
+export type EnvironmentTable = { readonly session: string } | undefined;
+
+function tableFlags(table: EnvironmentTable): string[] {
+  return table === undefined ? ["-g"] : ["-t", table.session];
+}
+
+function tableName(table: EnvironmentTable): string {
+  return table === undefined ? "global" : `session ${table.session}`;
+}
+
+/** `no server running` / socket never created (`NO_SERVER_STDERR`), or the named session is not
+ * there: nothing behind the target to read or write. */
+function targetAbsent(stderr: string | undefined): boolean {
+  return NO_SERVER_STDERR.test(stderr ?? "") || (stderr ?? "").startsWith("no such session");
+}
+
+/** The failure detail for every error message this module throws: tmux's stderr only, trimmed,
+ * omitted when empty — never stdout. For `show-environment` stdout is the value dump, and for the
+ * `-P -F` reports it is whatever a broken tmux printed; no value may reach a log or error string. */
+function failure(result: { stderr?: string }): string {
+  const detail = result.stderr?.trim();
+  return detail ? `: ${detail}` : "";
+}
+
+/** The characters tmux's `-s` output escapes inside a value with a backslash (tmux 3.7c
+ * `environment.c`: `$`, `` ` ``, `"`, `\`). */
+const SHELL_ESCAPED = new Set(["$", "`", '"', "\\"]);
+
+/**
+ * Parses `show-environment -s` output — the whole text, never line by line — into the names of
+ * the table's entries. tmux prints each set entry as `NAME="value"; export NAME;` followed by a
+ * newline, escaping `$`, `` ` ``, `"` and `\` inside the value with a backslash and leaving a
+ * value's own newlines in place, and each variable it unsets for new panes as `unset NAME;` (a
+ * marker: it reaches no pane, so it is not a name here). A name is everything up to the first `=`
+ * (tmux refuses `=` in a name; a space, `"` or `;` in one is fine — `A B`, `Q"N`, `X;` all print and
+ * parse). Marker or entry is decided by structure, never by the `unset ` prefix alone: a line is a
+ * marker only when it is exactly `unset <NAME>;` followed by a newline and NAME contains no `=`
+ * (a set entry always has `NAME="` on its first line) — so an entry *named* `unset X` parses as
+ * the entry it is, and a marker missing its `;` swallows nothing. The closing `"` is the first
+ * *unescaped* one, and the entry closes only on the exact `; export <the same NAME>;` — so a
+ * multi-line value's continuation line, whatever it contains (`HOME;=x`, `key = value`, the
+ * `=`-padded last line of a PEM, even the text `"; export X;` escaped), can never read as a name,
+ * and no per-name probe is needed. Anything else is a parse failure that names the table and the
+ * byte offset — never the text at it, which is a value.
+ */
+export function parseShellEnvironment(dump: string, table: EnvironmentTable): string[] {
+  const names: string[] = [];
+  const fail = (offset: number, what: string): never => {
+    throw new Error(
+      `tmux show-environment -s (${tableName(table)}): ${what} at byte ${offset}, cannot read the table`
+    );
+  };
+  let i = 0;
+  while (i < dump.length) {
+    const lineEnd = dump.indexOf("\n", i);
+    const line = dump.slice(i, lineEnd === -1 ? dump.length : lineEnd);
+    if (line.startsWith("unset ") && !line.includes("=")) {
+      // No `=` on the line, so it cannot open a set entry: it is a marker or nothing.
+      if (lineEnd === -1 || !line.endsWith(";") || line.length === "unset ;".length) {
+        fail(i, "malformed unset marker");
+      }
+      i = lineEnd + 1;
+      continue;
+    }
+    const eq = dump.indexOf("=", i);
+    if (eq === -1 || eq === i || (lineEnd !== -1 && lineEnd < eq)) fail(i, "expected NAME=");
+    const name = dump.slice(i, eq);
+    if (dump[eq + 1] !== '"') fail(eq + 1, 'expected `"` after NAME=');
+    let j = eq + 2;
+    for (;;) {
+      if (j >= dump.length) fail(j, "unterminated value");
+      const ch = dump[j];
+      if (ch === "\\") {
+        if (!SHELL_ESCAPED.has(dump[j + 1] ?? "")) fail(j, "unknown escape in value");
+        j += 2;
+        continue;
+      }
+      if (ch === '"') break;
+      j += 1;
+    }
+    const trailer = `"; export ${name};\n`;
+    if (!dump.startsWith(trailer, j)) fail(j, 'expected `"; export NAME;` closing the entry');
+    names.push(name);
+    i = j + trailer.length;
+  }
+  return names;
+}
+
+/** The variable names in one of the server's environment tables (see `EnvironmentTable`) — read
+ * with `show-environment -s` and `parseShellEnvironment`, so every name is exact — or `undefined`
+ * when there is nothing to read: no server is running on this socket, or the named session does
+ * not exist yet. Names only: the values are never kept. Any other failure throws with tmux's
+ * stderr. */
+export async function environmentNames(
+  server: TmuxServer,
+  table: EnvironmentTable
+): Promise<string[] | undefined> {
+  const flags = tableFlags(table);
+  const result = await server.run(argv(server, "show-environment", "-s", ...flags));
+  if (result.exitCode !== 0) {
+    if (targetAbsent(result.stderr)) return undefined;
+    throw new Error(
+      `tmux show-environment -s ${flags.join(" ")} failed (exit ${result.exitCode})${failure(result)}`
+    );
+  }
+  return parseShellEnvironment(result.stdout, table);
+}
+
+/** A name as a tmux argv token: tmux strips a trailing `;` from a token (its command separator), so
+ * a name ending in `;` would collapse onto the name before it — `HOME;` onto `HOME`. `\;` is the
+ * literal. */
+function nameToken(name: string): string {
+  return name.endsWith(";") ? `${name.slice(0, -1)}\\;` : name;
+}
+
+/** Removes `name` from one of the server's environment tables (`-u`: the entry is gone, not merely
+ * marked unset), so no pane opened afterwards inherits it. Panes already open keep their copy. */
+export async function unsetEnvironment(
+  server: TmuxServer,
+  table: EnvironmentTable,
+  name: string
+): Promise<void> {
+  const flags = tableFlags(table);
+  const result = await server.run(argv(server, "set-environment", ...flags, "-u", nameToken(name)));
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `tmux set-environment ${flags.join(" ")} -u ${name} failed (exit ${result.exitCode})${failure(result)}`
+    );
+  }
+}
+
+/** The `set-option` that empties a session's `update-environment`, so an attaching client (the
+ * operator's `tmux -L legion-<project> attach`) no longer copies its `SSH_AUTH_SOCK`,
+ * `SSH_CONNECTION`, `DISPLAY`, … into the session table every pane opened afterwards would
+ * inherit. tmux's default list is a per-session option seeded from the server's global one, so it
+ * is set on the session itself. */
+function disableEnvironmentUpdatesArgs(session: string): string[] {
+  return ["set-option", "-t", session, "update-environment", ""];
+}
+
+/** Empties an existing session's `update-environment` (see `disableEnvironmentUpdatesArgs`) —
+ * every boot against a running server does this before it reads the session table, so an attach
+ * landing meanwhile cannot slip a copy in behind the read. Returns `false`, having changed nothing,
+ * when no server or no such session is there; throws on any other failure. */
+export async function disableEnvironmentUpdates(
+  server: TmuxServer,
+  session: string
+): Promise<boolean> {
+  const result = await server.run(argv(server, ...disableEnvironmentUpdatesArgs(session)));
+  if (result.exitCode === 0) return true;
+  if (targetAbsent(result.stderr)) return false;
+  throw new Error(
+    `tmux set-option -t ${session} update-environment '' failed (exit ${result.exitCode})${failure(result)}`
+  );
 }
 
 const BOOTSTRAP_WINDOW = "__legion_bootstrap";
@@ -52,7 +218,7 @@ async function markOwner(
       await server.run(argv(server, "kill-window", "-t", target));
     }
     throw new Error(
-      `tmux ${scope} ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
+      `tmux ${scope} ownership marker failed (exit ${marker.exitCode})${failure(marker)}`
     );
   }
 }
@@ -67,21 +233,26 @@ interface PaneReport {
  * Parses a `-P -F` report from `new-window` (`"#{window_id} #{pane_id} #{pane_pid}"`, three
  * tokens) or `split-window` (`"#{pane_id} #{pane_pid}"`, two tokens) — the only difference is
  * whether a window id leads the line. Throws on any malformed/missing token so a launch failure
- * is loud rather than silently persisting a garbage locator.
+ * is loud rather than silently persisting a garbage locator; the message names the command and
+ * carries tmux's stderr, never the malformed report itself.
  */
-function parsePaneReport(stdout: string, context: string, expectWindow: boolean): PaneReport {
-  const tokens = stdout.trim().split(/\s+/);
+function parsePaneReport(
+  result: { stdout: string; stderr?: string },
+  context: string,
+  expectWindow: boolean
+): PaneReport {
+  const tokens = result.stdout.trim().split(/\s+/);
   const windowId = expectWindow ? tokens.shift() : undefined;
   if (expectWindow && (!windowId || !/^@\d+$/.test(windowId))) {
-    throw new Error(`${context} did not report a window id: ${stdout}`);
+    throw new Error(`${context} did not report a window id${failure(result)}`);
   }
   const [paneId, pidToken] = tokens;
   if (!paneId || !/^%\d+$/.test(paneId)) {
-    throw new Error(`${context} did not report a pane id: ${stdout}`);
+    throw new Error(`${context} did not report a pane id${failure(result)}`);
   }
   const pid = Number(pidToken);
   if (!Number.isSafeInteger(pid) || pid <= 0) {
-    throw new Error(`${context} did not report a pane pid: ${stdout}`);
+    throw new Error(`${context} did not report a pane pid${failure(result)}`);
   }
   return { windowId, paneId, pid };
 }
@@ -103,11 +274,25 @@ export async function openWindow(
   const sessionExists =
     (await server.run(argv(server, "has-session", "-t", session))).exitCode === 0;
   if (!sessionExists) {
+    // One client invocation (`;` is tmux's command separator): the session exists with
+    // `update-environment` already empty, so no attach can ever copy a client's environment into
+    // it — not even one landing between the two commands.
     const create = await server.run(
-      argv(server, "new-session", "-d", "-s", session, "-n", BOOTSTRAP_WINDOW, "sleep 3600")
+      argv(
+        server,
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-n",
+        BOOTSTRAP_WINDOW,
+        "sleep 3600",
+        ";",
+        ...disableEnvironmentUpdatesArgs(session)
+      )
     );
     if (create.exitCode !== 0) {
-      throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
+      throw new Error(`tmux new-session failed (exit ${create.exitCode})${failure(create)}`);
     }
     await markOwner(server, session, owner, "session");
   }
@@ -131,15 +316,15 @@ export async function openWindow(
     );
     if (cleanup.exitCode !== 0) {
       throw new Error(
-        `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`
+        `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode})${failure(cleanup)}`
       );
     }
   }
   if (result.exitCode !== 0) {
-    throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
+    throw new Error(`tmux new-window failed (exit ${result.exitCode})${failure(result)}`);
   }
-  const { windowId, paneId, pid } = parsePaneReport(result.stdout, "tmux new-window", true);
-  if (!windowId) throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
+  const { windowId, paneId, pid } = parsePaneReport(result, "tmux new-window", true);
+  if (!windowId) throw new Error(`tmux new-window did not report a window id${failure(result)}`);
   await markOwner(server, windowId, owner, "window");
   return { windowId, paneId, pid };
 }
@@ -164,21 +349,20 @@ export async function splitWindow(
     )
   );
   if (split.exitCode !== 0) {
-    throw new Error(`tmux split-window failed (exit ${split.exitCode}): ${split.stdout}`);
+    throw new Error(`tmux split-window failed (exit ${split.exitCode})${failure(split)}`);
   }
-  const { paneId, pid } = parsePaneReport(split.stdout, "tmux split-window", false);
+  const { paneId, pid } = parsePaneReport(split, "tmux split-window", false);
   await server.run(argv(server, "select-layout", "-t", windowId, "tiled"));
   return { paneId, pid };
 }
 
 /** What a tmux command's stderr says when the pane it targets provably does not exist -- and
  * neither does anything else on this daemon's private server: `can't find pane` (the pane was
- * reaped), `no server running` (a socket file left behind by an exited server), or `error
- * connecting to ... (No such file or directory)` (the socket was never created: a first boot after
- * the upgrade runbook, or a reboot that cleared `TMUX_TMPDIR`). No server on the daemon's own
- * socket means no Legion pane. Every other non-zero exit proves nothing about the pane. */
-export const PANE_GONE_STDERR =
-  /can't find pane|no server running|error connecting to .*\(No such file or directory\)/;
+ * reaped), or no server behind the private socket (`NO_SERVER_STDERR`: a socket file left behind
+ * by an exited server, or a socket never created — a first boot after the upgrade runbook, or a
+ * reboot that cleared `TMUX_TMPDIR`). No server on the daemon's own socket means no Legion pane.
+ * Every other non-zero exit proves nothing about the pane. */
+export const PANE_GONE_STDERR = new RegExp(`can't find pane|${NO_SERVER_STDERR.source}`);
 
 /** `lookupPane`'s verdict. `absent` is a proof (the pane is not there); `failed` is the lack of
  * one -- the listing itself did not run to completion, so the pane may or may not exist -- and

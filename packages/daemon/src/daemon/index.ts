@@ -116,15 +116,18 @@ function repoOwner(repo: `${string}/${string}`): string {
   return owner;
 }
 
+/** `baseEnv` is the daemon's `paneEnv`: a `gh` child gets the allow-listed environment plus its
+ * minted token and identity (`buildRoleEnv`), never the daemon's own `process.env`. */
 export function createCiStatusFetcher(
   tokenManager: Pick<TokenManager, "getToken">,
-  runner: CommandRunner = defaultRunner
+  runner: CommandRunner,
+  baseEnv: NodeJS.ProcessEnv
 ): (prRefs: Record<string, GitHubPRRef>) => Promise<Record<string, CiFetchResult>> {
   return (prRefs) =>
     getCiStatusBatch(prRefs, runner, async (owner) => {
       const lease = await tokenManager.getToken("implement", owner);
       return {
-        env: buildRoleEnv(lease.token, lease.gitIdentity, process.env),
+        env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
       };
     });
 }
@@ -398,7 +401,12 @@ async function startDaemonLocked(
     provisioningToken: async (owner) =>
       (await deps.tokenManager.getToken("implement", owner)).token,
     statPrompt: deps.statPrompt,
-    workerCatchup: { runner, tokenManager: deps.tokenManager, repo: config.repo },
+    workerCatchup: {
+      runner,
+      tokenManager: deps.tokenManager,
+      repo: config.repo,
+      baseEnv: environment.paneEnv,
+    },
     dispatchClient: deps.dispatchClient,
     now: deps.now,
     sleep: deps.sleep,
@@ -446,7 +454,11 @@ async function startDaemonLocked(
     config,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
-  const fetchCiStatusBatch = createCiStatusFetcher(deps.tokenManager, deps.runner);
+  const fetchCiStatusBatch = createCiStatusFetcher(
+    deps.tokenManager,
+    deps.runner,
+    environment.paneEnv
+  );
 
   const emitResync = async (options?: { force?: boolean }): Promise<void> => {
     // Serialized against the shared durable mutation lane: resync reads/writes the same PrState
@@ -485,6 +497,7 @@ async function startDaemonLocked(
     state,
     saveState: save,
     runner,
+    baseEnv: environment.paneEnv,
     tokenManager: deps.tokenManager,
     processManager,
     dispatchClient: deps.dispatchClient,
@@ -671,8 +684,24 @@ async function startDaemonLocked(
   // a launch prefix that fails before OMP) still refuses to serve: the daemon closes what it
   // opened — event pump, API, worker stream, NATS, the instance lock — and `startDaemon` rejects
   // with the probe's error, so `legion start` exits 1 exactly as before.
+  //
+  // Then, once they pass, the server those panes would open into. The private tmux server
+  // survives daemon restarts and hands every new pane two environment tables beneath that pane's
+  // `-e` pairs: its global table (the environment it was forked with — an earlier daemon's, not
+  // this one's `paneEnv` — plus whatever the operator's `tmux.conf` `set-environment -g`s) and the
+  // session table tmux's default `update-environment` fills from every operator attach
+  // (`SSH_AUTH_SOCK`, `SSH_CONNECTION`, …). Whatever `paneEnv` would not pass is removed from both
+  // here and the session's `update-environment` emptied (names logged, never values); a server
+  // this daemon forked itself carries exactly `paneEnv` and removes nothing. A tmux failure here
+  // is as fatal as a failed probe: no pane may open into a server this daemon could not inspect.
   try {
     await probes;
+    const removed = await runtime.scrubServerEnvironment(environment.paneEnv);
+    if (removed.length > 0) {
+      console.warn(
+        `[legion] removed ${removed.length} variable(s) from the private tmux server environment that panes may not inherit: ${removed.join(", ")}`
+      );
+    }
   } catch (error) {
     try {
       await stop();

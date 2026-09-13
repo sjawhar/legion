@@ -115,31 +115,39 @@ grep -Fq 'Authorization: Bearer test-dispatch-token' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
 
 # Checkpoint 13 inspects `/proc/<pid>/environ` of every pid the fake tmux reports, so those pids
-# must be real, long-lived processes the harness owns: one with a clean environment and one with
-# a planted `DISPATCH_TOKEN` (a `$PPID` trick would name a command-substitution subshell that has
-# already exited by the time /proc is read). Both scrub every variable the checkpoint inspects
-# from whatever shell runs this harness (a Legion worker's own pane carries a boot token).
-env -u DISPATCH_TOKEN -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET sleep 300 &
+# must be real, long-lived processes the harness owns: one with a clean environment, one with a
+# planted `DISPATCH_TOKEN` plus a planted App key and canary, and one with only the canary (a
+# `$PPID` trick would name a command-substitution subshell that has already exited by the time
+# /proc is read). All three scrub every variable the checkpoint inspects from whatever shell runs
+# this harness (a Legion worker's own pane carries a boot token; a box's panes may carry the keys).
+scrubbed=(-u DISPATCH_TOKEN -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET
+  -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u FOO_SECRET)
+env "${scrubbed[@]}" sleep 300 &
 clean_pid=$!
-env -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET DISPATCH_TOKEN="leaked-into-a-pane" sleep 300 &
+env "${scrubbed[@]}" DISPATCH_TOKEN="leaked-into-a-pane" GH_AGENT_APP_PRIVATE_KEY_B64="leaked-into-a-pane" FOO_SECRET="leaked-canary" sleep 300 &
 planted_pid=$!
-trap 'kill "$clean_pid" "$planted_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+env "${scrubbed[@]}" FOO_SECRET="leaked-canary" sleep 300 &
+canary_pid=$!
+trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
 
-if ! PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$clean_pid" \
-  env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1; then
+checkpoint_thirteen_against() {
+  # $1: the pid the fake tmux reports for every pane; $2: SMOKE_CANARY_ENV (may be empty).
+  PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$1" \
+    SMOKE_CANARY_ENV="$2" env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1
+}
+
+if ! checkpoint_thirteen_against "$clean_pid" ""; then
   cat "$output_file" >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *'CHECKPOINT 13 OK'* ]] || {
+[[ "$(<"$output_file")" == *'CHECKPOINT 13 OK'*'GH_REVIEW_APP_PRIVATE_KEY_B64'* ]] || {
   cat "$output_file" >&2
   exit 1
 }
 printf 'PASS: checkpoint 13 passes when no recorded process carries a secret\n'
 
-if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$planted_pid" \
-  env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1; then
+if checkpoint_thirteen_against "$planted_pid" ""; then
   printf 'expected checkpoint 13 to fail when a recorded process environment carries DISPATCH_TOKEN\n' >&2
   exit 1
 fi
@@ -148,6 +156,39 @@ fi
   exit 1
 }
 printf 'PASS: checkpoint 13 fails naming the pid and variable when a recorded process environment carries it\n'
+
+# The fixed names are checked before any canary: a planted App key is caught with no
+# SMOKE_CANARY_ENV configured at all.
+env "${scrubbed[@]}" GH_AGENT_APP_PRIVATE_KEY_B64="leaked-into-a-pane" sleep 300 &
+app_key_pid=$!
+trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" "$app_key_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+if checkpoint_thirteen_against "$app_key_pid" ""; then
+  printf 'expected checkpoint 13 to fail when a recorded process environment carries a GitHub App private key\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"pid ${app_key_pid} environ carries GH_AGENT_APP_PRIVATE_KEY_B64="* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 fails on a planted GitHub App private key with no canary configured\n'
+
+if ! checkpoint_thirteen_against "$canary_pid" ""; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 13 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+if checkpoint_thirteen_against "$canary_pid" "FOO_SECRET"; then
+  printf 'expected checkpoint 13 to fail when SMOKE_CANARY_ENV names a variable a recorded process carries\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"pid ${canary_pid} environ carries FOO_SECRET="* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 inspects an operator-planted canary only when SMOKE_CANARY_ENV names it\n'
 
 PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \

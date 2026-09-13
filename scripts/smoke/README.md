@@ -93,6 +93,59 @@ To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OM
 
 Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects an unpinned invocation. Use the explicit `LEGION_OMP_PATH` override above.
 
+### Pane-environment proof
+
+The daemon reads the two GitHub App private keys from its own environment (`private_key_command`
+in the generated `legion.yaml`), and every pane it launches must see neither them nor anything else
+the allow-list (`PANE_ENV_ALLOW_LIST`, `packages/daemon/src/daemon/environment.ts`) does not name.
+To prove it on the rig, plant a canary in the daemon's environment and tell checkpoint 13 about it:
+
+```sh
+FOO_SECRET=canary SMOKE_CANARY_ENV=FOO_SECRET \
+  secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \
+  bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
+```
+
+Then, for the private server and each pane the daemon records (`tmux -L legion-<slug> list-panes -a
+-F '#{window_name} #{pane_id} #{pane_pid}'`), the count must be `0` — `grep -c` exits 1 on zero
+matches, which is the expected exit:
+
+```sh
+pid=$(tmux -L legion-<slug> display-message -p '#{pid}')            # the server
+pid=$(tmux -L legion-<slug> display-message -p -t %<n> '#{pane_pid}')  # a pane
+tr '\0' '\n' < /proc/$pid/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET
+tr '\0' '\n' < /proc/$pid/environ | cut -d= -f1 | sort   # names only, never values
+```
+
+A pane's name list is the allow-listed subset of the daemon's environment, the `mise env` output,
+the explicit `-e` pairs (`LEGION_*`, `ENVOY_*`, `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`, `GH_*`, `GIT_*`,
+`PATH`), and what tmux adds per pane (`TMUX`, `TMUX_PANE`, `TERM*`, `COLORTERM`, `PWD`, `SHLVL`).
+Finish with `SMOKE_CANARY_ENV=FOO_SECRET bash scripts/smoke/checkpoints.sh 13`.
+
+The private server also outlives the daemon. To prove a restarted daemon cleans a server an earlier
+one forked, start the server by hand with a stale variable before `up.sh`, matching the daemon's
+session name: `FOO_SECRET=stale tmux -L legion-<slug> new-session -d -s legion-<slug> 'sleep 3600'`.
+The daemon log must then show `[legion] removed 1 variable(s) from the private tmux server
+environment that panes may not inherit: FOO_SECRET` (plus anything the operator's `tmux.conf`
+`set-environment -g`s, e.g. TPM's `TMUX_PLUGIN_MANAGER_PATH`), and a pane opened afterwards prints
+`0` above. Two things follow from having forked that server by hand: checkpoint 13 fails on the
+server's own pid by construction (`/proc/<pid>/environ` is a process's fork-time environment; the
+scrub edits tmux's global table, which is what new panes inherit — run 13 against a
+daemon-forked server for its green line), and `down.sh` refuses to kill the session because it
+carries no `@legion_owner` mark — `tmux -L legion-<slug> kill-server` yourself after `down.sh`.
+
+The session table is the second door. tmux's default `update-environment` copies an attaching
+client's `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, … into the session, and every pane opened
+afterwards inherits them; the daemon empties that option on its session and scrubs the table at
+boot. To prove it, attach to the rig's session once from a shell carrying a fake agent socket
+(`SSH_AUTH_SOCK=/tmp/fake tmux -L legion-<slug> attach -t legion-<slug>`, then detach) — or
+simulate the copy with `tmux -L legion-<slug> set-environment -t legion-<slug> SSH_AUTH_SOCK /tmp/fake`
+— restart the daemon, and check: `tmux -L legion-<slug> show-environment -t legion-<slug>` lists
+only `-NAME` markers, `tmux -L legion-<slug> show-options -t legion-<slug> update-environment`
+prints the bare option name (an empty list), the daemon log names `SSH_AUTH_SOCK`, and a pane
+opened afterwards prints `0` for `tr '\0' '\n' < /proc/<pid>/environ | grep -c SSH_AUTH_SOCK`. A
+second attach must copy nothing.
+
 The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. The daemon also binds the port one above `LEGION_DAEMON_PORT` for its worker stream (`worker_stream_port` defaults to the daemon port plus one), so that port must be free too. `up.sh` refuses to start when any of those ports is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time (the daemon's record covers both of its ports). Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats-<slug>` container (reused only when it is mapped to the configured `NATS_PORT`; otherwise `up.sh` refuses with `NATS container legion-smoke-nats-<slug> is not mapped to configured port <NATS_PORT>`). In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
 
 Two rigs share one machine when each has its own `SMOKE_PROJECT`, `SMOKE_DIR`, and ports — and their `LEGION_DAEMON_PORT` values are not adjacent, since each daemon also binds the port one above its own for its worker stream. The NATS container is `legion-smoke-nats-<slug>` and the listener's `ENVOY_MACHINE_ID` is `legion-smoke-<slug>` (it keys the listener's durable JetStream consumer, so two listeners sharing one id fail with `consumer is already bound to a subscription`), where `<slug>` is the same one the tmux session name below uses. Once the container is running, `up.sh` writes its name to `${SMOKE_DIR}/nats-container` so `down.sh` needs no environment to find it; a refused start writes no record.
@@ -191,4 +244,4 @@ a gate that can never be satisfied.
 | 10 | `arm-revival`, `SMOKE_WORKER_WINDOW`, `SMOKE_ARCHITECT_WINDOW`, `SMOKE_COMMENT_FRAGMENT` | Daemon logs `no_holder → probe → revive` after the arm point; the worker receives the comment without architect consumption. |
 | 11 | `SMOKE_RESURRECTION_ISSUE`, `SMOKE_RESURRECTION_ROLE`, `SMOKE_RESURRECTION_WORKER_SESSION`, `SMOKE_WORKER_WINDOW`, `SMOKE_CATCHUP_FRAGMENT` | Second live issue advances exactly one generation and its specific revived worker receives catch-up. |
 | 12 | `SMOKE_ROOT_ISSUE`, `SMOKE_QUEUED_ISSUE` | The lingering root released its slot and the queued issue was promoted. |
-| 13 | — | The private tmux server and every recorded pane (controller, roots, workers) carry no `DISPATCH_TOKEN=`, `LEGION_BOOT_TOKEN=`, or `LEGION_CONTROLLER_SECRET=` on argv or in environ; the server's global environment has none; the default server hosts no `legion-<slug>` session. |
+| 13 | `SMOKE_CANARY_ENV` optional | The private tmux server and every recorded pane (controller, roots, workers) carry none of `DISPATCH_TOKEN`, `LEGION_BOOT_TOKEN`, `LEGION_CONTROLLER_SECRET`, `GH_AGENT_APP_PRIVATE_KEY_B64`, `GH_REVIEW_APP_PRIVATE_KEY_B64`, or any name in `SMOKE_CANARY_ENV` (space-separated) on argv or in environ; the server's global environment has none; the default server hosts no `legion-<slug>` session. |

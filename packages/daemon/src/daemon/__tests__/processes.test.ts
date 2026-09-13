@@ -466,6 +466,7 @@ function manager(
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
       repo: "sjawhar/legion",
+      baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({
@@ -774,6 +775,12 @@ describe("ProcessManager", () => {
         "-n",
         "__legion_bootstrap",
         "sleep 3600",
+        ";",
+        "set-option",
+        "-t",
+        "legion-omp",
+        "update-environment",
+        "",
       ],
       ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"],
       [
@@ -4294,6 +4301,7 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => client,
       workerCatchup: {
         repo: "sjawhar/legion",
+        baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
           getToken: async () => {

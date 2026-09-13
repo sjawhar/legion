@@ -42,10 +42,10 @@ tells every process it spawns to register at the outer daemon's URL (this box's 
 at `http://127.0.0.1:13370`), while its own API listens on a different port. Nothing fails
 loudly; the inner daemon simply never hears from its own roots.
 
-`DISPATCH_TOKEN` and the `LEGION_BOOT_TOKEN*` family are the same hazard class, already handled:
-`stripDispatchEnv` (`environment.ts`) removes them from every child the daemon spawns, because a
-pane-started daemon inherits the pane's secret and its private tmux server would otherwise hand
-it to every pane. Secrets are stripped; a URL has to be checked.
+`DISPATCH_TOKEN` and the `LEGION_BOOT_TOKEN*` family were once handled by a strip-list; since
+LEGION-74 the daemon builds every child and pane environment from an allow-list
+(`PANE_ENV_ALLOW_LIST`, `environment.ts`), so no `LEGION_*`/`DISPATCH_*` value is inherited at all.
+A URL still has to be checked.
 
 ## The guard (tmux)
 
@@ -125,10 +125,12 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
 ## Rule for the next config key
 
 Before adding a `LEGION_*` environment key to `resolveDaemonConfig`, grep the pane env builders
-in `processes.ts` for the same name. If the daemon exports it to panes, decide up front which of
-three treatments applies — strip it from children (a secret), refuse an inherited value (a
-per-daemon address), or require the file key in every rig — and name the hazard in the
-`config.ts` row of `packages/daemon/src/daemon/AGENTS.md`, as the `daemon_url` row now does.
+in `processes.ts` for the same name. A `LEGION_*` key is never inherited by a pane (the allow-list
+in `environment.ts` passes none of them), so there is no strip decision to make. What remains, when
+the daemon exports the key to panes, is to decide up front between refusing an inherited value (a
+per-daemon address, as `daemon_url` does) and requiring the file key in every rig — and to name
+the hazard in the `config.ts` row of `packages/daemon/src/daemon/AGENTS.md`, as the `daemon_url`
+row now does.
 
 ## Related
 
