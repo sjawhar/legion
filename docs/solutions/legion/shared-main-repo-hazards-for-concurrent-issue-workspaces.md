@@ -52,7 +52,9 @@ resolved from your role's GitHub App lease, on the pane when it opens it (jj rea
 `JJ_EMAIL` over every config scope), and at every assignment it re-authors the workspace's
 undescribed working-copy commit for your role (`jj metaedit --update-author`), because `jj split`
 and `jj describe` keep that commit's author and only refresh the committer. Provisioning removes
-the repository-scoped identity earlier boots left behind, once, logged.
+the repository-scoped identity earlier boots left behind, once, logged. The jj facts behind each
+of those three steps, and the two failure-mode decisions the design took, are in
+[jj-commit-identity-is-per-process-and-the-working-copy-is-adopted-at-assignment](jj-commit-identity-is-per-process-and-the-working-copy-is-adopted-at-assignment.md).
 
 There is nothing to pin. **Never set or override `user.name`/`user.email` in any jj or Git scope
 — not `jj config set`, not `--config`, not `git config`.** `--config` outranks the pane
