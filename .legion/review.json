@@ -1,46 +1,51 @@
 {
   "verdict": "changes_requested",
-  "round": 1,
-  "reviewId": 5189754771,
-  "reviewUrl": "https://github.com/sjawhar/legion/pull/998#pullrequestreview-5189754771",
-  "commitId": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
-  "prHeadAtReview": "9b06ae6cfa5fa3cf5800e7d4fff88ed04b594e2d",
+  "round": 2,
+  "reviewId": 5189951838,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/998#pullrequestreview-5189951838",
+  "commitId": "07a170ccd58738cc271e54f7effbc93eb946df9e",
+  "prHeadAtReview": "6835e3feb96970fd136878529a90bb353bec392b",
   "critical": 1,
-  "important": 1,
-  "minor": 9,
+  "important": 0,
+  "minor": 8,
   "keyFindings": [
     {
       "severity": "critical",
-      "file": "skills/legion-worker/SKILL.md:333",
-      "description": "Unchanged-diff fingerprint: two positional filesets '~.legion' '~docs/solutions' are unioned by jj (~A | ~B = everything), so neither path is excluded. Verified: fingerprint at dd224351 c88658b3… vs 9b06ae6c 18e62757… (heads differ only by .legion/) as written; f06ac0c1… at both with the single fileset '~(.legion | docs/solutions)'. Consequence: every post-retro rebase reads 'changed' → full round — the loop this PR exists to end. Fix: single fileset in the code block and the bullet at :348. plan.json unchangedDiffCheck.command has the same form; the architect should use the corrected one on this tree."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/src/daemon/api/routes/workers.ts:42",
-      "description": "Architect decision, spec-literal: child issues (released at todo; only spawnTree writes in_progress, for tree.root) and a corrective round off a human's pr-review changes_requested wake never sit at in_progress, so their implementer completion now writes nothing where it wrote testing. Options: write in_progress on first spawn_worker for a todo issue + architect skill sets in_progress before a corrective spawn off a human review; or accept and document in AGENTS.md."
+      "file": "packages/daemon/src/daemon/api/routes/workers.ts:29",
+      "description": "knownIssueStatus has no supersession fence: a pending in_progress left by a failed PATCH outranks a human's later echoed move (backlog/icebox/todo) until the next resync (<=600 s), so the implementer's completion PATCHes testing over the human's status; round-1 code read the echoed status and wrote nothing, so the delta introduces it. Fix: `const pending = state.pendingStatusWrites[issue]; const echoed = state.issues[issue]?.status; return pending && echoed === pending.statusAtRecord ? pending.status : echoed;` (resync's own retryPendingWrite rule) + one test (echoed backlog, pending {in_progress, statusAtRecord: todo} -> []); update the two knownIssueStatus parentheticals in AGENTS.md and the doc comment. Thread 3999033803."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/__tests__/api.test.ts:2605",
-      "description": "Positive test relies on fixture default in_progress; set it explicitly like the retro twin."
+      "file": "skills/legion-architect/SKILL.md:257",
+      "description": "'if a human's review moved it since' — a review never moves a status; the spawn re-writes whenever the daemon does not yet know in_progress (echo lag), benign duplicate PATCH. Say 'unless the daemon already knows the issue is in_progress'. Thread 3999033805."
     },
     {
       "severity": "minor",
-      "file": "fast-follow (wording/duplication, batched in the review body)",
-      "description": "SKILL.md:306-314 rule 1 twice; tester.md:28 annotation lacks the two SHAs SKILL.md:274 requires; reviewer.md:93 'For an approved review, write that handoff' (clean round is COMMENT); architect SKILL.md:183-184 'change the reviewer-approved head' → 'rewrite'; merger.md:43/SKILL.md:302 empty --summary = no file changes, not no commits; SKILL.md:301 merger bullet lacks jj git fetch; SKILL.md:397 stdout vs stderr; architect SKILL.md:251 pr-review row retro-not-run case."
+      "file": "fast-follow batch (review body)",
+      "description": "checkPr fixture for four PrState literals; changesRequested predicate shared in workers.ts; recordingDispatchClient in the pending-write test; 'the spawn's in_progress' -> admission's (api.test.ts:2868, AGENTS.md:21); knownIssueStatus parenthetical duplicated across AGENTS.md rows; architect step 6 item 2 back to one sentence; planner-at-in_progress test optional delete."
     }
   ],
   "verifiedOnGitHub": {
-    "ci": "statusCheckRollup SUCCESS at 9b06ae6c: Tests run 34740651601 (lint, typecheck, test, pr-title), Legion Envoy and Contracts run 34740651605 (pi-envoy; rest skipped)",
-    "threads": "0 total before this review; this review added 3 inline comments (ids 3998885581, 3998885586, 3998885590) at dd224351",
-    "mergeable": "MERGEABLE / BLOCKED (review required)",
-    "e2e": "PR body E2E names throwaway daemon sjawhar/5959 from the PR head, LEGSMOKE-96, logging proxy at code head dd224351 (ancestor of 9b06ae6c); LEGSMOKE-96 Dispatch events #3-#6 match the rig timeline (no daemon event between tester retro 05:24:21 and tester in_progress 05:25:27)"
+    "ci": "statusCheckRollup SUCCESS at 6835e3fe: Tests run 34743811556 (lint, typecheck, test, pr-title), Legion Envoy and Contracts run 34743811538 (pi-envoy; rest skipped)",
+    "threads": "3 round-1 threads resolved with replies naming 20607c94 / 1dbbfd08; this review adds 2 (3999033803 blocking, 3999033805 wording)",
+    "mergeable": "MERGEABLE / BLOCKED",
+    "e2e": "Round-2 rig (sjawhar/5959, LEGSMOKE-97..100, proxy 19580) at cb255252, ancestor of 07a170cc; round-3 paragraph states the diff scope and why it stands; LEGSMOKE-99 #5 (daemon in_progress 06:31:59) and LEGSMOKE-100 (no daemon event after retro) corroborated on Dispatch"
   },
-  "daemonChange": "Correct against the spec: state.issues[issue]?.status === 'in_progress' ? 'testing' : undefined; state.issues[key].status is fed only by the Dispatch reducers (writeStatus never sets it). bun test -t 'implementer completes' → 2 pass locally.",
-  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at dd224351: no blocking finding from either; both confirmed the fileset-union bug; PR body Thermo line filled.",
-  "nextRound": "Implementer fixes SKILL.md:333/:348 (single fileset) and whatever the architect rules on workers.ts:42; if workers.ts changes, tester re-runs the unit tests and greps at the new head (E2E rig unaffected unless daemon behavior changes); reviewer round 2 at the new head. Fingerprint for any conflict-forced rebase on this tree must use '~(.legion | docs/solutions)'.",
-  "handoffCommit": "committed locally as 'review: record handoff'; the reviewer App cannot push — it rides the implementer's next push of legion/LEGION-59.",
+  "fingerprints": {
+    "fileset": "'~(.legion | docs/solutions)'",
+    "dd224351_round1_commit_id": "f06ac0c117325988",
+    "3d166c33_rebased_twin": "f06ac0c117325988",
+    "3d599ade_pre_rebase_tip": "fa03a9f2d1e7d65e",
+    "cdc4e3c9_post_rebase_tip": "fa03a9f2d1e7d65e",
+    "07a170cc_code_head": "03e9dd6c98bfbaaa",
+    "6835e3fe_pr_head": "03e9dd6c98bfbaaa",
+    "verdict": "rebase unchanged; round-1 -> round-2 changed (code) -> a round"
+  },
+  "daemonChange": "spawnStatus and phaseCompleteStatus match spec v6 rows; refusal paths throw before the write; COMMENT records no reviewDecision and resetPrHead drops it per head so deletion push/retro write nothing; duplicate corrective in_progress PATCH benign; 10 targeted tests pass locally.",
+  "thermo": "deep-review + code-quality at 07a170cc: no blocking finding from either; deep-review reproduced the knownIssueStatus fence gap; PR body Thermo line filled.",
+  "nextRound": "Implementer: fence fix + test + architect-skill sentence (+ fast-follow if convenient); tester: unit subset + greps at the new head (rig behaviours unchanged unless the corrective path moves); reviewer round 3 at the new head. If the architect rules the window acceptable, it says so on thread 3999033803 and round 3 proceeds on the same head with wording only.",
+  "handoffCommit": "committed locally as 'review: record handoff (round 2, changes requested at 07a170cc)' on top of 6835e3fe; the reviewer App cannot push — rides the implementer's next push.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T05:57:54.450Z"
+  "completed": "2026-09-13T07:06:53.414Z"
 }
