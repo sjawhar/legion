@@ -1720,6 +1720,22 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 		},
 		{
+			name:  "push with exactly 100 unique paths and a repeat does not flag truncation",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": numberedPaths(0, 100), "removed": []any{}, "modified": []any{}},
+					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(0, 1)},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
+				"changed_paths_truncated": "false",
+			},
+		},
+		{
 			name:  "push with no commits omits changed_paths",
 			event: "push",
 			body: map[string]any{

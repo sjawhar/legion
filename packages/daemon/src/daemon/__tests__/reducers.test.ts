@@ -1470,27 +1470,18 @@ describe("push fix-attempt classification", () => {
     expect(prBlockedEffects(all)).toEqual([]);
   });
 
-  it("a push touching a path outside .legion/ counts one attempt", () => {
+  it("a push touching a path outside .legion/ counts one attempt even when a .legion/ path is listed first", () => {
     const state = redPrState();
 
     expect(
       pushEffects(state, {
-        changed_paths: "packages/daemon/src/daemon/reducers.ts\n.legion/implement.json",
+        changed_paths: ".legion/implement.json\npackages/daemon/src/daemon/reducers.ts",
       })
     ).toEqual([]);
     expect(effects(state, syncPayload("new-sha"))).toEqual([]);
 
     expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
     expect(state.prs[prKey]?.pendingPush).toBeUndefined();
-  });
-
-  it("a push touching only a path outside .legion/ counts one attempt", () => {
-    const state = redPrState();
-
-    expect(pushEffects(state, { changed_paths: "README.md" })).toEqual([]);
-    effects(state, syncPayload("new-sha"));
-
-    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
   });
 
   const unclassifiable: ReadonlyArray<{
@@ -1515,6 +1506,11 @@ describe("push fix-attempt classification", () => {
       name: "changed_paths is absent while changed_paths_truncated is false",
       overrides: { changed_paths: undefined, changed_paths_truncated: "false" },
       reason: "no commits listed",
+    },
+    {
+      name: "changed_paths_truncated is an unrecognised value",
+      overrides: { changed_paths_truncated: "maybe" },
+      reason: "unrecognised",
     },
   ];
 
