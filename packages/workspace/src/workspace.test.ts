@@ -3,7 +3,7 @@ import { existsSync, watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { provisionIssueWorkspace, type RunResult } from "./workspace";
+import { provisionIssueWorkspace, type RunResult, type WorkspaceSpec } from "./workspace";
 
 type RunCall = {
   readonly cmd: string[];
@@ -136,6 +136,22 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
     ["git", `--git-dir=${gitDir}`, "config", "credential.interactive", "false"],
   ];
 }
+/** The command `createWorkspace` runs before anything else: the bookmark's local targets, one
+ * commit id per line — none, one, or (conflicted) several. */
+function resolveBookmarkCommand(bookmark: string, repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "log",
+    "-r",
+    `bookmarks(exact:${bookmark})`,
+    "--no-graph",
+    "-T",
+    'commit_id ++ "\n"',
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ];
+}
 
 const JJ_BINARIES = [
   { name: "local Sami JJ", command: ["jj"] },
@@ -194,30 +210,37 @@ describe("provisionIssueWorkspace", () => {
     const bookmark = "legion/WIDGETS-42";
     const calls: RunCall[] = [];
     process.env.LEGION_MAX_RECURSION_DEPTH = "11";
-
-    const spec = await provisionIssueWorkspace(issue, {
-      extensionPackage,
-      repo: "acme/widgets",
-      stateDir,
-      provisioningToken: async () => "installation-token",
-      credentialHelper,
-      commandTimeoutMs,
-      run: async (cmd, opts) => {
-        calls.push({ cmd, opts });
-        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
-          const target = cmd[4];
-          if (!target) throw new Error("clone is missing its destination");
-          // The clone lands in a sibling of the final path, never at the final path itself.
-          expect(target).not.toBe(repoCloneDir);
-          expect(existsSync(repoCloneDir)).toBeFalse();
-          await mkdir(path.join(target, ".jj"), { recursive: true });
-        }
-        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
-          await mkdir(workspaceDir, { recursive: true });
-        }
-        return { exitCode: 0, stdout: "", stderr: "" };
-      },
-    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let spec: WorkspaceSpec;
+    let logged: unknown[][];
+    try {
+      spec = await provisionIssueWorkspace(issue, {
+        extensionPackage,
+        repo: "acme/widgets",
+        stateDir,
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd, opts) => {
+          calls.push({ cmd, opts });
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+            const target = cmd[4];
+            if (!target) throw new Error("clone is missing its destination");
+            // The clone lands in a sibling of the final path, never at the final path itself.
+            expect(target).not.toBe(repoCloneDir);
+            expect(existsSync(repoCloneDir)).toBeFalse();
+            await mkdir(path.join(target, ".jj"), { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+            await mkdir(workspaceDir, { recursive: true });
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      logged = errorSpy.mock.calls;
+    } finally {
+      errorSpy.mockRestore();
+    }
 
     const [clone, fetch] = calls;
     if (!clone || !fetch) throw new Error("Provisioning did not clone and fetch the repository");
@@ -233,6 +256,7 @@ describe("provisionIssueWorkspace", () => {
         expect.stringMatching(new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`)),
       ],
       ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       [
         "jj",
@@ -249,9 +273,11 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
     ]);
-    // The bookmark is created in the new workspace, on its own working copy.
+    // The bookmark is created in the new workspace, on its own working copy — and a brand-new
+    // issue has no bookmark to miss, so nothing is logged.
     const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark");
     expect(bookmarkSet?.opts?.cwd).toBe(workspaceDir);
+    expect(logged).toEqual([]);
     // Every provisioning command runs under the slow budget, not the runner's generic default.
     expect(calls.map((call) => call.opts?.timeoutMs)).toEqual(calls.map(() => commandTimeoutMs));
     expect(
@@ -338,6 +364,66 @@ describe("provisionIssueWorkspace", () => {
     expect(cloneTargets[1]).not.toBe(cloneTargets[0]);
     expect(existsSync(workspaceDir42)).toBeTrue();
     expect(existsSync(workspaceDir43)).toBeTrue();
+  });
+
+  test("creates a workspace on top of a resolving bookmark and runs no bookmark command", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const bookmark = "legion/WIDGETS-42";
+    const commit = "3f2a9c1e5b7d4a6c8e0f1a2b3c4d5e6f7a8b9c0d";
+    const calls: RunCall[] = [];
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: unknown[][];
+    try {
+      await expect(
+        provisionIssueWorkspace(issue, {
+          extensionPackage,
+          repo: "acme/widgets",
+          stateDir,
+          provisioningToken: async () => "installation-token",
+          credentialHelper,
+          commandTimeoutMs,
+          run: async (cmd, opts) => {
+            calls.push({ cmd, opts });
+            if (cmd[0] === "jj" && cmd[1] === "log") {
+              return { exitCode: 0, stdout: `${commit}\n`, stderr: "" };
+            }
+            if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        })
+      ).resolves.toEqual({ repoCloneDir, workspaceDir, bookmark });
+      logged = errorSpy.mock.calls;
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand(bookmark, repoCloneDir),
+      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
+      [
+        "jj",
+        "workspace",
+        "add",
+        workspaceDir,
+        "--name",
+        "widgets-42",
+        "--revision",
+        commit,
+        "-R",
+        repoCloneDir,
+      ],
+      ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
+    ]);
+    expect(calls.some((call) => call.cmd[1] === "bookmark")).toBeFalse();
+    expect(logged).toEqual([]);
   });
 
   test("creates a missing workspace parent before adding an issue workspace", async () => {
@@ -688,94 +774,84 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
-  test("re-adds a forgotten issue workspace at its bookmark when the bookmark still exists", async () => {
+  test("re-adds a forgotten issue workspace at its bookmark's commit when the bookmark resolves, running no bookmark command", async () => {
     const stateDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const gitDir = path.join(repoCloneDir, ".git");
+    const commit = "3f2a9c1e5b7d4a6c8e0f1a2b3c4d5e6f7a8b9c0d";
     const calls: RunCall[] = [];
     let workspaceAddAttempts = 0;
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     await mkdir(workspaceDir, { recursive: true });
     await rm(workspaceDir, { recursive: true });
-
-    await expect(
-      provisionIssueWorkspace(issue, {
-        extensionPackage,
-        repo: "acme/widgets",
-        stateDir,
-        provisioningToken: async () => "installation-token",
-        credentialHelper,
-        commandTimeoutMs,
-        run: async (cmd, opts) => {
-          calls.push({ cmd, opts });
-          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
-            workspaceAddAttempts += 1;
-            if (workspaceAddAttempts === 1) {
-              return {
-                exitCode: 1,
-                stdout: "",
-                stderr: "Workspace named 'widgets-42' already exists",
-              };
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: unknown[][];
+    try {
+      await expect(
+        provisionIssueWorkspace(issue, {
+          extensionPackage,
+          repo: "acme/widgets",
+          stateDir,
+          provisioningToken: async () => "installation-token",
+          credentialHelper,
+          commandTimeoutMs,
+          run: async (cmd, opts) => {
+            calls.push({ cmd, opts });
+            if (cmd[0] === "jj" && cmd[1] === "log") {
+              return { exitCode: 0, stdout: `${commit}\n`, stderr: "" };
             }
-            await mkdir(workspaceDir, { recursive: true });
-          }
-          if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
-            return {
-              exitCode: 0,
-              stdout: "legion/WIDGETS-42: kxryzmon 3f2a9c1e (no description set)\n",
-              stderr: "",
-            };
-          }
-          return { exitCode: 0, stdout: "", stderr: "" };
-        },
-      })
-    ).resolves.toEqual({
-      repoCloneDir,
-      workspaceDir,
-      bookmark: "legion/WIDGETS-42",
-    });
+            if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+              workspaceAddAttempts += 1;
+              if (workspaceAddAttempts === 1) {
+                return {
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: "Workspace named 'widgets-42' already exists",
+                };
+              }
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        })
+      ).resolves.toEqual({ repoCloneDir, workspaceDir, bookmark: "legion/WIDGETS-42" });
+      logged = errorSpy.mock.calls;
+    } finally {
+      errorSpy.mockRestore();
+    }
 
     const fetch = calls[0];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
+    const addAt = (revision: string) => [
+      "jj",
+      "workspace",
+      "add",
+      workspaceDir,
+      "--name",
+      "widgets-42",
+      "--revision",
+      revision,
+      "-R",
+      repoCloneDir,
+    ];
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ],
+      addAt(commit),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      ["jj", "bookmark", "list", "legion/WIDGETS-42", "-R", repoCloneDir],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "legion/WIDGETS-42",
-        "-R",
-        repoCloneDir,
-      ],
+      addAt(commit),
       ...credentialConfigCommands(gitDir, credentialHelper),
     ]);
+    expect(logged).toEqual([]);
   });
 
-  test("re-adds a forgotten issue workspace at main and creates the bookmark when the bookmark is gone, logging it", async () => {
+  test("re-adds a forgotten issue workspace at main and creates the bookmark when the bookmark is gone, logging it once", async () => {
     const stateDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
@@ -811,14 +887,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
               }
               await mkdir(workspaceDir, { recursive: true });
             }
-            if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
-              // jj 0.44 and 0.45 alike: nothing on stdout, the note on stderr, exit 0.
-              return {
-                exitCode: 0,
-                stdout: "",
-                stderr: "Warning: No matching bookmarks for names: legion/WIDGETS-42\n",
-              };
-            }
+            // The resolution too: jj 0.44 and 0.45 print nothing for a bookmark that is gone.
             return { exitCode: 0, stdout: "", stderr: "" };
           },
         })
@@ -828,50 +897,45 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
+    const addAtMain = [
+      "jj",
+      "workspace",
+      "add",
+      workspaceDir,
+      "--name",
+      "widgets-42",
+      "--revision",
+      "main",
+      "-R",
+      repoCloneDir,
+    ];
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ],
+      addAtMain,
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      ["jj", "bookmark", "list", "legion/WIDGETS-42", "-R", repoCloneDir],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ],
+      addAtMain,
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
     ]);
     const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark" && call.cmd[2] === "set");
     expect(bookmarkSet?.opts?.cwd).toBe(workspaceDir);
-    expect(logged.filter((line) => line.includes("legion/WIDGETS-42 is gone"))).toHaveLength(1);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("legion/WIDGETS-42 is gone");
   });
 
-  test("fails provisioning when the bookmark lookup for a forgotten workspace fails, re-adding nothing", async () => {
+  test("refuses to create a workspace on a conflicted bookmark, before any workspace add", async () => {
     const stateDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const commits = [
+      "19508b7be08e4c3a2b1d0f9e8d7c6b5a49382716",
+      "4e4bde478a1d5f6e7a8b9c0d1e2f3a4b5c6d7e8f",
+    ];
     const calls: RunCall[] = [];
-    let workspaceAddAttempts = 0;
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
@@ -885,26 +949,58 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         commandTimeoutMs,
         run: async (cmd, opts) => {
           calls.push({ cmd, opts });
-          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
-            workspaceAddAttempts += 1;
-            return {
-              exitCode: 1,
-              stdout: "",
-              stderr: "Workspace named 'widgets-42' already exists",
-            };
+          if (cmd[0] === "jj" && cmd[1] === "log") {
+            return { exitCode: 0, stdout: `${commits[0]}\n${commits[1]}\n`, stderr: "" };
           }
-          if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      })
+    ).rejects.toThrow(
+      `Bookmark legion/WIDGETS-42 is conflicted (${commits[0]}, ${commits[1]}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set legion/WIDGETS-42 -r <commit> -R ${repoCloneDir}\`.`
+    );
+    // The resolution is the last command: no prune, no add, nothing registered for the next
+    // resume to adopt.
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
+    ]);
+    expect(existsSync(workspaceDir)).toBeFalse();
+  });
+
+  test("fails provisioning when the bookmark resolution fails, before any workspace add", async () => {
+    const stateDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const calls: RunCall[] = [];
+    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+
+    await expect(
+      provisionIssueWorkspace(issue, {
+        extensionPackage,
+        repo: "acme/widgets",
+        stateDir,
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd, opts) => {
+          calls.push({ cmd, opts });
+          if (cmd[0] === "jj" && cmd[1] === "log") {
             return { exitCode: 1, stdout: "", stderr: "Error: Failed to read the operation log" };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },
       })
     ).rejects.toThrow(
-      `Command failed (exit 1): jj bookmark list legion/WIDGETS-42 -R ${repoCloneDir}\nError: Failed to read the operation log`
+      `Bookmark legion/WIDGETS-42 could not be resolved; workspace ${workspaceDir} was not created.\nCommand failed (exit 1): ${resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir).join(" ")}\nError: Failed to read the operation log`
     );
-    // No second `workspace add` and no bookmark command: nothing is guessed from a failed lookup.
-    expect(workspaceAddAttempts).toBe(1);
-    expect(calls.some((call) => call.cmd[1] === "bookmark" && call.cmd[2] === "set")).toBeFalse();
+    // Nothing is guessed from a failed resolution: no prune, no add, no bookmark command.
+    expect(calls.map((call) => call.cmd)).toEqual([
+      ["jj", "git", "fetch", "-R", repoCloneDir],
+      resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
+    ]);
+    expect(existsSync(workspaceDir)).toBeFalse();
   });
 
   test("reports a clone killed at its budget as a timeout, leaves nothing at the final path, and clones fresh on the next attempt", async () => {

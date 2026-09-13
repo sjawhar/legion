@@ -707,6 +707,18 @@ describe("ProcessManager", () => {
     });
     expect(commands).toEqual([
       ["jj", "git", "fetch", "-R", repo],
+      [
+        "jj",
+        "log",
+        "-r",
+        "bookmarks(exact:legion/LEGION-42)",
+        "--no-graph",
+        "-T",
+        'commit_id ++ "\n"',
+        "--ignore-working-copy",
+        "-R",
+        repo,
+      ],
       ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
       [
         "jj",
