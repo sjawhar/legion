@@ -1,18 +1,18 @@
 {
   "verdict": "pass",
-  "passed": 25,
+  "passed": 30,
   "failed": 0,
   "failures": [],
   "pr": {
     "number": 1003,
     "url": "https://github.com/sjawhar/legion/pull/1003",
-    "headTested": "08700ee7fcfaeec5f4cc480fc11f22cea98ff27c",
-    "codeHead": "caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "headTested": "2b01e897df973e917aa0d67962795818fe478d3a",
+    "codeHead": "92a66d47c28c (docs) on dc38ca668ee8 (CLI + test), rebased onto main 0f744bc8811e; pre-rebase code head caa02ad28b477ced440a51a0bb45fc16bf2b224b",
     "ciAtHeadTested": {
-      "Tests": 34741250440,
-      "Legion Envoy and Contracts": 34741250416,
-      "conclusion": "success (lint, typecheck, test, pr-title, changes, pi-envoy SUCCESS; path-filtered jobs SKIPPED)"
-    }
+      "Tests": 34742377726,
+      "conclusion": "success (reported by the architect; head 2b01e897 MERGEABLE on GitHub)"
+    },
+    "fullVerificationHead": "08700ee7fcfaeec5f4cc480fc11f22cea98ff27c"
   },
   "unitTests": {
     "command": "cd packages/daemon && bun test src/cli/__tests__/review-threads.test.ts src/cli/__tests__/index.test.ts",
@@ -120,10 +120,54 @@
     "The daemon on 127.0.0.1:13370 was unreachable for about a minute mid-phase (every bash call blocked with `Unable to connect` because the installed plugin's tool_call hook mints a grant before each command); it returned on its own and this session's capability survived the restart — grants minted afterwards redeemed normally.",
     "The installed pi-legion-envoy build prepends `export LEGION_GRANT=…` to the bash command text; this tester imitated that line on several calls, which shadowed the real grant and answered `Unable to redeem LEGION_GRANT (403)` — the same failure the planner and implementer recorded. Running commands through script files via the eval kernel's tool.bash bridge kept the command text clean. The workspace extension (env-injected grant) already fixes this; nothing in this PR.",
     "The .omp/config.yml the extension provisions sits in the working copy (`A .omp/config.yml`); the handoff was committed with `jj split` on the single file and the bookmark advanced with `-r @- --allow-backwards`, so it never entered a commit.",
-    "prBodyEdits: 1 (Threads count 2→3 with the tester thread's line, and the E2E section overwritten, in one `legion gh -- pr edit --body-file`)."
+    "prBodyEdits: 1 (Threads count 2→3 with the tester thread's line, and the E2E section overwritten, in one `legion gh -- pr edit --body-file`).",
+    "Round 2 (rebase re-verification): the daemon and eval bridge were reachable throughout; no 403s once every command ran as a single clean line through tool.bash."
   ],
-  "prBodyEdits": 1,
+  "prBodyEdits": 2,
+  "rounds": [
+    {
+      "n": 1,
+      "head": "08700ee7fcfaeec5f4cc480fc11f22cea98ff27c",
+      "verdict": "pass",
+      "summary": "Full verification: 25 unit tests, live negative and positive control on tester thread PRRT_kwDORFy7ds6h220J, malformed --repo refusal, acceptance 4 diff read (see unitTests, liveRuns, acceptance).",
+      "completion": "legion handoff complete → 409 `Phase for LEGION-34 is no longer owned by this worker` (daemon restart at 06:06Z resumed the implementer and its /worker/started rewrote phases[LEGION-34]; LEGION-37); reported to the architect by envoy_publish, accepted as the tester's completion (option a)."
+    },
+    {
+      "n": 2,
+      "head": "2b01e897df973e917aa0d67962795818fe478d3a",
+      "verdict": "pass",
+      "reason": "Conflict-forced rebase onto main 0f744bc8 after PR #992 (LEGION-54) merged; the reviewer needs the E2E head to be an ancestor of the reviewed head.",
+      "checks": {
+        "workspace": "jj git fetch → Nothing changed; @- = 2b01e897 = legion/LEGION-34@origin = GitHub headRefOid; mergeable MERGEABLE",
+        "conflictMarkers": "packages/daemon/src/cli/index.ts: zero (grep for <<<<<<<|=======|>>>>>>>|%%%%%%%|+++++++|------- at line start)",
+        "cmdGhTail": "redeemGitHubToken(deps) → buildGitHubTokenEnv(token, deps.env) → pathWithoutWorkerBin(childEnv.PATH) → deps.spawnGh(args, childEnv) (index.ts 194-198); cmdThreadsResolve still calls redeemGitHubToken (228), so grantFrom's LEGION_GRANT_FILE-first path from #992 applies to the new command",
+        "unitTests": "bun test src/cli/__tests__/review-threads.test.ts src/cli/__tests__/index.test.ts → 30 pass, 0 fail, 84 expect() calls (25 from round 1 + #992's five grant-resolution tests)",
+        "lint": "bunx biome check --error-on-warnings src/ → Checked 156 files, no fixes applied, exit 0",
+        "typecheck": "bunx tsc --noEmit → exit 0",
+        "liveRun": {
+          "command": "bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion",
+          "output": [
+            "no unresolved threads"
+          ],
+          "exit": 0
+        },
+        "github": {
+          "PRRT_kwDORFy7ds6h2yAp": {
+            "isResolved": true
+          },
+          "PRRT_kwDORFy7ds6h2yBh": {
+            "isResolved": true
+          },
+          "PRRT_kwDORFy7ds6h220J": {
+            "isResolved": true
+          }
+        },
+        "newThreads": "none opened this round"
+      },
+      "prBodyEdits": 1
+    }
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T06:09:30.730Z"
+  "completed": "2026-09-13T06:21:37.310Z"
 }
