@@ -2,7 +2,7 @@
   "pr": 1024,
   "prUrl": "https://github.com/sjawhar/legion/pull/1024",
   "branch": "legion/LEGION-57",
-  "headSha": "35fabe0db389d1d4fecdc69648dee8e3a1353f17",
+  "headSha": "ee30986021a9",
   "spec": "dispatch://LEGION-57/spec v4",
   "commits": [
     "d7fd0d7e0404 daemon: a released child stays in its parent's tree; only an orphan admits as a root (T1, T2)",
@@ -10,7 +10,9 @@
     "14d6c1b4557d daemon: boot removes ownerless child trees and wakes their parents with child-adopted (T5)",
     "c1ac73212ba3 smoke: checkpoint 4 asserts a released child is owned inside its parent's tree (T6)",
     "7924c7f1256f docs: children never take admission slots; the first sub-architect spawn starts the child (T7)",
-    "35fabe0db389 smoke: checkpoint 4 single-issue fallback only while no child is released; docs: idle-retire architect exclusion is a role check (tester round)"
+    "35fabe0db389 smoke: checkpoint 4 single-issue fallback only while no child is released; docs: idle-retire architect exclusion is a role check (tester round)",
+    "e18b8d2f71c2 daemon: the boot repair also removes and revokes the child's stale root-architect claim (review round, blocking thread r3999941341)",
+    "ee30986021a9 review round: skill rows spawn only open released children; routeActive drops its dead envelope; checkpoint 4, docs, and test minors"
   ],
   "filesChanged": [
     "packages/daemon/src/daemon/legion-state.ts",
@@ -64,7 +66,7 @@
     "Skill changes (T7) ship with the plugin/skill install, not the daemon; the rig's architect follows the existing release-then-spawn flow, so acceptance 8 does not depend on T7."
   ],
   "openQuestions": [],
-  "headShaNote": "code head after the tester round (one corrective commit on top of the tester handoff cf7ad33367fa); .legion/implement.json sits in its own commit on top",
+  "headShaNote": "code head after the reviewer round (two commits on top of the reviewer handoff 4ac89fb25cda, which sits on the tester handoff dc1224cc01a3); .legion/implement.json sits in its own commit on top",
   "rebase": {
     "reason": "PR #1024 reported CONFLICTING/DIRTY against main before testing; architect asked for a rebase",
     "onto": "main@origin c8faafecc6a7 (LEGION-20 #975 design gate -> document approval; LEGION-77 #1017)",
@@ -96,9 +98,31 @@
       ],
       "notTouched": "processes.ts:2268 (resumeWorker doc comment) carries the same phrasing with the qualifier \"once it has spawned a planner\", which keeps it true; left alone per the two-changes scope.",
       "verification": "bash scripts/smoke/checkpoints.test.sh: 24 PASS lines, exit 0; bash -n on both scripts; no TypeScript touched, so no biome/tsc/bun test run this round."
+    },
+    {
+      "trigger": "reviewer REQUEST_CHANGES https://github.com/sjawhar/legion/pull/1024#pullrequestreview-5191080569: 3 blocking + 11 minor threads",
+      "blocking": [
+        "r3999941341 processes.ts adoptOwnerlessChildTrees: revoke (revokeRoleClaim) and delete roles[roleToken(child, architect)] when the tree is removed; doc comment no longer calls the claim inert; index.test WIDGETS-6 fixture carries the stale claim and asserts it is gone from memory and from the last persisted snapshot; processes.test table test asserts the delete and that revokeSessionCapability received its sessionId (the daemon-level test cannot observe revocation: capabilities are in-memory and empty at boot). Fixed in e18b8d2f.",
+        "r3999941347 SKILL.md child-adopted: restricted to open released children (todo through retro, never done). Fixed in ee309860.",
+        "r3999941349 SKILL.md catchup-overseer: compares childCounts[LEGION_ISSUE].open; any open released child with no architect claim; a done child gets nothing whatever lingering legacy tree shows. Fixed in ee309860."
+      ],
+      "minors": [
+        "r3999941344 launch-failed child with surviving confirmed-generation workers: removal kept (spec Errors row; the parent's spawn_worker is otherwise refused forever); the repair logs a second line naming worker claims with recorded panes whose root resolved to the removed key, and the doc comment records the exposure next to the dead rationale. Fixed in e18b8d2f (reviewer's primary suggestion).",
+        "r3999941351 SKILL.md child-status: to backlog/icebox clause -- the daemon stops nothing on that move now; tell the sub-architect to park via envoy_publish; workers idle-retire; resumes on next spawn_worker. Fixed in ee309860.",
+        "r3999941353 AGENTS.md orphan clause: nearest ancestor with a tree. Fixed in ee309860.",
+        "r3999941355 index.test saved>0: saveState now snapshots structuredClone(state); the last snapshot is asserted (no WIDGETS-2/-6/-7 trees, active [WIDGETS-1, WIDGETS-3], queue [WIDGETS-5], no stale claim). Fixed in e18b8d2f.",
+        "r3999941358 api.test human-re-released row: deleted (same inputs as the first half of writes-once; the resume-vs-fresh question belongs to processes.test, whose sub-architect spawn test already covers the fresh path). Fixed in ee309860.",
+        "r3999941361 api.test planner-on-child row: deleted (same branch as the pre-existing human-moved-to-todo test). Fixed in ee309860.",
+        "r3999941364 api.test glued child-completion test: replaced with the failed-PATCH edge -- setStatus throws once on the sub-architect spawn, pendingStatusWrites[child] = {in_progress, statusAtRecord: todo} recorded, no echo, implementer completion writes testing through knownIssueStatus's fence. Fixed in ee309860.",
+        "r3999941368 processes.test shadowing test: replaced with the direct table test of adoptOwnerlessChildTrees (queued/launch-failed/active-no-locator removed; dead, active-with-locator, lingering-ancestor orphan grandchild, parentless root kept; queued grandchild under a queued child removed with parent = child; stale claim deleted + session revoked; surviving worker pane logged; idempotent). Fixed in e18b8d2f.",
+        "r3999941371 workers.ts spawnStatus comment: names what the fence covers (a failed PATCH) and the idempotent duplicate window after a successful one. Fixed in ee309860.",
+        "r3999941374 checkpoints.sh: a released child still todo on Dispatch while its sub-architect pane exists fails as 'has a sub-architect worker pane ... but Dispatch still reports it todo', not as a missing claim; harness case added. Fixed in ee309860.",
+        "r3999941377 index.ts envelope constant: routeActive's dead _envelope parameter removed with every forwarder (settleCiVerdict, prComment, review, pullRequest, childAdopted, dispatchEnvelope, GATE_OFF_ENVELOPE, CHILD_ADOPTION_ENVELOPE; callers in events.ts, resync.ts, issues.ts, index.ts, reducers.test, api.test). Fixed in ee309860 -- the whole cutover, since dropping the parameter from childAdopted alone would have had it fabricate the same dead value."
+      ],
+      "verification": "tsc --noEmit -p packages/daemon exit 0 (package-local 5.9.3); biome check clean on the 11 touched TS files; bun test on reducers/api/index/processes/events/resync test files: 521 pass, 3 pre-existing live-tmux skips, 0 fail; bash scripts/smoke/checkpoints.test.sh 25 PASS exit 0."
     }
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T13:41:57.327Z"
+  "completed": "2026-09-13T15:15:21.900Z"
 }
