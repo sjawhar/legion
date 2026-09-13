@@ -89,8 +89,7 @@ Concurrent issues have disjoint workspaces; only the currently active phase muta
 one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
 alive to answer questions, not to keep editing. Do not create new commits, run
 `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
-(and, for the implementer and merger, pushed) — a code change belongs to whichever phase is
-active now.
+(and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legion/`:
@@ -441,14 +440,13 @@ cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<phase>.json
 ```
 
-Whether you then push depends on the GitHub App your role acts as (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`). **Only the implementer and merger can push the
-issue branch**: they act as the code-writing App (`legion-implementer[bot]`), the one App with
-`contents` permission — and the merger writes no handoff, so in practice the implementer is the
-role that pushes. If you are the implementer and the issue bookmark exists locally, advance
-it and push it with the provisioned credential helper. `--bookmark` also publishes the locally
-provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
-automatically:
+**Only the implementer pushes the issue branch.** It acts as the code-writing App
+(`legion-implementer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
+the one App with `contents` permission (the merger acts as the same App but pushes nothing: it
+verifies and publishes READY). If you are the implementer and the issue bookmark exists locally,
+advance it and push it with the provisioned credential helper. `--bookmark` also publishes the
+locally provisioned bookmark on its first push — a bookmark not yet tracking a remote one is
+tracked automatically:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
@@ -456,25 +454,23 @@ cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
-The planner, tester, reviewer, and architects act as the review App (`legion-reviewer[bot]`),
-which has no permission to push. Those roles commit the handoff locally with the `split` above
-and do **not** push: the commit sits on the shared workspace's issue branch and rides the
-implementer's next push — the corrective push after a review, or the final `.legion/` deletion.
-A push GitHub refuses for one of those roles — over git it reads `remote: Repository not found.`;
-the REST API's form of the same refusal is `Resource not accessible by integration` — is the
-expected refusal, not a failure to report or retry.
+Every other role — planner, tester, reviewer, architects — acts as the review App
+(`legion-reviewer[bot]`), which cannot push: the `split` above is your last step, and the commit
+rides the implementer's next push (the corrective push after a review, or the final `.legion/`
+deletion). A push from one of those roles is refused — over git it reads
+`remote: Repository not found.`; the REST API's form of the same refusal is
+`Resource not accessible by integration` — and that refusal is expected, not a failure to report
+or retry.
 
-Do not report phase completion until the write, existence check, and handoff commit
-succeed; for the implementer, when an issue branch exists, its push is also required. This is
-the committed
-copy the next phase reads after revival. It is removed once, at the end of a clean review: the
-implementer pushes that deletion at the reviewer's direction. No other phase removes it — and
-once it is gone (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout;
-jj warns on stderr), this
-gate no longer applies: a later rebase, bare-gate re-check, confirmation, or retro writes no
-`.legion/<phase>.json`, commits no handoff, and reports with `legion handoff complete` alone
-(below). Recreating `.legion/` after its deletion changes the approved head and restarts the
-review loop this rule exists to end.
+Do not report phase completion until the write, existence check, and handoff commit succeed —
+and, for the implementer, until the push has too. This is the committed copy the next phase
+reads after revival. It is removed once, at the end of a clean review: the implementer pushes
+that deletion at the reviewer's direction. No other phase removes it — and once it is gone
+(`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout; jj warns on
+stderr), this gate no longer applies: a later rebase, bare-gate re-check, confirmation, or retro
+writes no `.legion/<phase>.json`, commits no handoff, and reports with `legion handoff complete`
+alone (below). Recreating `.legion/` after its deletion changes the approved head and restarts
+the review loop this rule exists to end.
 
 ## Completion: report to the architect, then stay
 
