@@ -139,6 +139,14 @@ function renderIssuePage(
   return { ...view, runtime };
 }
 
+async function openSubscribedAgents(count: number) {
+  const toggle = await screen.findByRole("button", { name: `Subscribers: ${count}` });
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  return screen.findByRole("region", { name: "Subscribed agents" });
+}
+
 test("IssuePage shows subscribed agents with a live indicator and their title", async () => {
   const restore = stubIssuePage(
     issue,
@@ -151,7 +159,7 @@ test("IssuePage shows subscribed agents with a live indicator and their title", 
   const view = renderIssuePage();
 
   try {
-    const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
+    const subscribed = await openSubscribedAgents(2);
     expect(within(subscribed).getAllByRole("listitem")).toHaveLength(2);
     expect(within(subscribed).getByText("Planner (live)").getAttribute("title")).toBe(
       "0123456789abcdef"
@@ -184,7 +192,7 @@ test("IssuePage disables Unsubscribe and explains why for a subscriber reachable
   const view = renderIssuePage();
 
   try {
-    const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
+    const subscribed = await openSubscribedAgents(1);
     expect(within(subscribed).getByText("via notifications.dispatch.>")).toBeDefined();
     const unsubscribeButton = within(subscribed).getByRole("button", { name: "Unsubscribe" });
     expect(unsubscribeButton).toHaveProperty("disabled", true);
@@ -199,7 +207,7 @@ test("IssuePage shortens a subscriber id when its title is blank", async () => {
   const view = renderIssuePage();
 
   try {
-    const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
+    const subscribed = await openSubscribedAgents(1);
     const label = within(subscribed).getByText("session:01234567…");
     expect(label.getAttribute("title")).toBe("0123456789abcdef");
   } finally {
@@ -297,7 +305,7 @@ test("IssuePage unsubscribes an agent after confirming the dialog", async () => 
   const view = renderIssuePage();
 
   try {
-    const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
+    const subscribed = await openSubscribedAgents(1);
     await within(subscribed).findByText("Planner (live)");
     fireEvent.click(within(subscribed).getByRole("button", { name: "Unsubscribe" }));
 
@@ -323,7 +331,7 @@ test("IssuePage cancels an unsubscribe confirmation without calling the mutation
   const view = renderIssuePage();
 
   try {
-    const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
+    const subscribed = await openSubscribedAgents(1);
     fireEvent.click(within(subscribed).getByRole("button", { name: "Unsubscribe" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -584,7 +592,7 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     );
 
     try {
-      fireEvent.click(await screen.findByText("Messages default to no route"));
+      fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
       const routeInput = await screen.findByLabelText("Route");
       fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
       await screen.findByDisplayValue("role:not-saved-draft");
@@ -597,7 +605,9 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
       // CORE-1's unsaved draft onto CORE-2's page instead of showing CORE-2's
       // own route.
       expect(screen.queryByDisplayValue("role:not-saved-draft")).toBeNull();
-      expect(await screen.findByText("Messages default to role:second-issue-route")).toBeDefined();
+      expect(
+        await screen.findByRole("button", { name: "Messages default to role:second-issue-route" })
+      ).toBeDefined();
     } finally {
       view.unmount();
     }
@@ -1027,6 +1037,143 @@ test("IssuePage renders exactly one Version combobox on the Spec tab", async () 
     restore();
   }
 });
+test("IssuePage keeps version controls inside the Spec toolbar", async () => {
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    const toolbar = await screen.findByTestId("spec-document-toolbar");
+    expect(within(toolbar).getByRole("combobox", { name: "Version" })).not.toBeNull();
+    expect(within(toolbar).getByRole("button", { name: "Name version" })).not.toBeNull();
+
+    for (const tab of ["Conversation", "Children", "Artifacts"] as const) {
+      fireEvent.click(screen.getByRole("tab", { name: tab }));
+      await screen.findByRole("tab", { name: tab, selected: true });
+      expect(screen.queryByTestId("spec-document-toolbar")).toBeNull();
+      expect(screen.queryByRole("combobox", { name: "Version" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Name version" })).toBeNull();
+    }
+  } finally {
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage keeps a label-heavy metadata rail on one scrolling line", async () => {
+  const restore = stubIssuePage({
+    ...issue,
+    labels: Array.from({ length: 20 }, (_, index) => `long-label-${index}-for-overflow`),
+  });
+  const view = renderIssuePage();
+
+  try {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    expect(rail.classList.contains("flex-nowrap")).toBe(true);
+    expect(rail.classList.contains("overflow-x-auto")).toBe(true);
+    expect(rail.classList.contains("[scrollbar-gutter:stable]")).toBe(true);
+    expect(
+      within(rail)
+        .getByRole("button", { name: "Messages default to no route" })
+        .classList.contains("max-w-[14ch]")
+    ).toBe(true);
+    expect(within(rail).getByTestId("issue-labels").classList.contains("shrink-0")).toBe(true);
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage updates whose turn when a human clarification is latest", async () => {
+  const waitingIssue = { ...issue, open_asks: [{ ...openIssueAsk, last_reply: null }] };
+  const restore = stubIssuePage(waitingIssue);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = renderIssuePage("/issues/CORE-1", undefined, undefined, queryClient);
+
+  try {
+    expect(await screen.findByText("Waiting on you (1)")).not.toBeNull();
+    queryClient.setQueryData<IssueDetails>(["issue", "CORE-1"], {
+      ...waitingIssue,
+      open_asks: [
+        {
+          ...openIssueAsk,
+          last_reply: {
+            author: { id: "alice", kind: "user" },
+            created_at: "2026-09-11T01:00:00Z",
+          },
+        },
+      ],
+    });
+    expect(await screen.findByText("Waiting on agents (1)")).not.toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+test("IssuePage keeps pin with identity and mixes state with actions", async () => {
+  const restore = stubIssuePage({
+    ...issue,
+    artifacts: [
+      {
+        ...issue.artifacts[0],
+        approval: { latest_version: 1, state: "awaiting" },
+      },
+    ],
+  });
+  const view = renderIssuePage("/issues/CORE-1/conversation");
+
+  try {
+    const title = await screen.findByRole("heading", { level: 1, name: issue.title });
+    expect(title.classList.contains("text-xs")).toBe(true);
+    expect(title.classList.contains("sm:text-xl")).toBe(true);
+    expect(screen.getByText(issue.key).classList.contains("self-start")).toBe(true);
+    const pin = screen.getByRole("button", { name: "Pin issue" });
+    expect(title.parentElement?.contains(pin)).toBe(true);
+
+    const stateActions = screen.getByTestId("issue-state-actions");
+    expect(stateActions.classList.contains("flex-wrap")).toBe(true);
+    expect(within(stateActions).getByRole("combobox", { name: "Status" })).not.toBeNull();
+    expect(within(stateActions).getByRole("combobox", { name: "Priority" })).not.toBeNull();
+    expect(within(stateActions).getByRole("button", { name: "Approve" })).not.toBeNull();
+    expect(within(stateActions).getByRole("button", { name: "Close issue" })).not.toBeNull();
+    expect(within(stateActions).queryByRole("button", { name: "Pin issue" })).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+test("IssuePage keeps an unrequested draft approval passive", async () => {
+  const restore = stubIssuePage({
+    ...issue,
+    artifacts: [
+      {
+        ...issue.artifacts[0],
+        approval: { latest_version: 1, state: "draft" },
+      },
+    ],
+  });
+  const view = renderIssuePage("/issues/CORE-1/conversation");
+
+  try {
+    expect(await screen.findByRole("button", { name: "Draft" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /^Approve$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
 
 test("IssuePage shows a failed historical document version", async () => {
   const restore = stubIssuePage(issue);
@@ -1053,27 +1200,6 @@ test("IssuePage shows a failed historical document version", async () => {
     getArtifact.mockRestore();
     getArtifactText.mockRestore();
     getArtifactVersion.mockRestore();
-    restore();
-  }
-});
-
-test("IssuePage names the human blocking an ask open for more than an hour", async () => {
-  const restore = stubIssuePage({
-    ...issue,
-    open_asks: [
-      {
-        ...openIssueAsk,
-        author: { id: "session-1", kind: "session", owner: "sami" },
-        created_at: new Date(Date.now() - 61 * 60 * 1000).toISOString(),
-      },
-    ],
-  });
-  const view = renderIssuePage();
-
-  try {
-    expect(await screen.findByText("Waiting on sami")).toBeTruthy();
-  } finally {
-    view.unmount();
     restore();
   }
 });

@@ -12,7 +12,7 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedStrongBg,
-  textSecondaryOnCanvas,
+  textSecondaryOnSurface,
 } from "../../theme/classes";
 
 const maxLabelLength = 40;
@@ -41,6 +41,7 @@ export interface IssueLabelsProps {
   readonly project: string;
   readonly saveError: boolean;
   readonly saving: boolean;
+  readonly variant?: "default" | "rail";
 }
 
 export function IssueLabels({
@@ -50,6 +51,7 @@ export function IssueLabels({
   project,
   saveError,
   saving,
+  variant = "default",
 }: IssueLabelsProps): ReactNode {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<string[]>([]);
@@ -117,10 +119,17 @@ export function IssueLabels({
 
   if (!editing) {
     return (
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <div
+        className={
+          variant === "rail"
+            ? "flex shrink-0 flex-nowrap items-center gap-1"
+            : "mt-2 flex flex-wrap items-center gap-2"
+        }
+        data-testid="issue-labels"
+      >
         {labels.map((label) => (
           <button
-            className={`min-h-11 rounded-full px-3 py-2 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
+            className={`min-h-11 shrink-0 rounded-full px-3 py-2 text-xs font-medium whitespace-nowrap ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
             disabled={disabled}
             key={label}
             onClick={beginEditing}
@@ -130,29 +139,35 @@ export function IssueLabels({
           </button>
         ))}
         <button
-          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+          aria-label="Add labels"
+          className={`min-h-11 shrink-0 rounded-lg border px-3 py-2 text-sm font-medium whitespace-nowrap ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
           disabled={disabled}
           onClick={beginEditing}
           type="button"
         >
-          {labels.length === 0 ? "Add labels" : "Edit labels"}
+          {variant === "rail" ? "Add" : labels.length === 0 ? "Add labels" : "Edit labels"}
         </button>
       </div>
     );
   }
 
   return (
-    <form aria-label="Edit labels" className="mt-2 space-y-2" onSubmit={submit}>
+    <form
+      aria-label="Edit labels"
+      className={variant === "rail" ? "shrink-0 space-y-2" : "mt-2 space-y-2"}
+      data-testid="issue-labels"
+      onSubmit={submit}
+    >
       <div className="flex flex-wrap gap-2">
         {draft.map((label) => (
           <span
-            className={`inline-flex min-h-11 items-center gap-1 rounded-full px-3 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
+            className={`inline-flex min-h-11 items-center gap-1 rounded-full px-3 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
             key={label}
           >
             {label}
             <button
               aria-label={`Remove ${label}`}
-              className={`min-h-11 min-w-11 rounded-full text-sm ${textSecondaryOnCanvas}`}
+              className={`min-h-11 min-w-11 rounded-full text-sm ${textSecondaryOnSurface}`}
               disabled={saving}
               onClick={() => setDraft((current) => current.filter((value) => value !== label))}
               type="button"
@@ -162,7 +177,7 @@ export function IssueLabels({
           </span>
         ))}
       </div>
-      <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`}>
+      <label className={`block text-sm font-medium ${textSecondaryOnSurface}`}>
         Add label
         <input
           aria-label="Add label"
@@ -181,7 +196,7 @@ export function IssueLabels({
         <fieldset aria-label="Label suggestions" className="flex flex-wrap gap-2">
           {suggestions.map((label) => (
             <button
-              className={`min-h-11 rounded-full border px-3 py-2 text-xs font-medium ${borderDefault} ${textSecondaryOnCanvas} ${cardHoverBorder}`}
+              className={`min-h-11 rounded-full border px-3 py-2 text-xs font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
               disabled={saving}
               key={label}
               onClick={() => addLabel(label)}

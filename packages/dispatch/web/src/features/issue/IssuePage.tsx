@@ -22,6 +22,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
 import { IssueHeader, stateForIssue } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
+import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
 import { useIssueRoute } from "./useIssueRoute";
 export function IssuePage(): ReactNode {
@@ -159,16 +160,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         documentArtifact={primaryArtifact}
         isClosed={isClosed}
         issue={issue.data}
-        onShowDiffChange={setSpecShowDiff}
-        onVersionChange={(version) => {
-          setSpecShowDiff(false);
-          selectDocumentVersion(primaryArtifact, version);
-        }}
-        showDiff={specShowDiff}
-        showDocumentControls={activeTab === "spec"}
         state={issueState}
-        toolbar={specToolbar}
-        version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
       />
       <IssueTabs
         activeTab={activeTab}
@@ -198,6 +190,21 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
               selectDocumentVersion(primaryArtifact, version);
             }}
             showDiff={specShowDiff}
+            toolbar={
+              activeTab === "spec" && specToolbar !== undefined ? (
+                <SpecToolbar
+                  isClosed={isClosed}
+                  onShowDiffChange={setSpecShowDiff}
+                  onVersionChange={(version) => {
+                    setSpecShowDiff(false);
+                    selectDocumentVersion(primaryArtifact, version);
+                  }}
+                  showDiff={specShowDiff}
+                  toolbar={specToolbar}
+                  version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+                />
+              ) : undefined
+            }
             version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
           />
         ) : null}

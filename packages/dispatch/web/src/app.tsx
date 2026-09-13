@@ -6,6 +6,7 @@ import { api, isForbidden, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
+import { waitingOnYou } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { Margin, MarginProvider } from "./features/margin/Margin";
 import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
@@ -36,6 +37,8 @@ import {
   railAccentHoverText,
   railAccentText,
   railActiveBg,
+  railBadgeBg,
+  railBadgeText,
   railBg,
   railBorder,
   railDangerText,
@@ -318,6 +321,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           ? "xl:pr-20"
           : "";
   const connection = useConnectionState();
+  const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
+
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -402,9 +408,18 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <header
             className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
           >
-            <Link className="text-lg font-semibold" to="/">
-              Dispatch
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link className="text-lg font-semibold" to="/">
+                Dispatch
+              </Link>
+              {needsYouCount === 0 ? null : (
+                <span
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railBadgeBg} ${railBadgeText}`}
+                >
+                  Needs you {needsYouCount}
+                </span>
+              )}
+            </div>
             <button
               aria-expanded={navigationOpen}
               aria-label="Open navigation"

@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
-import type { IssueDetails } from "../api/types";
+import type { InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
 
 const issue: IssueDetails = {
@@ -76,7 +76,7 @@ function setViewport(width: number): void {
     }) as MediaQueryList) as typeof window.matchMedia;
 }
 
-function renderShellAt(width: number): void {
+function renderShellAt(width: number, inbox: InboxRow[] = []): void {
   setViewport(width);
   api.whoAmI = async () => ({ kind: "user", login: "alice" });
   api.listIssues = async () => [
@@ -94,7 +94,7 @@ function renderShellAt(width: number): void {
   ];
   api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
   api.getIssue = async () => issue;
-  api.getInbox = async () => [];
+  api.getInbox = async () => inbox;
   api.listProjects = async () => [
     { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
   ];
@@ -144,4 +144,45 @@ test("desktop exposes the persistent sidebar navigation and review margin", asyn
   expect(screen.queryByRole("complementary", { name: "Review margin" })).not.toBeNull();
   expect(screen.queryByRole("button", { name: "Open navigation" })).toBeNull();
   expect(screen.queryByRole("button", { name: /Open review panel/ })).toBeNull();
+});
+test("compact top bar shows only asks waiting on the viewer", async () => {
+  renderShellAt(800, [
+    {
+      anchor: null,
+      answer: null,
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-waiting",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [],
+      priority: null,
+      question: "Choose a direction",
+      state: "open",
+      urgency: "med",
+    },
+    {
+      anchor: null,
+      answer: null,
+      author: { id: "session-2", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-answered",
+      issue_key: "CORE-1",
+      kind: "question",
+      last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-10T01:00:00Z" },
+      multiple: false,
+      opened_event_id: 2,
+      options: [],
+      priority: null,
+      question: "Clarify this",
+      state: "open",
+      urgency: "med",
+    },
+  ]);
+
+  expect(await screen.findByText("Needs you 1")).not.toBeNull();
 });

@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ThreadCard } from "./ThreadCard";
 import {
@@ -104,8 +104,13 @@ export function ThreadList({
   // Anchored once its placement landed, and React remounts a card that changes parents, dropping
   // its open editor's draft. An anchored thread without a placement yet stacks below the previous
   // card (`measure`) until its mark can be located.
-  const anchored = threads.filter((thread) => isAnchoredThread(thread));
-  const discussion = threads.filter((thread) => !isAnchoredThread(thread));
+  const { anchored, discussion } = useMemo(
+    () => ({
+      anchored: threads.filter((thread) => isAnchoredThread(thread)),
+      discussion: threads.filter((thread) => !isAnchoredThread(thread)),
+    }),
+    [threads]
+  );
   const topFor = useCallback(
     (thread: Thread) => {
       const placement = placementFor(thread, markPlacements, blockPlacements);

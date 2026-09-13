@@ -6,7 +6,7 @@ import { linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes"
 import { formatAskAge } from "./ask-age";
 
 /** Open asks whose latest reply is not a human's are waiting for the viewer. */
-export function waitingOnYou(asks: readonly InboxRow[]): InboxRow[] {
+export function waitingOnYou<T extends Pick<InboxRow, "last_reply">>(asks: readonly T[]): T[] {
   return asks.filter((ask) => ask.last_reply?.author.kind !== "user");
 }
 
