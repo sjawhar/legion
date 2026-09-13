@@ -1,0 +1,387 @@
+{
+  "taskCount": 4,
+  "independentTasks": 2,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, one pull request. Tasks 1+2 (workflow trigger and the AGENTS.md sentence) are one logical commit; task 3 (Envoy webhook: failing test first, then the three-line handler change) is a second commit; task 4 opens the PR. Tasks 1+2 and task 3 touch disjoint files and can be done in either order. No daemon (TypeScript) change; no smoke rig needed for this PR. Rebase the branch only if GitHub reports the PR CONFLICTING (Sami, 2026-09-11).",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: workspace binding, jj-only commits via `jj split`, the exact bookmark/push/PR-open procedure, the PR body in READY format with `Dispatch: LEGION-99`, the `.legion/` deletion at the reviewer's direction, and the post-merge production verification the spec's Testing section assigns to the implementer.",
+      "test-driven-development: task 3 must start from the failing Go test (it fails today with `published = 1, want 0` on topic `notifications.github.sjawhar.legion.comment`) before `githubSkip` changes; the red run is the proof the change was needed.",
+      "verification-before-completion: every claim in `.legion/implement.json` and the PR body (actionlint clean, yq output, `go test` green, Tests run id at head) is pasted from a command that was actually run at that head."
+    ],
+    "test": [
+      "legion-worker: the tester fills the PR body's E2E line with the real surface (the PR's own `Tests` run on GitHub at the head SHA, plus the local actionlint/yq/go test commands) and one negative control; it names the post-switch merge-group run as out of pre-merge reach per the spec's Testing section rather than failing the phase.",
+      "verification-before-completion: run every check listed under testerPreMergeChecks and quote its output; do not trust `.legion/implement.json`.",
+      "envoy: the tester (and later the implementer in production) subscribes to `notifications.github.sjawhar.legion.comment` to observe whether a merge-group cycle publishes the junk envelope; `envoy_subscribe` and inbound-delivery reading are that skill."
+    ],
+    "review": [
+      "legion-worker: one review per round via the reviews API with commit_id, thermo pair once at the head (this is not docs-only: a Go file and a workflow change), `Accepted:`/`Still open:` thread replies, APPROVE only for the `.legion/`-free head named by SHA.",
+      "receiving-code-review: the reviewer verifies the CI/Threads/E2E facts against GitHub directly, not from a handoff, and checks the two safety properties named under reviewFocus (signature check before the skip; no `if:` on lint/typecheck/test).",
+      "verification-before-completion: re-run `actionlint` and `go test ./internal/webhook/` at the reviewed head before approving."
+    ]
+  },
+  "concerns": [
+    "Envoy webhook finding (spec Design says 'changed only if the current handler errors'): the handler does NOT error on merge_group — it answers 200 — but it PUBLISHES one envelope, which the spec's Requirements row 'answers 200 and publishes nothing' forbids. Proven by running the handler with a documented merge_group delivery on 2026-09-13: status=200, published=1, topic=notifications.github.sjawhar.legion.comment, summary='merge_group checks_requested', payload=''. Cause: contracts/normalize.go githubKind() default returns \"comment\" (lines 374-375), githubNumber() returns \"\" for merge_group, so githubTopic() falls through to GithubSubject(owner, repo, \"comment\") (line 291); GithubEnvelopes() returns that envelope (line 51); Validate() passes because Payload is not a required field; the handler publishes at github.go:198. The daemon's durable consumer filters `notifications.github.<owner>.<repo>.>` (events.ts:838) so it receives the envelope; payloadFrom()/recordPayload() swallow the JSON.parse('') error and reduceGithubEvent returns [] (reducers.ts:853-854), so today's cost is one no-op durable message per merge-group event (two per queued PR: checks_requested and destroyed) plus a meaningless delivery to any session subscribed repo-wide. Therefore the plan includes the minimal handler change (task 3). Architect: please update the spec's Design sentence to match (proposed text under specCorrection).",
+    "Production activation of the Envoy fix is an operator step: `Release Envoy Listener` (.github/workflows/release-envoy-listener.yaml) builds and publishes ghcr.io/sjawhar/legion/envoy:<merge-sha> on push to main touching packages/envoy/**, but packages/envoy/deploy/scripts/autodeploy.sh redeploys only the `dispatch` service (line 108/145: `up -d --no-deps dispatch`); the listener container is restarted by the operator (scripts/up-listener.sh or `ENVOY_IMAGE_TAG=<sha> docker compose -f compose/listener.compose.yml pull && up -d`). Until that rollout, merge_group deliveries keep publishing the harmless junk envelope described above. Not a blocker for the administrator's switch; recommended before it. The implementer reports the image tag to the operator session after the merge (deployment instructions: only the operator touches the box).",
+    "LEGION-90 (Tests re-runs on PR body edits) is queued ahead and had no branch or PR as of 2026-09-13 (`legion gh -- pr list --head legion/LEGION-90 --state all` → []). Its spec offers two designs: (1) `if: github.event_name != 'pull_request' || github.event.action != 'edited'` on lint/typecheck/test — evaluates true on merge_group, so compatible as-is; (2) move pr-title to its own workflow and drop `edited` from `pull_request.types` — edits line 8 of the same `on:` block. The plan places the new `merge_group:` block BEFORE `pull_request:` so one unchanged line (`  pull_request:`) separates the two edits; if LEGION-90 lands first with design 1, the tester additionally confirms the three jobs' `if:` still admits `merge_group`.",
+    "Acceptance lines 1–3 are provable only after the administrator adds the merge queue rule (spec Decision 1, ordered after this PR merges). Per the spec's Testing section the tester passes the phase on the pre-merge proofs (workflow parses and lists the trigger; webhook test) and the implementer proves acceptance 1–3 in production afterwards. Deployment instructions (2026-09-12) say a request that needs Sami's account goes as a plain `dispatch_message`, not an ask he has to click, while the spec says 'asked as one action item' — the architect picks the form when this PR is on main; nothing in this plan opens it.",
+    "Latent defect outside this issue's scope, filed as LEGION-114: every GitHub event type the normalizer does not know publishes an empty envelope to `notifications.github.<owner>.<repo>.comment`. This PR skips only `merge_group` by name (the spec scopes the Envoy change to that event); LEGION-114 makes the default safe.",
+    "Whether GitHub delivers merge_group to Envoy at all depends on the webhook's event subscription (a GitHub App receives only the events it is subscribed to). The handler change is correct either way; if no delivery arrives after the switch, the production check under implementerProductionVerification[4] simply observes nothing on either topic and says so."
+  ],
+  "spec": {
+    "issue": "LEGION-99",
+    "version": 5,
+    "readWith": "dispatch_doc_read({issue: \"LEGION-99\"})"
+  },
+  "specCorrection": {
+    "section": "Design, Envoy paragraph",
+    "find": "It must answer 200 and publish nothing for it, and the check runs GitHub reports on merge-group commits belong to no pull request head and are ignored by the checks tracker. Verified before the switch; changed only if the current handler errors on the event.",
+    "replaceWith": "It must answer 200 and publish nothing for it, and the check runs GitHub reports on merge-group commits belong to no pull request head and are ignored by the checks tracker. Verified on 2026-09-13: the current handler answers 200 but publishes one empty notification to the repository's comment topic, so this pull request also adds merge_group to the handler's skip list (three lines) and a test that posts a merge_group delivery and asserts nothing is published.",
+    "owner": "architect (spec is architect-owned; planner reports, does not edit)"
+  },
+  "scope": {
+    "in": [
+      ".github/workflows/pr-and-main.yaml — add a `merge_group` trigger; lint, typecheck, test run on merge-group commits under the same job names; pr-title stays pull-request-only (its existing `if:` already does this).",
+      "AGENTS.md — one sentence in the Issue Lifecycle section that merges into main go through GitHub's merge queue.",
+      "packages/envoy/internal/webhook/github.go — `githubSkip` returns true for `merge_group` (answer 200, publish nothing, record nothing).",
+      "packages/envoy/internal/webhook/github_test.go + testdata/merge_group_checks_requested.json — one test posting a merge_group delivery."
+    ],
+    "out": [
+      "The GitHub ruleset (12331919) — an administrator adds the merge queue rule after this lands.",
+      "The merge-queue organizer's procedure (READY, waves, tiers) — unchanged; `gh pr merge --squash` enqueues once the rule exists.",
+      "Making `Legion Envoy and Contracts` a required check.",
+      "The general unknown-event default in contracts/normalize.go — LEGION-114.",
+      "Any daemon (packages/daemon) change — none needed; the daemon already ignores the junk envelope and never sees merge-group check runs (see codeFacts)."
+    ]
+  },
+  "codeFacts": [
+    "github.go:101-210 GitHubHandler: method check → read body (1 MiB cap) → require X-GitHub-Delivery and X-GitHub-Event → verify.Github signature (line 119, 401 on failure) → JSON decode → githubEvent() sender log (comment/review events only) → githubSkip() (line 134: 200 'ok' and return when true) → githubPullRequestHead() (pull_request only) → GithubCIObservations() (check_run/check_suite only) → GithubEnvelopes() → Validate → Publish → 200.",
+    "github.go:28-32 githubSkip currently `func githubSkip(_ string) bool { return false }` with the comment 'Currently all events are published.' — the designed hook for this change; it sits AFTER signature verification, so skipping never bypasses auth.",
+    "normalize.go:36-51 GithubEnvelopes: returns nil for a workflow_run with pull_requests and for check_run/check_suite (githubCIEvent), returns nil when githubTopic is \"\" (line 46-49, today only push to a non-heads/tags ref and workflow_run without path/action), else publishes one envelope. For merge_group the topic is non-empty (see concerns[0]).",
+    "normalize.go:605-606 githubSummary default: `fmt.Sprintf(\"%s %s\", event, action)` → 'merge_group checks_requested' (non-empty, so Validate's payload_summary check passes). normalize.go:749-750 githubPayload default: returns \"\" (Payload is not validated for presence, generated.go:38-94).",
+    "Merge-group check runs: GithubCIObservations (normalize.go:103-113) records only when the check_run/check_suite lists pull_requests (githubCIPullRequests, 460-480); a merge-group commit is not a PR head, so GitHub lists none and nothing is recorded or published. Even if GitHub attached a PR, cistore keys per (owner, repo, number, SHA) and loop.go:48-54 skips any record whose SHA is not the recorded PR head (`cached.SHA != head → continue`), so the PR's `pr.<n>.checks` settlement is never produced from a merge-group SHA. This is the line behind the spec's 'ignored by the checks tracker'.",
+    "Merge-queue temporary branches (`gh-readonly-queue/main/pr-<n>-<sha>`) also arrive as `push` events; those publish `notifications.github.sjawhar.legion.push.branch.<sanitized ref>` as any branch push does, and the daemon ignores a push on a branch with no registered PR (reducers `prByBranch` is the only filter, per packages/daemon AGENTS.md). Existing behaviour; no change.",
+    "Daemon linking: reducers.ts:491-499 `issueForBranch` matches exactly `^legion/([A-Z][A-Z0-9]*-[0-9]+)$` and `issueForPrBody` matches a `Dispatch: KEY` line. Scratch PRs for the production check must use branch names outside `legion/…` and carry no `Dispatch:` line, so the daemon never attributes them to LEGION-99.",
+    "pr-and-main.yaml today: `on: push: branches: [main]` + `pull_request: types: [opened, edited, reopened, synchronize]`; jobs pr-title (`if: github.event_name == 'pull_request'`), lint, typecheck, test (no `if`). actionlint exits 0 on it; `yq '.on | keys'` prints `- push` / `- pull_request`.",
+    "Workspace @ (vtvvnrkv) parents 7f60bbfb = main as provisioned (`ci(release): … (LEGION-75) (#1035)`); `.omp/config.yml` is an untracked-by-intent pane artifact in the working copy — do not add it to any commit (use `jj split -m … <paths>` with explicit paths, never a bare `jj commit`)."
+  ],
+  "branching": {
+    "before-any-push": "Run `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" log -r 'main@origin' --no-graph -T 'commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"'`. If main@origin has moved past 7f60bbfb, move the not-yet-pushed chain onto it BEFORE the first push (no PR exists yet, so this is not a rebase in Sami's sense and costs no CI): `jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin`. Then check whether LEGION-90 landed: `legion gh -- pr list --repo sjawhar/legion --head legion/LEGION-90 --state merged --json number,mergedAt` — if it did, re-read the `on:` block and the three jobs' `if:` before editing (see concerns[2]).",
+    "after-the-PR-exists": "Rebase only when `legion gh -- pr view <n> --json mergeable --jq .mergeable` prints CONFLICTING (or the controller asks because of a conflict). Follow the legion-worker skill: fingerprint before and after, one PR comment `rebase <old> → <new>; fingerprint <a> → <b>; unchanged|changed`, rebase the whole chain with `jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin`. A failed CI job is re-run with `legion gh -- run rerun <run-id> --failed`, never by pushing.",
+    "bookmark": "legion/LEGION-99 (exists locally on @; first push with `jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-99 && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-99`)."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Workflow: run lint, typecheck, and test on merge-group commits",
+      "files": {
+        "modify": [
+          ".github/workflows/pr-and-main.yaml:3-8"
+        ]
+      },
+      "change": [
+        "Replace the `on:` block (lines 3-8) with exactly:",
+        "on:",
+        "  push:",
+        "    branches:",
+        "      - main",
+        "  merge_group:",
+        "    types: [checks_requested]",
+        "  pull_request:",
+        "    types: [opened, edited, reopened, synchronize]",
+        "No job changes. `pr-title` keeps `if: github.event_name == 'pull_request'` (already present, line 12) — a merge group has no title. `lint`, `typecheck`, `test` have no `if:`, so they run on `merge_group` under those exact names, which the main ruleset requires. `checks_requested` is the only merge_group activity type; naming it keeps the trigger greppable (`yq '.on.merge_group.types'`). The block goes before `pull_request:` so an unchanged line separates it from the `types:` line LEGION-90 may edit."
+      ],
+      "verify": [
+        "cd -- \"$LEGION_WORKSPACE\" && actionlint .github/workflows/pr-and-main.yaml; echo exit=$?   → no output, exit=0",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.on | keys' .github/workflows/pr-and-main.yaml   → - push / - merge_group / - pull_request",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.on.merge_group.types' .github/workflows/pr-and-main.yaml   → - checks_requested",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.jobs | to_entries | map({\"job\": .key, \"if\": .value[\"if\"]})' .github/workflows/pr-and-main.yaml   → pr-title if: github.event_name == 'pull_request'; lint/typecheck/test if: null",
+        "Negative control (offline): `sed 's/merge_group:/merge_grup:/' .github/workflows/pr-and-main.yaml > /tmp/bad.yaml && actionlint /tmp/bad.yaml`   → error naming unknown Webhook event \"merge_grup\" (then `rm /tmp/bad.yaml`)."
+      ]
+    },
+    {
+      "id": 2,
+      "title": "AGENTS.md: one sentence that merges into main go through GitHub's merge queue",
+      "files": {
+        "modify": [
+          "AGENTS.md:126-128 (Issue Lifecycle → Gate paragraph)"
+        ]
+      },
+      "change": [
+        "In the Gate paragraph, directly after the sentence ending `…which merges under its own authority and the repository's rules.` (line 127) and before `No lifecycle labels exist; …`, insert this one sentence (re-wrap the paragraph to the file's ~100-column width):",
+        "Every merge into `main` goes through GitHub's merge queue: enqueueing a pull request makes GitHub run the `Tests` workflow's `lint`, `typecheck`, and `test` jobs (its `merge_group` trigger) on a temporary merge of the pull request onto the current `main`, and the pull request lands only if they pass — no rebase and no new commit on its branch, and a pull request whose combination with the moved `main` fails is dropped from the queue instead of merged.",
+        "Present tense, as the spec asks; the sentence becomes literally true when the administrator adds the rule (spec step 2). Do not touch the `<knives-guidance>` copy of AGENTS.md that appears in prompts — it is generated from this file."
+      ],
+      "verify": [
+        "cd -- \"$LEGION_WORKSPACE\" && grep -n \"GitHub's merge queue\" AGENTS.md   → exactly one hit inside the Issue Lifecycle section (between `## Issue Lifecycle` line 94 and `## Documentation` line 135).",
+        "cd -- \"$LEGION_WORKSPACE\" && awk 'length > 100' AGENTS.md | wc -l   → unchanged from before the edit (the file already has a few over-long lines; do not add one).",
+        "Commit tasks 1+2 together: cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"ci: run lint, typecheck, and test on merge-group commits (LEGION-99)\" .github/workflows/pr-and-main.yaml AGENTS.md"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Envoy webhook: acknowledge merge_group with 200, publish and record nothing (TDD)",
+      "files": {
+        "create": [
+          "packages/envoy/internal/webhook/testdata/merge_group_checks_requested.json"
+        ],
+        "modify": [
+          "packages/envoy/internal/webhook/github_test.go (append one test after TestGitHubHandlerSubIssuesFixture, ~line 360)",
+          "packages/envoy/internal/webhook/github.go:28-32 (githubSkip)"
+        ]
+      },
+      "steps": [
+        {
+          "step": "3a — write the fixture (production-shaped per GitHub's documented merge_group payload; a real recorded delivery does not exist yet because the queue is not on — say so in the test comment, as sub_issues_added.json does)",
+          "file": "packages/envoy/internal/webhook/testdata/merge_group_checks_requested.json",
+          "content": [
+            "{",
+            "  \"action\": \"checks_requested\",",
+            "  \"merge_group\": {",
+            "    \"head_sha\": \"9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f\",",
+            "    \"head_ref\": \"refs/heads/gh-readonly-queue/main/pr-1050-7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d\",",
+            "    \"base_sha\": \"7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d\",",
+            "    \"base_ref\": \"refs/heads/main\",",
+            "    \"head_commit\": {",
+            "      \"id\": \"9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f\",",
+            "      \"tree_id\": \"0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c\",",
+            "      \"message\": \"ci: run lint, typecheck, and test on merge-group commits (LEGION-99) (#1050)\",",
+            "      \"timestamp\": \"2026-09-13T20:00:00Z\",",
+            "      \"author\": {\"name\": \"legion-implementer[bot]\", \"email\": \"legion-implementer[bot]@users.noreply.github.com\"},",
+            "      \"committer\": {\"name\": \"GitHub\", \"email\": \"noreply@github.com\"}",
+            "    }",
+            "  },",
+            "  \"repository\": {",
+            "    \"id\": 1,",
+            "    \"name\": \"legion\",",
+            "    \"full_name\": \"sjawhar/legion\",",
+            "    \"private\": true,",
+            "    \"owner\": {\"login\": \"sjawhar\", \"type\": \"User\"},",
+            "    \"default_branch\": \"main\"",
+            "  },",
+            "  \"installation\": {\"id\": 1, \"node_id\": \"MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uMQ==\"},",
+            "  \"sender\": {\"login\": \"github-merge-queue[bot]\", \"id\": 118344674, \"type\": \"Bot\"}",
+            "}"
+          ]
+        },
+        {
+          "step": "3b — write the failing test (github_test.go already imports fmt, os, path/filepath, strings, net/http/httptest, testing; mockPublisher/mockRecorder live in webhook_test.go)",
+          "file": "packages/envoy/internal/webhook/github_test.go",
+          "content": [
+            "// TestGitHubHandlerMergeGroup asserts GitHub's merge-queue event is acknowledged with 200 and",
+            "// neither published nor recorded: a merge group names no pull request head and nothing in",
+            "// Legion routes on it (LEGION-99). The fixture is production-shaped from GitHub's documented",
+            "// merge_group payload; the signature check still runs before the skip.",
+            "func TestGitHubHandlerMergeGroup(t *testing.T) {",
+            "\tchecksRequested, err := os.ReadFile(filepath.Join(\"testdata\", \"merge_group_checks_requested.json\"))",
+            "\tif err != nil {",
+            "\t\tt.Fatalf(\"read fixture: %v\", err)",
+            "\t}",
+            "\tdestroyed := []byte(`{",
+            "\t\t\"action\": \"destroyed\",",
+            "\t\t\"reason\": \"merged\",",
+            "\t\t\"merge_group\": {",
+            "\t\t\t\"head_sha\": \"9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f\",",
+            "\t\t\t\"head_ref\": \"refs/heads/gh-readonly-queue/main/pr-1050-7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d\",",
+            "\t\t\t\"base_sha\": \"7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d\",",
+            "\t\t\t\"base_ref\": \"refs/heads/main\"",
+            "\t\t},",
+            "\t\t\"sender\": {\"login\": \"github-merge-queue[bot]\", \"type\": \"Bot\"},",
+            "\t\t\"repository\": {\"name\": \"legion\", \"owner\": {\"login\": \"sjawhar\"}, \"full_name\": \"sjawhar/legion\"}",
+            "\t}`)",
+            "\tfor i, tc := range []struct {",
+            "\t\tname       string",
+            "\t\tbody       []byte",
+            "\t\tsignature  string // \"\" signs the body with the handler's secret",
+            "\t\twantStatus int",
+            "\t}{",
+            "\t\t{name: \"checks_requested is acknowledged and not published\", body: checksRequested, wantStatus: 200},",
+            "\t\t{name: \"destroyed is acknowledged and not published\", body: destroyed, wantStatus: 200},",
+            "\t\t{name: \"an unsigned merge_group is still refused\", body: checksRequested, signature: \"sha256=invalid\", wantStatus: 401},",
+            "\t} {",
+            "\t\tt.Run(tc.name, func(t *testing.T) {",
+            "\t\t\tpub := &mockPublisher{}",
+            "\t\t\trecorder := &mockRecorder{}",
+            "\t\t\thandler := GitHubHandler(\"s\", \"@legion\", \"\", pub, recorder)",
+            "\t\t\treq := httptest.NewRequest(\"POST\", \"/webhook/github\", strings.NewReader(string(tc.body)))",
+            "\t\t\treq.Header.Set(\"X-GitHub-Delivery\", fmt.Sprintf(\"d-merge-group-%d\", i))",
+            "\t\t\treq.Header.Set(\"X-GitHub-Event\", \"merge_group\")",
+            "\t\t\tsig := tc.signature",
+            "\t\t\tif sig == \"\" {",
+            "\t\t\t\tsig = githubSign(\"s\", tc.body)",
+            "\t\t\t}",
+            "\t\t\treq.Header.Set(\"X-Hub-Signature-256\", sig)",
+            "\t\t\trec := httptest.NewRecorder()",
+            "\t\t\thandler.ServeHTTP(rec, req)",
+            "\t\t\tif rec.Code != tc.wantStatus {",
+            "\t\t\t\tt.Fatalf(\"status = %d, want %d; body = %s\", rec.Code, tc.wantStatus, rec.Body.String())",
+            "\t\t\t}",
+            "\t\t\tif len(pub.published) != 0 {",
+            "\t\t\t\tt.Errorf(\"published = %d, want 0; first topic %q\", len(pub.published), pub.published[0].Topic)",
+            "\t\t\t}",
+            "\t\t\tif n := len(recorder.calls) + len(recorder.suiteCalls) + len(recorder.headCalls); n != 0 {",
+            "\t\t\t\tt.Errorf(\"recorder calls = %d, want 0\", n)",
+            "\t\t\t}",
+            "\t\t})",
+            "\t}",
+            "}"
+          ]
+        },
+        {
+          "step": "3c — run it and confirm RED (the proof the change is needed)",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/webhook/ -run TestGitHubHandlerMergeGroup -v -count=1",
+          "expected": "FAIL: the two 200 subtests report `published = 1, want 0; first topic \"notifications.github.sjawhar.legion.comment\"`; the 401 subtest passes (signature verification already precedes everything). Paste this output into .legion/implement.json under `redRun`."
+        },
+        {
+          "step": "3d — the minimal handler change",
+          "file": "packages/envoy/internal/webhook/github.go:28-32",
+          "content": [
+            "// githubSkip returns true for event types the handler acknowledges with 200 and neither",
+            "// publishes nor records. merge_group is GitHub's merge queue building (`checks_requested`) or",
+            "// tearing down (`destroyed`) a temporary merge commit: it names no pull request head, and",
+            "// nothing in Legion routes on it (LEGION-99). It runs after signature verification.",
+            "func githubSkip(event string) bool {",
+            "\treturn event == \"merge_group\"",
+            "}"
+          ]
+        },
+        {
+          "step": "3e — GREEN and the package",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/webhook/ -run TestGitHubHandlerMergeGroup -v -count=1 && go test ./internal/webhook/ ./internal/contracts/ -count=1 && gofmt -l ./internal/webhook && go vet ./internal/webhook/",
+          "expected": "PASS for all three subtests; `ok` for both packages; gofmt prints nothing; vet prints nothing."
+        },
+        {
+          "step": "3f — commit",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"fix(envoy): acknowledge GitHub merge_group webhooks without publishing (LEGION-99)\" packages/envoy/internal/webhook/github.go packages/envoy/internal/webhook/github_test.go packages/envoy/internal/webhook/testdata/merge_group_checks_requested.json"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Push, open the PR, write the body in READY format, register with the queue",
+      "steps": [
+        "Ancestry check: cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'  → only LEGION-99 commits above main@origin (plan handoff, ci commit, envoy commit, implement handoff).",
+        "Push: jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-99 && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-99",
+        "Open: legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-99 --title \"ci: run lint, typecheck, and test on merge-group commits; acknowledge merge_group webhooks (LEGION-99)\" --body-file <file>  — the body MUST contain the line `Dispatch: LEGION-99` and the READY-format sections (## Verification: CI / Threads / Thermo / E2E / Fast-follow / Chain) from the legion-worker skill. Two workflows run on this PR: `Tests` (pull_request) and `Legion Envoy and Contracts` (path-filtered; fires because packages/envoy/** changed) — the CI line names both run ids at the head.",
+        "Register at open with the merge-queue organizer (docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md §Registering): one `envoy_publish` to `notifications.role.pr-queue` carrying `sjawhar/legion#<n>`, head sha, one-line scope ('merge_group trigger on Tests + AGENTS.md sentence + Envoy skips merge_group'), proposed tier T1 (CI correctness), and conflicts: 'touches the `on:` block of .github/workflows/pr-and-main.yaml that LEGION-90 will also edit; nothing else open touches these files'.",
+        "Handoff: legion handoff write --phase implement (include redRun output, the commands run, the two run ids) → test -f .legion/implement.json → jj split -m \"implement: record handoff\" .legion/implement.json → bookmark set + push → legion handoff complete --summary '…'."
+      ]
+    }
+  ],
+  "testerPreMergeChecks": [
+    {
+      "criterion": "Workflow parses and lists the merge_group trigger with lint, typecheck, test not conditioned away and pr-title conditioned to pull requests (spec Testing, last paragraph).",
+      "surface": "Local parse with the repository's tooling + GitHub's own acceptance of the file via the PR's Tests run.",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git fetch && actionlint .github/workflows/pr-and-main.yaml; echo exit=$?   → exit=0, no findings",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.on | keys' .github/workflows/pr-and-main.yaml   → contains merge_group",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.on.merge_group.types' .github/workflows/pr-and-main.yaml   → - checks_requested",
+        "cd -- \"$LEGION_WORKSPACE\" && yq '.jobs | to_entries | map({\"job\": .key, \"if\": .value[\"if\"]})' .github/workflows/pr-and-main.yaml   → pr-title: github.event_name == 'pull_request'; lint, typecheck, test: null (or, if LEGION-90 design 1 landed first, an expression that is true when github.event_name == 'merge_group')",
+        "legion gh -- run list --repo sjawhar/legion --workflow Tests --branch legion/LEGION-99 --json databaseId,headSha,status,conclusion,event --limit 3   → a run at the PR head with conclusion success, event pull_request",
+        "legion gh -- run view <run-id> --repo sjawhar/legion --json jobs --jq '.jobs[] | \"\\(.name): \\(.conclusion)\"'   → lint, pr-title, typecheck, test all success (GitHub rejects an invalid workflow file with a failed 'workflow file issue' run, so a green run proves GitHub parsed the new trigger block)"
+      ],
+      "negativeControl": "sed 's/merge_group:/merge_grup:/' .github/workflows/pr-and-main.yaml > /tmp/bad.yaml && actionlint /tmp/bad.yaml; rm /tmp/bad.yaml   → actionlint names the unknown Webhook event."
+    },
+    {
+      "criterion": "Envoy's GitHub webhook, sent a merge_group delivery in its test suite, answers 200 and publishes nothing (spec Testing, last paragraph).",
+      "surface": "Go test suite locally and in the PR's `Legion Envoy and Contracts` run (job envoy-go, step 'Unit test envoy Go package').",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/webhook/ -run TestGitHubHandlerMergeGroup -v -count=1   → PASS ×3 subtests",
+        "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test ./internal/webhook/ ./internal/contracts/ -count=1   → ok, ok",
+        "legion gh -- run list --repo sjawhar/legion --workflow 'Legion Envoy and Contracts' --branch legion/LEGION-99 --json databaseId,headSha,conclusion --limit 3   → success at the PR head; `legion gh -- run view <id> --json jobs --jq '.jobs[] | \"\\(.name): \\(.conclusion)\"'` shows envoy-go success"
+      ],
+      "negativeControl": "The test's third subtest: an unsigned merge_group delivery → 401 and nothing published (the skip must not precede signature verification). Additionally, the implementer's recorded red run (`published = 1, want 0; first topic \"notifications.github.sjawhar.legion.comment\"`) in .legion/implement.json is the pre-fix behaviour; the tester may reproduce it with `jj -R \"$LEGION_WORKSPACE\" diff -r <envoy-commit> --stat` and by temporarily reading github.go at the parent: `jj -R \"$LEGION_WORKSPACE\" file show -r <envoy-commit>- packages/envoy/internal/webhook/github.go | sed -n '28,32p'` shows the old `return false`."
+    },
+    {
+      "criterion": "AGENTS.md records that merges into main go through GitHub's merge queue.",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && grep -n \"GitHub's merge queue\" AGENTS.md   → one hit between line `## Issue Lifecycle` and `## Documentation`"
+      ]
+    },
+    {
+      "criterion": "Scope guard: nothing in the PR touches the ruleset, the organizer's procedure, or envoy-and-contracts.yaml; no plan/spec markdown in the diff.",
+      "commands": [
+        "legion gh -- pr view <n> --repo sjawhar/legion --json files --jq '.files[].path'   → exactly: .github/workflows/pr-and-main.yaml, AGENTS.md, packages/envoy/internal/webhook/github.go, packages/envoy/internal/webhook/github_test.go, packages/envoy/internal/webhook/testdata/merge_group_checks_requested.json, and .legion/*.json until the deletion push"
+      ]
+    },
+    {
+      "criterion": "E2E line wording for what cannot run before the switch.",
+      "note": "The merge-group run itself exists only once an administrator adds the merge queue rule (spec Decision 1, ordered after this PR merges; spec Testing: 'Before the merge, the tester proves what can be proven without the switch'). Write the E2E line as: surface = GitHub Actions `Tests` run <id> on pull_request at <sha> (proves GitHub accepted the trigger block) + actionlint/yq output + `go test` output; negative control as above; and one sentence: 'the merge_group run is observable only after the ruleset change; acceptance 1–3 are the implementer's production verification per the spec's Testing section.' Do not fail the phase on that gap — the spec (controller-ruled) orders it this way."
+    }
+  ],
+  "implementerProductionVerification": [
+    {
+      "step": 0,
+      "title": "After the queue merges this PR: confirm main is green and the Envoy image exists; hand the listener rollout to the operator",
+      "commands": [
+        "legion gh -- run list --repo sjawhar/legion --workflow Tests --branch main --json databaseId,headSha,conclusion --limit 3   → success at the squash-merge sha",
+        "legion gh -- run list --repo sjawhar/legion --workflow 'Release Envoy Listener' --branch main --json databaseId,headSha,conclusion --limit 3   → success at the same sha (it fires because packages/envoy/** changed); the image is ghcr.io/sjawhar/legion/envoy:<merge-sha>",
+        "Message the operator session (dispatch_message on LEGION-99 and/or envoy to the operator's role) with the image tag and the ask to restart the listener on it (`ENVOY_IMAGE_TAG=<sha> docker compose -f compose/listener.compose.yml pull && … up -d` under packages/envoy/deploy; the autodeployer redeploys only `dispatch`). Only the operator touches the box (deployment instructions). This rollout is recommended before, not required for, the administrator's switch — see concerns[1]."
+      ],
+      "then": "The architect opens the administrator's item for spec step 2 (merge queue rule on ruleset 12331919 with the spec's recommended settings). The implementer does nothing until told the rule is on."
+    },
+    {
+      "step": 1,
+      "title": "Acceptance 1 — the LEGION-97 shape is held by the queue (spec Testing 1)",
+      "setup": "Throwaway module under packages/daemon/src (linted by `biome check src/` and typechecked by `tsc --noEmit` in the Tests jobs). Branch names OUTSIDE `legion/…` and NO `Dispatch:` line in any scratch PR body, so the daemon never links them to an issue (reducers.ts issueForBranch/issueForPrBody). Each scratch PR needs one approving review (ruleset) and is enqueued by the organizer: register each at open with `notifications.role.pr-queue` ('scratch PR for LEGION-99 spec Testing 1, T4, touches only packages/daemon/src/scratch/**, nothing else open touches it').",
+      "commands": [
+        "PR 0 (branch scratch/merge-queue-probe-0): add packages/daemon/src/scratch/merge-queue-probe.ts exporting `export function probe(input: string): string { return input; }` and packages/daemon/src/scratch/merge-queue-probe-caller-a.ts with `import { probe } from \"./merge-queue-probe\"; export const a = probe(\"a\");`. Green alone → organizer enqueues → merges.",
+        "PR A (branch scratch/merge-queue-probe-a, from main after PR 0): change the signature to `probe(input: string, times: number): string` (e.g. `return input.repeat(times);`) and update caller A to `probe(\"a\", 1)`. Green alone.",
+        "PR B (branch scratch/merge-queue-probe-b, opened from main BEFORE PR A merges): add packages/daemon/src/scratch/merge-queue-probe-caller-b.ts with `import { probe } from \"./merge-queue-probe\"; export const b = probe(\"b\");` (old signature). Green alone.",
+        "Organizer enqueues A → A merges. Organizer enqueues B → GitHub builds B's merge group on the new main → `typecheck` fails on the merge group → B is removed from the queue. Observe: `legion gh -- run list --repo sjawhar/legion --workflow Tests --event merge_group --json databaseId,headBranch,conclusion --limit 5` (a failed run whose headBranch is gh-readonly-queue/main/pr-<B>-…) and `legion gh -- pr view <B> --repo sjawhar/legion --json mergeStateStatus,statusCheckRollup`; B's branch is untouched (`legion gh -- pr view <B> --json headRefOid` unchanged).",
+        "Close B unmerged (`legion gh -- pr close <B>`). PR C (branch scratch/merge-queue-probe-c): delete packages/daemon/src/scratch/; enqueued and merged.",
+        "Record the run ids, PR numbers, and observations on the PR (#<this PR>) as a comment with the Legion footer and on LEGION-99 as one dispatch_message (a deliverable landed), linking the failed merge-group run."
+      ],
+      "cost": "Two throwaway commits on main plus their removal; about five Tests runs (spec accepts this)."
+    },
+    {
+      "step": 2,
+      "title": "Acceptance 2 — an ordinary PR lands after main moved, branch untouched, merge wake reaches the architect (spec Testing 2)",
+      "commands": [
+        "Pick the first ordinary Legion PR that enters the queue after main has moved since its checks ran (PR A above qualifies if main moved between its pull_request run and its enqueue; otherwise the next issue PR). Record: `legion gh -- pr view <n> --json headRefOid,mergedAt,mergeCommit` (head unchanged from its last push), `legion gh -- run list --workflow Tests --event merge_group --json databaseId,headBranch,conclusion` (its merge-group run, success), and — for an issue PR — that issue's architect saw the `pr-merged` wake (ask that architect over Envoy, or read the daemon's `[legion] consumed event` line for the PR's `closed` payload with `merged: \"true\"`)."
+      ]
+    },
+    {
+      "step": 3,
+      "title": "Acceptance 3 — main's Tests green at every merge commit over a day (spec Testing 3)",
+      "commands": [
+        "legion gh -- run list --repo sjawhar/legion --workflow Tests --branch main --event push --created '>=<switch-date>' --json headSha,conclusion,createdAt --limit 100 --jq '[.[] | select(.conclusion != \"success\")] | length'   → 0 after one day of merges; report the count and the window on LEGION-99 before the architect closes the issue."
+      ]
+    },
+    {
+      "step": 4,
+      "title": "Webhook in production — merge_group publishes nothing",
+      "commands": [
+        "Before enqueueing PR 0: `envoy_subscribe([\"notifications.github.sjawhar.legion.comment\"])` in the implementer's session (this is the exact topic the pre-fix handler published to; a junk envelope would render with summary `merge_group checks_requested`).",
+        "Through the PR 0 → C cycle: observe NO delivery on that topic once the operator has rolled the listener (step 0). If the rollout has not happened yet, one `merge_group checks_requested` and one `merge_group destroyed` delivery per queued PR is the pre-fix behaviour — report which build the listener runs. If GitHub is not delivering merge_group to the webhook at all (App event subscription), neither appears in either case; say so."
+      ]
+    }
+  ],
+  "reviewFocus": [
+    "github.go: `githubSkip` is consulted at line 134, AFTER `verify.Github` at line 119 — the skip must stay there; a skip before verification would let anyone POST an unsigned merge_group and get 200 (the test's 401 subtest pins this).",
+    "pr-and-main.yaml: no `if:` added to lint/typecheck/test; `pr-title`'s `if:` unchanged; `merge_group.types` is `[checks_requested]`; nothing else in the file changed (LEGION-90 owns the `edited` question).",
+    "AGENTS.md: exactly one sentence added in the Issue Lifecycle section; no other AGENTS.md changes; no docs/plans or spec files in the diff.",
+    "Not docs-only: run the thermonuclear pair once at the head. Expected clean — the Go change is three lines behind an existing hook.",
+    "PR body: CI line names both `Tests` and `Legion Envoy and Contracts` run ids at the head (the latter fires on packages/envoy/**)."
+  ],
+  "learningsInjected": [
+    "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
+    "docs/solutions/legion/template-names-a-ci-check-the-repository-never-produces.md",
+    "docs/solutions/daemon/external-red-and-phase-ownership.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
+    "docs/solutions/legion/template-names-a-ci-check-the-repository-never-produces.md"
+  ],
+  "relatedIssues": {
+    "LEGION-90": "same `on:` block of pr-and-main.yaml; queued ahead; unstarted as of 2026-09-13 — see concerns[2] and branching.",
+    "LEGION-97": "the incident (main red on typecheck) this issue prevents; its shape is the acceptance-1 probe.",
+    "LEGION-114": "filed by this planner: the general unknown-event publish default in contracts/normalize.go; out of scope here."
+  },
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T17:36:04.448Z"
+}
