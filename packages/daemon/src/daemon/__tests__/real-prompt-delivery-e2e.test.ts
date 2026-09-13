@@ -291,6 +291,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     mintWorkerBootToken: async () => "worker-boot-token",
     provisioningToken: async () => "installation-token",
     workerCatchup: {
+      baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
         getToken: async () => ({

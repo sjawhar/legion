@@ -88,11 +88,12 @@ resolve_webhook_mode() {
 # anything starts. LEGION_OMP_PATH is an explicit operator override for a non-release build:
 # an absolute executable path; the daemon's start_process env block in main() is the only place
 # up.sh names it explicitly (the operator's own export reaches every child process as any
-# exported variable does). Otherwise the daemon resolves `omp_pin` itself with `mise where` and
-# never installs, so the same lookup runs here in preflight, before NATS and the listener are
-# already up: a pin that is not installed stops the rig now, naming the exact `mise install`
-# command; any other `mise where` failure stops on mise's own message, without that remedy.
-# There is no default path and no guess.
+# exported variable does). Otherwise every pane the daemon spawns runs `mise x <omp_pin> -- omp`
+# verbatim (the daemon never resolves the pin to an install path), and a missing pin would only
+# surface inside the daemon's boot probe, after NATS and the listener are already up; so preflight
+# checks the install here first: a pin that is not installed stops the rig now, naming the exact
+# `mise install` command; any other `mise where` failure stops on mise's own message, without
+# that remedy. There is no default path and no guess.
 resolve_omp_path() {
   local install_dir mise_stderr mise_said
   local mise_status=0
@@ -728,8 +729,8 @@ main() {
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
 
-  # legion.yaml keeps `omp_invocation: mise x <pin> -- omp` (the loader requires that form) and the
-  # daemon resolves the pin itself with `mise where`. An explicit operator override is named here,
+  # legion.yaml keeps `omp_invocation: mise x <pin> -- omp` (the loader requires that form) and
+  # every pane runs that invocation through mise. An explicit operator override is named here,
   # in the daemon's env block — the only place up.sh sets LEGION_OMP_PATH explicitly; environment.ts
   # honours it over the pin, so every pane the daemon spawns runs the build resolve_omp_path verified.
   local -a daemon_env=(

@@ -2,6 +2,7 @@ import { accessSync, constants, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
+import { shellPath } from "./runtime";
 import { pathWithoutWorkerBin } from "./worker-bin";
 
 const REQUIRED_DAEMON_TOOLS = ["jj", "git", "gh", "tmux"] as const;
@@ -134,7 +135,7 @@ export const PANE_ENV_ALLOW_LIST: readonly string[] = [
   // OMP profile selection (DirResolver)
   "OMP_PROFILE",
   "PI_PROFILE",
-  // mise: where the tool store lives, for `mise env`/`mise where` here and the shims panes run
+  // mise: where the tool store lives, for `mise env` here and the `mise x` every pane runs
   "MISE_CACHE_DIR",
   "MISE_CONFIG_DIR",
   "MISE_DATA_DIR",
@@ -220,20 +221,21 @@ async function fullMiseEnvironment(
   return paneEnvironment(env, parseMiseEnvironment(result.stdout));
 }
 
-function miseToolFromInvocation(invocation: string): string | undefined {
-  return /^mise x (\S+) -- omp$/.exec(invocation)?.[1];
-}
-
-/** `LEGION_OMP_PATH` is daemon configuration, read from the daemon's own `env`; the `mise where`
- * lookup runs under `paneEnv` (the finished pane environment) like every other daemon child. */
-async function resolveOmpInvocation(
+/** The OMP launch fragment every pane and boot probe runs. `LEGION_OMP_PATH` is daemon
+ * configuration, read from the daemon's own `env`: it names an explicit direct binary (the
+ * Kubernetes worker image, a non-release build under test) and is used as given. Otherwise the
+ * configured `mise x <tool> -- omp` invocation is kept verbatim, with `mise` pinned to the absolute
+ * path resolved above: mise activates the pinned tool inside the pane — its `bin` first on PATH,
+ * its declared environment, an install if the pin is missing — exactly as an operator's shell
+ * does. The daemon never turns the invocation into the tool's install path and execs that binary
+ * itself: that skips mise's activation and quietly runs whatever happens to sit in the install
+ * directory. Whether the pin actually runs is proven by the boot probes, not here. */
+function resolveOmpInvocation(
   invocation: string,
   mise: string,
   env: NodeJS.ProcessEnv,
-  paneEnv: FullMiseEnvironment,
-  resolveExecutable: ResolveExecutable,
-  run: CommandRunner
-): Promise<string> {
+  resolveExecutable: ResolveExecutable
+): string {
   const configured = configuredPath(env, "omp");
   if (configured) {
     const resolved = resolveExecutable(configured);
@@ -241,24 +243,13 @@ async function resolveOmpInvocation(
     throw new Error(`[legion] LEGION_OMP_PATH is not an executable: ${configured}`);
   }
 
-  const tool = miseToolFromInvocation(invocation);
+  const tool = /^mise x (\S+) -- omp$/.exec(invocation)?.[1];
   if (!tool) {
     throw new Error(
       "[legion] OMP invocation must be 'mise x <tool> -- omp'. Set LEGION_OMP_PATH to an absolute executable path."
     );
   }
-
-  const result = await run([mise, "where", tool], { env: paneEnv });
-  const installDir = result.stdout.trim();
-  const resolved =
-    result.exitCode === 0 ? resolveExecutable(path.join(installDir, "bin", "omp")) : undefined;
-  if (resolved) return resolved;
-
-  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-  throw new Error(
-    `[legion] Could not resolve pinned OMP binary for ${tool}${detail ? `: ${detail}` : ""}. ` +
-      "Set LEGION_OMP_PATH to an absolute executable path."
-  );
+  return `${shellPath(mise)} x ${tool} -- omp`;
 }
 
 /** Builds the `<stateDir>/bin/legion` launcher script: a thin `sh` wrapper that re-execs this
@@ -353,14 +344,7 @@ export async function resolveDaemonEnvironment(
 
   return {
     commands,
-    ompInvocation: await resolveOmpInvocation(
-      ompInvocation,
-      mise,
-      env,
-      paneEnv,
-      resolveExecutable,
-      deps.run
-    ),
+    ompInvocation: resolveOmpInvocation(ompInvocation, mise, env, resolveExecutable),
     paneEnv,
   };
 }

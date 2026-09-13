@@ -230,8 +230,8 @@ fi
   cat "$assertion_file" >&2
   exit 1
 }
-# Unset LEGION_OMP_PATH: the daemon resolves the pin with `mise where` and never installs, so
-# preflight runs the same lookup. A fake mise on the harness PATH stands in for the operator's
+# Unset LEGION_OMP_PATH: every daemon pane runs `mise x <pin> -- omp` through mise, so a missing pin
+# would only surface in the boot probe; preflight checks the install first. A fake mise on the harness PATH stands in for the operator's
 # mise: `where` prints an install directory (whose bin/omp preflight then checks), or fails.
 fake_mise_install="${fake_bin}/mise-install"
 mkdir -p "${fake_mise_install}/bin"
@@ -623,7 +623,7 @@ preflight_status="$(set +e; (set -e; LEGION_OMP_PATH="${fake_bin}/missing-omp" m
 printf 'PASS: a missing OMP build stops up.sh in preflight before any process starts\n'
 
 # No override: preflight verifies the omp-pin.ts pin through the fake mise on PATH, prints the
-# install's bin/omp, and exports nothing -- the daemon resolves the same pin itself.
+# install's bin/omp, and exports nothing -- the daemon runs the same pin through `mise x` in every pane.
 : >"$order_log"
 rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
 main_status="$(set +e; (set -e; unset LEGION_OMP_PATH; main) >"$main_output_file" 2>&1; echo $?)"
