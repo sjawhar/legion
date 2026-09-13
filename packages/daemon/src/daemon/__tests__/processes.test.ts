@@ -3749,6 +3749,96 @@ describe("ProcessManager", () => {
     expect(managedState.phases[root]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
   });
 
+  it("confirms the boot before the ready-time bystander retire, so a StopFailed leaves a confirmed live claim the next spawn_worker probes instead of queueing behind a boot forever", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "tester-session.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      sessionId: "ses_tester",
+      generation: 2,
+      launchFailures: 1,
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/tester.sock",
+        ompSessionFile: sessionFile,
+      },
+    };
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    // The stop fails for real: the shim is unreachable (so the graceful frame cannot be sent)
+    // and `kill-pane` exits 1 with a stderr that is not one of the "pane already gone" shapes,
+    // which the tmux runtime surfaces as StopFailed. The retire never clears a locator on a
+    // StopFailed (the pane may still be alive), so the claim keeps its locator -- the question
+    // this test asks is what shape the rest of the claim is left in.
+    let connects = 0;
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerCap: 2 }),
+      sleep: async () => {},
+      connectWorkerRpc: async () => {
+        connects += 1;
+        // First dial is the retire's own stop-time shutdown dial: unreachable, fall to kill-pane.
+        if (connects === 1) throw new Error("ECONNREFUSED");
+        return client;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          return { stdout: "", stderr: "lost server", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return livePanes(command);
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const error = await processes
+      .workerReady(root, "tester", "ses_tester", 2)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(StopFailed);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    // Exactly retireIdleWorker's StopFailed shape: locator intact (never cleared on a failed
+    // stop), but the boot is confirmed and the bystander catch-up is gone -- so this claim is a
+    // live, confirmed worker to the rest of the daemon, not a boot still in flight.
+    expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%2");
+    expect(claim.readyConfirmedAt).toBeDefined();
+    expect(claim.launchFailures).toBeUndefined();
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(managedState.phases[root]).toEqual({
+      phase: "implementer",
+      sessionId: "ses_implementer",
+    });
+
+    // The architect's next spawn_worker for this role takes the live-claim probe path: the
+    // task is prompted straight into the (still alive) pane. Unconfirmed, it would have taken
+    // the booting branch instead -- queued as pendingAssignment for a /worker/ready that already
+    // came and will never come again.
+    const next = await processes.spawnWorker(root, root, "tester", "verify #42");
+
+    expect(next).toEqual({ status: "resumed", roleToken: token });
+    expect(client.prompts).toEqual(["verify #42"]);
+    const prompted = managedState.roles[token];
+    if (!prompted || !("issue" in prompted)) throw new Error("tester claim disappeared");
+    expect(prompted.pendingAssignment).toBeUndefined();
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
   it("delivers a sub-architect's queued catch-up at worker/ready whatever the child's active phase, without touching it", async () => {
     const state = newLegionState("omp", 1);
     tree(state);

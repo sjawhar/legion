@@ -832,16 +832,26 @@ export class ProcessManager {
         console.info(
           `[legion] dropping queued catch-up for ${token} at ready and retiring the relaunched pane: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
         );
+        // Confirmed in memory BEFORE the stop, never after it: `retireWorkerLocator` may throw
+        // `StopFailed` (a real kill-pane failure on a pane that may still be alive), and it has
+        // already cancelled this token's boot watchdog by then. Confirmed first, that failure
+        // leaves exactly `retireIdleWorker`'s own StopFailed shape -- locator intact, boot
+        // confirmed, catch-up gone -- which the next `spawn_worker` recovers through the live-claim
+        // probe path. Left unconfirmed, the claim would look like a boot still in flight with no
+        // watchdog left to judge it, and every later `spawn_worker` for the role would queue its
+        // task on the booting branch for a `/worker/ready` that never comes again. A restart
+        // re-derives "unconfirmed" from disk (nothing is persisted until after the stop) and
+        // `reconnectWorkers` re-arms the watchdog, which recovers that case too.
+        delete claim.pendingAssignment;
+        claim.readyConfirmedAt = this.deps.now();
+        delete claim.launchFailures;
         const locator = claim.locator;
         await this.retireWorkerLocator(token, locator);
-        delete claim.pendingAssignment;
         const resumeSessionFile = locator.ompSessionFile ?? claim.resumeSessionFile;
         delete claim.locator;
         if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
-        claim.readyConfirmedAt = this.deps.now();
-        delete claim.launchFailures;
         await this.persist();
-        this.cancelBootWatchdog(token, generation);
+        // `retireWorkerLocator` already cancelled the watchdog for every generation of this token.
         retiredBystander = true;
         return;
       }

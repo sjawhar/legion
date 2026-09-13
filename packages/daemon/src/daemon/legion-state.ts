@@ -478,8 +478,10 @@ export function activePhaseLabel(state: LegionState, issue: IssueKey): string {
  * sub-architect rationale lives here once: an architect (`role === "architect"` on a child issue)
  * is never a bystander, because it is never its child's active phase -- once it has spawned a
  * planner, `phases[child]` names that phase worker -- yet it parks for the life of its subtree and
- * a catch-up is its only recovery path. The root architect never holds a phase either and is
- * recovered through `resurrect`, never through these paths. */
+ * a catch-up is its only recovery path. The root architect never holds a phase either; its
+ * recovery is `resurrect`, and the one of these paths it does enter (`resumeWorker`, via the
+ * durable lane's `onUndeliverable`) exits at the no-resumable-identity guard before this judgement
+ * is made. */
 export function isBystanderRole(state: LegionState, issue: IssueKey, role: string): boolean {
   return role !== "architect" && !isActivePhase(state, issue, role);
 }
