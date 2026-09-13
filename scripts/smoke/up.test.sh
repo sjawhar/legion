@@ -174,6 +174,23 @@ printf 'PASS: derives the NATS container name and listener machine id from SMOKE
   printf 'SMOKE_WEBHOOK_MODE=envoy must not invoke gh\n' >&2
   exit 1
 }
+: >"$gh_call_file"
+[[ "$(SMOKE_WEBHOOK_MODE=isolated SMOKE_GH_CALL_FILE="$gh_call_file" resolve_webhook_mode)" == "isolated" ]] || {
+  printf 'expected SMOKE_WEBHOOK_MODE=isolated to select the isolated issue relay\n' >&2
+  exit 1
+}
+[[ ! -s "$gh_call_file" ]] || {
+  printf 'SMOKE_WEBHOOK_MODE=isolated must not invoke gh\n' >&2
+  exit 1
+}
+if (SMOKE_WEBHOOK_MODE=bogus resolve_webhook_mode) >"$assertion_file" 2>&1; then
+  printf 'expected an unknown SMOKE_WEBHOOK_MODE to fail\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'SMOKE_WEBHOOK_MODE must be forward, envoy, isolated, or none'* ]] || {
+  printf 'expected the unknown-mode error to name all four modes; got:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
 [[ "$(SMOKE_WEBHOOK_MODE=forward SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
   printf 'expected SMOKE_WEBHOOK_MODE=forward to select forward mode\n' >&2
   exit 1
@@ -186,8 +203,8 @@ fi
   printf 'expected explicit-forward availability error\n' >&2
   exit 1
 }
-[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode" ]] || {
-  printf 'expected the none-mode block reason to name the missing Dispatch issue-event feed and envoy for checkpoints 1-4 and 12\n' >&2
+[[ "$(webhook_ingress_block_reason)" == "SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=isolated or envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode" ]] || {
+  printf 'expected the none-mode block reason to name the missing Dispatch issue-event feed and isolated or envoy for checkpoints 1-4 and 12\n' >&2
   exit 1
 }
 
@@ -583,6 +600,7 @@ start_process() {
 wait_for_json() { printf 'wait_for_json:%s\n' "$1" >>"$order_log"; }
 assert_webhook_round_trip() { printf 'assert_webhook_round_trip\n' >>"$order_log"; }
 wait_for_envoy_bridge() { printf 'wait_for_envoy_bridge\n' >>"$order_log"; }
+wait_for_issue_relay() { printf 'wait_for_issue_relay\n' >>"$order_log"; }
 
 rm -f "${SMOKE_DIR}/root-issue"
 export SMOKE_REPO="sjawhar/legion-smoke"
@@ -731,6 +749,15 @@ root_issue_line="$(grep -n '^curl:issues-create$' "$order_log" | head -1 | cut -
   printf 'expected the envoy-bridge-ready wait before the root-issue POST; call order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1
 }
+# envoy mode is unchanged by the isolated relay: no relay process starts and nothing waits on one.
+[[ ! -e "${SMOKE_DIR}/start_process.issue-relay.argv" ]] || {
+  printf 'envoy mode must not start the isolated issue relay; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.issue-relay.argv")" >&2
+  exit 1
+}
+if grep -q '^wait_for_issue_relay$' "$order_log"; then
+  printf 'envoy mode must not wait for the isolated issue relay; call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+fi
 
 printf 'PASS: creates the Dispatch root issue only after the daemon and envoy bridge report ready\n'
 
@@ -921,3 +948,64 @@ if grep -q '^run \|^start ' "$docker_log"; then
   exit 1
 fi
 printf 'PASS: ensure_nats reuses an existing container only when its published port equals the configured NATS port exactly\n'
+
+# isolated mode: the relay starts only after the root issue is recorded (it replays the issue's
+# history from the Dispatch API, so issue.created still arrives) and RIG READY waits for it; the
+# envoy bridge never starts. The relay's env block carries exactly the recorded root key, the rig
+# NATS URL, and the Dispatch endpoint the daemon itself received.
+: >"$order_log"
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
+if ! SMOKE_WEBHOOK_MODE=isolated main >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed in isolated mode; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$main_output_file")" == *'RIG READY'* ]] || {
+  printf 'expected isolated mode to finish with RIG READY; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+[[ "$(<"$main_output_file")" == *'GREEN Dispatch ingress: isolated relay'* ]] || {
+  printf 'expected the isolated-mode ingress line; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+[[ "$(<"${SMOKE_DIR}/webhook-mode")" == "isolated" ]] || {
+  printf 'expected up.sh to record isolated as the webhook mode; got %s\n' "$(<"${SMOKE_DIR}/webhook-mode")" >&2
+  exit 1
+}
+daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
+root_issue_line="$(grep -n '^curl:issues-create$' "$order_log" | head -1 | cut -d: -f1)"
+relay_start_line="$(grep -n '^start_process:issue-relay$' "$order_log" | head -1 | cut -d: -f1)"
+relay_ready_line="$(grep -n '^wait_for_issue_relay$' "$order_log" | head -1 | cut -d: -f1)"
+[[ -n "$daemon_ready_line" && -n "$root_issue_line" && -n "$relay_start_line" && -n "$relay_ready_line" ]] || {
+  printf 'expected daemon-ready, root-issue-create, relay-start, and relay-ready markers in the call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+((daemon_ready_line < root_issue_line && root_issue_line < relay_start_line && relay_start_line < relay_ready_line)) || {
+  printf 'expected daemon ready < root-issue POST < relay start < relay ready; call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+if grep -q '^wait_for_envoy_bridge$' "$order_log" || [[ -e "${SMOKE_DIR}/start_process.envoy-bridge.argv" ]]; then
+  printf 'isolated mode must not start or wait for the envoy bridge; call order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+fi
+relay_argv="${SMOKE_DIR}/start_process.issue-relay.argv"
+for expected_line in \
+  'SMOKE_ROOT_ISSUE=LEGSMOKE-42' \
+  "SMOKE_RIG_NATS=nats://127.0.0.1:${nats_port}" \
+  'DISPATCH_URL=http://dispatch.test' \
+  'DISPATCH_TOKEN=test-dispatch-token'; do
+  grep -Fxq "$expected_line" "$relay_argv" || {
+    printf 'expected the relay env block to carry %s; argv:\n%s\n' "$expected_line" "$(<"$relay_argv")" >&2
+    exit 1
+  }
+done
+# up.sh builds the command from its own repo_root (which, sourced from a temp copy, is not this
+# harness's project_root), exactly as the envoy-bridge command is built.
+[[ "$(tail -n 1 "$relay_argv")" == "${repo_root}/scripts/smoke/issue-relay.ts" && "$(tail -n 3 "$relay_argv" | head -n 1)" == "bun" ]] || {
+  printf 'expected the relay command to end with bun run .../scripts/smoke/issue-relay.ts; argv:\n%s\n' "$(<"$relay_argv")" >&2
+  exit 1
+}
+if grep -q '^SMOKE_UPSTREAM_NATS=' "$relay_argv"; then
+  printf 'the isolated relay must not receive the production NATS URL; argv:\n%s\n' "$(<"$relay_argv")" >&2
+  exit 1
+fi
+printf 'PASS: isolated mode starts the issue relay for the recorded root only after the root issue exists, waits for it before RIG READY, and never starts the envoy bridge\n'

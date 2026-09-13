@@ -245,6 +245,9 @@ main() {
   local project=""
   project="$(rig_project)" || project=""
 
+  # First, so no new Dispatch event lands in the daemon during teardown (the relay is the rig's
+  # only Dispatch feed in isolated mode; the bridge plays the same part in envoy mode).
+  terminate_pid_file issue-relay
   terminate_pid_file envoy-bridge
   terminate_process_group_file webhook-forward
   terminate_process_group_file board-webhook-forward

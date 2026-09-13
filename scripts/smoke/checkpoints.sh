@@ -61,7 +61,7 @@ stored_webhook_mode() {
   elif [[ -n "${SMOKE_WEBHOOK_MODE:-}" ]]; then
     printf '%s\n' "$SMOKE_WEBHOOK_MODE"
   else
-    fail "no recorded webhook mode at ${mode_file}; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|none"
+    fail "no recorded webhook mode at ${mode_file}; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|isolated|none"
   fi
 }
 
@@ -92,21 +92,51 @@ stored_dispatch_ingress() {
 }
 
 webhook_ingress_block_reason() {
-  printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
+  printf 'SMOKE_WEBHOOK_MODE=%s: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward\n' "$1"
 }
 
 # Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has
 # ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and
-# reportRootAnomalies skip keys it never saw). With the recorded Dispatch ingress `shared`, only
-# up.sh's envoy-mode bridge relays those events into the rig NATS: none mode has no feed at all,
-# and forward mode (`gh webhook forward`) carries GitHub events only -- up.sh creates the root
-# issue over HTTP and the daemon never admits it -- so under either recorded mode these are
-# blocked, never reported as a false FAILED. With `rig` ingress a scratch Dispatch publishes into
-# the rig NATS directly, so the webhook mode says nothing about these checkpoints and the block is
-# skipped (the dispatch below prints which record let it through).
+# reportRootAnomalies skip keys it never saw). With the recorded Dispatch ingress `shared`, two
+# webhook modes relay those events into the rig NATS: isolated (up.sh's issue relay, this rig's
+# own root issue and its children only) and envoy (the production bridge, every project's
+# issues). none mode has no feed at all, and forward mode (`gh webhook forward`) carries GitHub
+# events only -- up.sh creates the root issue over HTTP and the daemon never admits it -- so under
+# either recorded mode these are blocked, never reported as a false FAILED. With `rig` ingress a
+# scratch Dispatch publishes into the rig NATS directly, so the webhook mode says nothing about
+# these checkpoints and the block is skipped (the dispatch below prints which record let it
+# through).
 dispatch_ingress_block_reason() {
-  printf 'SMOKE_WEBHOOK_MODE=%s with SMOKE_DISPATCH_INGRESS=shared: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig when a scratch Dispatch publishes into the rig NATS\n' "$1"
+  printf 'SMOKE_WEBHOOK_MODE=%s with SMOKE_DISPATCH_INGRESS=shared: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=isolated (this rig'"'"'s own issue only) or envoy, or SMOKE_DISPATCH_INGRESS=rig when a scratch Dispatch publishes into the rig NATS\n' "$1"
+}
+
+# The isolated relay is the rig's only Dispatch feed, so a checkpoint that reads daemon state
+# first proves the feed is alive: a dead or stalled relay makes "the daemon never saw the root"
+# a rig fault to fix (exit 1), never a false FAILED against the daemon or a human-controlled gate.
+relay_is_live() {
+  local pid_file="${smoke_dir}/issue-relay.pid"
+  local start_file="${smoke_dir}/issue-relay.start"
+  local pid
+
+  [[ -r "$pid_file" && -r "$start_file" ]] || return 1
+  pid="$(<"$pid_file")"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
+  [[ "$(awk '{print $22}' "/proc/${pid}/stat")" == "$(<"$start_file")" ]]
+}
+
+require_isolated_relay() {
+  local root
+  local log_file="${smoke_dir}/issue-relay.log"
+  local last_relay_line
+
+  root="$(dispatch_root_key)"
+  relay_is_live ||
+    fail "isolated relay is not running (no live process recorded at ${smoke_dir}/issue-relay.pid): the Dispatch issue-event feed for ${root} is missing, so daemon state cannot reflect it; rerun up.sh and inspect ${log_file}"
+  { [[ -r "$log_file" ]] && grep -Fq 'RELAY READY ' "$log_file"; } ||
+    fail "isolated relay has not reported RELAY READY; inspect ${log_file}"
+  last_relay_line="$(grep '^RELAY ' "$log_file" | tail -n 1)"
+  [[ "$last_relay_line" != "RELAY RETRY "* ]] ||
+    fail "isolated relay cannot reach Dispatch (${last_relay_line}); the feed for ${root} is stalled"
 }
 
 
@@ -659,6 +689,7 @@ checkpoint_twelve() {
   state | jq -e --arg root "$root" --arg promoted "$SMOKE_QUEUED_ISSUE" \
     '(.admission.active | index($root) == null) and (.admission.active | index($promoted) != null)' >/dev/null ||
     fail "closed tree is still active or queued issue was not promoted"
+  printf 'CHECKPOINT 12 OK: %s released its admission slot and %s was promoted\n' "$root" "$SMOKE_QUEUED_ISSUE"
 }
 
 # Spec LEGION-6 acceptance 2 and 4: no recorded Legion process — the private tmux server itself,
@@ -726,6 +757,7 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
+command -v awk >/dev/null 2>&1 || fail "awk is required"
 webhook_mode="$(stored_webhook_mode)"
 readonly webhook_mode
 dispatch_ingress="$(stored_dispatch_ingress)"
@@ -753,7 +785,7 @@ case "$webhook_mode" in
         dispatch_ingress_gate
         ;;
       5 | 6 | 7 | 9 | 10 | 11)
-        blocked "$(webhook_ingress_block_reason)"
+        blocked "$(webhook_ingress_block_reason "$webhook_mode")"
         ;;
     esac
     ;;
@@ -766,8 +798,18 @@ case "$webhook_mode" in
     ;;
   envoy)
     ;;
+  isolated)
+    case "$checkpoint" in
+      1 | 2 | 3 | 4 | 12)
+        require_isolated_relay
+        ;;
+      5 | 6 | 7 | 9 | 10 | 11)
+        blocked "$(webhook_ingress_block_reason "$webhook_mode")"
+        ;;
+    esac
+    ;;
   *)
-    fail "recorded SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
+    fail "recorded SMOKE_WEBHOOK_MODE must be forward, envoy, isolated, or none"
     ;;
 esac
 

@@ -108,9 +108,11 @@ since LEGION-40 includes `LEGION_OMP_PATH` and the three `DISPATCH_*` variables.
 - **`SMOKE_WEBHOOK_MODE=none` cannot run checkpoints 1–4** despite what the README said then: no
   Dispatch issue event reaches the rig's isolated NATS and resync's `healStatusDrift` skips keys
   the daemon never ingested, so the root issue is never tracked. Use `envoy` mode (production
-  NATS → rig NATS bridge). *Fixed in #957:* `checkpoints.sh` now blocks 1–4 and 12 with
-  `SKIPPED-BLOCKED` (exit 3) under `none` and `forward`, and the README says `envoy` is the only
-  mode for them — see `docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md`.
+  NATS → rig NATS bridge) or, since LEGION-61, `SMOKE_WEBHOOK_MODE=isolated`, which relays only
+  the rig's own root issue and its children and is the mode for a pre-merge proof. *Fixed in
+  #957:* `checkpoints.sh` now blocks 1–4 and 12 with `SKIPPED-BLOCKED` (exit 3) under `none` and
+  `forward`, and the README names the modes for them — see
+  `docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md`.
 - **`LEGION_OMP_PATH` had to point at the rpcfix OMP** production ran with; the rig's pinned mise
   OMP died at its first RPC prompt (`send did not invoke the agent`). *Fixed by LEGION-32 (#983)
   moving the one pin in `packages/daemon/src/daemon/omp-pin.ts` to a release with the fix, and by

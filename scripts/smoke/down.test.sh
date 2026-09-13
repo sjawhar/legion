@@ -10,6 +10,7 @@ readonly fake_bin="${temporary_dir}/bin"
 readonly smoke_dir="${temporary_dir}/smoke"
 readonly output_file="${temporary_dir}/output"
 bridge_pid=""
+relay_pid=""
 forward_job_pid=""
 forward_pgid=""
 
@@ -17,6 +18,10 @@ cleanup() {
   if [[ -n "$bridge_pid" ]]; then
     kill "$bridge_pid" 2>/dev/null || true
     wait "$bridge_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$relay_pid" ]]; then
+    kill "$relay_pid" 2>/dev/null || true
+    wait "$relay_pid" 2>/dev/null || true
   fi
   if [[ -n "$forward_pgid" ]]; then
     kill -- "-$forward_pgid" 2>/dev/null || true
@@ -45,6 +50,11 @@ sleep 300 &
 bridge_pid="$!"
 printf '%s\n' "$bridge_pid" >"${smoke_dir}/envoy-bridge.pid"
 awk '{print $22}' "/proc/${bridge_pid}/stat" >"${smoke_dir}/envoy-bridge.start"
+# isolated mode's relay is recorded the same way and stopped by the same teardown.
+sleep 300 &
+relay_pid="$!"
+printf '%s\n' "$relay_pid" >"${smoke_dir}/issue-relay.pid"
+awk '{print $22}' "/proc/${relay_pid}/stat" >"${smoke_dir}/issue-relay.start"
 
 PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" bash "$down_script" >/dev/null
 if kill -0 "$bridge_pid" 2>/dev/null; then
@@ -52,6 +62,15 @@ if kill -0 "$bridge_pid" 2>/dev/null; then
   exit 1
 fi
 bridge_pid=""
+if kill -0 "$relay_pid" 2>/dev/null; then
+  printf 'expected down.sh to stop the isolated issue relay\n' >&2
+  exit 1
+fi
+relay_pid=""
+[[ ! -e "${smoke_dir}/issue-relay.pid" && ! -e "${smoke_dir}/issue-relay.start" ]] || {
+  printf 'expected down.sh to remove the issue-relay pid and start records\n' >&2
+  exit 1
+}
 
 # The rig's identity for teardown is the directory's legion.yaml (up.sh's write_daemon_config
 # writes it for every rig), never SMOKE_PROJECT -- so these cases export no SMOKE_PROJECT at all.
@@ -346,6 +365,7 @@ fi
 
 printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'
+printf 'PASS: stops the isolated issue relay with a start-time-validated PID record and removes its records\n'
 printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\n'
 printf 'PASS: removes only the NATS container recorded for this rig and refuses a malformed record\n'
 printf 'PASS: without a record, removes legion-smoke-nats only when it is published on this directory'"'"'s legion.yaml NATS port, and otherwise leaves it as another rig'"'"'s\n'

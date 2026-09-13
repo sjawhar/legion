@@ -45,7 +45,7 @@ Three rules, all now in `checkpoints.sh` and its harness:
 - **Block, never fail.** A checkpoint the recorded mode cannot reach prints
   `CHECKPOINT <n> SKIPPED-BLOCKED: <reason>` and exits 3, before any network request and before
   its own `require_env`. A false red misleads exactly as a false green does. The reason names
-  the mode and the remedy (`use SMOKE_WEBHOOK_MODE=envoy`); the same sentence appears in
+  the mode and the remedy (`use SMOKE_WEBHOOK_MODE=isolated (this rig's own issue only) or envoy`); the same sentence appears in
   `up.sh`'s start-up line, `checkpoints.sh`, the harness assertions and the README, verbatim.
 - **Gate the default mode too.** `forward` is what `up.sh` picks whenever `gh webhook forward`
   is installed, so the first human on a normal machine hits the default. A gate that covers

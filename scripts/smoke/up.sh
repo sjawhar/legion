@@ -55,7 +55,7 @@ require_env() {
 # gating from the recorded mode.
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode'
+    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=isolated or envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode'
 }
 
 resolve_webhook_mode() {
@@ -68,6 +68,9 @@ resolve_webhook_mode() {
     envoy)
       printf 'envoy\n'
       ;;
+    isolated)
+      printf 'isolated\n'
+      ;;
     none)
       printf 'none\n'
       ;;
@@ -79,7 +82,7 @@ resolve_webhook_mode() {
       fi
       ;;
     *)
-      fail "SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
+      fail "SMOKE_WEBHOOK_MODE must be forward, envoy, isolated, or none"
       ;;
   esac
 }
@@ -585,6 +588,37 @@ wait_for_envoy_bridge() {
 
   fail "Envoy bridge did not become ready; inspect ${log_file}"
 }
+# Ready once the relay has replayed the recorded root issue's history into the rig NATS (the
+# first tick that fetches and publishes without error logs `RELAY READY`); a definitive failure
+# (`RELAY UNHEALTHY`: a rejected bearer or a root Dispatch does not know) stops the rig now.
+wait_for_issue_relay() {
+  local pid_file="${smoke_dir}/issue-relay.pid"
+  local log_file="${smoke_dir}/issue-relay.log"
+  local root
+  local log
+  local reason
+  local attempt
+
+  root="$(<"${smoke_dir}/root-issue")"
+  for ((attempt = 1; attempt <= 60; attempt += 1)); do
+    if [[ -r "$log_file" ]]; then
+      log="$(<"$log_file")"
+      if [[ "$log" == *"RELAY UNHEALTHY "* ]]; then
+        reason="${log##*RELAY UNHEALTHY }"
+        reason="${reason%%$'\n'*}"
+        fail "issue relay unhealthy: ${reason}"
+      fi
+      if [[ "$log" == *"RELAY READY "* ]] && pid_is_live "$pid_file"; then
+        printf 'GREEN issue relay: relaying %s and its children\n' "$root"
+        return
+      fi
+    fi
+    pid_is_live "$pid_file" || fail "issue relay exited; inspect ${log_file}"
+    sleep 1
+  done
+
+  fail "issue relay did not become ready; inspect ${log_file}"
+}
 assert_webhook_round_trip() {
   local payload='{"zen":"legion smoke round-trip"}'
   local signature
@@ -720,6 +754,8 @@ main() {
     record_forwarder_hook webhook-forward "repos/${SMOKE_REPO}/hooks"
   elif [[ "$webhook_mode" == "envoy" ]]; then
     printf 'GREEN webhook ingress: production Envoy NATS bridge will relay %s GitHub events and Dispatch issue events for every project\n' "$SMOKE_REPO"
+  elif [[ "$webhook_mode" == "isolated" ]]; then
+    printf 'GREEN Dispatch ingress: isolated relay will carry only this rig'"'"'s root issue and its children into the rig NATS once the root is recorded; no GitHub event reaches the rig\n'
   else
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
@@ -757,8 +793,20 @@ main() {
   # The daemon only admits issues whose events it has ingested; resync skips unknown keys, so
   # this must run after the daemon (and, in envoy mode, the bridge that relays Dispatch issue
   # events to it) are both confirmed ready -- never before, or a fresh rig's root issue is
-  # created but never triaged.
+  # created but never triaged. In isolated mode the relay replays the issue's whole history from
+  # the Dispatch API, so it starts after the root is recorded and still delivers issue.created;
+  # a rerun reuses a live relay (start_process's REUSED path) because ensure_root_issue reuses
+  # the same recorded root.
   ensure_root_issue
+  if [[ "$webhook_mode" == "isolated" ]]; then
+    start_process issue-relay env \
+      SMOKE_ROOT_ISSUE="$(<"${smoke_dir}/root-issue")" \
+      SMOKE_RIG_NATS="$nats_url" \
+      DISPATCH_URL="$DISPATCH_URL" \
+      DISPATCH_TOKEN="$DISPATCH_TOKEN" \
+      bun run "${repo_root}/scripts/smoke/issue-relay.ts"
+    wait_for_issue_relay
+  fi
   case "${SMOKE_BRANCH_PROTECTION:-}" in
     1)
       configure_branch_protection
