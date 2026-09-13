@@ -1,29 +1,34 @@
 {
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "reviewedHead": "873550aeea3cb0736b357199d66f06735b8caea9",
-  "reviewId": 5190437153,
-  "reviewUrl": "https://github.com/sjawhar/legion/pull/1014#pullrequestreview-5190437153",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/workspace/src/workspace.test.ts:276",
-      "description": "The test does not pin which clone stays: a last-writer-wins mutant (loser rm's the landed clone and renames its own into place at workspace.ts:156) passes 5/5. Fix: write a `clone-origin` marker into each fake clone's .jj (after line 250) and assert `readFile(jjDir/clone-origin) === cloneTargets[0]` (after line 276); verified 10/10 pass vs real code, 5/5 fail vs mutant, suite 13/13. Thread: https://github.com/sjawhar/legion/pull/1014#discussion_r3999399598"
-    }
-  ],
-  "clean": [
-    "Scope: fork point 52c5e03e -> head changes exactly packages/workspace/src/workspace.test.ts (+90/-1) plus the two .legion handoffs; no product code, no daemon fixture",
-    "Interleaving forces the second caller through workspace.ts:156; negative control (branch unreachable -> ENOTEMPTY) reproduced independently 20/20 in a scratch copy",
-    "Determinism: no timers; fs.watch on the parent + re-check after arming; inotify rename probe 100/100 (Bun 1.3.14, Linux); new test 50/50 at head; suite 13/13. Watcher closed on success; error path rejects without close (informational: an unclosed FSWatcher does not keep bun test alive). macOS not run here; kqueue NOTE_WRITE on the directory fd should wake the callback (inference)",
-    "Assertions match the spec's Acceptance 3 list; conventions match the sibling test (temporaryDirectory/afterEach, LEGION_MAX_RECURSION_DEPTH, hoisted deps idiom); Promise.withResolvers is the repo's gate idiom",
-    "CI: Tests run 34750665922 all four jobs success at head, verified on GitHub; 0 prior reviews; 0 threads before this review",
-    "Tester evidence reads as the spec's Testing section requires (branch 50-loop 50/50; pre-merge run 47 reproduced; 18 .jj hits classified; workspace suite green). 8-lane parallel timer-test failures are outside this PR"
-  ],
-  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at 873550ae: no blocking findings; deep-review surfaced the provenance gap (re-verified by mutant); code-quality's proposal to drop whenPathExists rejected because the spec's Design mandates the second-clone-after-first-rename ordering",
-  "reReviewPlan": "Corrective push -> tester re-runs bun test packages/workspace -> re-review: answer the thread `Accepted: fixed in <sha> — ...`, fingerprint, one COMMENT review if clean while .legion/ remains, then APPROVE the .legion/-deletion head by SHA",
+  "reviewedHead": "9bfe7d7511b00ca7cca0a467da168006a51dd81c",
+  "reviewId": 5190679320,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1014#pullrequestreview-5190679320",
+  "reviewEvent": "COMMENT",
+  "approvalPending": "APPROVE is reserved for the head that differs from 9bfe7d75 by the .legion/ deletion alone (plus this handoff commit, which that deletion removes); the reviewer approves it by SHA once the architect sends it back",
+  "round1": {
+    "reviewedHead": "873550aeea3cb0736b357199d66f06735b8caea9",
+    "reviewId": 5190437153,
+    "verdict": "changes_requested",
+    "thread": "https://github.com/sjawhar/legion/pull/1014#discussion_r3999399598",
+    "finding": "test did not pin which clone survives the rename collision; last-writer-wins mutant at workspace.ts:156 passed 5/5"
+  },
+  "round2": {
+    "fix": "0070e563bb8b187c9ab4a7be1a5807f44accf3dc",
+    "delta": "3 added lines in packages/workspace/src/workspace.test.ts: fake clone writes .jj/clone-origin = its temp target (after the mkdir at :250); assertion readFile(jjDir/clone-origin) === cloneTargets[0] (after :277). Exactly the round-1 proposal; no other test change, no product code, no daemon fixture (jj diff --from 873550ae --to 9bfe7d75 --summary: 3x .legion + workspace.test.ts)",
+    "verification": "scratch copy at head: fixed test 10/10 vs real code; last-writer-wins mutant fails 5/5 on the marker; branch-unreachable mutant still fails ENOTEMPTY 5/5; bun test packages/workspace 13/13 in the workspace",
+    "threadReply": "Accepted: fixed in 0070e563 — https://github.com/sjawhar/legion/pull/1014#discussion_r3999624355 (opener's reply, newest on the thread; isResolved false until the implementer runs legion threads resolve before the deletion push)",
+    "ci": "Tests run 34755512024 all four jobs success at 180c053e; run 34757223517 all four success at 9bfe7d75; verified via legion gh",
+    "thermo": "deep-review + code-quality once at 9bfe7d75 over the delta: both CLEAN, no findings",
+    "prBody": "Thermo line updated for both rounds; Threads line now names the opener's Accepted: reply",
+    "tester": ".legion/test.json round2 complete: suite 13/13 at 180c053e, new test 20/20, mutant + ENOTEMPTY control reproduced, biome/tsc clean, scope confirmed"
+  },
+  "keyFindings": [],
+  "remainingWork": "the .legion/ deletion push only; then APPROVE of that head by SHA",
+  "nextForApproval": "confirm the new head differs from 9bfe7d75 by .legion/ removal only (jj diff --from 9bfe7d75 --to <head> --summary shows only D .legion/*), thread PRRT_kwDORFy7ds6h4Kja isResolved true via gh api graphql, CI green at that head, then legion gh -- pr review --approve naming the SHA",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T10:43:04.274Z"
+  "completed": "2026-09-13T12:36:50.535Z"
 }
