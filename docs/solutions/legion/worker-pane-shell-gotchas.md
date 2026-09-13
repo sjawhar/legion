@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, a `(divergent)` change left behind by `jj squash` on the shared operation log, and — after the daemon moved to its own user — a workspace `.git` pointer that breaks `gh` from inside the workspace and a signing config that drops every signature"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, a `(divergent)` change left behind by `jj squash` on the shared operation log, a workspace `.git` pointer that breaks `gh` from inside the workspace and a signing config that drops every signature (after the daemon moved to its own user), and a plan's `actionlint`/`yq`/`go` that are not on the pane PATH"
 category: legion
 tags:
   - legion
@@ -50,6 +50,8 @@ related_issues:
   - "sjawhar/legion#1080"
   - "LEGION-96"
   - "sjawhar/legion#1086"
+  - "LEGION-99"
+  - "sjawhar/legion#1089"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -72,6 +74,7 @@ symptoms:
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
   - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
   - "legion gh -- pr create --repo … --head …: failed to run git: fatal: not a git repository: /home/ubuntu/.local/state/legion/…/.git/worktrees/<workspace>, from inside the workspace"
+  - "error: command not found: actionlint / yq / go in a worker pane, for a tool the plan's verify steps name"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -88,7 +91,8 @@ from LEGION-34 (sjawhar/legion#1003), whose implementer hit §1 again on a pane 
 the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace;
 §14 is from LEGION-40 (sjawhar/legion#1011), whose plan, harness comments, and shipped header comment all named the
 wrong `jq`; §16 is from LEGION-84 (sjawhar/legion#1080), and its list of which `gh` calls must leave the workspace is
-from LEGION-96 (sjawhar/legion#1086), whose implementer hit it on its first `pr create` the same day.
+from LEGION-96 (sjawhar/legion#1086), whose implementer hit it on its first `pr create` the same day; §17 is from
+LEGION-99 (sjawhar/legion#1089), whose plan's verify steps named three tools the pane lacks.
 None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
 delivery fixed for good by LEGION-54 (pi-envoy 1.20.1): the workarounds are recorded only so a worker still running
@@ -528,3 +532,26 @@ state dir `/home/legion/.local/state/legion/…`). Two consequences a worker mee
 
 Both are box facts, not defects of your branch; a plan step that says "confirm a fresh commit signs before the
 first push" is satisfied by recording why it cannot.
+
+## 17. `actionlint`, `yq`, and `go` are not on the pane PATH; run them from mise's Go without touching the profile (from LEGION-99)
+
+A worker pane's PATH is the daemon's allow-listed environment plus `mise env` for the tools the *daemon* needs
+(`bun`, `jj`, `gh`, `tmux`, `jq`). A plan whose verify steps say `actionlint <workflow>`, `yq '.on | keys'
+<workflow>`, or `go test ./...` meets `command not found` for all three — including `go`, although
+`mise ls` shows Go installed (`go 1.26.8` on this box); it is installed, not activated. The deployment
+instructions forbid `bun add`/`mise install` against the live profile, so the answer is never to install anything:
+
+```bash
+mise x go@1.26.8 -- go test ./internal/webhook/ -count=1              # the pinned Go, activated for one command
+mise x go@1.26.8 -- go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 <workflow>   # module cache only
+js-yaml <workflow> | jq -c '.on | keys_unsorted, .on.merge_group.types, (.jobs | to_entries | map({job: .key, if: .value["if"]}))'
+```
+
+`mise x <tool>@<version> -- <cmd>` activates the installed tool for that one process (check the version against
+`packages/envoy/go.mod`'s `go` line and the workflow's `setup-go`); `go run <module>@<version>` fetches into the Go
+module cache under the worker user's home and leaves the mise profile untouched, so it is not a profile mutation. Pin
+the actionlint version in the command and quote it in the proof, since it is the tool whose verdict the negative
+control (`merge_grup` → `unknown Webhook event`) depends on. `js-yaml` is on the box's Node install (`/usr/bin`) and,
+piped into `jq`, gives the same structural read a `yq` step asks for — say "run as `js-yaml | jq`" in the handoff's
+`deviations` rather than reporting the `yq` step as skipped. Note `jq` here is the bash tool's jaq (§14); for a
+`keys`/`to_entries`/`map` read the two engines agree.
