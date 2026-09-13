@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { ApiError, api } from "../../api/client";
-import type { Message } from "../../api/types";
+import type { Agent, CreateMessageInput, Message } from "../../api/types";
 import { ConversationComposer } from "./ConversationComposer";
 
 const createdMessage: Message = {
@@ -114,6 +114,71 @@ test("whitespace-only input and IME composition do not send a message", () => {
     fireEvent.keyDown(field, { isComposing: true, key: "Enter" });
 
     expect(sent).toEqual([]);
+  } finally {
+    view.unmount();
+    api.createMessage = originalCreateMessage;
+  }
+});
+
+test("updates the default delivery before sending to a selected recipient", async () => {
+  const originalCreateMessage = api.createMessage;
+  const sent: CreateMessageInput[] = [];
+  const agent: Agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/planner",
+    last_activity: null,
+    last_seen: Date.now(),
+    machine_id: "host-a",
+    open_asks: 0,
+    roles: [],
+    session_id: "planner-session",
+    title: "Planner",
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <ConversationComposer
+        agents={[agent]}
+        defaultDelivery="btw"
+        issueKey="CORE-1"
+        onSent={() => {}}
+        recipientSlot={<span>To: Planner</span>}
+        route="session:planner-session"
+      />
+    </QueryClientProvider>
+  );
+
+  try {
+    api.createMessage = async (_issueKey, input) => {
+      sent.push(input);
+      return { ...createdMessage, body: input.body };
+    };
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "BTW" }).getAttribute("aria-pressed")).toBe("true")
+    );
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <ConversationComposer
+          agents={[agent]}
+          defaultDelivery="steer"
+          issueKey="CORE-1"
+          onSent={() => {}}
+          recipientSlot={<span>To: Planner</span>}
+          route="session:planner-session"
+        />
+      </QueryClientProvider>
+    );
+    const field = screen.getByLabelText("Message");
+    fireEvent.change(field, { target: { value: "Switch to steer" } });
+    fireEvent.submit(screen.getByRole("form", { name: "Message composer" }));
+
+    await waitFor(() =>
+      expect(sent).toEqual([
+        { body: "Switch to steer", delivery: "steer", target: "session:planner-session" },
+      ])
+    );
   } finally {
     view.unmount();
     api.createMessage = originalCreateMessage;

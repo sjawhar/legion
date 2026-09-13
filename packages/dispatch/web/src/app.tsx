@@ -72,6 +72,10 @@ const DocumentPage = lazy(() =>
   import("./features/document/DocumentPage").then((module) => ({ default: module.DocumentPage }))
 );
 
+const AgentsPage = lazy(() =>
+  import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
+);
+
 function IssuePageFallback(): ReactNode {
   return (
     <div aria-busy="true">
@@ -483,6 +487,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <Suspense fallback={<IssuePageFallback />}>
             <Routes>
               <Route element={<InboxPage />} path="/" />
+              <Route element={<AgentsPage />} path="/agents" />
               <Route element={<IssuePage />} path="/issues/:key/*" />
               <Route element={<ProjectPage />} path="/projects/:key" />
               <Route element={<ProjectPage />} path="/projects/:key/documents" />

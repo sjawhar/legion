@@ -471,6 +471,8 @@ export interface Agent {
   readonly roles: string[];
   readonly capabilities: string[];
   readonly last_seen: number;
+  readonly open_asks: number;
+  readonly last_activity: string | null;
 }
 
 // Subscriber is a session whose persisted Envoy interests include an issue's
