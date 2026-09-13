@@ -173,50 +173,46 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 // BlockForMark returns the stable block that contains a persisted inline mark's
 // full range. A mark spanning top-level siblings has no block identity.
 func (s *Service) BlockForMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error) {
-	var blockID string
-	var markErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		tree, err := treeOf(doc)
-		if err != nil {
-			markErr = err
-			return
-		}
+	return s.blockForAnchor(ctx, artifactID, func(tree *pmdoc.Node) (pmdoc.Range, error) {
 		r, _, found := pmdoc.FindMark(tree, string(kind), id)
 		if !found {
-			markErr = ErrAnchorMissing
-			return
+			return pmdoc.Range{}, ErrAnchorMissing
 		}
-		blockID, markErr = pmdoc.BlockIDForRange(tree, r)
+		return r, nil
 	})
-	if markErr != nil {
-		return "", markErr
-	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return "", err
-	}
-	return blockID, nil
 }
 
 // BlockForQuote returns the stable block that contains the one matching quote.
 // A quote spanning top-level siblings has no block identity.
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
+	return s.blockForAnchor(ctx, artifactID, func(tree *pmdoc.Node) (pmdoc.Range, error) {
+		return pmdoc.FindQuote(tree, quote, nil, nil)
+	})
+}
+
+// blockForAnchor resolves an anchored range to its lowest containing block.
+func (s *Service) blockForAnchor(
+	ctx context.Context,
+	artifactID string,
+	findRange func(*pmdoc.Node) (pmdoc.Range, error),
+) (string, error) {
 	var blockID string
-	var quoteErr error
+	var blockErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		tree, err := treeOf(doc)
 		if err != nil {
-			quoteErr = err
+			blockErr = err
 			return
 		}
-		r, err := pmdoc.FindQuote(tree, quote, nil, nil)
+		r, err := findRange(tree)
 		if err != nil {
-			quoteErr = err
+			blockErr = err
 			return
 		}
-		blockID, quoteErr = pmdoc.BlockIDForRange(tree, r)
+		blockID, blockErr = pmdoc.BlockIDForRange(tree, r)
 	})
-	if quoteErr != nil {
-		return "", quoteErr
+	if blockErr != nil {
+		return "", blockErr
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return "", err
