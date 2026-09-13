@@ -3,10 +3,10 @@
   "pr": {
     "number": 1079,
     "url": "https://github.com/sjawhar/legion/pull/1079",
-    "headSha": "35d2483e3c5b06ad64f6c6371e9c26f02b7aecf0",
+    "headSha": "b869bf3290ba7fc5b09a7a035073cbefd1a2b1fc",
     "branch": "legion/LEGION-108",
-    "mergeable": "MERGEABLE at open and at the docs corrective push (mergeStateStatus BLOCKED = awaiting review/checks, not a conflict); no rebase performed",
-    "codeHeadSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72"
+    "mergeable": "MERGEABLE at every push so far (mergeStateStatus BLOCKED = awaiting review/checks, not a conflict); no rebase performed",
+    "codeHeadSha": "b869bf3290ba7fc5b09a7a035073cbefd1a2b1fc"
   },
   "filesChanged": [
     "packages/envoy/cmd/listener/delivery.go",
@@ -17,7 +17,9 @@
     "packages/envoy/internal/logging/logging.go",
     "packages/envoy/internal/logging/logging_test.go",
     "packages/envoy/AGENTS.md",
-    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+    "packages/envoy/internal/bus/nats.go",
+    "packages/envoy/internal/bus/request_core_test.go"
   ],
   "commits": [
     "9f30855fd044 listener: inject the role forward and log writer for tests",
@@ -28,7 +30,13 @@
     "fc7c2ab3ae2f docs(envoy): role-lane reasons no_holder/delivery_failed/receipt_timeout and publish dedupe_key",
     "b7ddac82a6ab implement: record handoff",
     "9b656be337ec test: record handoff (tester, carried by this push: the review App cannot push)",
-    "35d2483e3c5b docs(solutions): receipt_timeout branch in the receipt-backed delivery snippet; a deaf holder may be dead"
+    "35d2483e3c5b docs(solutions): receipt_timeout branch in the receipt-backed delivery snippet; a deaf holder may be dead",
+    "888e3e65952a implement: record handoff (docs corrective round)",
+    "b3ab12e5c279 review: record handoff (round 1, changes requested) (reviewer, carried by this push)",
+    "7c0e90891fcd bus: RequestCoreTo returns ErrReceiptTimeout only from the receipt wait and bounds the flush by the window (LEGION-108)",
+    "bf1c0cb4aa94 listener: receipt_timeout keys on bus.ErrReceiptTimeout, so a flush timeout stays delivery_failed (LEGION-108)",
+    "c49079abbf53 listener api: reject the reserved envoy.role.forward. dedupe_key prefix; assert the 400 contract by field (LEGION-108)",
+    "b869bf3290ba docs(envoy): the receipt sentinel is receipt-only, a flush failure is delivery_failed, reserved dedupe_key prefix; attempt-cache and delivery_failed wording"
   ],
   "proof": [
     {
@@ -70,6 +78,22 @@
       "observed": "vet clean; build ok; ok github.com/sjawhar/envoy/cmd/listener 38.309s; ok github.com/sjawhar/envoy/internal/logging 0.007s. PR MERGEABLE at open. What only a rig or production would add, and is deferred to the parent's production hour: a real OMP holder running the pi-envoy plugin answering (or not) on its agent subject, and the daemon consuming the receipt_timeout exception (LEGION-107).",
       "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
       "negativeControl": "The two reverted fault injections above (unconditional timeout branch; uncleared attempt cache) each failed exactly one of the new locks with the expected message."
+    },
+    {
+      "criterion": "1 and 2 (review round 1, blocking): receipt_timeout is receipt-only; a flush timeout is delivery_failed",
+      "surface": "Two real surfaces. (i) internal/bus on a nats:2.10 testcontainer: the real bus.Client.RequestCoreTo against an agent subject with no subscriber (publish and flush succeed, no receipt) and against a responder that acknowledges. (ii) cmd/listener on the testcontainer: the real coreNATSDeliveryHandler/roleTopicDelivery with the forward error injected through the forwardRole seam (a raw nats.ErrTimeout, exactly what the nats client Flush()/FlushTimeout returns on a reconnecting or stalled connection; a wrapped flush timeout; bus.ErrReceiptTimeout bare and wrapped), plus the unchanged real-path TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout through the real RequestCoreTo.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./internal/bus/ -count=1 -v -run TestRequestCoreTo && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run \"RoleForwardErrorSelectsTheReason|RoleFreshDeafHolderEmitsReceiptTimeout|RoleForwardPublishErrorEmitsDeliveryFailed|ExplicitDedupeKeyForwardsAgain\"",
+      "observed": "bus: TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout PASS (1.60s; errors.Is(err, bus.ErrReceiptTimeout) after the full 300ms window and no more), TestRequestCoreToReturnsNilOnAnEmptyReceipt PASS (0.81s). listener: TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason PASS with rows raw_nats.ErrTimeout_from_the_flush -> delivery_failed (log listener role forward failed, no receipt_timeout anywhere), flush_timeout_wrapped_by_the_client -> delivery_failed, bus.ErrReceiptTimeout -> receipt_timeout (log listener role receipt timed out), bus.ErrReceiptTimeout_wrapped -> receipt_timeout; TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout PASS (3.17s) still capturing reason receipt_timeout and the receipt-timed-out log line through the real RequestCoreTo; RoleForwardPublishErrorEmitsDeliveryFailed and ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly PASS unchanged. Full gates: go vet ./... clean; go build ./cmd/listener ok; go test ./cmd/listener/... ./internal/logging/ ./internal/bus/ -count=1 -> ok 35.282s / ok 0.002s / ok 40.269s.",
+      "headSha": "b869bf3290ba7fc5b09a7a035073cbefd1a2b1fc",
+      "negativeControl": "Two faults, each reverted before commit. (a) delivery.go keyed on errors.Is(err, bus.ErrReceiptTimeout) || errors.Is(err, nats.ErrTimeout) -- mapping the flush timeout to the sentinel: the two raw-ErrTimeout rows of RoleForwardErrorSelectsTheReason failed with exception reason = \"receipt_timeout\", want \"delivery_failed\"; the sentinel rows still passed. (b) RequestCoreTo receipt exits returning nats.ErrTimeout instead of ErrReceiptTimeout (the pre-fix shape): TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout failed with RequestCoreTo error = nats: timeout, want errors.Is ErrReceiptTimeout. Also the TDD RED before each fix: the bus test did not compile (undefined: bus.ErrReceiptTimeout); the listener table failed all four rows (raw ErrTimeout -> receipt_timeout, sentinel -> delivery_failed) and the real-path test showed delivery_failed once the bus returned the sentinel and before delivery.go keyed on it."
+    },
+    {
+      "criterion": "3 (review round 1, hardening): a dedupe_key beginning with the reserved forward prefix is a 400",
+      "surface": "publishHandler over httptest with a real core NATS topic probe on the testcontainer; one plain topic and one unheld role topic.",
+      "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run \"RejectsReservedDedupeKeyPrefix|RejectsDedupeKeyWithIdempotencyKey\"",
+      "observed": "TestPublishHandler_RejectsReservedDedupeKeyPrefix PASS on both topics: 400 {error: dedupe_key must not begin with the reserved prefix envoy.role.forward., expected: [dedupe_key]}, the topic probe read nothing in 250ms, and on the unheld role topic the 400 lands before the holder lookup (not its 404). TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey PASS asserting the decoded apiError (Expected == [dedupe_key, idempotency_key]) rather than the byte-for-byte body.",
+      "headSha": "b869bf3290ba7fc5b09a7a035073cbefd1a2b1fc",
+      "negativeControl": "TDD RED before the api.go change: the plain topic answered 200 with the reserved key in the envelope (a message the role arbiter would have dropped silently), and the role topic answered 404 no holder for role reserved-prefix-unheld -- the check had not run before the holder lookup."
     }
   ],
   "gates": {
@@ -83,7 +107,9 @@
     "The exclusion check is in publishHandler only (architect ruling 3), so validateMessageBody keeps its (string, string) signature and /v1/messages/send is unchanged; TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey locks that in.",
     "A struct-field comment on DedupeKey broke gofmt's alignment block and would have re-aligned five untouched lines; the field carries no comment and the rule is stated in publishHandler's doc comment instead.",
     "The bookmark legion/LEGION-108 was on the working-copy commit (which carries the untracked-on-main .omp/config.yml, ruling 5); it was moved to @- with --allow-backwards (local-only bookmark, never pushed before) and pushed from there, so .omp/config.yml is not on the branch.",
-    "gh pr create fails from the workspace with 'not a git repository: /home/ubuntu/.../worktrees/legion-108' (a stale colocated-worktree pointer); with --repo/--head/--base explicit it works from a non-git cwd (/tmp)."
+    "gh pr create fails from the workspace with 'not a git repository: /home/ubuntu/.../worktrees/legion-108' (a stale colocated-worktree pointer); with --repo/--head/--base explicit it works from a non-git cwd (/tmp).",
+    "nats.go v1.50.0 Conn.Flush() is FlushTimeout(10s) and returns the same nats.ErrTimeout sentinel as a receipt wait, so keying receipt_timeout on nats.ErrTimeout treated a forward still buffered on a reconnecting connection as acknowledged-late (the reviewer found it). The fix is at the source: RequestCoreTo has its own sentinel from the receipt wait alone; the flush is FlushTimeout(time.Until(deadline)) behind a guard so a request whose window elapsed before the flush returns a descriptive error (not ErrBadTimeout, not the sentinel) and the call never outlives the window by 10s.",
+    "A jj restore of an uncommitted file during a fault injection reverts the whole file to the parent, not just the fault: the first negative control of this round took delivery.go back to the committed state and its GREEN edit had to be re-applied; the second fault was run only after the bus change was committed so restore had the right base."
   ],
   "deviations": [
     "Plan task 4 put the dedupe_key/idempotency_key exclusion in the shared validateMessageBody; per architect ruling 3 it lives in publishHandler only and send is unchanged. One extra test (TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey) locks that ruling.",
@@ -114,7 +140,25 @@
       "rebase": "none; PR #1079 reported MERGEABLE"
     }
   ],
+  "reviewRounds": [
+    {
+      "round": 1,
+      "review": "https://github.com/sjawhar/legion/pull/1079#pullrequestreview-5194835304 (REQUEST_CHANGES at 888e3e65)",
+      "threads": {
+        "discussion_r4002875064": "blocking, delivery.go:374 -- fixed in 7c0e90891fcd + bf1c0cb4aa94",
+        "discussion_r4002875069": "forwardRole comment -- fixed in bf1c0cb4aa94",
+        "discussion_r4002875074": "reserved prefix, api.go:328 -- fixed in c49079abbf53",
+        "discussion_r4002875083": "byte-for-byte 400 body, api_test.go:1068 -- fixed in c49079abbf53",
+        "discussion_r4002875086": "AGENTS.md:90 attempt-cache wording -- fixed in b869bf3290ba",
+        "discussion_r4002875091": "learning doc line 35 missing receiver -- fixed in b869bf3290ba",
+        "discussion_r4002875097": "learning doc line 91 snippet -- fixed in b869bf3290ba"
+      },
+      "threadsResolve": "legion threads resolve --pr 1079 --repo sjawhar/legion at b869bf32: exit 0, seven left open (newest reply by legion-implementer is not an acceptance) -- expected in round 1; they resolve once the reviewer answers Accepted:. Run after the push (with no reviewer Accepted: yet it could resolve nothing either way); output pasted into the PR body Threads section.",
+      "rebase": "none; MERGEABLE",
+      "prBody": "E2E (tester) block restored from .legion/test.json; Threads section lists each thread with its fixing commit and the threads resolve output."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T06:46:53.267Z"
+  "completed": "2026-09-14T07:18:41.163Z"
 }
