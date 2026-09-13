@@ -1,87 +1,53 @@
 {
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 7,
-  "reviewedHead": "00f0458a21f625ee76f281d8605ebfcb15f2a560",
+  "important": 0,
+  "minor": 0,
+  "round": 2,
+  "reviewedHead": "e9cd302aacd4efa48a7a9ffa6a7556eb3163f40c",
   "codeHead": "ad8ed4d9944c5a9e594c232d09749c334d739b8d",
+  "correctiveCommit": "0be9d772c8da",
   "review": {
-    "id": 5190487737,
-    "url": "https://github.com/sjawhar/legion/pull/1017#pullrequestreview-5190487737",
-    "state": "CHANGES_REQUESTED",
-    "author": "legion-reviewer[bot]"
+    "id": 5190548110,
+    "state": "COMMENTED",
+    "url": "https://github.com/sjawhar/legion/pull/1017#pullrequestreview-5190548110",
+    "author": "legion-reviewer[bot]",
+    "note": "COMMENT because the head still carries .legion/; APPROVE is reserved for the deletion head, named by SHA."
   },
-  "blocking": [
+  "priorRound": {
+    "review": "https://github.com/sjawhar/legion/pull/1017#pullrequestreview-5190487737",
+    "state": "CHANGES_REQUESTED",
+    "head": "00f0458a21f625ee76f281d8605ebfcb15f2a560"
+  },
+  "threads": [
     {
       "thread": "PRRT_kwDORFy7ds6h4TsX",
       "url": "https://github.com/sjawhar/legion/pull/1017#discussion_r3999454968",
       "path": "docs/deployment.md",
-      "line": 117,
-      "item": "Rotation runbook revokes the old App keys (step 6) before restarting the daemon (step 7); the daemon holds the PEM in memory for its lifetime, so every pane's GitHub credential fails between the two steps and a failed step-7 boot has no rollback. Swap: restart on the new key, confirm `legion gh -- auth status` from a fresh worker pane, then revoke."
-    }
-  ],
-  "nonBlockingThreads": [
+      "disposition": "Accepted: fixed in 0be9d772 — rotation order now store -> restart+confirm -> revoke",
+      "acceptedReply": "https://github.com/sjawhar/legion/pull/1017#discussion_r3999480223",
+      "isResolved": false
+    },
     {
       "thread": "PRRT_kwDORFy7ds6h4TsY",
       "url": "https://github.com/sjawhar/legion/pull/1017#discussion_r3999454969",
       "path": "packages/daemon/src/daemon/AGENTS.md",
-      "line": 112,
-      "item": "Soft wrap splits `base64-`/`decodes`, renders as 'base64- decodes'; fold the rewrap into the same push."
+      "disposition": "Accepted: fixed in 0be9d772 — base64-decodes whole on one line",
+      "acceptedReply": "https://github.com/sjawhar/legion/pull/1017#discussion_r3999480335",
+      "isResolved": false
     }
   ],
-  "keyFindings": [
-    {
-      "severity": "Major",
-      "file": "docs/deployment.md:117",
-      "description": "Revoke-before-restart in the rotation order (blocking; see thread r3999454968)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:112",
-      "description": "base64- / decodes soft-wrap rendering (thread r3999454969; fold into the same push)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/daemon/config.ts:658-683",
-      "description": "Six repeated `!== undefined && !== \"\"` checks plus tsc-narrowing comment; normalise empty->undefined at the read site (fast-follow)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/daemon/config.ts:545",
-      "description": "readSecretName accepts a leading `-`, which clap parses as a flag -> misleading 'unparsable status' refusal; safe, diagnostics only (fast-follow)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/daemon/config.ts:618-619",
-      "description": "status.key !== name reuses the 'unparsable status' message (fast-follow)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/daemon/__tests__/config.test.ts:1235",
-      "description": "Unused `valueExit` fixture option; `.passthrough()` weightless (fast-follow)."
-    },
-    {
-      "severity": "Minor",
-      "file": "packages/daemon/src/cli/__tests__/index.test.ts:353",
-      "description": "Inline env literal instead of describe-level `env` (fast-follow)."
-    },
-    {
-      "severity": "Minor",
-      "file": "docs/deployment.md:51",
-      "description": "Dangling clause 'only a restart after it notices' (fast-follow)."
-    }
-  ],
+  "keyFindings": [],
   "verified": {
-    "ci": "Tests run 34752538517 — lint, pr-title, typecheck, test all success at 00f0458a (gh pr checks).",
-    "threads": "0 before this review; 2 opened by it (1 blocking, 1 non-blocking wording).",
-    "e2e": "Tester comment 5652761998: live legion start from tester tmux pane with fake secrets first on PATH, positive + negative control + --check-config never spawned; head b1a342d2, ancestor of 00f0458a; code head ad8ed4d9 identical.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at 00f0458a (code head ad8ed4d9): deep — no Blocker/Major, all 10 checks pass; quality — 1 Major (runbook order), 7 Minor."
+    "ci": "Tests run 34754400624 — lint, pr-title, typecheck, test all success at e9cd302a.",
+    "codeUnchanged": "jj diff --from ad8ed4d9 --to e9cd302a --summary '~(.legion | docs/deployment.md | packages/daemon/src/daemon/AGENTS.md)' -> empty.",
+    "docs": "All six quoted daemon messages match config.ts at e9cd302a after unwrapping; AGENTS.md GitHub Apps paragraph has no line >100 cols; rotation steps 5/6/7 = store / restart+confirm / revoke.",
+    "e2e": "Tester re-check issuecomment-5652957889 at c6796f71 (ancestor of e9cd302a); round-1 live surface issuecomment-5652761998 still applies (code unchanged).",
+    "thermo": "Docs-only corrective; round-1 pass at ad8ed4d9 stands, not re-run."
   },
-  "specNote": "Spec v8 acceptance 5 ask wording lists 'revoke the old keys, and tell the operator session to restart the daemon' — same inversion as the runbook; architect should write the ask as restart-then-revoke.",
-  "workspaceNote": "Working copy @ (9c0d983d) carries an empty tracked `.omp/config.yml` (not on main, not pushed). The corrective commit and the later `.legion/` deletion commit must not include it, or the approval gate 'differs only by the deletion' fails.",
-  "fastFollow": "LEGION-77 loader/docs tidy (one follow-up PR, no behaviour change): collapse repeated emptiness checks; reject leading `-` in readSecretName; own message for status.key mismatch; drop unused valueExit and .passthrough(); reuse describe-level env in cli test; reword deployment.md:51.",
-  "nextRound": "After the corrective push: verify CI green at the new head, reply on both threads (Accepted:/Still open:), confirm the swap and the rewrap by diff, then COMMENT (head still carries .legion/) or, if the architect routes the .legion/ deletion directly after, APPROVE the deletion head by SHA once both threads show isResolved: true.",
+  "remainingWork": "Only the .legion/ deletion. Implementer: run `legion threads resolve --pr 1017 --repo sjawhar/legion` (both threads' newest comment is my Accepted:), then push a commit that deletes .legion/ and nothing else (keep .omp/config.yml out — it is still an untracked-on-main file in the shared working copy @). Reviewer then approves that head by SHA once it differs from e9cd302a by the deletion alone and both threads show isResolved: true.",
+  "fastFollow": "LEGION-77 loader/docs tidy (one follow-up PR, no behaviour change): collapse repeated emptiness checks in loadGitHubApps; reject leading `-` in readSecretName; own message for status.key mismatch; drop unused valueExit and .passthrough(); reuse describe-level env in cli check-config test; reword deployment.md:51.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T11:14:46.445Z"
+  "completed": "2026-09-13T11:28:20.834Z"
 }
