@@ -885,6 +885,8 @@ describe("startDaemon", () => {
         tmuxSession: `legion-${daemonConfig.project}`,
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
+        panePid: 7777,
+        paneStartTicks: 4242,
         socketPath: path.join(stateDir, "workers", "dead-tester.sock"),
         ompSessionFile,
       },
@@ -915,12 +917,20 @@ describe("startDaemon", () => {
             throw new Error("ECONNREFUSED: worker shim socket unreachable");
           },
           runner: async (command, runnerOptions) => {
+            // The dead worker's pane is still there and still the recorded process (pid 7777,
+            // start ticks 4242 per `fakeProcStat`) -- only its shim is dead -- so the retirement
+            // is allowed to kill it; a pane that no longer ran the recorded process would be
+            // refused instead, and this test is about the kill path.
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-panes") {
+              return { stdout: "%7 7777\n", stderr: "", exitCode: 0 };
+            }
             if (command[0]?.endsWith("/tmux") && command[3] === "kill-pane") {
               killedPanes.push(command[5] ?? "");
               return { stdout: "", stderr: "can't find pane: %7", exitCode: 1 };
             }
             return baseRunner(command, runnerOptions);
           },
+          readProcessCmdline: async () => "omp\0",
         },
       });
 
