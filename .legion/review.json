@@ -1,0 +1,96 @@
+{
+  "pullRequest": {
+    "repo": "sjawhar/legion",
+    "number": 1089,
+    "url": "https://github.com/sjawhar/legion/pull/1089",
+    "branch": "legion/LEGION-99",
+    "reviewedHead": "376c94274429b580cdb2b355ed1648c58d6e1e84",
+    "codeHead": "5943ced3558008cfd2e72cd73ee3e642a1ee705c"
+  },
+  "review": {
+    "id": 5196581370,
+    "state": "COMMENTED",
+    "commitId": "376c94274429b580cdb2b355ed1648c58d6e1e84",
+    "author": "legion-reviewer[bot]",
+    "url": "https://github.com/sjawhar/legion/pull/1089#pullrequestreview-5196581370",
+    "why_not_approve": "The legion-worker skill reserves APPROVE for a head that carries no .legion/; 376c9427 carries plan.json, implement.json, test.json. The round is clean; the approval names the deletion head."
+  },
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "Minor",
+      "file": "AGENTS.md:128-133",
+      "description": "Sentence reads as present fact while the ruleset's merge-queue rule is a later administrator step; 'onto the current main' omits entries queued ahead. Spec-mandated sentence; no Legion role acts on it in the gap. Fast-follow wording, not a round."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/envoy/internal/webhook/github_test.go:365-416",
+      "description": "Re-implements the request harness TestGitHubHandler's table already provides; 401 row near-duplicates its 'invalid signature' case. Fold into the table with LEGION-114."
+    },
+    {
+      "severity": "Nit",
+      "file": "packages/envoy/internal/webhook/github_test.go:382",
+      "description": "`for i` exists only for a delivery id the skip path never reads."
+    },
+    {
+      "severity": "Nit",
+      "file": "packages/envoy/internal/webhook/github.go:31",
+      "description": "'It runs after signature verification' describes the call site (github.go:136), not the predicate."
+    }
+  ],
+  "verifiedOnGitHub": {
+    "checksAtHead": {
+      "Tests": {
+        "runId": 34832027911,
+        "lint": "success",
+        "typecheck": "success",
+        "test": "success"
+      },
+      "PR Title": {
+        "runId": 34832028134,
+        "pr-title": "success"
+      },
+      "Legion Envoy and Contracts": {
+        "runId": 34832028227,
+        "changes": "success",
+        "envoy-go": "success"
+      }
+    },
+    "threads": {
+      "resolved": 0,
+      "unresolved": 0
+    },
+    "e2eLines": {
+      "implementer": "present at 5943ced3 (ancestor of head)",
+      "tester": "present at 1ce204c8 (ancestor of head)"
+    },
+    "scope": "exactly .github/workflows/pr-and-main.yaml, AGENTS.md, github.go, github_test.go, testdata/merge_group_checks_requested.json + .legion/; no ruleset, organizer procedure, or other workflow"
+  },
+  "specChecks": {
+    "skipAfterSignature": "verify.Github at github.go:121 (401) precedes githubSkip at :136; subtest 3 (sha256=invalid -> 401) pins it",
+    "triggerTypes": "merge_group supports exactly one workflow activity type, checks_requested (GitHub docs, their example is types: [checks_requested]); destroyed is a webhook action only; push: branches: [main] does not match gh-readonly-queue/main/*",
+    "jobConditions": "no if:, concurrency:, or pull_request-context reference in pr-and-main.yaml or the scripts it runs; lint/typecheck/test names unchanged",
+    "nothingLost": "pre-change merge_group published one empty envelope to notifications.github.sjawhar.legion.comment and recorded no CI state; cistore keys state per (PR, sha) and settles only when the recorded head equals it, so merge-group check runs cannot settle a PR",
+    "agentsMd": "accurate for the spec's steady state; tense and 'current main' precision are fast-follow wording"
+  },
+  "thermo": {
+    "head": "5943ced3558008cfd2e72cd73ee3e642a1ee705c",
+    "deepReview": "1 Minor",
+    "codeQuality": "3 Minor + 3 Nit",
+    "blockers": 0,
+    "majors": 0,
+    "writtenToPrBody": true
+  },
+  "localVerification": "go test ./internal/webhook/ -run TestGitHubHandlerMergeGroup -v -count=1 PASS x3; go test ./internal/webhook/ ./internal/contracts/ -count=1 ok/ok; gofmt -l clean",
+  "fastFollow": "with LEGION-114: fold TestGitHubHandlerMergeGroup into TestGitHubHandler's table, drop githubSkip's call-site-ordering sentence; once the ruleset rule is on, tighten the AGENTS.md sentence (main plus entries queued ahead; split at the em dash)",
+  "remainingWork": "Only the .legion/ deletion: implementer pushes exactly that deletion on top of 376c9427 (legion threads resolve first; no threads exist), then resume me to confirm the new head differs by the deletion alone and APPROVE it by SHA.",
+  "deviations": [
+    "No smoke rig, scratch daemon, kind cluster, NATS container, or scratch tmux server started (Sami's standing order, 2026-09-13 19:00 UTC); unit tests, actionlint via go run, and GitHub API reads only.",
+    "No inline review comments opened: every finding is wording or test shape and batched into the fast-follow, so the approval path carries no thread to resolve."
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T10:32:16.441Z"
+}
