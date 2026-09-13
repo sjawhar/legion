@@ -3,8 +3,19 @@
 This runbook covers the one deployment shape Legion has today: the daemon, its tmux server, and
 every pane it launches run as the same Unix user on one machine, and every process on that machine
 can ask the `secrets` broker (secretsd) for any agent-tier key. A credential that only the daemon
-may hold therefore cannot live in the agent tier. Kubernetes deployments (`docs/kubernetes.md`)
-get a pod boundary instead and do not need this page.
+may hold therefore cannot live in the agent tier without every pane being able to read it.
+Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do not need this page.
+
+## Current decision for the LEGION deployment
+
+On 2026-09-13 Sami decided that the two GitHub App private keys stay in the secrets store's agent
+tier on this machine, readable by every pane, until the daemon runs in its own Kubernetes pod
+(LEGION-19, "Legion on Kubernetes"). Do not move them to the human tier and do not change the
+daemon's launcher on this deployment. The rotation happens at that cutover: the new keys are
+generated straight into the cluster's secret store, the App keys are mounted into the daemon pod
+only, and the old keys are revoked once the shared-box daemon stops using them. That rotation is
+recorded on LEGION-74. The rest of this page documents the human-tier mechanism and
+`private_key_secret` for a shared-box deployment that chooses that boundary.
 
 ## Where daemon-only credentials live
 
@@ -12,8 +23,9 @@ The two GitHub App private keys (`GH_AGENT_APP_PRIVATE_KEY_B64` for the implemen
 `GH_REVIEW_APP_PRIVATE_KEY_B64` for the review App) are daemon-only: a pane that could read them
 could mint installation tokens as either App and act on GitHub outside the daemon's grant path.
 
-They live in secretsd's **human tier**: one file per key under a source root's `secrets.human.d/`,
-written with `secrets edit-human <NAME>` (it accepts the value on stdin non-interactively). Never in
+On a shared box that chooses the human-tier boundary, they live in secretsd's **human tier**: one
+file per key under a source root's `secrets.human.d/`, written with `secrets edit-human <NAME>` (it
+accepts the value on stdin non-interactively). Never in
 the agent-tier files (`secrets.env`, `secrets.local.env` in `~/.dotfiles` or `~/.dotfiles/.secrets`):
 every process on the box reads those without approval. `secrets list` shows each key's tier;
 `secrets get <NAME> --no-request` prints it as JSON without requesting anything
@@ -92,7 +104,8 @@ daemon resolves its `mise` environment); under a login shell on the shared box t
 
 ## Rotating the App keys
 
-Rotation is pointless while panes can still read the keys, so the order is:
+When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
+while panes can still read the keys, so the order is:
 
 1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private
    keys"): no pane inherits the keys from the daemon's environment or the tmux server.

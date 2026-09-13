@@ -16,7 +16,9 @@ module: packages/daemon (config.ts loadGitHubApps), docs/deployment.md
 related_issues:
   - "LEGION-77"
   - "sjawhar/legion#1017"
+  - "sjawhar/legion#1033"
   - "LEGION-74"
+  - "LEGION-19"
 ---
 
 # Reading a human-tier secretsd key from the daemon
@@ -31,6 +33,17 @@ checks the key's tier with `secrets get <NAME> --no-request`, refuses to boot un
 then fetches it with `secrets get <NAME> --value`. Everything below was learned making that work
 against the real broker (`secrets` 3.2.1; source github.com/sjawhar/forward, crates `secrets` and
 `proto`) and is what a future worker touching a daemon-side `secrets` call needs first.
+
+## Status on the LEGION deployment: not in use, by decision
+
+The mechanism is merged and tested but the LEGION deployment does not use it. On 2026-09-13 Sami
+answered the store question (dispatch://LEGION-77/ask/5e3d2fa8-49d0-49d8-b4ea-5355b8f9b742) with
+**Wait for Kubernetes**: the two App keys stay agent-tier on this machine, readable by every pane,
+until the daemon runs in its own pod (LEGION-19), and the rotation happens at that cutover (recorded
+on LEGION-74). Do not move the keys or the launcher here. `docs/deployment.md` opens with that
+decision and presents everything below as the option a shared-box deployment may choose; how the
+runbook came to be corrected after the fact is
+`docs/solutions/legion/building-ahead-of-an-open-human-decision.md`.
 
 ## secretsd identifies a tokenless caller by its standard input
 
