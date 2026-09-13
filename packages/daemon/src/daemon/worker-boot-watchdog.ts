@@ -277,10 +277,12 @@ export class WorkerBootWatchdog {
      * here, never looped for another interval of timers, dials, and a second retirement that
      * would persist after the daemon's final save. A same-token `cancel()` that lands during the
      * await finds no entry and sets nothing: that watch re-inserts and runs one more bounded
-     * interval, and the next interval's claim check (a cancelled boot is confirmed, retired, or
-     * replaced by then) ends it -- one interval late, never a second retirement. Only a watch
-     * none of the re-check sees puts its entry back under the same generation, so a later
-     * `/worker/ready` or tree close still cancels it. */
+     * interval, after which whatever cancelled it ends it -- a `/worker/ready` or a tree close
+     * fails the claim check (`readyConfirmedAt` set, or the claim gone); a retirement from
+     * another path (`retireWorkerLocator`) has cleared the locator, so `retireUnconfirmedBoot`'s
+     * `sameProcess(claim.locator, locator)` guard makes the second call a no-op -- one interval
+     * late, never a second retirement. Only a watch none of the re-check sees puts its entry back
+     * under the same generation, so a later `/worker/ready` or tree close still cancels it. */
     const retire = async (): Promise<boolean> => {
       if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
       try {

@@ -1112,7 +1112,7 @@ describe("legion state", () => {
     }
   });
 
-  it("migrates a v24 file through v25 to v26 as pure version bumps, leaving PR records untouched", async () => {
+  it("migrates a v24 file through v25 and v26 to v27, leaving PR records untouched", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -1153,12 +1153,12 @@ describe("legion state", () => {
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
 
-  it("rejects a v26 locator that carries no runtime discriminant", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v26-untagged-"));
+  it("rejects a current-version (v27) locator that carries no runtime discriminant", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-untagged-"));
     const file = path.join(tempDir, "state.json");
-    const v26State = JSON.parse(JSON.stringify(stateWithTree()));
-    delete v26State.trees[issue].locator.runtime;
-    await writeFile(file, JSON.stringify(v26State), "utf8");
+    const untagged = JSON.parse(JSON.stringify(stateWithTree()));
+    delete untagged.trees[issue].locator.runtime;
+    await writeFile(file, JSON.stringify(untagged), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
