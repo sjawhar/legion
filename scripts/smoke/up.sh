@@ -30,8 +30,18 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
-omp_pin="$(bun "${repo_root}/packages/daemon/src/daemon/omp-pin.ts")" \
-  || fail "could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)"
+# The OMP build the rig's daemon launches in every pane: the repository's pin
+# (packages/daemon/src/daemon/omp-pin.ts) unless SMOKE_OMP_PIN names another
+# `github:sjawhar/oh-my-pi@<version>` — for running the rig on the build a production
+# daemon is pinned to when the repository pin lags behind it.
+if [[ -n "${SMOKE_OMP_PIN:-}" ]]; then
+  [[ "$SMOKE_OMP_PIN" == github:sjawhar/oh-my-pi@* ]] ||
+    fail "SMOKE_OMP_PIN must be github:sjawhar/oh-my-pi@<version>"
+  omp_pin="$SMOKE_OMP_PIN"
+else
+  omp_pin="$(bun "${repo_root}/packages/daemon/src/daemon/omp-pin.ts")" \
+    || fail "could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)"
+fi
 readonly omp_pin
 
 require_env() {
