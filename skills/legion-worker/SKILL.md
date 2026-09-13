@@ -120,10 +120,21 @@ transcript, the committed file wins: it is the copy that survived.
 - **Before pushing, check ancestry:** `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`
   — verify only your issue's commits are in the chain, not unrelated work.
 
-**Shared operation safety:** Never run `jj op restore` in a Legion workspace. It rewrites
-the shared operation log. If a mistake reaches that point, stop and send the owning
-architect the `jj -R "$LEGION_WORKSPACE" log` evidence; recover only through the approved,
-path-scoped workflow.
+**Shared operation safety:** Every Legion issue workspace is a `jj workspace` of one shared
+clone, so they all share one operation log: `jj undo`, `jj abandon`, and
+`jj op restore|revert|abandon|undo` rewrite it for every tree at once (on 2026-09-12 one
+worker's `jj undo` rewrote nine of another tree's commits). The extension refuses them in every
+phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
+chain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`
+process start — from your own tool calls and from any `task` subagent you spawn (it runs in
+your pane, against the same log), and a `bash` command whose quoted text merely mentions `jj`
+with one of those words (a heredoc, an echo, a commit message) is refused too: write such text
+with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
+`jj op log`, and `jj op show` stay allowed. Recover forward only: a new commit
+(`jj -R "$LEGION_WORKSPACE" new`) or `jj -R "$LEGION_WORKSPACE" restore <paths>` of files.
+Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE" log`
+evidence; the architect decides, and an operator performs any operation-log restore with every
+other tree paused.
 
 ## Phase work
 
