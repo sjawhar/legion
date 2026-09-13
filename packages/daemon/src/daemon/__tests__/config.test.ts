@@ -667,13 +667,13 @@ describe("daemon config", () => {
 
   it("accepts resync_interval_seconds exactly at 2147483 from either source and refuses 2147484: the post-resolve check judges milliseconds", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     // The file value is multiplied into milliseconds by the file loader and the env value only in
     // resolveDaemonConfig's return, while a cliOverride is already milliseconds; the post-resolve
     // check therefore judges the field in milliseconds (2147483 s = 2_147_483_000 ms fits).
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           [
             "project: acme/7",
@@ -725,7 +725,7 @@ describe("daemon config", () => {
 
   it("refuses a cliOverride above the bound post-resolve, naming the field", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     expect(() =>
       resolveDaemonConfig({
@@ -740,13 +740,13 @@ describe("daemon config", () => {
 
   it("bounds the root registration deadline, the product of worker_boot_timeout_seconds and worker_boot_registration_deadline_intervals, at 2147483 s", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     // Each factor is within its own bound; only the product overflows the one timer that
     // multiplies them (the root/controller registration deadline). The file supplies the pair,
     // `requiredEnv` the rest.
     expect(() =>
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           "worker_boot_timeout_seconds: 1000000\nworker_boot_registration_deadline_intervals: 3\n",
           "/tmp/legion-config"
@@ -758,7 +758,7 @@ describe("daemon config", () => {
       "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483"
     );
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           "worker_boot_timeout_seconds: 2147483\nworker_boot_registration_deadline_intervals: 1\n",
           "/tmp/legion-config"
@@ -1477,7 +1477,7 @@ describe("daemon config", () => {
       const file = loadConfigFromFile(baseYaml.join("\n"), "/tmp/legion-config");
       expect(() => resolveDaemonConfig({ configFile: file })).toThrow("github_apps is required");
       expect(() =>
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: file,
           cliOverrides: { githubApps: { implement: BOTH_APPS.implement } },
         })

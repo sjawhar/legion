@@ -583,19 +583,11 @@ describe("legion start --check-config", () => {
 
   it("refuses a timer setting above the 32-bit bound with the same message start-up gives", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
-    const configPath = path.join(dir, "legion.yaml");
-    const base = [
-      "project: acme/99",
-      "envoy_url: http://127.0.0.1:9020",
-      "dispatch_project: ACME",
-      "repos:",
-      "  - acme/widgets",
-      "nats_urls:",
-      "  - nats://one:4222",
-      "gates:",
-      "  design: off",
-    ];
-    fs.writeFileSync(configPath, [...base, "worker_boot_timeout_seconds: 2147484"].join("\n"));
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "worker_boot_timeout_seconds: 2147484",
+    ]);
 
     await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
       "worker_boot_timeout_seconds must be at most 2147483"
@@ -603,14 +595,12 @@ describe("legion start --check-config", () => {
 
     // The same parser accepts the bound itself; the registration deadline multiplies the boot
     // timeout by the intervals, so the default 3 intervals would overflow at the bound.
-    fs.writeFileSync(
-      configPath,
-      [
-        ...base,
-        "worker_boot_timeout_seconds: 2147483",
-        "worker_boot_registration_deadline_intervals: 1",
-      ].join("\n")
-    );
+    writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "worker_boot_timeout_seconds: 2147483",
+      "worker_boot_registration_deadline_intervals: 1",
+    ]);
     await cmdCheckConfig(undefined, configPath, env);
   });
 
