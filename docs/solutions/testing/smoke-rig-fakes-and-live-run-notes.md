@@ -60,19 +60,26 @@ surfaced things the next person touching the rig should not rediscover.
 
 ## Live run (what the tester needed beyond the README)
 
-- **`SMOKE_WEBHOOK_MODE=none` cannot run checkpoints 1–4** despite the README: no Dispatch issue
-  event reaches the rig's isolated NATS and resync's `healStatusDrift` skips keys the daemon
-  never ingested, so the root issue is never tracked. Use `envoy` mode (production NATS → rig
-  NATS bridge).
-- **`LEGION_OMP_PATH` must point at the rpcfix OMP** production runs with (the same override as
-  `run-daemon.sh`); the rig's pinned mise OMP dies at its first RPC prompt (`send did not invoke
-  the agent`) and the private server exits with it.
+Three of these were pre-existing rig defects and were fixed by LEGION-10 (sjawhar/legion#957);
+they are kept here as history with the fix named, so nobody re-applies the workaround.
+
+- **`SMOKE_WEBHOOK_MODE=none` cannot run checkpoints 1–4** despite what the README said then: no
+  Dispatch issue event reaches the rig's isolated NATS and resync's `healStatusDrift` skips keys
+  the daemon never ingested, so the root issue is never tracked. Use `envoy` mode (production
+  NATS → rig NATS bridge). *Fixed in #957:* `checkpoints.sh` now blocks 1–4 and 12 with
+  `SKIPPED-BLOCKED` (exit 3) under `none` and `forward`, and the README says `envoy` is the only
+  mode for them — see `docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md`.
+- **`LEGION_OMP_PATH` had to point at the rpcfix OMP** production ran with; the rig's pinned mise
+  OMP died at its first RPC prompt (`send did not invoke the agent`). *Fixed by LEGION-32 (#983)
+  moving the one pin in `packages/daemon/src/daemon/omp-pin.ts` to a release with the fix, and by
+  #957 making `up.sh` verify that pin through `mise where` in preflight.* `LEGION_OMP_PATH` is
+  now only an explicit override for a non-release build; do not export it for a normal run.
 - **`DISPATCH_TOKEN` is not a secretsd key on this box**; the documented source is
   `~/.config/opencode/envoy.json` `dispatch.token`. Inject it into the subprocess environment;
-  never print it.
-- **`up.sh ensure_root_issue` 409s (`POSSIBLE_DUPLICATE`)** against prior smoke roots; create
-  the root by hand with `force: true`, record it at `${SMOKE_DIR}/root-issue`, re-run `up.sh`
-  (it reuses everything). Pre-existing rig bug.
+  never print it. Filed as LEGION-40.
+- **`up.sh ensure_root_issue` 409'd (`POSSIBLE_DUPLICATE`)** against prior smoke roots. *Fixed in
+  #957:* the request carries `force: true`; a disposable near-duplicate per run is the rig's
+  intent. No by-hand creation is needed.
 - An architect that drives Dispatch through `eval` bypasses the `tool_result` subscribe hook, so
   it holds no topic interest and a Dispatch message on the root issue does not wake it —
   checkpoint 3's child-issue assertion may need an operator nudge.
