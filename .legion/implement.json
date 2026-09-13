@@ -1,19 +1,20 @@
 {
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/issue_queries.go",
-    "packages/envoy/internal/dispatch/api/issues_test.go",
-    "packages/envoy/internal/dispatch/model/model.go",
-    "packages/envoy/AGENTS.md",
     "packages/contracts/src/dispatch-api.ts",
-    "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
-    "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
-    "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
+    "packages/dispatch/AGENTS.md",
     "packages/dispatch/e2e/issue.e2e.ts",
     "packages/dispatch/e2e/labels.e2e.ts",
-    "packages/dispatch/AGENTS.md"
+    "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
+    "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
+    "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
+    "packages/dispatch/web/src/features/issue/issue-writes.test.tsx",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/internal/dispatch/api/issue_queries.go",
+    "packages/envoy/internal/dispatch/api/issues_test.go",
+    "packages/envoy/internal/dispatch/model/model.go"
   ],
   "pullRequest": "https://github.com/sjawhar/legion/pull/1088",
-  "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+  "headSha": "590a125129d3cd7b8813b604610b2da378b23c08",
   "proof": [
     {
       "criterion": "2. At 390px wide no control other than the title sits alone on a row; Close, Subscribers and the GitHub link share rows with their neighbours; the GitHub link shows the pull request's number and title, never a raw address; with two labels, a priority, a GitHub link, one subscriber and one open ask the header card is under 300px tall at 390x844.",
@@ -38,21 +39,31 @@
       "observed": "'Waiting on you (1)' on load at all three widths (badge at x=37 on the phone, x=357 on the desktop, in view). After alice's reply it reads 'Waiting on agents (1)' within the 10s live window and still after a reload; after the agent replies again it returns to 'Waiting on you (1)'. GET /api/v1/issues/{key} now returns open_asks[].last_reply as null before any reply, {author: alice (user)} after the human reply and {author: the session} after the agent's.",
       "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
       "negativeControl": "With the Go server still running the previous code (open_asks without a last_reply key) the header rendered no whose-turn badge at all — hidden rather than wrong, per the spec's error rule — and the Go test's 'last_reply key present' check fails on that server."
+    },
+    {
+      "criterion": "Review follow-up to acceptance 1: below 1280 the title keeps the row free space beside a short details line instead of splitting it with the line (reviewer thread r4004180109).",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of 590a1251 served by the real Go Dispatch server (e2e/run-server.sh, header identity alice) with an isolated Postgres 16 container and the fake Envoy listener, Chromium at 1024x800, 1200x800 and 1279x800 through the packages/dispatch Playwright harness.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium issue.e2e.ts -g \"free space\" (the new regression test), plus a throwaway proof spec (removed) that measured the 41-character title and took dispatch://LEGION-62/artifact/implemented2-title-1024-png",
+      "observed": "Title h1 430px wide and shown in full on two lines at 1024 (main: 388px), 210px at 1200 (main 168, both clamped for a 41-character title), 289px and unclamped at 1279 (main 247, clamped). The 31-character test title is unclipped at all three widths. The certified numbers held on the same build: header 238px at 390x844 with the fixture, 134px at 1280 with a one-line title, document scrollWidth equal to clientWidth with eight 30-character labels at 1280 and 390 (rail 502/2448 and 316/2536), whose-turn badge in view at 390, 1280 and 1536 (x 37/357/357).",
+      "headSha": "590a125129d3cd7b8813b604610b2da378b23c08",
+      "negativeControl": "With grow restored on the rail and the bundle rebuilt, the same regression test fails at 1200 (title clipped at 1200px); the probe measured the h1 at 61px and clamped there. Removing grow again makes it pass."
     }
   ],
   "verification": {
-    "unit": "cd packages/dispatch && bun test web/src: 891 pass, 0 fail (includes the new IssuePage test for the hidden-when-missing rule).",
-    "lint": "bunx biome check web/src e2e: clean. gofmt -l internal/dispatch: clean. go vet ./internal/dispatch/...: clean.",
-    "typecheck": "bunx tsc --noEmit in packages/dispatch and packages/contracts: clean.",
-    "go": "DISPATCH_TEST_DATABASE_URL=<isolated pg> go test ./internal/dispatch/api -count=1: ok (141s).",
-    "e2e": "Full Playwright suite on the VITE_DISPATCH_E2E=1 build of this head: chromium 102 passed, 6 skipped, 5 failed; iphone 102 passed, 6 skipped, 5 failed. All ten failures are LEGION-142's EACCES on fixed /tmp/<name>.png screenshot paths owned by another user of this box (agents, ask-blocks x2, inbox, polish); none is a header spec. issue, labels, layout, approval, live, board, inbox, threads and ask-blocks (apart from its screenshot write) are green on both projects."
+    "unit": "cd packages/dispatch && bun test web/src: 891 pass, 0 fail (new: IssuePage keeps a pull request title and state when only its check-runs lookup fails; issue-writes drain test opens the route editor first).",
+    "lint": "bunx biome check web/src e2e: clean.",
+    "typecheck": "bunx tsc --noEmit in packages/dispatch: clean.",
+    "e2e_touched": "bunx playwright test --project=chromium --project=iphone issue.e2e.ts labels.e2e.ts on the VITE_DISPATCH_E2E=1 build of 590a1251: 19 passed, 3 skipped (the viewport tests skip on iphone by design).",
+    "e2e_full": "Full Playwright suite on the same build: chromium 102 passed, 6 skipped, 6 failed; iphone 102 passed, 7 skipped, 5 failed. Ten of the eleven failures are LEGION-142 EACCES on fixed /tmp/<name>.png screenshot paths owned by another user of this box (agents, ask-blocks x2, inbox, polish); the eleventh, doc.e2e.ts:105 (two users edit the same spec), is the named two-user timing flake and passed in isolation on rerun. No fixed /tmp path was added.",
+    "go": "Not re-run this round: no Go file changed since 79f4d50c (go test ./internal/dispatch/api was ok there and CI run 34828956087 ran it green)."
   },
   "trickyParts": [
     "Below 1280px styles.css forces every input and select to font-size 1rem (the iOS focus-zoom guard), so Tailwind text sizes cannot shrink the status and priority pills on a phone; the native priority select was 128px because of its 'Priority —' option plus the dropdown arrow. It is now appearance-none (text-only, like the status pill) with the unset label 'Priority', which leaves 14px of slack for Close on the 316px phone row even with this box's wide DejaVu Sans fallback font.",
-    "The details rail must be a real box to be a scroll container, so the xl:contents / 2xl:flex breakpoints are gone: the rail is 'min-w-0 grow flex-nowrap overflow-x-auto' with flex-basis auto, so it joins the state row only when its whole content fits and otherwise takes its own line and scrolls. The state-actions box lost shrink-0 and gained min-w-0 so a long approval row wraps inside the card instead of overflowing it (approval.e2e.ts caught this).",
+    "The details rail must be a real box to be a scroll container, so the xl:contents / 2xl:flex breakpoints are gone: the rail is min-w-0 flex-nowrap overflow-x-auto with flex-basis auto and NO grow, so on a shared row it takes only its content width (the flex-1 title keeps the free space) and alone on its line it shrinks to the line and scrolls. Round one shipped it with grow, which split the free space with the title below 1280 and squeezed a 41-character title to 61px at 1200 (main 168); the reviewer caught it. The state-actions box lost shrink-0 and gained min-w-0 so a long approval row wraps inside the card instead of overflowing it (approval.e2e.ts caught this).",
     "The Playwright locator getByLabel('Route') matches the route button's aria-label 'Messages default to no route' as well as the input, so the button is not rendered while the route form is open; the form itself now renders under the header rows rather than inside the nowrap line.",
     "Harness gotcha: packages/dispatch's unit suite (classes-in-build-css.test.ts) rebuilds web/dist WITHOUT VITE_DISPATCH_E2E=1. Running the e2e suite against that production build fails live.e2e.ts (two stream connections on load, a cold reconnect) — rebuild with the flag before any e2e run after bun test.",
-    "The whose-turn badge leads the details line at every width (one DOM position) instead of trailing it with ml-auto: at 1280 with the sidebar and margin open the line is 502px and cannot hold every detail, so a trailing badge would be scrolled out of view."
+    "The whose-turn badge leads the details line at every width (one DOM position) instead of trailing it with ml-auto: at 1280 with the sidebar and margin open the line is 502px and cannot hold every detail, so a trailing badge would be scrolled out of view.",
+    "A React inline callback ref (ref={(node) => node?.focus()}) is re-invoked on every render, so using it to autofocus the route input re-stole focus from the title editor on each header re-render (issue-writes.test.tsx caught it). The route input is focused once by an effect keyed on routeEditing; the title input keeps the inline pattern because it is the only field that uses it."
   ],
   "deviations": [
     "The architect's push instruction said 'jj bookmark set legion/LEGION-62 -r @'; the bookmark was set to @- instead, because @ is the daemon-provisioned working-copy commit holding only .omp/config.yml with no description, which jj refuses to push. The branch tip is the last described commit, 79f4d50c.",
@@ -60,7 +71,31 @@
     "gh pr create had to run from /tmp: inside the workspace it fails with 'not a git repository: /home/ubuntu/.../worktrees/legion-62' (the colocated worktree's gitdir points at another user's home)."
   ],
   "openQuestions": [],
+  "previousHeadSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+  "reviewRound": {
+    "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
+    "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
+    "answeredIn": "590a125129d3cd7b8813b604610b2da378b23c08",
+    "threads": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109",
+        "reply": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004319854",
+        "answer": "Blocking: dropped grow from issue-metadata-rail; the title takes the row free space again (430px at 1024 vs main 388; 210 at 1200 vs 168; 289 unclamped at 1279 vs 247 clamped). Regression lock in issue.e2e.ts at 1024/1200/1279 asserts the h1 is not clipped; fails with grow restored."
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117",
+        "reply": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004324189",
+        "answer": "Should-fix: GitHubLink gates the reference on githubReference.isError only and the checks pill on !checks.isError; a failed check-runs read keeps the loaded title and state. Unit test in IssuePage.test.tsx (pulls resolves, check-runs rejects) fails on the reviewed head and passes now. The credentials tooltip applies only when the reference itself is missing."
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121",
+        "reply": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004324301",
+        "answer": "Nit, landed in the same push: the Route: group leaves the details line with its button while the form is open; the form carries a visible Route: caption; the input is focused once when editing starts via an effect keyed on routeEditing."
+      }
+    ],
+    "threadsResolve": "legion threads resolve --pr 1088 --repo sjawhar/legion before the push: three left open lines (newest reply by legion-implementer is not an acceptance), exit 0; nothing resolved yet, as expected before the reviewer Accepted replies."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T09:37:11.799Z"
+  "completed": "2026-09-14T10:39:24.562Z"
 }
