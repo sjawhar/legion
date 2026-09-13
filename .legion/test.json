@@ -1,60 +1,63 @@
 {
   "issue": "LEGION-45",
+  "round": 2,
   "pr": {
     "number": 1020,
     "url": "https://github.com/sjawhar/legion/pull/1020",
     "branch": "legion/LEGION-45",
-    "headTested": "dd2ec60f82bd5b95520cfcd8fb1e26413e9722ec",
-    "headTestedNote": "The pushed tip (`implement: record handoff`). Its packages/pi-envoy source is identical to the implementation tip 5c3a1824fa5fc944b7b2d80b6963e67277c35855 (`jj diff --from 5c3a1824 --to dd2ec60f --summary` prints only `A .legion/implement.json`); the rig built the plugin from the workspace's working copy, which adds only the provisioning file `.omp/config.yml` (empty, untracked on main)."
+    "headTested": "2e5a8c9cd2d05040355d4ed13e1d3b9005edb71a",
+    "headTestedNote": "The round-2 pushed tip (`implement: record handoff` over the round-2 implementation tip 0636a2ff37777dd3156b33106876f7cef6649c5f; `jj diff --from 0636a2ff --to 2e5a8c9c --summary` prints only `M .legion/implement.json`). The rig built the plugin from the workspace's working copy, which adds only the provisioning file `.omp/config.yml` (empty, untracked on main). MERGEABLE, CI green (Tests 34754358561, Legion Envoy and Contracts 34754358550 at 2e5a8c9c) per the PR body."
   },
   "passed": 6,
   "failed": 0,
   "failures": [],
-  "verdict": "All six acceptance criteria hold on the real surface and in the regression lock; no finding.",
+  "verdict": "Round 2: the two blocking round-1 review findings are fixed on the real surface — all four argv-identical evasion forms the reviewer proved in a scratch repo are now refused in a real production-profile phase-worker pane — every previously refused item is still refused, every allowed item still runs (including Acceptance 2's `describe -m \"undo this\"`), and the op log carries no rewrite. No finding.",
   "regressionLock": {
     "command": "cd packages/pi-envoy && bun run build && bun run lint && bun run typecheck && bun run test",
     "build": "ok (dist/envoy.js 1.23 MB, dist/legion.js 1.27 MB)",
     "lint": "biome lint extensions/ src/: 20 files, no diagnostics",
     "typecheck": "tsc --noEmit clean",
-    "test": "171 pass, 0 fail, 543 expect() calls, 7 files, 15.58 s",
+    "test": "171 pass, 0 fail, 543 expect() calls, 7 files, 16.54 s",
     "targeted": "bun test extensions/legion.test.ts -t \"operation-log|shared jj operation log|quoted message words alone|plain-text rule|controller session|root architect session|restricts phase-worker tool access|tool-device writes|subagent session\" -> 11 pass, 0 fail, 84 expect() calls",
+    "round2RowsPresent": "legion.test.ts contains the reviewer-named rows: `undo>/dev/null`, `2>&1 undo`, `jj \"undo\"`, the backslash-escaped subcommand, and `undo this` (kept allowed) — the implement handoff's 29 refused + 15 allowed bash rows.",
     "note": "The unit suite is the regression lock, not proof of a criterion; proof is the real-surface section below."
   },
   "realSurface": {
-    "surface": "Grant rig (packages/pi-envoy/scripts/grant-rig, README 'Running it') in RIG_PLUGINS=production mode: setup.sh copied the live `legion` profile's whole plugin tree (secretsd github:sjawhar/forward#v3.0.2 included; RIG_REFRESH_PLUGINS=1 so the copy is the current install of 2026-09-13 08:03Z with pi-legion-envoy 1.22.2) into the throwaway l12rig profile and swapped only the Legion plugin. run.ts drive launched a real headless phase worker (LEGION_ROLE=implementer, LEGION_ISSUE=RIG-1) under the daemon's launch prefix `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- <omp> --mode rpc` with the pane environment the daemon sets, against the stand-in daemon on 127.0.0.1:13445 and a real jj workspace at /tmp/l45rig/ws whose operation log is the evidence.",
-    "omp": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-203541/bin/omp — resolved from the `omp_invocation` line of ~/.config/legion/sjawhar-legion/legion.yaml (`mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 -- omp`) via `mise where`, not hard-coded; recorded in each run's report.json.",
-    "artifacts": "The rig directory and l12rig profile were cleaned up as the plan requires, so every run artifact is attached to LEGION-45 on Dispatch: http://sami-agents:8766/issues/LEGION-45/artifacts — slugs l45-branch-tool-frames-jsonl, l45-branch-events-jsonl, l45-branch-report (in events), l45-branch-subagent-tool-frames-jsonl, l45-branch-subagent-events-jsonl, l45-branch-subagent-subagent-jjundoprobe-jsonl, l45-released-tool-frames-jsonl, l45-released-events-jsonl, oplog-after-branch-txt, oplog-after-released-txt. The `*-tool-frames.jsonl` files are the tool_execution_start/end (+agent_start/end) frames extracted from the full events.jsonl of the same run.",
-    "branchRun": {
-      "label": "l45-branch",
-      "runDir": "/tmp/l45rig/runs/l45-branch-2026-09-13T10-33-48-639Z (cleaned up; events.jsonl attached as l45-branch-events-jsonl)",
+    "surface": "Identical procedure to round 1: grant rig (packages/pi-envoy/scripts/grant-rig, README 'Running it') in RIG_PLUGINS=production mode with RIG_REFRESH_PLUGINS=1 — setup.sh copied the live `legion` profile's whole plugin tree as installed at 2026-09-13 10:58Z (pi-legion-envoy 1.23.0 now, released to main at 63dac108 `chore: release pi-envoy v1.23.0` since round 1; secretsd github:sjawhar/forward#v3.0.2 included) into the throwaway l12rig profile and swapped only the Legion plugin for the branch `bun run build` (the swapped dist/legion.js is byte-identical to the checkout's dist/legion.js, `cmp` clean). run.ts drive launched a real headless phase worker (LEGION_ROLE=implementer, LEGION_ISSUE=RIG-1) under the daemon's launch prefix `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY -- <omp> --mode rpc` with the pane environment the daemon sets, against the stand-in daemon on 127.0.0.1:13445 and a fresh real jj workspace at /tmp/l45rig/ws whose operation log is the evidence.",
+    "omp": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-203541/bin/omp — re-read from the `omp_invocation` line of ~/.config/legion/sjawhar-legion/legion.yaml (`mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 -- omp`) via `mise where`; unchanged since round 1; recorded in the run's report.json.",
+    "artifacts": "The rig directory and l12rig profile were cleaned up, so every run artifact is attached to LEGION-45 on Dispatch: http://sami-agents:8766/issues/LEGION-45/artifacts — round-2 slugs l45-r2-branch-tool-frames-jsonl (tool_execution_start/end + agent_start/end frames extracted from the full stream), l45-r2-branch-events-jsonl (full stream), l45-r2-branch-standin-log, oplog-after-r2-branch-txt, prompt-r2-txt. Round-1 slugs remain (l45-branch-*, l45-branch-subagent-*, l45-released-*, oplog-after-branch-txt, oplog-after-released-txt).",
+    "run": {
+      "label": "l45-r2-branch",
+      "runDir": "/tmp/l45rig/runs/l45-r2-branch-2026-09-13T11-29-28-622Z (cleaned up; events.jsonl attached as l45-r2-branch-events-jsonl)",
       "rigMode": {
         "plugins": "production",
         "legionBuild": "branch",
-        "commit": "de1520cbd33ebd74755b71a88616c91d6ceebd26 (working copy = dd2ec60f + empty untracked .omp/config.yml)"
+        "commit": "3c3bf09426e1c7da2de58e9e20431de13ef557f5 (working copy = 2e5a8c9c + empty untracked .omp/config.yml)",
+        "productionTreePlugin": "1.23.0"
       },
-      "sessionFile": "~/.omp/profiles/l12rig/agent/sessions/-tmp-l45rig-ws/2026-09-13T10-33-57-206Z_01a09a54-b2d6-7000-869b-a224fd0338d4.jsonl (cleaned up)",
-      "prompt": "plan.json testerNotes.prompt verbatim, written to /tmp/l45rig/prompt.txt with the write tool and passed as --prompt-file",
+      "sessionFile": "~/.omp/profiles/l12rig/agent/sessions/-tmp-l45rig-ws/2026-09-13T11-29-37-953Z_01a09a87-aca1-7000-ba43-4a68c0054bc9.jsonl (cleaned up)",
+      "prompt": "14 items (artifact prompt-r2-txt), written with the write tool and passed as --prompt-file: the round-1 nine items with items 8-11 inserted after the hub item (the four forms the round-1 review proved slipped through: quoted subcommand, backslash-escaped subcommand, redirection glued to the subcommand, 2>&1 before the subcommand), item 13 the Acceptance 2 quoted message `describe -m \"undo this\"`, and the closing `op log -n 6`. The prompt told the model to type each command exactly as written, keeping every quote, backslash, and redirection character; the tool_execution_start frames confirm it did.",
       "toolCalls": [
         {
           "item": 1,
           "tool": "bash",
-          "call": "toolu_01UNtPeKUv5esv9Jx1LhvQSu",
+          "call": "toolu_01RhkHTk1uxxG3ErahCVTc7d",
           "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 3",
           "isError": false,
-          "result": "@ e6bc9f464d7d add workspace 'default' / ○ 000000000000 root()"
+          "result": "@ 22f00076e942 add workspace 'default' / ○ 000000000000 root()"
         },
         {
           "item": 2,
           "tool": "bash",
-          "call": "toolu_01MotXxgygQmqeMP2xrXaYzg",
+          "call": "toolu_01Uk8hbv19J6RBXEGDHQaEgp",
           "command": "jj -R \"$LEGION_WORKSPACE\" describe -m \"rig: marker before the guard checks\"",
           "isError": false,
-          "result": "Working copy (@) now at: prlxqutx 097bac12 (empty) rig: marker before the guard checks"
+          "result": "Working copy (@) now at: yorswsxk b911b8ee (empty) rig: marker before the guard checks"
         },
         {
           "item": 3,
           "tool": "bash",
-          "call": "toolu_01BmUYodx4NP9dgfZt33DRGT",
+          "call": "toolu_01JB56CKZMH2D3ic3uQoXBBq",
           "command": "jj -R \"$LEGION_WORKSPACE\" undo",
           "isError": true,
           "result": "refused `jj -R $LEGION_WORKSPACE undo`: jj undo, jj abandon, and jj op restore/revert/abandon/undo rewrite the jj operation log, which every Legion issue workspace shares (each is a jj workspace of one clone), so they rewrite other trees' commits too. Recover forward with a new commit or `jj restore <paths>` of files; anything else, stop and send the owning architect the `jj -R \"$LEGION_WORKSPACE\" log` evidence."
@@ -62,7 +65,7 @@
         {
           "item": 4,
           "tool": "bash",
-          "call": "toolu_01HwmNjNtgzGJXxDTYand4Vm",
+          "call": "toolu_01DUgBLmsXhz8KSSeGADKkRP",
           "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" op restore @-",
           "isError": true,
           "result": "refused `jj -R $LEGION_WORKSPACE op restore @-`: … which every Legion issue workspace shares … (same text)"
@@ -70,7 +73,7 @@
         {
           "item": 5,
           "tool": "bash",
-          "call": "toolu_014abZutQpM22gQLuvkj3P6Y",
+          "call": "toolu_01YKS5diEtjDYnxTxxNUCyUw",
           "command": "jj -R \"$LEGION_WORKSPACE\" abandon",
           "isError": true,
           "result": "refused `jj -R $LEGION_WORKSPACE abandon`: … which every Legion issue workspace shares … (same text)"
@@ -78,7 +81,7 @@
         {
           "item": 6,
           "tool": "eval",
-          "call": "toolu_017bB6Hdw5KEMinuU2aE3EFJ",
+          "call": "toolu_01Qu4fXak8qGyrpda3CMmp5H",
           "command": "language py: import os, subprocess; subprocess.run([\"jj\", \"-R\", os.environ[\"LEGION_WORKSPACE\"], \"undo\"], check=False)",
           "isError": true,
           "result": "refused `eval: jj undo`: … which every Legion issue workspace shares … (same text)"
@@ -86,15 +89,15 @@
         {
           "item": "7-prep",
           "tool": "bash",
-          "call": "toolu_01BgDoGsCrJfjdqqy36zhwvj",
+          "call": "toolu_01F4FBTAmd3r5LhtuYuAXF9s",
           "command": "printenv LEGION_WORKSPACE",
           "isError": false,
-          "result": "/tmp/l45rig/ws (the model resolving the prompt's placeholder for item 7; ran, not refused)"
+          "result": "/tmp/l45rig/ws (the model resolving the prompt's placeholder for item 7; ran)"
         },
         {
           "item": 7,
           "tool": "hub",
-          "call": "toolu_01We2g7uXp6mTjGmmdec5TRe",
+          "call": "toolu_017dmGJvo9TMkRxH9RYUJkAf",
           "command": "op start, name rig-jj, application jj, args [\"-R\", \"/tmp/l45rig/ws\", \"undo\"]",
           "isError": true,
           "result": "refused `hub: jj undo`: … which every Legion issue workspace shares … (same text)"
@@ -102,200 +105,109 @@
         {
           "item": 8,
           "tool": "bash",
-          "call": "toolu_01GXBoDSefYSou3DMHkQLQvT",
+          "call": "toolu_01Q92TX4ecYZYbuUFpQAvSLW",
+          "command": "jj -R \"$LEGION_WORKSPACE\" \"undo\"",
+          "isError": true,
+          "reviewThread": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453664 (quoted subcommand word; ran the rollback at 6b3acf60 per the reviewer)",
+          "result": "refused `jj -R $LEGION_WORKSPACE undo`: … which every Legion issue workspace shares … (same text)"
+        },
+        {
+          "item": 9,
+          "tool": "bash",
+          "call": "toolu_01ThPeXLkttyVPNVn3m37EWj",
+          "command": "jj -R \"$LEGION_WORKSPACE\" un\\do",
+          "isError": true,
+          "reviewThread": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453664 (backslash-escaped subcommand)",
+          "result": "refused `jj -R $LEGION_WORKSPACE undo`: … which every Legion issue workspace shares … (same text)"
+        },
+        {
+          "item": 10,
+          "tool": "bash",
+          "call": "toolu_01CtkD3vkoMkcb457xFN8WM2",
+          "command": "jj -R \"$LEGION_WORKSPACE\" undo>/dev/null",
+          "isError": true,
+          "reviewThread": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453666 (redirection glued to the subcommand)",
+          "result": "refused `jj -R $LEGION_WORKSPACE undo /dev/null`: … which every Legion issue workspace shares … (same text; the redirection operand appears as a harmless extra word, as the fix commit describes)"
+        },
+        {
+          "item": 11,
+          "tool": "bash",
+          "call": "toolu_01Ud7UU1SRfGfrFR6MPtFKbJ",
+          "command": "jj -R \"$LEGION_WORKSPACE\" 2>&1 undo",
+          "isError": true,
+          "reviewThread": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453666 (2>&1 before the subcommand — at 6b3acf60 the `&` split the invocation)",
+          "result": "refused `jj -R $LEGION_WORKSPACE 2 1 undo`: … which every Legion issue workspace shares … (same text)"
+        },
+        {
+          "item": 12,
+          "tool": "bash",
+          "call": "toolu_01KRPuyLRmUNzNJ8J2uXW4JE",
           "command": "jj -R \"$LEGION_WORKSPACE\" restore --help | head -1",
           "isError": false,
           "result": "Restore paths from another revision"
         },
         {
-          "item": 9,
+          "item": 13,
           "tool": "bash",
-          "call": "toolu_019itJQy3oR3YErSPABLuA2m",
-          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 5",
+          "call": "toolu_01R8xDKM1DBGz8PWoGZzRwSW",
+          "command": "jj -R \"$LEGION_WORKSPACE\" describe -m \"undo this\"",
           "isError": false,
-          "result": "@ 3640f172f102 describe commit 4393f276… args: jj -R /tmp/l45rig/ws describe -m 'rig: marker before the guard checks' / ○ e6bc9f464d7d add workspace 'default' / ○ 000000000000 root()"
+          "acceptance": 2,
+          "result": "Working copy (@) now at: yorswsxk 5b42f3f6 (empty) undo this — a quoted multi-word message containing a blocked word still runs after the round-2 fix that judges every word's text (the fix over-refuses only a one-word quoted message equal to a blocked word, as the review accepted)"
+        },
+        {
+          "item": 14,
+          "tool": "bash",
+          "call": "toolu_01CsKQzkd4fb1EniB2LectRd",
+          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 6",
+          "isError": false,
+          "result": "@ ad7757b5ee5f describe commit b911b8ee… args: jj -R /tmp/l45rig/ws describe -m 'undo this' / ○ b4df5defec45 describe commit fca4f742… args: … describe -m 'rig: marker before the guard checks' / ○ 22f00076e942 add workspace 'default' / ○ root()"
         }
       ],
-      "grantMints": "standin.log: 5 POST /legion/v1/grants (10:34:10, :14, :34, :42, :46) = exactly the 5 bash calls that ran (items 1, 2, 7-prep, 8, 9); the 3 refused bash calls minted nothing — the 'refused before any grant is minted' property, observed on the real surface.",
-      "hookLog": "~/.omp/profiles/l12rig/logs/omp.2026-09-13.3817395.log: one legion extension instance c72664bc; one `legion tool_call hook` line per tool call (8 bash, 1 eval, 1 hub); the plugin loaded from ~/.omp/profiles/l12rig/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js (the production tree's copy with the branch dist swapped in; `grep -c 'every Legion issue workspace shares'` on that file = 1)."
+      "grantMints": "standin.log (artifact l45-r2-branch-standin-log): worker/started, worker/ready, then 6 POST /legion/v1/grants = exactly the 6 bash calls that ran (items 1, 2, 7-prep, 12, 13, 14); the 7 refused bash calls (3, 4, 5, 8, 9, 10, 11) minted nothing — 'refused before any grant is minted' holds for the new forms too.",
+      "hookLog": "~/.omp/profiles/l12rig/logs/omp.2026-09-13.1518067.log (cleaned up with the profile): one legion extension instance 9d27a143; one `legion tool_call hook` line per tool call (13 bash, 1 eval, 1 hub); the plugin loaded from ~/.omp/profiles/l12rig/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js (the production tree's copy with the branch dist swapped in; `grep -c 'every Legion issue workspace shares'` = 1)."
     },
-    "opLogAfterBranch": "jj -R /tmp/l45rig/ws op log -n 8 --no-graph (artifact oplog-after-branch-txt):\n3640f172f102 ubuntu@sami-agents default@ 5 minutes ago, lasted 20 milliseconds\ndescribe commit 4393f2769a2a4ba64c7ffff6960906f80a952133\nargs: jj -R /tmp/l45rig/ws describe -m 'rig: marker before the guard checks'\ne6bc9f464d7d ubuntu@sami-agents 6 minutes ago, lasted 32 milliseconds\nadd workspace 'default'\n000000000000 root()\n— three operations in total; item 2's describe is the newest mutating operation; no undo, restore, or abandon operation. Taken after both branch-plugin runs (l45-branch and l45-branch-subagent).",
-    "subagentRun": {
-      "label": "l45-branch-subagent",
-      "runDir": "/tmp/l45rig/runs/l45-branch-subagent-2026-09-13T10-37-34-408Z (cleaned up; events.jsonl attached as l45-branch-subagent-events-jsonl; the subagent's own transcript JjUndoProbe.jsonl attached as l45-branch-subagent-subagent-jjundoprobe-jsonl)",
-      "prompt": "The worker was told to spawn exactly one default `task` subagent whose task text asks it to run, each as its own bash call: (a) jj -R \"$LEGION_WORKSPACE\" op log -n 3, (b) jj -R \"$LEGION_WORKSPACE\" undo, (c) echo subagent-still-runs && printenv LEGION_ROLE; then the worker itself runs jj -R \"$LEGION_WORKSPACE\" op log -n 5.",
-      "parentToolCalls": [
-        {
-          "tool": "task",
-          "call": "toolu_01HMGvXbSm2nWKLtyGZEDrmZ",
-          "isError": false,
-          "note": "spawned subagent JjUndoProbe with the task text verbatim"
-        },
-        {
-          "tool": "hub",
-          "call": "toolu_017kEczi2RZXkFWoAaMcwGvS",
-          "isError": false,
-          "note": "hub wait; the delivered task-result quotes the subagent's three results verbatim, (b) as `<error>refused \\`jj -R $LEGION_WORKSPACE undo\\`: … which every Legion issue workspace shares …</error>`"
-        },
-        {
-          "tool": "bash",
-          "call": "toolu_01LVdbRDbw4R1KuaGgrvFiaT",
-          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 5",
-          "isError": false,
-          "result": "head still 3640f172f102 (item 2's describe); unchanged"
-        }
-      ],
-      "subagentToolCalls": [
-        {
-          "tool": "bash",
-          "call": "toolu_019zyV4SGs8a2KoPhwwrCZQG",
-          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 3",
-          "isError": false,
-          "result": "@ 3640f172f102 describe … / ○ e6bc9f464d7d add workspace 'default' / ○ root()"
-        },
-        {
-          "tool": "bash",
-          "call": "toolu_01X74MV37aiLWWMrgv3ATPay",
-          "command": "jj -R \"$LEGION_WORKSPACE\" undo",
-          "isError": true,
-          "result": "refused `jj -R $LEGION_WORKSPACE undo`: jj undo, jj abandon, and jj op restore/revert/abandon/undo rewrite the jj operation log, which every Legion issue workspace shares … (same text as the parent's refusals)"
-        },
-        {
-          "tool": "bash",
-          "call": "toolu_01EFTn23QTNzgRPDPDpghSwW",
-          "command": "echo subagent-still-runs && printenv LEGION_ROLE",
-          "isError": false,
-          "result": "subagent-still-runs\nimplementer"
-        }
-      ],
-      "exemptionIntact": "standin.log for this run: worker/started + worker/ready (parent boot) + exactly ONE /legion/v1/grants at 10:38:19.800 (the parent's final bash). The subagent's three bash calls minted no grant and called no daemon route. omp.2026-09-13.3928633.log shows two legion extension instances: parent cdab38a4 (task, hub, bash hooks) and subagent 0e1c8610 (three bash hooks + yield) — the guard bound the subagent's instance while everything else about the exemption held."
-    },
-    "negativeControl": {
-      "label": "l45-released",
-      "runDir": "/tmp/l45rig/runs/l45-released-2026-09-13T10-39-42-526Z (cleaned up; events.jsonl attached as l45-released-events-jsonl)",
-      "rigMode": {
-        "plugins": "production",
-        "legionBuild": "1.22.2",
-        "note": "npm pack @sjawhar/pi-legion-envoy@1.22.2 extracted in place; its dist/legion.js is byte-identical (cmp) to ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js, the plugin the live panes run today (legion.yaml's own comment notwithstanding, the installed version is 1.22.2); `grep -c 'every Legion issue workspace shares'` = 0"
-      },
-      "sessionFile": "~/.omp/profiles/l12rig/agent/sessions/-tmp-l45rig-ws/2026-09-13T10-39-50-487Z_01a09a5a-16d7-7000-9381-cc8696f9c72c.jsonl (cleaned up)",
-      "prompt": "same /tmp/l45rig/prompt.txt; the workspace still carried the branch run's describe (3640f172f102)",
-      "toolCalls": [
-        {
-          "item": "model-extra",
-          "tool": "read",
-          "call": "toolu_01XQ1DMUdgWbMjhhrZ6RxbBC",
-          "command": "skill://using-jj",
-          "isError": true,
-          "result": "Unknown skill (the model's own lookup; irrelevant)"
-        },
-        {
-          "item": "model-extra",
-          "tool": "bash",
-          "call": "toolu_014vf3fuUXGVUMs3eYuT5fEa",
-          "command": "printenv LEGION_WORKSPACE",
-          "isError": false,
-          "result": "/tmp/l45rig/ws"
-        },
-        {
-          "item": 1,
-          "tool": "bash",
-          "call": "toolu_014aDmA1qALp6e6dMNt4vCKX",
-          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 3",
-          "isError": false,
-          "result": "head 3640f172f102"
-        },
-        {
-          "item": 2,
-          "tool": "bash",
-          "call": "toolu_01JkHkGFynXmVMeHgGUyLUxm",
-          "command": "jj -R \"$LEGION_WORKSPACE\" describe -m \"rig: marker before the guard checks\"",
-          "isError": false,
-          "result": "Working copy (@) now at: prlxqutx 2aada52e (empty) rig: marker before the guard checks"
-        },
-        {
-          "item": 3,
-          "tool": "bash",
-          "call": "toolu_0146NA1F5PPsTc5zXTKHAadP",
-          "command": "jj -R \"$LEGION_WORKSPACE\" undo",
-          "isError": false,
-          "result": "RAN: Undid operation: 59aa8dccfccd (2026-09-13 10:40:20) describe commit 097bac12… / Restored to operation: 3640f172f102 (2026-09-13 10:34:14) describe commit 4393f276…"
-        },
-        {
-          "item": 4,
-          "tool": "bash",
-          "call": "toolu_01L32JZZcyCuGZ2FAEcxHuqJ",
-          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" op restore @-",
-          "isError": false,
-          "result": "RAN: Restored to operation: 59aa8dccfccd (2026-09-13 10:40:20) describe commit 097bac12…"
-        },
-        {
-          "item": 5,
-          "tool": "bash",
-          "call": "toolu_01NqwcH4THjjzjCHzGGqz5Tv",
-          "command": "jj -R \"$LEGION_WORKSPACE\" abandon",
-          "isError": false,
-          "result": "RAN: Abandoned 1 commits: prlxqutx 2aada52e (empty) rig: marker before the guard checks"
-        },
-        {
-          "item": 6,
-          "tool": "eval",
-          "call": "toolu_01L2YDsV7DM1ygzE4diem2qe",
-          "command": "language py: import os, subprocess; subprocess.run([\"jj\", \"-R\", os.environ[\"LEGION_WORKSPACE\"], \"undo\"], check=False)",
-          "isError": true,
-          "result": "NOT refused — reached the Python kernel and failed there: KeyError: 'LEGION_WORKSPACE' (the eval kernel's own environment lacks the pane variable; an environment property of OMP's eval tool, not the guard). The difference from the branch run is that the extension let the call through."
-        },
-        {
-          "item": 7,
-          "tool": "hub",
-          "call": "toolu_01SfthpKtuetLbnDBkfQ75oi",
-          "command": "op start, name rig-jj, application jj, args [\"-R\", \"/tmp/l45rig/ws\", \"undo\"]",
-          "isError": false,
-          "result": "RAN: Started rig-jj: running pid=4035396 — the supervised process performed a second undo (op 3ac039d0c094 below)"
-        },
-        {
-          "item": 8,
-          "tool": "bash",
-          "call": "toolu_012ruZhvj4m2cUCsQkg8Mu2a",
-          "command": "jj -R \"$LEGION_WORKSPACE\" restore --help | head -1",
-          "isError": false,
-          "result": "Restore paths from another revision"
-        },
-        {
-          "item": 9,
-          "tool": "bash",
-          "call": "toolu_01ExZsAcjQd6aCe6CUfJS5zC",
-          "command": "jj -R \"$LEGION_WORKSPACE\" op log -n 5",
-          "isError": false,
-          "result": "head 3ac039d0c094 undo: … args: jj -R /tmp/l45rig/ws undo; then 885c5564b580 abandon …; b6123bd6e376 restore to operation …; de03f18002b8 undo …"
-        }
-      ],
-      "grantMints": "standin.log: 8 POST /legion/v1/grants for 8 bash calls — every bash call, the rewriting ones included, went through the ordinary path.",
-      "hookLog": "omp.2026-09-13.3999769.log: one instance ab695cb8; hook lines for 8 bash, 1 eval, 1 hub, 1 read; none refused."
-    },
-    "opLogAfterReleased": "jj -R /tmp/l45rig/ws op log -n 8 --no-graph (artifact oplog-after-released-txt):\n3ac039d0c094 ubuntu@sami-agents default@ 1 minute ago, lasted 7 milliseconds\nundo: restore to operation b6123bd6e376e1434aa40e840c0e469cc84d2dc2bd9c8dd3ce4a18a7ba13149fe0c607bc44c4dc95263b97846c23aee1388620573421b1a58d2eb97944d2a4a1\nargs: jj -R /tmp/l45rig/ws undo\n885c5564b580 ubuntu@sami-agents default@ 1 minute ago, lasted 28 milliseconds\nabandon commit 2aada52ee624f01a677539b3c264f916cc0076bb\nargs: jj -R /tmp/l45rig/ws abandon\nb6123bd6e376 ubuntu@sami-agents default@ 1 minute ago, lasted 6 milliseconds\nrestore to operation 59aa8dccfccd59121b8206e9d99e6ec2a8550a4df792b8f75e368307d10617b53173e807db9160443059dc219b4c8b546c1b9805eee62d734a62ebbf99d2fa79\nargs: jj -R /tmp/l45rig/ws op restore @-\nde03f18002b8 ubuntu@sami-agents default@ 1 minute ago, lasted 7 milliseconds\nundo: restore to operation 3640f172f1026856685c0012295ec51697bea1a42ea17af81e7749c987dbdd30de078fd481bb375d511b96f3e0af2aefcb06fbb74c5295539c2503e4c2af05f7\nargs: jj -R /tmp/l45rig/ws undo\n59aa8dccfccd ubuntu@sami-agents default@ 1 minute ago, lasted 27 milliseconds\ndescribe commit 097bac12136892e0a9ab23079c370ab701f19fae\nargs: jj -R /tmp/l45rig/ws describe -m 'rig: marker before the guard checks'\n3640f172f102 ubuntu@sami-agents default@ 7 minutes ago, lasted 20 milliseconds\ndescribe commit 4393f2769a2a4ba64c7ffff6960906f80a952133\nargs: jj -R /tmp/l45rig/ws describe -m 'rig: marker before the guard checks'\ne6bc9f464d7d ubuntu@sami-agents 8 minutes ago, lasted 32 milliseconds\nadd workspace 'default'\n000000000000 root()\n— the log gained de03f18002b8 (item 3's undo), b6123bd6e376 (item 4's op restore), 885c5564b580 (item 5's abandon) and 3ac039d0c094 (item 7's hub-started undo): exactly the rewrites the branch plugin refused."
+    "opLogAfter": "jj -R /tmp/l45rig/ws op log -n 8 --no-graph (artifact oplog-after-r2-branch-txt):\nad7757b5ee5f ubuntu@sami-agents default@ 1 minute ago, lasted 47 milliseconds\ndescribe commit b911b8ee3bb46f2cc390c3b2395271d73bbd8ccc\nargs: jj -R /tmp/l45rig/ws describe -m 'undo this'\nb4df5defec45 ubuntu@sami-agents default@ 1 minute ago, lasted 27 milliseconds\ndescribe commit fca4f742cc3d3b335f638a4b143b83d65c79b81b\nargs: jj -R /tmp/l45rig/ws describe -m 'rig: marker before the guard checks'\n22f00076e942 ubuntu@sami-agents 2 minutes ago, lasted 33 milliseconds\nadd workspace 'default'\n000000000000 root()\n— four operations in total, the two describes (items 13 and 2) newest; no undo, restore, or abandon operation. Item 14's transcript output matches.",
+    "negativeControl": "Not repeated this round (per the architect's assignment: only if the branch dist changed behaviour for an allowed row — it did not; every allowed row ran). The plugin the panes run today is now 1.23.0 (main 63dac108), whose dist/legion.js has 0 matches for the refusal text — the same unguarded state round 1's RIG_LEGION_BUILD=1.22.2 control exercised (items 3, 4, 5, 7 ran; the log gained undo, restore, abandon, undo — artifact oplog-after-released-txt). Acceptance 6's real-surface proof stands from round 1's l45-branch-subagent run; the round-2 commits touch only the bash tokenizer/matcher, not the subagent hoist."
   },
   "acceptanceEvidence": {
-    "1 bash refusal, every form, any pipeline position, message names command + shared log + recovery": "Real surface: branch run items 3 (plain `-R … undo`), 4 (`cd -- … && … op restore @-`, the && chain) and 5 (`abandon`) refused with isError=true; each reason names the invocation (`jj -R $LEGION_WORKSPACE undo`, `… op restore @-`, `… abandon`), says `every Legion issue workspace shares`, and gives the recovery (`new commit or \\`jj restore <paths>\\``, `send the owning architect the … log evidence`); no grant minted for any of the three. Negative control: the same three RAN on 1.22.2 and each left an operation in the log. Regression lock: legion.test.ts 'refuses a phase worker's bash command that would rewrite the shared jj operation log' (19 rows) — green in the 171.",
-    "2 jj restore <paths>, jj op log, jj op show, quoted 'undo this' allowed": "Real surface: branch run items 1 and 9 (`op log -n 3` / `-n 5`), item 2 (`describe -m \"rig: marker before the guard checks\"`, a quoted message) and item 8 (`restore --help | head -1`, the file-level restore subcommand in a pipeline) ran and each minted one grant; the subagent run's `op log` calls ran too. `jj op show` and a quoted `-m \"undo this\"` are covered by the regression lock only: legion.test.ts 'leaves file-level jj restore, jj op log, jj op show, and quoted message words alone' (13 rows, one mint each).",
-    "3 root architect and controller unaffected; reviewer .legion/ path unaffected": "Regression lock only — the grant rig boots one role (implementer) and has no root-architect or controller leg: legion.test.ts 'does not block bash calls from the controller session' (jj -R … undo -> undefined), 'blocks code tools in a root architect session' (jj undo -> the architect reason, never the shared-log one), 'applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone' (six roles; the reviewer's `.legion/` cleanup row allowed), plus the pre-existing 'restricts phase-worker tool access per LEGION_ROLE' and 'allows xd:// tool-device writes' — all green in the 171. The real-surface implementer run confirms the phase-worker branch of the same hook is what the production plugin tree loads (one legion.js instance from the profile's plugins/).",
-    "4 SKILL.md says blocked by the extension + recovery rule": "Diff of skills/legion-worker/SKILL.md in commit 5c163ecc3169fb80e7f1d64ac8aaf6468e815085 (on the PR): the 'Shared operation safety' paragraph says the extension refuses the commands (bash, eval, hub, task subagents), names the recovery rule (new commit or jj restore <paths>; otherwise the architect with the log evidence) and tells workers to write mentioning text with the write tool. Reviewer verifies from the diff; this phase read the committed file.",
-    "5 eval code and hub start refused with the same message": "Real surface: branch run item 6 (`eval` py subprocess argv `[\"jj\",\"-R\",…,\"undo\"]`) refused as `eval: jj undo` and item 7 (`hub` op start, application `jj`, args `-R /tmp/l45rig/ws undo`) refused as `hub: jj undo`, both isError=true with the identical shared-log/recovery text. Negative control: on 1.22.2 the hub start RAN (the supervised process performed undo 3ac039d0c094) and the eval reached the Python kernel (KeyError there, not a refusal). Regression lock: 'refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule' (6 refused / 5 allowed).",
-    "6 a task subagent of a phase worker is refused the same commands while its other calls stay exempt": "Real surface: run l45-branch-subagent — the worker's `task` subagent JjUndoProbe ran (a) `op log -n 3` (ran), (b) `jj -R \"$LEGION_WORKSPACE\" undo` (refused, isError=true, shared-log reason, in its own transcript and quoted verbatim in the parent's hub-wait result), (c) `echo subagent-still-runs && printenv LEGION_ROLE` (ran: `subagent-still-runs` / `implementer`); the subagent's bash calls minted no grant and called no daemon route (one mint in standin.log, the parent's); the OMP log shows the subagent's own extension instance 0e1c8610 handling its hooks. Op log head unchanged at 3640f172f102 afterwards. Regression lock: 'refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated'.",
-    "Errors: unparseable command -> plain-text rule, never allow": "Regression lock only (the nine-item prompt has no unterminated-quote row): step-1 row `jj -R \"$LEGION_WORKSPACE\" describe -m 'undo` refused naming the trimmed command."
+    "1 bash refusal, every form, any pipeline position, message names command + shared log + recovery": "Real surface, round 2: items 3, 4 (&& chain), 5 refused as in round 1, AND the four argv-identical forms from review round 1 — item 8 quoted `\"undo\"`, item 9 backslash-escaped `un\\do`, item 10 `undo>/dev/null`, item 11 `2>&1 undo` — each isError=true, each reason naming the invocation, `every Legion issue workspace shares`, and the recovery rule; none minted a grant. Regression lock: 'refuses a phase worker's bash command that would rewrite the shared jj operation log' (29 rows now) green.",
+    "2 jj restore <paths>, jj op log, jj op show, quoted 'undo this' allowed": "Real surface, round 2: item 13 `describe -m \"undo this\"` RAN (working copy now 'undo this'; op ad7757b5ee5f), item 12 `restore --help | head -1` ran, items 1/14 `op log` ran; one grant minted each. `jj op show` and the two redirection allowed rows (`jj op log 2>&1 | head`, `jj restore f 2>/dev/null`) by the regression lock: 'leaves file-level jj restore, jj op log, jj op show, and quoted message words alone' (15 rows).",
+    "3 root architect and controller unaffected; reviewer .legion/ path unaffected": "Regression lock only, unchanged from round 1 (the rig has no root/controller leg): controller, root-architect, and six-role matrix tests green in the 171.",
+    "4 SKILL.md says blocked by the extension + recovery rule": "Unchanged since round 1 (commit 5c163ecc); the round-2 fixes touch legion.ts, legion.test.ts, CHANGELOG.md, run.ts. Reviewer verifies from the diff.",
+    "5 eval code and hub start refused with the same message": "Real surface, round 2: item 6 eval refused as `eval: jj undo`, item 7 hub start refused as `hub: jj undo`, both isError=true with the identical text. Regression lock: the plain-text-rule test (6 refused / 5 allowed).",
+    "6 a task subagent of a phase worker is refused the same commands while its other calls stay exempt": "Round 1 real-surface run l45-branch-subagent (artifacts l45-branch-subagent-*), not re-run: the round-2 commits (4f0b1e9a, e03155e9, 0636a2ff) change the bash word tokenizer, the matcher, tests, changelog, and the rig usage header only — the guard hoist ahead of the subagent exemption is untouched. Regression lock: 'refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated' green.",
+    "Errors: unparseable command -> plain-text rule, never allow": "Regression lock only: the unterminated-quote row still refused."
   },
   "observations": [
-    "Grant minting is itself evidence: on the branch plugin the stand-in logged 5 mints for 8 bash calls (the 3 refused bash calls minted none); on 1.22.2 it logged 8 for 8. The 'refused before any grant is minted' property therefore holds on the real surface, not only in the unit test.",
-    "The model added one bash call outside the prompt in both nine-item runs — `printenv LEGION_WORKSPACE`, resolving the prompt's placeholder for item 7's hub args — and, on the released run, a `read skill://using-jj` lookup. Neither is a rewrite; both ran. The extra calls explain the rig table's '8 bash calls' against the prompt's 7 bash items.",
-    "Under 1.22.2, item 6's eval failed with KeyError: 'LEGION_WORKSPACE' rather than performing an undo: OMP's eval Python kernel does not expose the pane's LEGION_WORKSPACE variable. Under the branch plugin the same call never reached the kernel (refused by the extension), which is the property under test; the kernel's environment is an OMP behaviour outside this issue and is noted, not worked around.",
-    "The grant rig's A–G table is not this run's evidence (README, `--prompt-file` paragraph): with a custom prompt it scores whatever bash calls the prompt caused (no record-grant or legion probes), so its FAIL rows for B, C, D, G are expected and meaningless here.",
-    "legion.yaml's trailing comment on omp_invocation says 'profile plugin stays 1.17.0'; the installed plugin in ~/.omp/profiles/legion/plugins is 1.22.2 (package.json and the byte-identical dist used for the negative control). The comment is stale; the negative control used what the panes actually load.",
-    "Deployment note carried from the plan: the guard reaches live panes only once the pi-envoy release built from this branch is installed into the legion profile before the daemon restarts. The tester's own pane runs 1.22.2, so this phase could type `jj … undo` in bash; the PR body and this handoff were nevertheless written through the write tool (and `legion handoff write` read its data from a file on stdin) so the same steps stay typeable after the release.",
-    "Cleanup done as the plan requires: stand-in daemon stopped, `tmux -L l12rig kill-server`, `rm -rf ~/.omp/profiles/l12rig /tmp/l45rig`; port 13445 free, no rig processes left. Evidence survives on Dispatch (artifacts above)."
+    "Every refused evasion form was refused with the exact same reason text as the plain form; items 10 and 11 name the redirection operands as extra words (`undo /dev/null`, `2 1 undo`) exactly as the fix commit e03155e9 describes — the message is still truthful about which invocation was refused.",
+    "The model typed the evasion forms verbatim (the tool_execution_start args show `\"undo\"`, `un\\do`, `undo>/dev/null`, `2>&1 undo`), so the refusals were judged on the real evasion text, not a normalised one.",
+    "The production plugin tree copied into the rig is now pi-legion-envoy 1.23.0 (main 63dac108, released between rounds); its dist carries no guard, so what live panes run today is still the unguarded state round 1's negative control exercised.",
+    "Grant minting is still evidence: 6 mints for the 6 bash calls that ran, 0 for the 7 refused, including the four new forms.",
+    "Written through the write tool as instructed: the round-2 prompt, the PR body E2E block (spliced into the fetched body with a Python read/write, then `gh pr edit --body-file`), and this handoff (piped to `legion handoff write` on stdin from a file). My own pane runs the released plugin, so bash text with the blocked words would have worked today; the procedure stays typeable after the release.",
+    "Cleanup done: stand-in stopped, `tmux -L l12rig kill-server`, `rm -rf ~/.omp/profiles/l12rig /tmp/l45rig`; port 13445 free; no rig processes. Evidence survives on Dispatch."
   ],
-  "documentationFeedback": "None required for this PR. The grant-rig README's `--prompt-file` paragraph and the SKILL.md paragraph matched what the run showed.",
+  "rounds": [
+    {
+      "round": 1,
+      "headTested": "dd2ec60f82bd5b95520cfcd8fb1e26413e9722ec",
+      "completed": "2026-09-13T10:49:33.360Z",
+      "passed": 6,
+      "failed": 0,
+      "handoffCommit": "6b3acf6004472dabe58689dec67e079e0b2acb13 (test: record handoff — the full round-1 per-item record lives in that commit's .legion/test.json)",
+      "runs": {
+        "branch": "l45-branch-2026-09-13T10-33-48-639Z",
+        "subagent": "l45-branch-subagent-2026-09-13T10-37-34-408Z",
+        "negativeControl": "l45-released-2026-09-13T10-39-42-526Z (RIG_LEGION_BUILD=1.22.2)"
+      },
+      "outcome": "All six criteria held on the real surface for the plan's nine-item prompt; the reviewer then proved four argv-identical evasion forms (quoting/escaping, redirections) in a scratch repo — review 5190486592 REQUEST_CHANGES at 6b3acf60 — which round 2 re-tests above.",
+      "opLogAfterBranch": "3640f172f102 describe (item 2) / e6bc9f464d7d add workspace / root — no rewrite",
+      "opLogAfterReleased": "gained de03f18002b8 undo, b6123bd6e376 restore, 885c5564b580 abandon, 3ac039d0c094 undo (artifact oplog-after-released-txt)"
+    }
+  ],
+  "documentationFeedback": "None required. The run.ts usage header now lists --prompt-file (thread r3999453669, commit 0636a2ff); README and SKILL.md matched what the run showed.",
   "fastFollow": "none",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T10:49:33.360Z"
+  "completed": "2026-09-13T11:35:42.616Z"
 }
