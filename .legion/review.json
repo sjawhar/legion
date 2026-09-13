@@ -1,0 +1,66 @@
+{
+  "verdict": "approved",
+  "githubReview": {
+    "event": "COMMENT",
+    "id": 5191028940,
+    "url": "https://github.com/sjawhar/legion/pull/1028#pullrequestreview-5191028940",
+    "commit_id": "7441d1bcd861a298a614c8eb9c05267a7fff99e5"
+  },
+  "reviewedHead": "7441d1bcd861a298a614c8eb9c05267a7fff99e5",
+  "codeHead": "66e54dd7516a58f218bbfde069e91ccece66e6a6",
+  "remainingWork": "the .legion/ deletion push by the implementer; then APPROVE of that head by SHA (no new handoff write). Two PR-body-only edits requested alongside it: correct E2E (implementer) item 3's parenthetical (rig evidence at 4ef79ebb pre-rebase; implementer.md, architect.md, architect-root.md differ at 66e54dd7; tester re-drove at 66e54dd7) and add the knowledge-consolidate note to ## Deployment.",
+  "critical": 0,
+  "important": 0,
+  "minor": 7,
+  "gateFacts": {
+    "ci": "Tests runs 34762377091 and 34762415952 at 7441d1bc: lint, pr-title, typecheck, test success; required checks on main are lint, typecheck, test. Legion Envoy and Contracts run 34762377117: 7 jobs success, envoy-go flaked once on TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce (Postgres context canceled; no Go in this PR; passed at 554ba351; main green on last 8 runs); reran only that job with `legion gh -- run rerun 34762377117 --failed`.",
+    "threads": "0 reviews and 0 threads before mine; my review carries no inline comments (Minor items are the single fast-follow in the body), so the deletion round needs no Accepted:/threads resolve pass.",
+    "e2eImplementer": "present; items 1-2 at 66e54dd7 (ancestor); items 3-4 at 4ef79ebb (pre-rebase, not an ancestor) with a false byte-identical parenthetical the tester corrected and independently re-proved at 66e54dd7 — non-blocking per the architect's ruling.",
+    "e2eTester": "present; heads 554ba351 and 66e54dd7 (ancestors); negative controls; states how it verified the implementer's proof; implementerProof.verdict verified in .legion/test.json.",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at 66e54dd7: 0 Critical, 0 Important; 7 Minor.",
+    "planConstraints": "HANDOFF_SCHEMA_VERSION 1, no migration; daemon/ only the reducers.ts comment; Step-one and closing paragraphs untouched (pi-envoy job green); dispatch_message for retro/production note; write refuses before ensureLegionDir; read prints one stderr line; Zod 4.3.6 accepts the refined discriminatedUnion member; local targeted tests contracts 3/3, daemon 40/40."
+  },
+  "keyFindings": [
+    {
+      "severity": "Minor",
+      "file": "packages/contracts/src/handoff-schema.ts",
+      "description": "nonEmpty is z.string().min(1): whitespace-only proof fields validate; use .trim().min(1). failed>0 alone (no failures, no proof) validates, and implementerProof.verdict rejected with a clean pass validates although the prose says rejected is a recorded failure; add refine clauses. Unknown/missing phase discriminator renders as `phase: Invalid input`; name the expected set. .passthrough() repeated on five phase schemas; hoist onto baseHandoffSchema."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/pi-envoy/roles/planner.md",
+      "description": "Lines 14-21: two adjacent sentences state the surface-gap rule twice (child issue vs sub-issue); keep the new one; re-wrap the orphan `Fill` line."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/pi-envoy/roles/tester.md",
+      "description": "Lines 19-23: `complete the phase ... Then add your own proof` reads as an ordering; make it `Otherwise, add your own proof before completing`."
+    },
+    {
+      "severity": "Minor",
+      "file": "skills/legion-retro/SKILL.md",
+      "description": "Line 102 template `or the action ask it opened` presupposes an ask that per the worker skill is opened only post-merge."
+    },
+    {
+      "severity": "Minor",
+      "file": "skills/legion-worker/SKILL.md",
+      "description": "Completion-gate list of no-handoff steps should name the post-merge production check; the proof definition is stated in full in both the implementer and tester bullets."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/pi-envoy/roles/merger.md",
+      "description": "Orphan wrap fragments left by the one-line grep sentences (merger.md:18, reviewer.md:15); redundant round-trip test halves in cli/__tests__/handoff.test.ts:374-385 and handoff/__tests__/ledger.test.ts:330-333."
+    },
+    {
+      "severity": "Minor",
+      "file": "PR body",
+      "description": "Deployment section should note that `legion knowledge consolidate` drops learningsInjected/learningsHelpful from pre-change handoffs on in-flight branches (collector reads via readAllHandoffs); run it once before the daemon restart if wanted. Out of diff: docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md:68 still says E2E is left for the tester."
+    }
+  ],
+  "learningsHelpful": [
+    "legion/text-only-skill-pr-mechanics.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:38:12.742Z"
+}
