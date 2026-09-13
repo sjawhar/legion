@@ -225,6 +225,9 @@ PR opens, and every later phase keeps it current rather than replacing it:
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
 - Thread <id>: fixed in <commit-sha> — <one line>.
 - Thread <id>: not a defect — <reason>.
+`legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
+resolved <thread URL>
+left open <thread URL> — newest reply by <login> is not an acceptance
 
 **Thermo:** thermonuclear-deep-review + thermonuclear-code-quality run once at <head-sha>:
 <verdict>. (omitted entirely on a docs-only PR — no thermo pass runs)
@@ -238,8 +241,22 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 ```
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
-  thread gets its own line naming the fixing commit or the reason it isn't a defect before
-  it is marked resolved.
+  thread gets its own line naming the fixing commit or the reason it isn't a defect. The
+  reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
+  `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
+  acceptance, and nobody replies after an `Accepted:` (a later reply by anyone else puts the
+  thread back to left open). The review App can reply on a thread but can neither resolve it
+  nor push — GitHub grants both only to the pull request's author, the comment's author, or an
+  account with push access (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
+  **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
+  push that answers a review (the corrective push and the final `.legion/` deletion push) and
+  pastes its output into the `Threads` section. The command resolves each unresolved thread
+  whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread` per
+  thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
+  and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one; report that
+  exit to the architect, which opens an action ask for a human to resolve the thread by hand —
+  never skip it silently. The merger runs the same command once more before publishing READY
+  and does not publish while any `left open` line remains.
 - **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
   Findings about naming, duplication, or wording are batched into the single `Fast-follow`
@@ -290,12 +307,20 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   Then return the issue to the architect; when clean, have the architect send the implementer
   back to push the `.legion/` deletion (the review App cannot push), then review **that** head
   and approve it by name.
+  When you re-review after a corrective push, answer every thread you opened in one of the
+  three forms above — `Accepted:` is the only reply the implementer's `legion threads resolve`
+  acts on — and approve only once every thread you opened carries your `Accepted:` reply and the
+  implementer's run has resolved it (verify `isResolved: true` with `gh api graphql`, never from
+  the PR body).
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
-- The merger confirms the approved head still equals the current head, then publishes
-  `READY #<n> at <sha>` plus the PR body's gate facts to the merge queue's role
-  (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
-  merges under its own authority.
+- The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
+  code-writing App as the implementer; resolving a thread changes no commit, so this run never
+  invalidates the approval), does not publish while any `left open` line remains or the command
+  exits 1 (report the thread to the architect instead), confirms the approved head still equals
+  the current head, then publishes `READY #<n> at <sha>` plus the PR body's gate facts to the
+  merge queue's role (`notifications.role.pr-queue`) with `envoy_publish`. The merger never
+  merges; the queue merges under its own authority.
 - **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the

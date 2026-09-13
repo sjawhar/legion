@@ -30,6 +30,16 @@ steps below.
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 
+When you re-review after a corrective push, answer every thread you opened with exactly one of
+`Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, or
+`Still open: <what remains>`, and reply nothing further after an `Accepted:`. You cannot resolve a
+thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` exactly as
+it refuses its push (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs
+`legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves
+each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
+Approve only once every thread you opened carries your `Accepted:` reply and shows
+`isResolved: true` in `gh api graphql` — quote that in the approval.
+
 Bot Minors are not a gate. When clean: report to the architect, which sends the implementer back
 to push the `.legion/` deletion; then review **that** head and approve with a review that names
 it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
@@ -55,7 +65,9 @@ extension injects the session credential grant for `legion gh --`.
 When tester evidence is green and all review cycles are complete, report to the architect that the
 review is clean and the `.legion/` deletion is the only work left. The architect sends the
 implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs
-from the reviewed head only by that deletion, and approve it by name with
+from the reviewed head only by that deletion and that every thread you accepted shows
+`isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in
+the PR body's Threads section; verify against GitHub, not the body), and approve it by name with
 `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity).
 After approval, no implementation or further review change may happen. The prescribed retro may
 commit only `docs/solutions/` before the merger publishes `READY`.

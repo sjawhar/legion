@@ -70,6 +70,34 @@ The localhost-only Legion API lives in `api.ts`.
 - A phase worker's shim reaches the daemon one of two ways. The tmux runtime's `legion worker-shim --socket <path>` listens on a unix socket the daemon dials (`connectWorkerRpc`). `legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path>` is the reverse: the shim dials `worker_stream_port` (`LEGION_WORKER_STREAM_PORT`, default `port + 1`, validated as a TCP port distinct from `port`; a port already in use fails startup naming `worker_stream_port`), sends its boot token in one `hello` line, and spawns OMP only after the daemon's `hello_ack` — so a worker never runs unobserved and a rejected token never starts one. The daemon gives each connection `worker_rpc_timeout_seconds` to complete its hello (rejected as `hello timeout` otherwise, exactly like an unknown, stale-generation, already-bound, or malformed one), so an idle or dripping pre-hello connection never holds a file descriptor open indefinitely. While OMP lives, a dropped stream is redialed with exponential backoff from 200 ms capped at 5 s, `hello` is re-sent, and frames produced during the gap are delivered from the shim's bounded backlog in order after the next ack; the same 1000-frame bound and one-time drop log apply in both modes. The two flags are mutually exclusive; an unreadable or blank token file is a CLI error before anything is spawned. The stream carries the same NDJSON RPC protocol as the unix socket (`rpc_chunk` reassembly, drain-aware writes, run-state tracking are shared); `hello`/`hello_ack` are the only frames the shim itself consumes besides `shutdown`; any other line the daemon sends before its `hello_ack` is not forwarded either — the shim drops it with a `[worker-shim] ignoring a frame received before hello_ack` log, since no OMP child exists yet to receive it.
 - `api` before any `ProcessManager` call (`startDaemonLocked`, `index.ts`): no `ProcessManager` method runs before `api = startLegionApi(...)`. The manager's `mintControllerCapability`/`mintBootToken`/`mintWorkerBootToken`/`revokeSessionCapability` deps read `api` by reference, and every path into them — a dead worker's retirement (`retireWorkerLocator` → `revokeRoleClaim`), `ensureController`, root and worker launches — is reachable only afterwards. `reconnectWorkers` therefore runs after `api` is assigned (its retirements revoke through it) and, awaited, before `enableLaunches()` (promotion trusts the probed running-worker count); `pruneSecretFiles()` and the pending-controller-notice drain/spawn follow it in that same window. The API is already accepting requests while the probe runs; that is safe because every retirement re-validates its claim under `mutateClaim(token)`, an unprobed claim counts as running, and promotion stays gated.
 
+## GitHub Apps
+
+Legion acts on GitHub through two GitHub Apps, chosen per Legion role by `appRoleForLegionRole`
+(`api/github.ts`): the `reviewer` role runs as the **review** App (`github_apps.review` in
+`legion.yaml`; `legion-reviewer[bot]`), and every other role — root and sub-architects, planner,
+implementer, tester, merger — runs as the **implement** App (`github_apps.implement`;
+`legion-implementer[bot]`). Every credential a pane redeems — `/legion/v1/gh-token` behind
+`legion gh` and `legion threads resolve`, `/legion/v1/git-credential` behind `jj git push`, and the
+git identity lease minted at `/worker/started` — goes through that mapping, so the App a command
+acts as is the App of the role that runs it, never a choice the command makes.
+
+The review App holds `pull_requests: write` and no `contents` permission, and GitHub lets only a
+pull request's author, a comment's author, or an account with push access resolve a review thread
+or push to its branch; the review App is none of those by design, so it can post reviews and reply
+on threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened —
+both answer `Resource not accessible by integration`, and widening the App does not change that
+(LEGION-34). The implementer therefore pushes the `.legion/` deletion at the reviewer's direction,
+and the implementer — before every push that answers a review — and the merger — once more before
+READY — resolve every thread the reviewer has accepted with
+`legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
+`cmdThreadsResolve` in `cli/index.ts`). The command redeems the caller's grant through the same
+`/gh-token` path `legion gh` uses, reads every review thread over GitHub GraphQL with an injected
+`fetch`, resolves each unresolved thread whose newest comment was written by the account that
+opened it and begins `Accepted:` (one `resolveReviewThread` per thread), prints `resolved <url>` /
+`left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the first
+thread GitHub refuses; a `Still open:` reply, or any reply by another account, leaves the thread
+open with exit 0.
+
 ## OMP invocation and daemon tools
 
 Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required `mise x <tool> -- omp` command that launches the root architect and controller. The default is `DEFAULT_OMP_INVOCATION` in `omp-pin.ts`:

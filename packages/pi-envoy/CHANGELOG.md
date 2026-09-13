@@ -5,6 +5,7 @@
 ### Added
 
 - Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.
+- Reviewer, implementer, and merger role prompts (and the `legion-worker` skill) name the three thread reply forms — `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, `Still open: <what remains>` — and `legion threads resolve --pr <n> --repo <owner>/<repo>`, which the implementer runs before every push that answers a review and the merger before READY to resolve the threads the reviewer accepted (the review App cannot; LEGION-34).
 
 ### Fixed
 
