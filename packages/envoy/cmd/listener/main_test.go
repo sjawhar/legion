@@ -696,6 +696,104 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 	t.Logf("listener log line: %s", line)
 }
 
+func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "slow-holder"
+	roleTopic := contracts.RoleTopicPrefix + role
+	if err := harness.sessions.Put("ses_slow", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register slow holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_slow", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var acknowledge atomic.Bool
+	forwards := make(chan contracts.Envelope, 8)
+	responder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_slow"), func(message *natsgo.Msg) {
+		var forwarded contracts.Envelope
+		if err := json.Unmarshal(message.Data, &forwarded); err == nil {
+			forwards <- forwarded
+		}
+		if acknowledge.Load() && message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe holder responder: %v", err)
+	}
+	t.Cleanup(func() { _ = responder.Unsubscribe() })
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush subscriptions: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
+	publish := func(what string) contracts.Envelope {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body = %s", what, recorder.Code, recorder.Body.String())
+		}
+		var published contracts.Envelope
+		if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+			t.Fatalf("%s: decode: %v", what, err)
+		}
+		if published.DedupeKey != "publish.resend-1" {
+			t.Fatalf("%s: dedupe_key = %q, want publish.resend-1", what, published.DedupeKey)
+		}
+		return published
+	}
+	expectForward := func(what string, want contracts.Envelope) {
+		t.Helper()
+		select {
+		case forwarded := <-forwards:
+			if forwarded.EventID != want.EventID || forwarded.DedupeKey != roleForwardDedupePrefix+"publish.resend-1" {
+				t.Fatalf("%s: holder received event %q dedupe %q, want %q with the forward prefix", what, forwarded.EventID, forwarded.DedupeKey, want.EventID)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: holder received no forward", what)
+		}
+	}
+	expectNoException := func(what string) {
+		t.Helper()
+		if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+			t.Fatalf("%s: unexpected exception (or probe failed): %v", what, err)
+		}
+	}
+
+	// 1. The holder swallows the forward: receipt_timeout, attempt cache cleared.
+	first := publish("first publish")
+	expectForward("first publish", first)
+	assertDeliveryException(t, exceptionProbe, first, "receipt_timeout")
+
+	// 2. Same dedupe_key after the timeout: forwarded again; the holder now acknowledges.
+	acknowledge.Store(true)
+	second := publish("re-publish after receipt_timeout")
+	expectForward("re-publish after receipt_timeout", second)
+	expectNoException("re-publish after receipt_timeout")
+
+	// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded, no exception.
+	publish("re-publish after delivery")
+	select {
+	case forwarded := <-forwards:
+		t.Fatalf("re-publish after delivery: holder received %q; the listener must skip a delivered dedupe_key", forwarded.EventID)
+	case <-time.After(250 * time.Millisecond):
+	}
+	expectNoException("re-publish after delivery")
+	if !strings.Contains(harness.logs.String(), `"msg":"listener role dedupe skip"`) {
+		t.Fatalf("expected a dedupe skip log line:\n%s", harness.logs.String())
+	}
+}
+
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	client := setupPublishTestClient(t)
 	var state atomic.Pointer[listenerDeps]
