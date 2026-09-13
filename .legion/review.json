@@ -1,85 +1,100 @@
 {
-  "round": 1,
+  "round": 2,
   "verdict": "changes_requested",
   "critical": 1,
-  "important": 1,
-  "minor": 5,
-  "reviewedHead": "66b843f66a11de64f1ac07e3fd72276301e7834d",
-  "productHead": "bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad (implement handoff on d027061c0b310f4c78245e94df7c7423cef83d8c); 66b843f6 adds only .legion/test.json",
+  "important": 0,
+  "minor": 8,
+  "reviewedHead": "c1d38ed8e8f203c43d5f972da73591b26a8c81f3",
+  "productHead": "06d0f9a3692ea2133f96ad5562c62a8bbac2e7af (implement handoff round 4 on a457a5c888b8); c1d38ed8 adds only .legion/test.json",
+  "fingerprint": {
+    "66b843f6": "481c976a21e21f3dc34eec668af233dd96c58d91f8a524d7db68650c2c1c138e",
+    "c1d38ed8": "719079875d292e93e480b78a1a03266bd37407fabcc8e837a6a59082ca5fc1a6",
+    "changed": true
+  },
   "pullRequest": 1010,
-  "reviewId": 5190342693,
-  "reviewUrl": "https://github.com/sjawhar/legion/pull/1010#pullrequestreview-5190342693",
+  "reviewId": 5190510420,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1010#pullrequestreview-5190510420",
   "event": "REQUEST_CHANGES",
   "threads": [
     {
-      "url": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999296900",
-      "path": "scripts/smoke/up.sh",
-      "line": 579,
+      "url": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999472125",
+      "path": "scripts/smoke/down.sh",
+      "line": 165,
       "severity": "blocking",
       "state": "open",
-      "summary": "nats-container record is written before the port asserts and ensure_nats can refuse, so a refused up.sh leaves a record naming a container that does not exist; down.sh then never falls back to legion-smoke-nats (legacy rig re-run on its own SMOKE_DIR orphans the legacy container) and a same-SMOKE_DIR/different-SMOKE_PROJECT mistake overwrites a live rig's record. Fix: write the record after ensure_nats returns; add an assertion to the existing refusal case that the record is absent after refusal."
+      "summary": "Stale-directory hazard: legion.yaml is never removed by down.sh, so a directory whose pre-record rig was torn down long ago (yaml present, no record, no pids) still takes the legacy fallback and runs `docker rm -f legion-smoke-nats` on whoever owns that container now. Live at 11:20Z: /tmp/legion-smoke (the default SMOKE_DIR, what the README's `bash scripts/smoke/down.sh` acts on) has exactly that shape (project sjawhar/24, nats 14222, mtime 08:56Z) while `legion-smoke-nats` is Up since 11:16Z on 14262 (another tester's pre-PR rig). Reproduced with fake docker/tmux in a mktemp dir. Fix options: (1, recommended) no fallback removal — print the manual `docker rm -f legion-smoke-nats` instruction gated on `docker port` matching this rig's NATS_PORT; (2) fall back only when this run stopped a start-time-verified live daemon/listener from this directory's PID files. Either way: update the down.sh comment, README 104/110, down.test.sh's 'No record' case (assert refusal + empty docker log); consider removing legion.yaml and the record at the end of a successful teardown so a torn-down directory is inert for the tmux stop too. Spec Errors row 'down.sh finds no recorded name → removes the old fixed name and says so' must change — architect's call."
+    }
+  ],
+  "acceptedThreads": [
+    {
+      "url": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999296900",
+      "reply": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999469585",
+      "text": "Accepted: fixed in 1b6a5da65878f375800b8fd256748e33c68ddbd4 — record written after ensure_nats (a457a5c8 moved legion.yaml beside it); up.test.sh asserts neither file survives a refusal"
     },
     {
       "url": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999296902",
-      "path": "scripts/smoke/README.md",
-      "line": 96,
-      "severity": "non-blocking",
-      "state": "open",
-      "summary": "'naming the container and both ports' overstates ensure_nats's message, which names the container and the configured port only; fix wording or print docker port's mapping."
+      "reply": "https://github.com/sjawhar/legion/pull/1010#discussion_r3999469624",
+      "text": "Accepted: fixed in 1b6a5da65878f375800b8fd256748e33c68ddbd4 — README line 96 quotes ensure_nats's message verbatim"
     }
   ],
   "keyFindings": [
     {
       "severity": "critical",
-      "file": "scripts/smoke/up.sh:579",
-      "description": "Record written before any refusal point (port asserts 580-585, ensure_nats 592). Reproduced with a fake docker: no record -> down.sh falls back and removes legion-smoke-nats; record left by a refused start -> down.sh inspects only legion-smoke-nats-<slug>, removes nothing. thermonuclear-deep-review reproduced independently with a sourced-up.sh driver refused at ensure_nats. Proposed fix (move the write after ensure_nats) run against up.test.sh in a temp copy: 18 PASS."
-    },
-    {
-      "severity": "important",
-      "file": "scripts/smoke/README.md:96",
-      "description": "Docs claim the port-mismatch refusal names both ports; the message names the container and the configured port."
+      "file": "scripts/smoke/down.sh:164-169",
+      "description": "Legacy fixed-name fallback reachable from any stale pre-record directory (legion.yaml never revoked); removes another rig's live legion-smoke-nats. Exists on this machine now (/tmp/legion-smoke vs live legion-smoke-nats on 14262). Both thermo agents and I reproduced it with fakes; down.test.sh pins the behaviour as correct."
     },
     {
       "severity": "minor",
-      "file": "scripts/smoke/up.sh:582-584, scripts/smoke/up.test.sh:626-627",
-      "description": "Comment states the incident (first rig killed at boot) rather than the invariant (the daemon binds port+1)."
+      "file": "scripts/smoke/up.sh:596-597",
+      "description": "Write the record before legion.yaml so an interruption between the two writes leaves the shape down.sh ignores, not the legacy shape (moot if the fallback is removed)."
     },
     {
       "severity": "minor",
-      "file": "scripts/smoke/up.test.sh:637,640,659",
-      "description": "New shellcheck SC2154 (false positive via source=/dev/null) and two SC2329 infos on changed lines; implementer handoff's 'none on changed lines' inaccurate."
+      "file": "scripts/smoke/down.sh:128-131,175",
+      "description": "started-a-rig gate has two predicates (-r legion.yaml vs rig_project success); resolve the project once in main and pass it."
     },
     {
       "severity": "minor",
-      "file": "scripts/smoke/up.test.sh:597-608",
-      "description": "sjawhar/24 assertions depend on the last main() case having run as sjawhar/24; make the block self-contained."
+      "file": "scripts/smoke/down.sh:158",
+      "description": "-r sends a present-but-unreadable record down the legacy branch; fail closed (moot if fallback removed)."
     },
     {
       "severity": "minor",
-      "file": "scripts/smoke/down.sh:132-133",
-      "description": "-e then $(<record): an unreadable/directory record aborts down.sh under set -e after processes are stopped; -r would treat it as malformed."
+      "file": "scripts/smoke/up.sh:590-595",
+      "description": "Comment 'Nothing that can refuse the rig runs after this point' overstated; wait_for_json/assert_webhook_round_trip/ensure_root_issue can fail."
     },
     {
       "severity": "minor",
-      "file": "scripts/smoke/up.sh:585",
-      "description": "worker_stream_port resolves YAML > LEGION_WORKER_STREAM_PORT env > port+1 and the daemon inherits the operator env; optional: pin worker_stream_port in the generated legion.yaml."
+      "file": "scripts/smoke/down.sh:8, down.test.sh:227-230, up.test.sh:669",
+      "description": "Incident-narrating comments; keep the behavioural sentence."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/smoke/up.test.sh:643-648,670-677,709,713-720; down.test.sh:248-256",
+      "description": "main_with_real_port_check as subshell-bodied function; duplicated neither-file blocks; line 709 relies on a far-away export; no-rig case can assert an empty docker log."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/smoke/README.md:110",
+      "description": "'finding nothing' holds only for a directory up.sh refused; 'keep SMOKE_REPO exported' documents a gate (down.sh:113) whose value is never used."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/smoke/up.sh:569 vs down.sh:30",
+      "description": "SMOKE_PROJECT regex admits whitespace in the owner, which rig_project then rejects (fails closed; GitHub owners cannot contain whitespace). Accept as-is or tighten."
     }
   ],
   "verified": {
-    "ci": "Tests run 34749454851 at 66b843f6: lint, pr-title, typecheck, test success (check-runs API); same four green at bf338059 (34749394545, 34749228858, 34749177029). No pr-checks-result job on this workflow.",
-    "threads": "0 before this review (GraphQL reviewThreads.totalCount=0); 2 opened by review 5190342693.",
-    "e2e": "PR body carries acceptance-2 (two rigs, docker ps before/after each down.sh, malformed-record negative control) at 431a0d7a and acceptance-5 (A-1 rig refused by the new check before launch; own-daemon re-run REUSED) at bf338059; jj diff 431a0d7a..bf338059 --summary confirms down.sh untouched and up.sh changed only by the worker-stream hunk.",
-    "local": "up.test.sh 18 PASS exit 0; down.test.sh 4 PASS exit 0; shellcheck -x: 3 known pre-existing + SC2154/SC2329x2 on up.test.sh changed lines; checkpoints.sh and envoy-bridge.ts unchanged and name-independent.",
-    "thermo": "thermonuclear-deep-review: one blocking (record ordering), rest non-blocking/pre-existing. thermonuclear-code-quality: no blocking; README:96 wording + nits.",
-    "architectAsks": "record left after down.sh: correct, reason stated in down.sh comment and exercised by down.test.sh's double teardown; regex matches exactly project_slug output (slug never empty, [a-z0-9]+); ensure_nats reuse/mismatch unchanged; ENVOY_MACHINE_ID only in the listener env block; checkpoints.sh/envoy-bridge.ts unchanged."
+    "ci": "Tests run 34752584279 at c1d38ed8: lint, pr-title, typecheck, test success (check-runs API). No pr-checks-result job.",
+    "threads": "2 open before this review (mine, both with implementer fix replies naming 1b6a5da6); replied Accepted: on both; 1 new blocking thread opened by review 5190510420. GitHub wrapped the two standalone replies in an implicit empty 'commented' review each (pr-review events at 11:21:52/53Z) — GitHub's behaviour for reply comments, not extra submissions.",
+    "e2e": "PR body: round-3 live run (09:57–10:10Z) covers acceptance 6 (throwaway dir refusal left legion-sjawhar41 and its container alone; disagreement warning tore down the yaml's project); round-4 live run (10:39–10:40Z at 06d0f9a3, parent of head) covers acceptance 7 (refused start left neither file; fake-docker probe logged zero invocations vs round 3's rm -f). down.sh/down.test.sh/README byte-identical between 9f7a4e85 and head per tester hashes and jj diff --summary.",
+    "local": "up.test.sh 19 PASS exit 0; down.test.sh 5 PASS exit 0; shellcheck -x: only the 3 pre-existing findings; checkpoints.sh/envoy-bridge.ts unchanged and name-independent.",
+    "thermo": "thermonuclear-deep-review: one blocking (stale-directory fallback), three non-blocking; empirically confirmed both acceptance-7 cases go red under each previous ordering on a temp copy. thermonuclear-code-quality: no blocking; nits above.",
+    "architectAsks": "rig_project regex exact against write_daemon_config output (^project: cannot match dispatch_project:; padding/CRLF absorbed; whitespace-in-owner fails closed); disagreement warning leaks no secret; no up.sh path yields legion.yaml-without-record except a signal/I/O failure between the two adjacent writes (fast-follow swap); down.test.sh acceptance-6 fixtures prove their claims and the disagreement case shows the fake can drive a kill."
   },
-  "preExisting": [
-    "down.sh stop_tmux_session keys on SMOKE_PROJECT alone (legion-<slug> + @legion_owner), not on this SMOKE_DIR's rig. Out of LEGION-41's spec; raised to the architect for a scope decision (recording the tmux socket name in SMOKE_DIR like the container name would close it)."
-  ],
-  "incident": "~09:34Z: the thermonuclear-deep-review subagent ran the real scripts/smoke/down.sh with SMOKE_PROJECT=sjawhar/16 from a throwaway SMOKE_DIR (fake docker/ss, real tmux) and killed the live LEGION-16 rig's private tmux server legion-sjawhar16 (controller pane). That rig's daemon (pid 1741820, port 19391), listener, bridge, container legion16-smoke-nats, and pid files were untouched. LEGION-16 tester and architect notified via their role topics; LEGION-16 architect acknowledged (tearing down and re-upping from the same head) and asked that LEGION-41 key every down.sh stop path on the rig's own identity and that audits never run down.sh against another rig's project name. The subagent was told to run no real rig script again.",
-  "nextRound": "Implementer: move the record write after ensure_nats (+ refusal-case assertion), fix README:96 wording, optionally the fast-follow nits; reply on both threads; run `legion threads resolve --pr 1010 --repo sjawhar/legion` only after the reviewer's Accepted: replies. Tester round (behavioural testing is mandatory after a corrective push). Reviewer re-reviews the new head (thermo again if the fingerprint changed, which it will), answers both threads with Accepted:/Still open:, COMMENT while .legion/ remains; APPROVE only the head that carries the .legion/ deletion, named by SHA.",
-  "toolNote": "legion gh -- api --method POST .../reviews --input /abs/path.json worked from this pane (contrary to the tester's note about --input); use an absolute path.",
+  "safety": "No real up.sh/down.sh/checkpoints.sh run by me or my subagents this round; down.sh exercised only with fake docker and fake tmux first on PATH in mktemp directories I created; real docker/tmux use read-only (docker ps, ls).",
+  "nextRound": "Architect decides fix option (1 no fallback removal, recommended; 2 fallback only after a verified live-process stop from this directory) and rewrites the spec Errors row. Implementer: fix + tests + README, reply on r3999472125, run `legion threads resolve --pr 1010 --repo sjawhar/legion` (resolves the two Accepted threads) before pushing. Tester round. Reviewer: re-review new head (fingerprint will change: thermo again, one review), answer r3999472125, COMMENT while .legion/ remains; APPROVE only the .legion/-free head by SHA.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T09:41:05.393Z"
+  "completed": "2026-09-13T11:24:08.181Z"
 }
