@@ -1,0 +1,290 @@
+{
+  "requiredSkills": {
+    "implement": [
+      "test-driven-development",
+      "verification-before-completion"
+    ],
+    "test": [
+      "verification-before-completion"
+    ],
+    "review": [
+      "receiving-code-review"
+    ]
+  },
+  "workflowRecommendation": "One implementer, inline, in step order 0→1→2→3→5→4→6 (4 and 6 touch different files and can go anywhere after 1). TDD per step: write the test, watch it fail, implement, watch it pass, split-commit only the named paths. Then the tester runs the rig E2E and the negative control; the reviewer checks Acceptance 4 from the diff and the E2E facts from the run artifacts.",
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "issue": "LEGION-45",
+  "title": "Refuse jj operation-log rewrites (undo / abandon / op restore|revert|abandon|undo) in every phase-worker pane",
+  "summary": "One new guard in packages/pi-envoy/extensions/legion.ts's tool_call hook, inside the existing `active?.kind === \"phase-worker\"` branch after the reviewer/merger checks: a bash command is tokenised into simple commands and each `jj` invocation's whole bare argument list is judged (undo/abandon anywhere; restore/revert only beside op/operation); every quoted word, eval code, and hub application/args/text are judged by the plain-text rule (mentions `jj` together with undo, abandon, or op/operation … restore/revert); an unparseable command falls back to the plain-text rule, never to allowing. The refusal is `{ block: true, reason }` naming the command, stating the log is shared by every Legion issue workspace, and giving the recovery rule (new commit or `jj restore <paths>`; otherwise the architect). isSingleLegionCommand is untouched. Steps 1–5 map onto Acceptance 1–5; step 0 is preflight and step 6 gives the tester a real-surface rig (grant rig `--prompt-file`). The matcher was proven against all 50 case rows below before this plan was written.",
+  "authority": {
+    "spec": "dispatch_doc_read({ issue: \"LEGION-45\", version: 2 }) — Summary, Acceptance 1–5, Requirements, Design, Errors, Testing, Rejected, and the four inferred \"New since we talked\" points; all honoured, none reopened.",
+    "architectAssignment": "First prompt of this planner session: steps one-to-one onto Acceptance 1–5 with the exact positive/negative/role/eval/hub cases; refusal names the command, says the log is shared by every issue workspace, gives the recovery rule; skip project-wide lint/tests (implementer runs them).",
+    "branch": "legion/LEGION-45 in the shared jj clone (workspace legion-45), currently @ on main 52c5e03e 'daemon: trust a tmux pane only as the process its locator recorded (LEGION-27) (#981)'. No architect.json was committed for this issue; the spec is the only predecessor artifact.",
+    "proof": "The exact code in steps 1 and 5 was run by the planner against the 50-row case table (20 refused bash, 18 allowed bash, 6 refused eval/hub, 6 allowed eval/hub/edit): ALL CASES PASS; `bunx @biomejs/biome check --error-on-warnings` on the assembled fragment reports no lint or format diagnostics."
+  },
+  "decisionsNeeded": [
+    {
+      "id": "D1",
+      "question": "Should the guard also bind a phase worker's in-process `task` subagents?",
+      "currentState": "legion.ts:597-600 returns before any gate for a subagent session (`if (await checkSubagentSession(context)) return undefined;`), on the reasoning that the parent's own gate governed the parent's `task` call. That holds for edit/write, not for this guard: the parent's `task` call carries a prompt, the subagent's bash carries the `jj undo`, and it runs in the same pane against the same shared operation log. The spec scopes Acceptance 1–5 to bash/eval/hub in the phase-worker branch and says nothing about subagents; this plan implements exactly that scope.",
+      "options": [
+        "A (spec as written, planned below): guard inside the phase-worker branch only; a scout/reviewer subagent spawned by a worker can still run `jj undo`.",
+        "B (recommended): additionally evaluate the guard before the subagent early return whenever the pane's environment classifies as a phase worker — `classifySession(process.env).kind === \"phase-worker\"`, computed once per module instance on first tool_call (never at module load: the tests set env before calling legionExtension, but a throw for an unrecognised LEGION_ROLE must stay inside the handler). Roughly 8 lines: hoist the `jjAttempt` check to run right after the debug log when that classification holds, and drop the copy inside the branch. One extra test: boot as in 'never bootstraps, claims a role, or exits for a subagent session, even with phase-worker environment' (legion.test.ts:1258) and assert a bash `jj undo` from the subagent context is refused with the shared-log reason while `legion state` still passes."
+      ],
+      "recommendation": "B. Same blast radius, same fix, one pane; the spec's own argument for covering eval and hub ('refusing only bash would leave the problem in the title true') applies verbatim. It changes a documented invariant ('No gate of any kind applies to a subagent's own tool calls'), so it is the architect's call and a spec amendment (Acceptance 6), not a silent widening.",
+      "whoDecides": "architect (spec owner) before spawning the implementer; the implementer applies B as an extra step 1b if approved."
+    }
+  ],
+  "newSinceSpec": [
+    "Quoted shell words are opaque to the tokenizer but each is still held to the plain-text rule, so `sh -c 'jj undo'`, `bash -lc \"jj op restore x\"`, and a heredoc/echo containing `jj undo` are refused (spec Errors row 'never allow by default' applied to nested shells). Cost: a commit message or PR body that mentions `jj undo` cannot be written through bash text; the skill paragraph tells workers to use the write tool or say 'operation-log rollback'.",
+    "'Bare' means at least one character of the word was unquoted and unescaped: `\"undo\"` and `'undo'` are message words; `un\"do\"` and `un\\do` are the subcommand. `jj describe -m \"undo\"` (single quoted word) is therefore allowed, `jj describe -m undo` refused — exactly the spec's 'unquoted message word' line.",
+    "hub: `text` (stdin sent to a supervised process with `op: send`) is judged alongside `application` and `args`, since a supervised shell would run it; regardless of `op`, so the check is one join. Reversible by deleting one array element.",
+    "The refusal names the offending invocation as its unquoted words (`jj -R $LEGION_WORKSPACE undo`) for bash, and `<tool>: jj <words>` (`eval: jj op restore`, `hub: jj undo`) for the plain-text rule. Tests assert the three required contents (command name, 'every Legion issue workspace shares', recovery: 'new commit' + 'jj restore <paths>' + 'architect') with stringContaining, never the exact sentence.",
+    "The plain-text regex allows any non-word run between op/operation and restore/revert (`\\b(?:op|operation)\\b\\W+(?:restore|revert)\\b`) so an argv literal `[\"jj\", \"op\", \"restore\"]` in eval code counts; `jj op log; jj restore f` does not (word characters intervene). Case-sensitive: the subcommands are lowercase and that is the threat.",
+    "A refused command also never mints a grant (the guard returns before the grant path at legion.ts:648+); step 1's test pins it — a wrongly minted 60-second grant would be a live credential for a command that never ran.",
+    "Step 6 adds `--prompt-file` to the grant rig (packages/pi-envoy/scripts/grant-rig/run.ts) so the tester can drive a real production-profile worker through the refused and allowed commands and read the real op log — the production-like surface Sami requires (legion-worker skill, 2026-09-13 ruling). Without it there is no surface: the rig's prompt is hard-coded.",
+    "Commit messages and test names in this plan avoid putting `jj` and a blocked word in one quoted argument, so they remain typeable through bash once this guard is deployed to the panes that will maintain it."
+  ],
+  "decisions": [
+    {
+      "id": "M1",
+      "topic": "Matcher placement",
+      "decision": "Four unexported functions and five module constants in legion.ts directly after isSingleLegionCommand (line 167) and before LEGION_LOADED_MARKER (line 174): jjLogRewriteMention, splitShellCommands (+ interface ShellWord), jjLogRewriteInvocation, jjLogRewriteAttempt. isSingleLegionCommand is not modified. Static word tables are string arrays with .includes (matches CODE_MUTATION_TOOLS; project rule ts-set-map)."
+    },
+    {
+      "id": "M2",
+      "topic": "Hook placement and precedence",
+      "decision": "Inside `if (active?.kind === \"phase-worker\") { … }` (legion.ts:629-647), after the merger check and before the closing brace. Consequences pinned by tests: root architect (kind root-architect) and controller (no capability, LEGION_CONTROLLER=1) never reach it; a sub-architect (phase-worker with role architect) is answered first by the blanket architect bash gate at :609; reviewer and merger bash falls through their tool checks to the guard; a refused call returns before the grant is minted."
+    },
+    {
+      "id": "M3",
+      "topic": "Structural rule",
+      "decision": "Per simple command, the first bare word equal to `jj` or ending in `/jj` starts the invocation; its bare arguments are refused when any equals undo/abandon, or when one equals op/operation and another equals restore/revert (order-insensitive; whole list, so global options before the subcommand do not matter). Separators: ; & | newline ( ) backtick outside quotes — `&&`, `||`, `$(…)`, subshells, and backticks all fall out of that."
+    },
+    {
+      "id": "M4",
+      "topic": "Fallbacks",
+      "decision": "Unterminated quote → plain-text rule on the whole command. Quoted word → plain-text rule on the word. Neither ever allows on failure to parse (spec Errors row)."
+    },
+    {
+      "id": "M5",
+      "topic": "Docs in scope",
+      "decision": "SKILL.md 'Shared operation safety' paragraph (Acceptance 4) and a packages/pi-envoy/CHANGELOG.md [Unreleased] › Added bullet (the file is hand-maintained; release-bump.sh derives the version from `feat(pi-envoy):` commits). Role prompts already say never to use the commands and are not touched; packages/pi-envoy/AGENTS.md's src/legion row describes modules, not the hook's gates, and is not touched."
+    }
+  ],
+  "steps": [
+    {
+      "n": 0,
+      "acceptance": null,
+      "title": "Preflight: bind, install, baseline",
+      "files": [],
+      "change": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" status && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" log -r 'main@origin | @' --no-graph -T 'commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"'. Do not rebase if main@origin moved (Sami 2026-09-11: only on a real conflict). The working copy already carries an untracked-on-main `A .omp/config.yml` from provisioning: never name it in a `jj split`. Then `cd -- \"$LEGION_WORKSPACE\" && bun install --frozen-lockfile` (node_modules is gitignored; the planner ran it once: 1172 packages). Read legion.ts:143-194 (isSingleLegionCommand, the tool constants, isToolDeviceInvocation) and :591-691 (the tool_call hook) and legion.test.ts:317-390 (bootWorker) and :1643-1776 (the existing role-restriction tests) before editing.",
+      "tests": [],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"restricts phase-worker tool access|root architect session|controller session|tool-device writes|single `legion\"",
+      "expected": "5 pass, 0 fail (planner observed 2.8 s)."
+    },
+    {
+      "n": 1,
+      "acceptance": 1,
+      "title": "Refuse bash commands that rewrite the shared operation log",
+      "files": [
+        "Modify: packages/pi-envoy/extensions/legion.ts — insert the matcher after line 167 (end of isSingleLegionCommand), before the LEGION_LOADED_MARKER comment at 169; insert the hook fragment after line 646 (the merger `return`'s closing `}`), inside the phase-worker branch",
+        "Test: packages/pi-envoy/extensions/legion.test.ts — insert the new test after line 1776 (end of 'allows xd:// tool-device writes …')"
+      ],
+      "change": "1a. Add the failing test (`tests[0]` below) to legion.test.ts. 1b. Run it — it must FAIL with `allowedByMistake` listing all 19 commands (the hook currently returns undefined and mints a grant for each). 1c. Add the matcher (`code[0]`) to legion.ts and the guard (`code[1]`) to the hook. 1d. Run again — PASS. 1e. Commit.",
+      "code": [
+        "// Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one\n// operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for\n// every tree at once (LEGION-45: one worker's `jj undo` rewrote nine of another tree's commits).\n// The tool_call hook refuses them in every phase-worker pane. `restore`/`revert` are operation-log\n// commands only under `op`/`operation`; `jj restore <paths>` is file-level and stays allowed.\nconst JJ_LOG_REWRITE_WORDS = [\"undo\", \"abandon\"];\nconst JJ_OP_WORDS = [\"op\", \"operation\"];\nconst JJ_OP_LOG_REWRITE_WORDS = [\"restore\", \"revert\"];\nconst JJ_MENTION = /\\bjj\\b/;\n// Any non-word run between `op` and `restore`, so `\"op\", \"restore\"` in an argv literal counts.\nconst JJ_LOG_REWRITE_MENTION = /\\b(?:undo|abandon)\\b|\\b(?:op|operation)\\b\\W+(?:restore|revert)\\b/;\n\n/** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`\n * code, a `hub` process start, a quoted shell word, and a `bash` command with unbalanced quoting:\n * the blocked words `text` mentions together with `jj` (e.g. `undo`, `op restore`), or undefined. */\nfunction jjLogRewriteMention(text: string): string | undefined {\n  if (!JJ_MENTION.test(text)) return undefined;\n  const match = JJ_LOG_REWRITE_MENTION.exec(text);\n  return match === null ? undefined : match[0].replace(/\\W+/g, \" \");\n}\n\ninterface ShellWord {\n  readonly text: string;\n  /** False when every character came from inside quotes or a backslash escape (`\"undo\"`), so a\n   * quoted message word is never taken for a subcommand; `un\"do\"` and `un\\do` are still bare. */\n  readonly bare: boolean;\n}\n\n/** Splits a shell command into simple commands (at `;`, `&`, `|`, newline, `(`, `)`, and\n * backtick) of words, honouring single quotes, double quotes, and backslash escapes. A word's\n * text is its unquoted value. Undefined on an unterminated quote: the caller then applies the\n * plain-text rule to the whole command, never allows it. Not a shell parser -- no expansions, no\n * heredoc awareness -- and every gap errs toward refusing (a heredoc body is read as commands). */\nfunction splitShellCommands(command: string): ShellWord[][] | undefined {\n  const commands: ShellWord[][] = [];\n  let words: ShellWord[] = [];\n  let text = \"\";\n  let unquotedChars = 0;\n  let inWord = false;\n  let quote: '\"' | \"'\" | undefined;\n  const endWord = (): void => {\n    if (inWord) words.push({ text, bare: unquotedChars > 0 });\n    text = \"\";\n    unquotedChars = 0;\n    inWord = false;\n  };\n  const endCommand = (): void => {\n    endWord();\n    if (words.length > 0) commands.push(words);\n    words = [];\n  };\n  for (let i = 0; i < command.length; i += 1) {\n    const char = command.charAt(i);\n    if (quote !== undefined) {\n      if (char === quote) quote = undefined;\n      else if (quote === '\"' && char === \"\\\\\" && i + 1 < command.length) {\n        i += 1;\n        text += command.charAt(i);\n      } else text += char;\n      continue;\n    }\n    if (char === '\"' || char === \"'\") {\n      quote = char;\n      inWord = true;\n    } else if (char === \"\\\\\") {\n      if (i + 1 < command.length) {\n        i += 1;\n        text += command.charAt(i);\n        inWord = true;\n      }\n    } else if (char === \" \" || char === \"\\t\") {\n      endWord();\n    } else if (\";&|\\n()`\".includes(char)) {\n      endCommand();\n    } else {\n      text += char;\n      unquotedChars += 1;\n      inWord = true;\n    }\n  }\n  if (quote !== undefined) return undefined;\n  endCommand();\n  return commands;\n}\n\n/** The first thing in a `bash` command that would rewrite the shared jj operation log, named for\n * the refusal, or undefined. Each simple command is judged on the whole argument list after its\n * first bare `jj` (or `.../jj`) word -- never only the first word after it -- so `jj -R <path> undo`,\n * `jj --at-op <id> op restore <id>`, and `jj operation restore` count, in any position of a\n * pipeline or `&&` chain; a bare `undo`/`abandon` counts even as an unquoted message word, and\n * `restore`/`revert` count only beside a bare `op`/`operation`. Every quoted word is held to the\n * plain-text rule too (`sh -c \"jj undo\"`), and so is the whole command when it does not tokenise. */\nfunction jjLogRewriteInvocation(command: string): string | undefined {\n  const commands = splitShellCommands(command);\n  if (commands === undefined) {\n    return jjLogRewriteMention(command) === undefined ? undefined : command.trim();\n  }\n  for (const words of commands) {\n    const quoted = words.find((word) => !word.bare && jjLogRewriteMention(word.text) !== undefined);\n    if (quoted !== undefined) return quoted.text;\n    const jj = words.findIndex(\n      (word) => word.bare && (word.text === \"jj\" || word.text.endsWith(\"/jj\"))\n    );\n    if (jj === -1) continue;\n    const args = words.slice(jj + 1).flatMap((word) => (word.bare ? [word.text] : []));\n    const rewritesLog =\n      args.some((arg) => JJ_LOG_REWRITE_WORDS.includes(arg)) ||\n      (args.some((arg) => JJ_OP_WORDS.includes(arg)) &&\n        args.some((arg) => JJ_OP_LOG_REWRITE_WORDS.includes(arg)));\n    if (rewritesLog)\n      return words\n        .slice(jj)\n        .map((word) => word.text)\n        .join(\" \");\n  }\n  return undefined;\n}\n\n/** What a phase worker's `bash` call would run against the shared operation log, or undefined.\n * (Step 5 widens this to `eval` code and `hub` input.) */\nfunction jjLogRewriteAttempt(toolCall: ToolCallEvent): string | undefined {\n  const { toolName, input } = toolCall;\n  if (toolName === \"bash\" && typeof input.command === \"string\") {\n    return jjLogRewriteInvocation(input.command);\n  }\n  return undefined;\n}\n",
+        "      // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of\n      // one clone). Refused before it runs and before any grant is minted for it.\n      const jjAttempt = jjLogRewriteAttempt(toolCall);\n      if (jjAttempt !== undefined) {\n        return {\n          block: true,\n          reason:\n            `refused \\`${jjAttempt}\\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo ` +\n            \"rewrite the jj operation log, which every Legion issue workspace shares (each is a jj \" +\n            \"workspace of one clone), so they rewrite other trees' commits too. Recover forward with \" +\n            \"a new commit or `jj restore <paths>` of files; anything else, stop and send the owning \" +\n            'architect the `jj -R \"$LEGION_WORKSPACE\" log` evidence.',\n        };\n      }\n"
+      ],
+      "tests": [
+        "  test(\"refuses a phase worker's bash command that would rewrite the shared jj operation log\", async () => {\n    const requests: { readonly path: string; readonly body: unknown }[] = [];\n    const workspace = await createJjWorkspace();\n    const { toolCall, context } = await bootWorker({\n      role: \"implementer\",\n      workspace,\n      sessionId: \"ses_implementer_jj_log\",\n      requests,\n      extraRoutes: (url) =>\n        url.pathname === \"/legion/v1/grants\"\n          ? Response.json({ grantId: \"grant-jj-log\", expiresAt: \"2099-01-01T00:00:00.000Z\" })\n          : undefined,\n    });\n    const mints = (): number =>\n      requests.filter((request) => request.path === \"/legion/v1/grants\").length;\n    const mintsBefore = mints();\n    // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,\n    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases.\n    const refused = [\n      \"jj undo\",\n      'jj -R \"$LEGION_WORKSPACE\" undo',\n      \"cd ws && jj undo\",\n      \"jj op restore 63461aba\",\n      \"jj op abandon\",\n      \"jj op revert\",\n      \"jj abandon\",\n      \"jj --repository p undo\",\n      \"jj operation restore 63461aba\",\n      \"jj op undo\",\n      \"jj op log -n 1 | head -1 | xargs jj op restore\",\n      \"jj --at-op 805478f4 op restore 805478f4\",\n      \"jj describe -m undo this\",\n      \"sh -c 'jj -R ws undo'\",\n      \"(cd ws && jj abandon)\",\n      \"cd ws\\njj -R . undo\",\n      \"env JJ_CONFIG=/x /usr/local/bin/jj undo\",\n      'jj un\"do\"',\n      \"jj -R \\\"$LEGION_WORKSPACE\\\" describe -m 'undo\",\n    ];\n    const allowedByMistake: string[] = [];\n    for (const command of refused) {\n      const result = await toolCall(\n        { toolName: \"bash\", toolCallId: `call-jj-log-${command}`, input: { command } },\n        context\n      );\n      const blocked =\n        typeof result === \"object\" && result !== null && \"block\" in result && result.block === true;\n      if (!blocked) allowedByMistake.push(command);\n    }\n    expect(allowedByMistake).toEqual([]);\n    // A refused command never mints a grant: nothing ran, so nothing ran under one.\n    expect(mints()).toBe(mintsBefore);\n    // The refusal names the command, says the log is shared by every issue workspace, and gives\n    // the recovery rule (new commit, or jj restore of files; otherwise the architect).\n    const result = await toolCall(\n      {\n        toolName: \"bash\",\n        toolCallId: \"call-jj-log-named\",\n        input: { command: 'jj -R \"$LEGION_WORKSPACE\" undo' },\n      },\n      context\n    );\n    for (const phrase of [\n      \"jj -R $LEGION_WORKSPACE undo\",\n      \"every Legion issue workspace shares\",\n      \"new commit\",\n      \"jj restore <paths>\",\n      \"architect\",\n    ]) {\n      expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });\n    }\n  });\n"
+      ],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"shared jj operation log\"",
+      "expected": "1b: 1 fail — `expect(allowedByMistake).toEqual([])` with 19 entries. 1d: 1 pass; the earlier baseline filter still 5 pass.",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"feat(pi-envoy): refuse jj operation-log rewrites in phase-worker panes (LEGION-45)\" packages/pi-envoy/extensions/legion.ts packages/pi-envoy/extensions/legion.test.ts"
+    },
+    {
+      "n": 2,
+      "acceptance": 2,
+      "title": "Pin what stays allowed: jj restore <paths>, jj op log, jj op show, quoted message words, and every skill command",
+      "files": [
+        "Test: packages/pi-envoy/extensions/legion.test.ts — insert after the step 1 test"
+      ],
+      "change": "2a. Add `tests[0]`. 2b. Run — it must PASS with no production change (the step 1 matcher already satisfies it; the planner proved every row). If any row is refused, the defect is in splitShellCommands/jjLogRewriteInvocation — fix the rule, never add an allow-list or a special case for the row. 2c. Commit.",
+      "code": [],
+      "tests": [
+        "  test(\"leaves file-level jj restore, jj op log, jj op show, and quoted message words alone\", async () => {\n    const requests: { readonly path: string; readonly body: unknown }[] = [];\n    const workspace = await createJjWorkspace();\n    const { toolCall, context } = await bootWorker({\n      role: \"implementer\",\n      workspace,\n      sessionId: \"ses_implementer_jj_ok\",\n      requests,\n      extraRoutes: (url) =>\n        url.pathname === \"/legion/v1/grants\"\n          ? Response.json({ grantId: \"grant-jj-ok\", expiresAt: \"2099-01-01T00:00:00.000Z\" })\n          : undefined,\n    });\n    const mints = (): number =>\n      requests.filter((request) => request.path === \"/legion/v1/grants\").length;\n    const mintsBefore = mints();\n    // The spec's negatives plus the exact commands the legion-worker skill has every role run:\n    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.\n    const allowed = [\n      \"jj restore src/x.ts\",\n      'jj -R \"$LEGION_WORKSPACE\" restore packages/pi-envoy/extensions/legion.ts',\n      \"jj op log\",\n      'jj -R \"$LEGION_WORKSPACE\" op log -n 5',\n      \"jj op show\",\n      'jj describe -m \"undo this\"',\n      \"jj -R \\\"$LEGION_WORKSPACE\\\" rebase -s 'roots(main@origin..@)' -d main@origin\",\n      'cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(main@origin | abc123)\" --to abc123 --git --context 0 \\'~(.legion | docs/solutions)\\' | sed -e \\'/^@@/d\\' -e \\'/^index /d\\' | sha256sum',\n      'jj -R \"$LEGION_WORKSPACE\" split -m \"plan: record handoff\" .legion/plan.json',\n      \"jj -R \\\"$LEGION_WORKSPACE\\\" log -r 'description(glob:\\\"undo*\\\")'\",\n      \"jj -R \\\"$LEGION_WORKSPACE\\\" log -r 'ancestors(@, 5)'\",\n      \"jj --at-op 805478f4 restore src/x.ts\",\n      \"legion state\",\n    ];\n    const refusedByMistake: string[] = [];\n    for (const command of allowed) {\n      const result = await toolCall(\n        { toolName: \"bash\", toolCallId: `call-jj-ok-${command}`, input: { command } },\n        context\n      );\n      if (result !== undefined) refusedByMistake.push(`${command} -> ${JSON.stringify(result)}`);\n    }\n    expect(refusedByMistake).toEqual([]);\n    // Each allowed command went down the ordinary path: one grant minted per call.\n    expect(mints()).toBe(mintsBefore + allowed.length);\n  });\n"
+      ],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"shared jj operation log|quoted message words alone\"",
+      "expected": "2 pass. The second test also asserts one grant minted per allowed command (13), proving the hook fell through to its ordinary path.",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"test(pi-envoy): pin the jj commands the operation-log guard leaves alone (LEGION-45)\" packages/pi-envoy/extensions/legion.test.ts"
+    },
+    {
+      "n": 3,
+      "acceptance": 3,
+      "title": "Root architect and controller unaffected; every phase-worker role guarded; each role's sanctioned jj commands allowed",
+      "files": [
+        "Test: packages/pi-envoy/extensions/legion.test.ts — (a) extend 'does not block bash calls from the controller session' (lines 2014-2050); (b) extend 'blocks code tools in a root architect session' (lines 2760-2811); (c) insert the role-matrix test after the step 2 test"
+      ],
+      "change": "3a. Append `tests[0]` part (a) to the controller test and part (b) to the root-architect test, each before the test's closing `});`. 3b. Add `tests[1]` (role matrix over LEGION_ROLES: five phase-worker roles refused with the shared-log reason, the sub-architect answered by the architect gate; each role's real sanctioned command allowed). 3c. Run — all PASS with no production change. 3d. Commit.",
+      "code": [],
+      "tests": [
+        "// (a) Append inside the existing test \"does not block bash calls from the controller session\",\n//     after its `legion state` assertion (legion.test.ts ~line 2049, before the test's closing\n//     `});`):\n    // LEGION-45: the controller does not commit and is not a phase worker; the operation-log guard\n    // never binds it.\n    await expect(\n      toolCall(\n        {\n          toolName: \"bash\",\n          toolCallId: \"call-controller-jj\",\n          input: { command: \"jj -R /tmp/legion-workspace undo\" },\n        },\n        context\n      )\n    ).resolves.toBeUndefined();\n\n// (b) Append inside the existing test \"blocks code tools in a root architect session\", after its\n//     `echo should-not-run` assertion (legion.test.ts ~line 2810, before the test's closing `});`):\n    // LEGION-45: the root architect's blanket bash gate answers first; the phase-worker\n    // operation-log guard never reaches it (its behaviour is unchanged by that guard).\n    await expect(\n      toolCall(\n        { toolName: \"bash\", toolCallId: \"architect-bash-jj\", input: { command: \"jj undo\" } },\n        context\n      )\n    ).resolves.toEqual({\n      block: true,\n      reason: \"the architect delegates all code work to phase workers\",\n    });\n",
+        "  test(\"applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone\", async () => {\n    // What each role actually runs per the legion-worker skill and its role prompt.\n    const sanctioned: Record<LegionRole, string> = {\n      planner: 'jj -R \"$LEGION_WORKSPACE\" split -m \"plan: record handoff\" .legion/plan.json',\n      implementer:\n        'cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" new && rm -rf .legion && jj -R \"$LEGION_WORKSPACE\" describe -m \"chore: remove .legion handoffs\" && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/REPO-43 && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/REPO-43',\n      tester: 'jj -R \"$LEGION_WORKSPACE\" split -m \"test: record handoff\" .legion/test.json',\n      reviewer:\n        'cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" file list -r @- .legion && legion gh -- api --method POST repos/o/r/pulls/7/reviews --input body.json',\n      merger: 'jj -R \"$LEGION_WORKSPACE\" diff --from abc123 --to def456 --summary',\n      architect: \"legion handoff complete --summary x\",\n    };\n    for (const role of LEGION_ROLES) {\n      const workspace = await createJjWorkspace();\n      const { toolCall, context } = await bootWorker({\n        role,\n        workspace,\n        sessionId: `ses_${role}_jj_guard`,\n        extraRoutes: (url) =>\n          url.pathname === \"/legion/v1/grants\"\n            ? Response.json({ grantId: `grant-${role}`, expiresAt: \"2099-01-01T00:00:00.000Z\" })\n            : undefined,\n      });\n      const undo = await toolCall(\n        {\n          toolName: \"bash\",\n          toolCallId: `call-${role}-jj-undo`,\n          input: { command: 'jj -R \"$LEGION_WORKSPACE\" undo' },\n        },\n        context\n      );\n      if (role === \"architect\") {\n        // A sub-architect's blanket bash gate answers first, as for the root architect.\n        expect(undo).toEqual({\n          block: true,\n          reason: \"the architect delegates all code work to phase workers\",\n        });\n      } else {\n        expect(undo).toEqual({\n          block: true,\n          reason: expect.stringContaining(\"every Legion issue workspace shares\"),\n        });\n      }\n      await expect(\n        toolCall(\n          {\n            toolName: \"bash\",\n            toolCallId: `call-${role}-jj-sanctioned`,\n            input: { command: sanctioned[role] },\n          },\n          context\n        )\n      ).resolves.toBeUndefined();\n    }\n  });\n"
+      ],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"controller session|root architect session|every phase-worker role\"",
+      "expected": "3 pass (the role-matrix test boots six workers; ~5 s).",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"test(pi-envoy): the operation-log guard binds phase workers only (LEGION-45)\" packages/pi-envoy/extensions/legion.test.ts"
+    },
+    {
+      "n": 4,
+      "acceptance": 4,
+      "title": "Skill paragraph says the commands are refused by the extension and names the recovery rule; changelog entry",
+      "files": [
+        "Modify: skills/legion-worker/SKILL.md:123-126 — replace the whole 'Shared operation safety' paragraph",
+        "Modify: packages/pi-envoy/CHANGELOG.md — add one bullet at the top of `## [Unreleased]` › `### Added` (line 7)"
+      ],
+      "change": "4a. Replace lines 123-126 of SKILL.md with `code[0]` verbatim (keep the blank lines around it; lines 115-121's bullets stay). 4b. Insert `code[1]` as the first bullet under `### Added`. 4c. Check the diff shows exactly those two hunks: `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --git skills/legion-worker/SKILL.md packages/pi-envoy/CHANGELOG.md`. The 'ships a roles/<role>.md prompt file' test reads roles/*.md, not the skill, and is unaffected. 4d. Commit.",
+      "code": [
+        "**Shared operation safety:** Every Legion issue workspace is a `jj workspace` of one shared\nclone, so they all share one operation log: `jj undo`, `jj abandon`, and\n`jj op restore|revert|abandon|undo` rewrite it for every tree at once (on 2026-09-12 one\nworker's `jj undo` rewrote nine of another tree's commits). The extension refuses them in every\nphase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`\nchain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`\nprocess start — and a `bash` command whose quoted text merely mentions `jj` with one of those\nwords (a heredoc, an echo, a commit message) is refused too: write such text with the `write`\ntool or say \"operation-log rollback\" instead. `jj restore <paths>`, `jj op log`, and\n`jj op show` stay allowed. Recover forward only: a new commit (`jj -R \"$LEGION_WORKSPACE\" new`)\nor `jj -R \"$LEGION_WORKSPACE\" restore <paths>` of files. Anything else, stop and send the\nowning architect the `jj -R \"$LEGION_WORKSPACE\" log` evidence; the architect decides, and an\noperator performs any operation-log restore with every other tree paused.\n",
+        "- The Legion extension refuses `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` in every phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&` chain, with or without `-R`, judged on each `jj` invocation's whole argument list (so `jj --repository <path> undo` and `jj operation restore` count); `eval` code; and a `hub` process start, both by a plain-text rule (the text mentions `jj` with one of the words). Every Legion issue workspace is a `jj workspace` of one clone, so those commands rewrite the operation log for every tree at once (LEGION-45: on 2026-09-12 one worker's `jj undo` rewrote nine of another tree's commits). `jj restore <paths>`, `jj op log`, and `jj op show` stay allowed; the refusal names the command, says the log is shared, and gives the recovery rule. The root architect and controller panes are unaffected.\n"
+      ],
+      "tests": [],
+      "run": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --git skills/legion-worker/SKILL.md packages/pi-envoy/CHANGELOG.md",
+      "expected": "Two hunks; the reviewer checks Acceptance 4 from this diff.",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"docs(skills): the operation-log commands are refused by the extension, with the recovery rule (LEGION-45)\" skills/legion-worker/SKILL.md packages/pi-envoy/CHANGELOG.md"
+    },
+    {
+      "n": 5,
+      "acceptance": 5,
+      "title": "Cover eval code and hub input by the plain-text rule",
+      "files": [
+        "Modify: packages/pi-envoy/extensions/legion.ts — replace the step 1 `jjLogRewriteAttempt` (the last function of the matcher block) with `code[0]`",
+        "Test: packages/pi-envoy/extensions/legion.test.ts — insert after the step 3 role-matrix test"
+      ],
+      "change": "5a. Add `tests[0]`. 5b. Run — FAIL: `allowedByMistake` lists all six eval/hub calls (the step 1 attempt returns undefined for non-bash tools). 5c. Replace jjLogRewriteAttempt with `code[0]`. 5d. Run — PASS; also re-run 'restricts phase-worker tool access per LEGION_ROLE' (hub with `input: {}` must still pass for every role). 5e. Commit.",
+      "code": [
+        "/** What a phase worker's tool call would run against the shared operation log, or undefined. A\n * `bash` command is tokenised; `eval` code and a `hub` call's `application`, `args`, and `text`\n * (a process start's program and arguments, and stdin sent to a supervised process) are held to\n * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */\nfunction jjLogRewriteAttempt(toolCall: ToolCallEvent): string | undefined {\n  const { toolName, input } = toolCall;\n  if (toolName === \"bash\") {\n    return typeof input.command === \"string\" ? jjLogRewriteInvocation(input.command) : undefined;\n  }\n  let text: string;\n  if (toolName === \"eval\" && typeof input.code === \"string\") text = input.code;\n  else if (toolName === \"hub\") {\n    text = [input.application, ...(Array.isArray(input.args) ? input.args : []), input.text]\n      .filter((part): part is string => typeof part === \"string\")\n      .join(\" \");\n  } else return undefined;\n  const mention = jjLogRewriteMention(text);\n  return mention === undefined ? undefined : `${toolName}: jj ${mention}`;\n}\n"
+      ],
+      "tests": [
+        "  test(\"refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule\", async () => {\n    const workspace = await createJjWorkspace();\n    const { toolCall, context } = await bootWorker({\n      role: \"tester\",\n      workspace,\n      sessionId: \"ses_tester_jj_eval_hub\",\n    });\n    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [\n      {\n        toolName: \"eval\",\n        input: { language: \"py\", code: 'import subprocess\\nsubprocess.run([\"jj\", \"-R\", ws, \"undo\"])' },\n      },\n      { toolName: \"eval\", input: { language: \"js\", code: \"await Bun.$`jj op restore ${id}`\" } },\n      // An argv literal separates the words with `\", \"`; the rule allows any non-word run.\n      { toolName: \"eval\", input: { language: \"py\", code: 'run([\"jj\", \"op\", \"restore\", op_id])' } },\n      {\n        toolName: \"hub\",\n        input: { op: \"start\", name: \"x\", application: \"jj\", args: [\"-R\", \"/ws\", \"undo\"] },\n      },\n      {\n        toolName: \"hub\",\n        input: { op: \"start\", name: \"x\", application: \"bash\", args: [\"-c\", \"jj op restore 1\"] },\n      },\n      { toolName: \"hub\", input: { op: \"send\", name: \"shell\", text: \"jj undo\" } },\n    ];\n    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [\n      {\n        toolName: \"eval\",\n        input: { language: \"py\", code: 'run([\"jj\", \"op\", \"log\"]); run([\"jj\", \"restore\", \"f\"])' },\n      },\n      { toolName: \"eval\", input: { language: \"py\", code: 'print(read(\"jj-notes.md\"))' } },\n      { toolName: \"hub\", input: { op: \"start\", name: \"web\", application: \"bun\", args: [\"run\", \"dev\"] } },\n      { toolName: \"hub\", input: { op: \"logs\", name: \"web\" } },\n      { toolName: \"hub\", input: {} },\n    ];\n    const allowedByMistake: string[] = [];\n    for (const [index, call] of refused.entries()) {\n      const result = await toolCall({ ...call, toolCallId: `call-jj-text-${index}` }, context);\n      const blocked =\n        typeof result === \"object\" && result !== null && \"block\" in result && result.block === true;\n      if (!blocked) allowedByMistake.push(JSON.stringify(call));\n    }\n    expect(allowedByMistake).toEqual([]);\n    const refusedByMistake: string[] = [];\n    for (const [index, call] of allowed.entries()) {\n      const result = await toolCall({ ...call, toolCallId: `call-jj-text-ok-${index}` }, context);\n      if (result !== undefined) refusedByMistake.push(JSON.stringify(call));\n    }\n    expect(refusedByMistake).toEqual([]);\n    // Same message shape as the bash refusal, naming the tool and the words it found.\n    const named = await toolCall(\n      {\n        toolName: \"hub\",\n        toolCallId: \"call-jj-text-named\",\n        input: { op: \"start\", name: \"x\", application: \"jj\", args: [\"undo\"] },\n      },\n      context\n    );\n    for (const phrase of [\"hub: jj undo\", \"every Legion issue workspace shares\"]) {\n      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });\n    }\n  });\n"
+      ],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"plain-text rule|restricts phase-worker tool access\"",
+      "expected": "5b: 1 fail with six entries. 5d: 2 pass.",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"feat(pi-envoy): the operation-log guard covers eval code and hub process starts (LEGION-45)\" packages/pi-envoy/extensions/legion.ts packages/pi-envoy/extensions/legion.test.ts"
+    },
+    {
+      "n": 6,
+      "acceptance": null,
+      "title": "Real-surface E2E enablement: grant rig takes --prompt-file",
+      "files": [
+        "Modify: packages/pi-envoy/scripts/grant-rig/run.ts — import (line 36), parseArgs options (~972), prompt selection in the drive/tui case (~1002)",
+        "Modify: packages/pi-envoy/scripts/grant-rig/README.md — one sentence under 'Running it' (after the code block ending at line 178)"
+      ],
+      "change": "6a. Apply `code[0]` (three edits). 6b. Add `code[1]` as a paragraph under 'Running it'. 6c. Check: `cd -- \"$LEGION_WORKSPACE\" && bun packages/pi-envoy/scripts/grant-rig/run.ts prompt | head -3` still prints the built-in prompt; `cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bunx tsc --noEmit` passes (scripts/grant-rig/*.ts is in the tsconfig include). 6d. Commit. The tester runs the rig (testerNotes); the implementer does not need to.",
+      "code": [
+        "// packages/pi-envoy/scripts/grant-rig/run.ts — three edits.\n// 1. The import (line 36): add readFile.\nimport { appendFile, mkdir, readdir, readFile, writeFile } from \"node:fs/promises\";\n// 2. parseArgs options (after `\"omp-log\": { type: \"string\" },` ~line 972):\n    \"prompt-file\": { type: \"string\" },\n// 3. In `case \"drive\": case \"tui\":` (~line 1002) replace\n//      const prompt = buildPrompt(buildSteps(values.short));\n//    with\n    const prompt =\n      values[\"prompt-file\"] === undefined\n        ? buildPrompt(buildSteps(values.short))\n        : await readFile(values[\"prompt-file\"], \"utf8\");\n",
+        "`--prompt-file <path>` on `drive` or `tui` replaces the built-in steps with the file's text (the LEGION-45 operation-log guard is proven this way: a prompt that asks the worker to run `jj -R \"$LEGION_WORKSPACE\" undo`, an `eval` and a `hub` start doing the same, and `jj op log` before and after); the A–G grant verdicts in the table then describe whatever bash calls the prompt caused and are not that run's evidence."
+      ],
+      "tests": [],
+      "run": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bunx tsc --noEmit && bun scripts/grant-rig/run.ts prompt | head -3",
+      "expected": "tsc clean; the default prompt prints unchanged.",
+      "commit": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"test(pi-envoy): grant rig takes --prompt-file for the LEGION-45 e2e\" packages/pi-envoy/scripts/grant-rig/run.ts packages/pi-envoy/scripts/grant-rig/README.md"
+    }
+  ],
+  "acceptanceToTests": {
+    "1 bash refusal, every form, any pipeline position, message names command + shared log + recovery": "legion.test.ts 'refuses a phase worker's bash command that would rewrite the shared jj operation log' (step 1; 19 refused rows incl. `jj -R \"$LEGION_WORKSPACE\" undo`, `cd ws && jj undo`, `jj op restore 63461aba`, `jj --repository p undo`, `jj operation restore`, `jj op undo`, pipeline `… | xargs jj op restore`, `jj --at-op … op restore`, unquoted `-m undo this`, `sh -c 'jj -R ws undo'`, unterminated quote; no grant minted; five reason phrases)",
+    "2 jj restore <paths>, jj op log, jj op show, quoted 'undo this' allowed": "legion.test.ts 'leaves file-level jj restore, jj op log, jj op show, and quoted message words alone' (step 2; 13 allowed rows incl. the skill's rebase, fingerprint, split, and log commands; one grant per call)",
+    "3 root architect and controller unaffected; reviewer .legion/ path unaffected": "legion.test.ts 'does not block bash calls from the controller session' (+ `jj … undo` → undefined), 'blocks code tools in a root architect session' (+ `jj undo` → architect reason), 'applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone' (step 3); existing 'restricts phase-worker tool access per LEGION_ROLE' and 'allows xd:// tool-device writes …' unchanged and green",
+    "4 SKILL.md says blocked by the extension + recovery rule": "PR diff of skills/legion-worker/SKILL.md (step 4); reviewer reads it",
+    "5 eval code and hub start refused with the same message": "legion.test.ts 'refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule' (step 5; 6 refused incl. eval code string and hub start with program jj; 5 allowed incl. `hub {}`)",
+    "Errors: unparseable command → plain-text rule, never allow": "step 1 row `jj -R \"$LEGION_WORKSPACE\" describe -m 'undo` (unterminated quote)",
+    "Real surface (tester)": "grant rig, production-profile mode, branch build, --prompt-file (testerNotes.e2e); negative control on the released plugin 1.22.2"
+  },
+  "pinnedShapes": {
+    "hookResult": {
+      "block": true,
+      "reason": "refused `<attempt>`: jj undo, jj abandon, and jj op restore/revert/abandon/undo rewrite the jj operation log, which every Legion issue workspace shares (each is a jj workspace of one clone), so they rewrite other trees' commits too. Recover forward with a new commit or `jj restore <paths>` of files; anything else, stop and send the owning architect the `jj -R \"$LEGION_WORKSPACE\" log` evidence."
+    },
+    "attemptNames": {
+      "bash": "the offending jj invocation's unquoted words, e.g. `jj -R $LEGION_WORKSPACE undo`; for a quoted nested shell, the quoted text, e.g. `jj -R ws undo`; for an unparseable command, the trimmed command",
+      "eval": "eval: jj <words>",
+      "hub": "hub: jj <words>"
+    },
+    "reasonPhrasesTestsAssert": [
+      "<attempt>",
+      "every Legion issue workspace shares",
+      "new commit",
+      "jj restore <paths>",
+      "architect"
+    ],
+    "blockedWords": {
+      "anywhere": [
+        "undo",
+        "abandon"
+      ],
+      "onlyBeside": {
+        "op|operation": [
+          "restore",
+          "revert"
+        ]
+      }
+    },
+    "hubFieldsJudged": [
+      "application",
+      "args[]",
+      "text"
+    ],
+    "evalFieldJudged": "code"
+  },
+  "verification": {
+    "targetedTests": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/legion.test.ts -t \"operation-log|shared jj operation log|quoted message words alone|plain-text rule|controller session|root architect session|restricts phase-worker tool access|tool-device writes\"",
+    "packageCi": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun run build && bun run lint && bun run typecheck && bun run test   # the pi-envoy job of the \"Legion Envoy and Contracts\" workflow",
+    "repoCi": "cd -- \"$LEGION_WORKSPACE\" && bunx biome check --error-on-warnings packages/pi-envoy/extensions packages/pi-envoy/src packages/pi-envoy/scripts && bunx tsc --noEmit && bun test   # the \"Tests\" workflow: lint, typecheck, test jobs",
+    "prTitle": "feat(pi-envoy): refuse jj operation-log rewrites in every phase-worker pane (LEGION-45)   # the Tests workflow's pr-title job requires a conventional title; `feat(pi-envoy):` also makes release-bump.sh cut a minor pi-envoy release",
+    "prBodyLine": "Dispatch: LEGION-45"
+  },
+  "testerNotes": {
+    "surface": "A real production-profile phase worker: the grant rig (packages/pi-envoy/scripts/grant-rig/README.md) in RIG_PLUGINS=production RIG_LEGION_BUILD=branch mode runs the daemon's real launch prefix and the real plugin tree (secretsd included) against a stand-in daemon, with a real jj workspace at $RIG/ws whose operation log is the evidence.",
+    "ompBinary": "The live daemon's build, from ~/.config/legion/sjawhar-legion/legion.yaml: `mise x github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 -- omp` at planning time → `OMP=$(mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541)/bin/omp`. Re-read the yaml; do not hard-code.",
+    "e2e": [
+      "SRC=\"$LEGION_WORKSPACE\"; RIG=/tmp/l45rig; mkdir -p $RIG; PORT=13445; write the prompt below to $RIG/prompt.txt with the write tool.",
+      "bun $SRC/packages/pi-envoy/scripts/grant-rig/daemon-standin.ts $PORT $RIG/standin.log $RIG/state/secrets/boot &   (after setup.sh has created the boot file; see the README's order)",
+      "RIG_PLUGINS=production RIG_LEGION_BUILD=branch sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $SRC $RIG",
+      "bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --prompt-file $RIG/prompt.txt --label l45-branch",
+      "Evidence A (refusals): in $RIG/runs/l45-branch-*/events.jsonl, the tool_execution_end frames for items 3, 4, 5, 6, 7 carry the refusal text (`every Legion issue workspace shares`) and isError; items 1, 2, 8, 9 ran.",
+      "Evidence B (nothing rewrote the log): `jj -R $RIG/ws op log -n 8 --no-graph` shows the `describe` from item 2 as the newest mutating operation and no `undo`/`restore`/`abandon` operation; item 9's output in the transcript matches.",
+      "Negative control: `: > $RIG/standin.log; RIG_PLUGINS=production RIG_LEGION_BUILD=1.22.2 sh …/setup.sh $SRC $RIG` (the plugin the panes run today, from ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json) and the same drive with --label l45-released: item 3's `jj undo` RUNS and `jj -R $RIG/ws op log` gains an `undo` operation. Quote both op logs in the PR body's E2E line with the events.jsonl paths.",
+      "Cleanup: tmux -L l12rig kill-server 2>/dev/null; rm -rf ~/.omp/profiles/l12rig \"$RIG\""
+    ],
+    "prompt": "You are verifying a safety rule in this workspace. Run the numbered items one at a time, each as its own tool call, in order. Report every tool result verbatim in your reply, including any refusal text. Never retry or rephrase a refused item; move on to the next one.\n\n1. bash: jj -R \"$LEGION_WORKSPACE\" op log -n 3\n2. bash: jj -R \"$LEGION_WORKSPACE\" describe -m \"rig: marker before the guard checks\"\n3. bash: jj -R \"$LEGION_WORKSPACE\" undo\n4. bash: cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" op restore @-\n5. bash: jj -R \"$LEGION_WORKSPACE\" abandon\n6. eval (language py): import os, subprocess; subprocess.run([\"jj\", \"-R\", os.environ[\"LEGION_WORKSPACE\"], \"undo\"], check=False)\n7. hub start: name rig-jj, application jj, args [\"-R\", \"<the value of $LEGION_WORKSPACE>\", \"undo\"]\n8. bash: jj -R \"$LEGION_WORKSPACE\" restore --help | head -1\n9. bash: jj -R \"$LEGION_WORKSPACE\" op log -n 5\n\nThen reply with the single word: done\n",
+    "unitIsNotProof": "The legion.test.ts cases are the regression lock; the E2E line must name the rig run, the events.jsonl path, the head SHA, and the negative control per the legion-worker skill."
+  },
+  "implementerNotes": [
+    "The whole change is four functions + five constants + one hook block in legion.ts, four new tests and two extended tests in legion.test.ts, one skill paragraph, one changelog bullet, and the rig flag. No new module, no export, no contract change (LEGION_DAEMON_API_VERSION untouched), no daemon change.",
+    "Do not edit isSingleLegionCommand (spec point 4). Do not add an allow-list: a negative row that fails means the tokenizer is wrong.",
+    "Word tables are arrays with .includes (project rule: static string tables are not Sets). The refusal string is inlined at its single call site in the hook (project rule: no one-expression helper).",
+    "Insert positions are given as current line numbers; re-read before editing — the file has one insertion point for the matcher (after :167) and one for the hook (after :646).",
+    "Never name .omp/config.yml in a jj split; it is provisioning state already in the working copy.",
+    "Your own bash runs under the released plugin, so `jj -R \"$LEGION_WORKSPACE\" split -m \"…jj undo…\"` would work today — but keep the commit messages given here (they avoid the pattern) so they stay typeable once this ships.",
+    "If the architect approves D1 (subagents), implement it between steps 1 and 2 as described in decisionsNeeded[0].options[1], with the extra test, and add Acceptance 6 to acceptanceToTests in your implement handoff."
+  ],
+  "riskNotes": [
+    "False refusals by design (one rephrase each): any bash text that quotes `jj` with undo/abandon/op restore (heredocs, echo, `-m` messages, `--body`), `jj describe -m undo`, and a `bun test -t \"…jj undo…\"` filter. The skill paragraph tells workers to use the write tool for such text. Retro for this very issue will write docs/solutions/ with the write tool, not a heredoc.",
+    "Not caught: `JJ=jj; $JJ undo` (variable indirection) and a partially quoted nested shell like `sh -c\"jj undo\"`. Not a rationalisation path a model takes after a refusal that names the rule; noted, not guarded.",
+    "In-process `task` subagents of a phase worker are exempt unless D1 is approved (legion.ts:597-600).",
+    "Deployment: the guard reaches panes only when the pi-envoy release built from this commit is installed into the legion profile before the daemon restarts (packages/daemon AGENTS.md, plugin contract paragraph). Until then the skill text is ahead of the enforcement; that is the same state as today.",
+    "The reviewer cannot use the write tool, so it creates a review body.json through bash; a body that quotes `jj undo` (a heredoc) is refused. It writes 'operation-log rollback' instead — the skill paragraph says so."
+  ],
+  "openQuestions": [
+    "D1 in decisionsNeeded — architect's call; the plan is executable without it."
+  ],
+  "taskCount": 7,
+  "independentTasks": 2,
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T09:52:11.721Z"
+}
