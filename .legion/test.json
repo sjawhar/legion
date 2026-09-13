@@ -1,14 +1,8 @@
 {
   "head": "1c8cd3b944cc961b381f7842a65650ffc671a544",
   "pr": "https://github.com/sjawhar/legion/pull/1056",
-  "passed": 3,
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Acceptance 1: after docker stop of the rig's NATS container, re-running up.sh with the same environment prints `STARTED NATS container <name>` and reaches `RIG READY`",
-      "evidence": "Run 2 (same env and SMOKE_DIR, container stopped) printed `STARTED NATS container legion-smoke-nats-sjawhar870` through the docker start path (same container: Created 17:48:50Z, StartedAt 17:49:38Z) then `REUSED listener (pid 1680779)` and `error: Envoy listener did not become healthy; inspect /tmp/legion-smoke-87`, exit 1 — RIG READY not reached. The reused listener reconnected to NATS (`envoy nats recovery successful attempt=4`) but every self-health probe kept failing with `interest kv: nats: connection closed`; it logged `self-health terminal failure threshold exceeded; terminating for restart` at 17:50:50Z and exited. Cause is the Envoy listener's rebuild not recreating the interest KV handle on the new connection (packages/envoy/cmd/listener/main.go rebuildListenerDependencies; inference from log and code), pre-existing and outside scripts/smoke; filed as LEGION-120. Supplementary run 3, reboot-shaped (listener and my own daemon down, container stopped): `STARTED NATS container legion-smoke-nats-sjawhar870` (docker start, same container) → `STARTED listener` → `STARTED daemon` → `RIG READY`, exit 0."
-    }
-  ],
+  "passed": 4,
+  "failed": 0,
   "surface": "Real smoke rig on this box driven through scripts/smoke/up.sh and down.sh. Own rig: SMOKE_PROJECT=sjawhar/870 (container legion-smoke-nats-sjawhar870), SMOKE_DIR=/tmp/legion-smoke-87, NATS_PORT=14870, ENVOY_PORT=19070, LEGION_DAEMON_PORT=19870, SMOKE_WEBHOOK_MODE=none, secrets via the README's `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c '…'` wrapper, DISPATCH_URL/DISPATCH_TOKEN from envoy.json. The other live rig (legion-smoke-nats-sjawhar1083, 14283) untouched. Root issue created by the rig: LEGSMOKE-190.",
   "commands": {
     "gates": [
@@ -19,25 +13,26 @@
     "run1": "secrets … -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh' → STARTED NATS container legion-smoke-nats-sjawhar870 … RIG READY (exit 0), 17:48:47Z",
     "stop": "docker stop legion-smoke-nats-sjawhar870 → .State.Running false; .NetworkSettings.Ports {}; .HostConfig.PortBindings {\"4222/tcp\":[{\"HostIp\":\"\",\"HostPort\":\"14870\"}]}",
     "negativeControl": "same SMOKE_DIR, NATS_PORT=14871 → `error: NATS container legion-smoke-nats-sjawhar870 is published on port 14870, not the configured NATS port 14871`, exit 1; .State.Running still false; docker ps -a shows the one stopped container (Exited)",
-    "run2": "same env as run1 → STARTED NATS container legion-smoke-nats-sjawhar870; REUSED listener (pid 1680779); error: Envoy listener did not become healthy; exit 1 (see failures)",
-    "run3": "reboot-shaped (listener exited, own daemon SIGTERMed via its pid/start record, docker stop) → STARTED NATS container legion-smoke-nats-sjawhar870; STARTED listener (pid 1841842); STARTED daemon (pid 1842379); REUSED root issue LEGSMOKE-190; RIG READY; exit 0",
+    "run2": "docker-stop-only (listener and daemon alive), same env as run1 → STARTED NATS container legion-smoke-nats-sjawhar870 (docker start path); REUSED listener (pid 1680779); error: Envoy listener did not become healthy; exit 1 — LEGION-120, see observations",
+    "run3": "reboot-shaped = spec v4 acceptance 1 check (listener exited, own daemon SIGTERMed via its pid/start record, docker stop) → STARTED NATS container legion-smoke-nats-sjawhar870; STARTED listener (pid 1841842); STARTED daemon (pid 1842379); REUSED root issue LEGSMOKE-190; RIG READY; exit 0",
     "teardown": "SMOKE_DIR=/tmp/legion-smoke-87 bash scripts/smoke/down.sh → STOPPED NATS container legion-smoke-nats-sjawhar870; RIG DOWN; exit 0. Container gone, /tmp/legion-smoke-87 removed, ports 14870/19070/19870/19871 free, no legion-sjawhar870 tmux server."
   },
   "acceptance": {
-    "1": "FAIL — STARTED line yes (docker start path), RIG READY no; see failures[0] and LEGION-120",
+    "1": "PASS — run 3 (reboot-shaped, 2026-09-13T17:53:56Z, head 1c8cd3b944cc): listener already exited, own daemon stopped via its pid/start record, `docker stop legion-smoke-nats-sjawhar870` → .State.Running false; then up.sh with run 1's environment and SMOKE_DIR printed `STARTED NATS container legion-smoke-nats-sjawhar870` (docker start of the same container: created=2026-09-13T17:48:50Z, started=2026-09-13T17:53:58Z), `STARTED listener (pid 1841842)`, `GREEN Envoy listener: {… \"status\":\"healthy\"}`, `STARTED daemon (pid 1842379)`, `REUSED root issue LEGSMOKE-190`, `RIG READY`, exit 0. Negative control: same SMOKE_DIR, NATS_PORT=14871, container stopped → `error: NATS container legion-smoke-nats-sjawhar870 is published on port 14870, not the configured NATS port 14871`, exit 1, .State.Running still false, nothing started or created.",
     "2": "PASS — up.test.sh stopped+other-port case (up.test.sh:955) and the real-surface negative control",
     "3": "PASS — down.test.sh stopped+matching-port case (down.test.sh:230) asserts rm -f through the inspect reads; no legacy container fabricated",
     "4": "PASS — both harnesses exit 0; grep -rn 'docker port' scripts/smoke empty"
   },
   "observations": [
     "The script change is correct: the ownership test recognises the stopped container (created-with binding), docker start is reached, the same container (same Created time, JetStream state kept) comes back; the refusal names both ports and starts nothing.",
-    "Acceptance 1's check (docker stop only, listener and daemon alive) exercises a path the issue's reboot scenario does not: a listener that survives a NATS outage. That listener never returns to healthy and exits after ~110 s (LEGION-120), so up.sh's 60 s /healthz poll on the REUSED listener fails. Options for the architect: treat LEGION-120 as the blocker, or have up.sh restart a listener whose /healthz is not healthy instead of reusing it (scripts/smoke scope), or restate the check as the reboot-shaped sequence — not the tester's call.",
+    "Record of the docker-stop-only scenario (run 2, 17:49:38Z, listener and daemon left alive across the NATS stop): up.sh printed `STARTED NATS container legion-smoke-nats-sjawhar870` through the docker start path (proving this fix), then `REUSED listener (pid 1680779)` and `error: Envoy listener did not become healthy; inspect /tmp/legion-smoke-87`, exit 1 — RIG READY not reached. The reused listener reconnected (`envoy nats recovery successful attempt=4`) but every self-health probe kept failing `interest kv: nats: connection closed` until `self-health terminal failure threshold exceeded; terminating for restart` at 17:50:50Z. That is the Envoy listener's own recovery from a broker outage, filed as LEGION-120; the architect ruled it outside this issue (spec v4 Acceptance 1 and two Rejected lines: the PR is not held on LEGION-120, and up.sh will not restart an unhealthy listener).",
     "The rig's daemon logs nothing about its own NATS disconnect/reconnect (daemon.log had only the two listening lines); whether the daemon's NATS connection recovers after an outage was not observable here and is not part of this issue.",
-    "PR #1056 is MERGEABLE (not CONFLICTING); no rebase. Evidence transcript attached to LEGION-87 as tester-transcript-pr1056.md.",
-    "The outer Legion daemon (127.0.0.1:13370) was down from about 17:52Z during this phase, blocking the pane's bash grant mint; rig operations continued through the Python kernel (secrets agent-tier keys resolved without a session)."
+    "No new rig run for the restatement: run 3 already performed the restated check, and its transcript is attached to LEGION-87 as tester-transcript-pr1056.md.",
+    "The outer Legion daemon (127.0.0.1:13370) was down from about 17:52Z to 18:04Z during the first round, blocking the pane's bash grant mint; rig operations continued through the Python kernel (secrets agent-tier keys resolved without a session)."
   ],
   "documentationFeedback": "README's reuse sentence (`a stopped one … is started with STARTED NATS container <name>`) matches what the surface prints. Nothing else to change for this issue.",
+  "specVersion": "LEGION-87 spec v4: acceptance 1's check is the reboot-shaped sequence (NATS container stopped, listener and daemon exited, then up.sh with the same environment and SMOKE_DIR); the docker-stop-only scenario with a surviving listener is LEGION-120 and out of scope.",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T18:14:18.910Z"
+  "completed": "2026-09-13T18:33:47.728Z"
 }
