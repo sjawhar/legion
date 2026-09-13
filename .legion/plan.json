@@ -1,0 +1,105 @@
+{
+  "summary": "Client-only fix: the pi-envoy daemon client shares one /legion/v1/worker-session recovery per forgotten secret across every request refused while it runs (per session id: newest recovered secret + in-flight recovery; one retry per request), and roleDaemon() in extensions/legion.ts hands every caller one client per session. Two regression tests fail on today's code and pass with the fix; a scratch daemon with a real architect pane proves it after a real restart, with the parent commit as the 403 control. No daemon changes.",
+  "spec": "dispatch://LEGION-73 (primary document; Design, Errors, Testing, Rejected are settled)",
+  "planArtifact": "dispatch://LEGION-73/artifact/plan-md",
+  "taskCount": 7,
+  "independentTasks": 0,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, TDD order: Task 1 tests (run, quote the pre-fix failure) -> Task 2 client fix -> Task 3 extension test (fails until roleDaemon() is memoized) + memoization -> Task 4 AGENTS.md sentence -> Task 5 package checks, path-scoped pre-fix re-check, push, PR. Then the tester runs the scratch-daemon rig (control on the parent commit first, then the head) and fills the E2E line; the reviewer verifies scope (packages/pi-envoy only), the four Design branches, and the pre-fix quotes.",
+  "files": {
+    "modify": [
+      "packages/pi-envoy/src/legion/daemon-client.ts (replace the post wrapper, lines 117-141, with the coalesced recovery; reference implementation in the plan)",
+      "packages/pi-envoy/src/legion/daemon-client.test.ts (forgetfulDaemon helper + 5 tests; tests 1-3 fail pre-fix)",
+      "packages/pi-envoy/extensions/legion.ts (import type LegionDaemonClient; memoize roleDaemon() into one client per session)",
+      "packages/pi-envoy/extensions/legion.test.ts (one test: two legion tool calls at once through the registered tool, one /worker-session, both succeed; fails pre-fix with release_wave isError: true)",
+      "packages/pi-envoy/AGENTS.md (one Critical-conventions bullet stating the recovery contract)"
+    ],
+    "unchanged_by_design": [
+      "packages/daemon/** (spec Rejected: no grace window, no second live secret; recovery already survives a restart via the root claim's bootTokenHash, processes.ts:2858)"
+    ]
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "role": "implementer",
+      "title": "daemon-client.test.ts: forgetfulDaemon fake + 5 tests; run on today's code and quote the failing 403",
+      "prefixFailure": "test 1: Promise.all rejects with POST /legion/v1/waves/release failed with 403: {\"error\":\"Invalid session secret\"}; tests 2-3: recoveryCount 2 != 1"
+    },
+    {
+      "id": 2,
+      "role": "implementer",
+      "title": "daemon-client.ts: per-session {latestSecret, inFlight} record; secretAfterRefusal(); one retry per request; .finally clears inFlight; onRecovered before caching",
+      "commit": "fix(pi-envoy): share one session-secret recovery across concurrent daemon calls (LEGION-73)"
+    },
+    {
+      "id": 3,
+      "role": "implementer",
+      "title": "legion.test.ts concurrent-tool-calls test (fails until memoized) + legion.ts roleDaemon() memoization",
+      "prefixFailure": "results.map(isError) received [true, undefined]",
+      "commit": "fix(pi-envoy): one daemon client per session so concurrent legion calls share recovery (LEGION-73)"
+    },
+    {
+      "id": 4,
+      "role": "implementer",
+      "title": "packages/pi-envoy/AGENTS.md: one sentence on the recovery contract (no skill tells architects to serialise; none added)"
+    },
+    {
+      "id": 5,
+      "role": "implementer",
+      "title": "package checks (bun test both files, biome check extensions/ src/, tsc --noEmit), path-scoped pre-fix re-check via jj restore --from main@origin / --from @-, push legion/LEGION-73, PR with Dispatch: LEGION-73 and READY-format Verification body"
+    },
+    {
+      "id": 6,
+      "role": "tester",
+      "title": "Scratch daemon from the PR head (team sjawhar/73, SMOKE_DIR /tmp/legion-smoke-73pos, ports 14273/19273/19730, tmux -L legion-sjawhar73, OMP_PROFILE=legion73pos built from the head) with a real root-architect pane; SIGTERM + re-up the daemon; the architect's first action is two legion escalate calls in one batch -> both succeed. Control: same on the parent commit c8faafec (profile legion73neg, team sjawhar/7300) -> one 403 Invalid session secret. Negative harness control: a bogus escalate kind -> 400. Quote both runs with head SHAs in the PR E2E line; tear down both rigs and scratch profiles; never touch the live daemon or ~/.omp/profiles/legion."
+    },
+    {
+      "id": 7,
+      "role": "reviewer",
+      "title": "Scope = packages/pi-envoy only; the four Design branches visible in secretAfterRefusal; one retry per request; roleDaemon() single instance; pre-fix quotes match; CI/Threads/E2E verified on GitHub; thermo once at head; one review per round"
+    }
+  ],
+  "verifiedByPlanner": [
+    "Traced cause confirmed in code: CapabilityService.capabilities is an in-memory Map (api/auth.ts:72-76); /worker-session setCapability overwrites at mint time (routes/workers.ts:149-155); the plugin's post wrapper recovers per request (daemon-client.ts:117-141); roleDaemon() builds a client per call (legion.ts:224-251).",
+    "Throwaway prototype (not committed): reference implementation + memoized roleDaemon() -> race test passes, 5 existing daemon-client tests pass, all 54 legion.test.ts tests pass, bunx tsc --noEmit and biome check pass. Against today's code the race test rejects with the daemon's own 403 and the extension-level test returns release_wave isError: true.",
+    "Every legion.test.ts test assigns its fake globalThis.fetch before legionExtension(fixture.pi), so a per-session client that captures fetch once breaks nothing.",
+    "Fresh workspace needs `bun install --frozen-lockfile` (no node_modules).",
+    "Rig precedent: /tmp/legion52-smoke/rig-up.sh ran scripts/smoke/up.sh unmodified under a scratch OMP profile whose plugins/package.json points @sjawhar/pi-legion-envoy at a file: copy packed from the branch (dist/ + omp.extensions rewritten, daemonApiVersion 2). Ports 14273/19273/19730/19731 and teams sjawhar/73, sjawhar/7300 are free as of planning."
+  ],
+  "concerns": [
+    "The rig's batch must be the architect's first capability-bearing action after the restart: a bash call first would recover the secret through the grant hook and defeat the test. The prompt in the plan says so; the transcript shows whether it was obeyed.",
+    "The model may serialise the two tool calls on the rig; the control run's 403 is what proves the batch raced. Repeat the restart+prompt once before calling the control inconclusive.",
+    "Production verification after merge depends on the operator installing the released plugin into the live profile (deployment instructions: only the operator edits ~/.omp/profiles/legion/plugins); the implementer reports the released version on the issue with one dispatch_message."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract, jj rules, PR body format (READY Verification section), handoff gate",
+      "test-driven-development: Tasks 1 and 3 write the failing test first and quote the failure as the pre-fix proof the spec requires",
+      "verification-before-completion: package-scoped bun test / biome / tsc and the path-scoped pre-fix re-check before claiming done"
+    ],
+    "test": [
+      "legion-worker: the E2E line and .legion/test.json are the phase artifact; a unit suite is a regression lock, not proof of acceptance item 5",
+      "verification-before-completion: the scratch-daemon run with quoted transcripts and the parent-commit control is the evidence; re-run the implementer's pre-fix check yourself",
+      "systematic-debugging: if the control does not reproduce, read the pane transcript for a preceding bash call or serialised tool calls before changing the prompt"
+    ],
+    "review": [
+      "legion-worker: one review per round, thermonuclear passes once at the head, CI/Threads/E2E facts read from GitHub, approve only the head without .legion/",
+      "requesting-code-review: every finding names the line and the spec contract it breaks (Design branches, one retry per request, no daemon change)"
+    ]
+  },
+  "learningsInjected": [
+    "docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md",
+    "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
+    "docs/solutions/daemon/omp-pin-bump-behavioral-proof.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/testing/race-regression-tests-that-fail-before-the-fix.md",
+    "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T12:55:42.924Z"
+}
