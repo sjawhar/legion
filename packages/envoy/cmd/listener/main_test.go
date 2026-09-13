@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2235,6 +2236,62 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
 		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
+	}
+}
+
+// The reason is chosen by which error the forward returns, not by the fact that
+// it failed: only bus.ErrReceiptTimeout (the forward left this process and drew
+// no receipt) is receipt_timeout. A raw nats.ErrTimeout is what the client's
+// flush returns while a reconnecting or stalled connection still buffers the
+// forward, and that forward is not known to have reached anyone.
+func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		forwardErr error
+		reason     string
+		logMessage string
+	}{
+		{"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
+		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+		{"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
+		{"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newListenerDeliveryHarness(t, nil)
+			role := fmt.Sprintf("forward-error-kind-%d", i)
+			sessionID := fmt.Sprintf("ses_error_kind_%d", i)
+			if err := harness.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+				t.Fatalf("register holder: %v", err)
+			}
+			if _, err := harness.registry.SetRole(sessionID, "test-machine", role, false); err != nil {
+				t.Fatalf("claim role: %v", err)
+			}
+			cfg := harness.config
+			cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr }
+			handler := coreNATSDeliveryHandler(cfg)
+			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
+			item.Payload = `{"type":"worker-queued"}`
+			probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+			if err != nil {
+				t.Fatalf("subscribe exception probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush exception probe: %v", err)
+			}
+
+			handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+			assertDeliveryException(t, probe, item, tc.reason)
+
+			logs := harness.logs.String()
+			if !strings.Contains(logs, `"msg":"`+tc.logMessage+`"`) || !strings.Contains(logs, `"delivery_status":"`+map[string]string{"delivery_failed": "failed", "receipt_timeout": "receipt_timeout"}[tc.reason]+`"`) {
+				t.Fatalf("log does not carry %q for %s:\n%s", tc.logMessage, tc.reason, logs)
+			}
+			if tc.reason == "delivery_failed" && strings.Contains(logs, "receipt_timeout") {
+				t.Fatalf("a forward that never left this process must not be logged as a receipt timeout:\n%s", logs)
+			}
+		})
 	}
 }
 

@@ -36,9 +36,11 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
 	// forwardRole delivers a role-lane envelope to the holder's agent subject and
-	// waits for its empty receipt. main.go wires client.RequestCoreTo. A
-	// nats.ErrTimeout from it means the holder never answered inside timeout;
-	// any other error means the forward never reached the holder.
+	// waits for its empty receipt. main.go wires client.RequestCoreTo.
+	// bus.ErrReceiptTimeout means the forward was flushed to the server and no
+	// receipt arrived inside timeout; any other error — a raw nats.ErrTimeout
+	// from the flush included — means the forward is not known to have reached
+	// the holder.
 	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
@@ -285,9 +287,11 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // the sender learns immediately whether the holder received it. Every
 // branch ACKs: role lanes have no durable transit to retry against, so a
 // failed forward is reported via a delivery exception instead of a NAK. A
-// forward the live holder did not acknowledge inside roleReceiptTimeout is
-// receipt_timeout; a forward that never reached it is delivery_failed; no
-// claim is no_holder.
+// forward that reached the server and drew no receipt from the live holder
+// inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
+// receipt_timeout; a forward not known to have left this process — the flush
+// timed out or failed, the publish failed — is delivery_failed like a stale
+// holder; no claim is no_holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		message.finalize(false)
@@ -371,7 +375,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	forwarded := item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
-		if errors.Is(err, nats.ErrTimeout) {
+		if errors.Is(err, bus.ErrReceiptTimeout) {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,
 				metricStatus: "receipt_timeout",
