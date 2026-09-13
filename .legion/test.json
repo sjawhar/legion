@@ -1,11 +1,11 @@
 {
-  "passed": 11,
+  "passed": 12,
   "failed": 0,
   "failures": [],
-  "head": "115c55fd64e1bea77b7a23f80d13fa751363ed2a",
+  "head": "aedcc575914b3ea8d28bcf41c945601907d2d510",
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
-  "proof": "dispatch://LEGION-37/artifact/tester-proof-round3-md",
-  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round3-tar-gz",
+  "proof": "dispatch://LEGION-37/artifact/tester-proof-round4-md",
+  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round4-tar-gz",
   "rounds": [
     {
       "passed": 9,
@@ -196,6 +196,47 @@
         "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
         "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction."
       ]
+    },
+    {
+      "round": 4,
+      "head": "aedcc575914b3ea8d28bcf41c945601907d2d510",
+      "baseHead": "115c55fd64e1bea77b7a23f80d13fa751363ed2a",
+      "scope": "delta 57432d03..aedcc575: workerReady calls this.workerAdmission.promoteWorkerQueue() after its mutateClaim critical section when the ready-time bystander retire ran (retiredBystander flag), as markWorkerDead does; regression test queues the planner at cap 1 before ready and awaits the promotion's worker-started publish with no sweep call. Closes round 3's finding.",
+      "specVersion": 6,
+      "passed": 1,
+      "failed": 0,
+      "failures": [],
+      "proof": "dispatch://LEGION-37/artifact/tester-proof-round4-md",
+      "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round4-tar-gz",
+      "acceptance": [
+        {
+          "criterion": "round-3 finding: a spawn already queued behind the cap is promoted immediately when the ready-time bystander retire frees a slot, not by the next 60 s sweep",
+          "verdict": "pass",
+          "evidence": "Unit: processes.test.ts 'retires a relaunched worker at worker/ready ... freeing its cap slot and promoting a spawn already queued behind it ...' awaits the promotion's own worker-started publish with no reconcileWorkerAdmission call; with the promoteWorkerQueue() line deleted (mutation 8) it times out at that await after all retire assertions passed (10 expect() calls); mutation 7 (retire -> bare clear) still fails first at expect(shutdownCalls).toEqual(['tester']). Rig at aedcc575, cap 2, one restart before the scenario and none during (sweep ticks at :02): retire persisted 05:54:31.912 -> queued tester's pane process started 05:54:32.920 (+1.01 s) -> its locator persisted 05:54:33.546 (+1.63 s), thirty seconds off the tick, planner mid-sleep (tool result 05:55:19); idle-live variant: retire and the tester's prompt observed in the same 50 ms state.json poll (05:55:46.930), planner mid-sleep. Round 3 had measured 5.3 s and 33.3 s on the tick."
+        }
+      ],
+      "structural": "promoteWorkerQueue() appears after the mutateClaim callback closes and nowhere inside it (no per-role lock re-entry; drainWorkerQueue takes mutateClaim on the queue head itself); the retiredBystander flag is set only in the retire branch after retireWorkerLocator, so the assignment-delivery and connect-only ready paths never trigger a drain; promoteWorkerQueue is synchronous and detaches the drain, so workerReady's promise does not wait on the promoted launch.",
+      "regression": "The delta is three hunks in workerReady (flag declaration, flag set, gated call) plus the test and implement.json; promoteQueuedWorker, the retire body, promptExistingWorker, handleWorkerStarted, isBystanderRole/isBystanderCatchup and the migration are byte-identical to 115c55fd. Rounds 1-3 evidence stands; this round's rig again exercised Acceptance 1, 2, 3 and 7's delivery-time half.",
+      "unit": {
+        "tsc": "bunx tsc --noEmit exit 0",
+        "biome": "bunx biome check src/: 147 files, no fixes, exit 0",
+        "tests": "bun test legion-state api processes reducers index: 408 pass / 0 fail / 3 skip (411 tests, 5 files)",
+        "mutations": [
+          "8 delete the promoteWorkerQueue() drain -> regression test times out at await plannerStarted.promise (407 pass / 1 fail under the default per-test timeout)",
+          "7 ready-time retire replaced by a bare pending-clear (flag kept) -> regression test fails at processes.test.ts:3505 expect(shutdownCalls).toEqual(['tester'])"
+        ]
+      },
+      "rig": {
+        "surface": "same isolation (SMOKE_PROJECT sjawhar/370, /tmp/legion37-tester-rig4, NATS 14370 as legion37-tester4-nats via up-manual.sh/down-manual.sh, listener 19170, daemon 19470/19471, LEGSMOKE-90/91, production OMP invocation, real omp --mode rpc workers); v25 seed; cap 1 setup, one restart to cap 2 before the scenario, none during",
+        "scenarios": {
+          "m1-cold": "queued tester with no pane: retire -> pane start +1.01 s -> locator persisted +1.63 s, off the sweep tick, other slot-holder mid-task",
+          "m2-idle-live": "queued tester idle-live: retire and the prompt into its pane in the same 50 ms poll, other slot-holder mid-task",
+          "resume": "spawn_worker implementer afterwards -> omp --resume of the same session file, delivered"
+        }
+      },
+      "observations": [
+        "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll."
+      ]
     }
   ],
   "observations": [
@@ -208,16 +249,18 @@
     "runningWorkerCount does not count an idle-live pane; a rig fills a single slot with a fresh spawn's ~10 s boot to make a relaunch queue.",
     "Shared-name hazard for concurrent rigs: scripts/smoke/{up,down}.sh assume one legion-smoke-nats container per box; a second rig must not run down.sh while another rig's container is live.",
     "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
-    "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction."
+    "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction.",
+    "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll."
   ],
   "findings": [
     {
       "severity": "low",
       "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "The ready-time retire branch frees the slot in state but never calls promoteWorkerQueue(), and because clientFor was never called for the relaunched pane there is no cached client whose close reaches onWorkerClientClosed -> markWorkerDead -> promoteWorkerQueue() (the path that gives retireIdleWorker an immediate drain, processes.ts:862). A spawn already queued behind the cap is promoted only by the next 60 s linger sweep's reconcileWorkerAdmission() (index.ts:708): measured 5.3 s and 33.3 s after the retire, both landing on the :12-:13 sweep tick of startedAt 05:31:12.317, with the other slot-holder still mid-task both times. Bounded (<= 60 s), no starvation, no acceptance line sets a latency; the reviewer's ask (no pane held at runState unknown) is met. A one-line promoteWorkerQueue() after the branch's persist would make it immediate; architect's call whether it lands here or as a fast-follow."
+      "description": "The ready-time retire branch frees the slot in state but never calls promoteWorkerQueue(), and because clientFor was never called for the relaunched pane there is no cached client whose close reaches onWorkerClientClosed -> markWorkerDead -> promoteWorkerQueue() (the path that gives retireIdleWorker an immediate drain, processes.ts:862). A spawn already queued behind the cap is promoted only by the next 60 s linger sweep's reconcileWorkerAdmission() (index.ts:708): measured 5.3 s and 33.3 s after the retire, both landing on the :12-:13 sweep tick of startedAt 05:31:12.317, with the other slot-holder still mid-task both times. Bounded (<= 60 s), no starvation, no acceptance line sets a latency; the reviewer's ask (no pane held at runState unknown) is met. A one-line promoteWorkerQueue() after the branch's persist would make it immediate; architect's call whether it lands here or as a fast-follow.",
+      "resolved": "closed by aedcc575 (round 4)"
     }
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T05:40:57.309Z"
+  "completed": "2026-09-13T05:59:05.601Z"
 }
