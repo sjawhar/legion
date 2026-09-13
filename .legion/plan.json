@@ -1,0 +1,196 @@
+{
+  "taskCount": 5,
+  "independentTasks": 0,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks 1-5 in order, TDD inside tasks 1-3 (change the harness first, watch it fail, change the script, watch it pass). Three commits, then bookmark + push + PR. Tester runs the real two-up.sh acceptance on this box. Rebase only if GitHub reports CONFLICTING (LEGION-61 is at retro and edits the same four files).",
+  "summary": "The smoke rig refuses to reuse its own stopped NATS container because it asks Docker for the runtime port map (`docker port`), which is empty once a container stops. Both scripts' shared ownership test switches to the port the container was created with (`HostConfig.PortBindings`, read through one `docker container inspect --format` Go template), so a rig comes back after a host reboot, a container on another port is still refused naming both ports, and teardown still removes only this rig's leftover. Only `scripts/smoke` changes.",
+  "spec": {
+    "issue": "LEGION-87",
+    "document": "spec.md on LEGION-87 (Design, Errors, Testing decided by the architect; this plan orders them, it does not redesign)",
+    "predecessors": "no .legion/architect.json on the branch; the spec document is the architect artifact"
+  },
+  "verifiedFacts": [
+    "Docker 29.7.2 on this box. Scratch container `-p 14987:4222 nats:2.10 -js`: the spec template printed `14987` + newline for the RUNNING container and the identical `14987` + newline for the STOPPED one (`--format` appends one trailing newline of its own; `$(...)` strips it, so no empty line reaches the loop). `docker port <c> 4222/tcp` on the stopped container exited 1 with `no public port '4222/tcp' published for <c>` — the bug as filed. `{{json .HostConfig.PortBindings}}` was `{\"4222/tcp\":[{\"HostIp\":\"\",\"HostPort\":\"14987\"}]}`: ONE binding for a plain `-p PORT:4222`, not the two `0.0.0.0:`/`[::]:` lines `docker port` prints, so `published_ports` now prints a single port and the down.test.sh fixtures asserting `14262 14262` / `14731 14731` change to `14262` / `14731`. Inspect on a removed container exits 1 with `No such container`.",
+    "Both harnesses pass on main (up.test.sh: 25 PASS lines; down.test.sh: 3 PASS lines) after `bun install --frozen-lockfile` in the workspace (needed once; up.test.sh runs the daemon CLI).",
+    "shellcheck 0.11.0 is on PATH (mise). Baseline `shellcheck -x scripts/smoke/{up,down,up.test,down.test}.sh` has exactly three pre-existing findings: up.sh:21 SC2155, up.sh:380 SC2086, down.test.sh:111 SC2016. Probed: the Go template inline in `--format '...'` raises nothing; the same text in a variable assignment (`ports_template='...'` or `local template='...'`) raises SC2016 (info) — hence inline in the scripts, one justified `# shellcheck disable=SC2016` above the harness assignment.",
+    "up.sh is re-runnable against its own live rig: `assert_port_free` exempts a port held by the PID in `${SMOKE_DIR}/<name>.pid`, and `start_process` prints `REUSED <name>` for a live PID. So acceptance 1 is literally `up.sh` → `docker stop` → `up.sh` with the same environment and SMOKE_DIR.",
+    "`ensure_nats` order today: existence `docker container inspect <name>` → `container_published_on` → `.State.Running` → `docker start` (stopped) or `REUSED` (running). Only the read inside `container_published_on` changes; the order stays.",
+    "down.sh never reads `.State.Running` and `docker rm -f` removes a stopped container, so its legacy fallback needs only the read change. down.sh's docker calls are exactly: `container inspect <name>` (existence, lines 225/228), the two reads in `container_published_on`/`published_ports`, and `rm -f` (line 240).",
+    "Literal `docker port` sites that must all go: up.sh:459 (comment) and :469 (read); down.sh:64 (comment), :74 (read), :83 (comment), :88 (read); down.test.sh:162 (comment); README.md:166. up.test.sh:894 and down.test.sh:176 are the fakes' `'port <name> 4222/tcp'` answers (no literal `docker port`, but they go too).",
+    "jj 0.45.1-sami here has `split.legacy-bookmark-behavior=true`: after `jj split`, the bookmark follows the REMAINDER commit (`@`, which permanently holds the extension's untracked empty `.omp/config.yml` — LEGION-58), and moving it back onto the split-off commit is a 'backwards' move jj refuses without `--allow-backwards` (observed by the planner on this very handoff: `Error: Refusing to move bookmark backwards or sideways: legion/LEGION-87`). Every commit step below is therefore `split -m ... <paths>` then `bookmark set legion/LEGION-87 -r @- --allow-backwards`; never name `.omp/config.yml` in a split and never `bookmark set` without `-r @-`. Check the result with `jj log`: the bookmark must sit on the described commit, `@` above it holding only `.omp/config.yml`.",
+    "Two other rigs are live on this box right now (`legion-smoke-nats-sjawhar4404` on 14444, `legion-smoke-nats-sjawhar1083` on 14283). No role touches them; every scratch container or rig this issue starts uses its own name/port and is removed by the role that started it."
+  ],
+  "constraints": [
+    "Scope is `scripts/smoke` only: up.sh, down.sh, up.test.sh, down.test.sh, README.md. No daemon, contracts, or plugin change; no version bump.",
+    "The Go template is exactly the spec's: {{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) \"4222/tcp\"}}{{range $bindings}}{{.HostPort}}{{\"\\n\"}}{{end}}{{end}}{{end}} — same bytes in up.sh, down.sh, up.test.sh, and down.test.sh.",
+    "The comparison rule does not change: at least one line, every line numeric and equal to the configured port; failed inspect / no lines / non-numeric line → refusal. Only the read changes.",
+    "Function names `container_published_on` and `published_ports` stay; their BODIES are byte-identical between up.sh and down.sh (the comments above them may differ, as today).",
+    "down.sh gains no new command dependency (no jq).",
+    "Ownership test runs before `docker start`; nothing is ever started or created after a refusal.",
+    "After the change `grep -r 'docker port' scripts/smoke` prints nothing — comments and README included; do not write the phrase anywhere, not even as 'unlike `docker port`'.",
+    "Never include `.omp/config.yml` in a commit; never run jj undo / op restore / abandon / edit @- (shared operation log).",
+    "Rebase only if GitHub reports the PR CONFLICTING (Sami 2026-09-11). LEGION-61 (retro) and LEGION-71 edit these files; a conflict-forced rebase leaving the diff unchanged re-runs bare gates only.",
+    "No plan/spec markdown in the PR. `.legion/` handoffs are committed per phase; the implementer deletes `.legion/` only at the reviewer's direction."
+  ],
+  "files": [
+    {
+      "path": "scripts/smoke/up.sh",
+      "change": "container_published_on (458-476) reads HostConfig.PortBindings via the template; new published_ports copied verbatim from down.sh; ensure_nats (482-483) refusal names both ports."
+    },
+    {
+      "path": "scripts/smoke/down.sh",
+      "change": "container_published_on (63-81) and published_ports (83-94) read HostConfig.PortBindings via the template; bodies byte-identical to up.sh's."
+    },
+    {
+      "path": "scripts/smoke/up.test.sh",
+      "change": "Refusal stub/assertions (864, 869, 915) reworded; fake docker (888-897) answers the exact inspect argv, SMOKE_FAKE_RUNNING for .State.Running, `start <name>`; new cases: stopped+matching → start, stopped+other → refused naming both ports, several bindings with one differing → refused listing every port."
+    },
+    {
+      "path": "scripts/smoke/down.test.sh",
+      "change": "Comment (160-165) and fake docker (170-180) answer the exact inspect argv and SMOKE_FAKE_RUNNING; assertion strings 216/227/240 drop the duplicated port; new stopped+matching case asserts rm -f through exactly the inspect reads."
+    },
+    {
+      "path": "scripts/smoke/README.md",
+      "change": "Line 152 gains one sentence on reuse of a running-or-stopped container; line 166 describes the legacy fallback's ownership test as the created-with binding (HostConfig.PortBindings)."
+    }
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "up.sh: ownership test reads the created-with binding; refusal names both ports (TDD in up.test.sh)",
+      "files": [
+        "scripts/smoke/up.test.sh",
+        "scripts/smoke/up.sh"
+      ],
+      "steps": [
+        "Bind: `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" status` (expect `@` on main's d35e8b59 with `A .omp/config.yml`, plus the plan commit below it once this handoff is pushed). Run `bun install --frozen-lockfile` once. Baseline: `bash scripts/smoke/up.test.sh; echo $?` → 0.",
+        "up.test.sh, the reuse block (currently 880-923). Replace the fake docker heredoc with one that answers the exact inspect argv and never `port`. Define the template ONCE in the harness right above the heredoc, single-quoted, and let the unquoted heredoc expand it into the single-quoted case pattern (the generated script then holds literal `$port`/`$bindings`/`\\n` inside single quotes — no runtime expansion; `\\$` escapes stay for what the fake evaluates at runtime). shellcheck's SC2016 fires on that assignment (it does not fire on the inline `--format '…'` argument the scripts use), so the directive with its reason goes on the line above, as `.github/workflows/worker-image.yaml` does:\n\n# The exact --format template container_published_on and published_ports pass to docker (LEGION-87):\n# the fake answers only this argv, so a drift in either script's copy fails the reuse cases instead\n# of passing. One host port per line, one line per word of SMOKE_FAKE_PORT; .State.Running comes\n# from SMOKE_FAKE_RUNNING (default true); a `port …` argv, empty for a stopped container in real\n# docker, is refused like any other unknown argv.\n# shellcheck disable=SC2016 # Go template variables ($port, $bindings), not shell expansions\nports_template='{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) \"4222/tcp\"}}{{range $bindings}}{{.HostPort}}{{\"\\n\"}}{{end}}{{end}}{{end}}'\ncat >\"${fake_bin}/docker\" <<EOF\n#!/usr/bin/env bash\nprintf '%s\\n' \"\\$*\" >>\"${docker_log}\"\ncase \"\\$*\" in\n  'container inspect legion-smoke-nats-sjawhar24') exit 0 ;;\n  'container inspect --format {{.State.Running}} legion-smoke-nats-sjawhar24') printf '%s\\n' \"\\${SMOKE_FAKE_RUNNING:-true}\" ;;\n  'container inspect --format ${ports_template} legion-smoke-nats-sjawhar24') printf '%s\\n' \\${SMOKE_FAKE_PORT:?} ;;\n  'start legion-smoke-nats-sjawhar24') exit 0 ;;\n  *) exit 1 ;;\nesac\nEOF\n\nRewrite the block's leading comment (880-884) to say the fake answers the created-with binding read and reports state from SMOKE_FAKE_RUNNING; drop the 'two lines the real one prints (IPv4, IPv6)' sentence — PortBindings has one binding per `-p`. (The planner generated a fake from exactly this heredoc and drove the bodies below against it: match → owned; 142220 → refused, `142220`; `14222 142220` → refused, `14222 142220`; unknown name → refused, `none`.)",
+        "up.test.sh: change the existing refusal wording. Line 915 → `*\"NATS container legion-smoke-nats-sjawhar24 is published on port ${configured_nats_port}0, not the configured NATS port ${configured_nats_port}\"*`. The main() stub at 864 → `fail \"NATS container $1 is published on port ${nats_port}0, not the configured NATS port ${nats_port}\"` and its assertion at 869 → `*\"NATS container legion-smoke-nats-sjawhar24 is published on port\"*` (the stub simulates the refusal; keep its text in the new shape).",
+        "up.test.sh: append three cases after the prefix case (before the block's PASS line), each in its own `( ... )` subshell like the existing ones, each clearing `$docker_log` first:\n(a) stopped + matching port (spec Testing 1): `SMOKE_FAKE_RUNNING=false SMOKE_FAKE_PORT=\"$configured_nats_port\" real_ensure_nats legion-smoke-nats-sjawhar24` must exit 0; output contains `STARTED NATS container legion-smoke-nats-sjawhar24`; `grep -Fxq 'start legion-smoke-nats-sjawhar24' \"$docker_log\"`; no `^run ` line on the log.\n(b) stopped + other port (spec Testing 2): `SMOKE_FAKE_RUNNING=false SMOKE_FAKE_PORT=\"${configured_nats_port}0\" real_ensure_nats …` must exit non-zero; output contains `NATS container legion-smoke-nats-sjawhar24 is published on port ${configured_nats_port}0, not the configured NATS port ${configured_nats_port}`; `grep -q '^run \\|^start ' \"$docker_log\"` must find nothing (ownership runs before start).\n(c) several bindings, one differing (spec Errors row 3): `SMOKE_FAKE_PORT=\"${configured_nats_port} ${configured_nats_port}0\" real_ensure_nats …` must exit non-zero; output contains `is published on port ${configured_nats_port} ${configured_nats_port}0, not the configured NATS port ${configured_nats_port}`; no `^run \\|^start ` on the log.\nUpdate the block's final PASS line to say the test also starts a stopped container on the configured port and refuses one on any other.",
+        "Run `bash scripts/smoke/up.test.sh; echo $?` → must FAIL now (the fake no longer answers `port …`, so the first reuse case's `container_published_on` returns false and REUSED is not printed). If it passes, the fake or the assertions are wrong — stop and fix the harness before touching up.sh.",
+        "up.sh: replace `container_published_on` (458-476) with the body below, and add `published_ports` right after it (down.sh gets the same two bodies in task 2 — write both from this text so they are byte-identical). The template is inline in the `--format` argument, as the spec writes it; shellcheck is clean on that form (a `local template=…` would trip SC2016 twice per script):\n\n# Ownership test for a NATS container, shared verbatim with down.sh: true only when the container\n# was created publishing container port 4222/tcp on at least one host port (HostConfig.PortBindings,\n# which Docker keeps while the container is stopped -- the runtime port map is empty then, which is\n# how a rig could not restart after a host reboot, LEGION-87) and every such host port equals the\n# given one -- one host port is bound by one rig, so an equal port means this rig's container. A\n# failed inspect, no binding, or a non-numeric host port is a refusal, never a match.\ncontainer_published_on() {\n  local container=\"$1\"\n  local port=\"$2\"\n  local published\n  local line\n  local seen=0\n  published=\"$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) \"4222/tcp\"}}{{range $bindings}}{{.HostPort}}{{\"\\n\"}}{{end}}{{end}}{{end}}' \"$container\" 2>/dev/null)\" || return 1\n  while IFS= read -r line; do\n    [[ -n \"$line\" ]] || continue\n    [[ \"$line\" =~ ^[0-9]+$ && \"$line\" == \"$port\" ]] || return 1\n    seen=1\n  done <<<\"$published\"\n  ((seen))\n}\n\n# Prints the host ports the container was created to publish 4222/tcp on (HostConfig.PortBindings),\n# space-separated, or `none`. Shared verbatim with down.sh.\npublished_ports() {\n  local published\n  local line\n  local ports=\"\"\n  published=\"$(docker container inspect --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) \"4222/tcp\"}}{{range $bindings}}{{.HostPort}}{{\"\\n\"}}{{end}}{{end}}{{end}}' \"$1\" 2>/dev/null || true)\"\n  while IFS= read -r line; do\n    [[ \"$line\" =~ ^[0-9]+$ ]] || continue\n    ports=\"${ports:+${ports} }${line}\"\n  done <<<\"$published\"\n  printf '%s\\n' \"${ports:-none}\"\n}\n\n`$(...)` strips docker's trailing newline, so with one binding no empty line reaches the loop; the `-n` guard stays for the several-bindings shape. `$port`/`$bindings` inside the single quotes are Go template variables, never shell.",
+        "up.sh `ensure_nats` (482-483): the refusal becomes\n    container_published_on \"$nats_name\" \"$nats_port\" ||\n      fail \"NATS container ${nats_name} is published on port $(published_ports \"$nats_name\"), not the configured NATS port ${nats_port}\"\nNothing else in ensure_nats moves: existence → ownership → .State.Running → start/REUSED.",
+        "Run `bash scripts/smoke/up.test.sh; echo $?` → 0, and every new PASS line prints. Run `shellcheck -x scripts/smoke/up.sh scripts/smoke/up.test.sh` → only the pre-existing up.sh:21 SC2155 and up.sh:380 SC2086 remain.",
+        "Do not commit yet — task 2 completes the same logical change (the verbatim copy); commit at the end of task 3."
+      ]
+    },
+    {
+      "id": 2,
+      "title": "down.sh: same read in its two helpers (TDD in down.test.sh); stopped legacy container is removed",
+      "files": [
+        "scripts/smoke/down.test.sh",
+        "scripts/smoke/down.sh"
+      ],
+      "steps": [
+        "down.test.sh fake (170-180): remove the `'port legion-smoke-nats 4222/tcp'` arm; add, using the same two lines task 1 put above its heredoc (`# shellcheck disable=SC2016 # Go template variables ($port, $bindings), not shell expansions` and `ports_template='…'`) placed just above this heredoc,\n  'container inspect --format {{.State.Running}} legion-smoke-nats') printf '%s\\n' \"\\${SMOKE_FAKE_RUNNING:-true}\" ;;\n  'container inspect --format ${ports_template} legion-smoke-nats') printf '%s\\n' \\${SMOKE_FAKE_LEGACY_PORT:?} ;;\nRewrite the comment at 160-165: the fake answers the created-with binding read for the fixed name, one line per word of SMOKE_FAKE_LEGACY_PORT, and reports .State.Running from SMOKE_FAKE_RUNNING (default true) even though down.sh does not ask today; drop the sentence about the two lines real docker prints.",
+        "down.test.sh assertions: line 227 `14262 14262` → `14262`; line 240 `14731 14731` → `14731` (one binding per `-p`, as verified on real docker). Line 216's text is unchanged.",
+        "down.test.sh: add one case right after the same-port remove case (after line 219, before the different-port case):\n# The same fixed-name container stopped (a host reboot stops every container): the created-with\n# binding still names this rig's port, so it is removed -- and reached through exactly the existence\n# and binding reads plus rm -f, never a runtime port map or a start (LEGION-87 acceptance 3).\n: >\"$docker_log\"\nPATH=\"${fake_bin}:${PATH}\" SMOKE_DIR=\"$nats_smoke_dir\" SMOKE_FAKE_RUNNING=false SMOKE_FAKE_LEGACY_PORT=14731 bash \"$down_script\" >\"$output_file\" 2>&1\ngrep -Fxq 'rm -f legion-smoke-nats' \"$docker_log\" || {\n  printf 'expected down.sh to remove a stopped legion-smoke-nats published on this rig'\"'\"'s NATS port; docker log:\\n%s\\n' \"$(<\"$docker_log\")\" >&2\n  exit 1\n}\nif grep -qvE '^(container inspect( --format .*)? legion-smoke-nats|rm -f legion-smoke-nats)$' \"$docker_log\"; then\n  printf 'down.sh reached rm -f for a stopped legion-smoke-nats through an unexpected docker call; docker log:\\n%s\\n' \"$(<\"$docker_log\")\" >&2\n  exit 1\nfi\n[[ \"$(<\"$output_file\")\" == *'STOPPED NATS container legion-smoke-nats'* ]] || {\n  cat \"$output_file\" >&2\n  exit 1\n}",
+        "Run `bash scripts/smoke/down.test.sh; echo $?` → must FAIL now (the fixed-name remove case no longer gets a port answer and prints the leave-it message). Fix the harness if it passes.",
+        "down.sh: replace `container_published_on` (63-81) and `published_ports` (83-94) with the two bodies from task 1 step 6, byte-for-byte (keep down.sh's own comment wording 'shared verbatim with up.sh's ensure_nats' above the first; the `published_ports` comment says 'Shared verbatim with up.sh.'). The legacy-fallback messages (234-238) and `docker rm -f` are unchanged.",
+        "Prove the verbatim claim: `diff <(sed -n '/^container_published_on()/,/^}/p' scripts/smoke/up.sh) <(sed -n '/^container_published_on()/,/^}/p' scripts/smoke/down.sh) && diff <(sed -n '/^published_ports()/,/^}/p' scripts/smoke/up.sh) <(sed -n '/^published_ports()/,/^}/p' scripts/smoke/down.sh) && echo verbatim` → prints `verbatim`.",
+        "Run `bash scripts/smoke/down.test.sh; echo $?` → 0. `shellcheck -x scripts/smoke/down.sh scripts/smoke/down.test.sh` → only the pre-existing down.test.sh:111 SC2016."
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Real-docker confirmation on this box, then the implementation commit",
+      "files": [
+        "scripts/smoke/up.sh",
+        "scripts/smoke/down.sh",
+        "scripts/smoke/up.test.sh",
+        "scripts/smoke/down.test.sh"
+      ],
+      "steps": [
+        "Pick a free port P (e.g. `for p in 14987 14988 14989; do (echo >/dev/tcp/127.0.0.1/$p) 2>/dev/null || { echo $p; break; }; done`) and a scratch name that is not a rig's (`legion-87-impl-probe`). Never touch `legion-smoke-nats-*` containers you did not create.",
+        "Run, and keep the transcript for the PR (define the template first, exactly the spec's bytes):\n  template='{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq (print $port) \"4222/tcp\"}}{{range $bindings}}{{.HostPort}}{{\"\\n\"}}{{end}}{{end}}{{end}}'\n  docker run -d --name legion-87-impl-probe -p \"$P:4222\" nats:2.10 -js >/dev/null\n  docker container inspect --format \"$template\" legion-87-impl-probe            # expect: P then one blank line\n  docker container inspect --format '{{.State.Running}}' legion-87-impl-probe   # true\n  docker stop legion-87-impl-probe >/dev/null\n  docker container inspect --format \"$template\" legion-87-impl-probe            # expect: the identical P then one blank line\n  docker container inspect --format '{{.State.Running}}' legion-87-impl-probe   # false\n  docker rm -f legion-87-impl-probe >/dev/null\nThese two inspect outputs (running, then stopped) are what the PR must quote.",
+        "Then drive the real functions against a real stopped container, sourcing nothing: `docker run -d --name legion-87-impl-probe -p \"$P:4222\" nats:2.10 -js >/dev/null && docker stop legion-87-impl-probe >/dev/null && bash -c 'source <(sed -n \"/^container_published_on()/,/^}/p; /^published_ports()/,/^}/p\" scripts/smoke/down.sh); container_published_on legion-87-impl-probe '\"$P\"' && echo owned; container_published_on legion-87-impl-probe 1 || echo refused; published_ports legion-87-impl-probe'` → `owned`, `refused`, `P`. Remove the probe: `docker rm -f legion-87-impl-probe`.",
+        "Also confirm the Errors rows cheaply (no PR quote needed): a container created without `-p` (`docker run -d --name legion-87-impl-probe nats:2.10 -js`) → `published_ports` prints `none` and `container_published_on … <any>` fails; remove it.",
+        "Final gate before committing: `bash scripts/smoke/up.test.sh; echo $?` → 0; `bash scripts/smoke/down.test.sh; echo $?` → 0; `grep -n 'docker port' scripts/smoke/*.sh` → no output (README keeps its literal until task 4; the `-r` grep over the whole directory is task 4's gate); `shellcheck -x scripts/smoke/up.sh scripts/smoke/down.sh scripts/smoke/up.test.sh scripts/smoke/down.test.sh` → exactly the three baseline findings (up.sh:21 SC2155, up.sh:380 SC2086, down.test.sh:111 SC2016), nothing new.",
+        "Commit (paths only, never `.omp/config.yml`): `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m 'smoke: the NATS ownership test reads HostConfig.PortBindings so a stopped rig container is started, not refused (LEGION-87)' scripts/smoke/up.sh scripts/smoke/down.sh scripts/smoke/up.test.sh scripts/smoke/down.test.sh && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-87 -r @- --allow-backwards` (this jj build moves the bookmark to the remainder on split; `-r @-` puts it back on the commit that has the change). Check with `jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 4)'` that `@` holds only `.omp/config.yml` and the bookmark is on the described commit."
+      ]
+    },
+    {
+      "id": 4,
+      "title": "README: the legacy-fallback paragraph and one sentence on reuse of a stopped container",
+      "files": [
+        "scripts/smoke/README.md"
+      ],
+      "steps": [
+        "Line 166: replace `when \\`docker port legion-smoke-nats 4222/tcp\\` maps to the NATS port named in this directory's \\`legion.yaml\\` (\\`nats_urls\\`)` with `when the host port \\`legion-smoke-nats\\` was created to publish for \\`4222/tcp\\` (\\`HostConfig.PortBindings\\`, read through \\`docker container inspect\\` and kept by Docker while the container is stopped, so a rig left stopped by a host reboot is still recognised) equals the NATS port named in this directory's \\`legion.yaml\\` (\\`nats_urls\\`)`. Keep the rest of the sentence (same ownership test, exact, names both ports, leaves it; missing container silent).",
+        "Line 152: append one sentence after `a refused start writes no record.`: `\\`up.sh\\` reuses an existing \\`legion-smoke-nats-<slug>\\` only when the host port it was created to publish for \\`4222/tcp\\` equals \\`NATS_PORT\\` — a stopped one (every container is stopped after a host reboot) is started with \\`STARTED NATS container <name>\\`, a running one is \\`REUSED\\`, and one created on any other port is refused naming both its port(s) and the configured one.`",
+        "Verify: `grep -rn 'docker port' scripts/smoke; echo $?` → no output, exit 1 (acceptance 4). Read the two paragraphs once as a person on a phone would.",
+        "Commit: `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m 'docs(smoke): the NATS ownership test is the created-with binding, so a stopped container is recognised (LEGION-87)' scripts/smoke/README.md && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-87 -r @- --allow-backwards`."
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Handoff, push, pull request",
+      "files": [
+        ".legion/implement.json"
+      ],
+      "steps": [
+        "Write the implement handoff with: the three commit ids, the two quoted real-docker template outputs (running and stopped) plus the `owned`/`refused`/`P` function drive, the harness PASS counts, the shellcheck baseline statement, and the verbatim-diff proof. Then `test -f \"$LEGION_WORKSPACE/.legion/implement.json\"`, `jj -R \"$LEGION_WORKSPACE\" split -m 'implement: record handoff' .legion/implement.json`, `jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-87 -r @- --allow-backwards`.",
+        "Inspect `jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 6)'`: main → `plan: record handoff` → smoke commit → docs commit → `implement: record handoff` → `@` (only `.omp/config.yml`). `jj -R \"$LEGION_WORKSPACE\" diff --from main@origin --to legion/LEGION-87 --summary` lists only the five scripts/smoke files and the two `.legion/*.json`.",
+        "Push: `jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-87`.",
+        "Open the PR with `legion gh -- pr create --repo sjawhar/legion --head legion/LEGION-87 --title 'fix(smoke): start a stopped NATS container instead of refusing it (LEGION-87)' --body-file <file>`. Body: a phone-readable summary paragraph (no paths/line numbers), the line `Dispatch: LEGION-87`, a `## Template on this box` section quoting BOTH real-docker inspect outputs (running, then stopped — the spec requires both to be quoted) and the function drive, then the READY-format `## Verification` skeleton from the legion-worker skill: `CI` (fill after the run), `Threads: 0 resolved, 0 unresolved`, `Thermo` (reviewer fills), `E2E` (tester fills; pre-fill `pending tester`), `Fast-follow: none`, `Chain: not stacked`.",
+        "`legion handoff complete --summary '<two sentences>'` and stay resident for questions."
+      ]
+    }
+  ],
+  "testPhase": {
+    "surface": "The real smoke rig on this box (production-like per deployment instructions), driven through `scripts/smoke/up.sh` and `down.sh` exactly as an operator would after a host reboot.",
+    "isolation": "Two rigs are live on this box (NATS 14444 and 14283). Use your own `SMOKE_PROJECT=sjawhar/<unused number>` (its slug names the container), `SMOKE_DIR=/tmp/legion-smoke-87`, and free `NATS_PORT`, `ENVOY_PORT`, `LEGION_DAEMON_PORT` (`ss -ltn` to check; the daemon also binds LEGION_DAEMON_PORT+1 and must not be adjacent to another live daemon's port). `SMOKE_WEBHOOK_MODE=none` is enough to reach `RIG READY`. Secrets via the README's `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c '...'` wrapper; DISPATCH_URL/DISPATCH_TOKEN come from envoy.json. Never stop, start, or remove a container you did not create.",
+    "steps": [
+      "Run 1 (fresh rig): `up.sh` → expect `STARTED NATS container legion-smoke-nats-<slug>` (from `docker run`) and `RIG READY`. Confirm `docker container inspect --format '{{.State.Running}}' legion-smoke-nats-<slug>` → true.",
+      "Stop it as a reboot would: `docker stop legion-smoke-nats-<slug>`; confirm `.State.Running` → false.",
+      "Negative control (E2E requires one): same environment and SMOKE_DIR but `NATS_PORT=<another free port>`: `up.sh` must stop in `ensure_nats` with `error: NATS container legion-smoke-nats-<slug> is published on port <rig NATS port>, not the configured NATS port <other>`; afterwards `.State.Running` is still false (nothing was started), and no `docker run` happened (`docker ps -a --filter name=legion-smoke-nats-<slug>` shows the one container).",
+      "Run 2 (acceptance 1): the original environment again, same SMOKE_DIR: expect `STARTED NATS container legion-smoke-nats-<slug>` (now from `docker start`), `REUSED listener …`, `REUSED daemon …`, and `RIG READY`. Quote these lines in the PR's `E2E` section with the head SHA and a link to the run transcript (attach the transcript to LEGION-87 with `dispatch_artifact` and link it).",
+      "Teardown: `down.sh` → `STOPPED NATS container legion-smoke-nats-<slug>` and `RIG DOWN`; `docker ps -a --filter name=legion-smoke-nats-<slug>` empty.",
+      "Regression locks at the head: `bash scripts/smoke/up.test.sh` and `bash scripts/smoke/down.test.sh` exit 0; `grep -r 'docker port' scripts/smoke` prints nothing. Acceptance 3 (down.sh's stopped legacy container) is proven by the down.test.sh case per the spec — do not fabricate a legacy `legion-smoke-nats` on this box.",
+      "Write `.legion/test.json` (commands, observed lines, head SHA, negative control), commit it with `split -m 'test: record handoff' .legion/test.json` and `bookmark set legion/LEGION-87 -r @- --allow-backwards`, push, fill the PR's `E2E` line, `legion handoff complete`."
+    ]
+  },
+  "reviewPhase": {
+    "checks": [
+      "Diff touches only the five `scripts/smoke` files (+ `.legion/*.json`). No `.omp/config.yml`.",
+      "The template is byte-identical in all four scripts; `container_published_on` and `published_ports` bodies are byte-identical between up.sh and down.sh (run the two `diff <(sed …)` commands from task 2).",
+      "The comparison rule is unchanged (numeric, equal, at least one, refusal on empty/failed); `ensure_nats` order unchanged (ownership before `.State.Running` and `docker start`); down.sh gained no dependency.",
+      "`grep -r 'docker port' scripts/smoke` empty at the reviewed head (comments and README included).",
+      "Both harnesses pass at the head; new cases assert behaviour (start on log / no start on log / both ports in message / rm -f through inspect reads only), not source text.",
+      "The PR quotes both real-docker template outputs (running and stopped) and the tester's `STARTED NATS container` + `RIG READY` lines with a negative control and a link.",
+      "shellcheck adds no finding beyond the three baseline ones. Thermo runs once at the head (shell scripts are code, not docs-only)."
+    ]
+  },
+  "landing": {
+    "prTitle": "fix(smoke): start a stopped NATS container instead of refusing it (LEGION-87)",
+    "tier": "T3 follow-up (an operator convenience fix in the smoke rig; not CI/deploy correctness)",
+    "conflicts": "LEGION-61 (retro, PR open) edits up.sh/down.sh/up.test.sh/down.test.sh; LEGION-71 edits up.sh and the harnesses. Rebase ONLY if GitHub reports CONFLICTING; then `jj rebase -s 'roots(main@origin..@)' -d main@origin`, fingerprint before/after per the skill, one PR comment."
+  },
+  "concerns": [
+    "The harness fakes match the exact inspect argv, so any whitespace difference between a script's template and the harness's `ports_template` fails the reuse case — deliberate (drift detection), but the implementer must copy the template bytes, not retype them.",
+    "`published_ports` now prints one port per binding (real docker: one binding per `-p`), so down.sh's mismatch message changes from `14262 14262` to `14262` for a plain `-p` container. User-visible wording of the leave-it message is otherwise unchanged.",
+    "down.sh never reads `.State.Running`; the stopped-legacy harness case is meaningful only through its strict-argv assertion (rm -f reached via inspect reads alone), which is why that assertion is in the plan.",
+    "The tester's acceptance run needs the rig's secrets and a free port set on a box already running two rigs; `SMOKE_WEBHOOK_MODE=none` avoids the gh-webhook dependency and still reaches RIG READY."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the phase contract: workspace binding, split-then-`bookmark set legion/LEGION-87 -r @- --allow-backwards` commits (this jj moves the bookmark to the remainder on split and refuses the move back without the flag), `legion gh` PR creation with `Dispatch: LEGION-87`, READY-format body, no rebase unless CONFLICTING.",
+      "test-driven-development — each of tasks 1-2 changes the harness first, watches it fail, then changes the script; the fakes answering the exact inspect argv is the failing test.",
+      "verification-before-completion — the real-docker template check (running + stopped, quoted in the PR), both harnesses, the four-script `docker port` grep, and the verbatim diff run before any 'done' claim."
+    ],
+    "test": [
+      "legion-worker — the E2E section contract: real surface (smoke rig on this box), exact commands, observed lines, head SHA, one negative control, a link; test.json committed and pushed the same way.",
+      "verification-before-completion — quote observed output (`STARTED NATS container …`, `RIG READY`, the refusal), never a summary; run the harnesses and the grep at the head being certified."
+    ],
+    "review": [
+      "legion-worker — one review per round via the reviews API with inline comments, thermo once at the head (code change, not docs-only), verify CI/E2E facts against GitHub, approve only the `.legion/`-free head by SHA.",
+      "receiving-code-review — for the implementer when answering threads: verify each finding against the spec's Errors/Design tables before changing the comparison rule or the template."
+    ]
+  },
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T17:36:02.657Z"
+}
