@@ -248,6 +248,7 @@ describe("provisionIssueWorkspace", () => {
             await whenPathExists(path.dirname(repoCloneDir), jjDir);
           }
           await mkdir(path.join(target, ".jj"), { recursive: true });
+          await writeFile(path.join(target, ".jj", "clone-origin"), target, "utf8");
         }
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           const directory = cmd[3];
@@ -274,6 +275,8 @@ describe("provisionIssueWorkspace", () => {
       bookmark: "legion/WIDGETS-43",
     });
     expect(existsSync(jjDir)).toBeTrue();
+    // The clone that landed is the first one; the loser did not rename its own over it.
+    expect(await readFile(path.join(jjDir, "clone-origin"), "utf8")).toBe(cloneTargets[0]);
     // The surplus clone is gone: no `widgets.clone-*` sibling beside the one that landed.
     expect(await readdir(path.dirname(repoCloneDir))).toEqual(["widgets"]);
     const temporaryClone = new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`);
