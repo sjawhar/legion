@@ -1,0 +1,222 @@
+{
+  "taskCount": 9,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, one PR touching only scripts/smoke/* plus three one-line docs/solutions corrections. Build the relay (task 1) and its bun test first, then up.sh, checkpoints.sh, down.sh, README, and the three shell harnesses. Run the two-rig live proof on this machine before opening the PR. Implement against current main (52c5e03e, which already contains LEGION-10 #957); rebase onto main only when GitHub reports CONFLICTING after #1011 (LEGION-40) or #1010 (LEGION-41) merge - see `rebase` below for the exact hunks that will collide.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker",
+      "test-driven-development",
+      "verification-before-completion"
+    ],
+    "test": [
+      "legion-worker",
+      "verification-before-completion"
+    ],
+    "review": [
+      "legion-worker"
+    ]
+  },
+  "prerequisites": [
+    "`cd -- \"$LEGION_WORKSPACE\" && bun install` - the workspace has no root node_modules yet; scripts/smoke/envoy-bridge.ts (and the new relay) import `nats` (^2.29.2, hoisted from packages/daemon) and packages/contracts/src/envelope.ts.",
+    "A live Dispatch reachable from this box: DISPATCH_URL/DISPATCH_TOKEN exported (pre-LEGION-40) or `~/.config/opencode/envoy.json` `.dispatch.serverUrl`/`.dispatch.token` (post-LEGION-40). Project LEGSMOKE must exist there (it does; every earlier rig used it).",
+    "Provider credentials via `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` (the generated legion.yaml's default omp_launch_prefix) so the two live rigs' controller and architect panes actually run."
+  ],
+  "decision": {
+    "chosen": "A sibling relay, `scripts/smoke/issue-relay.ts`, that polls the Dispatch HTTP API for the rig's root issue and its transitive children and publishes each event onto the rig's own NATS as the production outbox would. `scripts/smoke/envoy-bridge.ts` is not modified.",
+    "why": [
+      "The root key does not exist until up.sh's ensure_root_issue runs, and children appear minutes later. A per-rig filter on the upstream core-NATS subscription (`notifications.dispatch.issue.<KEY>.>`) cannot see an event published before it subscribed, so it would need a JetStream consumer on the production ENVOY_NOTIFICATIONS stream - coupling the rig to production stream retention, subject permissions and tailnet reachability. `GET /api/v1/issues/<key>/events?after=0` replays the whole history, so ordering relative to root creation stops mattering.",
+      "A child's `issue.created` is published on the child's own subject, never under the root's, so child discovery needs the Dispatch API in either design. The filter design would therefore need production NATS *and* the API; the relay needs only the API the rig already requires (DISPATCH_URL/DISPATCH_TOKEN are already inputs to up.sh and the daemon).",
+      "It removes the production-NATS dependency the LEGION-27 architect asked to remove ('so resync-driven scenarios work without live ingress and without cross-rig contamination'), and it is the mechanism LEGION-27 already proved by hand (/tmp/legion27-smoke-rig/inject-issue-event.ts), made continuous and made exact.",
+      "envoy mode stays byte-identical (acceptance 3): no change to envoy-bridge.ts, its test, or the envoy branch of up.sh."
+    ],
+    "isolationGuarantee": "The relay only ever fetches `/api/v1/issues/<key>/events` for keys in its tracked set: the root from SMOKE_ROOT_ISSUE plus the transitive closure of `GET /api/v1/issues?project=<P>&parent=<key>`. Another rig's root is never a descendant of this root, so its events are never fetched, never published, and the daemon never logs `consumed event` for them. The daemon additionally skips any subject whose key does not start with `<dispatchProject>-` (events.ts handleEnvelope), and drops a seq not strictly newer than `state.issues[key].lastAppliedSeq` (reducers.ts reduceDispatchEvent), so a relay restart is harmless."
+  },
+  "relayContract": {
+    "file": "scripts/smoke/issue-relay.ts (+ scripts/smoke/issue-relay.test.ts)",
+    "process": "up.sh `start_process issue-relay` -> ${SMOKE_DIR}/issue-relay.{pid,start,log}; down.sh `terminate_pid_file issue-relay`.",
+    "environment": {
+      "SMOKE_ROOT_ISSUE": "required; must match /^[A-Z][A-Z0-9]*-[0-9]+$/ (ISSUE_KEY_PATTERN in packages/daemon/src/daemon/legion-state.ts); the project is the prefix before the dash. A wildcard or malformed value is a config error (never widen the subject set).",
+      "SMOKE_RIG_NATS": "required; the rig's NATS URL (up.sh's $nats_url).",
+      "DISPATCH_URL": "required; trailing slash stripped.",
+      "DISPATCH_TOKEN": "required. up.sh passes it in the relay's `env` block exactly as it already does for the daemon (`DISPATCH_TOKEN=\"$DISPATCH_TOKEN\"`); after LEGION-40 the variable is a shell variable assigned by resolve_dispatch_config, not exported, so passing it on purpose is the only way it reaches the child. Never logged."
+    },
+    "exports": {
+      "relayConfigFromEnvironment(env)": "-> { rootIssue, project, dispatchUrl, token, downstreamUrl }; throws naming the offending variable (mirrors bridgeConfigFromEnvironment).",
+      "envelopeForEvent(row)": "Takes one row of `GET /api/v1/issues/<key>/events` (the Go model.Event: id, issue_key, artifact_id, project, seq, type, actor, notify, created_at, payload) and returns the Envoy envelope exactly as packages/envoy/internal/dispatch/outbox/publisher.go `envelope()` builds it: event_id = `dispatch-<id>`; source = \"dispatch\"; source_event_id = String(id); source_session = actor.id only when actor.kind === \"session\"; topic = dispatchIssueSubject(issue_key, type) from packages/contracts/src/subject.ts; dedupe_key = event_id; issued_at = Date.parse(created_at) (ms); payload_summary = `<issue_key> <type with dots replaced by spaces>` plus `: <text>` for ask.* (payload.question, 120 runes), message.created / comment.* / suggestion.* (payload.body), subscription.removed (payload.session_id), whitespace-collapsed and cut at 160 runes (port of payloadSummary; owner is always the issue key - the artifact-slug branch is cosmetic and skipped); payload = JSON.stringify(row) (the same struct the outbox marshals, so the daemon's dispatchIssueEvent decodes it identically); trace_id = event_id. No expires_at, payload_ref, or sender.",
+      "messageId(envelope)": "`${dedupe_key}:${topic}` - what packages/envoy/internal/bus/nats.go sets as nats.MsgId for source \"dispatch\". Published with `js.publish(topic, data, { msgID })` so the ENVOY_NOTIFICATIONS stream's duplicate window (72 h) rejects a replay after a relay restart; the ack's `duplicate` flag is logged.",
+      "orderEvents(batches)": "Concatenates every tracked key's new rows and sorts by `id` ascending (Dispatch allocates event ids in commit order), reproducing the outbox's cross-issue order; within one key this is also ascending seq, which reduceDispatchEvent requires (a lower or equal seq is dropped).",
+      "runRelay(config, deps)": "deps = { fetch, connect, sleep } injectable for the unit test; defaults to globalThis.fetch, nats connect, setTimeout."
+    },
+    "loop": [
+      "Connect downstream once: connect({ servers, name: `legion-smoke-issue-relay-<root>`, reconnect: true, maxReconnectAttempts: -1, reconnectTimeWait: 2000 }); js = nc.jetstream(). No upstream NATS at all.",
+      "Every tick (2000 ms constant POLL_INTERVAL_MS; not an env knob): (1) discovery - breadth-first from the root, `GET /api/v1/issues?project=<P>&parent=<key>` for every tracked key, adding each returned `.key`; log `RELAY TRACKING <key> parent=<parent>` once per new key. (2) For every tracked key `GET /api/v1/issues/<key>/events?after=<cursor[key] ?? 0>&limit=500`, paging until a page is shorter than the limit. (3) orderEvents, then publish sequentially (await each ack) and after each ack set cursor[key] = row.seq; log `RELAYED subject=<topic> event=<event_id> seq=<seq> stream_seq=<ack.seq> duplicate=<ack.duplicate>`. (4) The first tick whose fetches all succeed logs `RELAY READY root=<root> project=<P> dispatch=<url> downstream=<nats>` exactly once - even with zero events (no events yet: the relay waits; nothing is invented).",
+      "Dispatch failure (network error, 5xx, any non-2xx other than 401/403/404-on-root, non-JSON body) or a publish failure: log `RELAY RETRY attempt=<n> next=<ms>ms: <message>`, sleep the backoff (1000 ms doubling to a 30000 ms cap), retry the tick; cursors are only advanced by acked publishes, so nothing is skipped. A later successful tick logs `RELAY RECOVERED after <n> attempts` and resets the backoff. The relay never exits on these.",
+      "Definitive misconfiguration - Dispatch answers 401/403 to any request, or 404 for the root issue itself - logs `RELAY UNHEALTHY <message>` and exits 1 (a wrong bearer or a missing root does not heal by waiting; no silent fallback). Config errors from relayConfigFromEnvironment take the same path via the import.meta.main wrapper, as in envoy-bridge.ts.",
+      "SIGINT/SIGTERM: stop the loop, drain the connection, exit 0."
+    ],
+    "logMarkers": "RELAY READY / RELAYED / RELAY TRACKING / RELAY RETRY / RELAY RECOVERED / RELAY UNHEALTHY - up.sh's wait_for_issue_relay and checkpoints.sh's require_isolated_relay key on these exact prefixes; the README names them."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Write scripts/smoke/issue-relay.ts and scripts/smoke/issue-relay.test.ts",
+      "files": [
+        "scripts/smoke/issue-relay.ts",
+        "scripts/smoke/issue-relay.test.ts"
+      ],
+      "steps": [
+        "Implement the relay per `relayContract`. Follow envoy-bridge.ts's shape: pure exported config/envelope helpers, `runRelay`, and an `import.meta.main` block that logs `RELAY UNHEALTHY <message>` and sets exitCode 1 on a thrown error.",
+        "Unit tests (bun test, same style as envoy-bridge.test.ts): (a) relayConfigFromEnvironment rejects `LEGSMOKE-*`, `LEGSMOKE-1.>`, `legsmoke-1`, and an empty SMOKE_RIG_NATS/DISPATCH_URL/DISPATCH_TOKEN, each error naming the variable; derives project `LEGSMOKE` from `LEGSMOKE-7`. (b) envelopeForEvent on the real captured rows packages/daemon/src/daemon/__tests__/fixtures/dispatch/issue-created-root.json, issue-created-child.json and legsmoke-3-issue.updated-human-todo.json: `envelopeValidation(JSON.stringify(envelope))` from ./envoy-bridge is `{valid: true}`; `dispatchIssueEvent(envelope)` from ../../packages/daemon/src/daemon/dispatch-events.ts returns the fixture's key/seq/type and eventId `dispatch-<id>`; event_id === dedupe_key === trace_id; messageId === `dispatch-<id>:notifications.dispatch.issue.<key>.<type>`; source_session is set only for a `kind: \"session\"` actor. (c) runRelay with a fake fetch/publish/sleep and a tick limit: tick 1 discovers a child from `?parent=`, publishes root then child rows in global id order, records each cursor; tick 2 requests `after=<last seq>` per key and publishes nothing new; a row already published is never published twice. (d) fetch failure on tick 2: a RETRY line, backoff 1000 -> 2000 -> ... capped at 30000, cursors untouched, then a successful tick publishes the missed rows and resets the backoff; 401 throws with the UNHEALTHY message. (e) zero events: READY logged once, nothing published, polling continues.",
+        "Run only `bun test scripts/smoke/issue-relay.test.ts` and `bunx biome check scripts/smoke/issue-relay.ts`; do not run the repository suites mid-flight."
+      ]
+    },
+    {
+      "id": 2,
+      "title": "up.sh: accept `isolated`, start and wait for the relay after the root issue is recorded",
+      "files": [
+        "scripts/smoke/up.sh"
+      ],
+      "steps": [
+        "resolve_webhook_mode: add `isolated) printf 'isolated\\n' ;;` beside envoy; the catch-all error becomes `SMOKE_WEBHOOK_MODE must be forward, envoy, isolated, or none`. Default selection is unchanged (forward when `gh webhook forward` exists, else none).",
+        "webhook_ingress_block_reason (the none-mode start-up line): `... checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=isolated or envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode` (up.test.sh pins this string - update the assertion in task 7).",
+        "After the listener health/ping block, add an `elif [[ \"$webhook_mode\" == \"isolated\" ]]` branch printing `GREEN Dispatch ingress: isolated relay will carry only this rig's root issue and its children into the rig NATS once the root is recorded; no GitHub event reaches the rig`.",
+        "Add `wait_for_issue_relay` next to wait_for_envoy_bridge: 60 x 1 s; `fail \"issue relay unhealthy: <reason>\"` on `RELAY UNHEALTHY `; GREEN `issue relay: relaying <root> and its children` when the log has `RELAY READY ` and the pid is live; `fail \"issue relay exited; inspect ${smoke_dir}/issue-relay.log\"` when the pid dies; `fail \"issue relay did not become ready; inspect ...\"` after 60 s.",
+        "In main(), directly after `ensure_root_issue` (keep the envoy bridge block and ensure_root_issue exactly where they are): `if [[ \"$webhook_mode\" == \"isolated\" ]]; then start_process issue-relay env SMOKE_ROOT_ISSUE=\"$(<\"${smoke_dir}/root-issue\")\" SMOKE_RIG_NATS=\"$nats_url\" DISPATCH_URL=\"$DISPATCH_URL\" DISPATCH_TOKEN=\"$DISPATCH_TOKEN\" bun run \"${repo_root}/scripts/smoke/issue-relay.ts\"; wait_for_issue_relay; fi`. Extend the comment above ensure_root_issue: in isolated mode the relay replays the issue's history from the Dispatch API, so it is started after the root is recorded and still delivers issue.created; a rerun reuses a live relay (start_process's REUSED path) because ensure_root_issue reuses the same recorded root.",
+        "`RIG READY` prints only after wait_for_issue_relay returned. No other main() ordering changes."
+      ]
+    },
+    {
+      "id": 3,
+      "title": "checkpoints.sh: isolated gating and the relay-feed precheck",
+      "files": [
+        "scripts/smoke/checkpoints.sh"
+      ],
+      "steps": [
+        "stored_webhook_mode's fail text: `... or export SMOKE_WEBHOOK_MODE=envoy|forward|isolated|none`; the final `*)` arm: `recorded SMOKE_WEBHOOK_MODE must be forward, envoy, isolated, or none`.",
+        "dispatch_ingress_block_reason: `... never admits the root issue; use SMOKE_WEBHOOK_MODE=isolated (this rig's own issue only) or envoy`. Make webhook_ingress_block_reason take the mode as $1 like dispatch_ingress_block_reason does: `SMOKE_WEBHOOK_MODE=%s: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward` - the none arm passes `$webhook_mode`, so none's text is unchanged.",
+        "Add `relay_is_live` (pid file + start file + /proc/<pid>/stat field 22 equality, the three lines down.sh's terminate_pid_file uses) and `require_isolated_relay`: (1) not live -> `fail \"isolated relay is not running (no live process recorded at ${smoke_dir}/issue-relay.pid): the Dispatch issue-event feed for <root> is missing, so daemon state cannot reflect it; rerun up.sh and inspect ${smoke_dir}/issue-relay.log\"`; (2) log lacks `RELAY READY ` -> `fail \"isolated relay has not reported RELAY READY; inspect <log>\"`; (3) the last line starting `RELAY ` is a `RELAY RETRY` -> `fail \"isolated relay cannot reach Dispatch (<that line>); the feed for <root> is stalled\"`. <root> is dispatch_root_key. Exit 1, not 3: a dead relay is a rig fault, not a human-controlled gate.",
+        "New `isolated)` arm in the mode case: `1 | 2 | 3 | 4 | 12) require_isolated_relay ;; 5 | 6 | 7 | 9 | 10 | 11) blocked \"$(webhook_ingress_block_reason \"$webhook_mode\")\" ;;`. 8 and 13 stay out of the arm. Update the comment block above dispatch_ingress_block_reason: isolated relays only this rig's root and children; envoy relays every project's issues."
+      ]
+    },
+    {
+      "id": 4,
+      "title": "down.sh: stop the relay with the rig",
+      "files": [
+        "scripts/smoke/down.sh"
+      ],
+      "steps": [
+        "`terminate_pid_file issue-relay` as the first line of main(), beside `terminate_pid_file envoy-bridge` (after LEGION-41 lands this sits after its `started_a_rig` computation - keep it as the first stop either way, so no new upstream event lands in the daemon during teardown)."
+      ]
+    },
+    {
+      "id": 5,
+      "title": "README: modes table, isolated as the pre-merge mode, logs, teardown, checkpoints prose",
+      "files": [
+        "scripts/smoke/README.md"
+      ],
+      "steps": [
+        "Line 3 intro: add `isolated` mode relays only this rig's own root issue and its children from the Dispatch API into the rig - no production NATS, no personal GitHub identity - and is the mode for a pre-merge proof.",
+        "Prerequisites table `SMOKE_WEBHOOK_MODE` row: add `isolated` (starts scripts/smoke/issue-relay.ts for the root issue up.sh records: Dispatch issue events for that issue and its children only, no GitHub events). Default column unchanged.",
+        "Human-controlled gates table: new row `SMOKE_WEBHOOK_MODE=isolated` - required for: the pre-merge proof of a change (Sami, 2026-09-13: the developing agent tests on a production-like surface before merging); behaviour: relays this rig's root and children only, so two rigs on one machine never see each other's issues; checkpoints 1-4 and 12 available, 5-7 and 9-11 `SKIPPED-BLOCKED` with the GitHub-ingress reason (exit 3), 8 and 13 ungated; needs neither production NATS nor a user gh identity. envoy row: replace `the only mode that reaches checkpoints 1-4 and 12` with a sentence saying envoy relays every LEGSMOKE issue on the server, so two rigs on one machine each consume the other's - use `isolated` for a proof. none row: `envoy is the mode for checkpoints 1-4 and 12` -> `isolated is the mode for checkpoints 1-4 and 12`.",
+        "Start and stop block: `export SMOKE_WEBHOOK_MODE=isolated`; the paragraph after it says what isolated starts (the relay, after the root issue is recorded) and that `envoy` remains available for live GitHub ingress.",
+        "Runtime paragraph (the `daemon health check ... envoy-bridge.log records ...` paragraph): add `In isolated mode, issue-relay.log records readiness (RELAY READY), every relayed subject with its event id and seq (RELAYED), each child it starts tracking (RELAY TRACKING), Dispatch retries with backoff (RELAY RETRY / RELAY RECOVERED), and a definitive failure (RELAY UNHEALTHY).` After LEGION-41 lands, extend its two-rigs paragraph with `... and SMOKE_WEBHOOK_MODE=isolated, so neither daemon consumes the other's issues`.",
+        "Teardown paragraph: `In isolated mode it first stops the issue relay; in envoy mode the bridge` (keep the existing bridge sentence).",
+        "Checkpoints paragraph (currently `With a recorded SMOKE_WEBHOOK_MODE=none ...`): isolated joins envoy for 1-4 and 12; only envoy and forward provide the GitHub ingress 5-7 and 9-11 need; add that under isolated, checkpoints 1-4 and 12 first verify the relay is live and READY and fail naming issue-relay.pid / issue-relay.log otherwise. Update the `falls back to an exported SMOKE_WEBHOOK_MODE (envoy, forward, or none)` list to include isolated."
+      ]
+    },
+    {
+      "id": 6,
+      "title": "docs/solutions: three one-line corrections so no doc still names envoy as the only Dispatch-feed mode",
+      "files": [
+        "docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md",
+        "docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md",
+        "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md"
+      ],
+      "steps": [
+        "smoke-rig-modes-gate-...md line ~48: the remedy sentence is `use SMOKE_WEBHOOK_MODE=isolated (this rig's own issue only) or envoy` (the doc states the sentence appears verbatim in up.sh, checkpoints.sh, the harnesses and the README - keep that true).",
+        "smoke-rig-fakes-and-live-run-notes.md lines ~66-69: after `Use envoy mode (...)` add `or, since LEGION-61, SMOKE_WEBHOOK_MODE=isolated, which relays only the rig's own root issue and its children and is the mode for a pre-merge proof`.",
+        "scratch-daemon-rig-proves-what-unit-tests-cannot.md line ~41: `scripts/smoke/envoy-bridge.ts for Dispatch events` -> add `(today: SMOKE_WEBHOOK_MODE=isolated, scripts/smoke/issue-relay.ts)`.",
+        "No new docs/solutions file: retro writes learnings, not the implementer. Acceptance 4's `throwaway relay in docs/solutions (if recorded)` is not recorded anywhere (grep confirmed), so there is nothing to replace beyond these stale statements."
+      ]
+    },
+    {
+      "id": 7,
+      "title": "up.test.sh cases",
+      "files": [
+        "scripts/smoke/up.test.sh"
+      ],
+      "steps": [
+        "resolve_webhook_mode: `SMOKE_WEBHOOK_MODE=isolated` selects isolated and invokes no gh (same gh_call_file pattern as the envoy case); an unknown value fails naming all four modes.",
+        "Update the pinned webhook_ingress_block_reason string (line ~156) to the new text.",
+        "Add `wait_for_issue_relay() { printf 'wait_for_issue_relay\\n' >>\"$order_log\"; }` to the main() stubs.",
+        "In the existing envoy main() run: assert `${SMOKE_DIR}/start_process.issue-relay.argv` does not exist (envoy unchanged).",
+        "New isolated main() run (SMOKE_WEBHOOK_MODE=isolated, fake curl answering `{\"key\":\"LEGSMOKE-7\"}` for issues-create): exit 0 and `RIG READY`; order log has `wait_for_json:Legion daemon` < `curl:issues-create` < `start_process:issue-relay` < `wait_for_issue_relay`, and no `wait_for_envoy_bridge` / no `start_process.envoy-bridge.argv`; `start_process.issue-relay.argv` contains the lines `SMOKE_ROOT_ISSUE=LEGSMOKE-7`, `SMOKE_RIG_NATS=nats://127.0.0.1:<port>`, `DISPATCH_URL=...`, `DISPATCH_TOKEN=...` and ends with `bun run .../scripts/smoke/issue-relay.ts`; output contains `GREEN Dispatch ingress: isolated relay`."
+      ]
+    },
+    {
+      "id": 8,
+      "title": "checkpoints.test.sh and down.test.sh cases",
+      "files": [
+        "scripts/smoke/checkpoints.test.sh",
+        "scripts/smoke/down.test.sh"
+      ],
+      "steps": [
+        "checkpoints.test.sh, with `isolated` recorded: (a) no relay pid -> checkpoint 1 exits 1 with `CHECKPOINT 1 FAILED: isolated relay is not running (no live process recorded at <smoke_dir>/issue-relay.pid)` and makes no Dispatch request (curl_log unchanged); (b) a planted live relay (`sleep 300 &` with issue-relay.pid/.start written the way the down.test.sh bridge case does, and issue-relay.log containing `RELAY READY root=LEGSMOKE-1 ...`) -> checkpoints 1 and 2 reach their fixtures and print OK exactly as under envoy, 12 reaches its own SMOKE_QUEUED_ISSUE check; (c) the same relay with a log whose last `RELAY ` line is `RELAY RETRY attempt=3 next=4000ms: ...` -> checkpoint 1 FAILED naming Dispatch and the feed, no Dispatch request; (d) 5-7 and 9-11 -> exit 3 with `CHECKPOINT <n> SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=isolated: ` and `requires live GitHub webhook ingress`, no Dispatch request; (e) 8 reaches its branch-protection gate and 13 runs ungated. Existing none/forward cases: only the `use SMOKE_WEBHOOK_MODE=envoy` substrings and the `envoy|forward|none` remedy string change to the new wording - exit codes, block prefixes and the no-request assertions stay as they are (acceptance 3). Kill the planted sleep in cleanup.",
+        "down.test.sh: plant issue-relay.pid/.start from a `sleep 300 &` next to the existing envoy-bridge case; after down.sh the process is dead and both files are gone; add the PASS line."
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Live two-rig proof on this machine (implementer before opening the PR; tester repeats for the E2E line)",
+      "files": [],
+      "steps": [
+        "Rig A: SMOKE_PROJECT=sjawhar/61 SMOKE_DIR=/tmp/legion-smoke-61 NATS_PORT=14261 ENVOY_PORT=19261 LEGION_DAEMON_PORT=19610. Rig B: SMOKE_PROJECT=sjawhar/62 SMOKE_DIR=/tmp/legion-smoke-62 NATS_PORT=14262 ENVOY_PORT=19262 LEGION_DAEMON_PORT=19620 (daemon ports non-adjacent: each daemon also binds port+1). Both: SMOKE_REPO=sjawhar/legion-smoke, SMOKE_WEBHOOK_MODE=isolated, the README start command (secrets wrapper for the three GitHub keys). Two rigs can run at the same time only on LEGION-41's shape (per-rig NATS container name and listener ENVOY_MACHINE_ID). If #1010 is not in main yet when you run the proof, do not hand-edit up.sh and do not stack on legion/LEGION-41: run rig A, `down.sh`, then rig B on the same machine and prove isolation with criterion (1) below (each daemon log carries only its own keys); state in the PR that the concurrent run follows once #1010 has merged. The tester produces the concurrent run for the E2E line after #1010 is in main.",
+        "Evidence to quote in the PR: (1) `grep -o 'consumed event [^ ]* subject=notifications.dispatch.issue.LEGSMOKE-[0-9]*' /tmp/legion-smoke-6{1,2}/daemon.log | sort -u` - each daemon lists only its own root (and children) keys, and the keys differ between the two files; (2) `grep -c RELAYED /tmp/legion-smoke-6{1,2}/issue-relay.log` and the RELAY TRACKING lines; (3) `bash scripts/smoke/checkpoints.sh <n>` output for 1, 2, 3, 4 (and 12 - see concerns) per rig; (4) a negative control: kill rig A's relay (`kill $(cat /tmp/legion-smoke-61/issue-relay.pid)`) and show `checkpoints.sh 1` prints the `isolated relay is not running` FAILED line, then restart with `up.sh` (REUSED everything else, STARTED issue-relay) and show the relay replays with `duplicate=true` acks and checkpoint 1 is OK again.",
+        "Close both rigs' LEGSMOKE issues as done and run down.sh for each when finished; state in the PR that the deployment's own daemon (legion-sjawharlegion) and any other running rig were untouched."
+      ]
+    }
+  ],
+  "rebase": {
+    "base": "legion/LEGION-61 sits on main 52c5e03e (#981), which already contains LEGION-10 (#957, merged 05:32Z). Nothing to rebase for #957.",
+    "openPrs": [
+      "#1011 legion/LEGION-40 'read DISPATCH_TOKEN and DISPATCH_URL from envoy.json when unset' - adds scripts/smoke/dispatch-config.sh; up.sh: sources it and replaces the two require_env lines with resolve_dispatch_config; checkpoints.sh: dispatch_request calls resolve_dispatch_config; README rows/blocks; up.test.sh and checkpoints.test.sh cases.",
+      "#1010 legion/LEGION-41 'derive the NATS container name and listener machine id per rig' - up.sh: nats_container_name/listener_machine_id, ensure_nats takes the name, ${SMOKE_DIR}/nats-container record, worker-stream port assert; down.sh: rig identity from legion.yaml, remove_nats_container, rewritten main(); README paragraphs; up.test.sh and down.test.sh cases."
+    ],
+    "rule": "Sami, 2026-09-11: rebase only on a real conflict. Implement on main now; when GitHub reports CONFLICTING after #1011/#1010 merge, `jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin`, keep both sides everywhere (every LEGION-61 hunk is additive), re-run bun test scripts/smoke/issue-relay.test.ts and the three shell harnesses, record the fingerprint before and after, and post the one rebase comment the skill prescribes.",
+    "expectedConflicts": [
+      "up.sh main(): none expected - LEGION-40 edits the require_env lines and LEGION-41 the ensure_nats/listener lines above write_daemon_config; LEGION-61's block goes after ensure_root_issue. resolve_webhook_mode, the ingress GREEN/SKIPPED block and wait_for_envoy_bridge are untouched by both.",
+      "up.sh relay env block: use `\"$DISPATCH_URL\"`/`\"$DISPATCH_TOKEN\"` - correct both before LEGION-40 (exported by the operator) and after (assigned by resolve_dispatch_config).",
+      "down.sh main(): LEGION-41 rewrites main(); LEGION-61 adds one line at its top - trivial to re-apply.",
+      "README: LEGION-40 touches the Start block (line ~58 is where `export SMOKE_WEBHOOK_MODE=envoy` becomes isolated) and the Checkpoints invocation; LEGION-41 rewrites the runtime and teardown paragraphs LEGION-61 also extends. Expect conflicts in both; resolution is 'their paragraph + our sentence'.",
+      "up.test.sh: LEGION-40 and LEGION-41 already collide with each other around lines 114-127 (LEGION-41 inserts a block directly above the two default-mode assertions LEGION-40 modifies). LEGION-61's new cases sit after the envoy case (~line 143) and at the end of file; the block-reason string at ~156 is edited by LEGION-61 only.",
+      "checkpoints.sh: LEGION-40 touches only the source line and dispatch_request; LEGION-61 touches the mode text/gating - disjoint."
+    ],
+    "mergeOrder": "Land after #1011 and #1010 (spec requirement). The PR body's Chain line says `not stacked`; its description names #1010 and #1011 as must-merge-first so the merge queue sequences it."
+  },
+  "concerns": [
+    "Checkpoint 12 (acceptance 2 lists it) asserts a closed root tree and a promoted queued issue (SMOKE_QUEUED_ISSUE). Under isolated only this rig's root and children exist for the daemon, and the generated legion.yaml has admission_cap 4, so a queued issue needs the smoke architect to release at least four children, or the exercise to reach root-tree close with a child queued. The plan proves 12 passes the isolated gate and runs its own assertion in checkpoints.test.sh, and the live run proves 1-4; a live `CHECKPOINT 12 OK` requires the full exercise to reach tree close - architect to confirm that is what acceptance 2 demands or accept the gate proof for 12.",
+    "The concurrent two-rig run is only possible on LEGION-41's shape (per-rig NATS container name and ENVOY_MACHINE_ID). Until #1010 merges, the implementer's own proof may have to be sequential (rig A, down, rig B) with the isolation criterion still checkable (each daemon log carries only its own keys). The tester's E2E line should be produced after #1010 is in main so the two rigs run concurrently, as acceptance 1 is written.",
+    "Checkpoints 3 and 4 depend on the smoke architect (real OMP + provider credentials via secretsd) posting the spec artifact, opening the design-gate ask (auto-closed, gates.design off) and creating/releasing a child. That is the rig's existing exercise, not new to this change, but it is wall-clock (tens of minutes per rig) and burns provider credit - budget for it.",
+    "The relay hands the daemon events in production order, but it polls every 2 s, so a status write the controller makes appears in daemon state up to ~2 s (plus the JetStream round trip) later than under envoy mode. No checkpoint reads state with a deadline tighter than that; keep the constant at 2 s rather than adding an env knob."
+  ],
+  "rejected": [
+    "Per-rig filter inside envoy-bridge.ts keyed on the root issue: needs a JetStream consumer on the production ENVOY_NOTIFICATIONS stream to see events published before up.sh learns the key (core subscriptions have no history), still needs the Dispatch API to discover children, keeps the production-NATS dependency, and changes the file acceptance 3 says must stay unchanged.",
+    "One-shot injection of `issue.created` (the LEGION-27 script as-is, and LEGION-10's Rejected list): every later event - the controller's todo write, ask answers, child creation - would be missing; the relay carries the live feed.",
+    "Reading the daemon's `${SMOKE_DIR}/daemon/secrets/dispatch-token` file from the relay instead of passing DISPATCH_TOKEN in its env block: avoids nothing the daemon's own start block does not already do, and couples the rig script to the daemon's private secrets layout.",
+    "A persisted relay cursor file: unnecessary - a restart replays from seq 0 and both JetStream (Nats-Msg-Id within the 72 h duplicate window) and the daemon (lastAppliedSeq) discard the replay; the `duplicate=true` acks are the visible proof.",
+    "Making `isolated` also start `gh webhook forward` for GitHub events: out of scope (acceptance 2 names checkpoints 1-4 and 12 only) and would reintroduce the user-authenticated gh requirement isolated exists to avoid.",
+    "A configurable poll interval / an env knob for the backoff: nothing needs it; constants keep the surface to the four variables above."
+  ],
+  "nonGoals": [
+    "No daemon, contracts, or envoy-client change.",
+    "No change to envoy or forward behaviour, to envoy-bridge.ts, or to its test.",
+    "No new docs/solutions document (retro owns learnings)."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T10:29:49.911Z"
+}
