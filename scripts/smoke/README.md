@@ -81,6 +81,10 @@ capability probes above — so provider credentials come from `secretsd` inside 
 rather than the daemon's own environment (a daemon-spawned architect otherwise has no Anthropic
 key and silently falls back to a different, possibly quota-exhausted model).
 
+The generated configuration also sets `instructions: ${SMOKE_DIR}/deployment-instructions.md`, a
+file `up.sh` writes naming the rig's Dispatch project and `SMOKE_REPO`; see `write_daemon_config`
+in `up.sh` for what that gives every pane the smoke daemon launches.
+
 ### Fail-closed OMP probe
 
 To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OMP_PATH` at an **absolute path** to an older OMP binary and run the rig with `LEGION_OMP_AGENTS=missing`. The daemon must refuse (exit 1) after closing the API and NATS it had already opened; a probe that merely times out is retried, not refused.

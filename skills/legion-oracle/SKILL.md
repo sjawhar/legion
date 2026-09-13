@@ -36,11 +36,12 @@ digraph oracle_decision {
 
 ## Research Strategy
 
-If the deployment instructions name a librarian role, ask it first (publish to its
-`notifications.role.<name>` topic with `expects_reply: required`). Then run steps 1-2 (parallel
-OK), and 3-4 if needed, with tools a Legion pane actually has: `read`, `grep`, `web_search`, and
-`task(agent="scout")` (fast read-only codebase search) or `task(agent="oracle")` (deeper
-read-only analysis when the answer needs judgment across many files). Do not name any other agent.
+If the deployment instructions name a librarian (or oracle) role, publish your question to
+`notifications.role.<name>` with `expects_reply: required` and wait for the reply before
+researching yourself. Then run steps 1-2 (parallel OK), and 3-4 if needed, with tools a Legion
+pane actually has: `read`, `grep`, `web_search`, and `task(agent="scout")` (fast read-only
+codebase search) or `task(agent="oracle")` (deeper read-only analysis when the answer needs
+judgment across many files). Do not name any other agent.
 
 | Step | Tool | Query |
 |------|------|-------|

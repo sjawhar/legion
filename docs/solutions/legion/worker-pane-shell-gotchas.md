@@ -30,6 +30,9 @@ related_issues:
   - "LEGION-13"
   - "sjawhar/legion#978"
   - "LEGION-37"
+  - "LEGION-17"
+  - "sjawhar/legion#956"
+  - "LEGION-52"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -54,7 +57,9 @@ LEGION-9 (planner, implementer, tester, and reviewer each rediscovered the first
 from LEGION-18; the 60-second grant lifetime in §1, the `packages/daemon` note in §2, and §9 are from LEGION-14, whose
 four workers hit §1–§3 again; the `packages/pi-envoy` note in §2 and the independent confirmation of §1's cause are
 from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-13 (sjawhar/legion#978); §11 is from
-LEGION-12's own retro and is filed as LEGION-37. None was part of
+LEGION-12's own retro and is filed as LEGION-37; the slow-push paragraph in §1 is from LEGION-17 (sjawhar/legion#956),
+whose implementer, on a pane still running the pre-LEGION-12 plugin, hit §1, §3, §8, §9, and §11 across five rounds
+and confirmed each as written (the architect filed the §1 harness fix as LEGION-52). None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found and fixed by LEGION-12 (pull request #974): its
 workarounds are recorded only so a worker still running the old plugin recognizes them, and must not be used on the
 fixed one. §2's check-config leak was fixed by LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
@@ -98,7 +103,13 @@ call, with the `bookmark set` taking about forty seconds on a loaded box, made t
 return the same `Unable to redeem LEGION_GRANT (403)` with a perfectly good grant. (That particular push still landed
 on a later helper call; do not count on it.) Put the command that redeems the grant — `legion gh`, `jj git push`,
 `legion handoff complete`, `legion credential` — **first** in its bash call, or alone in one. The recipe in section 3
-puts the bookmark move and the push in the same call; on a loaded box, split them.
+puts the bookmark move and the push in the same call; on a loaded box, split them. The push *itself* can outlive
+the grant too: on LEGION-17 a `jj git push` alone, first in its call, took 102 seconds while the box's one-minute
+load average was 889 on 32 cores, and every credential-helper call inside it 403'd once the 60 seconds were up
+(the same push took 22 seconds and landed at a load average of 187, and under 3 seconds at 110). Nothing in the
+command is at fault; wait for the load to fall and re-run the single push. Do not add a retry loop around it — a
+loop that redeems a fresh grant per attempt only works because each attempt is a new bash call, and that is the
+model re-issuing the command, not a script.
 
 **The fix (the first pi-envoy release after 1.16.0 — the post-merge task fills in the exact version; LEGION-12, pull
 request #974).** The grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash
