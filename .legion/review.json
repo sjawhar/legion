@@ -1,108 +1,83 @@
 {
   "verdict": "changes_requested",
-  "round": 2,
-  "critical": 2,
+  "round": 3,
+  "critical": 1,
   "important": 1,
-  "minor": 4,
-  "reviewedCodeHead": "cfe6d0660ee7",
-  "prHeadSha": "ccf037d5e676137cef61679cc6d8bfe4a782c9de",
+  "minor": 1,
+  "reviewedCodeHead": "883cd3dfcff0",
+  "prHeadSha": "8d5855cfb7bbf7b8fc37179b4961dcb36bfc4067",
+  "mergeBase": "195674ab0592",
   "pr": "https://github.com/sjawhar/legion/pull/981",
-  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188762941",
-  "previousReview": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188293250",
+  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5189671202",
+  "previousReviews": [
+    "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188293250",
+    "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188762941"
+  ],
   "verified": {
-    "ci": "Green at 5a3e715c (= cfe6d066 + implement.json): runs 34726147052 and 34726317242, lint/pr-title/test/typecheck SUCCESS (legion gh -- run list / commits/<sha>/check-runs). PR head ccf037d5 has ZERO check runs: GitHub reports the PR mergeable=CONFLICTING against main 21b1c334 (LEGION-30 #973 touched processes.ts, processes.test.ts, AGENTS.md after this branch's base d7ac170c).",
-    "threads": "4 open before this round (all mine, round 1); each answered twice by the implementer (fix, then re-home). All four verified satisfied against cfe6d066 and replied on; the review App cannot resolve threads (resolveReviewThread -> 'Resource not accessible by integration'), so the implementer resolves them with the next push. This review opened 6 new threads.",
-    "e2e": "Tester's real-tmux driver (throwaway server legion-smoke99493, real ProcessManager + real /proc) at 5a3e715c; accepted for cfe6d066.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at cfe6d066 (task agents ThermoDeep2, ThermoQuality2). Deep: no blocking, 3 non-blocking + 1 nit; I promoted its list-panes finding to blocking after reproducing it (B3). Quality: no blocking, 3 land-here items; I promoted the pane-id-less stop throw to blocking (B4). Both confirm B1/B2 fixed and the cutover clean.",
-    "deployedState": "/home/ubuntu/.local/state/legion/sjawhar-legion/state.json is v24 with 32 located records (19 trees incl. 5 lingering, 12 worker claims, controller); all carry tmuxPaneId+socketPath, none carry identity, none are pane-id-less -- so B4 cannot fire on this box's upgrade, and every live root/worker/controller will take the legacy no-identity path once."
+    "ci": "PR head 8d5855cf: pr-title/lint/typecheck/test SUCCESS (run 34739747901); code head 883cd3df: runs 34739339255 + 34739406529 SUCCESS. mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required).",
+    "threads": "Round-1 threads (4) resolved by others. Round-2 threads (6) each answered once by the implementer; all six verified satisfied against the code; the review App cannot resolve threads (resolveReviewThread -> Resource not accessible by integration, re-confirmed this round) so the implementer resolves them with the next push. This review opened 3 new threads.",
+    "rebase": "Branch src delta byte-identical across the rebase onto 195674ab (tester diff-of-diffs; spot-checked); AGENTS.md 0 conflict markers, #995 DaemonConfig sentence verbatim; f20c3072 drops only the deleted persist dep from #956's e2e fixture; 80c9cfb1 adds isProcessGoneError contract rows (mutant-tested by the tester).",
+    "smokeRig": "dispatch://LEGION-27/artifact/smoke-rig-evidence.md assessed honest: internally consistent (S2 legacy upgrade v24->v25 + .v24.bak, no-identity -> --resume fresh window, legacy window never repointed; S1 x2 decision lines name exact stranger pids, all strangers alive, root+controller resurrected); its Not-proven section correctly limits S2's graceful-shutdown attribution (no independent observer; no-kill is by construction of refuseKill) and separates it from the observed S1 liveness claims. Caveats accepted: ran when the branch sat on 4d516a1f (src proven byte-identical since); two rig gaps worked around outside the PR and named for the architect.",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 883cd3df (ThermoDeep3, ThermoQuality3). Neither blocking; both independently found and reproduced B5 and recommend landing it in this PR.",
+    "localRuns": "tsc clean; tmux/contract/watchdog/proc-stat/state 123 pass; processes.test.ts 237 pass / 3 gated skip; LEGION_E2E=1 LEGION_TMUX_LIVE=1 real-shutdown + deployment-instructions e2e 5 pass. Reproduced B5 via /tmp/legion27-review/r3/strand.test.ts (1 pass: sleepCalls 1, tree active/unconfirmed/launchFailures 1/locator intact)."
   },
   "priorItems": {
-    "B1": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829564",
+    "B3": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125105",
       "status": "satisfied",
-      "evidence": "grep tmuxWindowId\\s*= in packages/daemon/src -> 0 hits (one test fixture seed only); TmuxRuntimeDeps.persist removed; probedWindowId iterates recordedLocators and returns the first verifying window; reconcileOrphans known set from every locator; legacyLiveTreeFixture tests + 2 TmuxRuntime contract rows discriminate (list-windows @42/@43 idle, kill-window []).",
-      "reply": "https://github.com/sjawhar/legion/pull/981#discussion_r3998126492"
+      "evidence": "tmux.lookupPane present|absent|failed, absent only on PANE_GONE_STDERR or a successful listing missing the row; verifyPaneProcess listing-failed; TmuxRuntime.probe throws; TmuxRuntime.stop: graceful ask -> refuseKill return -> verify -> kill | ProcessStopFailed(detail) | refuse. Discriminating tests at tmux/contract/ProcessManager levels."
     },
-    "B2": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829566",
+    "B4": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125111",
       "status": "satisfied",
-      "evidence": "ProbeResult dead arm is a required discriminant (negative tsc: {status:'dead'} and not-recorded-process without detail -> TS2322); TmuxRuntime/FakeRuntime honest; contract rows over both; closeTreeLocked/removeTreeProcess/controllerAlive skipGraceful only on gone; live-legacy-root closeTree test asserts shutdown reaches /state/workers/architect.sock.",
-      "reply": "https://github.com/sjawhar/legion/pull/981#discussion_r3998126575"
+      "evidence": "missing-pane-id throw deleted; no-identity path: graceful ask, kill refused, locator clears; contract row + ProcessManager test."
     },
-    "nonBlockingSameProcess": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829569",
+    "removeTreeProcess": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125116",
+      "status": "satisfied"
+    },
+    "isProcessGoneError": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125119",
       "status": "satisfied",
-      "reply": "https://github.com/sjawhar/legion/pull/981#discussion_r3998126660"
+      "evidence": "ENOENT/ESRCH-only catch in readPaneStartTicks and isOmpPane; kill -0 removed and judged sufficient (isOmpPane runs only after a successful stat read; zombie -> not-omp; EACCES/EIO/EMFILE rethrow pinned for probe and stop)."
     },
-    "watchdogTest": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3997829573",
-      "status": "satisfied",
-      "reply": "https://github.com/sjawhar/legion/pull/981#discussion_r3998126716"
+    "legionStateComment": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125122",
+      "status": "satisfied"
     },
-    "cleanup": "All landed: tmux.panePid window branch + tmux.test.ts:30 removed; both docs/solutions notes rewritten; one log line per decision (probeTree/controllerAlive log, refuseKill suppresses the runtime's line); watchdog test discriminating."
+    "recordedLocatorsDedupe": {
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125124",
+      "status": "satisfied with a nit carried forward (reference identity not stable past /worker/started and /process/started spread copies; benign; see keyFindings)"
+    }
   },
   "keyFindings": [
     {
       "severity": "blocking",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts",
-      "line": 484,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125105",
-      "description": "B3. TmuxRuntime.stop reports a clean stop when list-panes itself fails: tmux.panePid returns undefined on ANY nonzero exit (tmux.ts:182) -> verifyPaneProcess 'pane-gone' -> stop returns normally -> caller clears the locator. At the merge base stop never consulted list-panes and threw ProcessStopFailed for any kill-pane failure not matching PANE_GONE_STDERR (the invariant the doc still states). A tmux client killed by defaultRunner's 30 s timeout (state/fetch.ts:55-61, nonzero exit, empty stderr) or any transient listing failure with the pane alive now yields: closeTree -> tree closed with a live root untracked; worker retire -> live worker's locator cleared; removeTreeProcess -> second root resumed beside a live one. Reproduced (throwaway TmuxRuntime test: list-panes {exitCode:1, stderr:''} -> stop resolves, commands ['list-panes'] only, nothing thrown). Fix: distinguish 'pane absent' (exit 0 + row missing, or stderr matching PANE_GONE_STDERR) from 'listing failed' in panePid/verifyPaneProcess; stop throws ProcessStopFailed for the latter; probe's pre-existing collapse to dead may stay or become unknown (document). Regression test required."
-    },
-    {
-      "severity": "blocking",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts",
-      "line": 480,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125111",
-      "description": "B4 (narrow). The `missing a pane id` throw sits above the refuseKill return and the verify gate. probe returns not-recorded-process for a pane-id-less locator without touching tmux, but the stop that verdict drives throws; in closeTreeLocked that is anyFailed -> StopFailed -> tree lingering forever, retried every sweep. Pre-PR the probe backfill repaired a live one. Schema-valid input (tmuxPaneId optional on tree/controller locators); deployed state has zero such records, so unreachable on this upgrade, but a self-contradiction with the stop doc. Fix: move refuseKill + verify above the throw (no-identity returns normally, refusal logged) or delete the throw; reconcile the two doc sentences. Reproduced (probe -> not-recorded-process; stop(paneless,100,{refuseKill:true}) throws; zero tmux commands)."
-    },
-    {
-      "severity": "blocking",
-      "file": "(merge)",
-      "description": "Rebase onto main required: PR is CONFLICTING (LEGION-30 #973: processes.ts, processes.test.ts, AGENTS.md); no CI can run on ccf037d5. A real conflict per the skill's rebase rule. #973's retireIdleWorker -> retireWorkerLocator -> stopProcess -> Runtime.stop is covered by the identity gate automatically after the rebase; its new processes.test.ts cases that seed/launch tmux locators need the fixture identity sweep (rule (a)). Tester re-verifies at the rebased head; I review that head."
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1732,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846681",
+      "description": "B5. escalateOrRetryUnconfirmedRoot cancels the registration deadline (1706) then awaits onRetry = resurrect; resurrectDeadTree re-probes (2967-2969); if that second list-panes fails for a non-PANE_GONE reason, probeLocator throws and only armRootRegistrationDeadline's .catch (1518) logs. Tree left active + unconfirmed, locator intact, launchFailures+1, no deadline re-armed; resync.probeActiveRoots skips unconfirmed trees, so nothing revisits the root until daemon restart or an architect exception. Newly reachable (pre-PR probe never threw); reproduced with a scripted runtime. Contradicts AGENTS.md's 'the controller and root registration deadlines log and retry instead of clearing anything'. Fix: try/catch around onRetry (or in retireUnconfirmedRoot), log, re-arm if treeStillUnconfirmed -- same shape as the stop-failure branch at 1800; or thread the already-taken verdict into resurrect so resurrectDeadTree does not re-probe. Regression test required (second probe throws -> locator intact, second deadline armed). Controller analogue self-heals via ensureController on every controller-bound effect; no change asked."
     },
     {
       "severity": "important",
       "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 2558,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125116",
-      "description": "Land with the rebase: removeTreeProcess deletes tree.locator before the graceful ask; during the <=10 s wait the root's window is in no locator, so a linger-sweep reconcileOrphans tick (120 s grace on window_activity) can kill-window an idle legacy root mid-shutdown (SIGHUP instead of the promised clean exit). Order predates the PR; the PR puts a live process behind it. Mirror closeTreeLocked/controllerAlive: stop, then delete in finally."
+      "line": 1994,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846683",
+      "description": "Land with B5: handleException (1986 ensureController, 1994 probe) is a probe caller the round-2 handling list omitted. On the core-NATS exception lane a probe/controllerAlive throw is pushed by events.ts track() (362-373) onto the pump's in-memory failures with no log and no redelivery (core NATS has no nak); surfaces only as an AggregateError from drain() at shutdown; a live root's reclaim-architect redeliver is lost. Silent failures sink is pre-existing; routing a plausible transient tmux fault into it is new, and probeLocator's doc ('a nak'd exception', 1876-1877) plus the AGENTS.md caller list describe a retry that does not exist on this lane. Fix: catch + console.error naming the role token in handleException (resync/onUndeliverable are the retry); reword the doc and AGENTS.md list."
     },
     {
       "severity": "minor",
       "file": "packages/daemon/src/daemon/runtime-tmux.ts",
-      "line": 337,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125119",
-      "description": "Land with the rebase: readPaneStartTicks catch-all maps EACCES/EIO/EMFILE to 'gone' -> under an fs fault every pane fails verification at once and every fresh spawn fails with a misleading message. Narrow to ENOENT/ESRCH, rethrow the rest (fixtures already throw code:'ENOENT')."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/legion-state.ts",
-      "line": 306,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125122",
-      "description": "Land with the rebase: the WorkerRoleClaimSchema superRefine comment (305-306) still calls a pane-id-less root 'a real, backfillable state (TmuxRuntime.probe)'; the backfill is removed. (Thread anchored on 223, a diff line.)"
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts",
-      "line": 300,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125124",
-      "description": "Land with the rebase: recordedLocators appends the issueWindows entry even when issueLocators already yields the same object (stored by reference), so the all-fail path verifies that pane twice; dedupe by reference; its doc disagrees with the issueWindows field doc."
+      "line": 308,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846684",
+      "description": "recordedLocators reference dedupe is dead in steady state: /process/started and /worker/started spread-copy the stored locator, so the issueWindows entry and the state locator become distinct equal-identity objects; benign (state locator listed first; one redundant list-panes + stat on the all-fail path) but the doc claim is false. Dedupe with sameProcess or by tmuxPaneId, or drop the claim. probedWindowId also drops the entry on a transient listing-failed (cosmetic extra window) -- worth a doc sentence."
     }
   ],
-  "refuseKillJudgment": "Keep. It is the deciding layer's verdict handed down so the runtime neither re-decides nor re-logs (log-once), and on tmux it cannot skip a kill the runtime's own gate would allow: a pane's root pid and start ticks are launch-fixed, so a not-recorded-process verdict on an identity-bearing locator cannot revert to 'recorded process alive' between probe and stop; every caller sets it from a same-locator probe taken immediately before, and stopProcess's cached-client branch preserves it. Redundant for tmux SAFETY (TmuxRuntime.stop self-gates when the flag is absent) and that is the right shape: no runtime may read the flag's absence as 'kill unconditionally' (neither TmuxRuntime nor FakeRuntime does). The interface doc states the trust relationship plainly. No change requested.",
-  "fastFollow": "probeTree/resurrectDeadTree/controllerAlive triplicate the unknown-throw (extract a silent probeLocator); watchdog it.each not-recorded-process row exercises the same path as gone; FakeRuntime tests' strangers.size/destroyed:false assertions are decided by the fake's own gate (options equality is what discriminates; retitle 'destroying nothing'); five copies of the /proc stat line across test files; exact detail-sentence pins where statReads/cmdlineReads carry the contract; vocabulary gate list still names recordedWindowId/rewriteIssueWindowId (exist nowhere); runtime-tmux.ts:455-456 'reaped after the grace period' -- the sweep is idle-bounded (window_activity), not time-bounded.",
-  "checkedAndSound": [
-    "Every kill path identity-gated or handle-set-gated (stop -> verifyPaneProcess; reconcileOrphans keyed on known from trees+roles+controller).",
-    "issueWindows: set only after identity is read, inside the per-issue lane; verified before reuse; dropped on failure; contract row 'a concurrent second spawn...' pins new-window < verify < split.",
-    "Upgrade transition for live legacy root/workers/controller: graceful shutdown over the role-scoped socket, never killed, window stays known; the old root's /process/exit 403s (capability revoked before the ask) so it cannot clobber the resurrected generation; spawn_worker on a live legacy tree opens a fresh window without repointing.",
-    "sameProcess guards in markWorkerDeadLocked/retireUnconfirmedBoot/closeTreeLocked (snapshot by value); /worker/started and /process/started spread the existing locator so identity survives.",
-    "Launch-time unreadable stat rides the launch-failure paths (root, worker, runtime-level tests); malformed stat throws at launch and probe.",
-    "Watchdog consumes Runtime.probe unchanged (status === 'alive' or socket); ProcessManager carries no tmux vocabulary; state v25 pure bump; parser unchanged from round 1; real-tmux negative control present.",
-    "AGENTS.md: the runtime-tmux.ts row, trusted-root invariant (with the discriminant), kill/graceful bullet, window-sharing bullet, watchdog bullet read true against the code."
-  ],
-  "nextRound": "Review the rebased fix head for B3 and B4 (+ regression tests) and the four land-with-rebase items; confirm the prior four threads were resolved; CI green at that head and the tester's re-verification; then COMMENT while .legion/ is present and APPROVE the head that differs from the reviewed one by the .legion/ deletion alone.",
+  "fastFollow": "Watchdog StopFailed at the registration deadline leaves a boot unwatched until restart (pre-existing shape; optional re-arm). probeTree doc says the resurrection hands the verdict down but resurrectDeadTree re-probes. AGENTS.md:53 probe-throw clause belongs in bullet 51. stop's listing-failed message bare vs probe's via describePaneVerdict. Test fixtures: two #{pane_id}-only list-panes branches (processes.test.ts 2376-2381, 5705-5710) shadow the real branch; two bare exit-1 list-panes fakes (7757, 7799) contradict paneGone()'s doc; kill argv fixture branches + 'never from a signal probe' comment describe the removed kill -0; docs/solutions/testing/mutation-proof-probe-tests.md still present-tense panePid; watchdog 'liveness probe did not complete' count and B4 'failed to stop' negative match pin wording; `${treeKey}` no-op template. Optional isOmpPane EACCES row. ThermoQuality3 observed one 1/7 flake in 'ensureController retires a stuck controller pane...' (passes in isolation; likely pre-existing tick-bounded wait) -- watch CI.",
+  "hotLoopAssessment": "No probe caller loops hot on a persistently failing tmux: resync (interval, default 600 s; probe effects only from resync, never inside applyDurableEvent -> never DurableFatalFailure), linger sweep (60 s), root registration deadline (workerBootTimeout x intervals, re-armed on probe failure in retireUnconfirmedRoot), watchdog (workerBootTimeout interval; deadline bounds), onUndeliverable/boot/held-recovery caught + logged. Every Runtime.stop caller leaves the locator/claim intact on the new ProcessStopFailed.",
+  "refuseKillJudgment": "Unchanged from round 2: keep. Passed only after a same-locator not-recorded-process verdict; identity cannot revert; stopProcess preserves it through the cached-client downgrade.",
+  "nextRound": "Review the B5 fix head (+ regression test, + handleException log/doc fix if landed together), confirm the six round-2 threads were resolved, CI green, tester re-verification; then COMMENT while .legion/ is present and APPROVE the head that differs from the reviewed one by the .legion/ deletion alone.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T00:32:58.224Z"
+  "completed": "2026-09-13T05:36:40.391Z"
 }
