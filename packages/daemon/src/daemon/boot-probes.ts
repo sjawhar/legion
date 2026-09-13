@@ -58,7 +58,8 @@ export interface BootProbeOptions {
   /** Aborts the probe: a daemon whose boot failed for another reason (state load, NATS, the
    * API bind) must neither spawn another OMP after its pending backoff nor leave an attempt's
    * OMP child running behind it. Passed to every runner call (which kills the child on abort)
-   * and checked after every sleep; the probe then rejects with `ProbeAbortedError`. */
+   * and checked before every attempt, after every failed attempt, and after every sleep; the
+   * probe then rejects with `ProbeAbortedError`. */
   readonly signal?: AbortSignal;
 }
 
@@ -113,9 +114,11 @@ function killedOutcome(
  * transient failure is logged with the delay before the next try, so an operator watching the
  * supervisor log sees the daemon waiting out host load instead of a silent stall. An aborted
  * `signal` ends the loop with `ProbeAbortedError` — before an attempt, after one the runner killed
- * on the abort, or after one that finished just as the daemon gave up — with no transient log and
- * no retry announced: a line promising a retry that will not happen would mislead the operator
- * reading the start-up error that follows it. */
+ * on the abort, or after a failed one that finished just as the daemon gave up — with no
+ * transient log and no retry announced: a line promising a retry that will not happen would
+ * mislead the operator reading the start-up error that follows it. An attempt that *passed* as
+ * the signal fired still returns as passed: nothing about the probe's answer changed, and the
+ * two-probe chain stops at the next probe's loop-top check before anything is spawned. */
 async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,

@@ -70,7 +70,9 @@ command; at most one of the two markers is present, the first kill to land decid
 `boot-probes.ts`'s `killedOutcome(result, stderrTail, negativeMarker)` runs before the marker
 checks: an `aborted` kill ends the chain silently (no transient line, no retry, no diagnosis —
 the caller's own start-up error is what surfaces; `retryBootProbe` also ends silently when the
-signal has aborted by the time an attempt returns, whatever it returned), and a budget kill with
+signal has aborted by the time a *failed* attempt returns, whatever the failure was — a passed
+attempt still returns as passed, and the two-probe chain then stops at the next probe's loop-top
+check before anything is spawned), and a budget kill with
 no answer is transient. The one exception is a probe that printed its negative marker
 (`LEGION_OMP_AGENTS=missing`, `LEGION_PLUGIN_LOADED=no`) and *then* hung past the budget: the
 answer is in, and it is definitive. The reviewer caught the first version of this, which retried
