@@ -1,0 +1,93 @@
+{
+  "issue": "LEGION-45",
+  "pr": {
+    "number": 1020,
+    "url": "https://github.com/sjawhar/legion/pull/1020",
+    "branch": "legion/LEGION-45",
+    "headReviewed": "6b3acf6004472dabe58689dec67e079e0b2acb13",
+    "headReviewedNote": "test: record handoff; packages/pi-envoy source identical to the implementation tip 5c3a1824fa5fc944b7b2d80b6963e67277c35855"
+  },
+  "review": {
+    "id": 5190486592,
+    "url": "https://github.com/sjawhar/legion/pull/1020#pullrequestreview-5190486592",
+    "event": "REQUEST_CHANGES",
+    "author": "legion-reviewer[bot]"
+  },
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/legion.ts:270-273",
+      "description": "Quoted or backslash-escaped exact words evade the argument rule although bash passes identical argv (the jj word must be bare; non-bare words are dropped from args). Verified in a scratch repo: the quoted-subcommand forms, the quoted op-subcommand form, the quoted jj word, and the fully backslash-escaped subcommand all performed the rollback; matcher returns undefined for each. Fix: judge every word text regardless of quoting; drop ShellWord.bare (plain-text pass on every word). Thread https://github.com/sjawhar/legion/pull/1020#discussion_r3999453664"
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/legion.ts:239-242",
+      "description": "Redirection metacharacters and line continuation are not modelled: `>` is not a word terminator (subcommand>/dev/null), `&` inside `>&`/`&>` is taken as a command terminator (2>&1 placed before the subcommand splits the invocation), and backslash-newline is prepended to the next word. Each verified to run the rollback in a scratch repo. Fix: `<`/`>` end a word; `&` adjacent to `>`/`<` ends a word not a command; backslash-newline is dropped. Thread https://github.com/sjawhar/legion/pull/1020#discussion_r3999453666"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/scripts/grant-rig/run.ts:27-33",
+      "description": "Usage header does not list --prompt-file for drive/tui (parsed at line 973, documented in README). Non-blocking; fold into the corrective push or fast-follow. Thread https://github.com/sjawhar/legion/pull/1020#discussion_r3999453669"
+    }
+  ],
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6h4Tea",
+      "url": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453664",
+      "blocking": true,
+      "path": "packages/pi-envoy/extensions/legion.ts",
+      "line": 273
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h4Teb",
+      "url": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453666",
+      "blocking": true,
+      "path": "packages/pi-envoy/extensions/legion.ts",
+      "line": 241
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h4Tec",
+      "url": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999453669",
+      "blocking": false,
+      "path": "packages/pi-envoy/scripts/grant-rig/run.ts",
+      "line": 973
+    }
+  ],
+  "fixValidation": "Reviewer ported splitShellCommands/jjLogRewriteInvocation/jjLogRewriteMention verbatim into a throwaway Bun script (/tmp, deleted), applied the four changes named in the two blocking threads, and re-ran the PR tables: 19 refused rows still refused, 13 allowed rows plus the six role-sanctioned commands still allowed (0 wrong verdicts); every argv-identical evasion above now refused; shell expansions ($x, $(which jj) …, $'…', xargs) remain allowed and are outside the spec design (not a shell parser, no expansions). New over-refusal accepted per spec: a single-word quoted message equal to a blocked word.",
+  "verifiedOnGitHub": {
+    "ci": "Tests run 34752875857 and Legion Envoy and Contracts run 34752875860 success at 6b3acf60; also green at dd2ec60f (34751280695/34751280724) and 5c3a1824 (34751211756/34751211754).",
+    "threads": "0 threads existed before this review (GraphQL reviewThreads.totalCount 0); 3 opened by review 5190486592.",
+    "e2e": "Read the Dispatch artifacts on LEGION-45 directly via /api/v1/issues/LEGION-45/artifacts/<slug>/versions/1: oplog-after-branch-txt (3 operations, no rollback), l45-branch-tool-frames-jsonl (isError true with the shared-log reason on bash undo / op restore / abandon, eval, hub start; false on op log, describe, restore --help), l45-branch-subagent-subagent-jjundoprobe-jsonl (subagent refused between two calls that ran), oplog-after-released-txt (1.22.2 gained undo, restore, abandon, undo)."
+  },
+  "specChecks": {
+    "acceptance1": "Structural rule correct for unquoted input (all 19 rows, -R, --repository, --at-op, operation restore, op undo, pipeline, subshell, newline, /usr/local/bin/jj, partial quoting, unterminated quote). Gap: argv-identical quoted/escaped/redirected forms (threads 1-2).",
+    "acceptance2": "jj restore <paths>, jj op log, jj op show, quoted multi-word messages, rebase revset, fingerprint pipeline, split, log filters allowed; one grant per allowed call.",
+    "acceptance3": "Root architect: blanket bash gate answers first (test at legion.test.ts ~3113). Controller: classifySession returns controller before LEGION_ROLE is read; test ~2342. Reviewer .legion cleanup row allowed in the role matrix.",
+    "acceptance4": "SKILL.md Shared operation safety says the extension refuses the commands (bash, eval, hub, task subagents), gives the recovery rule, and tells workers to write mentioning text with the write tool. CHANGELOG Unreleased/Added bullet matches. Neither needs changing for the fix.",
+    "acceptance5": "eval code and hub application/args/text by the plain-text rule; 6 refused / 5 allowed rows; refusal reads `hub: jj undo`.",
+    "acceptance6": "Guard judged from classifySession(process.env) once per instance on first tool_call (never at load; false cached by ??=), ahead of checkSubagentSession and every role gate and the grant path; subagent test proves legion state still passes with no /legion/ route; real-surface run l45-branch-subagent.",
+    "isSingleLegionCommand": "untouched; the hunk begins after its closing brace. No allow-list anywhere.",
+    "hoistFailureMode": "A classifySession throw in the hook is fail-closed (pi runner returns block: true, reason: Extension … failed) and reachable only with an environment session_start already rejects; ordinary OMP sessions classify not-legion."
+  },
+  "deviationsAccepted": [
+    "sub-architect now gets the shared-log reason ahead of its blanket bash gate (still refused; more accurate reason)",
+    "LEGION_ISSUE added to the unregistered-worker fixture (the pane real launch environment; contract unchanged)",
+    "eval test row rewritten for biome noTemplateCurlyInString (same runtime string)",
+    "repoCi mapped onto the jobs that run inside packages/daemon"
+  ],
+  "testQuality": "Every new case defends an observable contract: refusal shape via stringContaining phrases, zero grants minted on refusal, exactly one grant per allowed call, guard ahead of the sub-architect gate, subagent bound with no daemon traffic, controller and root architect untouched; each fails if the matcher is removed or the guard moves below the subagent check. No source-text pinning. Corrective push should add the evading forms to the refused table and two redirection rows to the allowed table (named in the threads).",
+  "thermo": {
+    "head": "6b3acf6004472dabe58689dec67e079e0b2acb13",
+    "deepReview": "1 correctness finding (2>&1 before the subcommand; folded into thread 2); hoist fail-closed confirmed; no regression for reviewer/merger/controller/root-architect/non-Legion sessions",
+    "codeQuality": "0 correctness findings; independently reached the thread-1 fix (drop ShellWord.bare) and validated it against the tables; nits: refusal reason built inline in the hook, constant names encode the wrong distinction, run.ts usage header"
+  },
+  "fastFollow": "Refusal reason as a module-level helper beside jjLogRewriteAttempt; rename JJ_LOG_REWRITE_WORDS / JJ_OP_LOG_REWRITE_WORDS by the unconditional-vs-op-qualified distinction. Architect observation (out of spec scope): OMP bash tool env values ({command: \"jj $SUB\", env: {SUB: …}}) are not judged; folding input.env strings into the plain-text rule would close it.",
+  "nextRound": "After the implementer corrective push and the tester round, re-review that head: verify each thread carries my Accepted reply and the implementer run resolved it (isResolved true via GraphQL), thermo again (new round), then COMMENT while .legion/ remains; APPROVE only the .legion/ deletion head by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T11:14:31.181Z"
+}
