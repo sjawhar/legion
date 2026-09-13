@@ -1,0 +1,61 @@
+{
+  "issue": "LEGION-20",
+  "title": "Design gate consumes Dispatch document approval (artifact.approved) instead of an Approve ask",
+  "tester": "legion-sjawharlegion-legion-20-tester",
+  "headSha": "b7d195ca8cce31a9b068fe5fcbe9b759f8a16aaf",
+  "codeHeadSha": "5a10614883f9380787b7147d33a0a05353ab15ff",
+  "baseSha": "4d516a1f4f2bed5613920a028ba35f27320e47cf",
+  "pullRequest": 975,
+  "passed": 7,
+  "failed": 1,
+  "report": "dispatch://LEGION-20/artifact/tester-report-md",
+  "rawEvidence": "dispatch://LEGION-20/artifact/legion20-tester-evidence-tar-gz",
+  "verdicts": {
+    "1 human approval records the version and wakes the architect": "pass — live on the scratch rig: human approved spec.md v2, gate approvedVersion==latestVersion 0.55 s later, {\"type\":\"design-approved\"} delivered to the architect session, which woke; reducers.test.ts fed the published JSON",
+    "2 changes requested wakes with the reason, gate closed": "pass — live: approvedVersion deleted, wake {\"type\":\"design-changes-requested\",\"version\":3,\"reason\":\"LEGION-20 tester: please name the rollback path\",\"author\":\"tester-human\"}; reducers.test.ts",
+    "3 new version closes, approval at the new version reopens": "pass — live: agent edit -> v3 -> {latestVersion 3, approvedVersion 2}, Dispatch stale, no wake; human approval at v3 -> open, exactly one design-approved; reducers.test.ts",
+    "4 approving a non-root-spec document changes no gate": "pass — live: tester-notes.md approved by the human, artifact.approved consumed, gate unchanged, no wake; reducers.test.ts",
+    "5 state upgrade keeps gates": "pass — copy of production state.json v24 (19 gates) -> v25, 19 distinct getIssue reads, all approvedVersion==latestVersion, state.json.v24.bak byte-identical; unreachable Dispatch -> 'Cannot migrate the design gate for LEGION-6: Unable to connect' after one read, nothing written",
+    "6 gate policy in the root architect system prompt": "pass — live pane argv carries the `off` sentence in the off rig and the `root-issues` sentence in the armed rig; off-mode architect made no approval/gate call (23 tool calls, session record)",
+    "7 smoke checkpoint approves the document and the rig is green": "FAIL — single-issue tree with SMOKE_DESIGN_GATE=root-issues: checkpoint 3 fails before approval ('neither a Dispatch child issue nor a phase-worker role claim on the root') because the compliant architect parks after register_gate, and fails after approval ('approval.state must be awaiting'); checkpoint 4 passes after approval; checkpoints 1-3 pass in off mode",
+    "8 no plan document committed": "pass — 45-file diff from 4d516a1f to b7d195ca has no docs/plans/ or plan markdown; .legion/plan.json is the only plan artifact"
+  },
+  "failures": [
+    {
+      "criterion": "7 — scripts/smoke/checkpoints.sh 3 with SMOKE_DESIGN_GATE=root-issues on a single-issue tree",
+      "evidence": "Real architect wrote the spec, called dispatch_request_approval, registered the gate {artifactId d637ac47-1642-4e30-87f1-2b6fd97e9387, version 2}, blocked its todos on design-approved and parked (no child, no worker). `checkpoints.sh 3` -> 'CHECKPOINT 3 FAILED: LEGSMOKE-2 has neither a Dispatch child issue nor a phase-worker role claim on the root: the tree has not moved past the gate'. After the human approved and the architect spawned an implementer: `checkpoints.sh 4` -> OK; `checkpoints.sh 3` -> 'FAILED: LEGSMOKE-2 has no open approval request on its registered spec document (approval.state must be awaiting)'. Cause: checkpoint_three runs tree_progress unconditionally (scripts/smoke/checkpoints.sh:319) after requiring approval.state == awaiting (:302-305); under root-issues the two cannot both hold for a single-issue tree. checkpoints.test.sh passes only because its fake state has a phase-worker claim while awaiting. Introduced by 7ba5ac15. Raw: gate-daemon.log, gate-architect-session.jsonl, gate-final-state.json in the evidence bundle."
+    }
+  ],
+  "notProven": [
+    "Checkpoint 3 on the decomposed (child-issue) path with the gate armed: every real architect (implementer's two runs and this one) chose a single-issue tree.",
+    "Daemon suite as one uninterrupted full run at 978/978: box load average 160-220; best full run 976/978 with both failures passing in isolation; CI is green at this head."
+  ],
+  "commands": {
+    "suites": "for p in contracts pi-envoy envoy-client: (cd packages/$p && scrubbed.sh bun test); (cd packages/daemon && scrubbed.sh env LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test); bash scripts/smoke/checkpoints.test.sh — scrubbed.sh unsets LEGION_*/DISPATCH_*/JJ_* (in the evidence bundle)",
+    "migration": "bun packages/daemon/tester-migrate.ts <scratch-dir-with-copied-state.json> http://sami-agents:8766 <token-file>; then the same with http://127.0.0.1:9 (script in the evidence bundle)",
+    "contractGuard": "bun packages/daemon/tester-contract-guard.ts; live: OMP_PROFILE=legion bun run packages/daemon/src/cli/index.ts start sjawhar/920 --config <copy of the rig legion.yaml with its own state_dir/port> -> refuses naming contract 1 vs 2",
+    "rig": "rig-up.sh <off|root-issues> <SMOKE_DIR> up|down|checkpoint N (evidence bundle): scripts/smoke/up.sh with SMOKE_WEBHOOK_MODE=none SMOKE_OMP_PIN=github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 OMP_PROFILE=legion20tester DISPATCH_URL=http://127.0.0.1:18777 against run-scratch-dispatch.sh (go build ./cmd/dispatch, Postgres 16 container, DISPATCH_IDENTITY=header:X-Dispatch-User, NATS_URLS=nats://127.0.0.1:14222)",
+    "humanActions": "POST /api/v1/artifacts/<id>/reviews {state: approved | changes_requested, reason} and POST /api/v1/asks/<id>/answer with header X-Dispatch-User: tester-human; agent bearer on the reviews route -> 403 HUMAN_ONLY"
+  },
+  "suiteCounts": {
+    "contracts": "100 pass, 0 fail",
+    "envoy-client": "198 pass, 0 fail",
+    "pi-envoy": "157 pass, 0 fail (third full run; run 1: 156/157 with a 5.3 s timeout of 'restricts phase-worker tool access per LEGION_ROLE' that passes alone in 3.6 s; run 2 aborted mid-file by a slow jj config set)",
+    "daemon": "best full run 976 pass, 2 fail of 978 (LEGION_E2E=1 LEGION_TMUX_LIVE=1); failures were the live-tmux 5 s timeouts and once each 'resurrects directly, once, when the root registration deadline elapses on a dead pane' / 'repeated dead-before-ready cycles escalate to launch-failed'; each passes alone (5/5, 3/3, 3/3)",
+    "checkpoints.test.sh": "16 PASS"
+  },
+  "environmentScrub": "Every suite and rig command ran with this pane's LEGION_*/DISPATCH_*/JJ_* variables unset (scrubbed.sh / rig-up.sh); the worker-bin gh shim was removed from PATH for the rig.",
+  "observations": [
+    "Later design-approved / design-changes-requested wakes were routed to the active phase worker (implementer), not the architect — pre-existing routeActive rule, also seen by the implementer.",
+    "Production profile `legion` holds pi-legion-envoy 1.17.0 (daemon API contract 1); this daemon refuses to boot against it by design, so the plugin from this commit must be installed there before the daemon deploys.",
+    "Stale wording: packages/daemon/src/daemon/dispatch-client.ts:108 still says migrateV23State / v23; legion-state.test.ts:956 says 'the v23 file survives'.",
+    "Under load ~200 the daemon logged 'failed to connect controller/architect shim socket on ready: negotiate_protocol timed out after 5000ms' for both panes in both rigs; sessions proceeded normally (worker_rpc_timeout_seconds default 5, pre-existing).",
+    "Live Dispatch events carry top-level `project` and `artifact_id: null` fields that the fixture envelopes omit; payload fields are identical.",
+    "The daemon writes <state_dir>/bin/legion and secrets/dispatch-token before verifyLegionPluginContract runs; state.json is not written.",
+    "POST /api/v1/artifacts/{id}/reviews rejects a body carrying `actor` with 400 unknown field (strict decode) — Dispatch API hygiene, not this change."
+  ],
+  "documentationFeedback": "scripts/smoke/README.md's checkpoint-3 row and the 'design gate between checkpoints 3 and 4' section describe an order (checkpoint 3 before the human approves) that the script cannot satisfy for a single-issue tree under root-issues; whichever way the checkpoint is fixed, the README should say when a single-issue armed tree is expected to pass checkpoint 3.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T03:01:49.452Z"
+}
