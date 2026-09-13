@@ -16,21 +16,27 @@ export function IssueTabs({
   activeTab,
   issueKey,
   onBeforeTabChange,
+  toolbar,
 }: {
   activeTab: IssueTab;
   issueKey: string;
   onBeforeTabChange: (current: IssueTab) => void;
+  toolbar?: ReactNode;
 }): ReactNode {
   const navigate = useNavigate();
 
   return (
-    <Tabs
-      activeTab={activeTab}
-      ariaLabel="Issue detail"
-      idPrefix="issue"
-      onBeforeTabChange={onBeforeTabChange}
-      onSelect={(tab) => navigate(buildIssuePath({ key: issueKey, kind: tab }))}
-      tabs={tabs}
-    />
+    <div data-testid="issue-tabs">
+      <Tabs
+        activeTab={activeTab}
+        ariaLabel="Issue detail"
+        compact
+        idPrefix="issue"
+        onBeforeTabChange={onBeforeTabChange}
+        onSelect={(tab) => navigate(buildIssuePath({ key: issueKey, kind: tab }))}
+        tabs={tabs}
+        trailing={toolbar}
+      />
+    </div>
   );
 }

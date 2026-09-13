@@ -178,10 +178,10 @@ export function IssueHeader({
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
 
   return (
-    <header className={`mb-3 rounded-xl border p-4 ${card}`}>
+    <header className={`mb-3 rounded-xl border p-3 ${card}`} data-testid="issue-header">
       {isClosed ? (
         <div
-          className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+          className={`mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
         >
           <span>This issue is closed.</span>
           <button
@@ -196,8 +196,8 @@ export function IssueHeader({
           </button>
         </div>
       ) : null}
-      <div className="flex flex-col gap-3 2xl:flex-row 2xl:items-start">
-        <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-start">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-[12rem] flex-1 flex-col gap-2 sm:flex-row sm:items-start xl:basis-full 2xl:basis-auto">
           <p
             className={`self-start shrink-0 rounded-md px-2.5 py-1.5 font-mono text-sm font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
           >
@@ -208,7 +208,7 @@ export function IssueHeader({
               <input
                 aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
                 aria-label="Issue title"
-                className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xs font-semibold outline-none sm:text-xl ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
+                className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xl font-semibold outline-none md:py-0 ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
                 disabled={isClosed}
                 onBlur={() => {
                   drafts.requestTitleSubmit();
@@ -228,7 +228,7 @@ export function IssueHeader({
               />
             ) : (
               <h1
-                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-xs font-semibold sm:text-xl ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
+                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-xl font-semibold md:py-0 ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
                   isClosed ? "" : `cursor-text ${borderStrongHover}`
                 }`}
                 onClick={() => {
@@ -255,7 +255,7 @@ export function IssueHeader({
             )}
             <button
               aria-label={state.pinned ? "Unpin issue" : "Pin issue"}
-              className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg md:min-h-8 md:min-w-8 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               disabled={updateState.isPending}
               onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
               title={state.pinned ? "Unpin issue" : "Pin issue"}
@@ -272,13 +272,16 @@ export function IssueHeader({
           </div>
         </div>
         <div
-          className="flex w-full flex-wrap items-center gap-2 2xl:w-auto 2xl:justify-end"
+          className="flex w-full shrink-0 flex-wrap items-center gap-2 md:w-auto xl:contents 2xl:flex"
           data-testid="issue-state-actions"
         >
           <label
-            className={`flex min-h-11 shrink-0 items-center gap-2 rounded-full border px-3 text-sm font-semibold uppercase tracking-wide ${borderDefault} ${statusPill.bg} ${statusPill.text}`}
+            className={`flex min-h-11 shrink-0 items-center gap-2 rounded-full border px-2 text-sm font-semibold uppercase tracking-wide sm:px-3 md:min-h-8 xl:px-2 ${borderDefault} ${statusPill.bg} ${statusPill.text}`}
           >
-            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${statusPillDot}`} />
+            <span
+              aria-hidden="true"
+              className={`hidden h-2 w-2 rounded-full sm:block ${statusPillDot}`}
+            />
             <select
               aria-label="Status"
               className={`min-w-0 appearance-none font-inherit outline-none disabled:cursor-not-allowed disabled:opacity-50 ${bgTransparent} ${statusPill.text}`}
@@ -295,7 +298,7 @@ export function IssueHeader({
           </label>
           <select
             aria-label="Priority"
-            className={`min-h-11 shrink-0 rounded-full border px-3 py-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:opacity-50 ${borderDefault} ${priorityPill.bg} ${priorityPill.text}`}
+            className={`min-h-11 shrink-0 rounded-full border px-2 py-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${borderDefault} ${priorityPill.bg} ${priorityPill.text}`}
             disabled={isClosed || updateIssue.isPending}
             onChange={(event) =>
               drafts.requestPrioritySubmit(
@@ -321,120 +324,134 @@ export function IssueHeader({
           {isClosed ? null : (
             <button
               aria-label="Close issue"
-              className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+              className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
               disabled={updateIssue.isPending}
               onClick={() => drafts.requestStatusSubmit("done")}
               type="button"
             >
-              {pendingStatus === "done" ? "Closing…" : "Close issue"}
+              {pendingStatus === "done" ? (
+                "Closing…"
+              ) : (
+                <>
+                  <span className="sm:hidden">Close</span>
+                  <span className="hidden sm:inline">Close issue</span>
+                </>
+              )}
             </button>
           )}
         </div>
-      </div>
-      <div
-        className={`mt-3 flex min-w-0 flex-nowrap items-center gap-3 overflow-x-auto border-t pt-3 [scrollbar-gutter:stable] ${borderDefault}`}
-        data-testid="issue-metadata-rail"
-      >
-        <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-          <span className="font-medium">Labels:</span>
-          <IssueLabels
-            disabled={isClosed}
-            labels={issue.labels}
-            onSave={(labels) => labelsMutation.mutateAsync(labels)}
-            project={issue.project}
-            saveError={labelsMutation.isError}
-            saving={labelsMutation.isPending}
-            variant="rail"
-          />
-        </div>
-        <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-          <span className="font-medium">Route:</span>
-          {routeEditing ? (
-            <form className="flex items-center gap-2" onSubmit={saveRoute}>
-              <label className="sr-only" htmlFor="issue-route">
-                Route
-              </label>
-              <input
-                aria-describedby="issue-route-help"
-                className={`w-64 rounded px-2 py-1 text-sm outline-none ${inputClasses(true)}`}
-                disabled={isClosed}
-                id="issue-route"
-                onChange={(event) => drafts.writeRoute(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
+        <div
+          className="flex min-w-0 flex-wrap items-center gap-2 md:[&_button]:min-h-7 md:[&_button]:py-0 xl:contents 2xl:flex"
+          data-testid="issue-metadata-rail"
+        >
+          <div
+            className={`flex shrink-0 items-center gap-2 text-sm xl:order-1 2xl:order-none ${textSecondaryOnSurface}`}
+          >
+            <span className="font-medium">Labels:</span>
+            <IssueLabels
+              disabled={isClosed}
+              labels={issue.labels}
+              onSave={(labels) => labelsMutation.mutateAsync(labels)}
+              project={issue.project}
+              saveError={labelsMutation.isError}
+              saving={labelsMutation.isPending}
+              variant="rail"
+            />
+          </div>
+          <div
+            className={`flex w-full shrink-0 flex-wrap items-center gap-2 text-sm md:w-auto xl:order-1 2xl:order-none ${textSecondaryOnSurface}`}
+          >
+            <span className="font-medium">Route:</span>
+            {routeEditing ? (
+              <form
+                className="flex w-full flex-wrap items-center gap-2 md:w-auto md:flex-nowrap"
+                onSubmit={saveRoute}
+              >
+                <label className="sr-only" htmlFor="issue-route">
+                  Route
+                </label>
+                <input
+                  aria-describedby="issue-route-help"
+                  className={`w-full rounded px-2 py-1 text-sm outline-none md:w-64 ${inputClasses(true)}`}
+                  disabled={isClosed}
+                  id="issue-route"
+                  onChange={(event) => drafts.writeRoute(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      drafts.discardRoute();
+                      setRouteEditing(false);
+                    }
+                  }}
+                  placeholder="role:legion-controller-core"
+                  value={drafts.route}
+                />
+                <button
+                  className={`min-h-11 rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
+                  disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
+                  type="submit"
+                >
+                  Save route
+                </button>
+                <button
+                  className={`min-h-11 rounded border px-2 py-1 text-sm font-medium ${borderTransparent} ${textMutedHoverToSecondary}`}
+                  onClick={() => {
                     drafts.discardRoute();
                     setRouteEditing(false);
-                  }
-                }}
-                placeholder="role:legion-controller-core"
-                value={drafts.route}
-              />
+                  }}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <span
+                  className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
+                  id="issue-route-help"
+                >
+                  Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
+                </span>
+              </form>
+            ) : (
               <button
-                className={`rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
-                disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
-                type="submit"
-              >
-                Save route
-              </button>
-              <button
-                className={`rounded border px-2 py-1 text-sm font-medium ${borderTransparent} ${textMutedHoverToSecondary}`}
-                onClick={() => {
-                  drafts.discardRoute();
-                  setRouteEditing(false);
-                }}
+                aria-label={routeLabel}
+                className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
+                disabled={isClosed}
+                onClick={() => setRouteEditing(true)}
+                title={drafts.route === "" ? undefined : drafts.route}
                 type="button"
               >
-                Cancel
+                {drafts.route === "" ? "No route" : drafts.route}
               </button>
-              <span
-                className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
-                id="issue-route-help"
-              >
-                Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
-              </span>
-            </form>
-          ) : (
-            <button
-              aria-label={routeLabel}
-              className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
-              disabled={isClosed}
-              onClick={() => setRouteEditing(true)}
-              title={drafts.route === "" ? undefined : drafts.route}
-              type="button"
+            )}
+          </div>
+          <button
+            aria-expanded={subscribersOpen}
+            className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium ${textSecondaryHoverToPrimary}`}
+            onClick={() => setSubscribersOpen((open) => !open)}
+            type="button"
+          >
+            <span>Subscribers:</span>
+            <span>{subscriberList.length}</span>
+          </button>
+          {issue.parent === null ? null : (
+            <Link
+              className={`shrink-0 text-sm underline ${linkText} ${linkHoverText}`}
+              to={buildIssuePath({ key: issue.parent, kind: "issue" })}
             >
-              {drafts.route === "" ? "No route" : drafts.route}
-            </button>
+              Parent: {issue.parent}
+            </Link>
+          )}
+          {issue.external_links.map((link) => (
+            <div className="shrink-0" key={link.url}>
+              <GitHubLink link={link} />
+            </div>
+          ))}
+          {whoseTurn === null ? null : (
+            <span
+              className={`ml-auto shrink-0 rounded-full border px-3 py-1 text-xs font-semibold xl:hidden 2xl:ml-auto 2xl:inline-flex ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
+            >
+              {whoseTurn}
+            </span>
           )}
         </div>
-        <button
-          aria-expanded={subscribersOpen}
-          className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium ${textSecondaryHoverToPrimary}`}
-          onClick={() => setSubscribersOpen((open) => !open)}
-          type="button"
-        >
-          <span>Subscribers:</span>
-          <span>{subscriberList.length}</span>
-        </button>
-        {issue.parent === null ? null : (
-          <Link
-            className={`shrink-0 text-sm underline ${linkText} ${linkHoverText}`}
-            to={buildIssuePath({ key: issue.parent, kind: "issue" })}
-          >
-            Parent: {issue.parent}
-          </Link>
-        )}
-        {issue.external_links.map((link) => (
-          <div className="shrink-0" key={link.url}>
-            <GitHubLink link={link} />
-          </div>
-        ))}
-        {whoseTurn === null ? null : (
-          <span
-            className={`ml-auto shrink-0 rounded-full border px-3 py-1 text-xs font-semibold ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}
-          >
-            {whoseTurn}
-          </span>
-        )}
       </div>
       {drafts.titleError === null ? null : (
         <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-help">

@@ -574,7 +574,7 @@ export function ConversationTab({
 
   return (
     <ReaderPosition
-      className="flex min-h-[60dvh] flex-col gap-3 pb-16 xl:pb-0"
+      className="flex min-h-[60dvh] flex-col gap-3 pb-56 sm:pb-16 xl:pb-0"
       shouldCompensate={() => !follow.pinnedToTop()}
     >
       {hasFailedOps ? (

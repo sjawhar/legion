@@ -20,6 +20,7 @@ export function Tabs<Id extends string>({
   onBeforeTabChange,
   onSelect,
   tabs,
+  trailing,
 }: {
   activeTab: Id;
   ariaLabel: string;
@@ -27,6 +28,7 @@ export function Tabs<Id extends string>({
   idPrefix: string;
   onBeforeTabChange?: (current: Id) => void;
   onSelect: (tab: Id) => void;
+  trailing?: ReactNode;
   tabs: readonly TabDefinition<Id>[];
 }): ReactNode {
   const tabRefs = useRef<Partial<Record<Id, HTMLButtonElement | null>>>({});
@@ -68,37 +70,38 @@ export function Tabs<Id extends string>({
 
   return (
     <div
-      aria-label={ariaLabel}
-      className={`${compact ? "mb-0" : "mb-3"} flex gap-1 border-b ${borderDefault}`}
-      role="tablist"
+      className={`${compact ? "mb-0" : "mb-3"} flex flex-wrap items-center gap-1 border-b ${borderDefault}`}
     >
-      {tabs.map((tab) => (
-        <button
-          aria-controls={`${idPrefix}-${tab.id}-panel`}
-          aria-selected={activeTab === tab.id}
-          className={
-            activeTab === tab.id
-              ? `${tabMinHeight} ${tabPadding} border-b-2 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-              : `${tabMinHeight} ${tabPadding} py-2 text-sm ${textSecondaryOnCanvas}`
-          }
-          id={`${idPrefix}-${tab.id}-tab`}
-          key={tab.id}
-          onClick={() => selectTab(tab.id)}
-          onKeyDown={(event) => onTabKeyDown(event, tab.id)}
-          onPointerDown={() => {
-            onBeforeTabChange?.(activeTab);
-            pointerCapturedScroll.current = true;
-          }}
-          ref={(node) => {
-            tabRefs.current[tab.id] = node;
-          }}
-          role="tab"
-          tabIndex={activeTab === tab.id ? 0 : -1}
-          type="button"
-        >
-          {tab.label}
-        </button>
-      ))}
+      <div aria-label={ariaLabel} className="flex min-w-0 gap-1" role="tablist">
+        {tabs.map((tab) => (
+          <button
+            aria-controls={`${idPrefix}-${tab.id}-panel`}
+            aria-selected={activeTab === tab.id}
+            className={
+              activeTab === tab.id
+                ? `${tabMinHeight} ${tabPadding} border-b-2 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                : `${tabMinHeight} ${tabPadding} py-2 text-sm ${textSecondaryOnCanvas}`
+            }
+            id={`${idPrefix}-${tab.id}-tab`}
+            key={tab.id}
+            onClick={() => selectTab(tab.id)}
+            onKeyDown={(event) => onTabKeyDown(event, tab.id)}
+            onPointerDown={() => {
+              onBeforeTabChange?.(activeTab);
+              pointerCapturedScroll.current = true;
+            }}
+            ref={(node) => {
+              tabRefs.current[tab.id] = node;
+            }}
+            role="tab"
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {trailing}
     </div>
   );
 }

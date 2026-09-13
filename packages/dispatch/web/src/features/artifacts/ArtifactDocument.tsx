@@ -18,7 +18,6 @@ export function ArtifactDocument({
   onToolbarChange,
   onVersionChange,
   showDiff,
-  toolbar,
   version,
 }: {
   artifact: Artifact;
@@ -28,7 +27,6 @@ export function ArtifactDocument({
   isClosed: boolean;
   owner: MarginOwner;
   showDiff: boolean;
-  toolbar?: ReactNode;
   onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange: (version: number | null) => void;
   version: number | undefined;
@@ -84,7 +82,6 @@ export function ArtifactDocument({
       onToolbarChange={onToolbarChange}
       owner={owner}
       showDiff={showDiff}
-      toolbar={toolbar}
       key={artifact.id}
       onVersionChange={onVersionChange}
       user={user.data}

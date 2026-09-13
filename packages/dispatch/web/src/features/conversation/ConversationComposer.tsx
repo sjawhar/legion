@@ -49,6 +49,7 @@ export function ConversationComposer({
   const [body, setBody] = useState("");
   const [recipient, setRecipient] = useState<Recipient | null>(null);
   const [delivery, setDelivery] = useState<"btw" | "aside" | "steer">("steer");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const defaultRecipient = useMemo(
     () =>
       recipientForRoute(agents, route) ??
@@ -118,7 +119,7 @@ export function ConversationComposer({
   return (
     <form
       aria-label="Message composer"
-      className={`sticky top-0 z-20 -mx-2 border-b px-2 pt-2 pb-2 ${borderDefault} ${surfaceBg}`}
+      className={`${pickerOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`}
       onSubmit={onSubmit}
     >
       <textarea
@@ -139,7 +140,10 @@ export function ConversationComposer({
               setRecipient(next);
               setDelivery(next.capabilities.includes("btw") ? "btw" : "steer");
             }}
-            onOpenChange={(open) => onPickerOpenChange?.(open)}
+            onOpenChange={(open) => {
+              setPickerOpen(open);
+              onPickerOpenChange?.(open);
+            }}
             value={recipient}
           />
         )}
