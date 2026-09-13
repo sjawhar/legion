@@ -1,0 +1,204 @@
+{
+  "planArtifact": "dispatch://LEGION-59/artifact/plan-md",
+  "summary": "Three rules stated once per file (retro's docs/solutions commit does not void the approval and the merger proves it with jj diff --summary quoted in READY; a conflict-forced rebase with an unchanged fingerprint is a confirmation (tester bare gates, reviewer approves the new head by SHA or continues its round, merger republishes READY), only a changed diff restarts the full review; no handoff file after the .legion deletion, report with legion handoff complete alone) plus a daemon change so an implementer completion writes testing only from in_progress.",
+  "taskCount": 4,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, three path-scoped commits in order (daemon TDD first, then the three skills, then the four role prompts), one PR. Text edits share no file across commits, so no hunk sequencing is needed. Run tests from packages/daemon, not the repo root.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker",
+      "test-driven-development",
+      "verification-before-completion",
+      "legion-retro",
+      "dispatch"
+    ],
+    "test": [
+      "legion-worker",
+      "verification-before-completion",
+      "dispatch"
+    ],
+    "review": [
+      "legion-worker",
+      "legion-retro",
+      "verification-before-completion",
+      "dispatch"
+    ],
+    "merge": [
+      "legion-worker",
+      "legion-retro"
+    ]
+  },
+  "branchState": {
+    "baseSha": "1cc59887a58fdceebd1dc479756d4cc445e92e31",
+    "baseDescription": "skills(legion-worker, legion-retro): pre-merge proof on a production-like surface linked in the E2E line; the implementer verifies in production after merge (Sami, 2026-09-13) (#990)",
+    "mainOriginAtPlanning": "94146572d9daca57c9ca8f6d3348b010b05197db",
+    "bookmark": "legion/LEGION-59",
+    "jjVersion": "0.45.1-sami.20260910",
+    "dependsOn": {
+      "skills/legion-worker/SKILL.md": "lines 201-330 at base (PR body and merge-queue discipline; Completion gate)",
+      "skills/legion-retro/SKILL.md": "lines 12-30, 85-96 at base",
+      "skills/legion-architect/SKILL.md": "lines 186-210 (step 6), 235 (phase-complete row), 239 (pr-review row) at base",
+      "packages/pi-envoy/roles/tester.md": "lines 11-23, 50-55 at base",
+      "packages/pi-envoy/roles/reviewer.md": "lines 11-35, 53-69 at base",
+      "packages/pi-envoy/roles/merger.md": "lines 11-15, 30-48 at base",
+      "packages/pi-envoy/roles/implementer.md": "lines 11-19, 44-52 at base (added beyond the spec's Design table; see concerns)",
+      "packages/daemon/src/daemon/api/routes/workers.ts": "phaseCompleteStatus, lines 24-51 at base",
+      "packages/daemon/src/daemon/__tests__/api.test.ts": "reviewer completion tests end at line 2603 at base; fixture sets state.issues[root].status = in_progress at lines 69-74",
+      "packages/daemon/src/daemon/AGENTS.md": "line 21, the POST /legion/v1/phase/complete row",
+      "packages/daemon/src/daemon/legion-state.ts": "IssueNode.status?: IssueStatus (line 45)"
+    }
+  },
+  "rules": [
+    "Retro's commit does not void the approval: after the reviewer approves the cleaned head, retro commits only docs/solutions/ on top; the tree goes to the merger, never back to tester or reviewer. Merger proves it with `jj diff --from <approved-sha> --to <tip-sha> --summary` quoted in READY and refuses if `... --summary '~docs/solutions'` prints anything.",
+    "An unchanged-diff rebase is a confirmation, not a round: rebase only when GitHub reports CONFLICTING; each role compares the fingerprint at the head it last verified with the new head; equal -> tester bare gates only (CI green at new head + repository smoke), reviewer APPROVEs the new head by SHA if previously approved else continues its round, merger republishes READY, retro never re-runs; different -> full review restarts.",
+    "No handoff file after the .legion deletion: later rebase, re-check, confirmation, or retro writes no .legion/<phase>.json and reports with `legion handoff complete` alone."
+  ],
+  "unchangedDiffCheck": {
+    "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(main@origin | <head-sha>)\" --to <head-sha> --git --context 0 '~.legion' '~docs/solutions' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
+    "verified": "jj 0.45.1: --from/--to/--git/--context 0/--summary accepted; fork_point() resolves; a hidden (rebased-away) head is addressable by SHA in the shared workspace; fileset negation ~docs/solutions works; jj warns on stderr `No matching entries for paths: .legion` once .legion is gone (hash unaffected)",
+    "unresolvableOldHead": "counts as a changed diff (no silent fallback)",
+    "heads": {
+      "implementer": "tip before vs tip after its own rebase; post both SHAs and both fingerprints in one PR comment",
+      "tester": "head named in the E2E line vs new head",
+      "reviewer": "commit_id of its last submitted review (legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews) vs new head",
+      "merger": "no fingerprint; uses the --summary check between approved head and tip"
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "commit": "daemon: an implementer completion advances the status only from in_progress",
+      "files": [
+        "packages/daemon/src/daemon/api/routes/workers.ts",
+        "packages/daemon/src/daemon/__tests__/api.test.ts",
+        "packages/daemon/src/daemon/AGENTS.md"
+      ],
+      "change": "phaseCompleteStatus implementer branch: `return state.issues[issue]?.status === \"in_progress\" ? \"testing\" : undefined;`; doc comment updated; two tests after line 2603 (from in_progress -> [{issue: root, status: \"testing\"}]; from retro -> []); AGENTS.md row sentence: implementer -> testing only when the issue's current status (state.issues[issue].status) is in_progress ... so retro is never followed by testing.",
+      "tdd": "write tests, run `cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\"` (retro test fails), change workers.ts, rerun (both pass), `bunx biome check src/ && bunx tsc --noEmit` in packages/daemon. `bun install --frozen-lockfile` at the workspace root first."
+    },
+    {
+      "id": 2,
+      "commit": "skills(legion-worker, legion-retro, legion-architect): retro's docs commit keeps the approval; an unchanged-diff rebase is a confirmation; no handoff file after the .legion deletion",
+      "files": [
+        "skills/legion-worker/SKILL.md",
+        "skills/legion-retro/SKILL.md",
+        "skills/legion-architect/SKILL.md"
+      ],
+      "passages": {
+        "skills/legion-worker/SKILL.md": [
+          "A 233-238 rebase bullet: add before/after fingerprint + rebase whole chain",
+          "B 242-264 tester bullet: bare gates after unchanged-fingerprint rebase; E2E head updated",
+          "C 265-278 reviewer bullet: APPROVE only for a head carrying no .legion/ (deletion head, or rebased head with equal fingerprint), confirmation vs continue vs new round",
+          "D 281-284 merger bullet: replace; --summary quoted in READY; '~docs/solutions' must be empty; phrase 'approved head still equals the current head' removed",
+          "E new bullet: Retro's commit does not void the approval; retro never re-runs on a rebase",
+          "F new section '## The unchanged-diff check' before '## Completion gate'",
+          "G 327-330: gate no longer applies once .legion/ is gone; report with `legion handoff complete` alone"
+        ],
+        "skills/legion-retro/SKILL.md": [
+          "A 22-23 step 4: merger verifies approved head plus docs/solutions-only commits via --summary quoted in READY",
+          "B new paragraph after the list: approval stands; retro -> merger, never back; rebase after retro moves docs, retro does not re-run",
+          "C 85-86: no handoff; report with `legion handoff complete --summary` alone",
+          "D 92 completion check: approval of the cleanup head stands"
+        ],
+        "skills/legion-architect/SKILL.md": [
+          "A 195-201 step 6 item 2: drop set_status retro; implementer completion advances only in_progress -> testing",
+          "B 202 item 3: retro's commit does not void the approval",
+          "C 203-207 item 4: merger --summary check quoted in READY",
+          "D 209-210: what returns to review vs not; rebase order; CONFLICTING check on every end-game wake",
+          "E 235 phase-complete row: reviewer completion after rebase naming unchanged fingerprint is a confirmation, not a round",
+          "F 239 pr-review row: approved on rebased head with unchanged fingerprint is that confirmation -> merger, never a second retro"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "commit": "roles(tester, reviewer, merger, implementer): the same rules in the role prompts",
+      "files": [
+        "packages/pi-envoy/roles/tester.md",
+        "packages/pi-envoy/roles/reviewer.md",
+        "packages/pi-envoy/roles/merger.md",
+        "packages/pi-envoy/roles/implementer.md"
+      ],
+      "passages": {
+        "tester.md": [
+          "A new paragraph after line 23: bare gates after unchanged-fingerprint rebase; retro docs never a reason to re-test",
+          "B line 55: skip handoff write when .legion/ absent; never recreate .legion/"
+        ],
+        "reviewer.md": [
+          "A 15-18 APPROVE reservation includes the rebased equal-fingerprint head",
+          "B new paragraph after 35: confirmation vs continue vs new round",
+          "C 60-61: retro's docs commit does not void your approval; rebase after approval is confirmed, never re-reviewed",
+          "D 69 item 5: merger --summary check quoted in READY"
+        ],
+        "merger.md": [
+          "A 11-15: approved head plus docs/solutions-only commits; READY names approved head, tip, --summary; rebase -> republish against the confirmation approval; phrase 'approved head equals the current head' removed",
+          "B 35-40 step 2: exact --summary and '~docs/solutions' commands; refuse and notify architect otherwise",
+          "C 41-42 step 3: READY contents"
+        ],
+        "implementer.md": [
+          "A new paragraph after 19: rebase only on CONFLICTING; before/after fingerprints in one PR comment; rebase whole chain",
+          "B 51-52: skip handoff write when .legion/ absent; never recreate .legion/"
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "commit": null,
+      "change": "implementer self-checks (all tester greps; even ``` fence count), bookmark `-r @- --allow-backwards`, push, `legion gh -- pr create` with `Dispatch: LEGION-59` and a CI line naming the real workflows (Tests; Legion Envoy and Contracts), implement handoff, complete"
+    }
+  ],
+  "testerChecks": {
+    "reads": [
+      "grep -c 'does not void the reviewer' skills/legion-worker/SKILL.md -> 1",
+      "grep -c 'approved head still equals the current head' skills/legion-worker/SKILL.md -> 0",
+      "grep -c 'bare gates' skills/legion-worker/SKILL.md -> >=1",
+      "grep -c -F 'handoff complete` alone' skills/legion-worker/SKILL.md -> 1",
+      "grep -c '^## The unchanged-diff check' skills/legion-worker/SKILL.md -> 1",
+      "grep -c 'does not void' skills/legion-retro/SKILL.md -> 1",
+      "grep -c 'legion handoff complete' skills/legion-retro/SKILL.md -> 1",
+      "grep -c -- '--summary' skills/legion-retro/SKILL.md -> 1",
+      "grep -c 'status: \"retro\"' skills/legion-architect/SKILL.md -> 0",
+      "grep -c 'is a confirmation, not a round' skills/legion-architect/SKILL.md -> 1",
+      "grep -c 'is that confirmation' skills/legion-architect/SKILL.md -> 1",
+      "grep -c 'does not void the approval' skills/legion-architect/SKILL.md -> 1",
+      "grep -c 'quoted in READY' skills/legion-architect/SKILL.md -> 1",
+      "grep -c 'bare gates only' packages/pi-envoy/roles/tester.md -> 1",
+      "grep -c 'never recreate' packages/pi-envoy/roles/tester.md -> 1",
+      "grep -c 'a confirmation, not a round' packages/pi-envoy/roles/reviewer.md -> 1",
+      "grep -c 'does not void your approval' packages/pi-envoy/roles/reviewer.md -> 1",
+      "grep -c 'approved head equals the current head' packages/pi-envoy/roles/merger.md -> 0",
+      "grep -c 'do not void the approval' packages/pi-envoy/roles/merger.md -> 1",
+      "grep -c -- '--summary' packages/pi-envoy/roles/merger.md -> >=2",
+      "grep -c 'never recreate' packages/pi-envoy/roles/implementer.md -> 1",
+      "grep -c 'is never followed by' packages/daemon/src/daemon/AGENTS.md -> 1"
+    ],
+    "unit": "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\" -> 2 pass; -t \"reviewer completes\" -> 2 pass; bun test (packages/daemon) green. Negative control: the in_progress twin still writes testing.",
+    "e2eScoping": "Acceptance 3 and the status half of 4 are proven on this tree's own end-game, observed by the architect at sign-off from the Dispatch event history and the merger's READY; the tester records that scoping in the E2E section (surface: this issue's Dispatch event history + READY on notifications.role.pr-queue; head SHA; negative control = the unit test) and does not try to observe the merge before it happens."
+  },
+  "concerns": [
+    "The live daemon runs main: until it is restarted on code containing commit 1, this tree's own .legion deletion push and retro completions still PATCH testing, so the status half of acceptance 4 holds on this tree only if the daemon is restarted on the PR head before the end-game (operator action) or the architect runs the scratch-daemon rig from the PR head; otherwise it is proven by the implementer's post-merge production verification on the first end-game under the restarted daemon. Architect decides.",
+    "This tree's workers read the installed skills (~/.dotfiles/.claude/plugins/marketplaces/legion-plugins, older than #990), not this branch's; the architect applies the new rules by instruction in each spawn_worker task (merger: --summary check quoted in READY; reviewer: approve only the deletion head; retro: legion handoff complete alone).",
+    ".omp/config.yml (extension-provisioned, empty, not gitignored) sits in every issue workspace's working copy; every push needs `jj bookmark set legion/LEGION-59 -r @- --allow-backwards` after a split. Adding .omp/ to .gitignore is a one-line fix outside this spec; not included — say if you want it.",
+    "Status wobble on a post-approval rebase: a tester completion always writes needs_review, so retro -> needs_review -> retro appears; the spec constrains only the implementer completion. Recorded, not fixed.",
+    "implementer.md is edited although the spec's Design table does not list it (LEGION-17's second rebase recreated .legion/implement.json; the prompt's last-acts paragraph contradicts rule 3). Drop Task 3's implementer.md section if you disagree."
+  ],
+  "learningsInjected": [
+    "docs/solutions/legion/text-only-skill-pr-mechanics.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md",
+    "docs/solutions/legion/handoff-file-conflicts-during-rebases.md",
+    "docs/solutions/github/conflicting-pr-gets-no-pull-request-ci.md",
+    "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/legion/text-only-skill-pr-mechanics.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md",
+    "docs/solutions/github/conflicting-pr-gets-no-pull-request-ci.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T04:36:34.233Z"
+}
