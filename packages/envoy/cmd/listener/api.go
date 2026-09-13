@@ -41,6 +41,7 @@ type messageBody struct {
 	Message        string  `json:"message"`
 	Payload        *string `json:"payload"`
 	IdempotencyKey string  `json:"idempotency_key"`
+	DedupeKey      string  `json:"dedupe_key"`
 	InReplyTo      *string `json:"in_reply_to"`
 	Supersedes     *string `json:"supersedes"`
 	Urgency        *string `json:"urgency"`
@@ -285,7 +286,9 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and publishes the envelope to NATS.
+// instead) and publishes the envelope to NATS. An explicit dedupe_key is used
+// verbatim (a re-send a receiver's own dedupe recognises); it is mutually
+// exclusive with idempotency_key.
 func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -316,8 +319,15 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, message, field)
 			return
 		}
+		if request.DedupeKey != "" && request.IdempotencyKey != "" {
+			writeJSONError(w, http.StatusBadRequest, "dedupe_key and idempotency_key are mutually exclusive", "dedupe_key", "idempotency_key")
+			return
+		}
 		dedupeKey := "publish." + id.New()
-		if request.IdempotencyKey != "" {
+		switch {
+		case request.DedupeKey != "":
+			dedupeKey = request.DedupeKey
+		case request.IdempotencyKey != "":
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
 		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
