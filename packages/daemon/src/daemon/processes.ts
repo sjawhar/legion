@@ -26,6 +26,7 @@ import {
   type LegionState,
   liveAncestorTree,
   type PendingAssignment,
+  staleQueueEntryReason,
   type TreeState,
   type WorkerRoleClaim,
 } from "./legion-state";
@@ -622,6 +623,18 @@ export class ProcessManager {
 
     const admission = this.deps.state.admission;
     admission.cap = this.deps.config.admissionCap;
+    // Drop every waiting entry whose issue has already left the line -- a `done` issue queued by
+    // a daemon that predates the `dequeue` effect (LEGION-56), or one whose status event this
+    // daemon missed -- before anything below is promoted: a stale head of the queue must never
+    // spawn a root for an issue with nothing to do, and the valid entry behind it must be the one
+    // promoted. The same rule as the resync sweep (`staleQueueEntryReason`, legion-state.ts);
+    // `reconcileAdmission`'s closing persist saves the result.
+    for (const issue of [...admission.queue]) {
+      const reason = staleQueueEntryReason(this.deps.state, issue);
+      if (reason === undefined) continue;
+      this.removeQueued(issue);
+      console.error(`[legion] dropped ${issue} from the admission queue at boot: ${reason}`);
+    }
     // An "active" tree with no recorded locator never finished spawning
     // before the daemon last stopped: advancePromotionSweep persists the
     // promotion before startRoot/spawnRoot ever records a locator, so a

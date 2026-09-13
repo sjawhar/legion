@@ -2308,10 +2308,67 @@ describe("ProcessManager", () => {
     }
   });
 
+  it("drops a finished issue from the head of the queue at boot, logs it, and promotes the todo entry behind it", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    // LEGION-56's shape: closed in Dispatch, still first in line with a queued tree record.
+    state.issues[root] = { key: root, title: "Finished", status: "done", children: [] };
+    state.issues[child] = { key: child, title: "Waiting", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "queued", launchFailures: 0 };
+    state.trees[child] = { root: child, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(root, child);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir, { admissionCap: 1 }),
+    });
+
+    try {
+      await processes.reconcileAdmission();
+
+      expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
+      expect(state.trees[root]).toBeUndefined();
+      expect(state.trees[child]?.status).toBe("active");
+      expect(errorLog).toHaveBeenCalledWith(
+        `[legion] dropped ${root} from the admission queue at boot: Dispatch status "done"`
+      );
+      // Exactly one root pane opened, and it is the waiting issue's.
+      const windows = commands.filter(
+        (command) => command[0] === "tmux" && command[3] === "new-window"
+      );
+      expect(windows).toHaveLength(1);
+      expect(tmuxWindowEnvironment(windows[0]).LEGION_TREE).toBe(child);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("drops a queue entry with no issue record at boot, naming it unknown", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.queue.push(root);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+    });
+
+    try {
+      await processes.reconcileAdmission();
+
+      expect(state.admission).toEqual({ cap: 2, active: [], queue: [] });
+      expect(state.trees[root]).toBeUndefined();
+      expect(errorLog).toHaveBeenCalledWith(
+        `[legion] dropped ${root} from the admission queue at boot: unknown issue`
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("leaves launch-failed trees queued when reconciling admission capacity", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
     state.trees[root].status = "launch-failed";
     state.admission.queue.push(root);
     const { manager: processes } = manager(state, {
@@ -2327,6 +2384,9 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
+    for (const issue of [root, child, grandchild]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+    }
     state.trees[root].status = "launch-failed";
     state.admission.queue.push(root, child, grandchild);
     const { manager: processes } = manager(state, {
@@ -2362,6 +2422,9 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.admission.queue.push(root, child, grandchild);
+    for (const issue of [root, child, grandchild]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+    }
     const settled = Promise.withResolvers<void>();
     const { manager: processes } = manager(state, {
       config: config(stateDir, { admissionCap: 2 }),
@@ -2397,6 +2460,9 @@ describe("ProcessManager", () => {
     tree(state, child);
     tree(state, grandchild);
     tree(state, closed);
+    for (const issue of [root, child, grandchild, closed]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+    }
     state.trees[root].status = "active";
     state.trees[child].status = "lingering";
     state.trees[grandchild].status = "dead";
