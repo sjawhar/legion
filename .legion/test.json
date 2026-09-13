@@ -2,23 +2,37 @@
   "passed": 3,
   "failed": 0,
   "failures": [],
-  "verifiedHead": "9a0320b02cf38d621d21be4b245ba8f4abde2718",
-  "testCommit": "c0a6dec365ee8d1116eca33e5fc20b8daac79b7a",
-  "machine": "32 cores (nproc), load average 110-125 throughout (uptime), Bun 1.3.14, 2026-09-13 09:47-09:56Z",
-  "acceptance1": {
-    "branchLoop": "bun test packages/daemon/src/daemon/__tests__/processes.test.ts x50 sequential at 9a0320b0: pass=50 fail=0 (252 pass / 3 skip / 0 fail each run); load 115-125 before/during/after",
-    "preMergeLoop": "same x50 sequential in a separate jj workspace at 4d516a1f (base of #980): pass=49 fail=1; run 47 failed with `Incomplete Jujutsu clone at <tmp>/repos/github.com/sjawhar/legion: missing .../.jj` thrown at ensureRepoClone (workspace.ts:90) in sibling test `admits only up to the configured global cap and selects the next queued tree on release` (admit(root) then releaseSlot -> admit(child); both provision the same repo concurrently); the test then timed out at 5000ms. Neither of the two named tests failed in the 50 runs; the race surfaced in the sibling test that shares the same mechanism.",
-    "branchLanes": "supplementary: 8 parallel lanes x 10 runs at 9a0320b0 = 80 runs: 72 pass, 8 fail; 0 `Incomplete Jujutsu clone`; 0 failures in the two named tests; failing tests were 4 unrelated real-timer/flushEventLoopUntil tests starved under 8 concurrent bun processes at load ~115 (retires an older generation's launch as stale x4; keeps closeTree from finishing while a QUEUE-PROMOTED launch is still in flight x2; retires its own just-opened pane and reports TreeClosingError x1; retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm x1)",
-    "preMergeLanes": "supplementary: 8 lanes x 10 runs at 4d516a1f = 80 runs: 58 pass, 22 fail; 0 `Incomplete Jujutsu clone`; all 22 were pre-#980 registration-deadline/watchdog/resurrection timer tests starved by the parallel load"
+  "verifiedHead": "180c053e294647db125942c2174c01b52f54dbd2",
+  "testCommit": "c0a6dec365ee8d1116eca33e5fc20b8daac79b7a + 0070e563bb8b187c9ab4a7be1a5807f44accf3dc",
+  "round1": {
+    "verifiedHead": "873550aeea3cb0736b357199d66f06735b8caea9",
+    "machine": "32 cores (nproc), load average 110-125 throughout (uptime), Bun 1.3.14, 2026-09-13 09:47-09:56Z",
+    "acceptance1": {
+      "branchLoop": "bun test packages/daemon/src/daemon/__tests__/processes.test.ts x50 sequential at 9a0320b0: pass=50 fail=0 (252 pass / 3 skip / 0 fail each run); load 115-125 before/during/after",
+      "preMergeLoop": "same x50 sequential in a separate jj workspace at 4d516a1f (base of #980): pass=49 fail=1; run 47 failed with `Incomplete Jujutsu clone at <tmp>/repos/github.com/sjawhar/legion: missing .../.jj` thrown at ensureRepoClone (workspace.ts:90) in sibling test `admits only up to the configured global cap and selects the next queued tree on release` (admit(root) then releaseSlot -> admit(child); both provision the same repo concurrently); the test then timed out at 5000ms. Neither of the two named tests failed in the 50 runs; the race surfaced in the sibling test that shares the same mechanism.",
+      "branchLanes": "supplementary: 8 parallel lanes x 10 runs at 9a0320b0 = 80 runs: 72 pass, 8 fail; 0 `Incomplete Jujutsu clone`; 0 failures in the two named tests; failing tests were 4 unrelated real-timer/flushEventLoopUntil tests starved under 8 concurrent bun processes at load ~115 (retires an older generation's launch as stale x4; keeps closeTree from finishing while a QUEUE-PROMOTED launch is still in flight x2; retires its own just-opened pane and reports TreeClosingError x1; retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm x1)",
+      "preMergeLanes": "supplementary: 8 lanes x 10 runs at 4d516a1f = 80 runs: 58 pass, 22 fail; 0 `Incomplete Jujutsu clone`; all 22 were pre-#980 registration-deadline/watchdog/resurrection timer tests starved by the parallel load"
+    },
+    "acceptance2": "18 `.jj`-creation lines across packages/daemon/src/daemon/__tests__ (6) and packages/workspace/src (12); repo-wide sweep of packages/ and scripts/ finds no others. Classes: (i) processes.test.ts:466 fixture fake clone -> command[4] temp destination; (ii) workspace.test.ts:165,250,660-661,669,791 fake clones -> cmd[4] temp destination; (iii) index.test.ts:351,470,768,1450, processes.test.ts:636, workspace.test.ts:294,385,441,567,818 complete clone at final path before startDaemon/provisionIssueWorkspace. Zero non-atomic final-path creations during provisioning. workspace.test.ts:773-774 creates an incomplete final dir (no .jj, `leftover` file) up front as the premise of the `removes an incomplete clone` test, not during provisioning.",
+    "acceptance3": "bun test packages/workspace at 9a0320b0: 13 pass, 0 fail, 95 expect() calls [8.15s]; new test alone (-t filter) x20: 20/20 pass, 1 pass / 12 filtered out / 8 expect() calls each",
+    "observations": [
+      "The sequential 50-loop at the pre-merge commit reproduced the spec's race once in 50 runs (2%) under load ~120 on 32 cores; the 8-lane parallel run did not surface it in 80 more runs, so the loop is a weak but real detector and the code-level argument in the spec (temp sibling + rename) carries the closure with it.",
+      "Under 8 concurrent bun processes on this already-loaded host, unrelated timer-based ProcessManager tests fail on both the pre-merge commit (22/80) and the branch head (8/80). None involve provisioning; none are the two named tests; none appeared in the sequential 50-loops that Acceptance 1 specifies. Reported to the architect as an observation, not a finding against this PR.",
+      "Negative control for the loop as a detector: the pre-merge run-47 failure output is quoted verbatim in the PR body; the branch head never produced that string in 130 runs (50 sequential + 80 parallel)."
+    ]
   },
-  "acceptance2": "18 `.jj`-creation lines across packages/daemon/src/daemon/__tests__ (6) and packages/workspace/src (12); repo-wide sweep of packages/ and scripts/ finds no others. Classes: (i) processes.test.ts:466 fixture fake clone -> command[4] temp destination; (ii) workspace.test.ts:165,250,660-661,669,791 fake clones -> cmd[4] temp destination; (iii) index.test.ts:351,470,768,1450, processes.test.ts:636, workspace.test.ts:294,385,441,567,818 complete clone at final path before startDaemon/provisionIssueWorkspace. Zero non-atomic final-path creations during provisioning. workspace.test.ts:773-774 creates an incomplete final dir (no .jj, `leftover` file) up front as the premise of the `removes an incomplete clone` test, not during provisioning.",
-  "acceptance3": "bun test packages/workspace at 9a0320b0: 13 pass, 0 fail, 95 expect() calls [8.15s]; new test alone (-t filter) x20: 20/20 pass, 1 pass / 12 filtered out / 8 expect() calls each",
-  "observations": [
-    "The sequential 50-loop at the pre-merge commit reproduced the spec's race once in 50 runs (2%) under load ~120 on 32 cores; the 8-lane parallel run did not surface it in 80 more runs, so the loop is a weak but real detector and the code-level argument in the spec (temp sibling + rename) carries the closure with it.",
-    "Under 8 concurrent bun processes on this already-loaded host, unrelated timer-based ProcessManager tests fail on both the pre-merge commit (22/80) and the branch head (8/80). None involve provisioning; none are the two named tests; none appeared in the sequential 50-loops that Acceptance 1 specifies. Reported to the architect as an observation, not a finding against this PR.",
-    "Negative control for the loop as a detector: the pre-merge run-47 failure output is quoted verbatim in the PR body; the branch head never produced that string in 130 runs (50 sequential + 80 parallel)."
-  ],
+  "round2": {
+    "trigger": "reviewer thread https://github.com/sjawhar/legion/pull/1014#discussion_r3999399598 (test did not pin which clone survives); implementer fix 0070e563: each fake clone writes .jj/clone-origin = its own temp target, test asserts the marker at the final path equals cloneTargets[0]",
+    "scope": "jj diff --from 873550ae --to 180c053e --summary: M .legion/implement.json, A .legion/review.json, M packages/workspace/src/workspace.test.ts — processes.test.ts and product code untouched, so the round-1 50-run daemon loops stand unchanged",
+    "machine": "32 cores, load average 106-113, Bun 1.3.14, 2026-09-13 12:26-12:28Z",
+    "workspaceSuite": "bun test packages/workspace at 180c053e: 13 pass, 0 fail, 96 expect() calls [6.98s]",
+    "newTestAlone": "20/20 pass (1 pass / 12 filtered out / 9 expect() calls each)",
+    "reviewerMutant": "scratch copy of packages/workspace, workspace.ts:156 collision branch replaced with { await rm(repoCloneDir, {recursive:true, force:true}); await rename(tempDir, repoCloneDir); return; } -> new test FAILS 5/5 on `expect(await readFile(jjDir/clone-origin)).toBe(cloneTargets[0])`: Expected widgets.clone-EMhC5u / Received widgets.clone-kYKdQn (12 pass, 1 fail, 91 expect()); reverted, scratch copy byte-identical to the workspace afterwards",
+    "enotemptyControl": "same scratch copy, collision branch made unreachable (`if (false && ...)`) -> new test fails with ENOTEMPTY: directory not empty, rename widgets.clone-sBx3iS -> widgets at ensureRepoClone (12 pass, 1 fail, 87 expect()); reverted",
+    "lint": "packages/workspace: bunx biome check src/ -> Checked 3 files in 36ms. No fixes applied. (exit 0); bunx tsc --noEmit -> exit 0",
+    "ci": "Tests run 34755512024 green at 180c053e (per architect; re-verified via legion gh before the PR body edit)"
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T09:58:38.541Z"
+  "completed": "2026-09-13T12:29:07.847Z"
 }
