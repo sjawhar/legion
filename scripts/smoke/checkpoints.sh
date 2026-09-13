@@ -248,10 +248,25 @@ checkpoint_two() {
   printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
+# The Dispatch lifecycle statuses at or past `todo`: a child in one of them has been released by
+# its architect (`release_wave`), so it is the one status set both `architect_parked` (none may
+# be) and `checkpoint_four` (one must be) read. `triage`, `icebox`, and `backlog` are not released.
+readonly released_statuses='["todo", "in_progress", "testing", "needs_review", "retro", "done"]'
+
+# The phase-worker role claimed on the root itself in daemon state (a single-issue tree: any role
+# other than the architect, e.g. planner or implementer), or nothing when only the architect is.
+root_phase_worker() {
+  local root="$1"
+  local daemon_state="$2"
+  jq -r --arg root "$root" '
+    [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
+    | first // empty
+  ' <<<"$daemon_state"
+}
+
 # How the tree moved past the gate: a Dispatch child issue under the root (the decomposed path),
-# or a phase-worker role claim on the root itself in daemon state (a single-issue tree: any role
-# other than the architect, e.g. planner or implementer). Prints which one was observed, or fails
-# naming the root when neither is.
+# or a phase-worker role claim on the root itself (`root_phase_worker`). Prints which one was
+# observed, or fails naming the root when neither is.
 tree_progress() {
   local root="$1"
   local daemon_state="$2"
@@ -262,12 +277,9 @@ tree_progress() {
     printf 'a child issue\n'
     return
   fi
-  worker="$(jq -er --arg root "$root" '
-    [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
-    | first // empty
-  ' <<<"$daemon_state")" || true
+  worker="$(root_phase_worker "$root" "$daemon_state")"
   if [[ -n "$worker" ]]; then
-    printf 'a %s phase worker on the root (single-issue tree)\n' "$worker"
+    printf 'a %s phase worker claimed on the root (single-issue tree)\n' "$worker"
     return
   fi
   fail "${root} has neither a Dispatch child issue nor a phase-worker role claim on the root: the tree has not moved past the gate"
@@ -283,8 +295,8 @@ architect_parked() {
   local children
   local moved
   children="$(dispatch_children "$root")"
-  moved="$(jq -r --arg root "$root" '
-    [.[] | select(.parent == $root and (.status | IN("todo", "in_progress", "testing", "needs_review", "retro", "done"))) | "\(.key) (\(.status))"]
+  moved="$(jq -r --arg root "$root" --argjson released "$released_statuses" '
+    [.[] | select(.parent == $root and (.status | IN($released[]))) | "\(.key) (\(.status))"]
     | first // empty
   ' <<<"$children")"
   [[ -z "$moved" ]] ||
@@ -345,6 +357,8 @@ checkpoint_three() {
         any(.[]; .id == $id and .approval.state == "awaiting")
       ' >/dev/null <<<"$artifacts" ||
         fail "${root} has no open approval request on its registered spec document (approval.state must be awaiting; a Dispatch server without document approval never reports one)"
+      architect_parked "$root" "$daemon_state"
+      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)\n'
       ;;
     off)
       jq -e --arg root "$root" '.gates | has($root) | not' >/dev/null <<<"$daemon_state" ||
@@ -353,19 +367,11 @@ checkpoint_three() {
         any(.[]; .name == "spec.md" and .primary == true and (.approval.state // "draft") == "awaiting") | not
       ' >/dev/null <<<"$artifacts" ||
         fail "${root} has an open approval request on its spec document although the rig runs with gates.design: off (a question is waiting in a human's inbox)"
+      progress="$(tree_progress "$root" "$daemon_state")"
+      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and %s observed\n' "$progress"
       ;;
     *)
       fail "recorded design-gate policy '${design_gate}' is neither off nor root-issues"
-      ;;
-  esac
-  case "$design_gate" in
-    root-issues)
-      architect_parked "$root" "$daemon_state"
-      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)\n'
-      ;;
-    off)
-      progress="$(tree_progress "$root" "$daemon_state")"
-      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and %s observed\n' "$progress"
       ;;
   esac
 }
@@ -390,27 +396,23 @@ checkpoint_four() {
     ' >/dev/null <<<"$daemon_state" ||
       fail "daemon has not recorded the spec approval for ${root} (gates[${root}].approvedVersion must equal latestVersion)"
   fi
-  jq -e --arg root "$root" '
+  jq -e --arg root "$root" --argjson released "$released_statuses" '
     [
       .issues[$root].children[]? as $child |
       .issues[$child].status as $status |
       .trees[$child].status as $tree_status |
       select(
-        ($status == "todo" or $status == "in_progress" or $status == "testing" or
-          $status == "needs_review" or $status == "retro" or $status == "done") and
+        ($status | IN($released[])) and
           ((.admission.active | index($child)) != null or $tree_status == "queued" or
             $tree_status == "active")
       )
     ] | length > 0
   ' >/dev/null <<<"$daemon_state" && released="a released child is tracked by admission or tree state"
   if [[ -z "${released:-}" ]]; then
-    released="$(jq -er --arg root "$root" '
-      [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
-      | first // empty
-    ' <<<"$daemon_state")" || true
+    released="$(root_phase_worker "$root" "$daemon_state")"
     [[ -n "$released" ]] ||
       fail "neither a child is released into admission or an active tree nor a phase worker is claimed on ${root}"
-    released="a ${released} phase worker is claimed on the root (single-issue tree)"
+    released="a ${released} phase worker claimed on the root (single-issue tree)"
   fi
   if [[ "$design_gate" == root-issues ]]; then
     printf 'CHECKPOINT 4 OK: spec approval recorded on the gate; %s\n' "$released"

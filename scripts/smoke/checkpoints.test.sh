@@ -236,9 +236,9 @@ no_children="${temporary_dir}/children-none.json"
 printf '%s' '[]' >"$no_children"
 write_single_issue_state '{}'
 CHILDREN_FILE="$no_children" run_checkpoint 3
-expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker on the root (single-issue tree) observed'
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker claimed on the root (single-issue tree) observed'
 CHILDREN_FILE="$no_children" run_checkpoint 4
-expect_output 'CHECKPOINT 4 OK: a planner phase worker is claimed on the root (single-issue tree)'
+expect_output 'CHECKPOINT 4 OK: a planner phase worker claimed on the root (single-issue tree)'
 printf 'root-issues\n' >"${smoke_dir}/design-gate"
 # Armed, single-issue, before approval: the architect registered the gate and parked — no child,
 # no worker. This is exactly what the real architect produced in every rig run.
@@ -252,7 +252,7 @@ expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval
 # After approval the architect spawns the worker: checkpoint 4 passes on the claim.
 write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
 CHILDREN_FILE="$no_children" run_checkpoint 4
-expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a planner phase worker is claimed on the root (single-issue tree)'
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a planner phase worker claimed on the root (single-issue tree)'
 printf 'PASS: checkpoints 3 and 4 accept a single-issue tree: parked before approval, a phase worker on the root after; a worker claimed while awaiting fails naming the early move\n'
 # Neither a child nor a phase worker: the tree has not moved past the gate, and the failure says so.
 printf 'off\n' >"${smoke_dir}/design-gate"
