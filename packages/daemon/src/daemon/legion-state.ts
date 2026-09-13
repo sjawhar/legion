@@ -464,6 +464,29 @@ export function isActivePhase(state: LegionState, issue: IssueKey, role: string)
   return phase !== undefined && !phase.completed && phase.phase === role;
 }
 
+/** The role `issue`'s active phase names, for log lines: `none` when no phase is active (absent,
+ * or completed and awaiting replay to the architect). */
+export function activePhaseLabel(state: LegionState, issue: IssueKey): string {
+  const phase = state.phases[issue];
+  return phase !== undefined && !phase.completed ? phase.phase : "none";
+}
+
+/** True when `pending` is the daemon's own catch-up queued for a phase-worker role that is no
+ * longer `issue`'s active phase -- a bystander's catch-up, judged at delivery time (a queued
+ * promotion or `/worker/ready`), not only when `resumeWorker` decides whether to queue one: the
+ * phase can move on while the catch-up waits behind the cap or a boot. Such a catch-up is
+ * dropped rather than prompted or relaunched; only the architect's next `spawn_worker` resumes a
+ * finished worker. An architect's catch-up is never a bystander's: a sub-architect is never its
+ * child's active phase and the catch-up is its only recovery path (see `resumeWorker`). */
+export function isBystanderCatchup(
+  state: LegionState,
+  issue: IssueKey,
+  role: string,
+  pending: PendingAssignment | undefined
+): boolean {
+  return pending?.kind === "catchup" && role !== "architect" && !isActivePhase(state, issue, role);
+}
+
 function migrateV5State(state: unknown): unknown {
   if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
   if (!("version" in state) || state.version !== 5) return state;

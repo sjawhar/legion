@@ -1,6 +1,12 @@
 import type { SpawnWorkerResponse } from "@legion/contracts";
 import { type IssueKey, type LegionRole, parseRoleToken } from "@legion/contracts";
-import type { LegionState, PendingAssignment, WorkerRoleClaim } from "./legion-state";
+import {
+  activePhaseLabel,
+  isBystanderCatchup,
+  type LegionState,
+  type PendingAssignment,
+  type WorkerRoleClaim,
+} from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
 import type { WorkerRpcClient } from "./worker-rpc";
 
@@ -18,8 +24,9 @@ export const MAX_LAUNCH_FAILURES = 3;
  * (see `promoteQueuedWorker`'s handling below), so a failed prompt never strands the
  * assignment. `"stop"` covers both "still at cap" and a queued locator-carrying claim whose
  * client is alive but not currently idle (mid-prompt or genuinely busy) — neither is stale, so
- * neither drops the entry; only `"stale"` does that (the client is gone, or a session was never
- * confirmed). */
+ * neither drops the entry; only `"stale"` does that: the client is gone, a session was never
+ * confirmed, or the entry is a bystander's catch-up (`isBystanderCatchup`), which is cleared
+ * from the claim as it is dropped so neither delivery branch ever runs for it. */
 type PromotionDecision =
   | { kind: "retry" }
   | { kind: "stop" }
@@ -500,6 +507,18 @@ export class WorkerAdmission {
       ) {
         // Stale entry: the claim vanished, lost its task, or isn't a real issue/tree. Drop and
         // continue.
+        queue.shift();
+        return { kind: "stale" };
+      }
+      if (isBystanderCatchup(this.deps.state, parsed.issue, parsed.role, claim.pendingAssignment)) {
+        // The phase moved on while this catch-up waited for a slot: whether the worker is a live
+        // idle pane or a retired claim, delivering it would only prompt or relaunch a finished
+        // worker with nothing to do. Dropped and drained like any other consumed entry; the
+        // architect's next spawn_worker is what resumes a finished worker.
+        console.info(
+          `[legion] dropping queued catch-up for ${token}: ${parsed.issue}'s active phase is ${activePhaseLabel(this.deps.state, parsed.issue)}; only spawn_worker resumes a finished worker`
+        );
+        delete claim.pendingAssignment;
         queue.shift();
         return { kind: "stale" };
       }

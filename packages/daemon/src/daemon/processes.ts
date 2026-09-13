@@ -19,7 +19,9 @@ import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
 import {
+  activePhaseLabel,
   isActivePhase,
+  isBystanderCatchup,
   type LegionState,
   type PendingAssignment,
   type TreeState,
@@ -704,11 +706,12 @@ export class ProcessManager {
    * the caller knows whether this prompt represents a new admission (`resumeOrQueueExisting`'s
    * below-cap idle-resume, or a queue promotion) or none at all (`/worker/ready` resuming a
    * worker whose slot was already counted via its locator from the moment `launchWorker` wrote
-   * it, so nothing here needs releasing or re-checking). This is the ONE writer of the issue's
-   * active phase (`state.phases[issue]`, which `phase/complete` and `routeActive` read), and it
-   * writes it only for an architect `assignment` -- a `catchup` prompt is recovery plumbing and
-   * leaves the phase exactly as it was, so a relaunched worker whose phase already finished
-   * never becomes the active phase again. Clears the claim's `pendingAssignment` if it was
+   * it, so nothing here needs releasing or re-checking). This is the one place a new active phase
+   * is written (`state.phases[issue]`, which `phase/complete` and `routeActive` read; `phase/complete`
+   * itself only deletes, restores, or marks that record completed), and it is written only for an
+   * architect `assignment` -- a `catchup` prompt is recovery plumbing and leaves the phase exactly
+   * as it was, so a relaunched worker whose phase already finished never becomes the active phase
+   * again. Clears the claim's `pendingAssignment` if it was
    * still set. Throws (without touching phases/`pendingAssignment`/persisting) only if
    * `prompt()` itself rejects — the caller decides what "the prompt failed" means for its own
    * bookkeeping. A `persist` failure *after* `prompt()` already succeeded is a durable-state
@@ -810,7 +813,18 @@ export class ProcessManager {
         this.cancelBootWatchdog(token, generation);
         return;
       }
-      const pending = claim.pendingAssignment;
+      let pending = claim.pendingAssignment;
+      if (isBystanderCatchup(this.deps.state, issue, role, pending)) {
+        // The phase moved on while this boot was in flight: the catch-up queued for it is a
+        // bystander's now. Ready is confirmed exactly as a connect-only ready would be (the boot
+        // itself succeeded), the pending prompt is cleared and persisted with it, and nothing is
+        // prompted; the architect's next spawn_worker is what gives this worker its next task.
+        console.info(
+          `[legion] dropping queued catch-up for ${token} at ready: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
+        );
+        delete claim.pendingAssignment;
+        pending = undefined;
+      }
       const client = await this.clientFor(token, claim.locator);
       if (pending) {
         await this.promptExistingWorker(client, token, issue, role, sessionId, pending, () => {
@@ -2024,13 +2038,19 @@ export class ProcessManager {
    * `phases[issue]`, and it is not sent at all to a phase-worker role that is neither the issue's
    * active phase nor holding a pending prompt -- a finished worker whose wake was misrouted is a
    * bystander until the architect's next `spawn_worker`, so resuming it would only relaunch a
-   * process with nothing to do. A sub-architect (`role === "architect"`; the root architect never
-   * reaches this method) is exempt, exactly as in `retireIdleWorker`: an architect has no phase
-   * of its own -- it is never `phases[issue].phase` once it has spawned a planner -- and it parks
-   * by design between wakes for the life of its subtree, so this is its only recovery path. A
-   * catch-up never replaces a queued architect assignment either: checked here to skip the fetch,
-   * and again inside the role's lock in `deliverToWorker` for a `spawn_worker` that lands while
-   * the catch-up is being computed.
+   * process with nothing to do. The same judgement is made again at delivery time
+   * (`isBystanderCatchup` in `promoteQueuedWorker` and `workerReady`): a catch-up queued here
+   * behind the cap or a boot is dropped if the phase has moved on by the time it would be
+   * prompted or relaunched. A sub-architect (`role === "architect"` on a child issue) is exempt,
+   * exactly as in `retireIdleWorker`: an architect has no phase of its own -- it is never
+   * `phases[issue].phase` once it has spawned a planner -- and it parks by design between wakes
+   * for the life of its subtree, so this is its only recovery path. The root architect does reach
+   * this method too, through the durable lane's `onUndeliverable` (only `handleException` routes it
+   * to `resurrect` instead), and exits at the no-resumable-identity guard below: its claim, written
+   * by `/process/started`, carries neither a locator nor a `resumeSessionFile`. A catch-up never
+   * replaces a queued architect assignment either: checked here to skip the fetch, and again
+   * inside the role's lock in `deliverToWorker` for a `spawn_worker` that lands while the
+   * catch-up is being computed.
    */
   async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
@@ -2053,7 +2073,7 @@ export class ProcessManager {
       claim.pendingAssignment === undefined
     ) {
       console.info(
-        `[legion] no catch-up for ${token}: ${issue}'s active phase is ${this.deps.state.phases[issue]?.phase ?? "none"} and nothing is queued for this role; only spawn_worker resumes a finished worker`
+        `[legion] no catch-up for ${token}: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)} and nothing is queued for this role; only spawn_worker resumes a finished worker`
       );
       return;
     }

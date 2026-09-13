@@ -8,6 +8,7 @@ import {
 } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
 import {
+  activePhaseLabel,
   type IssueStatus,
   isActivePhase,
   type LegionState,
@@ -124,10 +125,11 @@ export async function handleWorkerSession(
 
 /** Registers a booted worker's session: records its capability, locator (with the OMP session
  * file), and claim, and mints its session secret. Never writes the issue's active phase
- * (`state.phases[issue]`): that is written only when an architect assignment is delivered
- * (`promptExistingWorker` with `kind: "assignment"` -- a task prompted into a live worker, or
- * delivered from the claim's `pendingAssignment` at `/worker/ready`), so a relaunch of a worker
- * whose phase already finished registers as a bystander and the newer phase keeps its
+ * (`state.phases[issue]`): the one place a new active phase is written is the delivery of an
+ * architect assignment (`promptExistingWorker` with `kind: "assignment"` -- a task prompted into
+ * a live worker, or delivered from the claim's `pendingAssignment` at `/worker/ready`;
+ * `/phase/complete` only deletes, restores, or marks the record completed), so a relaunch of a
+ * worker whose phase already finished registers as a bystander and the newer phase keeps its
  * completion route and its wakes. */
 export async function handleWorkerStarted(
   ctx: RouteContext,
@@ -228,14 +230,17 @@ export async function handleWorkerStarted(
       throw error;
     }
     // A fresh spawn or a resume carrying the architect's task is the normal path: its
-    // assignment makes it the active phase at ready. Anything else -- a finished worker
-    // relaunched by the daemon's own recovery, or a reconnect -- is a bystander; say so once.
+    // assignment makes it the active phase at ready. A phase worker registering with anything
+    // else -- a finished worker relaunched by the daemon's own recovery, or a reconnect -- is a
+    // bystander; say so once. An architect is exempt: a sub-architect is never its child's
+    // active phase, so every one of its catch-up relaunches would log here for nothing.
     if (
+      role !== "architect" &&
       !isActivePhase(ctx.deps.state, issue, role) &&
       nextClaim.pendingAssignment?.kind !== "assignment"
     ) {
       console.info(
-        `[legion] ${token} registered session ${sessionId} while ${issue}'s active phase is ${ctx.deps.state.phases[issue]?.phase ?? "none"}; the phase changes only when an architect assignment is delivered`
+        `[legion] ${token} registered session ${sessionId} while ${issue}'s active phase is ${activePhaseLabel(ctx.deps.state, issue)}; the phase changes only when an architect assignment is delivered`
       );
     }
 

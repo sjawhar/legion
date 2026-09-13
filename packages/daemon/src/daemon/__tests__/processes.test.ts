@@ -3619,14 +3619,91 @@ describe("ProcessManager", () => {
     expect(state.phases[child]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
   });
 
-  it("delivers a queued catch-up at worker/ready without touching the issue's active phase", async () => {
+  it("drops a queued catch-up at worker/ready for a role that is no longer the active phase, confirming ready and prompting nothing, while an assignment in the same position is delivered", async () => {
     const state = newLegionState("omp", 1);
-    const token = roleToken("omp", root, "tester");
-    state.roles[token] = {
+    tree(state);
+    const testerToken = roleToken("omp", root, "tester");
+    const reviewerToken = roleToken("omp", root, "reviewer");
+    const locator = (pane: string, sock: string) => ({
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@42",
+      tmuxPaneId: pane,
+      socketPath: `/state/workers/${sock}.sock`,
+    });
+    // The tester finished earlier; a catch-up was queued on its relaunch (a delivery exception
+    // arrived while the tester was still the active phase), and the architect moved the issue
+    // on to the implementer before the relaunch reached ready. At delivery time the tester is a
+    // bystander: the catch-up is dropped, never prompted.
+    state.roles[testerToken] = {
       issue: root,
       role: "tester",
       sessionId: "ses_tester",
+      generation: 2,
+      launchFailures: 1,
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      locator: locator("%2", "tester"),
+    };
+    // The mirror: an architect assignment queued on a booting reviewer is delivered as today.
+    state.roles[reviewerToken] = {
+      issue: root,
+      role: "reviewer",
+      sessionId: "ses_reviewer",
       generation: 1,
+      pendingAssignment: { kind: "assignment", task: "review #41" },
+      locator: locator("%3", "reviewer"),
+    };
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const testerClient = fakeWorkerRpcClient();
+    const reviewerClient = fakeWorkerRpcClient();
+    const { manager: processes, state: managedState } = manager(state, {
+      connectWorkerRpc: async (socketPath) =>
+        socketPath === "/state/workers/tester.sock" ? testerClient : reviewerClient,
+    });
+
+    await processes.workerReady(root, "tester", "ses_tester", 2);
+
+    expect(testerClient.prompts).toEqual([]);
+    const tester = managedState.roles[testerToken];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
+    expect(tester.pendingAssignment).toBeUndefined();
+    // Ready is confirmed exactly as a connect-only ready would be: the boot succeeded, it just
+    // has nothing to deliver.
+    expect(tester.readyConfirmedAt).toBeDefined();
+    expect(tester.launchFailures).toBeUndefined();
+    expect(managedState.phases[root]).toEqual({
+      phase: "implementer",
+      sessionId: "ses_implementer",
+    });
+
+    await processes.workerReady(root, "reviewer", "ses_reviewer", 1);
+
+    expect(reviewerClient.prompts).toEqual(["review #41"]);
+    const reviewer = managedState.roles[reviewerToken];
+    if (!reviewer || !("issue" in reviewer)) throw new Error("reviewer claim disappeared");
+    expect(reviewer.pendingAssignment).toBeUndefined();
+    expect(managedState.phases[root]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
+  });
+
+  it("delivers a sub-architect's queued catch-up at worker/ready whatever the child's active phase, without touching it", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const token = roleToken("omp", child, "architect");
+    state.roles[token] = {
+      issue: child,
+      role: "architect",
+      sessionId: "ses_sub_architect",
+      generation: 2,
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
@@ -3636,28 +3713,152 @@ describe("ProcessManager", () => {
         tmuxSession: "legion-omp",
         tmuxWindowId: "@42",
         tmuxPaneId: "%2",
-        socketPath: "/state/workers/tester.sock",
+        socketPath: "/state/workers/child-architect.sock",
       },
     };
-    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    // A sub-architect is never its child's active phase once it has spawned a planner; its
+    // catch-up is its only recovery path and is always delivered.
+    state.phases[child] = { phase: "planner", sessionId: "ses_planner" };
     const client = fakeWorkerRpcClient();
     const { manager: processes, state: managedState } = manager(state, {
       connectWorkerRpc: async () => client,
     });
 
-    await processes.workerReady(root, "tester", "ses_tester", 1);
+    await processes.workerReady(child, "architect", "ses_sub_architect", 2);
 
     expect(client.prompts).toEqual([JSON.stringify({ type: "catchup-worker", unhandled: [] })]);
     const claim = managedState.roles[token];
-    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    if (!claim || !("issue" in claim)) throw new Error("sub-architect claim disappeared");
     expect(claim.pendingAssignment).toBeUndefined();
     expect(claim.readyConfirmedAt).toBeDefined();
-    // Mirror of the pending-assignment delivery above: an `assignment` writes the phase, a
-    // `catchup` leaves the implementer as the active phase.
+    // A delivered catch-up still never writes the phase.
+    expect(managedState.phases[child]).toEqual({ phase: "planner", sessionId: "ses_planner" });
+  });
+
+  it("drops a queued catch-up at promotion instead of prompting a live idle worker that is no longer the active phase, while a queued assignment is still prompted", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.emitRunState("idle");
+    const { processes, state, managedState, commands } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+    });
+    // Queued at the cap while the tester was still the active phase; the phase moved on to the
+    // implementer before a slot freed.
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    await processes.reconnectWorkers();
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(client.prompts).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.pendingAssignment).toBeUndefined();
+    // The live pane is left alone: nothing launched, nothing retired.
+    expect(claim.locator).toBeDefined();
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeFalse();
     expect(managedState.phases[root]).toEqual({
       phase: "implementer",
       sessionId: "ses_implementer",
     });
+
+    // The mirror: the same queue position holding an architect assignment is prompted in place
+    // and, being an assignment, makes the tester the active phase.
+    claim.pendingAssignment = { kind: "assignment", task: "verify #41" };
+    managedState.workerAdmission.queue.push(token);
+    await processes.reconcileWorkerAdmission();
+
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+  });
+
+  it("drops a queued catch-up at promotion instead of relaunching a retired worker that is no longer the active phase, while a queued assignment still launches", async () => {
+    const stateDir = await temporaryDir();
+    const resumeFile = path.join(stateDir, "prior-tester-session.json");
+    await writeFile(resumeFile, "{}", "utf8");
+    const token = roleToken("omp", root, "tester");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // Retired tester (locator cleared, session file kept) whose catch-up was queued at the cap
+    // while it was still the active phase; the implementer took over before a slot freed.
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      resumeSessionFile: resumeFile,
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      connectWorkerRpc: async () => {
+        throw new Error("shim not listening yet");
+      },
+    });
+
+    await processes.reconcileWorkerAdmission();
+
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeFalse();
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.locator).toBeUndefined();
+    // The retired shape survives intact for the architect's next spawn_worker to --resume.
+    expect(claim.resumeSessionFile).toBe(resumeFile);
+    expect(managedState.phases[root]).toEqual({
+      phase: "implementer",
+      sessionId: "ses_implementer",
+    });
+
+    // The mirror: an architect assignment in the same queue position relaunches with --resume.
+    claim.pendingAssignment = { kind: "assignment", task: "verify #41" };
+    managedState.workerAdmission.queue.push(token);
+    await processes.reconcileWorkerAdmission();
+
+    expect(commands.some((command) => command.join(" ").includes(`--resume=${resumeFile}`))).toBe(
+      true
+    );
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const launched = managedState.roles[token];
+    if (!launched || !("issue" in launched)) throw new Error("tester claim disappeared");
+    expect(launched.locator).toBeDefined();
+    expect(launched.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
   });
 
   it("leaves a booting claim's architect assignment untouched when a catch-up arrives for the same role", async () => {
@@ -3679,7 +3880,6 @@ describe("ProcessManager", () => {
       },
     };
     const client = fakeWorkerRpcClient();
-    client.setRunStateSilently("idle");
     const { manager: processes, commands } = manager(state, {
       connectWorkerRpc: async () => client,
     });
@@ -3715,7 +3915,6 @@ describe("ProcessManager", () => {
     state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
     const assignment = { kind: "assignment" as const, task: "verify #41" };
     const client = fakeWorkerRpcClient();
-    client.setRunStateSilently("idle");
     const { manager: processes, commands } = manager(state, {
       connectWorkerRpc: async () => client,
       workerCatchup: {
