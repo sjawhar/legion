@@ -41,15 +41,10 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !human {
-		if input.Target != nil || input.Delivery != nil || input.Urgency != nil {
-			writeError(w, "ACTOR_KIND", http.StatusBadRequest, "only users may target message delivery")
+		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
-		if input.Actor == nil || input.Actor.Kind != "session" || strings.TrimSpace(input.Actor.ID) == "" {
-			writeError(w, "ACTOR_KIND", http.StatusBadRequest, "bearer callers require actor.kind session")
-			return
-		}
-		actor = *input.Actor
 	}
 	if strings.TrimSpace(input.Body) == "" {
 		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "message body is required")
@@ -66,10 +61,6 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Urgency != nil && !validMessageUrgency(*input.Urgency) {
 		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "urgency must be one of low, med, high, blocking")
-		return
-	}
-	if !human && (target != nil || delivery != "") {
-		writeError(w, "ACTOR_KIND", http.StatusBadRequest, "only users may target message delivery")
 		return
 	}
 
@@ -145,31 +136,6 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, message)
 }
 
-func (s *server) messageActor(
-	w http.ResponseWriter,
-	r *http.Request,
-	supplied *model.Actor,
-	hasDeliveryInput bool,
-) (model.Actor, bool, bool) {
-	actor, human, err := s.optionalActor(r)
-	if err != nil {
-		s.writeAuthenticationError(w, err)
-		return model.Actor{}, false, false
-	}
-	if human {
-		return actor, true, true
-	}
-	if hasDeliveryInput {
-		writeError(w, "ACTOR_KIND", http.StatusBadRequest, "only users may target message delivery")
-		return model.Actor{}, false, false
-	}
-	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
-		writeError(w, "ACTOR_KIND", http.StatusBadRequest, "bearer callers require actor.kind session")
-		return model.Actor{}, false, false
-	}
-	return *supplied, false, true
-}
-
 func validMessageUrgency(value string) bool {
 	return value == "low" || value == "med" || value == "high" || value == "blocking"
 }
@@ -217,19 +183,24 @@ func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey string, inReplyTo
 }
 
 func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
-	if _, human, err := s.optionalActor(r); err != nil {
+	actor, human, err := s.optionalActor(r)
+	if err != nil {
 		s.writeAuthenticationError(w, err)
-		return
-	} else if !human {
-		writeError(w, "ACTOR_KIND", http.StatusBadRequest, "only users may target message delivery")
 		return
 	}
 	var input struct {
-		Delivery string `json:"delivery"`
+		Delivery string       `json:"delivery"`
+		Actor    *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if !human {
+		if actor, err = bearerSessionActor(actor, input.Actor); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if !validDelivery(input.Delivery) {
 		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "delivery must be one of btw, aside, steer")
@@ -240,7 +211,6 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
 		return
 	}
-	actor, _, _ := s.optionalActor(r)
 	attempt, err := s.deliverMessage(r.Context(), message, input.Delivery, nil, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)

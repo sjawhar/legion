@@ -132,10 +132,13 @@ provide a field.
 
 ## Targeted Dispatch messages
 
-Humans can create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
-`delivery: "btw" | "aside" | "steer"`. Dispatch resolves a role holder and checks the selected
+Any authenticated caller — a browser session or a bearer naming its session in `actor` — can
+create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
+`delivery: "btw" | "aside" | "steer"`; a bearer-authored targeted message is authored by that
+session, never by a human. Dispatch resolves a role holder and checks the selected
 session's capabilities for every attempt, then makes the synchronous listener send; `POST
-/api/v1/messages/{id}/deliveries` creates an explicit retry attempt. The targeted session alone
+/api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same callers, same
+`actor` rule for bearers). The targeted session alone
 uses `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary
 agent reply uses `dispatch_message({ in_reply_to })` on the same open issue.
 

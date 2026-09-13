@@ -247,12 +247,78 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 		t.Fatalf("listener payload frame = %s", payload)
 	}
 
-	forbidden := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
-		"body": "Don't interrupt", "target": "session:s1", "delivery": "btw",
-		"actor": map[string]any{"kind": "session", "id": "s1"},
+	// An agent may ask another agent through Dispatch too; the card must show the asking
+	// session as the author, never a human, and the frame the target receives says the same.
+	asked := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Is the build green?", "target": "session:s1", "delivery": "btw",
+		"actor": map[string]any{"kind": "session", "id": "s2"},
 	})
-	if forbidden.Code != http.StatusBadRequest || !strings.Contains(forbidden.Body.String(), `"code":"ACTOR_KIND"`) {
-		t.Fatalf("bearer target = %d %s", forbidden.Code, forbidden.Body.String())
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("bearer target: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	agentAsked := decodeBody[model.Message](t, asked)
+	if agentAsked.Author.Kind != "session" || agentAsked.Author.ID != "s2" ||
+		len(agentAsked.Deliveries) != 1 || agentAsked.Deliveries[0].State != "sent" {
+		t.Fatalf("agent-authored targeted message = %#v", agentAsked)
+	}
+	var agentFrame struct {
+		Event struct {
+			Actor model.Actor `json:"actor"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(sent[1]["payload"].(string)), &agentFrame); err != nil {
+		t.Fatalf("decode agent frame: %v", err)
+	}
+	if agentFrame.Event.Actor.Kind != "session" || agentFrame.Event.Actor.ID != "s2" {
+		t.Fatalf("agent frame actor = %#v, want session s2", agentFrame.Event.Actor)
+	}
+
+	personalTokenResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/me/agent-tokens", map[string]string{
+		"name": "btw-owner",
+	}, "alice")
+	if personalTokenResponse.Code != http.StatusCreated {
+		t.Fatalf("mint personal token: status=%d body=%s", personalTokenResponse.Code, personalTokenResponse.Body.String())
+	}
+	personalToken := decodeBody[agentTokenResponse](t, personalTokenResponse)
+	personalSendIndex := len(sent)
+	personalAskedResponse := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Can a personal bearer ask?", "target": "session:s1", "delivery": "btw",
+		"actor": map[string]any{"kind": "session", "id": "s3", "owner": "mallory"},
+	}, personalToken.Token)
+	if personalAskedResponse.Code != http.StatusCreated {
+		t.Fatalf("personal-token bearer target: status=%d body=%s", personalAskedResponse.Code, personalAskedResponse.Body.String())
+	}
+	personalAsked := decodeBody[model.Message](t, personalAskedResponse)
+	if personalAsked.Author.Kind != "session" || personalAsked.Author.ID != "s3" ||
+		personalAsked.Author.Owner == nil || *personalAsked.Author.Owner != "alice" ||
+		len(personalAsked.Deliveries) != 1 || personalAsked.Deliveries[0].State != "sent" {
+		t.Fatalf("personal-token targeted message = %#v, want session s3 owned by alice with sent delivery", personalAsked)
+	}
+	if len(sent) != personalSendIndex+1 {
+		t.Fatalf("personal-token target sent %d listener requests, want %d", len(sent), personalSendIndex+1)
+	}
+	personalPayload, ok := sent[personalSendIndex]["payload"].(string)
+	if !ok {
+		t.Fatalf("personal-token listener payload = %#v, want JSON string", sent[personalSendIndex])
+	}
+	var personalFrame struct {
+		Event struct {
+			Actor model.Actor `json:"actor"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(personalPayload), &personalFrame); err != nil {
+		t.Fatalf("decode personal-token frame: %v", err)
+	}
+	if personalFrame.Event.Actor.Kind != "session" || personalFrame.Event.Actor.ID != "s3" ||
+		personalFrame.Event.Actor.Owner == nil || *personalFrame.Event.Actor.Owner != "alice" {
+		t.Fatalf("personal-token frame actor = %#v, want session s3 owned by alice", personalFrame.Event.Actor)
+	}
+
+	anonymous := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Who is asking?", "target": "session:s1", "delivery": "btw",
+	})
+	if anonymous.Code != http.StatusBadRequest || !strings.Contains(anonymous.Body.String(), `"code":"ACTOR_KIND"`) {
+		t.Fatalf("bearer target without actor = %d %s", anonymous.Code, anonymous.Body.String())
 	}
 
 	live = false
@@ -273,6 +339,43 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 	retried := decodeBody[model.MessageDelivery](t, retry)
 	if retried.Attempt != 2 || retried.Delivery != "steer" || retried.State != "sent" {
 		t.Fatalf("retried delivery = %#v", retried)
+	}
+	agentRetry := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+failed.ID+"/deliveries", map[string]any{
+		"delivery": "btw", "actor": map[string]any{"kind": "session", "id": "s2"},
+	})
+	if agentRetry.Code != http.StatusCreated {
+		t.Fatalf("bearer retry: status=%d body=%s", agentRetry.Code, agentRetry.Body.String())
+	}
+	if attempt := decodeBody[model.MessageDelivery](t, agentRetry); attempt.Attempt != 3 || attempt.Delivery != "btw" || attempt.State != "sent" {
+		t.Fatalf("bearer retried delivery = %#v", attempt)
+	}
+	retryEventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if retryEventsResponse.Code != http.StatusOK {
+		t.Fatalf("read retry events: status=%d body=%s", retryEventsResponse.Code, retryEventsResponse.Body.String())
+	}
+	retryEvents := decodeBody[[]struct {
+		Type    string      `json:"type"`
+		Actor   model.Actor `json:"actor"`
+		Payload struct {
+			MessageID string `json:"message_id"`
+			Attempt   int    `json:"attempt"`
+		} `json:"payload"`
+	}](t, retryEventsResponse)
+	foundAgentRetryEvent := false
+	for _, event := range retryEvents {
+		if event.Type == "message.delivery" && event.Payload.MessageID == failed.ID && event.Payload.Attempt == 3 {
+			foundAgentRetryEvent = true
+			if event.Actor.Kind != "session" || event.Actor.ID != "s2" {
+				t.Fatalf("bearer retry event actor = %#v, want session s2", event.Actor)
+			}
+		}
+	}
+	if !foundAgentRetryEvent {
+		t.Fatalf("bearer retry event for message %s attempt 3 not found in %#v", failed.ID, retryEvents)
+	}
+	anonymousRetry := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+failed.ID+"/deliveries", map[string]any{"delivery": "btw"})
+	if anonymousRetry.Code != http.StatusBadRequest || !strings.Contains(anonymousRetry.Body.String(), `"code":"ACTOR_KIND"`) {
+		t.Fatalf("bearer retry without actor = %d %s", anonymousRetry.Code, anonymousRetry.Body.String())
 	}
 
 	reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+failed.ID+"/reply", map[string]any{
@@ -300,41 +403,82 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 }
 
 func TestTargetedMessageRejectsInvalidDeliveryInputBeforePersisting(t *testing.T) {
-	handler, _ := newTargetedMessageHandler(t, "")
+	handler, database := newTargetedMessageHandler(t, "")
 	issue := createInteractionIssue(t, handler, "TEST", "Targeted input", "before")
 
-	for _, input := range []map[string]any{
-		{"body": "Missing target", "delivery": "btw"},
-		{"body": "Invalid target", "target": "agent:s1", "delivery": "btw"},
-		{"body": "Invalid delivery", "target": "session:s1", "delivery": "interrupt"},
-	} {
-		response := dispatchRequest(
-			t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", input, "alice",
-		)
-		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"MESSAGE_INPUT"`) {
-			t.Fatalf("input %v: status=%d body=%s", input, response.Code, response.Body.String())
+	assertRejected := func(label string, response *httptest.ResponseRecorder, message string) {
+		t.Helper()
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s", label, response.Code, response.Body.String())
+		}
+		body := decodeBody[struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}](t, response)
+		if body.Code != "MESSAGE_INPUT" || body.Error != message {
+			t.Fatalf("%s: error=%#v, want MESSAGE_INPUT %q", label, body, message)
 		}
 	}
 
-	for _, input := range []map[string]any{
+	cases := []struct {
+		name    string
+		input   map[string]any
+		message string
+	}{
 		{
-			"body": "Bearer target", "target": "session:s1", "delivery": "btw",
-			"actor": map[string]any{"kind": "session", "id": "s1"},
+			name:    "missing target",
+			input:   map[string]any{"body": "Missing target", "delivery": "btw"},
+			message: "delivery requires target",
 		},
 		{
-			"body": "Bearer delivery", "delivery": "btw",
-			"actor": map[string]any{"kind": "session", "id": "s1"},
+			name:    "invalid target",
+			input:   map[string]any{"body": "Invalid target", "target": "agent:s1", "delivery": "btw"},
+			message: "target must be role:<name> or session:<id>",
 		},
-	} {
-		response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", input)
-		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ACTOR_KIND"`) {
-			t.Fatalf("bearer input %v: status=%d body=%s", input, response.Code, response.Body.String())
-		}
+		{
+			name:    "invalid delivery",
+			input:   map[string]any{"body": "Invalid delivery", "target": "session:s1", "delivery": "interrupt"},
+			message: "delivery must be one of btw, aside, steer",
+		},
+		{
+			name: "invalid urgency",
+			input: map[string]any{
+				"body": "Invalid urgency", "target": "session:s1", "delivery": "btw", "urgency": "soon",
+			},
+			message: "urgency must be one of low, med, high, blocking",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			human := dispatchRequest(
+				t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", test.input, "alice",
+			)
+			assertRejected("human "+test.name, human, test.message)
+
+			bearerInput := make(map[string]any, len(test.input)+1)
+			for key, value := range test.input {
+				bearerInput[key] = value
+			}
+			bearerInput["actor"] = map[string]any{"kind": "session", "id": "s1"}
+			bearer := bearerRequest(
+				t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", bearerInput,
+			)
+			assertRejected("bearer "+test.name, bearer, test.message)
+		})
 	}
 
+	var messageCount int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from messages where issue_key = $1
+	`, issue.Key).Scan(&messageCount); err != nil {
+		t.Fatalf("count rejected messages: %v", err)
+	}
+	if messageCount != 0 {
+		t.Fatalf("invalid target delivery persisted %d messages, want 0", messageCount)
+	}
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if strings.Contains(events.Body.String(), `"type":"message.created"`) {
-		t.Fatalf("invalid target delivery must not persist a message: %s", events.Body.String())
+		t.Fatalf("invalid target delivery must not append an event: %s", events.Body.String())
 	}
 }
 

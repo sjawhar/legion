@@ -349,6 +349,12 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 	if present {
 		return actor, nil
 	}
+	return bearerSessionActor(actor, supplied)
+}
+
+// bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
+// session in the request body, and a personal token's owner stays attached for attribution.
+func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}
@@ -356,7 +362,7 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 		Kind:   "session",
 		ID:     supplied.ID,
 		Origin: supplied.Origin,
-		Owner:  actor.Owner,
+		Owner:  authenticated.Owner,
 	}, nil
 }
 

@@ -194,6 +194,7 @@ function TargetedMessageTurn({
   const isBtw = delivery?.payload.delivery === "btw";
   const canBtw = target?.capabilities.includes("btw") !== false;
   const answer = item.answer;
+  const asker = resolveAuthor(item.author, titles);
   const answerAuthor =
     answer === undefined
       ? undefined
@@ -207,7 +208,16 @@ function TargetedMessageTurn({
       data-turn={item.id}
       ref={register}
     >
-      <EventBody event={item.event} />
+      <div className="flex gap-3">
+        <Avatar author={asker} />
+        <div className="min-w-0 flex-1">
+          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+            <span className="font-semibold">{asker.label}</span>
+            <Timestamp at={item.at} />
+          </p>
+          <EventBody event={item.event} />
+        </div>
+      </div>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
         {answer !== undefined
           ? `Answered by ${answerAuthor}`
