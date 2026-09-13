@@ -18,13 +18,14 @@ export interface LegionEventPayload {
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). */
+/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). A `log` effect only writes one line to the daemon's log and cannot fail. */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
   | { kind: "linger"; tree: IssueKey }
-  | { kind: "admit"; issue: IssueKey };
+  | { kind: "admit"; issue: IssueKey }
+  | { kind: "log"; message: string };
 
 export interface EnvelopeJson {
   event_id: string;
@@ -392,10 +393,6 @@ function payloadFrom(envelope: EnvelopeJson): JsonRecord | undefined {
   }
 }
 
-function repository(payload: JsonRecord): string | undefined {
-  return stringValue(asRecord(payload.repository)?.full_name) ?? stringValue(payload.repo);
-}
-
 function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   let current = key;
   const visited = new Set<IssueKey>();
@@ -599,8 +596,22 @@ function registerPrFenced(
   return pr;
 }
 
+/** A new head arrived (the synchronize webhook, or resync's GitHub read). It counts as a fix
+ * attempt when the prior verdict was red — unless the push webhook already classified this exact
+ * sha handoff-only (`pendingPush`, consumed here whatever it says); `headCounted` records the
+ * decision so a handoff-only push webhook arriving later can take the attempt back (see `push`). A
+ * pending slot naming a different sha describes a newer push whose synchronize has not arrived and
+ * is left in place. */
 export function resetPrHead(pr: PrState, headSha: string): void {
-  if (pr.verdict === "red") pr.fixAttempts += 1;
+  const pending = pr.pendingPush;
+  const handoffOnly = pending?.sha === headSha && pending.handoffOnly;
+  if (pending?.sha === headSha) delete pr.pendingPush;
+  if (pr.verdict === "red" && !handoffOnly) {
+    pr.fixAttempts += 1;
+    pr.headCounted = true;
+  } else {
+    delete pr.headCounted;
+  }
   pr.headSha = headSha;
   pr.verdict = null;
   pr.failing = [];
@@ -611,6 +622,74 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSnapshot = null;
   pr.ciReconciled = false;
   delete pr.reviewDecision;
+}
+
+const HANDOFF_PATH_PREFIX = ".legion/";
+
+type PushClassification = { handoffOnly: true } | { handoffOnly: false; unknown?: string };
+
+/** Classifies a normalized push from the file lists the listener forwards (`changed_paths`,
+ * `changed_paths_truncated` — the push case of `githubPayload` in normalize.go). Handoff-only
+ * means every path is under `.legion/`; a push mixing in any other path is a real change.
+ * `unknown` names why the push could not be classified at all — such a push counts as a fix
+ * attempt exactly as before these fields existed. `changed_paths_truncated` is read first: the
+ * listener emits it on every push, whereas `payloadJSON` drops an empty `changed_paths`, so that
+ * key's absence alone cannot tell an old listener from a push listing no commits. */
+function classifyPush(payload: JsonRecord): PushClassification {
+  const truncated = stringValue(payload.changed_paths_truncated);
+  if (truncated === undefined) {
+    return { handoffOnly: false, unknown: "changed_paths absent (listener predates LEGION-33)" };
+  }
+  if (truncated === "true") {
+    return { handoffOnly: false, unknown: "changed_paths truncated at 100" };
+  }
+  if (truncated !== "false") {
+    return { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` };
+  }
+  const changedPaths = stringValue(payload.changed_paths);
+  if (!changedPaths) return { handoffOnly: false, unknown: "no commits listed" };
+  return changedPaths.split("\n").every((path) => path.startsWith(HANDOFF_PATH_PREFIX))
+    ? { handoffOnly: true }
+    : { handoffOnly: false };
+}
+
+/** A push webhook on a branch with a registered PR (`prByBranch` is the whole filter: a push on
+ * `main`, a tag, or a legion branch with no PR maps to nothing). Its classification either takes
+ * back the attempt the current head was counted for (its synchronize arrived first — the take-back
+ * also forgets a `pr-blocked` published for that count, so the next real fix publishes it again)
+ * or is remembered for the head that has not arrived yet (`pendingPush`, latest push wins). A push
+ * that cannot be classified counts as before and, when that count is real, says so through a `log`
+ * effect. */
+function push(state: LegionState, payload: JsonRecord): Effect[] | undefined {
+  if (payload.kind !== "push") return undefined;
+  const repo = stringValue(payload.repo);
+  const ref = stringValue(payload.ref);
+  const after = stringValue(payload.after);
+  if (!repo || !ref?.startsWith("refs/heads/") || !after) return [];
+  const branch = ref.slice("refs/heads/".length);
+  const prKey = state.prByBranch[`${repo}@${branch}`];
+  const pr = prKey === undefined ? undefined : state.prs[prKey];
+  if (!pr) return [];
+  const classification = classifyPush(payload);
+  // Whether this push's count is real — judged before any mutation below: the current head's
+  // recorded decision, or, for a head still to arrive, the verdict `resetPrHead` will see.
+  const counted = pr.headSha === after ? pr.headCounted === true : pr.verdict === "red";
+  if (pr.headSha === after) {
+    if (classification.handoffOnly && pr.headCounted) {
+      if (pr.blockedAttempts === pr.fixAttempts) delete pr.blockedAttempts;
+      pr.fixAttempts -= 1;
+      delete pr.headCounted;
+    }
+  } else {
+    pr.pendingPush = { sha: after, handoffOnly: classification.handoffOnly };
+  }
+  if (classification.handoffOnly || classification.unknown === undefined || !counted) return [];
+  return [
+    {
+      kind: "log",
+      message: `fix attempt: ${pr.repo}#${pr.number} (${pr.key}) push ${after} to ${branch} could not be classified as handoff-only (${classification.unknown}); it counts against max_fix_attempts`,
+    },
+  ];
 }
 
 function removeBranchMappings(state: LegionState, prKey: string): void {
@@ -787,19 +866,18 @@ export function reduceGithubEvent(
   if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
   if (!payload) return [];
-  const repo = repository(payload);
-  // Pushes to legion issue branches carry no reducer-visible state transitions.
-  if (repo && stringValue(payload.ref)?.startsWith("refs/heads/legion/")) return [];
   // "resync" is the daemon's own sentinel topic for reducer input (board GraphQL
   // reads, not an external webhook) — GitHub's authoritative read wins a
   // same-clock tie against a webhook (see `supersededBy`).
   const source: UpdateSource = topic === "resync" ? "resync" : "webhook";
-  // GitHub carries PRs, checks, and reviews only (D1/D2): the daemon never reads or writes a
-  // GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no effect.
+  // GitHub carries PRs, checks, reviews, and branch pushes only (D1/D2): the daemon never reads
+  // or writes a GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no
+  // effect.
   return collapseClosedTreeWakes(
     prComment(state, payload, envelope) ??
       review(state, payload, envelope) ??
       pullRequest(state, payload, envelope, source) ??
+      push(state, payload) ??
       []
   );
 }
@@ -822,14 +900,16 @@ export function reduceCiEmission(
       ? routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope)
       : [];
   }
-  return pr.fixAttempts >= config.maxFixAttempts
-    ? routeActive(
-        state,
-        pr.key,
-        { type: "pr-blocked", pr: number, attempts: pr.fixAttempts },
-        envelope
-      )
-    : [];
+  if (pr.fixAttempts < config.maxFixAttempts || pr.blockedAttempts === pr.fixAttempts) return [];
+  // Published once per exhausted count, never again on a later red verdict for the same count;
+  // recorded whether or not a tree was found to route to (the publish is this reducer's decision).
+  pr.blockedAttempts = pr.fixAttempts;
+  return routeActive(
+    state,
+    pr.key,
+    { type: "pr-blocked", pr: number, attempts: pr.fixAttempts },
+    envelope
+  );
 }
 
 function dispatchEnvelope(eventId: string): EnvelopeJson {

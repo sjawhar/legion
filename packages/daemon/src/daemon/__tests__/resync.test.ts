@@ -383,6 +383,38 @@ describe("runResync", () => {
     ]);
   });
 
+  it("applies a pending handoff-only push classification to a head first seen by the GitHub read", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.prs["sjawhar/legion#7"] = checkPr(issue, {
+      repo: "sjawhar/legion",
+      verdict: "red",
+      failing: ["unit"],
+      ciSettledAt: 1_000,
+      fixAttempts: 2,
+      pendingPush: { sha: "head-2", handoffOnly: true },
+    });
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: async () => ({
+        "sjawhar/legion#7": {
+          ciStatus: "passing" as const,
+          mergeableStatus: null,
+          headSha: "head-2",
+          updatedAt: "2026-08-24T00:00:00.000Z",
+          checkRuns: [],
+          isOpen: true,
+        },
+      }),
+      applyEffects: async () => {},
+    });
+
+    expect(state.prs["sjawhar/legion#7"]).toMatchObject({ headSha: "head-2", fixAttempts: 2 });
+    expect(state.prs["sjawhar/legion#7"]?.pendingPush).toBeUndefined();
+    expect(state.prs["sjawhar/legion#7"]?.headCounted).toBeUndefined();
+  });
+
   // A -> B -> A: GitHub briefly had head B while the daemon read; A came back
   // with a later lifecycle update. The fetched B view is stale either way.
   function prAtHeadA(state: LegionState): PrState {

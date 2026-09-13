@@ -201,9 +201,86 @@ function effects(
   eventId?: string
 ): Effect[] {
   const normalized =
-    payload.kind === "pr" || payload.kind === "review" || payload.kind === "comment";
+    payload.kind === "pr" ||
+    payload.kind === "review" ||
+    payload.kind === "comment" ||
+    payload.kind === "push";
   const input = normalized ? envelope(payload, eventId) : github(payload, eventId);
   return reduceGithubEvent(state, topic, input, config);
+}
+
+const pushTopic = `notifications.github.acme.widgets.push.branch.${childBranch}`;
+
+/** A normalized push envelope as the listener emits it (normalize.go's push case): a handoff-only
+ * push of `new-sha` onto the child's branch by default. */
+function pushPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: "push",
+    repo,
+    ref: `refs/heads/${childBranch}`,
+    after: "new-sha",
+    before: "old-sha",
+    pusher: "legion-implementer[bot]",
+    head_subject: "implement: record handoff",
+    commit_count: "1",
+    compare_url: "https://example.invalid/compare",
+    changed_paths: ".legion/implement.json",
+    changed_paths_truncated: "false",
+    ...overrides,
+  };
+}
+
+function pushEffects(state: LegionState, overrides: Record<string, unknown> = {}): Effect[] {
+  return effects(state, pushPayload(overrides), pushTopic);
+}
+
+function syncPayload(sha: string): Record<string, unknown> {
+  return {
+    kind: "pr",
+    action: "synchronize",
+    repo,
+    number: String(prNumber),
+    head_ref: childBranch,
+    head_sha: sha,
+  };
+}
+
+function settleRed(state: LegionState, sha: string, at: number): Effect[] {
+  const pr = state.prs[`${repo}#${prNumber}`];
+  if (!pr || pr.headSha !== sha) throw new Error(`PR head is not ${sha}`);
+  return settleCiVerdict(
+    state,
+    pr,
+    { verdict: "red", failing: ["worker-image"], failingStatuses: [], settledAt: at },
+    config,
+    envelope({})
+  );
+}
+
+function settleGreen(state: LegionState, sha: string, at: number): Effect[] {
+  const pr = state.prs[`${repo}#${prNumber}`];
+  if (!pr || pr.headSha !== sha) throw new Error(`PR head is not ${sha}`);
+  return settleCiVerdict(
+    state,
+    pr,
+    { verdict: "green", failing: [], failingStatuses: [], settledAt: at },
+    config,
+    envelope({})
+  );
+}
+
+/** A red PR at `old-sha` with one settled red verdict — the starting point of every push case. */
+function redPrState(overrides: Partial<PrState> = {}): LegionState {
+  const state = rootState();
+  attachChild(state);
+  addPr(state, { verdict: "red", failing: ["worker-image"], ciSettledAt: 1, ...overrides });
+  return state;
+}
+
+function prBlockedEffects(effects: Effect[]): Effect[] {
+  return effects.filter(
+    (effect) => effect.kind === "publish" && effect.payload.type === "pr-blocked"
+  );
 }
 
 /** Every Dispatch fixture that mutates state or emits an effect on its first application, paired
@@ -1332,6 +1409,276 @@ describe("reduceCiEmission", () => {
         payload: { type: "pr-blocked", pr: prNumber, attempts: 3 },
       },
     ]);
+    expect(state.prs[`${repo}#${prNumber}`]?.blockedAttempts).toBe(3);
+  });
+
+  it("publishes pr-blocked once per exhausted count, not on every later red verdict", () => {
+    const state = redPrState({ fixAttempts: 3, headSha: "h", verdict: null, ciSettledAt: null });
+    const published: Effect[] = [];
+
+    const first = settleRed(state, "h", 1);
+    expect(
+      prBlockedEffects(first).map((effect) => effect.kind === "publish" && effect.payload)
+    ).toEqual([{ type: "pr-blocked", pr: prNumber, attempts: 3 }]);
+    expect(state.prs[`${repo}#${prNumber}`]?.blockedAttempts).toBe(3);
+    published.push(...first);
+    published.push(...settleGreen(state, "h", 2));
+    published.push(...settleRed(state, "h", 3));
+    published.push(...settleGreen(state, "h", 4));
+    published.push(...settleRed(state, "h", 5));
+
+    expect(prBlockedEffects(published)).toHaveLength(1);
+  });
+});
+
+describe("push fix-attempt classification", () => {
+  const prKey = `${repo}#${prNumber}`;
+
+  it("six handoff-only pushes on a red PR count nothing and never publish pr-blocked", () => {
+    const state = redPrState();
+    const all: Effect[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      const sha = `h${i}`;
+      all.push(...pushEffects(state, { after: sha }));
+      all.push(...effects(state, syncPayload(sha)));
+      all.push(...settleRed(state, sha, i + 1));
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+      expect(state.prs[prKey]?.headCounted).toBeUndefined();
+      expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+    }
+    expect(prBlockedEffects(all)).toEqual([]);
+    expect(all.filter((effect) => effect.kind === "log")).toEqual([]);
+  });
+
+  it("six handoff-only pushes count nothing whichever webhook arrives first each round", () => {
+    const state = redPrState();
+    const all: Effect[] = [];
+    for (let i = 1; i <= 6; i += 1) {
+      const sha = `h${i}`;
+      if (i % 2 === 0) {
+        all.push(...effects(state, syncPayload(sha)));
+        all.push(...pushEffects(state, { after: sha }));
+      } else {
+        all.push(...pushEffects(state, { after: sha }));
+        all.push(...effects(state, syncPayload(sha)));
+      }
+      all.push(...settleRed(state, sha, i + 1));
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+      expect(state.prs[prKey]?.headCounted).toBeUndefined();
+      expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+    }
+    expect(prBlockedEffects(all)).toEqual([]);
+  });
+
+  it("a push touching a path outside .legion/ counts one attempt", () => {
+    const state = redPrState();
+
+    expect(
+      pushEffects(state, {
+        changed_paths: "packages/daemon/src/daemon/reducers.ts\n.legion/implement.json",
+      })
+    ).toEqual([]);
+    expect(effects(state, syncPayload("new-sha"))).toEqual([]);
+
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
+    expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+  });
+
+  it("a push touching only a path outside .legion/ counts one attempt", () => {
+    const state = redPrState();
+
+    expect(pushEffects(state, { changed_paths: "README.md" })).toEqual([]);
+    effects(state, syncPayload("new-sha"));
+
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
+  });
+
+  const unclassifiable: ReadonlyArray<{
+    name: string;
+    overrides: Record<string, unknown>;
+    reason: string;
+  }> = [
+    {
+      name: "neither changed_paths nor changed_paths_truncated present",
+      overrides: { changed_paths: undefined, changed_paths_truncated: undefined },
+      reason: "changed_paths absent",
+    },
+    {
+      name: "changed_paths_truncated is true",
+      overrides: {
+        changed_paths: Array.from({ length: 100 }, (_, n) => `.legion/x${n}.json`).join("\n"),
+        changed_paths_truncated: "true",
+      },
+      reason: "truncated",
+    },
+    {
+      name: "changed_paths is absent while changed_paths_truncated is false",
+      overrides: { changed_paths: undefined, changed_paths_truncated: "false" },
+      reason: "no commits listed",
+    },
+  ];
+
+  for (const { name, overrides, reason } of unclassifiable) {
+    it(`an unclassifiable push (${name}) counts as today and logs why`, () => {
+      const state = redPrState();
+      effects(state, syncPayload("new-sha"));
+      expect(state.prs[prKey]?.fixAttempts).toBe(1);
+
+      const logged = pushEffects(state, overrides);
+
+      expect(logged).toEqual([{ kind: "log", message: expect.stringContaining(reason) }]);
+      const message = logged[0]?.kind === "log" ? logged[0].message : "";
+      expect(message).toContain("acme/widgets#17");
+      expect(message).toContain("LEGSMOKE-2");
+      expect(message).toContain("new-sha");
+      expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
+    });
+  }
+
+  it("an unclassifiable push arriving first logs on a red PR and the head then counts", () => {
+    const state = redPrState();
+
+    expect(
+      pushEffects(state, { changed_paths: undefined, changed_paths_truncated: undefined })
+    ).toEqual([{ kind: "log", message: expect.stringContaining("changed_paths absent") }]);
+    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: false });
+
+    effects(state, syncPayload("new-sha"));
+
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
+    expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+  });
+
+  it("an unclassifiable push on a green PR logs nothing because nothing is counted", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { verdict: "green", ciSettledAt: 1 });
+    effects(state, syncPayload("new-sha"));
+
+    expect(
+      pushEffects(state, { changed_paths: undefined, changed_paths_truncated: undefined })
+    ).toEqual([]);
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
+  });
+
+  it("a handoff-only push before its synchronize leaves fixAttempts unchanged", () => {
+    const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
+
+    expect(pushEffects(state)).toEqual([]);
+    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: true });
+    expect(state.prs[prKey]?.fixAttempts).toBe(3);
+
+    expect(effects(state, syncPayload("new-sha"))).toEqual([]);
+
+    expect(state.prs[prKey]).toMatchObject({
+      headSha: "new-sha",
+      fixAttempts: 3,
+      blockedAttempts: 3,
+    });
+    expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
+  });
+
+  it("a handoff-only push after its synchronize takes the attempt back", () => {
+    const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
+
+    effects(state, syncPayload("new-sha"));
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 4, headCounted: true });
+
+    expect(pushEffects(state)).toEqual([]);
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 3, blockedAttempts: 3 });
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
+
+    expect(prBlockedEffects(settleRed(state, "new-sha", 2))).toEqual([]);
+  });
+
+  it("a take-back forgets a pr-blocked published for the taken-back count so the next real fix republishes it", () => {
+    const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
+    const architect = roleToken(state.project, root, "architect");
+    const blocked = (attempts: number): Effect => ({
+      kind: "publish",
+      role: architect,
+      payload: { type: "pr-blocked", pr: prNumber, attempts },
+    });
+
+    effects(state, syncPayload("new-sha"));
+    expect(state.prs[prKey]?.fixAttempts).toBe(4);
+    expect(prBlockedEffects(settleRed(state, "new-sha", 2))).toEqual([blocked(4)]);
+    expect(state.prs[prKey]?.blockedAttempts).toBe(4);
+
+    expect(pushEffects(state)).toEqual([]);
+    expect(state.prs[prKey]?.fixAttempts).toBe(3);
+    expect(state.prs[prKey]?.blockedAttempts).toBeUndefined();
+
+    expect(
+      pushEffects(state, {
+        after: "fix-sha",
+        changed_paths: "packages/daemon/src/daemon/reducers.ts",
+      })
+    ).toEqual([]);
+    effects(state, syncPayload("fix-sha"));
+    expect(state.prs[prKey]?.fixAttempts).toBe(4);
+    expect(prBlockedEffects(settleRed(state, "fix-sha", 3))).toEqual([blocked(4)]);
+  });
+
+  it("a duplicate handoff-only push delivery takes back at most once", () => {
+    const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
+    effects(state, syncPayload("new-sha"));
+    expect(pushEffects(state)).toEqual([]);
+    expect(state.prs[prKey]?.fixAttempts).toBe(3);
+
+    expect(pushEffects(state)).toEqual([]);
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(3);
+  });
+
+  it("the push that deletes .legion/ is handoff-only", () => {
+    const state = redPrState();
+
+    pushEffects(state, {
+      changed_paths:
+        ".legion/implement.json\n.legion/plan.json\n.legion/review.json\n.legion/test.json",
+    });
+    effects(state, syncPayload("new-sha"));
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
+  });
+
+  it("a push on a legion branch with no registered PR is ignored", () => {
+    const state = rootState();
+    const before = structuredClone({ prs: state.prs, prByBranch: state.prByBranch });
+
+    expect(pushEffects(state)).toEqual([]);
+
+    expect({ prs: state.prs, prByBranch: state.prByBranch }).toEqual(before);
+  });
+
+  it("a later push for a newer head does not disturb a counted current head, and its classification waits for that head", () => {
+    const state = redPrState();
+
+    effects(state, syncPayload("h1"));
+    expect(state.prs[prKey]).toMatchObject({ fixAttempts: 1, headCounted: true });
+
+    expect(pushEffects(state, { after: "h2", changed_paths: "README.md" })).toEqual([]);
+    expect(state.prs[prKey]).toMatchObject({
+      fixAttempts: 1,
+      headCounted: true,
+      pendingPush: { sha: "h2", handoffOnly: false },
+    });
+
+    expect(pushEffects(state, { after: "h1" })).toEqual([]);
+    expect(state.prs[prKey]).toMatchObject({
+      fixAttempts: 0,
+      pendingPush: { sha: "h2", handoffOnly: false },
+    });
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
+
+    effects(state, syncPayload("h2"));
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    expect(state.prs[prKey]?.pendingPush).toBeUndefined();
+    expect(state.prs[prKey]?.headCounted).toBeUndefined();
   });
 });
 
