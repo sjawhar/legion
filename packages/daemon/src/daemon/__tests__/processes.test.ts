@@ -11,6 +11,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { spawnCapabilityKey } from "../api/auth";
+import { appRoleForLegionRole } from "../api/github";
 import type { DaemonConfig } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
@@ -994,6 +995,148 @@ describe("ProcessManager", () => {
       expect(environment.LEGION_GRANT).toBeUndefined();
       for (const part of launch) expect(part.startsWith("LEGION_GRANT=")).toBe(false);
     });
+  });
+  it("carries each phase worker's commit identity in its pane environment, from its role's GitHub App; root and controller panes carry none", async () => {
+    // Every issue workspace is a `jj workspace` of one shared clone, and jj's `--repo` config is one
+    // file for all of them: a worker that wrote its identity there set the author and committer for
+    // every other tree's commits (LEGION-44). Identity therefore rides the pane's environment —
+    // `JJ_USER`/`JJ_EMAIL` (jj reads these over every config scope) and the four Git variables —
+    // resolved from the same App lease `/worker/started` and `legion gh` use, before the pane opens.
+    // Which App a role acts as is `appRoleForLegionRole`'s to say (LEGION-42 is moving planner,
+    // tester, and architect to the review App); only the two roles every mapping agrees on are
+    // pinned to a named App here, the sub-architect is checked against whatever the mapping says.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [child] };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const apps = {
+      review: { id: 3202653, slug: "legion-reviewer" },
+      implement: { id: 3202636, slug: "legion-implementer" },
+    };
+    const identityOf = (appRole: keyof typeof apps) => ({
+      name: `${apps[appRole].slug}[bot]`,
+      email: `${apps[appRole].id}+${apps[appRole].slug}[bot]@users.noreply.github.com`,
+    });
+    const identityEnvOf = (appRole: keyof typeof apps) => {
+      const { name, email } = identityOf(appRole);
+      return {
+        JJ_USER: name,
+        JJ_EMAIL: email,
+        GIT_AUTHOR_NAME: name,
+        GIT_AUTHOR_EMAIL: email,
+        GIT_COMMITTER_NAME: name,
+        GIT_COMMITTER_EMAIL: email,
+      };
+    };
+    const leases: Array<{ appRole: string; owner: string }> = [];
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      workerCatchup: {
+        repo: "sjawhar/legion",
+        baseEnv: {},
+        runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+        tokenManager: {
+          getToken: async (appRole, owner) => {
+            leases.push({ appRole, owner });
+            return {
+              token: `ghs_${appRole}`,
+              expiresAt: "2099-01-01T00:00:00.000Z",
+              gitIdentity: identityOf(appRole),
+            };
+          },
+        },
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "reviewer", "review #41");
+    await processes.spawnWorker(root, root, "implementer", "fix #41");
+    // A sub-architect is opened by the same worker spawn path and commits like any phase worker.
+    await processes.spawnWorker(root, child, "architect", `own ${child}`);
+
+    const launches = commands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
+    expect(launches).toHaveLength(5);
+    const [controller, rootWindow, reviewer, implementer, subArchitect] =
+      launches.map(tmuxWindowEnvironment);
+    // Root architect and controller never commit: none of the six.
+    expect(controller?.LEGION_ROLE).toBe("controller");
+    expect(rootWindow?.LEGION_ROLE).toBe("architect");
+    for (const pane of [controller, rootWindow]) {
+      for (const key of Object.keys(identityEnvOf("review"))) expect(pane?.[key]).toBeUndefined();
+    }
+    expect(reviewer).toMatchObject({ LEGION_ROLE: "reviewer", ...identityEnvOf("review") });
+    expect(implementer).toMatchObject({
+      LEGION_ROLE: "implementer",
+      ...identityEnvOf("implement"),
+    });
+    expect(subArchitect).toMatchObject({
+      LEGION_ROLE: "architect",
+      LEGION_ISSUE: child,
+      ...identityEnvOf(appRoleForLegionRole("architect")),
+    });
+    // The App is the role's (`appRoleForLegionRole`), the owner is the configured repo's.
+    expect(leases).toEqual([
+      { appRole: "review", owner: "sjawhar" },
+      { appRole: "implement", owner: "sjawhar" },
+      { appRole: appRoleForLegionRole("architect"), owner: "sjawhar" },
+    ]);
+  });
+  it("fails a worker launch when the role's App identity cannot be resolved: no pane opens, one launch failure is counted", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      workerCatchup: {
+        repo: "sjawhar/legion",
+        baseEnv: {},
+        runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+        tokenManager: {
+          getToken: async () => {
+            throw new Error("github_app_not_installed: sjawhar");
+          },
+        },
+      },
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await expect(processes.spawnWorker(root, root, "tester", "verify #41")).rejects.toThrow(
+      "github_app_not_installed"
+    );
+
+    // No pane without an identity: the token manager's own error is the launch's error.
+    expect(
+      commands.some((c) => c[0] === "tmux" && (c[3] === "new-window" || c[3] === "split-window"))
+    ).toBeFalse();
+    const claim = managedState.roles[roleToken("omp", root, "tester")];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim missing");
+    expect(claim.launchFailures).toBe(1);
+    expect(claim.locator).toBeUndefined();
   });
   it("a daemon started from inside a Legion pane still launches panes with worker-bin exactly once", async () => {
     // The daemon's `processPath` is `resolveDaemonEnvironment`'s pane PATH. Started from a pane,
@@ -7294,6 +7437,12 @@ describe("ProcessManager", () => {
       ENVOY_URL: "http://127.0.0.1:9020",
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
+      JJ_USER: "legion-implement[bot]",
+      JJ_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+      GIT_AUTHOR_NAME: "legion-implement[bot]",
+      GIT_AUTHOR_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "legion-implement[bot]",
+      GIT_COMMITTER_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
       PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
       GH_CONFIG_DIR: path.join(stateDir, "gh"),
       GH_TOKEN: "",

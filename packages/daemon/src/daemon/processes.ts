@@ -14,10 +14,12 @@ import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
+import { appRoleForLegionRole } from "./api/github";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
+import { gitIdentityEnv } from "./github-app-env";
 import {
   activePhaseLabel,
   isActivePhase,
@@ -3100,6 +3102,7 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const workspace = await this.provisionWorkspace(issue);
+      const identity = await this.workerIdentityEnv(role);
       const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
 
@@ -3124,6 +3127,7 @@ export class ProcessManager {
         ENVOY_URL: this.deps.config.envoyUrl,
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
+        ...identity,
         ...this.credentialProcessEnvironment(token),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
@@ -3542,6 +3546,23 @@ export class ProcessManager {
       roleTopic(controllerToken(this.deps.state.project)),
       JSON.stringify(payload)
     );
+  }
+
+  /** The commit identity a phase worker's pane carries for its whole life: the GitHub App its role
+   * acts as (`appRoleForLegionRole` — the mapping `/worker/started`'s lease and `legion gh` use),
+   * read from the token manager's lease *before* the pane opens, so no worker ever commits without
+   * one and a token-manager failure is a launch failure, never a pane with a generic author.
+   * Environment, not `jj config`: every issue workspace is a workspace of the one shared clone, and
+   * jj's repository-scoped config is a single file for all of them — a worker that wrote its
+   * identity there set the author and committer for every other tree's commits (LEGION-44). Root
+   * architect and controller panes never commit and carry none of these. */
+  private async workerIdentityEnv(role: LegionRole): Promise<Record<string, string>> {
+    const [owner] = this.deps.config.repo.split("/") as [string, string];
+    const lease = await this.deps.workerCatchup.tokenManager.getToken(
+      appRoleForLegionRole(role),
+      owner
+    );
+    return gitIdentityEnv(lease.gitIdentity);
   }
 
   /** The credential environment a root, worker, or controller pane carries for life — never per
