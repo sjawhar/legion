@@ -201,13 +201,34 @@ run_checkpoint 4 && { printf 'checkpoint 4 passed with the child admitted as a t
 expect_output 'CHECKPOINT 4 FAILED: child LEGSMOKE-2 is admitted as a tree of its own (LEGION-57)'
 printf 'PASS: checkpoint 4 fails with a clear message when a child is admitted as a tree of its own\n'
 # Released but not yet spawned: no sub-architect claim for the child, and no phase worker on the
-# root either.
+# root either. The failure names the child and the missing claim.
 write_state '{}'
 jq -c 'del(.roles["legion-exampleorg24-legsmoke-2-architect"])' \
   "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
 run_checkpoint 4 && { printf 'checkpoint 4 passed with no sub-architect claim for the released child\n' >&2; exit 1; }
-expect_output 'CHECKPOINT 4 FAILED: neither a released child holds a sub-architect role claim with a worker pane nor a phase worker is claimed on LEGSMOKE-1'
+expect_output 'CHECKPOINT 4 FAILED: released child LEGSMOKE-2 (in_progress) holds no sub-architect role claim with a worker pane on LEGSMOKE-1 (LEGION-57'
 printf 'PASS: checkpoint 4 fails with a clear message when no released child holds a sub-architect claim\n'
+# The window after `release_wave` and before `spawn_worker`, with a planner running on the root: a
+# phase worker on the root does not own the released child, so the single-issue fallback must not
+# label this OK (tester observation on the rig).
+todo_child="${temporary_dir}/children-todo.json"
+printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]' >"$todo_child"
+write_state '{}'
+jq -c '
+  del(.roles["legion-exampleorg24-legsmoke-2-architect"])
+  | .issues["LEGSMOKE-2"].status = "todo"
+  | .roles["legion-exampleorg24-legsmoke-1-planner"] = {"issue":"LEGSMOKE-1","role":"planner","sessionId":"ses_planner","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%5"}}
+' "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+CHILDREN_FILE="$todo_child" run_checkpoint 4 && { printf 'checkpoint 4 passed on the root planner while a released child had no sub-architect\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: released child LEGSMOKE-2 (todo) holds no sub-architect role claim with a worker pane on LEGSMOKE-1 (LEGION-57'
+# The same planner on the root with the child still unreleased (`triage`): a single-issue tree
+# for checkpoint 4's purposes, so the fallback applies and says so.
+triage_child="${temporary_dir}/children-triage-only.json"
+printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"triage"}]' >"$triage_child"
+jq -c '.issues["LEGSMOKE-2"].status = "triage"' "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+CHILDREN_FILE="$triage_child" run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: a planner phase worker claimed on the root (single-issue tree)'
+printf 'PASS: checkpoint 4 refuses the single-issue fallback while a released child has no sub-architect, and applies it once no child is released\n'
 write_state '{}'
 
 # Under `off`, a registered gate means the architect ignored its policy line: fail naming it.
