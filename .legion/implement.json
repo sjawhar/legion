@@ -1,7 +1,7 @@
 {
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
-  "headSha": "167754ae9e25 (rebased code+test tip; the pushed tip is the implement handoff commit on top of it, differing only in .legion/implement.json)",
+  "headSha": "188f8d697265 (review round 2 fix; the pushed tip is the handoff commit on top of it, differing only in .legion/implement.json)",
   "commits": [
     "9d48d41d0185 daemon: deliver a worker prompt only when its turn is observed to start (LEGION-60) (was 372310dc3b21 before the conflict-forced rebase)",
     "48ad9b49c27f daemon: send worker-queued/worker-started and the other ProcessManager notices through the Envoy listener (was 208d87937e58)",
@@ -98,7 +98,44 @@
     "identicalPaths": 21,
     "verificationOnRebasedTip": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: run 1 had 4 failures in real-shutdown-e2e.test.ts and real-deployment-instructions-e2e.test.ts (fixed tmux socket names shared by every workspace on this box; the same 5 tests pass in isolation), run 2 1205 pass / 0 fail; bunx tsc --noEmit clean; bunx biome check src/ clean; bash scripts/smoke/up.test.sh 24 PASS exit 0; bash scripts/smoke/down.test.sh 6 PASS exit 0."
   },
+  "rounds": [
+    {
+      "round": 1,
+      "verdict": "changes requested",
+      "review": "https://github.com/sjawhar/legion/pull/1030#pullrequestreview-5191097841",
+      "reviewedHead": "b23aa9429fce"
+    },
+    {
+      "round": 2,
+      "headSha": "188f8d697265",
+      "findings": [
+        {
+          "thread": "https://github.com/sjawhar/legion/pull/1030#discussion_r3999956952",
+          "severity": "blocking",
+          "finding": "A ready-time prompt (workerReady -> promptExistingWorker) whose shim socket closed before the turn started was handled as a swallowed prompt: boot confirmed, task queued, promptFailures counted. The socket-close handler had already snapshotted the claim as unconfirmed and routed its dead verdict to retireUnconfirmedBoot, which declines a confirmed claim, so the dead locator stayed recorded: at worker_cap 1 the slot leaked; at cap >= 2 the queue entry was dropped as stale and the task orphaned; the architect heard only worker-queued. Reproduced with the reviewer's /tmp/legion-60-repro/ready-close.test.ts at REPRO_CAP=1 and 2 before the fix (locator kept, readyConfirmedAt set, promptFailures 1, launchFailures undefined).",
+          "fix": "PromptNotStarted carries reason: \"no-turn\" | \"socket-closed\" (process-errors.ts). awaitTurnStart answers socket-closed when the socket closed before or during its wait — a flag set from client.closed is consulted after the confirming get_state too, so a close that made get_state fail is socket-closed, not no-turn (processes.ts). On socket-closed the ready path confirms, cancels, and queues nothing and logs one line (`…; boot left unconfirmed for the socket-close handler to retire`), leaving the claim an unconfirmed boot with its pendingAssignment; onWorkerClientClosed -> retireUnconfirmedBoot (queued behind the same role lock) is then the single handler: locator cleared and slot released, launchFailures counted, task re-queued and relaunched cold with --resume (worker-started), worker-died at the threshold. No prompt site counts a socket close against promptFailures (queueUnstartedPrompt takes the reason; promoteQueuedWorker's catch skips recordPromptFailure for it) — on the queued and direct paths markWorkerDead alone retires the worker — and promptExistingWorker leaves no late-start continuation on a closed socket's receipt.",
+          "tests": [
+            "processes.test.ts: `retires a ready-time worker whose socket closes after acknowledging its first task and relaunches the task cold with --resume (workerCap 1)` and `(workerCap 2)` — built from the reviewer's repro on workerCapFixture with a fake tmux that reports a new pane per launch; assert the dead pane %301 is killed, the claim is relaunched as %302 at generation 2 unconfirmed with the task kept, launchFailures 1 and promptFailures untouched, the relaunch argv carries --resume=<session file>, the queue is empty, and the architect hears exactly [worker-started] (never worker-queued)",
+            "processes.test.ts: `does not count a socket that closes during a queued promotion's wait as a prompt failure: the task stays queued and the next drain re-prompts the reconnected worker` — the reconnect-succeeds variant, where the old code counted promptFailures 1 against a live worker"
+          ]
+        },
+        {
+          "thread": "https://github.com/sjawhar/legion/pull/1030#discussion_r3999956955",
+          "severity": "minor",
+          "finding": "awaitTurnStart's get_state-failed branch returned not-started without consulting receipt.hasStarted, so an agent_start that arrived while get_state was failing produced a spurious promptFailures count, a spurious worker-queued on the direct paths, two persists, and a misleading late-start log line before commitLateStart committed.",
+          "fix": "receipt.hasStarted is consulted after the get_state call however it ended (processes.ts awaitTurnStart); the doc comment says so.",
+          "tests": [
+            "processes.test.ts: `credits a turn that starts while the confirming get_state is failing, counting no prompt failure` — get_state emits agent_start then rejects; the prompt commits with promptFailures 0, one worker-started, no worker-queued, no console.error"
+          ]
+        }
+      ],
+      "docs": "packages/daemon/src/daemon/AGENTS.md: the /worker/ready row and the delivery bullet distinguish no-turn from socket-closed and name the single handler for each.",
+      "gates": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail (64 files), twice; bunx tsc --noEmit clean; bunx biome check src/ clean. The reviewer's repro harness now fails on its own `expect(claim.locator).toBeDefined()` at both caps, showing locator cleared, readyConfirmedAt unset, launchFailures 1, promptFailures untouched, task queued.",
+      "notInThisRound": "The review body's design gap (a worker that keeps acking without a turn loops retire/relaunch with no terminal escalation) and turn attribution by order are filed as their own LEGION issue by the architect; not widened here. The fast-follow wording/fixture items (a)-(i) are left for the fast-follow.",
+      "includes": "The reviewer's locally committed review handoff 537055d5 (review: record handoff) is pushed with this round."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T14:02:07.946Z"
+  "completed": "2026-09-13T15:27:05.621Z"
 }
