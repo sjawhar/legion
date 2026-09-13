@@ -1,0 +1,97 @@
+{
+  "summary": "LEGION-71 implemented as pull request sjawhar/legion#1029 (https://github.com/sjawhar/legion/pull/1029), code head 55a042fff733 on legion/LEGION-71, one code commit over the plan handoff: the eight plan edits across scripts/smoke/up.sh, up.test.sh, checkpoints.test.sh and README.md, no rig behaviour change beyond the spec's six Acceptance lines. Registered with the merge queue (notifications.role.pr-queue) as T4 at open naming the head, scope and the conflict set (#1010, #1011, #1026). Tests workflow run 34756988633 completed success at that head (lint, test, typecheck, pr-title); CI does not run the shell harnesses, the three from /tmp are the gate.",
+  "filesChanged": [
+    "scripts/smoke/up.sh",
+    "scripts/smoke/up.test.sh",
+    "scripts/smoke/checkpoints.test.sh",
+    "scripts/smoke/README.md"
+  ],
+  "pullRequest": {
+    "repo": "sjawhar/legion",
+    "number": 1029,
+    "url": "https://github.com/sjawhar/legion/pull/1029",
+    "codeHead": "55a042fff733",
+    "tier": "T4",
+    "landsAfter": [
+      "#1011 (LEGION-40)",
+      "#1010 (LEGION-41)",
+      "#1026 (LEGION-61)"
+    ],
+    "ciRun": "Tests run 34756988633 at 55a042fff733: completed success — lint, test, typecheck, pr-title all success (CI does not run the shell harnesses)"
+  },
+  "editsByTask": {
+    "T1 up.sh resolve_omp_path": "mise stderr captured to a mktemp file, cat to the operator's stderr whatever the exit, file removed; on non-zero exit `not installed` in that text -> unchanged `OMP pin <pin> is not installed (mise where failed); run: mise install <pin>`, otherwise `mise where <pin> failed; mise's own message is above` (no remedy); header comment reworded per plan.",
+    "T2 up.sh main()": "`local omp_source` beside the other locals; `GREEN OMP build: <path> (LEGION_OMP_PATH override)` when LEGION_OMP_PATH is set, else `GREEN OMP build: <path> (mise where <pin>)`; env-block comment reworded per plan.",
+    "T3 up.test.sh": "sed pins `repo_root=\"${project_root}\"` in the sourced copy with a fixture grep; all three success-path main() calls (unset-override, override, SMOKE_DISPATCH_INGRESS=rig) in the probe's `main_status=\"$(set +e; (set -e; …; main) >file 2>&1; echo $?)\"` form with `(exit %s)` in the failure message.",
+    "T4 up.test.sh": "fake mise gains SMOKE_MISE_CONFIG_ERROR (`mise ERROR Invalid TOML in config file: /etc/mise/config.toml`, exit 1); not-installed case also asserts `mise ERROR <pin> not installed` reached the output; new config-error case asserts `Invalid TOML in config file`, `mise where <pin> failed`, and no `mise install`; own PASS line.",
+    "T5 up.test.sh": "fake mise logs `$*` to SMOKE_MISE_CALL_LOG as its first statement; mise_where_log -> mise_call_log; pin assertion compares to `where <pin>`; override-never-consults-mise assertion moved below the fake and rewritten as an empty-call-log check (no-mise-here PATH trick dropped).",
+    "T6 up.test.sh": "for listener/daemon/envoy-bridge the argv file must exist (fixture error otherwise) before the `grep -l '^LEGION_OMP_PATH='` check; `2>/dev/null` removed from that grep.",
+    "T7 up.test.sh": "retired-gates comments and PASS line without pull-request numbers; GREEN assertions tightened to the full labelled line in both success cases; override message and PASS line reworded per plan.",
+    "T8 checkpoints.test.sh": "bare_smoke_dir=${temporary_dir}/bare-smoke under the trapped directory; bare_temporary_dir and its eight rm -rf lines deleted.",
+    "T9 checkpoints.test.sh": "precedence block: recorded none + exported envoy -> exit 3 SKIPPED-BLOCKED; recorded envoy + exported none -> exit 1 `SMOKE_ROOT_ISSUE is unset`, no SKIPPED-BLOCKED; PASS line per plan.",
+    "T10 README.md": "line 78 GREEN line with `(mise where <pin>)`, the other-mise-failure sentence, the override wording and `(LEGION_OMP_PATH override)`; line 126 `uses an exported SMOKE_WEBHOOK_MODE (...) when there is no record`."
+  },
+  "testFirst": "T4 landed before T1: with the config-error case and the strengthened not-installed assertion in place and up.sh unchanged, `bash up.test.sh` from /tmp exited 1 after 1 PASS, printing only `error: OMP pin github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 is not installed (mise where failed); run: mise install github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423` (mise's own line absent); after T1 the same run exited 0 with 17 PASS. T3 alone took the harness from 0 to 16 PASS from /tmp.",
+  "proof": {
+    "baselineFromTmp": "before any edit, from /tmp: up.test.sh exit=1 pass=0 (`error: Module not found \"//packages/daemon/src/daemon/omp-pin.ts\"` then `error: could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)`); checkpoints.test.sh exit=0 pass=21; down.test.sh exit=0 pass=3.",
+    "harnessesFromTmp": "at 55a042fff733, `cd /tmp && bash $LEGION_WORKSPACE/scripts/smoke/<t>.test.sh`: up.test.sh exit=0 PASS=17 non-PASS-lines=0; checkpoints.test.sh exit=0 PASS=22 non-PASS-lines=0; down.test.sh exit=0 PASS=3 non-PASS-lines=0.",
+    "upTestPassLines": [
+      "PASS: selects webhook ingress mode without silently falling back",
+      "PASS: an explicit LEGION_OMP_PATH override passes through; otherwise the omp-pin.ts pin must be installed under mise, and preflight names mise install when it is not",
+      "PASS: a mise failure other than not-installed stops preflight on mise's own message, without the mise install remedy",
+      "PASS: asserts a signed local GitHub ping without webhook forwarding",
+      "PASS: normalizes stored GitHub webhook secret before child processes start",
+      "PASS: SMOKE_OMP_LAUNCH_PREFIX=\"\" disables the launch prefix (omp_launch_prefix: [])",
+      "PASS: unset SMOKE_OMP_LAUNCH_PREFIX defaults to the secrets wrapper prefix",
+      "PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)",
+      "PASS: the real daemon loader rejects the retired gates.merge block",
+      "PASS: records a created Dispatch root issue and reuses it on a later rerun",
+      "PASS: a missing OMP build stops up.sh in preflight before any process starts",
+      "PASS: with no override, preflight verifies the omp-pin.ts pin under mise and exports no LEGION_OMP_PATH to the daemon",
+      "PASS: an explicit LEGION_OMP_PATH override is named in the daemon env block and in no other start_process argv, and omp_invocation keeps the mise x <pin> -- omp form",
+      "PASS: records the Dispatch ingress (shared by default, rig on request) beside the other rig records and refuses any other value naming both",
+      "PASS: creates the Dispatch root issue only after the daemon and envoy bridge report ready",
+      "PASS: root-issue creation request forces past the Dispatch near-duplicate check",
+      "PASS: root-issue creation request carries a session actor for the bearer-authenticated POST"
+    ],
+    "realMiseConfigError": "`printf 'not toml [[[\\n' >/tmp/legion71-bad-mise.toml && bash -c 'source <(sed \"\\$d\" scripts/smoke/up.sh); unset LEGION_OMP_PATH; MISE_CONFIG_FILE=/tmp/legion71-bad-mise.toml resolve_omp_path'` -> stderr: `Error loading settings file: TOML parse error at line 1, column 5` (twice, with the caret block), `mise::config::parse_error`, `× Invalid TOML in config file: /tmp/legion71-bad-mise.toml`, then `error: mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 failed; mise's own message is above`; exit=1; no `mise install` anywhere.",
+    "realMiseNotInstalled": "`SMOKE_OMP_PIN=github:sjawhar/oh-my-pi@0.0.0-nonexistent bash -c 'source <(sed \"\\$d\" scripts/smoke/up.sh); unset LEGION_OMP_PATH; resolve_omp_path'` -> `mise ERROR github:sjawhar/oh-my-pi@0.0.0-nonexistent not installed`, `mise ERROR Version: 2026.8.10 linux-x64 (2026-08-20)`, `mise ERROR Run with --verbose or MISE_VERBOSE=1 for more information`, `error: OMP pin github:sjawhar/oh-my-pi@0.0.0-nonexistent is not installed (mise where failed); run: mise install github:sjawhar/oh-my-pi@0.0.0-nonexistent`; exit=1.",
+    "noPrNumbers": "`grep -n '#[0-9]' scripts/smoke/up.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.test.sh scripts/smoke/README.md` -> no output, grep exit=1.",
+    "noBareRmRf": "`grep -n 'rm -rf' scripts/smoke/checkpoints.test.sh` -> `14:trap 'rm -rf \"$temporary_dir\"' EXIT` and `123:trap 'kill \"$clean_pid\" \"$planted_pid\" 2>/dev/null; rm -rf \"$temporary_dir\"' EXIT` only.",
+    "shellcheck": "shellcheck 0.11.0, `shellcheck -S warning scripts/smoke/up.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.test.sh` -> only `scripts/smoke/up.sh line 22 ... SC2155 (warning)`, the pre-existing finding; nothing new."
+  },
+  "negativeControls": [
+    "Acceptance 2: scratch up.test.sh (project_root pinned to the workspace) with the fake go's `exit 0` -> `exit 1`: exit 1 after 11 PASS, stopping at `expected up.sh main() to succeed on the installed pin (exit 1)`. The pre-change up.test.sh and up.sh from @- with the same mutation, run from the repository root: exit 0, 16 PASS — the old `if !` form was blind to a failure inside main().",
+    "Acceptance 1: scratch up.sh with `2>/dev/null` restored on `mise where`: harness exit 1 after 1 PASS at the not-installed passthrough assertion (output carries only the generic `mise where <pin> failed` line, since nothing was captured to classify). Scratch up.sh with the remedy made unconditional: exit 1 after 2 PASS at `expected mise's own message and no mise install remedy`.",
+    "Acceptance 3: scratch up.sh calling `mise where` before the override `return`: exit 1 after 1 PASS at `a valid LEGION_OMP_PATH must not invoke mise; calls:` (naming `where <pin>`). Scratch up.test.sh with the start_process stub's argv write removed: exit 1 after 11 PASS at `fixture error: main() recorded no start_process argv for listener`.",
+    "Acceptance 4: scratch checkpoints.sh with stored_webhook_mode's two branches swapped: exit 1 after 14 PASS at `expected the recorded none mode to outrank the exported envoy; got 1:` (checkpoint 1 reached its root-issue check instead of blocking)."
+  ],
+  "trickyParts": [
+    "The first `jj git push` failed with `The working copy is stale (not updated since operation …)` — a concurrent operation from another workspace on the shared repository. `jj workspace update-stale` refreshed the working copy onto a new empty commit above the code commit (the provisioned, untracked .omp/config.yml was dropped from disk with the superseded working-copy commit; it was never part of any commit) and the push then succeeded. No `jj undo`/`op restore`.",
+    "The GREEN line label is a plain `if` on LEGION_OMP_PATH into `local omp_source` declared with the other locals — the `local x=\"$(...)\"` masking trap the harness comments warn about is avoided.",
+    "The mise failure classifier is the substring `not installed` in mise's captured stderr (matches mise 2026.8.10 and the harness fake); any other text falls to the generic message without the remedy, so a future wording change fails safe (still correct, only without the remedy)."
+  ],
+  "deviations": [
+    "None from the plan. Scope readings taken as approved: every success-path main() call on this head (three) got the `(set -e; …)` form, and the optional GREEN-line branch label was taken. The order of the two PASS lines around the mise cases: the existing override/pin PASS line keeps its place after the not-installed case; the new config-error case follows it with its own PASS line."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "prQueueRegistration": "envoy_publish to notifications.role.pr-queue at open (id c306cf265d96c53dd8827a16f7969b10, holder 01a06e66-4375-7000-945c-3b85debccc28): `sjawhar/legion#1029 at 55a042fff733: scripts/smoke harness and diagnostics hardening (#957 Fast-follow, LEGION-71); tier T4, no rig behaviour change; conflicts: scripts/smoke/ — open #1010, #1011, #1026 edit the same files, this PR lands after them.`",
+  "testerNotes": [
+    "Run `bun install --frozen-lockfile` in the workspace once before the harnesses (the --check-config cases need node_modules).",
+    "Proof commands are the plan's proofCommands block; expected counts at this head: up 17, checkpoints 22, down 3, all from /tmp.",
+    "The fake-go negative control needs a scratch copy of up.test.sh with `project_root` pinned to the workspace (sed `s|^project_root=.*|project_root=\"$LEGION_WORKSPACE\"|`), since a copy elsewhere resolves project_root from its own location.",
+    "Predecessor state at open: #1010 MERGEABLE, #1011 CONFLICTING, #1026 MERGEABLE (all open). Rebase only on CONFLICTING; hot spots in the plan's rebaseHotSpots."
+  ],
+  "learningsInjected": [
+    "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T12:26:08.404Z"
+}
