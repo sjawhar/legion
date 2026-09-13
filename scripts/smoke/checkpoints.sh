@@ -420,6 +420,7 @@ checkpoint_four() {
   local offender
   local owned
   local unowned
+  local pending
   local released
 
   root="$(dispatch_root_key)"
@@ -458,6 +459,18 @@ checkpoint_four() {
   if [[ -n "$owned" ]]; then
     released="released child ${owned%% *} has no tree or admission entry of its own; its architect runs as a worker pane of ${root} and Dispatch reports it ${owned##* }"
   else
+    # A released child the sub-architect claim already covers, still `todo` on Dispatch: the
+    # `in_progress` PATCH in flight during `spawn_worker`, or a failed one parked in the daemon's
+    # `pendingStatusWrites` for resync. Named as such -- the claim is not missing.
+    pending="$(jq -r --arg root "$root" --argjson children "$children" '
+      . as $state |
+      [ $children[] | select(.parent == $root and .status == "todo") | .key as $child |
+        select(any($state.roles[]?;
+          has("issue") and .issue == $child and .role == "architect" and
+            (.locator.tmuxPaneId | type == "string" and length > 0))) | $child ] | first // empty
+    ' <<<"$daemon_state")"
+    [[ -z "$pending" ]] ||
+      fail "released child ${pending} has a sub-architect worker pane on ${root} but Dispatch still reports it todo (the in_progress PATCH is in flight, or failed and is parked in the daemon's pendingStatusWrites for resync)"
     unowned="$(jq -r --arg root "$root" --argjson released "$released_statuses" '
       [ .[] | select(.parent == $root and (.status | IN($released[]))) | "\(.key) (\(.status))" ]
       | first // empty

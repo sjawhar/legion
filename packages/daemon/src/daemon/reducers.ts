@@ -344,14 +344,13 @@ export function settleCiVerdict(
   state: LegionState,
   pr: PrState,
   input: CiSettlementInput,
-  config: ReducerConfig,
-  envelope: EnvelopeJson
+  config: ReducerConfig
 ): Effect[] {
   pr.ciSettledAt = input.settledAt;
   return collapseClosedTreeWakes(
     ciVerdictEmissions(pr, input.verdict, input.failing, input.failingStatuses).flatMap(
       (emission) => [
-        ...routeActive(state, pr.key, emission, envelope),
+        ...routeActive(state, pr.key, emission),
         ...reduceCiEmission(state, pr.repo, pr.number, emission, config),
       ]
     )
@@ -427,8 +426,7 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
 export function routeActive(
   state: LegionState,
   issue: IssueKey,
-  payload: LegionEventPayload,
-  _envelope: EnvelopeJson
+  payload: LegionEventPayload
 ): Effect[] {
   const tree = treeFor(state, issue);
   if (!tree) return [];
@@ -708,11 +706,7 @@ function removeBranchMappings(state: LegionState, prKey: string): void {
 /** A `pull_request_review_comment` (`path` present) or `issue_comment` on a PR (`path` absent) —
  * both arrive from Envoy as `kind: "comment"`. A comment on a plain GitHub issue
  * (`parent_kind !== "pr"`) is never acted on: the daemon does not read or write GitHub issues. */
-function prComment(
-  state: LegionState,
-  payload: JsonRecord,
-  envelope: EnvelopeJson
-): Effect[] | undefined {
+function prComment(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   if (payload.kind !== "comment") return undefined;
   const repo = stringValue(payload.repo);
   const number = numberValue(payload.number);
@@ -729,16 +723,11 @@ function prComment(
     pr.key,
     path !== undefined
       ? { type: "pr-review-comment", author, body, path, url }
-      : { type: "pr-comment", author, body, url },
-    envelope
+      : { type: "pr-comment", author, body, url }
   );
 }
 
-function review(
-  state: LegionState,
-  payload: JsonRecord,
-  envelope: EnvelopeJson
-): Effect[] | undefined {
+function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   if (payload.kind !== "review") return undefined;
   const repo = stringValue(payload.repo);
   const number = numberValue(payload.number);
@@ -760,19 +749,14 @@ function review(
   if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
     pr.reviewDecision = decision;
   }
-  const result = routeActive(
-    state,
-    pr.key,
-    {
-      type: "pr-review",
-      state: decision,
-      author: stringValue(payload.author) ?? "",
-      body: stringValue(payload.body) ?? "",
-    },
-    envelope
-  );
+  const result = routeActive(state, pr.key, {
+    type: "pr-review",
+    state: decision,
+    author: stringValue(payload.author) ?? "",
+    body: stringValue(payload.body) ?? "",
+  });
   if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
-    result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope));
+    result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }));
   }
   return result;
 }
@@ -780,7 +764,6 @@ function review(
 function pullRequest(
   state: LegionState,
   payload: JsonRecord,
-  envelope: EnvelopeJson,
   source: UpdateSource
 ): Effect[] | undefined {
   if (payload.kind !== "pr") return undefined;
@@ -796,12 +779,11 @@ function pullRequest(
   if (payload.action === "opened") {
     const pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source);
     if (!pr) return [];
-    return routeActive(
-      state,
-      pr.key,
-      { type: "pr-opened", pr: number, url: stringValue(payload.url) ?? "" },
-      envelope
-    );
+    return routeActive(state, pr.key, {
+      type: "pr-opened",
+      pr: number,
+      url: stringValue(payload.url) ?? "",
+    });
   }
 
   let pr: PrState | undefined = state.prs[prKey];
@@ -848,18 +830,13 @@ function pullRequest(
     removeBranchMappings(state, prKey);
     if (headUpdatedAt !== undefined) state.prTombstones[prKey] = headUpdatedAt;
     if (payload.merged === "true") {
-      return routeActive(
-        state,
-        pr.key,
-        {
-          type: "pr-merged",
-          pr: number,
-          mergeCommitSha: stringValue(payload.merge_commit_sha) ?? "",
-        },
-        envelope
-      );
+      return routeActive(state, pr.key, {
+        type: "pr-merged",
+        pr: number,
+        mergeCommitSha: stringValue(payload.merge_commit_sha) ?? "",
+      });
     }
-    return routeActive(state, pr.key, { type: "pr-closed-unmerged", pr: number }, envelope);
+    return routeActive(state, pr.key, { type: "pr-closed-unmerged", pr: number });
   }
   return [];
 }
@@ -881,9 +858,9 @@ export function reduceGithubEvent(
   // or writes a GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no
   // effect.
   return collapseClosedTreeWakes(
-    prComment(state, payload, envelope) ??
-      review(state, payload, envelope) ??
-      pullRequest(state, payload, envelope, source) ??
+    prComment(state, payload) ??
+      review(state, payload) ??
+      pullRequest(state, payload, source) ??
       push(state, payload) ??
       []
   );
@@ -898,29 +875,16 @@ export function reduceCiEmission(
 ): Effect[] {
   const pr = state.prs[`${repo}#${number}`];
   if (!pr || pr.headSha !== emission.sha || pr.ciSettledAt === null) return [];
-  const envelope = {
-    event_id: `ci:${repo}#${number}:${emission.sha}`,
-    issued_at: pr.ciSettledAt,
-  };
   if (emission.type === "ci-green") {
     return pr.reviewDecision === "approved"
-      ? routeActive(state, pr.key, { type: "pr-ready", pr: number }, envelope)
+      ? routeActive(state, pr.key, { type: "pr-ready", pr: number })
       : [];
   }
   if (pr.fixAttempts < config.maxFixAttempts || pr.blockedAttempts === pr.fixAttempts) return [];
   // Published once per exhausted count, never again on a later red verdict for the same count;
   // recorded whether or not a tree was found to route to (the publish is this reducer's decision).
   pr.blockedAttempts = pr.fixAttempts;
-  return routeActive(
-    state,
-    pr.key,
-    { type: "pr-blocked", pr: number, attempts: pr.fixAttempts },
-    envelope
-  );
-}
-
-function dispatchEnvelope(eventId: string): EnvelopeJson {
-  return { event_id: eventId, issued_at: Date.now() };
+  return routeActive(state, pr.key, { type: "pr-blocked", pr: number, attempts: pr.fixAttempts });
 }
 
 function isIssueStatus(value: string): value is IssueStatus {
@@ -970,28 +934,22 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
   if (!issue.parent) {
     return [{ kind: "controller", payload: { type: "triage", issue: issue.key } }];
   }
-  return childAdopted(state, issue.parent, issue.key, dispatchEnvelope(event.eventId));
+  return childAdopted(state, issue.parent, issue.key);
 }
 
 /** The wake for a child that has (re)entered `parent`'s tree: emitted by `issue.created` with a
  * parent, and by the boot repair that removes a pre-LEGION-57 root tree for a child
  * (`ProcessManager.adoptOwnerlessChildTrees`, published from `index.ts`). Records the child on the
  * parent's `children` when it is not there yet; nothing when the parent has no node. */
-export function childAdopted(
-  state: LegionState,
-  parent: IssueKey,
-  child: IssueKey,
-  envelope: EnvelopeJson
-): Effect[] {
+export function childAdopted(state: LegionState, parent: IssueKey, child: IssueKey): Effect[] {
   const parentNode = state.issues[parent];
   if (!parentNode) return [];
   if (!parentNode.children.includes(child)) parentNode.children.push(child);
-  return routeActive(
-    state,
-    parent,
-    { type: "child-adopted", child, remaining: openChildren(state, parentNode) },
-    envelope
-  );
+  return routeActive(state, parent, {
+    type: "child-adopted",
+    child,
+    remaining: openChildren(state, parentNode),
+  });
 }
 
 function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effect[] {
@@ -1043,22 +1001,14 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
   const parent = state.issues[node.parent];
   if (!parent) return result;
   result.push(
-    ...routeActive(
-      state,
-      node.parent,
-      { type: "child-closed", child: issue.key, remaining: openChildren(state, parent) },
-      dispatchEnvelope(event.eventId)
-    )
+    ...routeActive(state, node.parent, {
+      type: "child-closed",
+      child: issue.key,
+      remaining: openChildren(state, parent),
+    })
   );
   if (openChildren(state, parent) === 0) {
-    result.push(
-      ...routeActive(
-        state,
-        node.parent,
-        { type: "children-complete" },
-        dispatchEnvelope(event.eventId)
-      )
-    );
+    result.push(...routeActive(state, node.parent, { type: "children-complete" }));
   }
   return result;
 }
@@ -1070,12 +1020,7 @@ function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effec
   const from = stringValue(raw?.from);
   const to = stringValue(raw?.to);
   if (!child || !from || !to) return [];
-  return routeActive(
-    state,
-    event.key,
-    { type: "child-status", child, from, to },
-    dispatchEnvelope(event.eventId)
-  );
+  return routeActive(state, event.key, { type: "child-status", child, from, to });
 }
 
 /** The design gate an artifact event addresses: `state.gates[event.key]` only when the issue node
@@ -1106,12 +1051,7 @@ function reduceArtifactApproved(state: LegionState, event: DispatchIssueEvent): 
   gate.approvedVersion = version;
   gate.latestVersion = Math.max(gate.latestVersion, version);
   if (!designGateOpen(gate)) return [];
-  return routeActive(
-    state,
-    event.key,
-    { type: "design-approved" },
-    dispatchEnvelope(event.eventId)
-  );
+  return routeActive(state, event.key, { type: "design-approved" });
 }
 
 /** A human requested changes on the root's spec document (`ArtifactReviewEventPayload` with
@@ -1127,17 +1067,12 @@ function reduceArtifactChangesRequested(state: LegionState, event: DispatchIssue
   delete gate.approvedVersion;
   gate.latestVersion = Math.max(gate.latestVersion, version);
   const author = stringValue(asRecord(raw?.actor)?.id);
-  return routeActive(
-    state,
-    event.key,
-    {
-      type: "design-changes-requested",
-      version,
-      reason,
-      ...(author === undefined ? {} : { author }),
-    },
-    dispatchEnvelope(event.eventId)
-  );
+  return routeActive(state, event.key, {
+    type: "design-changes-requested",
+    version,
+    reason,
+    ...(author === undefined ? {} : { author }),
+  });
 }
 
 /** The root's spec document gained a version (`ArtifactVersionEventPayload`; named or unnamed —

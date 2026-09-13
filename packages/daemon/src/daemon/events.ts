@@ -755,13 +755,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         snapshot: input.snapshot,
       });
       pr.ciReconciled = false;
-      return settleCiVerdict(
-        state,
-        pr,
-        { ...outcome, settledAt: input.settledAt },
-        deps.config,
-        envelope
-      );
+      return settleCiVerdict(state, pr, { ...outcome, settledAt: input.settledAt }, deps.config);
     });
   };
 

@@ -82,8 +82,10 @@ function phaseCompleteStatus(
  * ancestor tree), so this spawn is the child's admission and writes what `spawnTree` writes for a
  * root. A child a human moved back to `todo` gets `in_progress` again on its next sub-architect
  * spawn: for a child, that spawn *is* its admission. A second spawn for the same live
- * sub-architect writes nothing because the Dispatch echo (or the pending-write fence in
- * `knownIssueStatus`) already reads `in_progress`.
+ * sub-architect writes nothing once Dispatch's echo lands (or, after a failed PATCH, at once,
+ * through `knownIssueStatus`'s pending-write fence); one that lands between a successful PATCH
+ * and its echo PATCHes `in_progress` again — an idempotent duplicate, the same window a root's
+ * `spawnTree` write has.
  *
  * (b) An implementer spawned while the issue's PR carries `reviewDecision: "changes_requested"` (a
  * Legion reviewer's round or a human's review after approval) returns the issue to `in_progress`

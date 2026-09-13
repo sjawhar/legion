@@ -52,7 +52,7 @@ import {
   ProcessManager,
   type ProcessManagerDeps,
 } from "./processes";
-import { childAdopted, type EnvelopeJson } from "./reducers";
+import { childAdopted } from "./reducers";
 import { runResync } from "./resync";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
@@ -61,10 +61,6 @@ import { connectWorkerRpc } from "./worker-rpc";
 import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
 
 const LINGER_SWEEP_INTERVAL_MS = 60_000;
-
-/** `childAdopted` takes the triggering envelope only to keep one signature with the reducers; the
- * boot repair's wake has no Dispatch event behind it. */
-const CHILD_ADOPTION_ENVELOPE: EnvelopeJson = { event_id: "boot-child-adoption", issued_at: 0 };
 
 interface DaemonDependencies {
   loadState: typeof loadState;
@@ -721,7 +717,7 @@ async function startDaemonLocked(
   // any released child without an architect claim.
   for (const { child, parent } of adoptions) {
     await publishWakeEffects(
-      childAdopted(state, parent, child, CHILD_ADOPTION_ENVELOPE),
+      childAdopted(state, parent, child),
       deps.envoyPublish,
       (message) =>
         `[legion] the child-adopted wake for ${child} (moved back into ${parent}'s tree at boot) failed to publish; the parent's architect reconciles released children at its next catch-up: ${message}`

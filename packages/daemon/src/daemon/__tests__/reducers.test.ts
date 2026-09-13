@@ -260,8 +260,7 @@ function settleRed(state: LegionState, sha: string, at: number): Effect[] {
     state,
     pr,
     { verdict: "red", failing: ["worker-image"], failingStatuses: [], settledAt: at },
-    config,
-    envelope({})
+    config
   );
 }
 
@@ -272,8 +271,7 @@ function settleGreen(state: LegionState, sha: string, at: number): Effect[] {
     state,
     pr,
     { verdict: "green", failing: [], failingStatuses: [], settledAt: at },
-    config,
-    envelope({})
+    config
   );
 }
 
@@ -1861,8 +1859,7 @@ describe("settleCiVerdict", () => {
         state,
         state.prs[`${repo}#${prNumber}`],
         { verdict: "green", failing: [], failingStatuses: [], settledAt: 5 },
-        config,
-        envelope({})
+        config
       )
     ).toEqual([{ kind: "publish", role: tester, payload: { type: "ci-green", sha: "old-sha" } }]);
   });
@@ -1877,8 +1874,7 @@ describe("settleCiVerdict", () => {
         state,
         state.prs[`${repo}#${prNumber}`],
         { verdict: "green", failing: [], failingStatuses: [], settledAt: 5 },
-        config,
-        envelope({})
+        config
       )
     ).toEqual([
       {

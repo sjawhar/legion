@@ -230,6 +230,13 @@ CHILDREN_FILE="$triage_child" run_checkpoint 4
 expect_output 'CHECKPOINT 4 OK: a planner phase worker claimed on the root (single-issue tree)'
 printf 'PASS: checkpoint 4 refuses the single-issue fallback while a released child has no sub-architect, and applies it once no child is released\n'
 write_state '{}'
+# The sub-architect claim exists but Dispatch still reports the child `todo` (the `in_progress`
+# PATCH in flight, or failed and parked for resync): the failure names that, not a missing claim.
+jq -c '.issues["LEGSMOKE-2"].status = "todo"' "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+CHILDREN_FILE="$todo_child" run_checkpoint 4 && { printf 'checkpoint 4 passed with the child still todo on Dispatch\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: released child LEGSMOKE-2 has a sub-architect worker pane on LEGSMOKE-1 but Dispatch still reports it todo'
+printf 'PASS: checkpoint 4 names a spawned child Dispatch still reports todo, instead of calling its claim missing\n'
+write_state '{}'
 
 # Under `off`, a registered gate means the architect ignored its policy line: fail naming it.
 write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'

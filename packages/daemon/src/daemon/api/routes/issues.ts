@@ -6,7 +6,7 @@ import {
   type IssueStatus,
   type LegionState,
 } from "../../legion-state";
-import { type Effect, type EnvelopeJson, routeActive } from "../../reducers";
+import { type Effect, routeActive } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {
   EnvoyPublishError,
@@ -17,10 +17,6 @@ import {
   requiredString,
   validateContractResponse,
 } from "../http";
-
-/** `routeActive` takes the triggering envelope only to keep one signature with the reducers; the
- * gate-off wake has no Dispatch event behind it. */
-const GATE_OFF_ENVELOPE: EnvelopeJson = { event_id: "gate-off", issued_at: 0 };
 
 /**
  * Sets an issue's Dispatch status. Two mutually exclusive credentials, distinguished by which is
@@ -102,7 +98,7 @@ export async function publishDesignApproved(
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>
 ): Promise<void> {
   await publishWakeEffects(
-    routeActive(state, issue, { type: "design-approved" }, GATE_OFF_ENVELOPE),
+    routeActive(state, issue, { type: "design-approved" }),
     envoyPublish,
     (message) =>
       `[legion] the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${message}`

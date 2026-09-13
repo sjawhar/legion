@@ -172,8 +172,7 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       deps.state,
       pr,
       { verdict, failing, failingStatuses, settledAt: now },
-      deps.config,
-      envelope
+      deps.config
     );
     if (effects.length === 0) continue;
     await deps.applyEffects(effects, envelope);
