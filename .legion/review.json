@@ -1,0 +1,106 @@
+{
+  "pr": {
+    "number": 993,
+    "url": "https://github.com/sjawhar/legion/pull/993",
+    "branch": "legion/LEGION-33",
+    "reviewedHead": "9321a7834ccf005463ce842b6f1b8d29fbdc2838",
+    "codeHead": "ec8ea35837d8cbcec64e0d15a5ddea2dede5665d (merge commit; 2c808fbd and 9321a783 add only .legion/implement.json and .legion/test.json)"
+  },
+  "spec": "dispatch://LEGION-33/spec version 2",
+  "reviewEvent": "COMMENT",
+  "review": {
+    "id": 5189567896,
+    "url": "https://github.com/sjawhar/legion/pull/993#pullrequestreview-5189567896",
+    "commitId": "9321a7834ccf005463ce842b6f1b8d29fbdc2838",
+    "submittedAt": "2026-09-13T04:47:55Z",
+    "inlineThreads": 3
+  },
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "cleanForApproval": true,
+  "approvalPending": "Head-pinned APPROVE follows the implementer's `.legion/` deletion push: resume this reviewer with that head; it must differ from the reviewed head only by the `.legion/` deletion (plus, if the architect chooses, the three test rows below landed in a separate earlier push that the tester re-runs).",
+  "thermo": {
+    "ranAt": "ec8ea35837d8cbcec64e0d15a5ddea2dede5665d",
+    "deepReview": "0 blocking; 4 non-blocking notes (late handoff push after the next head applied — same rarity class as plan concerns[3]; push-first log is a verdict-at-push-time prediction; blockedAttempts recorded when routeActive routes nothing — deliberate per plan step 3; Go forwards a whitespace-only path — conservative). Confirmed push topics reach reduceGithubEvent in production via the notifications.github.<owner>.<repo>.> filter.",
+    "codeQuality": "0 blocking; 3 cheap test gaps (below) plus optional style notes (push() restructure / flatten PushClassification / goldens setup helper / doc duplication) — none requested."
+  },
+  "verifiedAgainstGitHub": {
+    "ci": "Tests run 34735490966 and package run 34735475715 both success at 2c808fbd; 12/12 checks pass at 9321a783 (envoy-go and dispatch finished during this phase).",
+    "threads": "0 before this review; 3 unresolved inline threads opened by this review (all non-blocking test rows).",
+    "reviews": "none before this one",
+    "prBody": "CI / Threads / E2E / Fast-follow / Chain lines match GitHub and .legion/test.json; Thermo line still reads 'not yet run' — implementer updates it with the verdict below at the deletion push."
+  },
+  "localVerification": "bun test reducers+envelope-goldens+resync+events+legion-state → 198 pass, 0 fail; bunx biome check src/ → clean; bunx tsc --noEmit → exit 0; go test ./internal/contracts/ -count=1 → ok; gofmt -l internal/contracts → nothing; go vet → ok.",
+  "decisionsHonoured": "D1 events.ts:630; D2 legion-state.ts:299-304 + migrateV24State appended last + loadState !== 25 + newLegionState 25 + all version-pinned titles; D3 reducers.ts:679 pre-decrement compare; D4 638-650 order; D5 676 counted before mutation; D6 resetPrHead signature unchanged, resync.ts:129 untouched; D7 no push special cases; D8 repository() and refs/heads/legion/ guard removed, prByBranch is the filter.",
+  "probesBeyondCommittedTests": "Throwaway replay (not committed): redelivered handoff push after take-back → no second take-back; redelivered synchronize → no double count; stale push redelivery overwriting a newer pending slot → newer handoff head counts as before (spec-accepted, bounded); two handoff pushes before either synchronize → round counts once; unrecognised/empty changed_paths_truncated → unknown+log+count; mixed push on counted head → count kept, no log; take-back with blockedAttempts below pre-decrement → kept, next red silent; push on main/tag/closed PR → no effect; 100 .legion paths + \"false\" → handoff-only; plan concerns[3] interleaving reproduces exactly.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/reducers.test.ts:1478",
+      "description": "Test gap: no case has a .legion/ path first followed by a real path; a first-path-only or non-splitting classifier passes the suite. Swap the mixed case's order (or add a row)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/reducers.test.ts:1519",
+      "description": "Test gap: no `unclassifiable` row for an unrecognised changed_paths_truncated value; collapsing that branch passes the suite. Add { changed_paths_truncated: \"maybe\" } → reason \"unrecognised\"."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/contracts/normalize_test.go:1707",
+      "description": "Test gap: no row for exactly 100 unique paths + a duplicate → \"false\"; swapping the dedupe and cap checks passes every existing row. Add commit1 added numberedPaths(0,100), commit2 modified numberedPaths(0,1)."
+    },
+    {
+      "severity": "note",
+      "file": "packages/daemon/src/daemon/reducers.ts:676-685",
+      "description": "A handoff-only push webhook arriving after the NEXT head has been applied lands in pendingPush instead of taking the earlier head back; same rarity class as plan concerns[3]; stale slot harmless. No change requested."
+    },
+    {
+      "severity": "note",
+      "file": "packages/daemon/src/daemon/reducers.ts:676",
+      "description": "Push-first log predicts from the verdict at push time (D5): a green-before-synchronize or a branch-deletion push logs 'counts' for a head never counted. State correct. No change requested."
+    },
+    {
+      "severity": "note",
+      "file": "packages/daemon/src/daemon/reducers.ts:903-912",
+      "description": "blockedAttempts recorded even when routeActive routes nothing (no tree). Deliberate per plan step 3; reachable only by a human-opened PR on an unadmitted issue. No change requested."
+    }
+  ],
+  "recommendation": "The three test rows are regression locks for the exact rule this PR exists for and total ~15 lines; landing them now (one commit → tester re-runs bun test + go test → this reviewer re-checks) is my recommendation over naming them as the Fast-follow. Architect's call: either path is consistent with the review.",
+  "knownForDeletionPush": [
+    "PR body 'Deploy skew' paragraph: 'The live PR #966 sits at fixAttempts=6 … publishes pr-blocked exactly once more' is stale — #966 merged 2026-09-12T18:22Z; live state holds only its tombstone.",
+    "PR body Thermo line: replace 'not yet run' with the verdict above at ec8ea358.",
+    "Shared workspace carries divergent local change e5cf55e3 (change kulvkspq, auto-snapshotted .omp/config.yml), not on the PR; the local bookmark legion/LEGION-33 also sat on the tester's empty remainder commit wnqqovvn (now holding this session's .omp/config.yml snapshot) and was re-pointed to the review handoff commit before this push."
+  ],
+  "docs": "The four doc edits state the rule accurately against the code as read; daemon AGENTS.md merge kept both sides' bullets intact (checked jj diff vs abaf0817 and vs c092a5ac).",
+  "workerEnvironmentFinding": "Same as the implementer/tester: the bash tool injects two `export LEGION_GRANT` blocks per call and only the first redeems; a persistent DEBUG trap capturing the first value per call (GRANTS array + GRANT_MARK) was the workaround. The `write` tool is blocked for the reviewer role ('the reviewer edits nothing except the final .legion/ cleanup commit via bash'), so throwaway probes were written from the eval kernel to /tmp/legion33-reviewer/.",
+  "throwawayArtifacts": "/tmp/legion33-reviewer/{probe.ts,review.json}; nothing committed besides .legion/review.json.",
+  "findings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/reducers.test.ts:1478",
+      "description": "Test gap: no case has a .legion/ path first followed by a real path; a first-path-only or non-splitting classifier passes the suite. Swap the mixed case's order (or add a row).",
+      "threadId": "PRRT_kwDORFy7ds6h2g8B",
+      "blocking": false
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/reducers.test.ts:1519",
+      "description": "Test gap: no `unclassifiable` row for an unrecognised changed_paths_truncated value; collapsing that branch passes the suite. Add { changed_paths_truncated: \"maybe\" } → reason \"unrecognised\".",
+      "threadId": "PRRT_kwDORFy7ds6h2g8C",
+      "blocking": false
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/contracts/normalize_test.go:1707",
+      "description": "Test gap: no row for exactly 100 unique paths + a duplicate → \"false\"; swapping the dedupe and cap checks passes every existing row. Add commit1 added numberedPaths(0,100), commit2 modified numberedPaths(0,1).",
+      "threadId": "PRRT_kwDORFy7ds6h2g8D",
+      "blocking": false
+    }
+  ],
+  "threadResolution": "The implementer resolves the three PRRT threads after landing (or consciously declining) each row, one resolveReviewThread mutation per thread, per docs/solutions/daemon/external-red-and-phase-ownership.md §3; the reviewer replies on each thread with its acceptance first.",
+  "pushNote": "Push of this handoff commit 403s (legion-reviewer[bot] has no contents permission) — expected; the commit is local on legion/LEGION-33 in the shared workspace and rides on the implementer's next push. Verify with jj log that it is an ancestor before building on it.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T04:51:47.728Z"
+}
