@@ -144,14 +144,20 @@ const JJ_BINARIES = [
 
 /** A colocated scratch remote, a colocated clone of it at the daemon's repo path with `main` set
  * and `origin` pointing at the remote, and a `provisionIssueWorkspace` dependency set that runs
- * `jj` as `command` and records every command line it is asked to run. */
+ * `jj` as `command` and records every command line it is asked to run. Every jj invocation — the
+ * rig's own and provisioning's — carries a commit identity through `JJ_USER`/`JJ_EMAIL`: the CI
+ * runner has no jj user config, and `jj git push` refuses a commit with no author. */
 async function realJjRig(command: readonly string[], stateDir: string) {
   const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
   const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
   const remoteDir = path.join(stateDir, "remote");
   const calls: string[][] = [];
+  const withIdentity = (options?: RunCall["opts"]): RunCall["opts"] => ({
+    ...options,
+    env: { ...options?.env, JJ_USER: "Legion test", JJ_EMAIL: "legion-test@example.invalid" },
+  });
   const jj = async (args: string[], options?: RunCall["opts"]) => {
-    const result = await runCommand([...command, ...args], options);
+    const result = await runCommand([...command, ...args], withIdentity(options));
     expect(result.exitCode, `${command.join(" ")} ${args.join(" ")}\n${result.stderr}`).toBe(0);
     return result;
   };
@@ -166,7 +172,9 @@ async function realJjRig(command: readonly string[], stateDir: string) {
     commandTimeoutMs,
     run: (cmd: string[], opts?: RunCall["opts"]) => {
       calls.push(cmd);
-      return runCommand(cmd[0] === "jj" ? [...command, ...cmd.slice(1)] : cmd, opts);
+      return cmd[0] === "jj"
+        ? runCommand([...command, ...cmd.slice(1)], withIdentity(opts))
+        : runCommand(cmd, opts);
     },
   };
   await mkdir(path.dirname(repoCloneDir), { recursive: true });
