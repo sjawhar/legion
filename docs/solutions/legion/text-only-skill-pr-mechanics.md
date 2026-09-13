@@ -16,6 +16,8 @@ module: skills
 related_issues:
   - "LEGION-18"
   - "sjawhar/legion#953"
+  - "LEGION-38"
+  - "sjawhar/legion#1008"
 symptoms:
   - "jj split <path> puts every hunk of that file in one commit when the plan wanted two commits"
   - "grep -c '<full sentence>' returns 0 although the sentence is present, because the replacement text wrapped it across two lines"
@@ -108,6 +110,7 @@ and change every hit in the same commit; the tester's greps for the new phrase e
   before writing an agent name.
 - A "not yet runnable until PR X merges" caveat needs a removal step tied to PR X. Three skills kept
   theirs for weeks after #873/#923 landed.
-- The worker skill's PR-body template names a `pr-checks-result` check. This repository defines no such
-  check (its heads settle on the `Tests` and `Legion Envoy and Contracts` workflow runs). Fill the
-  `CI:` line with the real run ids and workflow names and say the template name does not exist here.
+- The worker skill's PR-body template names the `Tests` workflow run and its jobs (lint, pr-title,
+  typecheck, test); fill the `CI:` line verbatim from `gh run view <run-id> --json jobs,headSha,conclusion`.
+  A template line that names a check or job no workflow here defines is fixed in the template
+  (LEGION-38, #1008), never explained away in the PR body or recorded here as a workaround.
