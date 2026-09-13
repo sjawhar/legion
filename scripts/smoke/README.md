@@ -20,6 +20,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `DISPATCH_URL` | Base URL of the shared Dispatch server the daemon talks to for the issue lifecycle. `up.sh` never reads a config file for this — export it yourself (e.g. from this box's `~/.config/opencode/envoy.json` → `.dispatch.serverUrl`). | Required; `up.sh` fails loudly naming `DISPATCH_URL`/`DISPATCH_TOKEN` if either is unset. |
 | `SMOKE_PROJECT` | Legion's own daemon identity (`LEGION_ID`), as `<owner>/<number>`; unrelated to the Dispatch project. | Required. |
 | `SMOKE_WEBHOOK_MODE` | `forward` starts `gh webhook forward` (live GitHub events only); `envoy` starts the production-Envoy NATS bridge (live GitHub events and Dispatch issue events); `none` omits every ingress transport — neither GitHub events nor Dispatch issue events reach the rig NATS. | `forward` when `gh webhook forward --help` is available; otherwise `none`. |
+| `SMOKE_DISPATCH_INGRESS` | Where the rig's Dispatch issue events come from. `shared`: the shared Dispatch server, whose events reach the rig NATS only through the `envoy` webhook mode's bridge. `rig`: a scratch Dispatch server that publishes into the rig NATS itself (the armed-gate exercise below), so those events arrive whatever the webhook mode and `checkpoints.sh` no longer blocks checkpoints 1–4 and 12 on it. Recorded at `${SMOKE_DIR}/dispatch-ingress`; any other value stops `up.sh` naming the two. | `shared` |
 | `SMOKE_UPSTREAM_NATS` | Production NATS source for `envoy` mode. | `nats://envoy-nats.tailb86685.ts.net:4222` |
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
@@ -43,8 +44,8 @@ Provide secrets with the `secrets` wrapper rather than writing a `.env` file. Th
 | Variable | Required for | Behavior when absent |
 | --- | --- | --- |
 | `SMOKE_WEBHOOK_MODE=envoy` | Production Envoy ingress | App-only, live GitHub envelope and Dispatch issue-event ingress from the production Envoy receiver; the only mode that reaches checkpoints 1–4 and 12. It never registers a hook or calls GitHub with a personal identity. |
-| `SMOKE_WEBHOOK_MODE=forward` | Local GitHub webhook ingress (live GitHub events only) | `gh webhook forward` relays GitHub events only: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue `up.sh` creates and `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 (exit 3); 5–7 and 9–11 are available. This is the default whenever `gh webhook forward --help` is available (otherwise `none`) and needs a user-authenticated `gh` identity. |
-| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live ingress: neither GitHub events nor Dispatch issue events reach the rig NATS | Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13. The daemon never admits the root issue `up.sh` creates (its resync skips issue keys it never ingested), so `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 and with the GitHub-ingress reason for 5–7 and 9–11, exit 3 each. `envoy` is the mode for checkpoints 1–4 and 12. |
+| `SMOKE_WEBHOOK_MODE=forward` | Local GitHub webhook ingress (live GitHub events only) | `gh webhook forward` relays GitHub events only: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue `up.sh` creates and `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 (exit 3) — unless the recorded `SMOKE_DISPATCH_INGRESS` is `rig`, in which case a scratch Dispatch feeds those events itself and the checkpoints run, saying which record let them through; 5–7 and 9–11 are available. This is the default whenever `gh webhook forward --help` is available (otherwise `none`) and needs a user-authenticated `gh` identity. |
+| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live ingress: neither GitHub events nor Dispatch issue events reach the rig NATS | Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13. The daemon never admits the root issue `up.sh` creates (its resync skips issue keys it never ingested), so `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 and with the GitHub-ingress reason for 5–7 and 9–11, exit 3 each. `envoy` is the mode for checkpoints 1–4 and 12 against the shared Dispatch server; with a scratch Dispatch publishing into the rig NATS (`SMOKE_DISPATCH_INGRESS=rig`) they run under `none` too, while 5–7 and 9–11 stay blocked. |
 | `SMOKE_BRANCH_PROTECTION=1` | Branch protection | `up.sh` configures `main` to require one approving review only when explicitly armed. This needs a user-authenticated `gh` identity. Without it, the rig prints `SKIPPED-BLOCKED`; checkpoints 7–8 exit 3 with the exact missing-ruleset reason. |
 
 The sandbox repository includes the 20-second `ci` check and the `.fail-me`-controlled `fail-on-demand` workflow. Both Legion Apps are installed account-wide for `sjawhar`; no per-repository install step is required.
@@ -124,7 +125,7 @@ secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-13>
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated. Such a directory also has no recorded webhook mode: `checkpoints.sh` reads `${SMOKE_DIR}/webhook-mode`, falls back to an exported `SMOKE_WEBHOOK_MODE` (`envoy`, `forward`, or `none`), and otherwise stops naming the missing file — it never guesses a mode, because the mode decides which checkpoints are reachable at all.
 
-With a recorded `SMOKE_WEBHOOK_MODE=none`, checkpoints 1–4 and 12 are blocked: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (`resync.ts`'s `healStatusDrift` skips issue keys it has never ingested). Checkpoints 5–7 and 9–11 are blocked because they assert pull-request, check-run, issue-comment, or issue-event delivery. With a recorded `forward`, checkpoints 1–4 and 12 are blocked for the same reason — `gh webhook forward` provides live GitHub events only, never Dispatch issue events — while 5–7 and 9–11 are available. Checkpoints 8 and 13 are not gated by the mode. `envoy` is the only mode for checkpoints 1–4 and 12; `envoy` and `forward` both provide the live GitHub ingress that checkpoints 5–7 and 9–11 need.
+With a recorded `SMOKE_WEBHOOK_MODE=none`, checkpoints 1–4 and 12 are blocked: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (`resync.ts`'s `healStatusDrift` skips issue keys it has never ingested). Checkpoints 5–7 and 9–11 are blocked because they assert pull-request, check-run, issue-comment, or issue-event delivery. With a recorded `forward`, checkpoints 1–4 and 12 are blocked for the same reason — `gh webhook forward` provides live GitHub events only, never Dispatch issue events — while 5–7 and 9–11 are available. Checkpoints 8 and 13 are not gated by the mode. Against the shared Dispatch server, `envoy` is the only mode for checkpoints 1–4 and 12; when `up.sh` recorded `SMOKE_DISPATCH_INGRESS=rig` (a scratch Dispatch publishes into the rig NATS itself), the webhook mode says nothing about those five checkpoints and `checkpoints.sh` runs them, printing which record let it through. `envoy` and `forward` both provide the live GitHub ingress that checkpoints 5–7 and 9–11 need, whatever the Dispatch ingress.
 
 ### Required checkpoint sequence
 
@@ -138,13 +139,47 @@ bash scripts/smoke/checkpoints.sh arm-revival
 
 Then post the comment and run checkpoint 10. The command captures the daemon-log offset at the trigger boundary, so older same-run events cannot satisfy the assertion.
 
+### The design gate between checkpoints 3 and 4
+
+`up.sh` writes the rig's design-gate policy into `legion.yaml` from `SMOKE_DESIGN_GATE` and records
+it at `${SMOKE_DIR}/design-gate`; checkpoints 3 and 4 read that record and assert the matching
+path. `off` is the default: a smoke exercise runs unattended, the root architect is told in its
+system prompt that the gate is off and adds no approval step, and checkpoint 3 proves exactly that
+— the root's primary `spec.md` is posted, no gate is registered for the root, no approval request
+is open on the document, and the tree has moved past the gate: a child issue exists or a phase
+worker is claimed on the root (a single-issue tree). No `Approve` question is opened in either mode
+and there is no operator command for the gate.
+
+`SMOKE_DESIGN_GATE=root-issues` arms the gate for the human-approval exercise. Checkpoint 3 then
+proves the architect asked and waited: the daemon's gate names the root's primary `spec.md`
+document at its current version, Dispatch shows that document with an open approval request
+(`approval.state` is `awaiting`), and nothing has moved past the gate — no child issue is
+released (`todo` or later; children in `triage` or `backlog` are fine) and no phase worker is
+claimed on the root or a child. Then a human approves the document — the `Approve` control in the
+document's header on the Dispatch dashboard, or the approval question in the Inbox answered
+`Approve`. Checkpoint 4 proves the approval opened the gate (`approvedVersion` equals
+`latestVersion`) and the tree moved: a child was released or a phase worker is claimed on the
+root. This is the human-controlled design gate.
+
+Document approval needs a Dispatch server that includes the server half of document reviews
+(the `approval` field on every artifact read). Run the `root-issues` exercise against a scratch
+Dispatch server built from this checkout — `packages/dispatch/e2e/run-server.sh` is the template;
+point it at the rig's NATS instead of disabling NATS so the outbox reaches the daemon — and start
+the rig with `SMOKE_DISPATCH_INGRESS=rig`. That record tells `checkpoints.sh` the daemon receives
+Dispatch issue events straight from the scratch server, so checkpoints 1–4 and 12 run under
+`SMOKE_WEBHOOK_MODE=none` (the natural mode for this exercise: no GitHub ingress is needed until
+checkpoint 5) instead of being blocked as they would be against the shared server, where only the
+`envoy` bridge carries those events. The shared devbox server may lag behind `main` and then never
+reports `approval`; checkpoint 3 fails naming the missing approval request rather than passing on
+a gate that can never be satisfied.
+
 
 | Checkpoint | Extra input when needed | Assertion |
 | --- | --- | --- |
 | 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
 | 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
-| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact, its registered design-gate ask is daemon-approved (`designApproved: "gate-off"`; the rig runs with `gates.design: off`) and `resolved` on Dispatch, and a Dispatch child issue exists. |
-| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree. |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact. Under the recorded `design-gate` `off` (default): no gate is registered for the root, no approval request is open on the spec, and the tree has moved past the gate — a child issue or a phase worker on the root (the output names which). Under `root-issues`: the architect asked and waited — the daemon's registered gate names that document at its current version, Dispatch shows an open approval request on it (`approval.state == "awaiting"`), and no child is released nor any phase worker claimed yet (a released child or a claimed worker fails naming the early move). |
+| 4 | `SMOKE_ROOT_ISSUE` optional | The tree moved: a child in a released lifecycle status is tracked in active admission or an active/queued tree, or a phase worker is claimed on the root (the output names which); under `root-issues`, the human's approval opened the gate first (`approvedVersion == latestVersion`). |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |

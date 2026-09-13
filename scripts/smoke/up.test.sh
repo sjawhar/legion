@@ -540,6 +540,37 @@ grep -Fxq "omp_invocation: mise x ${omp_pin} -- omp" "${SMOKE_DIR}/legion.yaml" 
 }
 printf 'PASS: an explicit LEGION_OMP_PATH override reaches the daemon env block only, and omp_invocation keeps the mise x <pin> -- omp form\n'
 
+# The Dispatch-ingress record lands beside the webhook-mode and design-gate records: `shared` by
+# default, `rig` when the operator says a scratch Dispatch publishes into the rig NATS, and
+# anything else refused before the rig starts, naming the two values.
+[[ "$(<"${SMOKE_DIR}/dispatch-ingress")" == "shared" && "$(<"${SMOKE_DIR}/webhook-mode")" == "envoy" && "$(<"${SMOKE_DIR}/design-gate")" == "off" ]] || {
+  printf 'expected main() to record dispatch-ingress shared beside webhook-mode envoy and design-gate off; got %s / %s / %s\n' "$(<"${SMOKE_DIR}/dispatch-ingress")" "$(<"${SMOKE_DIR}/webhook-mode")" "$(<"${SMOKE_DIR}/design-gate")" >&2
+  exit 1
+}
+[[ "$(SMOKE_DISPATCH_INGRESS=rig resolve_dispatch_ingress)" == "rig" ]] || {
+  printf 'expected SMOKE_DISPATCH_INGRESS=rig to be accepted\n' >&2
+  exit 1
+}
+if (SMOKE_DISPATCH_INGRESS=direct resolve_dispatch_ingress) >"$assertion_file" 2>&1; then
+  printf 'expected an unknown SMOKE_DISPATCH_INGRESS to be refused\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'SMOKE_DISPATCH_INGRESS must be shared or rig'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+: >"$order_log"
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
+if ! SMOKE_DISPATCH_INGRESS=rig main >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed with SMOKE_DISPATCH_INGRESS=rig; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/dispatch-ingress")" == "rig" ]] || {
+  printf 'expected main() to record dispatch-ingress rig; got %s\n' "$(<"${SMOKE_DIR}/dispatch-ingress")" >&2
+  exit 1
+}
+printf 'PASS: records the Dispatch ingress (shared by default, rig on request) beside the other rig records and refuses any other value naming both\n'
+
 daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
 bridge_ready_line="$(grep -n '^wait_for_envoy_bridge$' "$order_log" | head -1 | cut -d: -f1)"
 root_issue_line="$(grep -n '^curl:issues-create$' "$order_log" | head -1 | cut -d: -f1)"

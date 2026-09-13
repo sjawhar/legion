@@ -1,5 +1,10 @@
 import type { IssueDetails, IssueKey, IssueSummary } from "@legion/contracts";
-import type { IssueStatus, LegionState, PendingStatusWrite } from "./legion-state";
+import type {
+  IssueStatus,
+  LegionState,
+  PendingStatusWrite,
+  SpecArtifactResolver,
+} from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */
@@ -15,8 +20,7 @@ export class DispatchHttpError extends Error {
 }
 
 /** The daemon's thin client for Dispatch's native-tool API: the lifecycle statuses it owns
- * (see events.ts/processes.ts), the issue reads resync needs to detect drift, and the close of a
- * design-gate ask the daemon satisfied itself. Every write
+ * (see events.ts/processes.ts) and the issue reads resync and the state migration need. Every write
  * carries the daemon's own actor identity (D4): `{kind:"session", id:"legion-daemon:<project>",
  * origin:{session_title}}` — `origin` nests inside the session actor per the contract
  * (`packages/contracts/src/dispatch-api.ts`'s `Actor` union), never a sibling of `actor`: the
@@ -33,11 +37,6 @@ export interface DispatchClient {
   getIssue(key: string): Promise<IssueDetails>;
   /** `PATCH /api/v1/issues/<key>` with `{status, actor: {kind, id, origin}}`. */
   setStatus(key: string, status: IssueStatus): Promise<void>;
-  /** `POST /api/v1/asks/<id>/resolve` with `{kind:"resolved", reason, actor}`: closes an open ask
-   * without answering it. Any session actor may resolve any open ask (`resolveAsk` in
-   * `packages/envoy/internal/dispatch/api/asks.go` requires an actor, not the author or a human);
-   * an already-answered or already-resolved ask is a 409. */
-  resolveAsk(id: string, reason: string): Promise<void>;
 }
 
 export interface DispatchClientOptions {
@@ -103,13 +102,26 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
         actor,
       });
     },
-    async resolveAsk(id, reason) {
-      await request("POST", `/api/v1/asks/${encodeURIComponent(id)}/resolve`, {
-        kind: "resolved",
-        reason,
-        actor,
-      });
-    },
+  };
+}
+
+/** One of the two Dispatch reads outside resync (the other is `register_gate`'s approval read in
+ * `api/routes/issues.ts`): `migrateV27State`'s resolver for a v27 design gate. Reads
+ * the issue once and returns its primary artifact's id (the spec document) with the highest
+ * version number that artifact carries. Throws naming the issue when the primary artifact is
+ * missing from the issue's `artifacts` or has no versions — the caller refuses to start on it. */
+export function specArtifactResolver(client: DispatchClient): SpecArtifactResolver {
+  return async (issue) => {
+    const details = await client.getIssue(issue);
+    const spec = details.artifacts.find((artifact) => artifact.id === details.primary_artifact_id);
+    if (!spec) {
+      throw new Error(`${issue} has no primary artifact ${details.primary_artifact_id}`);
+    }
+    const latestVersion = Math.max(...spec.versions.map((version) => version.number));
+    if (!Number.isSafeInteger(latestVersion) || latestVersion <= 0) {
+      throw new Error(`${issue}'s spec document ${spec.id} has no versions`);
+    }
+    return { artifactId: spec.id, latestVersion };
   };
 }
 

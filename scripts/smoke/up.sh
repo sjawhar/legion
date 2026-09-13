@@ -30,8 +30,18 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
-omp_pin="$(bun "${repo_root}/packages/daemon/src/daemon/omp-pin.ts")" \
-  || fail "could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)"
+# The OMP build the rig's daemon launches in every pane: the repository's pin
+# (packages/daemon/src/daemon/omp-pin.ts) unless SMOKE_OMP_PIN names another
+# `github:sjawhar/oh-my-pi@<version>` — for running the rig on the build a production
+# daemon is pinned to when the repository pin lags behind it.
+if [[ -n "${SMOKE_OMP_PIN:-}" ]]; then
+  [[ "$SMOKE_OMP_PIN" == github:sjawhar/oh-my-pi@* ]] ||
+    fail "SMOKE_OMP_PIN must be github:sjawhar/oh-my-pi@<version>"
+  omp_pin="$SMOKE_OMP_PIN"
+else
+  omp_pin="$(bun "${repo_root}/packages/daemon/src/daemon/omp-pin.ts")" \
+    || fail "could not read the OMP pin from packages/daemon/src/daemon/omp-pin.ts (bun required)"
+fi
 readonly omp_pin
 
 require_env() {
@@ -94,6 +104,39 @@ resolve_omp_path() {
   [[ -f "${install_dir}/bin/omp" && -x "${install_dir}/bin/omp" ]] ||
     fail "OMP pin ${omp_pin} is installed at ${install_dir} but ${install_dir}/bin/omp is missing or not executable; run: mise install ${omp_pin}"
   printf '%s\n' "${install_dir}/bin/omp"
+}
+
+# The rig's design-gate policy. The default, `off`, keeps a smoke exercise unattended: the root
+# architect is told in its system prompt that the gate is off and adds no approval step, so no
+# question waits in anyone's inbox. `root-issues` arms the gate for the human-approval exercise:
+# between checkpoints 3 and 4 a person approves the root's spec document in Dispatch.
+resolve_design_gate() {
+  case "${SMOKE_DESIGN_GATE:-off}" in
+    off | root-issues)
+      printf '%s\n' "${SMOKE_DESIGN_GATE:-off}"
+      ;;
+    *)
+      fail "SMOKE_DESIGN_GATE must be off or root-issues"
+      ;;
+  esac
+}
+
+# Where the rig's Dispatch issue events come from. `shared` (the default) is today's behaviour:
+# the daemon reads the shared Dispatch server over HTTP, and its issue events reach the rig NATS
+# only through the `envoy` webhook mode's production bridge — under `none` or `forward` no
+# Dispatch event arrives, so checkpoints.sh blocks the checkpoints that need one. `rig` says a
+# scratch Dispatch server (the armed-gate exercise in the README runs one built from this
+# checkout) publishes its outbox straight into the rig NATS, so those events arrive whatever the
+# webhook mode and checkpoints.sh must not block on the webhook mode alone.
+resolve_dispatch_ingress() {
+  case "${SMOKE_DISPATCH_INGRESS:-shared}" in
+    shared | rig)
+      printf '%s\n' "${SMOKE_DISPATCH_INGRESS:-shared}"
+      ;;
+    *)
+      fail "SMOKE_DISPATCH_INGRESS must be shared or rig"
+      ;;
+  esac
 }
 
 normalize_github_webhook_secret() {
@@ -294,6 +337,10 @@ write_daemon_config() {
   # preserved as empty rather than falling back to the default — only truly unset uses it.
   local omp_launch_prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}"
   local omp_launch_prefix_yaml
+  # Resolved here, not handed in: `up.test.sh` calls this function on its own, and the same
+  # `resolve_design_gate` answer is what main() records in `${smoke_dir}/design-gate`.
+  local design_gate
+  design_gate="$(resolve_design_gate)"
   if [[ -z "$omp_launch_prefix" ]]; then
     omp_launch_prefix_yaml="omp_launch_prefix: []"
   else
@@ -330,7 +377,7 @@ instructions: ${smoke_dir}/deployment-instructions.md
 omp_invocation: mise x ${omp_pin} -- omp
 ${omp_launch_prefix_yaml}
 gates:
-  design: off
+  design: ${design_gate}
 github_apps:
   implement:
     app_id: "${LEGION_IMPLEMENT_APP_ID}"
@@ -345,8 +392,9 @@ EOF
 # at `${smoke_dir}/root-issue` -- the daemon discovers it as a parentless issue, and
 # checkpoints.sh's `smoke_root_issue` reads this exact file to name the right root instead of
 # guessing "the first parentless issue" in a project other concurrent rigs also share. The rig's
-# daemon runs with `gates.design: off` (write_daemon_config): a smoke exercise must run end to
-# end with nobody answering a design-gate ask, and the daemon closes the one the architect opens.
+# daemon runs with the design-gate policy `resolve_design_gate` chose (`off` unless
+# SMOKE_DESIGN_GATE says otherwise): under `off` the root architect adds no approval step, so a
+# smoke exercise runs end to end with nobody asked to approve anything.
 # Idempotent across a rerun against the same SMOKE_DIR: a rig that already
 # recorded a root issue reuses it rather than creating a second one.
 ensure_root_issue() {
@@ -538,6 +586,8 @@ main() {
   require_command setsid
   local webhook_mode
   local omp_path
+  local design_gate
+  local dispatch_ingress
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -556,10 +606,14 @@ main() {
   webhook_mode="$(resolve_webhook_mode)"
   omp_path="$(resolve_omp_path)"
   printf 'GREEN OMP build: %s\n' "$omp_path"
+  design_gate="$(resolve_design_gate)"
+  dispatch_ingress="$(resolve_dispatch_ingress)"
 
   mkdir -p "$smoke_dir" "${smoke_dir}/daemon" \
     "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
+  printf '%s\n' "$design_gate" >"${smoke_dir}/design-gate"
+  printf '%s\n' "$dispatch_ingress" >"${smoke_dir}/dispatch-ingress"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config

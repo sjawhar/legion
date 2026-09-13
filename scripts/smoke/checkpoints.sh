@@ -44,10 +44,6 @@ dispatch_issue() {
   dispatch_request "issues/$1"
 }
 
-dispatch_asks() {
-  dispatch_request "issues/$1/asks?state=all"
-}
-
 dispatch_artifacts() {
   dispatch_request "issues/$1/artifacts"
 }
@@ -71,6 +67,32 @@ stored_webhook_mode() {
   fi
 }
 
+# The design-gate policy `up.sh` wrote into the rig's `legion.yaml` and recorded beside it. `off`
+# (the default) means the root architect was told to add no approval step; `root-issues` means a
+# human approves the root's spec document between checkpoints 3 and 4.
+stored_design_gate() {
+  local gate_file="${smoke_dir}/design-gate"
+  if [[ -r "$gate_file" ]]; then
+    printf '%s\n' "$(<"$gate_file")"
+  else
+    printf '%s\n' "${SMOKE_DESIGN_GATE:-off}"
+  fi
+}
+
+# Where the rig's Dispatch issue events come from, as `up.sh` recorded it (`SMOKE_DISPATCH_INGRESS`):
+# `shared` (the default) — events arrive only through the `envoy` webhook mode's bridge; `rig` — a
+# scratch Dispatch server publishes straight into the rig NATS, whatever the webhook mode. An
+# unrecorded rig (a scratch directory up.sh never populated) is `shared` unless the variable says
+# otherwise, so an old rig keeps today's gating.
+stored_dispatch_ingress() {
+  local ingress_file="${smoke_dir}/dispatch-ingress"
+  if [[ -r "$ingress_file" ]]; then
+    printf '%s\n' "$(<"$ingress_file")"
+  else
+    printf '%s\n' "${SMOKE_DISPATCH_INGRESS:-shared}"
+  fi
+}
+
 webhook_ingress_block_reason() {
   printf '%s\n' \
     'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
@@ -78,12 +100,15 @@ webhook_ingress_block_reason() {
 
 # Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has
 # ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and
-# reportRootAnomalies skip keys it never saw). Only up.sh's envoy-mode bridge relays those events
-# into the rig NATS: none mode has no feed at all, and forward mode (`gh webhook forward`) carries
-# GitHub events only -- up.sh creates the root issue over HTTP and the daemon never admits it -- so
-# under either recorded mode these are blocked, never reported as a false FAILED.
+# reportRootAnomalies skip keys it never saw). With the recorded Dispatch ingress `shared`, only
+# up.sh's envoy-mode bridge relays those events into the rig NATS: none mode has no feed at all,
+# and forward mode (`gh webhook forward`) carries GitHub events only -- up.sh creates the root
+# issue over HTTP and the daemon never admits it -- so under either recorded mode these are
+# blocked, never reported as a false FAILED. With `rig` ingress a scratch Dispatch publishes into
+# the rig NATS directly, so the webhook mode says nothing about these checkpoints and the block is
+# skipped (the dispatch below prints which record let it through).
 dispatch_ingress_block_reason() {
-  printf 'SMOKE_WEBHOOK_MODE=%s: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy\n' "$1"
+  printf 'SMOKE_WEBHOOK_MODE=%s with SMOKE_DISPATCH_INGRESS=shared: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig when a scratch Dispatch publishes into the rig NATS\n' "$1"
 }
 
 
@@ -240,58 +265,177 @@ checkpoint_two() {
   printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
-# The rig runs with `gates.design: off` (up.sh): the daemon approves the gate the moment the
-# architect registers it and closes the ask on Dispatch, so a smoke exercise never waits on a
-# human. This checkpoint proves that whole path — the gate is registered and daemon-approved, and
-# the ask the architect opened is `resolved` rather than sitting open in someone's inbox.
+# The Dispatch lifecycle statuses at or past `todo`: a child in one of them has been released by
+# its architect (`release_wave`), so it is the one status set both `architect_parked` (none may
+# be) and `checkpoint_four` (one must be) read. `triage`, `icebox`, and `backlog` are not released.
+readonly released_statuses='["todo", "in_progress", "testing", "needs_review", "retro", "done"]'
+
+# The phase-worker role claimed on the root itself in daemon state (a single-issue tree: any role
+# other than the architect, e.g. planner or implementer), or nothing when only the architect is.
+root_phase_worker() {
+  local root="$1"
+  local daemon_state="$2"
+  jq -r --arg root "$root" '
+    [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
+    | first // empty
+  ' <<<"$daemon_state"
+}
+
+# How the tree moved past the gate: a Dispatch child issue under the root (the decomposed path),
+# or a phase-worker role claim on the root itself (`root_phase_worker`). Prints which one was
+# observed, or fails naming the root when neither is.
+tree_progress() {
+  local root="$1"
+  local daemon_state="$2"
+  local children
+  local worker
+  children="$(dispatch_children "$root")"
+  if jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children"; then
+    printf 'a child issue\n'
+    return
+  fi
+  worker="$(root_phase_worker "$root" "$daemon_state")"
+  if [[ -n "$worker" ]]; then
+    printf 'a %s phase worker claimed on the root (single-issue tree)\n' "$worker"
+    return
+  fi
+  fail "${root} has neither a Dispatch child issue nor a phase-worker role claim on the root: the tree has not moved past the gate"
+}
+
+# The architect parked on the gate: the human has not approved yet, so nothing may have moved past
+# it. A child issue may exist in `triage` or `backlog` (the skill allows decomposing before the
+# approval request) but none may be `todo` or later, and no phase-worker role (anything but the
+# architect) may be claimed on the root or on any child in daemon state. Fails naming what moved.
+architect_parked() {
+  local root="$1"
+  local daemon_state="$2"
+  local children
+  local moved
+  children="$(dispatch_children "$root")"
+  moved="$(jq -r --arg root "$root" --argjson released "$released_statuses" '
+    [.[] | select(.parent == $root and (.status | IN($released[]))) | "\(.key) (\(.status))"]
+    | first // empty
+  ' <<<"$children")"
+  [[ -z "$moved" ]] ||
+    fail "${root}'s architect moved before approval: child issue ${moved} was released while the spec document is still awaiting approval"
+  moved="$(jq -r --arg root "$root" --argjson children "$children" '
+    ([$children[] | .key] + [$root]) as $tree |
+    [.roles | to_entries[] | select((.value.issue | IN($tree[])) and .value.role != "architect") | "\(.value.role) on \(.value.issue)"]
+    | first // empty
+  ' <<<"$daemon_state")"
+  [[ -z "$moved" ]] ||
+    fail "${root}'s architect moved before approval: a ${moved} phase worker is claimed while the spec document is still awaiting approval"
+}
+
+# The daemon's design gate is a human's approval of the root spec document at a version. What this
+# checkpoint proves depends on the policy the rig recorded (`stored_design_gate`):
+# - `root-issues`: before the human acts, the architect must have registered the document
+#   (`gates[root].artifactId`) at its current version (`latestVersion`) and Dispatch must show an
+#   open approval request on it (`approval.state == "awaiting"`, from `dispatch_request_approval`).
+# - `off`: the architect was told in its system prompt that the gate is off, so it must have
+#   registered no gate and requested no approval — nothing waits in anyone's inbox.
+# Under `root-issues` the checkpoint proves the architect asked and WAITED: with the document still
+# awaiting approval, no child issue may be released and no phase worker may be claimed
+# (`architect_parked`) — a compliant architect is parked on `design-approved` at this moment, and
+# on a single-issue tree there is nothing else to observe. Under `off` it proves the tree moved
+# past the (absent) gate — a child issue, or a phase worker on the root itself (`tree_progress`).
+# Either way the spec is posted as the root's primary `spec.md`. No `Approve` ask is involved.
 checkpoint_three() {
   local root
+  local design_gate
   local daemon_state
-  local design_ask_id
-  local asks
+  local gate_artifact
+  local gate_version
   local artifacts
-  local children
+  local progress
 
   root="$(dispatch_root_key)"
+  design_gate="$(stored_design_gate)"
   daemon_state="$(state)"
-  design_ask_id="$(jq -er --arg root "$root" '.gates[$root].designAskId' <<<"$daemon_state")" ||
-    fail "${root} has no registered design-gate ask"
-  jq -e --arg root "$root" '.gates[$root].designApproved == "gate-off"' >/dev/null <<<"$daemon_state" ||
-    fail "${root} design gate is registered but the daemon did not approve it (gates.design is not off?)"
-  asks="$(dispatch_asks "$root")"
-  jq -e --arg ask "$design_ask_id" '
-    any(.[]; .id == $ask and .state == "resolved" and any(.options[]?; .label == "Approve"))
-  ' >/dev/null <<<"$asks" || fail "${root} design-gate ask ${design_ask_id} is not resolved on Dispatch"
   artifacts="$(dispatch_artifacts "$root")"
   jq -e '
     any(.[]; .name == "spec.md" and .primary == true and (.versions | type == "array" and length > 0))
   ' >/dev/null <<<"$artifacts" || fail "${root} lacks a posted primary spec.md artifact"
-  children="$(dispatch_children "$root")"
-  jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children" ||
-    fail "${root} has no Dispatch child issue"
-  printf 'CHECKPOINT 3 OK: posted spec artifact, daemon-approved design gate (ask resolved), and child issue observed\n'
+  case "$design_gate" in
+    root-issues)
+      gate_artifact="$(jq -er --arg root "$root" '.gates[$root].artifactId' <<<"$daemon_state")" ||
+        fail "${root} has no registered design gate"
+      gate_version="$(jq -er --arg root "$root" '.gates[$root].latestVersion' <<<"$daemon_state")" ||
+        fail "${root}'s registered design gate records no latestVersion"
+      jq -e --arg id "$gate_artifact" '
+        any(.[]; .id == $id and .name == "spec.md" and .primary == true)
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root}'s registered design gate ${gate_artifact} is not its posted primary spec.md artifact"
+      jq -e --arg id "$gate_artifact" --argjson version "$gate_version" '
+        any(.[]; .id == $id and ([.versions[].number] | max) == $version)
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root}'s registered design gate is not at the spec document's current version ${gate_version}"
+      jq -e --arg id "$gate_artifact" '
+        any(.[]; .id == $id and .approval.state == "awaiting")
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root} has no open approval request on its registered spec document (approval.state must be awaiting; a Dispatch server without document approval never reports one)"
+      architect_parked "$root" "$daemon_state"
+      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)\n'
+      ;;
+    off)
+      jq -e --arg root "$root" '.gates | has($root) | not' >/dev/null <<<"$daemon_state" ||
+        fail "${root} registered a design gate although the rig runs with gates.design: off (the architect ignored its Design gate policy line)"
+      jq -e '
+        any(.[]; .name == "spec.md" and .primary == true and (.approval.state // "draft") == "awaiting") | not
+      ' >/dev/null <<<"$artifacts" ||
+        fail "${root} has an open approval request on its spec document although the rig runs with gates.design: off (a question is waiting in a human's inbox)"
+      progress="$(tree_progress "$root" "$daemon_state")"
+      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and %s observed\n' "$progress"
+      ;;
+    *)
+      fail "recorded design-gate policy '${design_gate}' is neither off nor root-issues"
+      ;;
+  esac
 }
 
+# Under `root-issues`, between checkpoints 3 and 4 a human approves the root spec document (the
+# document header's Approve, or the approval ask with Approve); this checkpoint proves the approval
+# opened the gate (`approvedVersion == latestVersion`) and the tree then moved — a child released
+# into admission or an active tree, or a phase-worker role claim on the root itself (a
+# single-issue tree). Under `off` there is no gate to check; only the move itself is observed.
 checkpoint_four() {
   local root
+  local design_gate
   local daemon_state
+  local released
 
   root="$(dispatch_root_key)"
+  design_gate="$(stored_design_gate)"
   daemon_state="$(state)"
-  jq -e --arg root "$root" '
+  if [[ "$design_gate" == root-issues ]]; then
+    jq -e --arg root "$root" '
+      .gates[$root] | (.approvedVersion != null) and (.approvedVersion == .latestVersion)
+    ' >/dev/null <<<"$daemon_state" ||
+      fail "daemon has not recorded the spec approval for ${root} (gates[${root}].approvedVersion must equal latestVersion)"
+  fi
+  jq -e --arg root "$root" --argjson released "$released_statuses" '
     [
       .issues[$root].children[]? as $child |
       .issues[$child].status as $status |
       .trees[$child].status as $tree_status |
       select(
-        ($status == "todo" or $status == "in_progress" or $status == "testing" or
-          $status == "needs_review" or $status == "retro" or $status == "done") and
+        ($status | IN($released[])) and
           ((.admission.active | index($child)) != null or $tree_status == "queued" or
             $tree_status == "active")
       )
     ] | length > 0
-  ' >/dev/null <<<"$daemon_state" || fail "no child is released into admission or an active tree"
-  printf 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state\n'
+  ' >/dev/null <<<"$daemon_state" && released="a released child is tracked by admission or tree state"
+  if [[ -z "${released:-}" ]]; then
+    released="$(root_phase_worker "$root" "$daemon_state")"
+    [[ -n "$released" ]] ||
+      fail "neither a child is released into admission or an active tree nor a phase worker is claimed on ${root}"
+    released="a ${released} phase worker claimed on the root (single-issue tree)"
+  fi
+  if [[ "$design_gate" == root-issues ]]; then
+    printf 'CHECKPOINT 4 OK: spec approval recorded on the gate; %s\n' "$released"
+  else
+    printf 'CHECKPOINT 4 OK: %s\n' "$released"
+  fi
 }
 
 checkpoint_five() {
@@ -535,11 +679,29 @@ command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
 webhook_mode="$(stored_webhook_mode)"
 readonly webhook_mode
+dispatch_ingress="$(stored_dispatch_ingress)"
+readonly dispatch_ingress
+case "$dispatch_ingress" in
+  shared | rig) ;;
+  *)
+    fail "recorded SMOKE_DISPATCH_INGRESS must be shared or rig"
+    ;;
+esac
+# Whether the recorded webhook mode decides checkpoints 1-4 and 12: only when the rig's Dispatch
+# issue events have no other way in (`shared`). Under `rig` the scratch Dispatch publishes into
+# the rig NATS itself, so the same webhook mode blocks nothing for them.
+dispatch_ingress_gate() {
+  if [[ "$dispatch_ingress" == rig ]]; then
+    printf 'CHECKPOINT %s: SMOKE_WEBHOOK_MODE=%s does not block this checkpoint; the recorded SMOKE_DISPATCH_INGRESS=rig says a scratch Dispatch publishes issue events into the rig NATS directly\n' "$checkpoint" "$webhook_mode" >&2
+    return
+  fi
+  blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+}
 case "$webhook_mode" in
   none)
     case "$checkpoint" in
       1 | 2 | 3 | 4 | 12)
-        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        dispatch_ingress_gate
         ;;
       5 | 6 | 7 | 9 | 10 | 11)
         blocked "$(webhook_ingress_block_reason)"
@@ -549,7 +711,7 @@ case "$webhook_mode" in
   forward)
     case "$checkpoint" in
       1 | 2 | 3 | 4 | 12)
-        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        dispatch_ingress_gate
         ;;
     esac
     ;;

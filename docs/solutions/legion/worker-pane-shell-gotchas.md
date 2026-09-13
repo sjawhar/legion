@@ -337,6 +337,14 @@ message directly; a `phase-complete` event will not arrive. Contrast section 7's
 the daemon does keep the record and a repeat of the same command later delivers it: after a 409 a repeat only 409s
 again.
 
+**The same 409 in a multi-round tree, with no respawn involved (LEGION-20).** On #975 the implementer's later pushes
+(a review-fix round, a fix for a tester finding, the `.legion/` deletion) each ended in this 409 while the tester's
+or reviewer's phase was the active one on the issue — the architect had already handed the next phase on, and the
+implementer's completion had nowhere to land. Only the very first round's `handoff complete` returned 200. It cost
+nothing: every round's report went over the architect topic with the head sha, the CI run ids, and one line per
+item, and the architect acted on those. Treat the topic publish as the completion channel on any round after the
+first and the 409 as the expected daemon answer — do not wait for it to say 200 before publishing.
+
 ## 12. Three facts a multi-round tree meets that are not defects of the branch (from LEGION-54)
 
 **The "exact released version" a doc states is a moving target while the tree is open.** LEGION-54's docs named the

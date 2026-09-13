@@ -11,7 +11,7 @@ import { LEGION_ROLES } from "./legion-roles";
  * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
  * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
  */
-export const LEGION_DAEMON_API_VERSION = 1;
+export const LEGION_DAEMON_API_VERSION = 2;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -82,9 +82,13 @@ const stateTree = z.strictObject({
   readyConfirmedAt: z.number().optional(),
   locator: stateTreeLocator.optional(),
 });
+// The design gate as the daemon records it: the root spec document (`artifactId`) with the
+// highest version the daemon has seen and, once a human approves, the version they approved.
+// The gate is open exactly when `approvedVersion === latestVersion` (see `designGateOpen`).
 const stateGate = z.strictObject({
-  designAskId: nonEmptyString.optional(),
-  designApproved: nonEmptyString.optional(),
+  artifactId: nonEmptyString,
+  latestVersion: z.number().int().positive(),
+  approvedVersion: z.number().int().positive().optional(),
 });
 // `role` matches `RoleClaim.role`'s own persisted type (a plain non-empty string, not the
 // stricter `legionRole` enum request schemas use): a stored claim's role always belongs to
@@ -241,7 +245,16 @@ export const LegionDaemonApi = {
     response: z.object({}),
   },
   GatesRegister: {
-    request: architectCapability.extend({ issue: nonEmptyString, askId: nonEmptyString }),
+    // `artifactId` and `version` are the `artifact` and `version` values from
+    // `dispatch_request_approval`'s result: the document a human must approve, at the version the
+    // architect requested approval of. Dispatch artifact ids are UUIDs, and the approval events the
+    // daemon matches carry that UUID as `artifact_id` — so a slug or file name (`spec`, `spec.md`)
+    // is rejected here, naming the field, instead of registering a gate no event can ever open.
+    request: architectCapability.extend({
+      issue: nonEmptyString,
+      artifactId: z.uuid(),
+      version: z.number().int().positive(),
+    }),
     response: z.object({}),
   },
   Grant: {

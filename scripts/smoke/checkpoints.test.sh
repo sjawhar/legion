@@ -17,7 +17,28 @@ mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
 # Checkpoints 1-4 need Dispatch issue-event ingress, so their fixture-backed OK cases run with
 # envoy recorded; the none-mode and forward-mode blocks further down prove the mode gating itself.
 printf 'envoy\n' >"${smoke_dir}/webhook-mode"
-printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":{"LEGSMOKE-1":{"designAskId":"ask-design","designApproved":"gate-off"}}}' >"${smoke_dir}/daemon/state.json"
+# The daemon state every checkpoint reads. `write_state` takes the `gates` record so the
+# design-gate runs below can vary it; the default carries no gate, matching the rig's default
+# `gates.design: off` (recorded in `design-gate` exactly as `up.sh` records it).
+write_state() {
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
+# The same rig as a single-issue tree: LEGSMOKE-1 has no child, and the architect spawned a
+# planner on the root itself (`roles` carries a non-architect claim with issue == root). `$1` is
+# the gates record, `$2` the role claimed on the root (default planner; pass "architect" to model
+# a tree that has not moved past the gate at all).
+write_single_issue_state() {
+  local role="${2:-planner}"
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-1-architect":{"issue":"LEGSMOKE-1","role":"architect","sessionId":"ses_arch"},"legion-exampleorg24-legsmoke-1-'"$role"'":{"issue":"LEGSMOKE-1","role":"'"$role"'","sessionId":"ses_'"$role"'","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%5"}}},"admission":{"active":["LEGSMOKE-1"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
+# The armed rig at the moment checkpoint 3 runs: the architect asked for approval and PARKED.
+# Here it decomposed first — child LEGSMOKE-2 exists in `triage` (the skill allows creating
+# children before the approval request) — but released nothing and claimed no worker.
+write_parked_state() {
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"triage","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-1-architect":{"issue":"LEGSMOKE-1","role":"architect","sessionId":"ses_arch"}},"admission":{"active":["LEGSMOKE-1"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
+write_state '{}'
+printf 'off\n' >"${smoke_dir}/design-gate"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
 # it at all, standing in for a concurrent rig's own root sharing the same LEGSMOKE project. The
 # recorded root-issue file below must make every checkpoint below target LEGSMOKE-1 regardless --
@@ -30,14 +51,19 @@ cat >"${fake_bin}/curl" <<'EOF'
 request="$*"
 printf '%s\n' "$request" >>"$CURL_LOG"
 case "$request" in
-  *"/api/v1/issues/LEGSMOKE-1/asks?state=all"*)
-    printf '%s' '[{"id":"ask-design","state":"resolved","options":[{"label":"Approve"}]}]'
-    ;;
   *"/api/v1/issues/LEGSMOKE-1/artifacts"*)
-    printf '%s' '[{"name":"spec.md","primary":true,"versions":[{"number":1}]}]'
+    if [[ -n "${ARTIFACTS_FILE:-}" ]]; then
+      cat "$ARTIFACTS_FILE"
+    else
+      printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"draft","latest_version":1}}]'
+    fi
     ;;
   *"/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1"*)
-    printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
+    if [[ -n "${CHILDREN_FILE:-}" ]]; then
+      cat "$CHILDREN_FILE"
+    else
+      printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
+    fi
     ;;
   *"/api/v1/issues/LEGSMOKE-1"*)
     printf '%s' '{"key":"LEGSMOKE-1","status":"in_progress"}'
@@ -133,32 +159,110 @@ PATH="${fake_bin}:${PATH}" \
 }
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
 
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 3 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 3 OK'* ]] || {
-  cat "$output_file" >&2
-  exit 1
+run_checkpoint() {
+  PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    DISPATCH_URL="http://dispatch.test" \
+    DISPATCH_TOKEN="test-dispatch-token" \
+    bash "$checkpoints_script" "$@" >"$output_file" 2>&1
 }
-grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/asks?state=all' "$curl_log"
+expect_output() {
+  [[ "$(<"$output_file")" == *"$1"* ]] || {
+    printf 'expected output to contain: %s\n' "$1" >&2
+    cat "$output_file" >&2
+    exit 1
+  }
+}
+
+# Default rig (`gates.design: off`): the architect registered no gate and requested no approval;
+# checkpoints 3 and 4 pass on the spec, the child, and the release alone.
+run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a child issue observed'
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/artifacts' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1' "$curl_log"
-
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 4 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 4 OK'* ]] || {
-  cat "$output_file" >&2
+! grep -Fq '/asks?state=' "$curl_log" || {
+  printf 'checkpoint 3 still reads asks; the design gate is a document approval\n' >&2
   exit 1
 }
+run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state'
+printf 'PASS: checkpoints 3 and 4 pass under gates.design: off with no gate and no approval request\n'
+
+# Under `off`, a registered gate means the architect ignored its policy line: fail naming it.
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+run_checkpoint 3 && { printf 'checkpoint 3 passed with a gate registered under gates.design: off\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 registered a design gate although the rig runs with gates.design: off'
+printf 'PASS: checkpoint 3 fails under gates.design: off when a gate was registered anyway\n'
+
+# `root-issues`: the human-approval exercise. Before the human acts the gate is registered at the
+# spec's current version and the document awaits approval; afterwards the daemon records it.
+printf 'root-issues\n' >"${smoke_dir}/design-gate"
+awaiting_artifacts="${temporary_dir}/artifacts-awaiting.json"
+printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"awaiting","latest_version":1,"requested_by":{"kind":"session","id":"arch"},"ask_id":"ask-design"}}]' >"$awaiting_artifacts"
+triage_children="${temporary_dir}/children-triage.json"
+printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"triage"}]' >"$triage_children"
+# Before the human acts: gate registered at the spec's current version, document awaiting, and
+# the architect parked — a child may exist in triage, nothing released, no worker claimed.
+write_parked_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$triage_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'
+# An architect that released a child while the document is still awaiting moved before approval.
+ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3 && { printf 'checkpoint 3 passed with a child released while the spec awaits approval\n' >&2; exit 1; }
+expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (todo) was released while the spec document is still awaiting approval"
+printf 'PASS: checkpoint 3 under root-issues proves the architect parked, and fails naming a child released before approval\n'
+write_parked_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+# A Dispatch server without document approval (or a spec nobody requested approval of) reports no
+# open request: the checkpoint must fail naming the missing request, never pass on a gate that can
+# never be satisfied.
+CHILDREN_FILE="$triage_children" run_checkpoint 3 && { printf 'checkpoint 3 passed without an open approval request on the spec document\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has no open approval request on its registered spec document'
+printf 'PASS: checkpoint 3 under root-issues requires an open approval request on the registered spec document\n'
+# After the human approves, the architect releases the child (the default state): checkpoint 4
+# needs the recorded approval first, then the release.
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+run_checkpoint 4 && { printf 'checkpoint 4 passed before the daemon recorded the approval\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: daemon has not recorded the spec approval for LEGSMOKE-1'
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
+run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'
+printf 'PASS: checkpoint 4 under root-issues requires the recorded approval at the current spec version\n'
+printf 'off\n' >"${smoke_dir}/design-gate"
+
+# Single-issue tree (the legion-architect skill allows one): no child issue exists, but the
+# architect spawned a phase worker on the root. Checkpoints 3 and 4 pass on that claim and say so.
+no_children="${temporary_dir}/children-none.json"
+printf '%s' '[]' >"$no_children"
+write_single_issue_state '{}'
+CHILDREN_FILE="$no_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker claimed on the root (single-issue tree) observed'
+CHILDREN_FILE="$no_children" run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: a planner phase worker claimed on the root (single-issue tree)'
+printf 'root-issues\n' >"${smoke_dir}/design-gate"
+# Armed, single-issue, before approval: the architect registered the gate and parked — no child,
+# no worker. This is exactly what the real architect produced in every rig run.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}' architect
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$no_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'
+# A worker claimed on the root while the document still awaits approval is an early move.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$no_children" run_checkpoint 3 && { printf 'checkpoint 3 passed with a phase worker claimed while the spec awaits approval\n' >&2; exit 1; }
+expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: a planner on LEGSMOKE-1 phase worker is claimed while the spec document is still awaiting approval"
+# After approval the architect spawns the worker: checkpoint 4 passes on the claim.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
+CHILDREN_FILE="$no_children" run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a planner phase worker claimed on the root (single-issue tree)'
+printf 'PASS: checkpoints 3 and 4 accept a single-issue tree: parked before approval, a phase worker on the root after; a worker claimed while awaiting fails naming the early move\n'
+# Neither a child nor a phase worker: the tree has not moved past the gate, and the failure says so.
+printf 'off\n' >"${smoke_dir}/design-gate"
+write_single_issue_state '{}' architect
+CHILDREN_FILE="$no_children" run_checkpoint 3 && { printf 'checkpoint 3 passed with neither a child issue nor a phase worker\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has neither a Dispatch child issue nor a phase-worker role claim on the root'
+CHILDREN_FILE="$no_children" run_checkpoint 4 && { printf 'checkpoint 4 passed with neither a released child nor a phase worker\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: neither a child is released into admission or an active tree nor a phase worker is claimed on LEGSMOKE-1'
+printf 'PASS: checkpoints 3 and 4 fail naming the root when neither a child issue nor a phase worker exists\n'
+write_state '{}'
 
 # none mode: no Dispatch issue event reaches the rig NATS, so 1-4 and 12 are blocked with the
 # Dispatch-ingress reason before any Dispatch request is made (12 before it even asks for
@@ -178,7 +282,7 @@ for blocked_checkpoint in 1 2 3 4 12; do
   else
     status=$?
   fi
-  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig'* ]] || {
     printf 'expected exit 3 and the Dispatch-ingress reason for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
     exit 1
   }
@@ -198,6 +302,69 @@ fi
   exit 1
 }
 printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\n'
+
+# The same none mode with the recorded Dispatch ingress `rig` (a scratch Dispatch publishes into
+# the rig NATS itself): the webhook mode no longer decides checkpoints 1-4 and 12. Checkpoint 1
+# passes the gate, says which record let it through, and reaches its own assertion — here it
+# passes on the same fixtures the envoy-mode case above uses. An explicitly recorded `shared` is
+# today's behaviour, blocked exactly as before; anything else on record is refused naming the two
+# values. The webhook-only checkpoints (5-7, 9-11) stay blocked under none whatever the ingress.
+printf 'rig\n' >"${smoke_dir}/dispatch-ingress"
+if ! PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  FAKE_TMUX_PID="$clean_pid" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected rig ingress under none to let checkpoint 1 run its own assertion; got:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 1: SMOKE_WEBHOOK_MODE=none does not block this checkpoint; the recorded SMOKE_DISPATCH_INGRESS=rig says a scratch Dispatch publishes issue events into the rig NATS directly'*'CHECKPOINT 1 OK'* && "$(<"$output_file")" != *'SKIPPED-BLOCKED'* ]] || {
+  printf 'expected the rig-ingress notice followed by checkpoint 1 OK; got:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+}
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
+  printf 'expected none mode to keep blocking the GitHub-fed checkpoint 5 under rig ingress\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 5 SKIPPED-BLOCKED: '*'requires live GitHub webhook ingress'* ]] || {
+  printf 'expected checkpoint 5 to stay blocked with the GitHub-ingress reason under rig ingress; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'shared\n' >"${smoke_dir}/dispatch-ingress"
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected shared ingress under none to block checkpoint 1\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: '* ]] || {
+  printf 'expected the shared-ingress block for checkpoint 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'sideways\n' >"${smoke_dir}/dispatch-ingress"
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected an unknown recorded Dispatch ingress to be refused\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 1 FAILED: recorded SMOKE_DISPATCH_INGRESS must be shared or rig'* ]] || {
+  printf 'expected the unknown-ingress refusal naming the two values; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+rm -f "${smoke_dir}/dispatch-ingress"
+printf 'PASS: a recorded rig Dispatch ingress lets none mode reach checkpoint 1 (naming the record), shared stays blocked, an unknown record is refused\n'
 
 # Every GitHub-fed checkpoint under none: exit 3, the GitHub-ingress reason, and no Dispatch
 # request. The mode gate runs before each checkpoint's own require_env, so none of the SMOKE_*
@@ -275,7 +442,7 @@ for blocked_checkpoint in 1 2 3 4 12; do
   else
     status=$?
   fi
-  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward with SMOKE_DISPATCH_INGRESS=shared: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig'* ]] || {
     printf 'expected exit 3 and the Dispatch-ingress reason naming forward for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
     exit 1
   }
@@ -345,7 +512,7 @@ if PATH="${fake_bin}:${PATH}" \
 else
   status=$?
 fi
-[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: '*'requires Dispatch issue-event ingress'* ]] || {
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: '*'requires Dispatch issue-event ingress'* ]] || {
   printf 'expected the exported none mode to gate checkpoint 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
   rm -rf "$bare_temporary_dir"
   exit 1

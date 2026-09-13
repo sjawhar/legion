@@ -60,6 +60,22 @@ Three rules, all now in `checkpoints.sh` and its harness:
 Checkpoints whose gate is something else (8: branch protection; 13: secrets on panes) stay
 out of the mode arm, and the harness proves it — adding `8` to the `none` arm fails a case.
 
+**The gate has a second axis (LEGION-20).** "No Dispatch issue event reaches the rig NATS" is
+true against the shared Dispatch server, whose events arrive only through the `envoy` bridge.
+It is false for the armed-gate exercise, which runs a scratch Dispatch built from the checkout
+with its outbox pointed at the rig's own NATS — the daemon consumed every event, and the tester
+had to flip the recorded webhook mode to `envoy` by hand to get past a block that described a
+problem the rig did not have. `up.sh` now records a third choice beside `webhook-mode` and
+`design-gate`: `${SMOKE_DIR}/dispatch-ingress`, `shared` (default, today's gating) or `rig`
+(a scratch Dispatch feeds the rig NATS itself). Under `rig`, `checkpoints.sh` skips the
+Dispatch-ingress block for 1–4 and 12 and prints which record let it through; under `shared` the
+block stands and its reason names both remedies (`use SMOKE_WEBHOOK_MODE=envoy, or
+SMOKE_DISPATCH_INGRESS=rig …`); an unknown record is refused naming the two values. The
+GitHub-only gate for 5–7 and 9–11 is unchanged whatever the ingress. The rule generalizes the
+three above: every fact a checkpoint gates on is a *recorded choice with a name* — never a
+property inferred from another record (the webhook mode said nothing about where Dispatch
+events came from), and never a default the operator did not make.
+
 ## 2. The OMP pin has one home; a stop-gap rooted in one operator's home directory is not shippable
 
 The rig's controller crashed on its first prompt because the pinned Oh My Pi release predated

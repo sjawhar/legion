@@ -72,6 +72,17 @@ Test the 4-quadrant matrix for any field rename:
 | Both fields present | New field takes precedence |
 | Neither field | Both undefined, no regression |
 
+Two more rules for the daemon's persisted-state migrations (`legion-state.ts`), from LEGION-20:
+
+- **The next version number is a shared resource, re-checked against `main` at every rebase.**
+  Two branches both claimed v25, then two claimed v26, then two claimed v27; the later one renumbered (to v28 in the end) inside the commit that
+  introduced the number. See
+  `docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`.
+- **A migration that reads an external system runs exactly once.** `loadState` writes the
+  migrated state right after the `.bak`, so a restart before the first ordinary save does not
+  repeat the reads (or re-depend on the external system at boot); the test reloads the file with
+  a resolver that throws.
+
 ## Updating Workflow Markdown Files
 
 When a handoff field change affects workflow examples:

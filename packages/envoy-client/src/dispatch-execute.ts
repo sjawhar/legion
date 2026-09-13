@@ -1034,7 +1034,7 @@ export async function executeDispatchTool(
       const result = await client.requestApproval(resolved.artifact.id, { actor });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -1046,7 +1046,7 @@ export async function executeDispatchTool(
       }
       const details = await askResultDetails(client, result.ask, resolved);
       return {
-        text: `Approval requested for ${resolved.artifact.name} at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

@@ -98,6 +98,37 @@ packages/daemon/src/daemon/legion-state.ts | grep -n 'z.literal('`. If it moved 
 branch consumes, renumber before pushing rather than after the tester finds `CONFLICTING`. A
 schema bump is the one change that cannot be conflict-resolved by picking a side.
 
+## The same collision, three times on one branch, and two neighbours of the same shape (LEGION-20)
+
+LEGION-20's design-gate migration claimed v25 first; LEGION-33 (#993) took v25 on main during
+review, so it became v26; LEGION-37 (#991, this document's own issue) took v26 on main during
+the retro, so it became v27; then LEGION-27 (#981) took v27 while the merger was waiting to
+publish READY, so it became v28 — three renumbers in one review cycle, each found only when
+GitHub flipped the PR to CONFLICTING. The loop ends only when the queue orders the schema-bump
+branch ahead of its neighbours; every wait for re-approval otherwise hands the next number to
+whoever merges first. Three things from that branch that this checklist does not
+already say:
+
+- **Renumber inside the commit that introduced the number**, with `jj squash --into <that
+  change>`, so no commit on the branch declares a version it does not implement and the reviewer
+  can still read the chain commit by commit. A squash into a mid-chain commit conflicts with every
+  later commit that touched the same lines; if that happens, `jj undo` once and commit the
+  wording-only sweep at the head instead.
+- **A migration that reads an external system must run exactly once**, so the renumber has to
+  keep that property: `loadState` writes the migrated state right after the `.bak`, and the test
+  reloads the file with a resolver that throws.
+- **`LEGION_DAEMON_API_VERSION` and the plugin manifest's `legion.daemonApiVersion` are the same
+  kind of serial**, and Dispatch's `0025_…` SQL migration numbers are too. Two branches that each
+  change a `LegionDaemonApi` shape will both bump 1 → 2; the check before every push is the same
+  `file show -r main@origin … | grep` on each counter your branch claims. See
+  `../daemon/plugin-daemon-api-contract-version-gate.md`.
+
+When the collision arrives *after* the reviewer's approval is pinned to a head, resolve it with a
+merge commit on top of the approved head (`jj new <branch head> main@origin`, resolve, describe)
+rather than a rebase, so the approved SHAs stay real —
+`long-lived-branch-mechanics-jj-new-and-merge-not-rebase.md` §2 — and say what the merge
+renumbered in the PR body's "Merge with main" note.
+
 ## Related
 
 - `conflict-only-rebases-keep-the-diff-auditable.md` — the added/removed-line identity check for

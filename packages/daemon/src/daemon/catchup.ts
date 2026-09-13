@@ -1,7 +1,7 @@
 import { type IssueKey, isLegionRole, type LegionRole } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
-import type { LegionState, PrState } from "./legion-state";
+import { type DesignGate, designGateOpen, type LegionState, type PrState } from "./legion-state";
 import type { LegionEventPayload } from "./reducers";
 
 type JsonRecord = Record<string, unknown>;
@@ -18,7 +18,9 @@ const WORKER_MODE: Record<LegionRole, string> = {
 
 export interface CatchupOverseerPayload extends LegionEventPayload {
   type: "catchup-overseer";
-  gates: Record<IssueKey, { designAskId?: string; designApproved?: string }>;
+  /** `{}` for a tree issue with no registered gate; otherwise the gate record plus `open`, the
+   * daemon's own verdict (`designGateOpen`) so a reconnecting architect never re-derives it. */
+  gates: Record<IssueKey, Partial<DesignGate> & { open?: boolean }>;
   childCounts: Record<IssueKey, { total: number; open: number; closed: number }>;
   prVerdicts: Record<
     string,
@@ -109,7 +111,8 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
   const childCounts = {} as CatchupOverseerPayload["childCounts"];
   for (const issue of [...issues].sort()) {
     const node = s.issues[issue];
-    gates[issue] = s.gates[issue] ?? {};
+    const gate = s.gates[issue];
+    gates[issue] = gate ? { ...gate, open: designGateOpen(gate) } : {};
     let open = 0;
     let closed = 0;
     for (const child of node.children) {
