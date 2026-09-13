@@ -6112,6 +6112,166 @@ describe("ProcessManager", () => {
     });
   });
 
+  // LEGION-89: the retired controller's window was the private session's only one, so its pane
+  // closing tears session and server down -- and the graceful stop confirms before tmux has
+  // finished doing so, so the respawn's `has-session` can still answer present while its
+  // `new-window` finds the server gone. The respawn must recreate the session and open the window.
+  it("respawns a stuck controller whose window was the session's last one even when the private server dies between the respawn's has-session and its new-window (LEGION-89)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const staleLocator = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
+    };
+    state.controllerLocator = { ...staleLocator };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    const commands: string[][] = [];
+    const controllerRelaunched = Promise.withResolvers<void>();
+    const noServer = "no server running on /tmp/tmux-1000/legion-omp";
+    let hasSessionCalls = 0;
+    let newWindowCalls = 0;
+    let sessionRecreated = false;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        if (tmuxFields(state.controllerLocator)?.tmuxWindowId === "@44") {
+          controllerRelaunched.resolve();
+        }
+      },
+      // As in the fixture above: only the stale locator's deadline elapses; the fresh
+      // controller's own deadline must stay pending.
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
+        if (command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[3] === "has-session") {
+          hasSessionCalls += 1;
+          // Present at the first check (the stale answer); gone afterwards, until recreated.
+          if (hasSessionCalls === 1 || sessionRecreated) return { stdout: "", exitCode: 0 };
+          return { stdout: "", stderr: noServer, exitCode: 1 };
+        }
+        if (command[3] === "new-session") {
+          sessionRecreated = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[3] === "new-window") {
+          newWindowCalls += 1;
+          if (newWindowCalls === 1) return { stdout: "", stderr: noServer, exitCode: 1 };
+          return { stdout: "@44 %3 65432\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.ensureController();
+      sleepGate.resolve();
+      await controllerRelaunched.promise;
+
+      expect(managedState.controllerLocator).toEqual({
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@44",
+        tmuxPaneId: "%3",
+        socketPath: path.join(stateDir, "workers", "controller.sock"),
+        ...paneIdentity(65432),
+      });
+      expect(commands.filter((command) => command[3] === "new-window")).toHaveLength(2);
+      expect(commands.filter((command) => command[3] === "new-session")).toHaveLength(1);
+      const logged = errorLog.mock.calls.map((call) => String(call[0]));
+      const recoveryLines = logged.filter(
+        (line) =>
+          line.includes(
+            "tmux new-window for controller failed after has-session reported legion-omp present"
+          ) && line.includes(noServer)
+      );
+      expect(recoveryLines).toHaveLength(1);
+      expect(logged.some((line) => line.includes("failed to retire and respawn"))).toBe(false);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("a controller respawn whose new-window fails while the session still exists is logged with tmux's stderr (LEGION-89)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const staleLocator = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: path.join(stateDir, "workers", "controller.sock"),
+      ...paneIdentity(),
+    };
+    state.controllerLocator = { ...staleLocator };
+    const sleepGate = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    const commands: string[][] = [];
+    const respawnFailed = Promise.withResolvers<unknown>();
+    const errorLog = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("failed to retire and respawn a stuck controller")) {
+        respawnFailed.resolve(args[1]);
+      }
+    });
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await sleepGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        if (command[3] === "list-panes") return livePanes(command);
+        if (command[3] === "new-window") {
+          return { stdout: "", stderr: "create window failed: fork failed", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.ensureController();
+      sleepGate.resolve();
+      const error = await respawnFailed.promise;
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        "tmux new-window failed (exit 1): create window failed: fork failed"
+      );
+      expect(managedState.controllerLocator).toBeUndefined();
+      expect(commands.filter((command) => command[3] === "new-window")).toHaveLength(1);
+      expect(commands.filter((command) => command[3] === "new-session")).toHaveLength(0);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("dispose() cancels a pending controller-registration deadline so its stale expiry never retires or respawns", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
