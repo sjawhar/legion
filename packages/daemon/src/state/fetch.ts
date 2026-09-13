@@ -72,6 +72,10 @@ export async function defaultRunner(
 
   let killed = false;
   const killTimeout = setTimeout(() => {
+    // A child that has already exited (its stdio pipes may still be held open by a grandchild
+    // the runner is draining) was not killed by us: reporting a timeout for it would send a probe
+    // that finished inside the timer's slack back into a retry it never needed.
+    if (proc.exitCode !== null) return;
     killed = true;
     try {
       proc.kill();

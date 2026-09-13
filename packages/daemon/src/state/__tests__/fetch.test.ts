@@ -25,7 +25,16 @@ describe("defaultRunner", () => {
   it("reports no timeout for a command that exits on its own", async () => {
     const result = await defaultRunner(["true"]);
     expect(result.exitCode).toBe(0);
-    expect("timedOut" in result).toBeFalse();
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("does not report a timeout for a command that already exited when the timer fired, even if its pipes were still open", async () => {
+    // The shell exits 0 at once; the backgrounded sleep inherits the stdio pipes and holds them
+    // past the 200 ms budget, so the kill timer fires while the runner is still draining output
+    // from a child that has already exited. That is not a timeout of the command.
+    const result = await defaultRunner(["sh", "-c", "sleep 1 & exit 0"], { timeoutMs: 200 });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBeUndefined();
   });
 });
 
