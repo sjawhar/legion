@@ -94,9 +94,45 @@ case "${1:-}" in
   *) printf 'controller\nlegsmoke-1\nlegsmoke-2\n' ;;
 esac
 EOF
+# Serves GitHub fixtures the way the fake curl serves Dispatch ones, dispatching on the argument
+# list and logging every call to GH_LOG: `pr list …` prints PR_LIST_OUTPUT (a JSON array of
+# `{number, headRefName}`; `[]` when unset); `api …/pulls/<n>/commits…` PR_COMMITS_FILE;
+# `api …/pulls/<n>/reviews…` PR_REVIEWS_FILE — the concatenated pages a real `--paginate` prints;
+# `api …/pulls/<n>/files…` PR_FILES_FILE; `api …/pulls/<n>` PR_FILE; `api …/commits/<sha>` the
+# per-SHA view `${COMMIT_DIR}/<sha>.json`; `api …/git/ref/heads/main --jq .object.sha` a fixed
+# SHA. Anything else fails naming the call.
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+request="$*"
+printf '%s\n' "$request" >>"${GH_LOG:-/dev/null}"
+serve() {
+  [[ -n "${!1:-}" && -r "${!1}" ]] || {
+    printf 'fake gh: %s is unset or unreadable for: %s\n' "$1" "$request" >&2
+    exit 1
+  }
+  cat "${!1}"
+}
+case "$request" in
+  "pr list "*) printf '%s\n' "${PR_LIST_OUTPUT:-[]}" ;;
+  "api "*"/pulls/"*"/commits"*) serve PR_COMMITS_FILE ;;
+  "api "*"/pulls/"*"/reviews"*) serve PR_REVIEWS_FILE ;;
+  "api "*"/pulls/"*"/files"*) serve PR_FILES_FILE ;;
+  "api "*"/git/ref/heads/main "*) printf 'feedfacefeedfacefeedfacefeedfacefeedface\n' ;;
+  "api "*"/commits/"*)
+    sha="${request##*/commits/}"
+    sha="${sha%% *}"
+    [[ -r "${COMMIT_DIR:-}/${sha}.json" ]] || {
+      printf 'fake gh: no commit view fixture at %s for: %s\n' "${COMMIT_DIR:-}/${sha}.json" "$request" >&2
+      exit 1
+    }
+    cat "${COMMIT_DIR}/${sha}.json"
+    ;;
+  "api "*"/pulls/"*) serve PR_FILE ;;
+  *)
+    printf 'unexpected gh call: %s\n' "$request" >&2
+    exit 1
+    ;;
+esac
 EOF
 chmod +x "${fake_bin}/curl" "${fake_bin}/gh" "${fake_bin}/tmux"
 
@@ -501,13 +537,15 @@ if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
   SMOKE_PROJECT="example-org/24" \
+  SMOKE_IMPLEMENTER_LOGIN='legion-implementer[bot]' \
+  SMOKE_REVIEWER_LOGIN='legion-reviewer[bot]' \
   bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
   printf 'expected checkpoint 5 to require a PR fixture\n' >&2
   exit 1
 else
   status=$?
 fi
-[[ "$status" == 1 && "$(<"$output_file")" == *'set SMOKE_PR or open a legion/issue-* pull request'* ]] || {
+[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 5 FAILED: set SMOKE_PR or open a legion/<KEY> pull request'* ]] || {
   cat "$output_file" >&2
   exit 1
 }
@@ -544,13 +582,15 @@ if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
   SMOKE_PROJECT="example-org/24" \
+  SMOKE_IMPLEMENTER_LOGIN='legion-implementer[bot]' \
+  SMOKE_REVIEWER_LOGIN='legion-reviewer[bot]' \
   bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
   printf 'expected checkpoint 5 under forward to require a PR fixture\n' >&2
   exit 1
 else
   status=$?
 fi
-[[ "$status" == 1 && "$(<"$output_file")" == *'set SMOKE_PR or open a legion/issue-* pull request'* ]] || {
+[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 5 FAILED: set SMOKE_PR or open a legion/<KEY> pull request'* ]] || {
   printf 'expected forward mode to let checkpoint 5 past the mode gate to its PR-fixture check; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
   exit 1
 }
@@ -786,6 +826,200 @@ fi
   exit 1
 }
 printf 'PASS: checkpoint 9 fails with a clear message when the root issue is not done\n'
+
+# LEGION-85: checkpoints 5 and 7 read GitHub only, through the fake gh above. The identities are
+# the two Legion GitHub App bots exactly as GitHub reports them on a finished Legion pull request:
+# `<slug>[bot]` as the login, `<app id>+<slug>[bot]@users.noreply.github.com` as the email.
+github_dir="${temporary_dir}/github"
+commit_dir="${github_dir}/commits"
+mkdir -p "$commit_dir"
+export COMMIT_DIR="$commit_dir"
+export GH_LOG="${temporary_dir}/gh.log"
+implementer='legion-implementer[bot]'
+reviewer='legion-reviewer[bot]'
+implementer_email="271566630+${implementer}@users.noreply.github.com"
+reviewer_email="271566912+${reviewer}@users.noreply.github.com"
+trailer='Omp-Session: 01a099d3-3247-7000-87ef-9b63eff44185'
+pr_file="${github_dir}/pull.json"
+pr_commits_file="${github_dir}/commits.json"
+pr_reviews_file="${github_dir}/reviews.json"
+pr_files_file="${github_dir}/files.json"
+export PR_FILE="$pr_file" PR_COMMITS_FILE="$pr_commits_file" PR_REVIEWS_FILE="$pr_reviews_file" PR_FILES_FILE="$pr_files_file"
+
+# One entry of `…/pulls/<n>/commits`: sha, author login, author email, committer login, committer
+# email, message.
+list_commit() {
+  jq -cn --arg sha "$1" --arg alogin "$2" --arg aemail "$3" --arg clogin "$4" --arg cemail "$5" --arg message "$6" '{
+    sha: $sha, author: {login: $alogin}, committer: {login: $clogin},
+    commit: {author: {email: $aemail, date: "2026-09-13T10:00:00Z"},
+             committer: {email: $cemail, date: "2026-09-13T10:00:00Z"}, message: $message}
+  }'
+}
+# The `…/commits/<sha>` view checkpoint 7 reads: sha, author login, committer login, committer
+# date, files (a JSON array of `{filename, status}`).
+write_commit_view() {
+  jq -cn --arg sha "$1" --arg alogin "$2" --arg clogin "$3" --arg date "$4" --argjson files "$5" '{
+    sha: $sha, author: {login: $alogin}, committer: {login: $clogin},
+    commit: {author: {date: $date}, committer: {date: $date}}, files: $files
+  }' >"${commit_dir}/$1.json"
+}
+# Writes the reviews fixture from `<login> <state> <submitted_at>` rows on stdin, as one page.
+write_reviews() {
+  jq -Rc '[inputs | select(length > 0) | split(" ") | {user: {login: .[0]}, state: .[1], submitted_at: .[2]}]' -n >"$pr_reviews_file"
+}
+run_github_checkpoint() {
+  PATH="${fake_bin}:${PATH}" \
+    SMOKE_DIR="$smoke_dir" \
+    SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" \
+    SMOKE_BRANCH_PROTECTION=1 \
+    SMOKE_PR="${SMOKE_PR-7}" \
+    SMOKE_RETRO_COMMIT="${SMOKE_RETRO_COMMIT-retro1}" \
+    SMOKE_IMPLEMENTER_LOGIN="${SMOKE_IMPLEMENTER_LOGIN-$implementer}" \
+    SMOKE_REVIEWER_LOGIN="$reviewer" \
+    bash "$checkpoints_script" "$@" >"$output_file" 2>&1
+}
+
+# The finished pull request: head `legion/LEGSMOKE-1`; an implementer commit, then a commit the
+# reviewer made in the shared workspace (committer reviewer, author inherited from the
+# implementer's working copy), both with the trailer.
+printf '%s' '{"number":7,"state":"closed","head":{"ref":"legion/LEGSMOKE-1","sha":"c3c3c3"}}' >"$pr_file"
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement (LEGSMOKE-1)"$'\n\n'"$trailer")" \
+  --argjson c2 "$(list_commit c2c2c2 "$implementer" "$implementer_email" "$reviewer" "$reviewer_email" "review: record handoff"$'\n\n'"$trailer")" \
+  '[$c1, $c2]' >"$pr_commits_file"
+run_github_checkpoint 5
+expect_output 'CHECKPOINT 5 OK: PR #7 on legion/LEGSMOKE-1: 2 commits carry App bot identity (legion-implementer[bot] committed 1) and an Omp-Session trailer'
+grep -Fxq 'api repos/example-org/legion-smoke/pulls/7' "$GH_LOG"
+grep -Fxq 'api repos/example-org/legion-smoke/pulls/7/commits?per_page=100' "$GH_LOG"
+printf 'PASS: checkpoint 5 passes on a legion/<KEY> head whose commits carry App bot identity and the Omp-Session trailer, with one committed by each App\n'
+
+# A commit a human committed: the failure names the SHA, the field, and the login found.
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  --argjson c2 "$(list_commit c2c2c2 "$implementer" "$implementer_email" octocat "octocat@example.com" "fix: by hand"$'\n\n'"$trailer")" \
+  '[$c1, $c2]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed with a human committer\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 commit c2c2c2: committer.login is octocat, not legion-implementer[bot] or legion-reviewer[bot]'
+# An App login whose email is not that App's no-reply address (a `git config` override).
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "legion@example.com" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  '[$c1]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed with a non-no-reply email\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 commit c1c1c1: commit.author.email is legion@example.com, not <id>+legion-implementer[bot]@users.noreply.github.com'
+printf 'PASS: checkpoint 5 fails naming the commit, the field, and the value when an identity is not an App bot with its no-reply address\n'
+
+# A commit without the trailer (a corrective-round commit whose pane wrote none, and a trailer
+# key mentioned mid-line rather than as a trailer line, are both misses).
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  --argjson c2 "$(list_commit c2c2c2 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "fix: round 2"$'\n\n'"see ${trailer}")" \
+  '[$c1, $c2]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed with a commit lacking the Omp-Session trailer\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 commit c2c2c2: commit.message carries no Omp-Session: <uuid> trailer line'
+printf 'PASS: checkpoint 5 fails naming the commit that carries no Omp-Session trailer\n'
+
+# Only the reviewer App committed: the code-writing App wrote nothing.
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$reviewer" "$reviewer_email" "$reviewer" "$reviewer_email" "plan: record handoff"$'\n\n'"$trailer")" \
+  '[$c1]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed with no implementer-committed commit\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 has no commit committed by legion-implementer[bot] (the code-writing App wrote none of its 1 commits)'
+printf 'PASS: checkpoint 5 fails naming the implementer login when no commit was committed by it\n'
+
+# A head that is not a Legion issue branch (the bookmark is `legion/<KEY>`, the key upper-case).
+printf '%s' '{"number":7,"state":"closed","head":{"ref":"feature/LEGSMOKE-1","sha":"c3c3c3"}}' >"$pr_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed on a non-Legion head branch\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 head branch is feature/LEGSMOKE-1, not a Legion issue branch legion/<KEY>'
+printf 'PASS: checkpoint 5 fails naming a head branch that is not legion/<KEY>\n'
+printf '%s' '{"number":7,"state":"closed","head":{"ref":"legion/LEGSMOKE-1","sha":"c3c3c3"}}' >"$pr_file"
+
+# No vacuous pass: an empty commit list and a full first page both fail naming the count.
+printf '[]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed on an empty commit list\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 has no commits (0 listed)'
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  '[range(100) | $c1]' >"$pr_commits_file"
+run_github_checkpoint 5 && { printf 'checkpoint 5 passed on a full page of 100 commits\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: PR #7 lists 100 commits on the first page of 100, so the list may be truncated; nothing was checked'
+printf 'PASS: checkpoint 5 fails naming the count on an empty or a possibly truncated commit list\n'
+
+# The new required input.
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  '[$c1]' >"$pr_commits_file"
+SMOKE_IMPLEMENTER_LOGIN='' run_github_checkpoint 5 && { printf 'checkpoint 5 passed without SMOKE_IMPLEMENTER_LOGIN\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: SMOKE_IMPLEMENTER_LOGIN is required'
+SMOKE_IMPLEMENTER_LOGIN='' run_github_checkpoint 7 && { printf 'checkpoint 7 passed without SMOKE_IMPLEMENTER_LOGIN\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 7 FAILED: SMOKE_IMPLEMENTER_LOGIN is required'
+printf 'PASS: checkpoints 5 and 7 require SMOKE_IMPLEMENTER_LOGIN\n'
+
+# smoke_pr without SMOKE_PR: the repository's one legion/<KEY> pull request is used (a branch
+# that is not one is ignored); two candidates fail naming both and asking for SMOKE_PR.
+PR_LIST_OUTPUT='[{"number":8,"headRefName":"feature/other"},{"number":7,"headRefName":"legion/LEGSMOKE-1"}]' \
+  SMOKE_PR='' run_github_checkpoint 5
+expect_output 'CHECKPOINT 5 OK: PR #7 on legion/LEGSMOKE-1: 1 commits carry App bot identity'
+grep -Fxq 'pr list -R example-org/legion-smoke --state all --limit 100 --json number,headRefName' "$GH_LOG"
+PR_LIST_OUTPUT='[{"number":7,"headRefName":"legion/LEGSMOKE-1"},{"number":9,"headRefName":"legion/LEGSMOKE-4"}]' \
+  SMOKE_PR='' run_github_checkpoint 5 && { printf 'checkpoint 5 guessed one of two Legion pull requests\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: SMOKE_PR is unset and example-org/legion-smoke has 2 legion/<KEY> pull requests: #7 (legion/LEGSMOKE-1), #9 (legion/LEGSMOKE-4); set SMOKE_PR to the one this exercise opened'
+printf 'PASS: without SMOKE_PR the one legion/<KEY> pull request is used, and two candidates fail naming both\n'
+
+# Checkpoint 7: the retro commit touches docs/solutions/; the .legion deletion c3 is committed by
+# the implementer at 12:00 and the reviewer approves at 12:05; the final diff has no .legion path;
+# main's SHA is recorded for checkpoint 8.
+write_commit_view retro1 "$reviewer" "$reviewer" "2026-09-13T12:10:00Z" '[{"filename":"docs/solutions/legion/legsmoke-1.md","status":"added"}]'
+write_commit_view c1c1c1 "$implementer" "$implementer" "2026-09-13T10:00:00Z" '[{"filename":"src/x.ts","status":"modified"},{"filename":".legion/implement.json","status":"added"}]'
+write_commit_view c3c3c3 "$implementer" "$implementer" "2026-09-13T12:00:00Z" '[{"filename":".legion/implement.json","status":"removed"},{"filename":".legion/plan.json","status":"removed"}]'
+jq -cn --argjson c1 "$(list_commit c1c1c1 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "feat: implement"$'\n\n'"$trailer")" \
+  --argjson c3 "$(list_commit c3c3c3 "$implementer" "$implementer_email" "$implementer" "$implementer_email" "docs(legion): remove phase handoffs"$'\n\n'"$trailer")" \
+  '[$c1, $c3]' >"$pr_commits_file"
+write_reviews <<EOF
+${reviewer} COMMENTED 2026-09-13T11:00:00Z
+${reviewer} APPROVED 2026-09-13T12:05:00Z
+EOF
+printf '%s' '[{"filename":"src/x.ts","status":"modified"},{"filename":"docs/solutions/legion/legsmoke-1.md","status":"added"}]' >"$pr_files_file"
+run_github_checkpoint 7
+expect_output 'CHECKPOINT 7 OK: .legion deletion c3c3c3 committed by legion-implementer[bot], legion-reviewer[bot] approved after it, retro retro1 is durable, and the final diff has no .legion path'
+grep -Fxq 'api --paginate repos/example-org/legion-smoke/pulls/7/reviews?per_page=100' "$GH_LOG"
+[[ "$(<"${smoke_dir}/base-at-merge")" == feedfacefeedfacefeedfacefeedfacefeedface ]] || {
+  printf 'checkpoint 7 did not record main at %s/base-at-merge\n' "$smoke_dir" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 7 passes on an implementer-committed .legion deletion followed by the reviewer approval, reading every review page\n'
+
+# The reviewer made the deletion commit locally in the shared workspace and the implementer's
+# push carried it: author inherited from the implementer, committer the reviewer. Still an App.
+write_commit_view c3c3c3 "$implementer" "$reviewer" "2026-09-13T12:00:00Z" '[{"filename":".legion/implement.json","status":"removed"}]'
+run_github_checkpoint 7
+expect_output 'CHECKPOINT 7 OK: .legion deletion c3c3c3 committed by legion-reviewer[bot], legion-reviewer[bot] approved after it'
+printf 'PASS: checkpoint 7 passes on a reviewer-committed .legion deletion the implementer pushed\n'
+
+# A human committed the deletion: the failure names the SHA, the field, and the login.
+write_commit_view c3c3c3 "$implementer" octocat "2026-09-13T12:00:00Z" '[{"filename":".legion/implement.json","status":"removed"}]'
+run_github_checkpoint 7 && { printf 'checkpoint 7 passed on a human-committed .legion deletion\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 7 FAILED: the .legion deletion commit c3c3c3: committer.login is octocat, not legion-implementer[bot] or legion-reviewer[bot]'
+printf 'PASS: checkpoint 7 fails naming the deletion commit, the field, and the login when a human committed it\n'
+
+# The approval was submitted before the deletion landed (existing message).
+write_commit_view c3c3c3 "$implementer" "$implementer" "2026-09-13T12:00:00Z" '[{"filename":".legion/implement.json","status":"removed"}]'
+write_reviews <<EOF
+${reviewer} APPROVED 2026-09-13T11:55:00Z
+EOF
+run_github_checkpoint 7 && { printf 'checkpoint 7 passed with the approval before the deletion\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 7 FAILED: reviewer approval did not follow the .legion deletion'
+printf 'PASS: checkpoint 7 fails when the reviewer approval precedes the .legion deletion\n'
+
+# 31 reviews: GitHub pages them 30 at a time and the approval is the 31st, on page 2. The fake gh
+# serves `--paginate` as a real one does -- the pages printed one after another -- and the
+# checkpoint flattens them.
+{
+  jq -cn --arg reviewer "$reviewer" '[range(30) | {user: {login: $reviewer}, state: "COMMENTED", submitted_at: "2026-09-13T11:\(. + 10):00Z"}]'
+  jq -cn --arg reviewer "$reviewer" '[{user: {login: $reviewer}, state: "APPROVED", submitted_at: "2026-09-13T12:05:00Z"}]'
+} >"$pr_reviews_file"
+run_github_checkpoint 7
+expect_output 'CHECKPOINT 7 OK: .legion deletion c3c3c3 committed by legion-implementer[bot], legion-reviewer[bot] approved after it'
+printf 'PASS: checkpoint 7 finds the approval on the second page of a 31-review pull request\n'
+
+# No commit removes a .legion/ path.
+write_commit_view c3c3c3 "$implementer" "$implementer" "2026-09-13T12:00:00Z" '[{"filename":"src/y.ts","status":"modified"}]'
+run_github_checkpoint 7 && { printf 'checkpoint 7 passed without a .legion deletion commit\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 7 FAILED: PR #7 has no commit that removes a .legion/ path'
+printf 'PASS: checkpoint 7 fails when no commit removes a .legion/ path\n'
 
 rm -f "${smoke_dir}/daemon/state.json"
 if PATH="${fake_bin}:${PATH}" \
