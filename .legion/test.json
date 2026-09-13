@@ -1,11 +1,11 @@
 {
-  "passed": 12,
+  "passed": 13,
   "failed": 0,
   "failures": [],
-  "head": "aedcc575914b3ea8d28bcf41c945601907d2d510",
+  "head": "def77cccdb7098e0ab27a19ec25d91a227b56172",
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
-  "proof": "dispatch://LEGION-37/artifact/tester-proof-round4-md",
-  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round4-tar-gz",
+  "proof": "dispatch://LEGION-37/artifact/tester-proof-round5-md",
+  "evidence": "see rounds[].evidence",
   "rounds": [
     {
       "passed": 9,
@@ -237,6 +237,54 @@
       "observations": [
         "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll."
       ]
+    },
+    {
+      "round": 5,
+      "head": "def77cccdb7098e0ab27a19ec25d91a227b56172",
+      "baseHead": "aedcc575914b3ea8d28bcf41c945601907d2d510",
+      "scope": "delta 889c4498..def77ccc: in workerReady's ready-time bystander retire the boot is confirmed in memory (pending cleared, readyConfirmedAt set, launchFailures reset) BEFORE retireWorkerLocator; the post-retire cancelBootWatchdog(token, generation) dropped; isBystanderRole doc agrees with resumeWorker's on the root architect. Answers review round 3 (pullrequestreview-5189806485).",
+      "specVersion": 6,
+      "passed": 1,
+      "failed": 0,
+      "failures": [],
+      "proof": "dispatch://LEGION-37/artifact/tester-proof-round5-md",
+      "evidence": "unit-only round; no rig run by design (see rig.reason)",
+      "acceptance": [
+        {
+          "criterion": "review round 3: a StopFailed from the ready-time retire leaves retireIdleWorker's own StopFailed shape (locator intact, boot confirmed, catch-up gone) that the next spawn_worker recovers through the live-claim probe path instead of queueing forever on the booting branch",
+          "verdict": "pass",
+          "evidence": "processes.test.ts 'confirms the boot before the ready-time bystander retire, so a StopFailed leaves a confirmed live claim ...': kill-pane exit 1 / stderr 'lost server' (not a PANE_GONE_STDERR shape, runtime-tmux.ts:25-26 -> ProcessStopFailed :330 -> StopFailed) after an unreachable shim; asserts the StopFailed rejection, tmuxPaneId still %2, readyConfirmedAt set, launchFailures cleared, pendingAssignment undefined, phase untouched, then spawnWorker(tester) -> {status: resumed} with client.prompts == ['verify #42'] and phases = tester. Mutation 9 (round-4 stop-then-confirm order restored) fails it at processes.test.ts:3612 expect(claim.readyConfirmedAt).toBeDefined(). Statement-set diff aedcc575 vs def77ccc: only 'this.cancelBootWatchdog(token, generation);' removed; retireWorkerLocator (processes.ts:2940-2945) calls cancelBootWatchdog(token) at :2941 and WorkerBootWatchdog.cancel with generation undefined cancels whatever is armed (worker-boot-watchdog.ts:96-99), so the dropped call could never cancel anything. Round-4 happy-path test byte-identical across the two heads (sha256 bb42c54d... both) and green. Both review-round-3 replies (3998924762, 3998925090) match the diff verbatim."
+        }
+      ],
+      "unit": {
+        "tsc": "bunx tsc --noEmit exit 0",
+        "biome": "bunx biome check src/: 147 files, no fixes, exit 0",
+        "tests": "bun test legion-state api processes reducers index: 409 pass / 0 fail / 3 skip (412 tests, 5 files)",
+        "mutations": [
+          "9 revert ordering (retire before confirm) -> new StopFailed test fails at :3612 readyConfirmedAt toBeDefined (3 expect() calls: rejection and intact locator passed first)",
+          "7 retire -> bare pending-clear -> round-4 test fails at :3505 expect(shutdownCalls).toEqual(['tester'])",
+          "8 promoteWorkerQueue() drain removed -> round-4 test times out at await plannerStarted.promise (10 expect() calls passed)"
+        ]
+      },
+      "rig": {
+        "ran": false,
+        "reason": "The delta is an error-path ordering change: the failure it handles is a real kill-pane error on a live pane, which the rig cannot inject without corrupting its own private tmux server, and the happy path is byte-identical to round 4 (proved there on the rig). The unit test injects the failure at the runtime boundary (run fixture answering kill-pane with a non-PANE_GONE stderr)."
+      },
+      "findings": [
+        {
+          "severity": "blocking",
+          "file": "packages/daemon/src/daemon/legion-state.ts",
+          "description": "PR #991 is CONFLICTING with main (gh: mergeable false, mergeStateStatus DIRTY). A read-only `git merge-tree --write-tree main(d1eea37c, #1001) def77ccc` conflicts in legion-state.ts and __tests__/legion-state.test.ts: #1001 already bumped the state schema to v25 (its migrateV24State is a pure version bump) and this branch also declares z.literal(25)/version 25 with its own payload-classifying migrateV24State. Production's state.json is already version 25 under main's meaning (the production checkout runs main). This branch's migration therefore has to become v25 -> v26 (schema literal, newLegionState, loadState check, the migrations array, tests, AGENTS.md 'v24 -> v25'), and round 1's (d) rig proof (a main-written v24 file -> .v24.bak + v25 {kind, task}) must be re-run against a main-written v25 file once rebased -- otherwise a bare-string pendingAssignment in a v25 production state would fail this branch's strict PendingAssignmentSchema at boot with no migration to classify it. Per Sami's 2026-09-11 ruling this is the one case a rebase is required. Not fixed by the tester."
+        },
+        {
+          "severity": "info",
+          "file": ".github",
+          "description": "No CI run exists at def77ccc (actions/runs?head_sha -> 0, no check-runs, 15+ minutes after the 06:20Z push): GitHub creates no merge ref for a CONFLICTING pull request, so pull_request-triggered workflows do not start. The CI line cannot be filled until the conflict above is resolved; CI at c493afa8/aedcc575/115c55fd/143dd0d1/5d895442/910c527f remains green."
+        }
+      ],
+      "observations": [
+        "The kernel-driven bash lacks the pi-envoy grant hook (LEGION_GRANT_FILE is missing); every legion gh / jj git push / legion handoff call in rounds 3-5 went through the tool bash where the extension injects it."
+      ]
     }
   ],
   "observations": [
@@ -250,7 +298,8 @@
     "Shared-name hazard for concurrent rigs: scripts/smoke/{up,down}.sh assume one legion-smoke-nats container per box; a second rig must not run down.sh while another rig's container is live.",
     "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
     "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction.",
-    "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll."
+    "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll.",
+    "The kernel-driven bash lacks the pi-envoy grant hook (LEGION_GRANT_FILE is missing); every legion gh / jj git push / legion handoff call in rounds 3-5 went through the tool bash where the extension injects it."
   ],
   "findings": [
     {
@@ -258,9 +307,19 @@
       "file": "packages/daemon/src/daemon/processes.ts",
       "description": "The ready-time retire branch frees the slot in state but never calls promoteWorkerQueue(), and because clientFor was never called for the relaunched pane there is no cached client whose close reaches onWorkerClientClosed -> markWorkerDead -> promoteWorkerQueue() (the path that gives retireIdleWorker an immediate drain, processes.ts:862). A spawn already queued behind the cap is promoted only by the next 60 s linger sweep's reconcileWorkerAdmission() (index.ts:708): measured 5.3 s and 33.3 s after the retire, both landing on the :12-:13 sweep tick of startedAt 05:31:12.317, with the other slot-holder still mid-task both times. Bounded (<= 60 s), no starvation, no acceptance line sets a latency; the reviewer's ask (no pane held at runState unknown) is met. A one-line promoteWorkerQueue() after the branch's persist would make it immediate; architect's call whether it lands here or as a fast-follow.",
       "resolved": "closed by aedcc575 (round 4)"
+    },
+    {
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/legion-state.ts",
+      "description": "PR #991 is CONFLICTING with main (gh: mergeable false, mergeStateStatus DIRTY). A read-only `git merge-tree --write-tree main(d1eea37c, #1001) def77ccc` conflicts in legion-state.ts and __tests__/legion-state.test.ts: #1001 already bumped the state schema to v25 (its migrateV24State is a pure version bump) and this branch also declares z.literal(25)/version 25 with its own payload-classifying migrateV24State. Production's state.json is already version 25 under main's meaning (the production checkout runs main). This branch's migration therefore has to become v25 -> v26 (schema literal, newLegionState, loadState check, the migrations array, tests, AGENTS.md 'v24 -> v25'), and round 1's (d) rig proof (a main-written v24 file -> .v24.bak + v25 {kind, task}) must be re-run against a main-written v25 file once rebased -- otherwise a bare-string pendingAssignment in a v25 production state would fail this branch's strict PendingAssignmentSchema at boot with no migration to classify it. Per Sami's 2026-09-11 ruling this is the one case a rebase is required. Not fixed by the tester."
+    },
+    {
+      "severity": "info",
+      "file": ".github",
+      "description": "No CI run exists at def77ccc (actions/runs?head_sha -> 0, no check-runs, 15+ minutes after the 06:20Z push): GitHub creates no merge ref for a CONFLICTING pull request, so pull_request-triggered workflows do not start. The CI line cannot be filled until the conflict above is resolved; CI at c493afa8/aedcc575/115c55fd/143dd0d1/5d895442/910c527f remains green."
     }
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T05:59:05.601Z"
+  "completed": "2026-09-13T06:28:51.872Z"
 }
