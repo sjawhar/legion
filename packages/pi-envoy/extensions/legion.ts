@@ -189,10 +189,11 @@ function jjLogRewriteMention(text: string): string | undefined {
 }
 
 /** Splits a shell command into simple commands (at `;`, `&`, `|`, newline, `(`, `)`, and
- * backtick) of words, honouring single quotes, double quotes, and backslash escapes. A word is
- * its unquoted text -- the argv bash would build -- so quoting never changes a verdict.
- * Undefined on an unterminated quote: the caller then applies the plain-text rule to the whole
- * command, never allows it. Not a shell parser -- no expansions, no heredoc awareness -- and
+ * backtick) of words, honouring single quotes, double quotes, backslash escapes, backslash-newline
+ * continuation, and redirection operators (`<`, `>`, `>&`, `<&`, `&>` end a word, never the simple
+ * command). A word is its unquoted text -- the argv bash would build -- so quoting never changes a
+ * verdict. Undefined on an unterminated quote: the caller then applies the plain-text rule to the
+ * whole command, never allows it. Not a shell parser -- no expansions, no heredoc awareness -- and
  * every gap errs toward refusing (a heredoc body is read as commands). */
 function splitShellCommands(command: string): string[][] | undefined {
   const commands: string[][] = [];
@@ -224,12 +225,22 @@ function splitShellCommands(command: string): string[][] | undefined {
       quote = char;
       inWord = true;
     } else if (char === "\\") {
-      if (i + 1 < command.length) {
+      // Backslash-newline is line continuation: both characters vanish, the word continues.
+      if (command.charAt(i + 1) === "\n") i += 1;
+      else if (i + 1 < command.length) {
         i += 1;
         text += command.charAt(i);
         inWord = true;
       }
-    } else if (char === " " || char === "\t") {
+    } else if (char === " " || char === "\t" || char === "<" || char === ">") {
+      // A redirection operator ends the word before it and belongs to the same simple command:
+      // `jj undo>/dev/null` is `jj undo`, and `2>&1`'s operands are harmless extra words.
+      endWord();
+    } else if (
+      char === "&" &&
+      (command.charAt(i - 1) === ">" || command.charAt(i - 1) === "<" || command.charAt(i + 1) === ">")
+    ) {
+      // The `&` of `>&`, `<&`, and `&>` is part of the redirection, not a command terminator.
       endWord();
     } else if (";&|\n()`".includes(char)) {
       endCommand();
