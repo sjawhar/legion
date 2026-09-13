@@ -69,7 +69,9 @@ test("project board persists reordering, lets humans close and reopen, and expla
 
     await page.getByRole("button", { name: "Board" }).click();
     const daemonColumn = page.getByRole("region", { name: "In progress" });
-    await expect(daemonColumn).toContainText(
+    const daemonLock = daemonColumn.getByRole("img", { name: "Daemon controlled" });
+    await expect(daemonLock).toHaveAttribute(
+      "aria-description",
       "Only the Legion daemon can move issues to In progress."
     );
     const firstHandle = page.getByRole("button", { name: `Reorder ${first.key}` });
@@ -100,6 +102,7 @@ test("project board persists reordering, lets humans close and reopen, and expla
 
     if (testInfo.project.name === "chromium") {
       const thirdHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
+      await thirdHandle.scrollIntoViewIfNeeded();
       const thirdBox = await thirdHandle.boundingBox();
       if (thirdBox === null) {
         throw new Error("board card is not visible for close drag");
@@ -190,6 +193,37 @@ test("project list and board cards show an issue priority", async ({ browser }) 
         .getByRole("article", { name: `${issue.key} Prioritized card` })
         .getByText("P1", { exact: true })
     ).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("board scrolls horizontally inside its own container at 1100px", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the board scroll check exercises a desktop viewport"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Board scrolls without widening the page" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+    const boardScroller = page.getByTestId("board-scroll-container");
+    await expect(boardScroller).toBeVisible();
+    const dimensions = await boardScroller.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      pageWidth: document.documentElement.scrollWidth,
+      scrollWidth: element.scrollWidth,
+      viewportWidth: window.innerWidth,
+    }));
+    expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
+    expect(dimensions.pageWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
   } finally {
     await context.close();
   }

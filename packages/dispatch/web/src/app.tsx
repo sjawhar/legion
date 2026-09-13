@@ -16,6 +16,7 @@ import { SettingsPage } from "./features/settings/SettingsPage";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
+import { userPreferenceStorageKey } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import {
   backdrop50,
@@ -49,6 +50,13 @@ import {
   textSecondaryOnSurface,
   textTransparent,
 } from "./theme/classes";
+
+const DEFAULT_MARGIN_WIDTH = 384;
+function marginWidthFromStorage(storageKey: string): number {
+  const storedWidth = window.localStorage.getItem(storageKey);
+  const parsedWidth = Number(storedWidth);
+  return storedWidth !== null && Number.isInteger(parsedWidth) ? parsedWidth : DEFAULT_MARGIN_WIDTH;
+}
 
 const IssuePage = lazy(() =>
   import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
@@ -205,6 +213,7 @@ function NavigationContents({
   closeButtonRef,
   compact,
   onClose,
+  onHideSidebar,
   onSearch,
   onSignOut,
   signOutError,
@@ -214,6 +223,7 @@ function NavigationContents({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   compact: boolean;
   onClose: () => void;
+  onHideSidebar: () => void;
   onSearch: () => void;
   onSignOut: () => void;
   signOutError: boolean;
@@ -261,7 +271,7 @@ function NavigationContents({
           </button>
         </p>
       ) : null}
-      <Sidebar onNavigate={onClose} user={user} />
+      <Sidebar onHide={compact ? undefined : onHideSidebar} onNavigate={onClose} user={user} />
     </>
   );
 }
@@ -270,6 +280,43 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const sidebarStorageKey = userPreferenceStorageKey(user.login, "shell.sidebar");
+  const marginStorageKey = userPreferenceStorageKey(user.login, "shell.margin");
+  const marginWidthStorageKey = userPreferenceStorageKey(user.login, "shell.margin-width");
+  const [sidebarHidden, setSidebarHidden] = useState(
+    () => window.localStorage.getItem(sidebarStorageKey) === "hidden"
+  );
+  const [marginHidden, setMarginHidden] = useState(
+    () => window.localStorage.getItem(marginStorageKey) === "hidden"
+  );
+  const [marginWidth, setMarginWidth] = useState(() =>
+    marginWidthFromStorage(marginWidthStorageKey)
+  );
+  useEffect(() => {
+    setSidebarHidden(window.localStorage.getItem(sidebarStorageKey) === "hidden");
+    setMarginHidden(window.localStorage.getItem(marginStorageKey) === "hidden");
+    setMarginWidth(marginWidthFromStorage(marginWidthStorageKey));
+  }, [marginStorageKey, marginWidthStorageKey, sidebarStorageKey]);
+  const setSidebarVisibility = (hidden: boolean) => {
+    setSidebarHidden(hidden);
+    window.localStorage.setItem(sidebarStorageKey, hidden ? "hidden" : "shown");
+  };
+  const setMarginVisibility = (hidden: boolean) => {
+    setMarginHidden(hidden);
+    window.localStorage.setItem(marginStorageKey, hidden ? "hidden" : "shown");
+  };
+  const setPersistedMarginWidth = (width: number) => {
+    setMarginWidth(width);
+    window.localStorage.setItem(marginWidthStorageKey, String(width));
+  };
+  const mainLayoutClass =
+    sidebarHidden && marginHidden
+      ? "xl:w-full xl:pl-20 xl:pr-20"
+      : sidebarHidden
+        ? "xl:pl-20"
+        : marginHidden
+          ? "xl:pr-20"
+          : "";
   const connection = useConnectionState();
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
@@ -313,6 +360,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
+      onHideSidebar={() => setSidebarVisibility(true)}
       onSearch={() => setSearchOpen(true)}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
@@ -386,16 +434,33 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             </aside>
           </>
         ) : null}
-        {isCompactViewport ? null : (
+        {isCompactViewport ? null : sidebarHidden ? (
+          <aside
+            aria-label="Collapsed sidebar"
+            className={`fixed inset-y-0 left-0 z-10 flex w-14 justify-center border-r p-2 ${railBorder} ${railBg} ${railText}`}
+            data-testid="sidebar-rail"
+          >
+            <button
+              aria-label="Show sidebar"
+              className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
+              onClick={() => setSidebarVisibility(false)}
+              type="button"
+            >
+              <span aria-hidden="true">›</span>
+            </button>
+          </aside>
+        ) : (
           <aside
             aria-label="Navigation"
-            className={`order-1 min-h-dvh w-80 max-w-none border-r p-5 ${railBorder} ${railBg} ${railText}`}
+            className={`relative order-1 min-h-dvh w-80 max-w-none border-r p-5 ${railBorder} ${railBg} ${railText}`}
           >
             {navigation}
           </aside>
         )}
         <main
-          className="min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6"
+          className={`min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6 ${mainLayoutClass}`}
+          data-shell-layout={sidebarHidden && marginHidden ? "full-width" : "standard"}
+          data-testid="main-content"
           id="main-content"
           ref={mainRef}
           tabIndex={-1}
@@ -412,7 +477,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             </Routes>
           </Suspense>
         </main>
-        <Margin />
+        <Margin
+          collapsed={marginHidden}
+          onCollapsedChange={setMarginVisibility}
+          onWidthChange={setPersistedMarginWidth}
+          width={marginWidth}
+        />
         <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
       </div>
     </MarginProvider>

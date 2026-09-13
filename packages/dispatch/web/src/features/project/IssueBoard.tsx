@@ -40,7 +40,6 @@ import {
   surfaceMutedBg,
   surfaceMutedStrongBg,
   textMutedOnCanvas,
-  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -185,29 +184,44 @@ function BoardColumnView({
   return (
     <section
       aria-label={statusLabels[column.status]}
-      className={`shrink-0 ${column.issues.length === 0 ? "w-40" : "w-72"}`}
+      className="w-72 shrink-0"
       data-drop-disabled={dropDisabled ? "true" : undefined}
       ref={setNodeRef}
     >
       <header
-        className={`rounded-xl border px-3 py-3 ${borderDefault} ${surfaceMutedBg} ${
+        className={`min-h-[52px] rounded-xl border px-3 py-2 ${borderDefault} ${surfaceMutedBg} ${
           isOver ? cardHoverBorder : ""
         }`}
-        title={humanSettable ? undefined : daemonReason}
+        data-testid="board-column-header"
       >
         <div
-          className={`flex items-center justify-between gap-2 text-sm font-semibold ${textPrimaryOnSurface}`}
+          className={`grid grid-cols-[minmax(0,1fr)_1rem_auto] items-center gap-2 text-sm font-semibold ${textPrimaryOnSurface}`}
         >
           <span>{statusLabels[column.status]}</span>
+          <span className={`flex h-4 w-4 items-center justify-center ${textSecondaryOnSurface}`}>
+            {humanSettable ? null : (
+              <svg
+                aria-description={daemonReason}
+                aria-label="Daemon controlled"
+                className="h-4 w-4"
+                fill="none"
+                role="img"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                viewBox="0 0 20 20"
+              >
+                <title>{daemonReason}</title>
+                <rect height="8" rx="1.5" width="12" x="4" y="9" />
+                <path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9" />
+              </svg>
+            )}
+          </span>
           <span
             className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
           >
             {column.issues.length}
           </span>
         </div>
-        {humanSettable ? null : (
-          <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>{daemonReason}</p>
-        )}
       </header>
       {column.issues.length === 0 ? null : (
         <SortableContext
@@ -296,7 +310,7 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
   }
 
   return (
-    <section aria-label="Project board">
+    <section aria-label="Project board" className="min-w-0">
       {error === undefined ? null : (
         <div
           aria-live="assertive"
@@ -313,8 +327,8 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
         onDragStart={onDragStart}
         sensors={sensors}
       >
-        <div className="overflow-x-auto pb-3">
-          <div className="flex min-w-max items-start gap-4">
+        <div className="overflow-x-auto pb-3" data-testid="board-scroll-container">
+          <div className="flex w-max items-start gap-4">
             {groupIssuesByStatus(issues.data ?? []).map((column) => (
               <BoardColumnView activeStatus={activeStatus} column={column} key={column.status} />
             ))}

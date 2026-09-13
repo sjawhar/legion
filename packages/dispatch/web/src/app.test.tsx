@@ -177,3 +177,104 @@ test("project routes render the project page and a project document route", asyn
     window.matchMedia = originalMatchMedia;
   }
 });
+test("desktop shell persists collapsed sidebars and gives the main region the full layout", async () => {
+  const sidebarStorageKey = "dispatch.shell.sidebar:alice";
+  const marginStorageKey = "dispatch.shell.margin:alice";
+  const marginWidthStorageKey = "dispatch.shell.margin-width:alice";
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerWidth = window.innerWidth;
+  const innerWidthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  window.localStorage.removeItem(sidebarStorageKey);
+  window.localStorage.removeItem(marginStorageKey);
+  window.localStorage.removeItem(marginWidthStorageKey);
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  const first = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    await screen.findByRole("navigation", { name: "Navigation" });
+    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize margin" }), {
+      key: "ArrowLeft",
+    });
+    await waitFor(() => expect(window.localStorage.getItem(marginWidthStorageKey)).toBe("408"));
+    fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide margin" }));
+
+    expect(screen.getByRole("button", { name: "Show sidebar" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Show margin" })).toBeTruthy();
+    expect(screen.getByTestId("main-content").getAttribute("data-shell-layout")).toBe("full-width");
+    const main = screen.getByTestId("main-content");
+    expect(main.classList.contains("xl:w-full")).toBe(true);
+    expect(main.classList.contains("xl:pl-20")).toBe(true);
+    expect(main.classList.contains("xl:pr-20")).toBe(true);
+    expect(window.localStorage.getItem(sidebarStorageKey)).toBe("hidden");
+    expect(window.localStorage.getItem(marginStorageKey)).toBe("hidden");
+  } finally {
+    first.unmount();
+  }
+
+  const second = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    await screen.findByRole("button", { name: "Show sidebar" });
+    expect(screen.getByRole("button", { name: "Show margin" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show margin" }));
+    expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
+      "width: 408px"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Show sidebar" }));
+
+    await screen.findByRole("navigation", { name: "Navigation" });
+    expect(screen.getByRole("button", { name: "Hide margin" })).toBeTruthy();
+    expect(screen.getByTestId("main-content").getAttribute("data-shell-layout")).toBe("standard");
+  } finally {
+    second.unmount();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+    window.localStorage.removeItem(sidebarStorageKey);
+    window.localStorage.removeItem(marginStorageKey);
+    window.localStorage.removeItem(marginWidthStorageKey);
+    window.matchMedia = originalMatchMedia;
+    if (innerWidthDescriptor === undefined) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+    } else {
+      Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
+    }
+  }
+});
