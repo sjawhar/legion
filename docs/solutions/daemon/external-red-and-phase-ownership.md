@@ -42,10 +42,11 @@ the daemon emitted a `pr-blocked` wake per push — noise the architect had to t
 ignore.
 
 **What a worker should do:** nothing. Report the red's external cause in the PR body's CI line so
-the merge queue and the reviewer know why it is red, and expect the `pr-blocked` wakes.
-**Daemon follow-up (not this PR):** either do not count a head whose diff is confined to
-`.legion/` toward `fixAttempts`, or let the architect acknowledge a known-external red so it stops
-accumulating.
+the merge queue and the reviewer know why it is red. Handoff pushes no longer count, so a
+`pr-blocked` wake on such a PR means real fixes were pushed onto the red, not bookkeeping.
+**Landed in LEGION-33:** a head whose push changed only `.legion/` paths no longer counts toward
+`fixAttempts` (the listener forwards `changed_paths`; the daemon classifies), and `pr-blocked`
+fires once per exhausted count. An expected-external red still counts real fixes as before.
 
 ## 2. `/worker/started` overwrites `phases[issue]` unconditionally
 
