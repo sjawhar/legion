@@ -774,6 +774,113 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
+  test("re-creates a forgotten workspace on top of its surviving bookmark without moving it", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      const pointOperations = async () =>
+        (
+          await jj(["op", "log", "--no-graph", "-T", 'description ++ "\n"', "-R", repoCloneDir])
+        ).stdout
+          .split("\n")
+          .filter((line) => line.startsWith(`point bookmark ${bookmark}`)).length;
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      await jj(["status"], { cwd: workspaceDir });
+      const bookmarkCommit = await commitOf(bookmark);
+      expect(await pointOperations(), name).toBe(1);
+      // An operator's hand-run forget plus a wiped directory: jj no longer knows the workspace,
+      // the bookmark is still there.
+      await jj(["workspace", "forget", "widgets-42", "-R", repoCloneDir]);
+      await rm(workspaceDir, { recursive: true, force: true });
+
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(
+        calls.some((cmd) => cmd[1] === "bookmark"),
+        name
+      ).toBeFalse();
+      // Before this change the fresh path started at `main` and the `bookmark set -r @` that
+      // followed refused to move the surviving bookmark sideways.
+      expect(await commitOf("@-", workspaceDir), name).toBe(bookmarkCommit);
+      expect(await commitOf(bookmark), name).toBe(bookmarkCommit);
+      expect(await pointOperations(), name).toBe(1);
+    }
+  }, 60_000);
+
+  test("refuses to create a workspace on a conflicted bookmark and leaves no directory behind, on consecutive attempts", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, deps } = await realJjRig(command, stateDir);
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      await jj(["new", "-m", "later work"], { cwd: workspaceDir });
+      // Two moves of the bookmark from the same operation — one on the main operation line, one
+      // `--at-op` the operation before it — which the next command reconciles into a conflict.
+      const baseOperation = (
+        await jj(
+          [
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            'id.short() ++ "\n"',
+            "--limit",
+            "1",
+            "-R",
+            repoCloneDir,
+          ],
+          { cwd: repoCloneDir }
+        )
+      ).stdout.trim();
+      await jj(["bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
+      await jj(
+        ["--at-op", baseOperation, "bookmark", "set", bookmark, "-r", "main", "--allow-backwards"],
+        { cwd: repoCloneDir }
+      );
+      await jj(["workspace", "forget", "widgets-42", "-R", repoCloneDir]);
+      await rm(workspaceDir, { recursive: true, force: true });
+      const listed = (await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout;
+      expect(listed, name).toContain("(conflicted)");
+      const conflictedTargets = (
+        await jj(resolveBookmarkCommand(bookmark, repoCloneDir).slice(1))
+      ).stdout
+        .split("\n")
+        .filter((line) => line !== "");
+      expect(conflictedTargets, name).toHaveLength(2);
+
+      for (const attempt of [1, 2]) {
+        calls.length = 0;
+        await expect(
+          provisionIssueWorkspace("WIDGETS-42", deps),
+          `${name}, attempt ${attempt}`
+        ).rejects.toThrow(`Bookmark ${bookmark} is conflicted (${conflictedTargets.join(", ")})`);
+        // The resolution is the last command: nothing was added, so nothing exists or is
+        // registered for the next resume to adopt.
+        expect(
+          calls.map((cmd) => cmd[1]),
+          `${name}, attempt ${attempt}`
+        ).toEqual(["git", "log"]);
+        expect(existsSync(workspaceDir), `${name}, attempt ${attempt}`).toBeFalse();
+        expect(
+          (await jj(["workspace", "list", "-R", repoCloneDir])).stdout,
+          `${name}, attempt ${attempt}`
+        ).not.toContain("widgets-42:");
+      }
+    }
+  }, 60_000);
+
   test("re-adds a forgotten issue workspace at its bookmark's commit when the bookmark resolves, running no bookmark command", async () => {
     const stateDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
