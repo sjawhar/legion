@@ -92,8 +92,9 @@ GitHub on the implementer's next push.
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it
 holds `pull_requests: write` and no `contents` permission — so it can post reviews and reply on
-threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened, and
-both answer `Resource not accessible by integration`. Widening the review App is rejected by design
+threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened: over
+git the refused push reads `remote: Repository not found.`, and the REST/GraphQL API answers
+`Resource not accessible by integration`. Widening the review App is rejected by design
 (LEGION-34), not because it would not work. The implementer therefore pushes the `.legion/`
 deletion at the reviewer's direction, and the implementer — before every push that answers a
 review — and the merger — once more before READY — resolve every thread the reviewer has accepted with

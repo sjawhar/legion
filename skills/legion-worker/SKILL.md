@@ -460,8 +460,9 @@ The planner, tester, reviewer, and architects act as the review App (`legion-rev
 which has no permission to push. Those roles commit the handoff locally with the `split` above
 and do **not** push: the commit sits on the shared workspace's issue branch and rides the
 implementer's next push — the corrective push after a review, or the final `.legion/` deletion.
-A push GitHub refuses with `Resource not accessible by integration` for one of those roles is
-the expected refusal, not a failure to report or retry.
+A push GitHub refuses for one of those roles — over git it reads `remote: Repository not found.`;
+the REST API's form of the same refusal is `Resource not accessible by integration` — is the
+expected refusal, not a failure to report or retry.
 
 Do not report phase completion until the write, existence check, and handoff commit
 succeed; for the implementer, when an issue branch exists, its push is also required. This is

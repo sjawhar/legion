@@ -36,8 +36,9 @@ create another workspace, or move a bookmark you do not own. Use jj, never git m
 use `jj op restore`, `jj abandon`, or `jj edit @-`. Put only your logical paths in
 `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push: you act as the review
 App (`legion-reviewer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
-which holds no `contents` permission, so `jj git push` from this role is refused
-`Resource not accessible by integration`. Your handoff commit stays on the shared workspace's
+which holds no `contents` permission, so `jj git push` from this role is refused with
+`remote: Repository not found.` (the REST API's form of the same refusal is
+`Resource not accessible by integration`). Your handoff commit stays on the shared workspace's
 issue branch and rides the implementer's next push.
 
 Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose a token; the
