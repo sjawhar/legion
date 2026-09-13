@@ -18,6 +18,14 @@ first; use ordinary oracle, scout, or reviewer subagents for bounded research an
 checks, but never spawn a Legion role. Exercise the changed behavior through its real surface
 before reporting it.
 
+Before every push that answers a review — the corrective push and the `.legion/` deletion push —
+run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its
+output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved
+thread whose newest comment is the reviewer's own `Accepted:` reply (the review App cannot resolve
+threads or push — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other
+unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's
+message: report it to the architect with `envoy_publish`; never skip it.
+
 ## Shared workspace and credentials
 
 `LEGION_WORKSPACE` names the authoritative issue workspace. Before reading repository files or

@@ -14,6 +14,8 @@ status: active
 module: daemon
 related_issues:
   - "sjawhar/legion#966"
+  - "LEGION-34"
+  - "sjawhar/legion#1003"
 symptoms:
   - "`pr-blocked` wakes on every push to a PR whose failing check is external and expected"
   - "`legion handoff complete` → 409 `Phase for <KEY> is no longer owned by this worker` for the worker the architect just prompted"
@@ -74,18 +76,59 @@ than the active phase's must never overwrite it. Alternatively key `phases` by r
 
 ## 3. The review App can neither push nor resolve threads; the implementer App does both
 
-The `legion-reviewer` GitHub App holds no `contents` permission and cannot resolve review threads:
-`resolveReviewThread` returns `Resource not accessible by integration`. So in every round:
+The `legion-reviewer` GitHub App holds `pull_requests: write` and no `contents` permission, and
+GitHub lets only the pull request's author or an account with write (push) access to the repository
+resolve a review thread or push to its branch. The review App is neither by design, so
+`resolveReviewThread` from it returns `Resource not accessible by integration`, and so does its
+push. Widening the review App is rejected by design, not because it would not work. So in every
+round:
 
 - the reviewer's `.legion/review.json` commit exists only in the shared workspace until the
   implementer's next push carries it (check `jj log` that it is an ancestor before building on it);
-- the reviewer replies on each thread with its acceptance naming the fixing commit, and the
-  **implementer** resolves the threads afterwards with
-  `legion gh -- api graphql -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }' -F id=<PRRT_…>`,
-  one mutation per thread, then confirms with a `reviewThreads(first: 20) { nodes { id isResolved } }`
-  query that none remain unresolved;
+- the reviewer answers each thread it opened with one of `Accepted: fixed in <commit> — <one line>`,
+  `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
+  runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) before its next
+  push: it resolves every unresolved thread whose newest comment is the opener's own `Accepted:`
+  reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
+  `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the thread
+  and GitHub's message when GitHub refuses one (report it to the architect; a human resolves that
+  thread). The merger runs it once more before READY. Never a hand-written GraphQL mutation and
+  never a bulk resolve;
 - the reviewer's approval is the review itself; the head it approves by name is the
   implementer-pushed `.legion/` deletion.
 
 Thread ids are the `PRRT_…` node ids the reviewer records in `review.json` (`findings[*].threadId`);
-they are stable across pushes even when the thread goes `isOutdated`.
+they are stable across pushes even when the thread goes `isOutdated`. On `sjawhar/legion`, `main`'s
+ruleset (id 12331919, read with `legion gh -- api repos/sjawhar/legion/rules/branches/main`) sets
+`required_review_thread_resolution: false`, so an unresolved thread does not stop the merge queue
+there today; the command keeps the Threads record truthful whatever that setting is.
+
+**The rule is easy to misstate, and the first draft of LEGION-34 misstated it in four files.** The
+intent — "whoever raised the point signs it off" — reads as if the *comment's author* could resolve
+the thread, and the docs, the worker skill, the daemon `AGENTS.md`, and a doc comment all said
+"the pull request's author, a comment's author, or an account with push access" until the
+reviewer caught it (review 5189854058 on sjawhar/legion#1003). GitHub's own text is "you opened the
+pull request or you have write access to the repository where the pull request was opened"; the
+review App *is* the author of every comment in the threads it opens and is still refused, which is
+the whole reason the command exists. Two corollaries the same draft got wrong: "widening the App
+does not change that" is false (an App with `contents: write` would satisfy the rule — the design
+decision is to keep the review App without it), and the same rule governs pushing to the branch.
+Quote GitHub's sentence when writing the *why*; do not re-derive it from the intent.
+
+**Why the reply grammar is exact.** GitHub stores no verdict on a thread — `isResolved` is the only
+state, and the review App cannot set it — so the reviewer's reply text is the only machine-readable
+signal. `isAcceptance` (`packages/daemon/src/cli/review-threads.ts`) is a strict prefix check on
+the newest comment after `trimStart()`: `Accepted (round 2): …` (sjawhar/legion#966's own wording),
+`Fixed in …`, a bare "fixed, thanks", or an `Accepted:` written by anyone but the thread's opener
+leaves the thread open, silently and by design (the unit test pins each). The opener's own later
+follow-up leaves it open too — the rule reads the newest comment only — so nobody replies after an
+`Accepted:`. A worker who free-forms the reply gets a truthful `left open` line, not an error.
+
+**GraphQL facts the command depends on** (verified live on sjawhar/legion#992 and #1003): a Bot
+actor's `login` is the bare App slug (`legion-reviewer`, `legion-implementer`), never the
+`<slug>[bot]` that `/gh-token`'s `appLogin` and REST `user.login` report — compare logins from the
+same query, never against `appLogin`; a review thread has no URL of its own, the opening comment's
+`url` (`…/pull/<n>#discussion_r<id>`) is the anchor the PR page scrolls to; two aliases on one thread,
+`opener: comments(first: 1)` and `newest: comments(last: 1)`, read exactly the opener and the newest
+comment without a second pagination loop; `reviewThreads(first: 100, after: $after)` pages with
+`pageInfo { hasNextPage endCursor }`, and every page is read before any mutation.

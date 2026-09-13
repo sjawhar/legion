@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, and a phase completion refused with 409 after a respawn"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, and a pane `legion` that is the deployed build, not your branch"
 category: legion
 tags:
   - legion
@@ -36,6 +36,8 @@ related_issues:
   - "LEGION-17"
   - "sjawhar/legion#956"
   - "LEGION-52"
+  - "LEGION-34"
+  - "sjawhar/legion#1003"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -63,7 +65,10 @@ four workers hit §1–§3 again; the `packages/pi-envoy` note in §2 and the in
 from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-13 (sjawhar/legion#978); §11 is from
 LEGION-12's own retro and is filed as LEGION-37; the slow-push paragraph in §1 is from LEGION-17 (sjawhar/legion#956),
 whose implementer, on a pane still running the pre-LEGION-12 plugin, hit §1, §3, §8, §9, and §11 across five rounds
-and confirmed each as written (the architect filed the §1 harness fix as LEGION-52). None was part of
+and confirmed each as written (the architect filed the §1 harness fix as LEGION-52); §13 and the §12 correction are
+from LEGION-34 (sjawhar/legion#1003), whose implementer hit §1 again on a pane running the fixed plugin — by copying
+the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace.
+None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
 delivery fixed for good by LEGION-54 (pi-envoy 1.18.2): the workarounds are recorded only so a worker still running
 the 1.17.0 plugin recognizes them, and must not be used on the fixed one. §2's check-config leak was fixed by
@@ -355,11 +360,44 @@ has the same rule for the symmetric case; check `jj log -r '::main@origin ~ ::<b
 **Already recorded, so read these rather than re-deriving:** the 409 after a daemon restart and the architect's
 re-derived status write are §11 above and
 [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); the review App's
-inability to push or resolve threads, and the implementer resolving them with the `resolveReviewThread` GraphQL
-mutation under `legion gh` — there is no `legion threads` command; a worker on LEGION-54 was told to run one and it
-does not exist on any branch — is §3 of that same note (LEGION-34); the tester completion's status write is
+inability to push or resolve threads, and the implementer resolving the threads the reviewer accepted with
+`legion threads resolve --pr <n> --repo <owner>/<repo>` (LEGION-34, sjawhar/legion#1003 — until that release is
+deployed the pane's `legion` has no `threads` subcommand, see §13; a worker on LEGION-54 was told to run it before it
+existed on any branch), is §3 of that same note; the tester completion's status write is
 verdict-blind (`phaseCompleteStatus` in `api/routes/workers.ts` returns `needs_review` for a tester whatever it
 found), so a FAIL is carried by the tester's comment and the architect's own `set_status in_progress` seconds later —
 a sibling architect reading Dispatch status alone will see `needs_review` flash by; the daemon-provisioned untracked
 `.omp/config.yml` that every path-scoped commit must leave out is [text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md) §1
 and is filed as LEGION-58.
+
+## 13. The pane's `legion` is the deployed daemon's build: a new CLI subcommand is exercised live from the workspace (from LEGION-34)
+
+`legion` on a worker pane's PATH is `<state_dir>/bin/legion`, a launcher that re-execs the **running daemon's** own
+checkout (`legionCliLauncherScript` in `packages/daemon/src/daemon/environment.ts`), and the `gh` beside it is a shim
+that execs `legion gh --`. Neither knows anything on your branch. A CLI subcommand added by the PR under test does not
+exist there until the release lands on `main` and the operator restarts the daemon — on LEGION-34 `legion threads
+resolve` answered `Unknown command` from the pane for the whole tree. Every live run is the branch's own entry point,
+from the workspace, with the same grant delivery the pane gives any command:
+
+```bash
+cd -- "$LEGION_WORKSPACE" && bun packages/daemon/src/cli/index.ts threads resolve --pr <n> --repo sjawhar/legion
+```
+
+(`bun install --frozen-lockfile` once in the workspace; `bun packages/daemon/src/cli/index.ts --help` lists the
+branch's commands.) That is a real production-like proof, not a stand-in: the process reads `LEGION_GRANT_FILE` /
+`LEGION_GRANT` from the pane, redeems it at the real daemon's `/legion/v1/gh-token`, and acts on real GitHub as the
+App of your role. Name the `bun …` form in the PR body's `E2E` line and in every role's instructions for the tree,
+and record in the handoff that the deployed `legion` form is exercised only after the merge (LEGION-34's deployment
+note: the first review round on any later issue runs the plain `legion threads resolve` and quotes it on that PR).
+
+Two things that bit the same runs. First, §1's copied credential block: a command whose text carries an imitated
+`export LEGION_GRANT='…'` line ahead of the real one answers `Unable to redeem LEGION_GRANT (403)` on every `legion …`
+call — and a `jj git push` through the credential helper fails as `could not read Username for
+'https://github.com'`, which looks like a broken helper and is not. Running the command from the eval kernel's
+`tool.bash` bridge, with the shell in a script file (`bash /tmp/<issue>-step.sh`), keeps the model's own transcript
+out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, every edit of the PR
+body re-runs the whole `Tests` workflow (`pull_request: types: [opened, edited, reopened, synchronize]` in
+`.github/workflows/pr-and-main.yaml`), so paste command output into the body once per round, after that round's last
+push, never per fact; and the `pr-checks-result` check the skill template names does not exist on this repository
+([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md)) — the `CI:` line cites the `Tests` run id at the
+head.

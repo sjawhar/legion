@@ -44,18 +44,35 @@ import {
 import { type CommandRunner, defaultRunner } from "../state/fetch";
 import { CliError } from "./errors";
 import {
+  acceptedByOpener,
+  type Fetch,
+  type GitHubRepo,
+  githubGraphql,
+  listUnresolvedThreads,
+  resolveThread,
+} from "./review-threads";
+import {
   cmdWorkerShim,
   cmdWorkerShimConnect,
   defaultWorkerShimDeps,
   resolveWorkerShimTarget,
 } from "./worker-shim";
 
-type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 interface GhCommandDeps {
   env: NodeJS.ProcessEnv;
   fetch: Fetch;
   spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number>;
   daemonUrl?: string;
+}
+
+interface GrantRedemptionDeps {
+  env: NodeJS.ProcessEnv;
+  fetch: Fetch;
+  daemonUrl?: string;
+}
+
+interface ThreadsResolveCommandDeps extends GrantRedemptionDeps {
+  log(line: string): void;
 }
 
 interface CredentialCommandDeps {
@@ -151,10 +168,10 @@ function isPrMergeInvocation(args: string[]): boolean {
   return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
 }
 
-export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
-  if (isPrMergeInvocation(args)) {
-    throw new CliError("Legion workers never merge; publish READY to the merge queue");
-  }
+/** Redeems the pane's grant for a GitHub App token: the App of the role running the command
+ * (`appRoleForLegionRole` in the daemon — the review App for the reviewer, the implement App for
+ * every other role). */
+async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -167,11 +184,68 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }
-  const childEnv = buildGitHubTokenEnv(payload.data.token, deps.env);
+  return payload.data.token;
+}
+
+export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
+  if (isPrMergeInvocation(args)) {
+    throw new CliError("Legion workers never merge; publish READY to the merge queue");
+  }
+  const token = await redeemGitHubToken(deps);
+  const childEnv = buildGitHubTokenEnv(token, deps.env);
   // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
   if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);
   const exitCode = await deps.spawnGh(args, childEnv);
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
+}
+
+function parseRepo(value: string): GitHubRepo {
+  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(value);
+  if (!match) throw new CliError(`--repo must be <owner>/<name> (got ${JSON.stringify(value)})`);
+  return { owner: match[1] as string, name: match[2] as string };
+}
+
+function parsePullNumber(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new CliError(`--pr must be a pull request number (got ${JSON.stringify(value)})`);
+  }
+  return Number(value);
+}
+
+/** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it,
+ * resolves every unresolved review thread whose newest comment is its opener's own `Accepted:`
+ * reply and names every other unresolved thread as left open. GitHub lets only the pull request's
+ * author or an account with write (push) access to the repository resolve a thread or push to its
+ * branch; the review App is neither by design (`pull_requests: write`, no `contents`), so the
+ * threads it opens are resolved here by the implementer — before every push that answers a
+ * review — and by the merger once more before READY. A thread GitHub refuses ends the run with
+ * exit 1 naming the thread's URL and GitHub's message; nothing after it is attempted. */
+export async function cmdThreadsResolve(
+  options: { repo: string; pr: string },
+  deps: ThreadsResolveCommandDeps
+): Promise<void> {
+  const repo = parseRepo(options.repo);
+  const number = parsePullNumber(options.pr);
+  const graphql = githubGraphql(deps.fetch, await redeemGitHubToken(deps));
+  const threads = await listUnresolvedThreads(graphql, repo, number);
+  if (threads.length === 0) {
+    deps.log("no unresolved threads");
+    return;
+  }
+  for (const thread of threads) {
+    if (!acceptedByOpener(thread)) {
+      const by = thread.newestLogin ?? "an unknown account";
+      deps.log(`left open ${thread.url} — newest reply by ${by} is not an acceptance`);
+      continue;
+    }
+    try {
+      await resolveThread(graphql, thread.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new CliError(`resolveReviewThread failed for ${thread.url}: ${message}`);
+    }
+    deps.log(`resolved ${thread.url}`);
+  }
 }
 
 export async function cmdCredential(deps: CredentialCommandDeps): Promise<void> {
@@ -603,6 +677,30 @@ const ghCommand = defineCommand({
     }),
 });
 
+const threadsResolveCommand = defineCommand({
+  meta: {
+    name: "resolve",
+    description:
+      "Resolve every review thread whose newest comment is its opener's `Accepted:` reply, as the GitHub App of the role running it",
+  },
+  args: {
+    pr: { type: "string", required: true, description: "Pull request number" },
+    repo: { type: "string", required: true, description: "Repository as <owner>/<name>" },
+  },
+  run: ({ args }) =>
+    runCli(() =>
+      cmdThreadsResolve(
+        { repo: args.repo as string, pr: args.pr as string },
+        { env: process.env, fetch, log: (line) => console.log(line) }
+      )
+    ),
+});
+
+const threadsCommand = defineCommand({
+  meta: { name: "threads", description: "Pull request review threads" },
+  subCommands: { resolve: threadsResolveCommand },
+});
+
 const credentialCommand = defineCommand({
   meta: {
     name: "credential",
@@ -700,6 +798,7 @@ export const mainCommand = defineCommand({
     legions: legionsCommand,
     handoff: handoffCommand,
     gh: ghCommand,
+    threads: threadsCommand,
     credential: credentialCommand,
     "worker-shim": workerShimCommand,
     state: stateCommand,

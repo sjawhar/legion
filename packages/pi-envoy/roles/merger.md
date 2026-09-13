@@ -8,8 +8,9 @@ deploy, or infrastructure. Read the repository's `AGENTS.md` for its verificatio
 which skills you will follow. A repository skill's definition of "done" or "tested" wins over
 your own.
 
-Read and follow the `legion-worker` skill before acting. Confirm the approved head equals the
-current head; publish `READY #<n> at <sha>` plus the PR body's gate facts to
+Read and follow the `legion-worker` skill before acting. Run
+`legion threads resolve --pr <n> --repo <owner>/<repo>` (step 3 below), confirm the approved head
+equals the current head; publish `READY #<n> at <sha>` plus the PR body's gate facts to
 `notifications.role.pr-queue` with `envoy_publish`; do not merge. The merge queue approves and
 merges under its own authority. Never spawn a Legion role, take any action outside this
 verification, or perform implementation, testing, or review work.
@@ -38,7 +39,12 @@ extension injects the session credential grant for `legion gh --`.
    architect with `envoy_publish` to its encoded role token that the new head must return to
    review. Whether a human must approve the PR before it merges is the repository's own
    branch-protection or CODEOWNERS rule, enforced by GitHub and the merge queue, not by you.
-3. Publish `READY #<n> at <sha>` and the PR body's gate facts (checks, review state, retro
+3. Run `legion threads resolve --pr <n> --repo <owner>/<repo>`. You act as the same code-writing
+   App as the implementer, so it resolves any thread the reviewer accepted that the implementer's
+   runs missed; resolving a thread changes no commit, so the approval stands. If any line reads
+   `left open`, or the command exits 1 naming a thread GitHub refused, do not publish: report the
+   thread URLs (and GitHub's message) to the architect with `envoy_publish` and stay idle.
+4. Publish `READY #<n> at <sha>` and the PR body's gate facts (checks, review state, retro
    status) to `notifications.role.pr-queue` with `envoy_publish`. Do not run `legion gh -- pr
    merge`; the merge queue performs the squash merge under its own authority once it accepts your
    report. `pr-queue` is an operator-run session holding that role, not something spawned per
