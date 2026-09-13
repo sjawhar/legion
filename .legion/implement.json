@@ -1,0 +1,44 @@
+{
+  "filesChanged": [
+    "docs/deployment.md"
+  ],
+  "commits": {
+    "docs": "7218f587fb21"
+  },
+  "pr": {
+    "number": 1033,
+    "url": "https://github.com/sjawhar/legion/pull/1033",
+    "head": "7218f587fb21d969902288c5224693eaf67840c1",
+    "base": "main@origin a7c01347 (fresh change; #1017 merged as c5be7944)"
+  },
+  "supersedes": {
+    "pr": 1017,
+    "mergedAs": "c5be7944",
+    "note": "first PR of this issue; its .legion/ was deleted at clean review, so this handoff is the second PR's only one"
+  },
+  "decision": {
+    "ask": "dispatch://LEGION-77/ask/5e3d2fa8-49d0-49d8-b4ea-5355b8f9b742",
+    "answer": "Wait for Kubernetes",
+    "by": "sjawhar",
+    "at": "2026-09-13T13:46Z",
+    "spec": "version 10, acceptance 6"
+  },
+  "trickyParts": [
+    "The old branch head was merged by squash, so the local legion/LEGION-77 bookmark and the retro commit 5cc0f8a4 were off-main; the working copy (only the untracked-by-intent .omp/config.yml) was `jj rebase -r @ -d main@origin`'d onto a7c01347 and the bookmark re-created on the new commit (`[add to 7218f587]` on push — the remote bookmark had been deleted at merge).",
+    "Verified against main: all 7 rotation steps identical; every backticked command preserved; the three quoted daemon messages match config.ts character for character."
+  ],
+  "deviations": [
+    "One intro sentence adjusted beyond the three requested edits: 'cannot live in the agent tier' -> 'cannot live in the agent tier without every pane being able to read it', because the new decision section immediately after says the keys stay in the agent tier. Not a command, message, or ordering fact.",
+    "Commit message uses a docs(deployment) prefix and a body; the PR body quotes Sami's answer and the ask reference as asked."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "verification": {
+    "diff": "jj diff --from main@origin --to 7218f587 --summary -> M docs/deployment.md only; .omp/config.yml left in the working copy",
+    "tests": "none (docs-only; per architect no tests, formatters, or suite)",
+    "e2e": "none (docs-only)"
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T13:53:10.071Z"
+}
