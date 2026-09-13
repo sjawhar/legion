@@ -19,6 +19,11 @@ export interface RunResult {
 export interface WorkspaceSpec {
   readonly repoCloneDir: string;
   readonly workspaceDir: string;
+  /** `legion/<KEY>`: created by `createWorkspace` on the fresh working copy when the workspace is
+   * created and no bookmark resolved (a resolving bookmark is where the workspace is created
+   * instead), moved only by the implementer's push, and never re-created on an existing workspace
+   * — so absent on one whose pull request has merged, since the fetch deletes it. The daemon does
+   * not read this field. */
   readonly bookmark: string;
 }
 
@@ -75,9 +80,10 @@ async function runChecked(
   deps: ProvisionIssueWorkspaceDeps,
   cmd: string[],
   opts?: WorkspaceCommandOptions
-): Promise<void> {
+): Promise<RunResult> {
   const result = await run(deps, cmd, opts);
   if (result.exitCode !== 0) throw commandFailure(result, cmd);
+  return result;
 }
 
 const PROVISIONING_TOKEN_ENV = "LEGION_PROVISIONING_TOKEN";
@@ -167,6 +173,29 @@ async function ensureRepoClone(
   }
 }
 
+/** Creates the issue workspace on top of its bookmark `legion/<KEY>` when that bookmark resolves
+ * to exactly one commit, or at `main` — creating the bookmark on the fresh working copy — when it
+ * resolves to none. This is the one place provisioning creates or moves that bookmark. A workspace
+ * that already exists gets no `jj bookmark` command at all (see `provisionIssueWorkspace`): after
+ * a pull request merges and GitHub deletes its branch, the fetch drops the tracked local bookmark
+ * that still matched it, and creating it again would put the issue's branch on whatever the
+ * working copy holds (LEGION-28); a bookmark a worker left elsewhere stays there. The implementer's
+ * push step (`jj bookmark set` + `jj git push --bookmark`) owns every later move.
+ *
+ * The resolution runs before any other command. `bookmarks(exact:legion/<KEY>)` lists the
+ * bookmark's local targets one commit id per line — none when it is missing or only a remote row
+ * survives, one normally, two or more when it is conflicted (verified on jj 0.44 and 0.45). A
+ * failed command or more than one commit throws, naming the bookmark, before anything is pruned,
+ * added, or registered: a `jj workspace add --revision legion/<KEY>` for a name jj cannot resolve
+ * still registers the workspace, parented on the root commit, before reporting the error, and the
+ * next resume would adopt that empty workspace silently. The add takes the commit id, never the
+ * name, for the same reason.
+ *
+ * A brand-new workspace and one jj still registers but whose directory is gone start from the same
+ * resolution: on `already registered|exists` the registration is forgotten, the colocated worktree
+ * pruned, and the add repeated at the same revision. Only when nothing resolved does the add end
+ * with `jj bookmark set legion/<KEY> -r @` in the new workspace, and only when the registration had
+ * to be forgotten is one line logged — a brand-new issue has no bookmark to miss. */
 async function createWorkspace(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
@@ -174,11 +203,36 @@ async function createWorkspace(
   workspaceName: string,
   bookmark: string
 ): Promise<void> {
-  await mkdir(path.dirname(workspaceDir), { recursive: true });
+  const resolveArgs = [
+    "jj",
+    "log",
+    "-r",
+    `bookmarks(exact:${bookmark})`,
+    "--no-graph",
+    "-T",
+    'commit_id ++ "\n"',
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ];
+  const resolved = await run(deps, resolveArgs);
+  if (resolved.exitCode !== 0) {
+    throw new Error(
+      `Bookmark ${bookmark} could not be resolved; workspace ${workspaceDir} was not created.\n${commandFailure(resolved, resolveArgs).message}`
+    );
+  }
+  const commits = resolved.stdout.split("\n").filter((line) => line.trim() !== "");
+  if (commits.length > 1) {
+    throw new Error(
+      `Bookmark ${bookmark} is conflicted (${commits.join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
+    );
+  }
+  const bookmarkCommit = commits[0];
 
+  await mkdir(path.dirname(workspaceDir), { recursive: true });
   const gitDir = path.join(repoCloneDir, ".git");
   const pruneArgs = ["git", `--git-dir=${gitDir}`, "worktree", "prune"];
-  const initialWorkspaceArgs = [
+  const addArgs = [
     "jj",
     "workspace",
     "add",
@@ -186,7 +240,7 @@ async function createWorkspace(
     "--name",
     workspaceName,
     "--revision",
-    "main",
+    bookmarkCommit ?? "main",
     "-R",
     repoCloneDir,
   ];
@@ -195,40 +249,28 @@ async function createWorkspace(
     await run(deps, pruneArgs);
   } catch {}
 
-  const result = await run(deps, initialWorkspaceArgs);
-  if (result.exitCode === 0) return;
-  if (!/already (?:registered|exists)/.test(result.stderr)) {
-    throw commandFailure(result, initialWorkspaceArgs);
+  const result = await run(deps, addArgs);
+  const forgotten = result.exitCode !== 0;
+  if (forgotten) {
+    if (!/already (?:registered|exists)/.test(result.stderr)) {
+      throw commandFailure(result, addArgs);
+    }
+    // `jj workspace forget` takes only workspace names (jj 0.44 and 0.45); the `git worktree prune`
+    // that follows is what cleans the colocated worktree.
+    await runChecked(deps, ["jj", "workspace", "forget", workspaceName, "-R", repoCloneDir]);
+    try {
+      await run(deps, pruneArgs);
+    } catch {}
+    await runChecked(deps, addArgs);
   }
 
-  await runChecked(deps, [
-    "jj",
-    "workspace",
-    "forget",
-    workspaceName,
-    "--cleanup",
-    "--force",
-    "-R",
-    repoCloneDir,
-  ]);
-  try {
-    await run(deps, pruneArgs);
-  } catch {}
-
-  const recoveryWorkspaceArgs = [
-    "jj",
-    "workspace",
-    "add",
-    workspaceDir,
-    "--name",
-    workspaceName,
-    "--revision",
-    bookmark,
-    "-R",
-    repoCloneDir,
-  ];
-  const retry = await run(deps, recoveryWorkspaceArgs);
-  if (retry.exitCode !== 0) throw commandFailure(retry, recoveryWorkspaceArgs);
+  if (bookmarkCommit !== undefined) return;
+  if (forgotten) {
+    console.error(
+      `[legion] bookmark ${bookmark} is gone (its pull request merged or the branch was deleted); re-added the forgotten workspace ${workspaceDir} at main, creating the bookmark on its fresh working copy`
+    );
+  }
+  await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
 
 async function writeOmpConfig(workspaceDir: string): Promise<void> {
@@ -247,7 +289,11 @@ export async function provisionIssueWorkspace(
   const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, workspaceName);
   const gitDir = path.join(repoCloneDir, ".git");
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
-  // matches exactly this pattern for a Dispatch key).
+  // matches exactly this pattern for a Dispatch key). `createWorkspace` alone touches it: it
+  // creates the workspace on the bookmark's one commit, or at `main` creating the bookmark when
+  // none resolved, and stops before registering anything when the bookmark is conflicted. A
+  // workspace that already exists gets no bookmark command here — present or absent, the bookmark
+  // is left exactly as the fetch and the workers left it.
   const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);
@@ -272,9 +318,6 @@ export async function provisionIssueWorkspace(
     await createWorkspace(deps, repoCloneDir, workspaceDir, workspaceName, bookmark);
   }
 
-  await runChecked(deps, ["jj", "bookmark", "set", bookmark, "--allow-backwards"], {
-    cwd: workspaceDir,
-  });
   await runChecked(deps, [
     "git",
     `--git-dir=${gitDir}`,
