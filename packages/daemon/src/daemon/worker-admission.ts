@@ -7,7 +7,12 @@ import {
   type PendingAssignment,
   type WorkerRoleClaim,
 } from "./legion-state";
-import { StopFailed, TreeClosingError } from "./process-errors";
+import {
+  PromptNotStarted,
+  type PromptNotStartedReason,
+  StopFailed,
+  TreeClosingError,
+} from "./process-errors";
 import type { WorkerRpcClient } from "./worker-rpc";
 
 /** Bounds a claim's `launchFailures` (cold-launch attempts) or `promptFailures` (queued
@@ -20,8 +25,9 @@ export const MAX_LAUNCH_FAILURES = 3;
  * everything needed to run `launchWorker` outside the lock; `"prompt"` carries an already-live,
  * cached, idle client to prompt in place (the resume-at-cap path queued via
  * `enqueueIdleWorker` never touched the locator, so there is a real pane to reuse instead of
- * relaunching) — its token deliberately stays on the queue until the prompt actually succeeds
- * (see `promoteQueuedWorker`'s handling below), so a failed prompt never strands the
+ * relaunching) — its token deliberately stays on the queue until the worker's turn is observed
+ * to start (`promptExistingWorker`'s commit removes it; see `promoteQueuedWorker`'s handling
+ * below), so a prompt that is refused or acknowledged without a turn never strands the
  * assignment. `"stop"` covers both "still at cap" and a queued locator-carrying claim whose
  * client is alive but not currently idle (mid-prompt or genuinely busy) — neither is stale, so
  * neither drops the entry; only `"stale"` does that: the client is gone, no session was ever
@@ -71,6 +77,11 @@ export interface WorkerAdmissionDeps {
     claim: WorkerRoleClaim | undefined,
     pending: PendingAssignment
   ): Promise<void>;
+  /** Prompts a live worker and commits the delivery — `phases[issue]` for an assignment,
+   * `pendingAssignment` cleared, `promptFailures` reset, the token's queue entry removed
+   * (`removeFromQueue`), persisted — only once the worker's turn is observed to start. Throws
+   * the shim's own error for a refused prompt and `PromptNotStarted` for an acknowledgement no
+   * turn followed within the bound; both leave the claim and queue exactly as they were. */
   promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -347,6 +358,70 @@ export class WorkerAdmission {
     this.promoteWorkerQueue();
   }
 
+  /** Removes `token`'s FIFO queue entry, if any, under the shared admission lock — the commit
+   * half of a delivered prompt (`ProcessManager.commitPromptDelivery`), called once the worker's
+   * turn is observed to start, whether in the bound or late. A no-op for a token that was never
+   * queued (the direct `resumed` path and `/worker/ready`'s delivery). No persist: the caller
+   * folds the removal into its own commit save. */
+  async removeFromQueue(token: string): Promise<void> {
+    await this.withAdmissionLock(async () => {
+      const queue = this.deps.state.workerAdmission.queue;
+      const index = queue.indexOf(token);
+      if (index !== -1) queue.splice(index, 1);
+    });
+  }
+
+  /** Counts one failed prompt attempt against `token`'s claim — a refusal, or an acknowledgement
+   * no turn followed within the bound — and, at `MAX_LAUNCH_FAILURES` with a locator still
+   * recorded, retires the worker: that many consecutive failures against an already-live,
+   * already-idle-cached socket is not a fluke a retry will fix — a worker that keeps refusing or
+   * swallowing prompts needs replacing, the same recovery a dead socket gets. Retiring the pane
+   * and clearing the locator (inside the caller's role lock — see
+   * `WorkerAdmissionDeps.retireDeadClaim`'s doc comment for why this must never re-acquire it)
+   * lets the still-queued assignment fall through to the launch path's own threshold and
+   * `launch-failed` publish on the next drain, instead of looping through the exact same broken
+   * prompt forever. No persist: every caller saves as part of its own larger transition. */
+  private async recordPromptFailure(token: string): Promise<void> {
+    const claim = this.deps.state.roles[token];
+    if (!claim || !("issue" in claim)) return;
+    const failures = (claim.promptFailures ?? 0) + 1;
+    claim.promptFailures = failures;
+    if (failures >= MAX_LAUNCH_FAILURES && claim.locator) {
+      await this.deps.retireDeadClaim(token, claim.locator);
+    }
+  }
+
+  /** What the two prompt paths with no drain of their own — `spawn_worker`'s direct `resumed`
+   * prompt (`resumeOrQueueExisting`) and `/worker/ready`'s delivery — do with a task the worker
+   * acknowledged but never started: leave it on the claim (`enqueueIdleWorker`, locator untouched
+   * — the pane is alive), place the role on the promotion queue so the next drain retries it
+   * under the same cap-aware decision every promotion goes through, count the failure for a
+   * `"no-turn"` reason (`recordPromptFailure`, retiring the worker at the threshold so the queued
+   * task relaunches cold with `--resume`), persist, and tell the architect `worker-queued` — it
+   * hears `worker-started` when the retry or a late start commits. A `"socket-closed"` reason is
+   * counted against nothing: that is a death, and the socket-close handler (`markWorkerDead`)
+   * alone retires the worker — the task is only kept and queued here so that retirement's own
+   * drain finds it. Deliberately no drain trigger: an immediate re-prompt of the same client would
+   * widen the window in which a merely slow worker receives the task twice; the retry is the next
+   * drain (an idle/dead event, the 60 s sweep) or the late start. The caller holds `token`'s role
+   * lock. */
+  async queueUnstartedPrompt(
+    token: string,
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    claim: WorkerRoleClaim,
+    pending: PendingAssignment,
+    reason: PromptNotStartedReason
+  ): Promise<void> {
+    await this.withAdmissionLock(async () => {
+      this.enqueueIdleWorker(token, claim, pending);
+    });
+    if (reason === "no-turn") await this.recordPromptFailure(token);
+    await this.deps.persist();
+    this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+  }
+
   /**
    * Decides whether an already-connected, already-idle client below the running-worker cap
    * should be prompted immediately in place, or queued via `enqueueIdleWorker` instead — either
@@ -359,7 +434,11 @@ export class WorkerAdmission {
    * from `"idle"`, then — exactly like `launchOrQueue` owns its own `launchWorker` call — runs
    * the actual `deps.promptExistingWorker` call itself and releases the reservation (and
    * re-checks the queue) the instant it settles, so the caller (`ProcessManager.spawnWorker`)
-   * never has to remember admission bookkeeping around its own prompt call.
+   * never has to remember admission bookkeeping around its own prompt call. `"resumed"` means
+   * the worker's turn was observed to start; a prompt the worker acknowledged without starting a
+   * turn (`PromptNotStarted`) answers `"queued"` instead, the task queued for promotion through
+   * `queueUnstartedPrompt` — the architect hears `worker-queued` now and `worker-started` on the
+   * retry or the late start. A refused prompt still throws.
    */
   async resumeOrQueueExisting(
     token: string,
@@ -388,13 +467,24 @@ export class WorkerAdmission {
       this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
       return { kind: "queued" };
     }
+    let notStarted = false;
     try {
       await this.deps.promptExistingWorker(client, token, issue, role, sessionId, pending);
+    } catch (error) {
+      if (!(error instanceof PromptNotStarted)) throw error;
+      notStarted = true;
+      console.error(`[legion] ${token}: ${error.message}; queued for promotion`);
+      await this.queueUnstartedPrompt(token, treeKey, issue, role, claim, pending, error.reason);
+      return { kind: "queued" };
     } finally {
       this.release(token);
       this.deps.onAdmissionEvent?.(token, "reservation-released");
-      this.promoteWorkerQueue();
-      this.deps.onAdmissionEvent?.(token, "queue-drain-triggered");
+      // No drain trigger on the not-started path, for the same reason `promoteQueuedWorker`'s
+      // catch has none: it would re-peek this same head and re-prompt the same client at once.
+      if (!notStarted) {
+        this.promoteWorkerQueue();
+        this.deps.onAdmissionEvent?.(token, "queue-drain-triggered");
+      }
     }
     return { kind: "resumed" };
   }
@@ -592,45 +682,33 @@ export class WorkerAdmission {
           decision.pending
         );
       } catch (error) {
+        // One line per attempt; a `PromptNotStarted`'s own message names the token and the
+        // observation (`get_state: isStreaming=false`, `get_state failed: …`, `socket closed`).
         console.error(`[legion] failed to prompt queued worker ${token}:`, error);
         // The token was never removed from the queue for this decision (see the admission-lock
-        // section above) and `promptExistingWorker` only mutates the claim's
-        // `pendingAssignment` after `client.prompt()` succeeds — both are left exactly as they
-        // were. Stop draining instead of looping straight back into the same broken client
-        // (deliberately no `promoteWorkerQueue()` call here — that would just re-peek this same
-        // head and retry the same broken prompt again).
+        // section above) and `promptExistingWorker` commits nothing before a started turn — the
+        // claim's `pendingAssignment` and the queue are left exactly as they were, whether the
+        // prompt was refused or acknowledged without a turn. Stop draining instead of looping
+        // straight back into the same broken client (deliberately no `promoteWorkerQueue()` call
+        // here — that would just re-peek this same head and retry the same broken prompt again,
+        // widening the window in which a merely slow worker receives the task twice). A socket
+        // that closed during the wait is counted against nothing: that is the worker's death,
+        // and the socket-close handler (`markWorkerDead`) alone retires it — counting it here
+        // too would, at the threshold, race that retirement with a second one.
         this.launching.delete(token);
-        const claim = this.deps.state.roles[token];
-        if (claim && "issue" in claim) {
-          const failures = (claim.promptFailures ?? 0) + 1;
-          claim.promptFailures = failures;
-          if (failures >= MAX_LAUNCH_FAILURES && claim.locator) {
-            // Persistently broken, not transient: `MAX_LAUNCH_FAILURES` consecutive rejections
-            // against an already-live, already-idle-cached socket is not a fluke a retry will
-            // fix — a worker that keeps refusing prompts needs replacing, the same recovery a
-            // dead socket gets. Retires the pane and clears the locator (inside this same
-            // roleLock — see `WorkerAdmissionDeps.retireDeadClaim`'s doc comment for why this
-            // must never re-acquire it) so the still-queued assignment falls through to the
-            // launch path's own threshold and `launch-failed` publish on the next drain,
-            // instead of looping through the exact same broken prompt forever.
-            await this.deps.retireDeadClaim(token, claim.locator);
-          }
+        if (!(error instanceof PromptNotStarted) || error.reason === "no-turn") {
+          await this.recordPromptFailure(token);
         }
         await this.deps.persist();
         return false;
       }
-      // `promptExistingWorker` no longer releases the reservation itself — WorkerAdmission owns
-      // that timing since it owns `this.launching`. No `promoteWorkerQueue()` call needed here:
-      // this method's own caller (`drainWorkerQueue`) already continues its loop on a `true`
-      // return, which is exactly "re-check the queue" — an extra trigger here would just start
-      // a second, separately-tracked drain pass racing the one already in progress.
+      // `promptExistingWorker`'s commit already removed this token from the queue and persisted;
+      // WorkerAdmission still owns the reservation's timing since it owns `this.launching`. No
+      // `promoteWorkerQueue()` call needed here: this method's own caller (`drainWorkerQueue`)
+      // already continues its loop on a `true` return, which is exactly "re-check the queue" — an
+      // extra trigger here would just start a second, separately-tracked drain pass racing the
+      // one already in progress.
       this.launching.delete(token);
-      await this.withAdmissionLock(async () => {
-        const queue = this.deps.state.workerAdmission.queue;
-        const index = queue.indexOf(token);
-        if (index !== -1) queue.splice(index, 1);
-      });
-      await this.deps.persist();
       this.deps.publishArchitect(decision.treeKey, {
         type: "worker-started",
         issue: decision.issue,

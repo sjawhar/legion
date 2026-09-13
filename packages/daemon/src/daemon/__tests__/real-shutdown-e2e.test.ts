@@ -234,7 +234,7 @@ function processManagerDeps(
     processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
     run: runner,
-    natsPublish: () => {},
+    publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
@@ -307,7 +307,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       closed: closed.promise,
       runState: "idle" as const,
       negotiate: async () => {},
-      prompt: async () => {},
+      prompt: async () => ({ turnStarted: Promise.resolve(), hasStarted: true, abandonWait() {} }),
       getState: async () => ({}),
       shutdown: () => {
         // Resolves gracefully on the next microtask, exactly like the shared fake client used

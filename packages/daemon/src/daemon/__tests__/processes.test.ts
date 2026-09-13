@@ -22,6 +22,7 @@ import {
   type WorkerRoleClaim,
 } from "../legion-state";
 import { parseProcStatStartTicks } from "../proc-stat";
+import { PromptNotStarted } from "../process-errors";
 import {
   addressingFragment,
   type ChildAdoption,
@@ -130,7 +131,14 @@ async function temporaryDir(): Promise<string> {
  * than a race against real time. `boundedWait`'s `cancel` is a no-op under an injected sleep, so a
  * wait the code under test has superseded (a re-armed clock) or cancelled (`dispose()`) stays in
  * `pending` and can still be fired — which is how a test delivers a stale clock's expiry on purpose. */
-function manualSleep() {
+interface ManualClock {
+  pending: Array<{ ms: number; resolve: () => void }>;
+  sleep(ms: number): Promise<void>;
+  /** Resolves the oldest pending wait of exactly `ms`; false if none is pending. */
+  fire(ms: number): boolean;
+}
+
+function manualSleep(): ManualClock {
   const pending: Array<{ ms: number; resolve: () => void }> = [];
   return {
     pending,
@@ -451,7 +459,7 @@ function manager(
     state,
     saveState: async () => {},
     config: config("/state"),
-    natsPublish: (subject, json) => publications.push({ subject, json }),
+    publishRole: (subject, json) => publications.push({ subject, json }),
     natsRequest: async (subject, json) => {
       controlRequests.push({ subject, json });
       return JSON.stringify({ type: "ack" });
@@ -2446,7 +2454,7 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
-      natsPublish: (subject) => {
+      publishRole: (subject) => {
         if (subject === `notifications.role.${controllerToken("omp")}`) {
           throw new Error("nats down");
         }
@@ -3394,7 +3402,11 @@ describe("ProcessManager", () => {
           closed: closed.promise,
           runState: "unknown" as const,
           negotiate: async () => {},
-          prompt: async () => {},
+          prompt: async () => ({
+            turnStarted: Promise.resolve(),
+            hasStarted: true,
+            abandonWait() {},
+          }),
           getState: async () => ({}),
           // A socket reset while waiting, not a graceful close -- must never be mistaken for
           // proof the process exited.
@@ -3912,7 +3924,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/tester.sock" ? testerClient : reviewerClient,
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         if (
           subject === architectTopic &&
           json === JSON.stringify({ type: "worker-started", issue: root, role: "planner" })
@@ -9014,7 +9026,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9098,7 +9110,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/planner.sock" ? plannerClient : testerClient,
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9225,7 +9237,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9524,7 +9536,7 @@ describe("ProcessManager", () => {
     });
     const architectTopic = roleTopic(roleToken("omp", root, "architect"));
     const { processes, state, managedState, stateDir } = await workerCapFixture(2, {
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         records.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9928,7 +9940,7 @@ describe("ProcessManager", () => {
     });
     const architectTopic = roleTopic(roleToken("omp", root, "architect"));
     const { processes, state, managedState } = await workerCapFixture(2, {
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         records.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -10026,7 +10038,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -10428,7 +10440,7 @@ describe("ProcessManager", () => {
     client.prompt = async (task) => {
       promptStarted.resolve();
       await releasePrompt.promise;
-      await originalPrompt(task);
+      return originalPrompt(task);
     };
     const { manager: processes, state: managedState } = manager(state, {
       connectWorkerRpc: async () => client,
@@ -11532,7 +11544,7 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (
           subject === roleTopic(roleToken("omp", root, "architect")) &&
@@ -11889,15 +11901,16 @@ describe("ProcessManager", () => {
     const client = fakeWorkerRpcClient();
     client.setRunStateSilently("idle");
     let shouldReject = true;
+    const realPrompt = client.prompt;
     client.prompt = async (message: string) => {
-      client.prompts.push(message);
       if (shouldReject) {
+        client.prompts.push(message);
         const previous = client.runState;
         client.setRunStateSilently("running");
         client.setRunStateSilently(previous);
         throw new Error("shim write failed");
       }
-      client.emitRunState("running");
+      return realPrompt(message);
     };
     const { processes, state, managedState } = await workerCapFixture(2, {
       connectWorkerRpc: async () => client,
@@ -11932,6 +11945,609 @@ describe("ProcessManager", () => {
     const promotedClaim = managedState.roles[token];
     if (!promotedClaim || !("issue" in promotedClaim)) throw new Error("tester claim disappeared");
     expect(promotedClaim.promptFailures).toBe(0);
+  });
+
+  /** A ready-confirmed, idle-live tester whose architect assignment waits on the promotion queue,
+   * cached in the manager exactly as `reconnectWorkers` leaves it, on a manual clock — the fixture
+   * every acknowledged-without-a-turn case below starts from. Its confirming `get_state` answers
+   * "no stream" (the fake ignores an `isStreaming: false` answer's run-state side, so the reconnect
+   * probe's own call leaves the silently-seeded idle alone). `turnStartsOnPrompt` is left `true`
+   * here; a case models the acknowledgement no turn follows by flipping it. */
+  async function queuedIdleWorkerFixture(
+    workerCap: number,
+    overrides: Partial<ProcessManagerDeps & RuntimeOverrides> = {},
+    client: FakeWorkerRpcClient = fakeWorkerRpcClient()
+  ) {
+    const token = roleToken("omp", root, "tester");
+    const clock = manualSleep();
+    client.setRunStateSilently("idle");
+    const fixture = await workerCapFixture(workerCap, {
+      connectWorkerRpc: async () => client,
+      sleep: clock.sleep,
+      ...overrides,
+    });
+    fixture.state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    fixture.state.workerAdmission.queue.push(token);
+    await fixture.processes.reconnectWorkers();
+    client.getStateImpl = async () => ({ data: { isStreaming: false } });
+    return { ...fixture, token, clock, client };
+  }
+
+  /** Expires one prompt's turn-start bound: waits for `promptExistingWorker` to arm the 5 s wait on
+   * the manual clock, then fires it; the fake's `get_state` then answers "no stream". */
+  async function expireTurnStartWait(clock: ManualClock): Promise<void> {
+    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
+    expect(clock.fire(5_000)).toBeTrue();
+  }
+
+  function testerClaim(state: LegionState, token: string): WorkerRoleClaim {
+    const claim = state.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
+    return claim;
+  }
+
+  const workerStartedJson = JSON.stringify({ type: "worker-started", issue: root, role: "tester" });
+  const workerQueuedJson = JSON.stringify({ type: "worker-queued", issue: root, role: "tester" });
+
+  it("commits a queued idle-resume prompt only when the worker's turn starts, not on the shim's acknowledgement", async () => {
+    const { processes, managedState, publications, token, clock, client } =
+      await queuedIdleWorkerFixture(2);
+    client.turnStartsOnPrompt = false;
+
+    const run = processes.reconcileWorkerAdmission();
+    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
+
+    // Acknowledged, no turn yet: nothing is committed.
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(testerClaim(managedState, token).pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+    });
+    expect(managedState.phases[root]).toBeUndefined();
+    expect(client.runState).toBe("running");
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(0);
+
+    // The worker's agent_start arrives.
+    client.emitRunState("running");
+    await run;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+    // The bound was never reached: its wait is still pending, unfired.
+    expect(clock.pending.filter((wait) => wait.ms === 5_000)).toHaveLength(1);
+    expect(client.getStateCalls).toBe(1);
+  });
+
+  it("keeps the assignment queued and counts a prompt failure when the acknowledged prompt starts no turn within the bound", async () => {
+    const { processes, managedState, publications, token, clock, client } =
+      await queuedIdleWorkerFixture(2);
+    client.turnStartsOnPrompt = false;
+    const getStateCallsBefore = client.getStateCalls;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorCalls: unknown[][] = [];
+    try {
+      const run = processes.reconcileWorkerAdmission();
+      await expireTurnStartWait(clock);
+      await run;
+    } finally {
+      errorCalls = errorLog.mock.calls.map((call) => [...call]);
+      errorLog.mockRestore();
+    }
+
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.locator).toBeDefined();
+    expect(claim.promptFailures).toBe(1);
+    expect(managedState.phases[root]).toBeUndefined();
+    // The pre-prompt run state is restored silently — an undo, never an idle transition — and
+    // the spec's second signal was asked for exactly once.
+    expect(client.runState).toBe("idle");
+    expect(client.idleFireCount).toBe(0);
+    expect(client.getStateCalls).toBe(getStateCallsBefore + 1);
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(0);
+    expect(errorCalls).toHaveLength(1);
+    const [message, error] = errorCalls[0] ?? [];
+    expect(String(message)).toContain(token);
+    expect(error).toBeInstanceOf(PromptNotStarted);
+    expect(String(error)).toContain("get_state: isStreaming=false");
+  });
+
+  it("commits a turn that starts after the bound as the same delivery and never prompts the task again", async () => {
+    const { processes, managedState, publications, token, clock, client } =
+      await queuedIdleWorkerFixture(2);
+    client.turnStartsOnPrompt = false;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const infoLog = vi.spyOn(console, "info").mockImplementation(() => {});
+    let infoLines: string[] = [];
+    try {
+      const run = processes.reconcileWorkerAdmission();
+      await expireTurnStartWait(clock);
+      await run;
+      expect(testerClaim(managedState, token).promptFailures).toBe(1);
+
+      // The worker was merely slow: its agent_start arrives after the bound expired.
+      client.emitRunState("running");
+      await flushEventLoopUntil(() => managedState.workerAdmission.queue.length === 0);
+    } finally {
+      infoLines = infoLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+      infoLog.mockRestore();
+    }
+
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(infoLines).toContainEqual(
+      expect.stringContaining(`${token} started its turn after the prompt wait expired`)
+    );
+
+    // The next drain finds nothing to deliver: the task is never prompted a second time.
+    await processes.reconcileWorkerAdmission();
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+  });
+
+  it("commits nothing on a late start when the queued task has been replaced meanwhile", async () => {
+    const { processes, managedState, publications, token, clock, client } =
+      await queuedIdleWorkerFixture(2);
+    client.turnStartsOnPrompt = false;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const run = processes.reconcileWorkerAdmission();
+      await expireTurnStartWait(clock);
+      await run;
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    // A newer assignment for the same role replaced the one whose receipt is still pending.
+    testerClaim(managedState, token).pendingAssignment = { kind: "assignment", task: "other" };
+    client.emitRunState("running");
+    await flushEventLoop(50);
+
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(testerClaim(managedState, token).pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "other",
+    });
+    expect(managedState.phases[root]).toBeUndefined();
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(0);
+  });
+
+  it("retires a worker whose acknowledged prompts start no turn three times, then relaunches the assignment cold with --resume", async () => {
+    const { processes, managedState, token, clock, client } = await queuedIdleWorkerFixture(1, {
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "split-window") {
+          return { stdout: "%301 23456\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    client.turnStartsOnPrompt = false;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorCalls = 0;
+    try {
+      // Three separate drain attempts, each an acknowledgement no turn follows — the third
+      // crosses MAX_LAUNCH_FAILURES (3) and retires the pane through the same path a refusal
+      // takes (markWorkerDeadLocked, via WorkerAdmissionDeps.retireDeadClaim).
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const run = processes.reconcileWorkerAdmission();
+        await expireTurnStartWait(clock);
+        await run;
+        expect(testerClaim(managedState, token).promptFailures).toBe(attempt + 1);
+      }
+    } finally {
+      errorCalls = errorLog.mock.calls.length;
+      errorLog.mockRestore();
+    }
+    expect(errorCalls).toBe(3);
+
+    const retiredClaim = testerClaim(managedState, token);
+    expect(retiredClaim.promptFailures).toBe(3);
+    expect(retiredClaim.locator).toBeUndefined();
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+
+    // Falls through to the launch path on the next drain: a fresh cold launch, not another
+    // prompt attempt against the now-retired client.
+    await processes.reconcileWorkerAdmission();
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const launchedClaim = testerClaim(managedState, token);
+    expect(tmuxFields(launchedClaim.locator)?.tmuxPaneId).toBe("%301");
+    expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+  });
+
+  it("answers queued and queues the task when spawn_worker's direct prompt is acknowledged but starts no turn", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        ompSessionFile: "/state/workers/tester-session.json",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    client.turnStartsOnPrompt = false;
+    client.getStateImpl = async () => ({ data: { isStreaming: false } });
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+      publications,
+    } = manager(state, { connectWorkerRpc: async () => client, sleep: clock.sleep });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const result = processes.spawnWorker(root, root, "tester", "verify #55");
+      await expireTurnStartWait(clock);
+      expect(await result).toEqual({ status: "queued", roleToken: token });
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #55" });
+    expect(claim.locator).toBeDefined();
+    expect(claim.promptFailures).toBe(1);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(managedState.phases[root]).toBeUndefined();
+    expect(publications.filter((p) => p.json === workerQueuedJson)).toHaveLength(1);
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(0);
+    expect(commands.some((command) => command[0] === "tmux")).toBeFalse();
+    // No immediate retry: the not-started path triggers no drain of its own.
+    expect(client.prompts).toEqual(["verify #55"]);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain(token);
+
+    // The next drain retries the queued task; this time the turn starts.
+    const retry = processes.reconcileWorkerAdmission();
+    await flushEventLoopUntil(() => client.prompts.length === 2);
+    client.emitRunState("running");
+    await retry;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(testerClaim(managedState, token).pendingAssignment).toBeUndefined();
+    expect(testerClaim(managedState, token).promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+  });
+
+  it("confirms the boot but queues the assignment and counts a prompt failure when the ready-time prompt is acknowledged without a turn", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      launchFailures: 2,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const client = fakeWorkerRpcClient();
+    client.turnStartsOnPrompt = false;
+    // The confirming get_state is what seeds this fresh client from "unknown" to idle — the
+    // one genuine idle observation on this path, and what makes the queued retry promotable.
+    client.getStateImpl = async () => {
+      client.emitRunState("idle");
+      return { data: { isStreaming: false } };
+    };
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, { connectWorkerRpc: async () => client, sleep: clock.sleep });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const ready = processes.workerReady(root, "tester", "ses_tester", 1);
+      await expireTurnStartWait(clock);
+      await ready;
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    const claim = testerClaim(managedState, token);
+    // The boot did succeed and is confirmed exactly as a delivered prompt would have confirmed it.
+    expect(claim.readyConfirmedAt).toBeDefined();
+    expect(claim.launchFailures).toBeUndefined();
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.locator).toBeDefined();
+    expect(claim.promptFailures).toBe(1);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(managedState.phases[root]).toBeUndefined();
+    expect(publications.filter((p) => p.json === workerQueuedJson)).toHaveLength(1);
+    expect(client.runState).toBe("idle");
+    expect(client.idleFireCount).toBe(1);
+    // No immediate retry: the not-started path triggers no drain of its own.
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain("boot confirmed, task queued");
+
+    // The next drain retries the queued task; this time the turn starts.
+    const retry = processes.reconcileWorkerAdmission();
+    await flushEventLoopUntil(() => client.prompts.length === 2);
+    client.emitRunState("running");
+    await retry;
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(testerClaim(managedState, token).pendingAssignment).toBeUndefined();
+    expect(testerClaim(managedState, token).promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+  });
+
+  /** A fake tmux for a worker that is launched, dies, and is relaunched: `split-window` reports a
+   * new pane each time (`%301`, `%302`, …) under the fixture's default process identity, so every
+   * recorded pane verifies against `list-panes`. Records every command it is given (a custom
+   * `run` replaces `manager()`'s recording runner, so its `commands` stays empty). */
+  function relaunchingTmux(): { run: ProcessManagerDeps["run"]; commands: string[][] } {
+    let panes = 0;
+    const commands: string[][] = [];
+    return {
+      commands,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "split-window") {
+          panes += 1;
+          return { stdout: `%${300 + panes} 12345\n`, exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    };
+  }
+
+  /** A `connectWorkerRpc` that hands out `client` once and refuses every later dial — a shim whose
+   * process exited after the daemon's one connection to it. */
+  function connectOnce(client: FakeWorkerRpcClient): {
+    connect: () => Promise<FakeWorkerRpcClient>;
+    attempts: () => number;
+  } {
+    let attempts = 0;
+    return {
+      attempts: () => attempts,
+      connect: async () => {
+        attempts += 1;
+        if (attempts > 1) throw new Error("ECONNREFUSED");
+        return client;
+      },
+    };
+  }
+
+  /** Makes `client` acknowledge each prompt and then close its socket before any turn starts —
+   * a worker that died right after saying "got it". */
+  function closeAfterAcknowledging(client: FakeWorkerRpcClient): void {
+    client.turnStartsOnPrompt = false;
+    const acknowledge = client.prompt.bind(client);
+    client.prompt = async (message: string) => {
+      const receipt = await acknowledge(message);
+      client.close();
+      return receipt;
+    };
+  }
+
+  function resumeArgument(commands: string[][]): string | undefined {
+    return commands
+      .filter((command) => command[0] === "tmux" && command[3] === "split-window")
+      .map((command) => command.at(-1) ?? "")
+      .find((argv) => argv.includes("--resume="));
+  }
+
+  for (const workerCap of [1, 2]) {
+    it(`retires a ready-time worker whose socket closes after acknowledging its first task and relaunches the task cold with --resume (workerCap ${workerCap})`, async () => {
+      const token = roleToken("omp", root, "planner");
+      const clock = manualSleep();
+      const sessionFile = path.join(await temporaryDir(), "planner-session.jsonl");
+      await writeFile(sessionFile, "{}", "utf8");
+      const client = fakeWorkerRpcClient();
+      closeAfterAcknowledging(client);
+      const shim = connectOnce(client);
+      const tmuxFake = relaunchingTmux();
+      // The relaunch does real filesystem work (the session-file `stat`, the boot-token secret
+      // file, the workspace config, the socket dir) before and after its tmux call, so a
+      // `setImmediate` budget racing it is load-sensitive. `worker-started` is published only
+      // once `launchWorker` has written the fresh claim, dequeued the token, and persisted — the
+      // last step of the chain under test — so a waiter resolved from inside the fake publish is
+      // the observable end itself, exactly as the queued-promotion tests above await it. A wait
+      // that never resolves fails on bun's own timeout with the assertions unreached, never a
+      // false green.
+      const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+      const publications: Array<{ subject: string; json: string }> = [];
+      const promoted = Promise.withResolvers<void>();
+      const { processes, managedState } = await workerCapFixture(workerCap, {
+        sleep: clock.sleep,
+        connectWorkerRpc: shim.connect,
+        run: tmuxFake.run,
+        publishRole: (subject, json) => {
+          publications.push({ subject, json });
+          if (subject === architectTopic && json.includes("worker-started")) promoted.resolve();
+        },
+      });
+      const claimOf = (): WorkerRoleClaim => {
+        const claim = managedState.roles[token];
+        if (!claim || !("issue" in claim)) throw new Error("planner claim disappeared");
+        return claim;
+      };
+
+      expect(await processes.spawnWorker(root, root, "planner", "plan #41")).toEqual({
+        status: "spawned",
+        roleToken: token,
+      });
+      const booted = claimOf();
+      expect(tmuxFields(booted.locator)?.tmuxPaneId).toBe("%301");
+      expect(booted.readyConfirmedAt).toBeUndefined();
+      // `/worker/started` registered this generation's session and its OMP session file.
+      booted.sessionId = "ses_planner";
+      if (!booted.locator) throw new Error("planner locator disappeared");
+      booted.locator.ompSessionFile = sessionFile;
+
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      let errorLines: string[] = [];
+      try {
+        await processes.workerReady(root, "planner", "ses_planner", 1);
+        // The close handler's reconnect (refused), the retirement, the requeue and the relaunch
+        // all run detached from `workerReady`; the relaunch's `worker-started` is the observable end.
+        await promoted.promise;
+      } finally {
+        errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+        errorLog.mockRestore();
+      }
+
+      // Exactly where any dead worker with a pending assignment ends: the dead pane killed, its
+      // locator replaced by the relaunch, the task kept for the new boot's `/worker/ready`, the
+      // death counted against `launchFailures` (never `promptFailures`), the boot unconfirmed.
+      const relaunched = claimOf();
+      expect(tmuxFields(relaunched.locator)?.tmuxPaneId).toBe("%302");
+      expect(relaunched.generation).toBe(2);
+      expect(relaunched.readyConfirmedAt).toBeUndefined();
+      expect(relaunched.pendingAssignment).toEqual({ kind: "assignment", task: "plan #41" });
+      expect(relaunched.launchFailures).toBe(1);
+      expect(relaunched.promptFailures).toBeUndefined();
+      expect(managedState.workerAdmission.queue).toEqual([]);
+      expect(managedState.phases[root]).toBeUndefined();
+      expect(resumeArgument(tmuxFake.commands)).toContain(`--resume=${sessionFile}`);
+      expect(
+        tmuxFake.commands.some(
+          (command) =>
+            command[0] === "tmux" && command[3] === "kill-pane" && command.includes("%301")
+        )
+      ).toBeTrue();
+      expect(shim.attempts()).toBeGreaterThanOrEqual(2);
+      expect(client.prompts).toEqual(["plan #41"]);
+      // The architect hears the relaunch, never a "queued" for a worker that was dead.
+      expect(publications.map((p) => JSON.parse(p.json).type)).toEqual(["worker-started"]);
+      expect(errorLines.filter((line) => line.includes(token))).toHaveLength(1);
+    });
+  }
+
+  it("does not count a socket that closes during a queued promotion's wait as a prompt failure: the task stays queued and the next drain re-prompts the reconnected worker", async () => {
+    // The shim's socket drops right after it acknowledges the prompt, but the shim is still
+    // listening: the close handler's one reconnect succeeds. A socket close is the close
+    // handler's event, never a swallowed prompt — nothing is counted against `promptFailures`,
+    // the entry stays queued, and the reconnected client's idle seed drives the next drain.
+    const reconnected = fakeWorkerRpcClient();
+    reconnected.turnStartsOnPrompt = false;
+    reconnected.getStateImpl = async () => {
+      reconnected.emitRunState("idle");
+      return { data: { isStreaming: false } };
+    };
+    const first = fakeWorkerRpcClient();
+    let dials = 0;
+    const { processes, managedState, publications, token, client } = await queuedIdleWorkerFixture(
+      2,
+      {
+        connectWorkerRpc: async () => {
+          dials += 1;
+          return dials === 1 ? first : reconnected;
+        },
+      },
+      first
+    );
+    closeAfterAcknowledging(client);
+
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.reconcileWorkerAdmission();
+      await flushEventLoopUntil(() => reconnected.prompts.length === 1);
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    // The retry is in flight on the reconnected socket, waiting on its own bound; the close
+    // itself was counted against nothing.
+    const claim = testerClaim(managedState, token);
+    expect(claim.promptFailures ?? 0).toBe(0);
+    expect(claim.locator).toBeDefined();
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(managedState.phases[root]).toBeUndefined();
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(reconnected.prompts).toEqual(["verify #41"]);
+    expect(publications).toEqual([]);
+    expect(errorLines.filter((line) => line.includes(token))).toHaveLength(1);
+  });
+
+  it("credits a turn that starts while the confirming get_state is failing, counting no prompt failure", async () => {
+    const { processes, managedState, publications, token, clock, client } =
+      await queuedIdleWorkerFixture(2);
+    client.turnStartsOnPrompt = false;
+    client.getStateImpl = async () => {
+      // The worker's agent_start lands while get_state is in flight; the call itself then fails.
+      client.emitRunState("running");
+      throw new Error('Worker RPC "get_state" timed out after 5000ms');
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorCalls = 0;
+    try {
+      const run = processes.reconcileWorkerAdmission();
+      await expireTurnStartWait(clock);
+      await run;
+    } finally {
+      errorCalls = errorLog.mock.calls.length;
+      errorLog.mockRestore();
+    }
+
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment).toBeUndefined();
+    expect(claim.promptFailures).toBe(0);
+    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+    expect(publications.filter((p) => p.json === workerQueuedJson)).toHaveLength(0);
+    expect(client.prompts).toEqual(["verify #41"]);
+    expect(errorCalls).toBe(0);
   });
 
   it("does not drop a queued idle-resume assignment as stale when its client is alive but not currently idle, only stops the drain until it goes idle", async () => {

@@ -28,6 +28,30 @@ const RPC_CHUNK_BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A
 export type WorkerRunState = "unknown" | "running" | "idle";
 
 /**
+ * What `WorkerRpcClient.prompt()` hands back once the shim has acknowledged the prompt. The
+ * acknowledgement is not delivery: OMP's rpc mode answers `{success:true}` before it starts the
+ * turn (`session.prompt(...)` is started, not awaited, in `rpc-mode.ts`'s `case "prompt"`), and a
+ * fork build since commit 0e57a6ca can accept a message that starts no turn at all. The receipt
+ * is how a caller learns the turn actually started.
+ */
+export interface PromptReceipt {
+  /** Resolves when the worker's turn is observed to start: the first `agent_start` frame, or a
+   * `get_state` answer with `isStreaming: true`, seen on this connection after this prompt was
+   * written. Never rejects and never times out — the caller bounds it — and still resolves after
+   * `abandonWait()` (a late start). Settled at most once; a later `prompt()` on the same client
+   * supersedes this receipt, and a superseded receipt never settles. */
+  readonly turnStarted: Promise<void>;
+  /** Synchronous view of `turnStarted`, so a caller can skip building a bounded race when the
+   * start already arrived (an `agent_start` can precede the acknowledgement). */
+  readonly hasStarted: boolean;
+  /** The caller's bound expired first: restores `runState` to its pre-prompt value without
+   * firing `onIdle`, exactly like a refused prompt — only if this receipt is still the last
+   * prompt sent on this client, the turn has not been observed, and `runState` is still the
+   * optimistic `"running"` (a socket close's `"unknown"` is never clobbered). Idempotent. */
+  abandonWait(): void;
+}
+
+/**
  * Minimal client for the OMP RPC protocol v2, reached through a worker's
  * `legion worker-shim` stream — the unix socket the daemon dials or the TCP
  * stream a `--connect` shim dialed in — rather than a spawned process's stdio.
@@ -50,18 +74,22 @@ export interface WorkerRpcClient {
    * `getState()`'s `isStreaming` field on a fresh connection that hasn't observed a frame yet. */
   readonly runState: WorkerRunState;
   negotiate(): Promise<void>;
-  /** Marks `runState` as `"running"` before the request is even sent, so a concurrent caller
-   * checking occupancy never sees free capacity in the gap between sending a prompt to an
-   * already-idle worker and its `agent_start` frame arriving. If the prompt is refused (an
-   * ordinary `{success:false}` response, socket and shim still alive) `runState` is restored to
-   * whatever it was before this call instead of staying wrongly stuck at `"running"` — a rejected
-   * prompt never started a real turn, so nothing will ever emit the `agent_end` frame that would
-   * otherwise be the only way back to `"idle"`. */
-  prompt(message: string): Promise<void>;
+  /** Resolves on the shim's acknowledgement with a `PromptReceipt`; the acknowledgement alone is
+   * not delivery — the receipt's `turnStarted` is how a caller learns the turn began. Marks
+   * `runState` as `"running"` before the request is even sent, so a concurrent caller checking
+   * occupancy never sees free capacity in the gap between sending a prompt to an already-idle
+   * worker and its `agent_start` frame arriving. If the prompt is refused (an ordinary
+   * `{success:false}` response, socket and shim still alive) this rejects with the shim's error
+   * and `runState` is restored to whatever it was before this call instead of staying wrongly
+   * stuck at `"running"` — a rejected prompt never started a real turn, so nothing will ever emit
+   * the `agent_end` frame that would otherwise be the only way back to `"idle"`. A caller whose
+   * bound on `turnStarted` expires performs the same restore through `receipt.abandonWait()`. */
+  prompt(message: string): Promise<PromptReceipt>;
   /** Also seeds `runState` from the response's `isStreaming` field (`true` -> `"running"`,
    * `false` -> `"idle"`, firing `onIdle` on a transition into idle) when present, so a worker
    * that was already idle before this connection existed — e.g. reconnected after a daemon
-   * restart — is not stuck at the conservative `"unknown"` default forever. */
+   * restart — is not stuck at the conservative `"unknown"` default forever. An `isStreaming:
+   * true` answer also resolves the last prompt's pending `turnStarted`. */
   getState(timeoutMs?: number): Promise<Record<string, unknown>>;
   /** Asks the shim to close the wrapped OMP process's stdin; never SIGTERMs it. */
   shutdown(): void;
@@ -79,6 +107,12 @@ export interface WorkerRpcClient {
    * confirmed is actually gone. Replaces any previously registered callback.
    */
   onIdle(callback: () => void): void;
+}
+
+/** The settle callback of the last prompt sent on a connection, armed before the prompt is
+ * written so an `agent_start` racing the acknowledgement is not missed; one slot per client. */
+interface PendingTurnStart {
+  resolve: () => void;
 }
 
 interface PendingRequest {
@@ -163,10 +197,19 @@ export function createWorkerRpcClient(
   let idleCallback: (() => void) | undefined;
   let loggedMissingIsStreaming = false;
   let pendingChunks: PendingRpcChunks | undefined;
+  let pendingTurnStart: PendingTurnStart | undefined;
   const markIdle = (): void => {
     const wasIdle = runState === "idle";
     runState = "idle";
     if (!wasIdle) idleCallback?.();
+  };
+  /** A turn was observed to start (`agent_start`, or `get_state` reporting a stream): the worker
+   * is running, and the last prompt's receipt — if one is still waiting — is settled. */
+  const observeTurnStart = (): void => {
+    runState = "running";
+    const slot = pendingTurnStart;
+    pendingTurnStart = undefined;
+    slot?.resolve();
   };
 
   const failAllPending = (error: Error): void => {
@@ -293,7 +336,7 @@ export function createWorkerRpcClient(
     }
 
     if (frame.type === "agent_start") {
-      runState = "running";
+      observeTurnStart();
     } else if (frame.type === "agent_end") {
       markIdle();
     }
@@ -366,10 +409,22 @@ export function createWorkerRpcClient(
     },
     async prompt(message) {
       const previousRunState = runState;
+      let hasStarted = false;
+      const started = Promise.withResolvers<void>();
+      const slot: PendingTurnStart = {
+        resolve: () => {
+          hasStarted = true;
+          started.resolve();
+        },
+      };
+      // Armed before the request is written: the worker's `agent_start` can reach us before
+      // the acknowledgement does, and a slot armed afterwards would miss it.
+      pendingTurnStart = slot;
       runState = "running";
       try {
         await request("prompt", { message });
       } catch (error) {
+        if (pendingTurnStart === slot) pendingTurnStart = undefined;
         // An ordinary {success:false} rejection means the worker refused the prompt but the
         // socket and its shim are still alive -- restore whatever runState was before this
         // attempt (usually "idle") instead of leaving it wrongly stuck at "running" forever,
@@ -382,12 +437,26 @@ export function createWorkerRpcClient(
         if (runState === "running") runState = previousRunState;
         throw error;
       }
+      return {
+        turnStarted: started.promise,
+        get hasStarted() {
+          return hasStarted;
+        },
+        abandonWait() {
+          // The same restore as a refused prompt, under the same "nothing else has touched it"
+          // guard, plus two of its own: the turn must not have been observed, and this must
+          // still be the last prompt sent (a later prompt owns runState now). The slot stays
+          // armed so a turn that starts late still settles `turnStarted`.
+          if (hasStarted || pendingTurnStart !== slot || runState !== "running") return;
+          runState = previousRunState;
+        },
+      };
     },
     getState(requestTimeoutMs = timeoutMs) {
       return request("get_state", {}, requestTimeoutMs).then((response) => {
         const data = isRecord(response.data) ? response.data : undefined;
         if (typeof data?.isStreaming === "boolean") {
-          if (data.isStreaming) runState = "running";
+          if (data.isStreaming) observeTurnStart();
           else markIdle();
         } else if (!loggedMissingIsStreaming) {
           // Logged once per client, not once per call: a shim that never reports

@@ -218,7 +218,7 @@ for (const transport of [unixTransport, tcpTransport]) {
       }
     });
 
-    it("resolves prompt on its immediate ack without waiting for the agent turn", async () => {
+    it("resolves prompt on its acknowledgement with a receipt whose turn has not started; the shim's later agent_start resolves turnStarted", async () => {
       const { shim, connect } = await transport.start((frame, write) => {
         if (frame.type === "prompt") {
           write({ id: frame.id, type: "response", command: "prompt", success: true });
@@ -226,7 +226,99 @@ for (const transport of [unixTransport, tcpTransport]) {
       });
       try {
         const client = await connect();
-        await expect(client.prompt("verify #41")).resolves.toBeUndefined();
+        const receipt = await client.prompt("verify #41");
+        expect(receipt.hasStarted).toBe(false);
+        expect(client.runState).toBe("running");
+        shim.write({ type: "agent_start" });
+        await receipt.turnStarted;
+        expect(receipt.hasStarted).toBe(true);
+        expect(client.runState).toBe("running");
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+
+    it("counts an agent_start that arrives before the prompt's acknowledgement", async () => {
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type === "prompt") {
+          write({ type: "agent_start" });
+          write({ id: frame.id, type: "response", command: "prompt", success: true });
+        }
+      });
+      try {
+        const client = await connect();
+        const receipt = await client.prompt("verify #41");
+        expect(receipt.hasStarted).toBe(true);
+        await receipt.turnStarted;
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+
+    it("abandonWait() restores the pre-prompt runState without firing onIdle, and a later agent_start still resolves turnStarted", async () => {
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type === "get_state") {
+          write({
+            id: frame.id,
+            type: "response",
+            command: "get_state",
+            success: true,
+            data: { isStreaming: false },
+          });
+        } else if (frame.type === "prompt") {
+          write({ id: frame.id, type: "response", command: "prompt", success: true });
+        }
+      });
+      try {
+        const client = await connect();
+        await client.getState(2_000);
+        expect(client.runState).toBe("idle");
+        let idleFired = 0;
+        client.onIdle(() => {
+          idleFired++;
+        });
+        const receipt = await client.prompt("verify #41");
+        expect(client.runState).toBe("running");
+        receipt.abandonWait();
+        expect(client.runState).toBe("idle");
+        expect(idleFired).toBe(0);
+        expect(receipt.hasStarted).toBe(false);
+        shim.write({ type: "agent_start" });
+        await receipt.turnStarted;
+        expect(receipt.hasStarted).toBe(true);
+        expect(client.runState).toBe("running");
+        receipt.abandonWait();
+        expect(client.runState).toBe("running");
+        expect(idleFired).toBe(0);
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+
+    it("a get_state answer with isStreaming: true resolves the pending turnStarted", async () => {
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type === "prompt") {
+          write({ id: frame.id, type: "response", command: "prompt", success: true });
+        } else if (frame.type === "get_state") {
+          write({
+            id: frame.id,
+            type: "response",
+            command: "get_state",
+            success: true,
+            data: { isStreaming: true },
+          });
+        }
+      });
+      try {
+        const client = await connect();
+        const receipt = await client.prompt("verify #41");
+        expect(receipt.hasStarted).toBe(false);
+        await client.getState(2_000);
+        expect(receipt.hasStarted).toBe(true);
+        await receipt.turnStarted;
         client.close();
       } finally {
         shim.stop();
@@ -368,7 +460,7 @@ for (const transport of [unixTransport, tcpTransport]) {
       const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const client = await connect();
-        await expect(client.prompt("verify #41")).resolves.toBeUndefined();
+        await expect(client.prompt("verify #41")).resolves.toMatchObject({ hasStarted: false });
         // "running" is exactly what `prompt()` itself sets optimistically before sending the
         // request -- the aborted chunk sequence never dispatched anything, so it never had a
         // chance to touch `runState` on its own.

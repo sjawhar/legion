@@ -142,11 +142,12 @@ export interface WorkerRoleClaim {
   generation?: number;
   pendingAssignment?: PendingAssignment;
   launchFailures?: number;
-  /** Consecutive `prompt()` rejections against this claim's already-live socket (reset to 0 on
-   * a successful prompt) — the queued idle-resume path's own failure counter, mirroring
-   * `launchFailures` for the cold-launch path. At `MAX_LAUNCH_FAILURES` the worker is
-   * considered persistently broken: its locator is retired and cleared so the still-queued
-   * assignment falls through to the launch path's own threshold on the next drain. */
+  /** Consecutive failed prompt attempts against this claim's already-live socket — a refusal,
+   * or an acknowledgement no turn followed within the bound (`PromptNotStarted`) — reset to 0
+   * once a prompt's turn is observed to start. The live-worker prompt paths' own failure
+   * counter, mirroring `launchFailures` for the cold-launch path. At `MAX_LAUNCH_FAILURES` the
+   * worker is considered persistently broken: its locator is retired and cleared so the
+   * still-queued assignment falls through to the launch path's own threshold on the next drain. */
   promptFailures?: number;
   bootTokenHash?: string;
   /** The dead worker's last OMP session file, preserved when its locator is cleared (retired or
