@@ -35,7 +35,10 @@ test("project filters stay collapsed until needed and margin asks use the compac
     const filters = page.getByRole("button", { name: "Filters · 0 active" });
     await expect(filters).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByRole("combobox", { name: "Status" })).toHaveCount(0);
-    await page.screenshot({ path: `/tmp/polish-project-list-${viewport}.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-project-list-${viewport}.png`),
+      fullPage: true,
+    });
 
     await filters.click();
     await page.getByRole("combobox", { name: "Status" }).selectOption("todo");
@@ -56,13 +59,19 @@ test("project filters stay collapsed until needed and margin asks use the compac
         )
       ).toBe(true);
     }
-    await page.screenshot({ path: `/tmp/polish-project-board-${viewport}.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-project-board-${viewport}.png`),
+      fullPage: true,
+    });
 
     await page.goto("/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
     await expect(inboxCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(inboxCard.getByLabel("Your answer")).toBeVisible();
-    await page.screenshot({ path: `/tmp/polish-inbox-${viewport}.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-inbox-${viewport}.png`),
+      fullPage: true,
+    });
 
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
@@ -73,14 +82,20 @@ test("project filters stay collapsed until needed and margin asks use the compac
     await expect(marginCard.getByLabel("Your answer")).toBeHidden();
     await marginCard.getByText("Add a note or answer in your own words", { exact: true }).click();
     await expect(marginCard.getByLabel("Your answer")).toBeVisible();
-    await page.screenshot({ path: `/tmp/polish-margin-${viewport}.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-margin-${viewport}.png`),
+      fullPage: true,
+    });
     if (!process.env.PLAYWRIGHT_BASE_URL) {
       await setLiveSessions([]);
     }
 
     await page.goto("/agents");
     await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
-    await page.screenshot({ path: `/tmp/polish-agents-${viewport}.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-agents-${viewport}.png`),
+      fullPage: true,
+    });
   } finally {
     await context.close();
   }
