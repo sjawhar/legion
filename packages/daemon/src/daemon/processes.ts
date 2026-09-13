@@ -357,8 +357,9 @@ export class ProcessManager {
    * gated: the hold is about opening panes. */
   private launchesEnabled = false;
   private readonly heldResurrects = new Set<IssueKey>();
-  /** Redeliveries of one role message to one live architect within `ROLE_REDELIVERY_PERIOD_MS`,
-   * keyed by `\`${roleToken}\n${payload}\``; see `MAX_ROLE_REDELIVERIES`. */
+  /** Per-period counters for `handleException`: redeliveries of one role message to one live
+   * architect (`<token>\n<payload>`, see `MAX_ROLE_REDELIVERIES`) and late receipts per role
+   * (`<token>\nlate-receipt`, logged once). */
   private readonly roleRedeliveries = new Map<string, { count: number; firstAt: number }>();
   private heldControllerRequest = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
@@ -2520,8 +2521,16 @@ export class ProcessManager {
   /**
    * Recovers the role a core-NATS delivery exception names: the controller through
    * `ensureController`, a tree's root architect by probing its process (alive: told to reclaim
-   * its role and redelivered the missed event; dead: resurrected), any other role through
-   * `resumeWorker`. The exception lane has no redelivery -- core NATS has no nak, and the event
+   * its role and, for a `no_holder`, redelivered the missed event; dead: resurrected), any other
+   * role through `resumeWorker`. A `delivery_failed` whose holder is alive — an architect whose
+   * pane probes alive, a worker whose shim client is connected — is a receipt that arrived after
+   * the listener's window, not a lost message: the holder has it, and republishing it or sending
+   * a catch-up only interrupts the holder's turn with a duplicate (LEGION-103: one late receipt
+   * became the same message every few seconds for as long as the load lasted, and a worker's
+   * catch-up queued against its own running turn was retried into `promptFailures` and a
+   * relaunch). Such an exception is logged once per role per `ROLE_REDELIVERY_PERIOD_MS` and
+   * otherwise ignored; a `no_holder`, or a `delivery_failed` whose holder is gone, recovers as
+   * before. The exception lane has no redelivery -- core NATS has no nak, and the event
    * pump only records a rejected handler in memory, surfaced at shutdown -- so every failure
    * past parsing the token (a liveness probe the runtime could not complete, a recovery that
    * failed past it, a token naming an issue no tree records) is logged here, naming the role
@@ -2542,6 +2551,10 @@ export class ProcessManager {
       if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
       if (parsed.role === "architect" && parsed.issue === root) {
         if ((await this.probe(root)) === "alive") {
+          if (exception.reason === "delivery_failed") {
+            this.noteLateReceipt(exception);
+            return;
+          }
           const redeliver = this.countRoleRedelivery(exception);
           await this.controlDirective(
             root,
@@ -2553,6 +2566,10 @@ export class ProcessManager {
         }
         return;
       }
+      if (exception.reason === "delivery_failed" && this.workerClients.has(exception.roleToken)) {
+        this.noteLateReceipt(exception);
+        return;
+      }
       await this.resumeWorker(root, parsed.issue, parsed.role);
     } catch (error) {
       console.error(
@@ -2562,27 +2579,43 @@ export class ProcessManager {
     }
   }
 
+  /** One more `delivery_failed` for a role whose holder is alive (see `handleException`): counted
+   * per role token so the first in each `ROLE_REDELIVERY_PERIOD_MS` is logged and the rest are
+   * silent — a loaded box produces these by the dozen, and each is the same fact. */
+  private noteLateReceipt(exception: ExceptionInfo): void {
+    if (this.countRedelivery(`${exception.roleToken}\nlate-receipt`) !== 1) return;
+    console.error(
+      `[legion] ${exception.roleToken} is alive but its receipt for ${exception.original.eventId} came after the listener's window; the message was delivered, so nothing is republished or caught up (further late receipts for this role are not logged for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes)`
+    );
+  }
+
   /** Counts one more redelivery of `exception.original` to its role and says whether it may go
    * out: true up to `MAX_ROLE_REDELIVERIES` per (role token, payload) within
    * `ROLE_REDELIVERY_PERIOD_MS`, false after — logged once, at the first refusal. The
    * `reclaim-architect` directive still goes out either way (the architect re-asserts its claim);
-   * only the republish is withheld. Stale entries are pruned as the map is touched. */
+   * only the republish is withheld. */
   private countRoleRedelivery(exception: ExceptionInfo): boolean {
-    const now = this.deps.now();
-    for (const [key, record] of this.roleRedeliveries) {
-      if (now - record.firstAt >= ROLE_REDELIVERY_PERIOD_MS) this.roleRedeliveries.delete(key);
-    }
-    const key = `${exception.roleToken}\n${exception.original.payload}`;
-    const record = this.roleRedeliveries.get(key) ?? { count: 0, firstAt: now };
-    record.count += 1;
-    this.roleRedeliveries.set(key, record);
-    if (record.count <= MAX_ROLE_REDELIVERIES) return true;
-    if (record.count === MAX_ROLE_REDELIVERIES + 1) {
+    const count = this.countRedelivery(`${exception.roleToken}\n${exception.original.payload}`);
+    if (count <= MAX_ROLE_REDELIVERIES) return true;
+    if (count === MAX_ROLE_REDELIVERIES + 1) {
       console.error(
-        `[legion] not redelivering to ${exception.roleToken} again: the same message drew ${exception.reason} ${MAX_ROLE_REDELIVERIES} times in a row (a receipt later than the listener's window, not a lost message - the holder has it); further exceptions for it are ignored for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes`
+        `[legion] not redelivering to ${exception.roleToken} again: the same message drew ${exception.reason} ${MAX_ROLE_REDELIVERIES} times in a row; further exceptions for it are ignored for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes`
       );
     }
     return false;
+  }
+
+  /** Increments and returns `key`'s count within the current `ROLE_REDELIVERY_PERIOD_MS`, pruning
+   * every entry whose period has passed as the map is touched. */
+  private countRedelivery(key: string): number {
+    const now = this.deps.now();
+    for (const [entry, record] of this.roleRedeliveries) {
+      if (now - record.firstAt >= ROLE_REDELIVERY_PERIOD_MS) this.roleRedeliveries.delete(entry);
+    }
+    const record = this.roleRedeliveries.get(key) ?? { count: 0, firstAt: now };
+    record.count += 1;
+    this.roleRedeliveries.set(key, record);
+    return record.count;
   }
 
   /**
