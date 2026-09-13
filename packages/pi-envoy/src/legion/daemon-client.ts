@@ -114,6 +114,52 @@ export function createLegionDaemonClient(
     if (!response.ok) throw new LegionDaemonApiError("POST", path, response.status, responseBody);
     return schema.parse(JSON.parse(responseBody));
   };
+
+  /** One record per session id: the newest secret a completed recovery returned, and the
+   * recovery currently in flight, shared by every request refused while it runs. */
+  interface SessionRecoveryRecord {
+    latestSecret?: string;
+    inFlight?: Promise<WorkerSessionResponse>;
+  }
+  const recoveries = new Map<string, SessionRecoveryRecord>();
+
+  /** The secret a request refused with `refusedSecret` retries with: a newer secret already
+   * recovered, else the result of the recovery in flight, else the one recovery this call starts.
+   * `onRecovered` runs once per recovery, before the secret is recorded, so a throw there caches
+   * nothing; a settled recovery clears the in-flight slot so the next refusal starts a new one. */
+  const secretAfterRefusal = async (
+    active: LegionSessionRecovery,
+    sessionId: string,
+    refusedSecret: string
+  ): Promise<string> => {
+    let record = recoveries.get(sessionId);
+    if (record === undefined) {
+      record = {};
+      recoveries.set(sessionId, record);
+    }
+    if (record.latestSecret !== undefined && record.latestSecret !== refusedSecret) {
+      return record.latestSecret;
+    }
+    if (record.inFlight === undefined) {
+      const current = record;
+      const inFlight = postOnce(
+        WORKER_SESSION_PATH,
+        { sessionId, recoveryToken: active.recoveryToken(sessionId) },
+        LegionDaemonApi.WorkerSession.response
+      )
+        .then((recovered) => {
+          active.onRecovered?.(sessionId, recovered);
+          current.latestSecret = recovered.secret;
+          return recovered;
+        })
+        .finally(() => {
+          if (current.inFlight === inFlight) current.inFlight = undefined;
+        });
+      record.inFlight = inFlight;
+    }
+    return (await record.inFlight).secret;
+  };
+
   const post = async <T>(path: string, body: object, schema: ResponseSchema<T>): Promise<T> => {
     try {
       return await postOnce(path, body, schema);
@@ -127,16 +173,8 @@ export function createLegionDaemonClient(
       ) {
         throw error;
       }
-      const recovered = await postOnce(
-        WORKER_SESSION_PATH,
-        {
-          sessionId: capability.sessionId,
-          recoveryToken: recovery.recoveryToken(capability.sessionId),
-        },
-        LegionDaemonApi.WorkerSession.response
-      );
-      recovery.onRecovered?.(capability.sessionId, recovered);
-      return await postOnce(path, { ...body, secret: recovered.secret }, schema);
+      const secret = await secretAfterRefusal(recovery, capability.sessionId, capability.secret);
+      return await postOnce(path, { ...body, secret }, schema);
     }
   };
   const get = async <T>(path: string, schema: ResponseSchema<T>): Promise<T> => {

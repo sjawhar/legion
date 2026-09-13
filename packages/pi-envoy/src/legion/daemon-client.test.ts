@@ -169,3 +169,187 @@ test("leaves a revoked Legion role loudly forbidden without retrying the origina
   );
   expect(requests).toEqual(["/legion/v1/grants", "/legion/v1/worker-session"]);
 });
+
+/** The daemon right after a restart: no secret for the session; every `/worker-session` mints and
+ * stores a fresh one at once (`setCapability` overwrites at mint time) and only its response can be
+ * held; every capability-bearing route is refused unless it carries the stored secret. */
+function forgetfulDaemon(
+  options: {
+    readonly holdRecoveries?: boolean;
+    readonly recoveryFails?: boolean;
+    readonly recoveredRole?: string;
+  } = {}
+) {
+  const requests: { readonly path: string; readonly secret?: unknown }[] = [];
+  const held: (() => void)[] = [];
+  const firstRecoverySeen = Promise.withResolvers<void>();
+  let current: string | undefined;
+  let minted = 0;
+  const fetchFn = (async (input, init) => {
+    const path = new URL(input.toString()).pathname;
+    const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+    requests.push({ path, secret: body.secret });
+    if (path === "/legion/v1/worker-session") {
+      minted += 1;
+      firstRecoverySeen.resolve();
+      if (options.recoveryFails) {
+        return Response.json(
+          { error: "Worker session is not bound to a daemon-issued recovery token" },
+          { status: 403 }
+        );
+      }
+      const secret = `recovered-${minted}`;
+      current = secret;
+      if (options.holdRecoveries) {
+        const gate = Promise.withResolvers<void>();
+        held.push(gate.resolve);
+        await gate.promise;
+      }
+      return Response.json({
+        tree: "acme/widgets#1",
+        issue: "acme/widgets#1",
+        role: options.recoveredRole ?? "architect",
+        secret,
+      });
+    }
+    if (current === undefined || body.secret !== current) {
+      return Response.json({ error: "Invalid session secret" }, { status: 403 });
+    }
+    if (path === "/legion/v1/waves/release") return Response.json({ released: ["acme/widgets#2"] });
+    return Response.json({});
+  }) as typeof fetch;
+  return {
+    requests,
+    held,
+    fetchFn,
+    firstRecoverySeen: firstRecoverySeen.promise,
+    forget: () => {
+      current = undefined;
+    },
+    recoveryCount: () =>
+      requests.filter((request) => request.path === "/legion/v1/worker-session").length,
+  };
+}
+
+const architectCall = { tree: "acme/widgets#1", sessionId: "ses_root", secret: "boot-secret" };
+
+test("two requests refused together share one recovery and both retry with its secret", async () => {
+  const daemon = forgetfulDaemon({ holdRecoveries: true });
+  const recovered: string[] = [];
+  const client = createLegionDaemonClient("http://daemon.test", daemon.fetchFn, {
+    recoveryToken: () => "root-boot-token",
+    onRecovered: (sessionId, session) => recovered.push(`${sessionId}:${session.secret}`),
+  });
+
+  const release = client.releaseWave({ ...architectCall, issues: ["acme/widgets#2"] });
+  const escalate = client.escalate({
+    ...architectCall,
+    kind: "capacity",
+    context: { reason: "x" },
+  });
+  await daemon.firstRecoverySeen;
+  // One macrotask tick, never a wall-clock wait: the fake is pure promises, so every microtask the
+  // two refusals queued has run and a second recovery request (the defect) is already visible.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (const resume of daemon.held) resume();
+
+  expect(await Promise.all([release, escalate])).toEqual([
+    { released: ["acme/widgets#2"] },
+    undefined,
+  ]);
+  expect(daemon.recoveryCount()).toBe(1);
+  expect(recovered).toEqual(["ses_root:recovered-1"]);
+  expect(daemon.requests.map((request) => request.secret)).toEqual([
+    "boot-secret",
+    "boot-secret",
+    undefined,
+    "recovered-1",
+    "recovered-1",
+  ]);
+});
+
+test("a request refused after a recovery already replaced its secret retries with the newer secret without asking again", async () => {
+  const daemon = forgetfulDaemon();
+  const client = createLegionDaemonClient("http://daemon.test", daemon.fetchFn, {
+    recoveryToken: () => "root-boot-token",
+  });
+
+  await client.releaseWave({ ...architectCall, issues: [] });
+  // A caller that still holds the boot secret (a closure captured before the recovery).
+  await client.releaseWave({ ...architectCall, issues: [] });
+
+  expect(daemon.recoveryCount()).toBe(1);
+  expect(daemon.requests.map((request) => request.secret)).toEqual([
+    "boot-secret",
+    undefined,
+    "recovered-1",
+    "boot-secret",
+    "recovered-1",
+  ]);
+});
+
+test("a failed recovery fails every waiting request and the next refusal starts a new recovery", async () => {
+  const daemon = forgetfulDaemon({ recoveryFails: true });
+  const client = createLegionDaemonClient("http://daemon.test", daemon.fetchFn, {
+    recoveryToken: () => "root-boot-token",
+  });
+
+  const results = await Promise.allSettled([
+    client.releaseWave({ ...architectCall, issues: [] }),
+    client.releaseWave({ ...architectCall, issues: [] }),
+  ]);
+
+  expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+  expect(daemon.recoveryCount()).toBe(1);
+  await expect(client.releaseWave({ ...architectCall, issues: [] })).rejects.toThrow(
+    "POST /legion/v1/worker-session failed with 403"
+  );
+  expect(daemon.recoveryCount()).toBe(2);
+});
+
+test("a recovery onRecovered rejects caches nothing: the next refusal recovers again", async () => {
+  const daemon = forgetfulDaemon({ recoveredRole: "tester" });
+  const client = createLegionDaemonClient("http://daemon.test", daemon.fetchFn, {
+    recoveryToken: () => "root-boot-token",
+    onRecovered: (_sessionId, session) => {
+      if (session.role !== "architect") {
+        throw new Error("Daemon recovered a capability for a different Legion role");
+      }
+    },
+  });
+
+  await expect(client.releaseWave({ ...architectCall, issues: [] })).rejects.toThrow(
+    "different Legion role"
+  );
+  await expect(client.releaseWave({ ...architectCall, issues: [] })).rejects.toThrow(
+    "different Legion role"
+  );
+  expect(daemon.recoveryCount()).toBe(2);
+});
+
+test("a request still refused after retrying with the recovered secret is returned after exactly one recovery", async () => {
+  const daemon = forgetfulDaemon();
+  let forgetOnRetry = true;
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    (async (input, init) => {
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+      // The daemon restarts again between the recovery and the retry.
+      if (body.secret === "recovered-1" && forgetOnRetry) {
+        forgetOnRetry = false;
+        daemon.forget();
+      }
+      return daemon.fetchFn(input, init);
+    }) as typeof fetch,
+    { recoveryToken: () => "root-boot-token" }
+  );
+
+  await expect(client.releaseWave({ ...architectCall, issues: [] })).rejects.toThrow(
+    "POST /legion/v1/waves/release failed with 403"
+  );
+  expect(daemon.requests.map((request) => request.path)).toEqual([
+    "/legion/v1/waves/release",
+    "/legion/v1/worker-session",
+    "/legion/v1/waves/release",
+  ]);
+});
