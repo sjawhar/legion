@@ -1,145 +1,271 @@
 {
-  "headSha": "9f7a4e858eb678a2bfbb94e7076b03c21dfce7de",
-  "round": 3,
+  "headSha": "06d0f9a3692ea2133f96ad5562c62a8bbac2e7af",
+  "round": 4,
   "pullRequest": 1010,
   "pullRequestUrl": "https://github.com/sjawhar/legion/pull/1010",
-  "passed": 6,
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Acceptance 6 / requirement 'Teardown never removes another rig's container': down.sh acts only on a SMOKE_DIR that actually started a rig",
-      "evidence": "A start refused inside ensure_nats leaves ${SMOKE_DIR}/legion.yaml (write_daemon_config at up.sh:584 runs before go build and ensure_nats at up.sh:590) and, per acceptance 7, no nats-container record. That is the exact 'pre-record rig' shape down.sh's legacy fallback keys on. Live at 09:57Z: NATS_PORT 14251 occupied by a scratch listener; `up.sh` -> `error: NATS port 14251 is already in use` (exit 1); /tmp/legion-smoke-41 then held `legion.yaml` (`project: sjawhar/41`) and no `nats-container`. Probe at 09:58Z on that directory with a logging fake `docker` first on PATH (real docker never invoked): `SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh` printed `no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats` / `STOPPED NATS container legion-smoke-nats` / `RIG DOWN` (exit 0); fake argv log: `docker container inspect legion-smoke-nats`, `docker rm -f legion-smoke-nats`. At that moment `legion-smoke-nats` (port 14222) was another tester's live pre-PR rig on this machine — the real command would have removed it. Suggested fix in this PR: move `write_daemon_config` after `ensure_nats` beside the record write (nothing between them reads legion.yaml) so a refused start leaves neither marker; extend up.test.sh's refusal cases to assert legion.yaml is absent too."
-    }
-  ],
+  "passed": 7,
+  "failed": 0,
+  "failures": [],
   "verdictPerAcceptance": {
-    "1": "PASS (bare gates at 9f7a4e85: up.test.sh 19 PASS / exit 0, down.test.sh 5 PASS / exit 0). Name derivation, ensure_nats reuse rule and assert_port_free are byte-identical to the round-2 head: sha256 of the project_slug/nats_container_name/listener_machine_id/ensure_nats/assert_port_free function bodies = 991306d6… at both bf338059 and 9f7a4e85.",
-    "2": "PASS (round-1 live run at 431a0d7a stands; not repeated). Product changes since: d027061c (round 2, worker-stream check) and 1b6a5da6 (round 3: down.sh identity from legion.yaml + refusal, up.sh record write after ensure_nats, comment reword). checkpoints.sh / envoy-bridge.ts / checkpoints.test.sh unchanged since bf338059 (8aa385d3… / 87876bc2… / 5b0786de…). Whole-branch fingerprint (skill formula) 481c976a… at bf338059 -> 5b4082b2… at 9f7a4e85, changed by 1b6a5da6 alone. Round-3 step 3 also re-exercised the container-removal path live: own down.sh removed exactly legion-smoke-nats-sjawhar41.",
-    "3": "PASS: README teardown paragraph names `legion-smoke-nats-<slug>`, takes the project from legion.yaml, says SMOKE_PROJECT 'is therefore not needed for teardown; keep SMOKE_REPO exported in forward mode so down.sh can delete the repository webhook it recorded', and that a directory without legion.yaml stops no tmux server and removes no container; the ports sentence quotes ensure_nats verbatim: `NATS container legion-smoke-nats-<slug> is not mapped to configured port <NATS_PORT>` (up.sh: `fail \"NATS container ${nats_name} is not mapped to configured port ${nats_port}\"`). The old 'Keep SMOKE_REPO and SMOKE_PROJECT exported for teardown' sentence is removed.",
-    "4": "PASS (unchanged): PR body Base section names LEGION-10 (#957) merge commit 4b934e60, an ancestor of the head; branch not rebased.",
-    "5": "PASS (round-2 live run at bf338059 stands; assert_port_free and the main() port asserts unchanged since — only the comment above the worker-stream assert was reworded).",
-    "6": "PASS on both spec checks, live: (b) throwaway SMOKE_DIR with no legion.yaml + SMOKE_PROJECT=sjawhar/41 while the sjawhar/41 rig and its private tmux server were up -> `/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container`, RIG DOWN, exit 0; has-session legion-sjawhar41 still OK (@1 controller), docker ps unchanged, daemon/listener alive. (c) own SMOKE_DIR + SMOKE_PROJECT=sjawhar/9999 -> `warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41`, STOPPED tmux session legion-sjawhar41, STOPPED NATS container legion-smoke-nats-sjawhar41, RIG DOWN; afterwards no legion-sjawhar41 server, no legion-smoke-nats* container, ports free. FAIL on the intent ('only a directory that actually started a rig') for a directory left by a start refused at ensure_nats — see failures[0].",
-    "7": "PASS as worded, live: refused start (NATS port occupied) left no nats-container record; real start then wrote `legion-smoke-nats-sjawhar41`. But the same refused start leaves legion.yaml, which is what feeds failures[0]."
+    "1": "PASS: up.test.sh 19 PASS / exit 0, down.test.sh 5 PASS / exit 0 at 06d0f9a3. Every helper the criterion exercises is byte-identical to 9f7a4e85 (up.sh minus main() hashes 0ba55352… at both heads; down.sh a5de07ab… at both).",
+    "2": "PASS (round-1 live run at 431a0d7a stands). Container-name derivation, ensure_nats, and down.sh's removal path unchanged since; round 4 step 4 re-exercised removal live (own down.sh removed exactly legion-smoke-nats-sjawhar41 with real docker).",
+    "3": "PASS: README.md byte-identical to 9f7a4e85 (a0dc655b…), where round 3 verified the teardown paragraph, the derived names, and the verbatim ensure_nats quote.",
+    "4": "PASS (unchanged): PR body names LEGION-10 merge commit 4b934e60, an ancestor of the head; no rebase.",
+    "5": "PASS (round-2 live run at bf338059 stands): assert_port_free and the three main() port asserts are unchanged (the round-4 hunk moves write_daemon_config, which sits after them).",
+    "6": "PASS (round-3 live 6b/6c stand; down.sh byte-identical). The round-3 intent gap (refused-at-ensure_nats directory tearing down the legacy name) is closed: see 7.",
+    "7": "PASS live, as reworded: start refused at the NATS port left neither legion.yaml nor nats-container (nor deployment-instructions.md); the round-3 fake-docker down.sh probe on that exact directory now prints the never-started-a-rig refusal and logs zero docker invocations (round 3: `docker container inspect legion-smoke-nats` + `docker rm -f legion-smoke-nats`); the real start then wrote both files (`project: sjawhar/41`, `legion-smoke-nats-sjawhar41`), the daemon answered GET /legion/v1/state HTTP 200, and its own down.sh removed only legion-smoke-nats-sjawhar41."
+  },
+  "unchangedSince9f7a4e85": {
+    "byteIdenticalFiles": {
+      "scripts/smoke/down.sh": "a5de07ab6e26",
+      "scripts/smoke/down.test.sh": "f54c3fccfd2f",
+      "scripts/smoke/README.md": "a0dc655b78b0",
+      "scripts/smoke/checkpoints.sh": "8aa385d3e28b",
+      "scripts/smoke/envoy-bridge.ts": "87876bc26ecb",
+      "scripts/smoke/checkpoints.test.sh": "5b0786de3aaa"
+    },
+    "upShMinusMain": "0ba5535208602ad631083ba3effce6ec3172be6cad41af8216b1884b31bd65dd at both 9f7a4e85 and 06d0f9a3",
+    "mainHunk": "-write_daemon_config (before go build); +write_daemon_config (directly after ensure_nats, before the nats-container record write) with a rewritten comment; nothing else in main() changed",
+    "wholeBranchFingerprint": {
+      "9f7a4e85": "5b4082b2d21c99362174c901a7623ffcdaf0b0107a9e20d9c4c825ec72cb328b",
+      "06d0f9a3": "719079875d292e93e480b78a1a03266bd37407fabcc8e837a6a59082ca5fc1a6",
+      "formula": "jj diff --from \"fork_point(main@origin | <h>)\" --to <h> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum"
+    }
   },
   "liveRun": {
     "rig": {
       "SMOKE_PROJECT": "sjawhar/41",
       "SMOKE_DIR": "/tmp/legion-smoke-41",
-      "NATS_PORT": 14251,
-      "ENVOY_PORT": 19051,
-      "LEGION_DAEMON_PORT": 19411,
-      "workerStreamPort": 19412,
+      "NATS_PORT": 14261,
+      "ENVOY_PORT": 19061,
+      "LEGION_DAEMON_PORT": 19421,
+      "workerStreamPort": 19422,
       "container": "legion-smoke-nats-sjawhar41",
-      "rootIssue": "LEGSMOKE-116",
-      "listenerPid": 2726911,
-      "daemonPid": 2727720,
-      "controller": "window @1 pane %1 on tmux -L legion-sjawhar41, alive at 10:09:23Z (first resync, ~10 min after boot)"
+      "rootIssue": "LEGSMOKE-118",
+      "listenerPid": 4016825,
+      "daemonPid": 4017582
     },
-    "preflight": "docker ps -a: only another tester's legacy-named `legion-smoke-nats` (Up 4 minutes, 0.0.0.0:14222->4222) — left alone; ports 14251 19051 19411 19412 free; no /tmp/legion-smoke-41; no legion-sjawhar41 tmux server",
-    "step7a_refused": {
-      "at": "2026-09-13T09:57:24Z",
-      "setup": "python3 socket bound to 127.0.0.1:14251 (hub-supervised, ss showed LISTEN 127.0.0.1:14251)",
+    "preflight": "docker ps -a: no legion-smoke-nats*; 14261 19061 19421 19422 free; no /tmp/legion-smoke-41; tmux -L legion-sjawhar41 has-session -> no server running",
+    "step1_refused": {
+      "at": "2026-09-13T10:39:48Z",
+      "setup": "python3 socket bound+listening on 127.0.0.1:14261 (hub-supervised); ss: LISTEN 127.0.0.1:14261",
       "output": [
         "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
-        "error: NATS port 14251 is already in use"
+        "error: NATS port 14261 is already in use"
       ],
       "exit": 1,
-      "after": "ls /tmp/legion-smoke-41/nats-container -> No such file or directory; SMOKE_DIR contents: daemon/ deployment-instructions.md gh-config/ legion.yaml webhook-mode xdg-data/ xdg-state/; no *.pid/*.log; docker ps -a unchanged; 19051 19411 19412 free"
+      "dirAfter": "daemon gh-config webhook-mode xdg-data xdg-state",
+      "legionYaml": "absent",
+      "natsContainer": "absent",
+      "deploymentInstructions": "absent",
+      "pidLogFiles": "none",
+      "dockerPsA": "no legion-smoke-nats*",
+      "ports": "19061 19421 19422 free"
     },
-    "step7a_probeDownShOnRefusedDir": {
-      "at": "2026-09-13T09:58:12Z",
-      "how": "fake docker on PATH logging argv and exiting 0; real docker untouched (verified: legion-smoke-nats still Up afterwards)",
+    "step2_probe": {
+      "at": "2026-09-13T10:39:52Z",
+      "command": "FAKE_DOCKER_LOG=… PATH=/tmp/legion41-fakebin:$PATH SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+      "fakeDocker": "logs argv to FAKE_DOCKER_LOG, exits 0",
       "output": [
-        "no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats",
-        "STOPPED NATS container legion-smoke-nats",
-        "RIG DOWN"
-      ],
-      "fakeDockerArgv": [
-        "docker container inspect legion-smoke-nats",
-        "docker rm -f legion-smoke-nats"
-      ],
-      "meaning": "see failures[0]"
-    },
-    "step7a_realStart": {
-      "at": "2026-09-13T09:58:50Z",
-      "output": [
-        "STARTED NATS container legion-smoke-nats-sjawhar41",
-        "STARTED listener (pid 2726911)",
-        "GREEN Envoy listener: {...\"status\":\"healthy\"}",
-        "GREEN webhook round-trip: listener accepted signed ping",
-        "SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: ...",
-        "STARTED daemon (pid 2727720)",
-        "GREEN Legion daemon: {\"project\":\"sjawhar41\",...}",
-        "CREATED root issue LEGSMOKE-116",
-        "SKIPPED-BLOCKED branch protection: ...",
-        "RIG READY"
-      ],
-      "record": "legion-smoke-nats-sjawhar41",
-      "legionYamlProject": "sjawhar/41",
-      "dockerPs": [
-        "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14251->4222/tcp, [::]:14251->4222/tcp",
-        "legion-smoke-nats 6222/tcp, 8222/tcp, 0.0.0.0:14222->4222/tcp, [::]:14222->4222/tcp (another tester's; gone from docker ps by 10:09Z, not by any action of mine)"
-      ]
-    },
-    "step6b_throwaway": {
-      "at": "2026-09-13T10:09:42Z",
-      "command": "SMOKE_DIR=/tmp/legion-smoke-throwaway SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
-      "dirContents": "(empty; no legion.yaml)",
-      "before": "has-session legion-sjawhar41 OK; list-windows: @1 controller; state controllerLocator {@1,%1}; docker ps: legion-smoke-nats-sjawhar41 …14251->4222",
-      "output": [
-        "/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container",
+        "/tmp/legion-smoke-41 has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container",
         "RIG DOWN"
       ],
       "exit": 0,
-      "after": "has-session legion-sjawhar41 OK (still up); @1 controller; docker ps unchanged; listener 2726911 alive, daemon 2727720 alive"
+      "fakeDockerArgvLog": [],
+      "fakeDockerArgvLogLines": 0,
+      "round3SameProbe": [
+        "docker container inspect legion-smoke-nats",
+        "docker rm -f legion-smoke-nats"
+      ],
+      "realDockerAfter": "/usr/bin/docker ps -a: no legion-smoke-nats* (re-checked by absolute path after `hash -r`; the persistent shell had cached the fake)"
     },
-    "step6c_disagreement": {
-      "at": "2026-09-13T10:09:57Z",
-      "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/9999 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
-      "before": "has-session legion-sjawhar41 OK; tmux -L legion-sjawhar9999 has-session -> error connecting … (No such file or directory); docker ps -a: legion-smoke-nats-sjawhar41 Up 11 minutes; legion.yaml project: sjawhar/41; record legion-smoke-nats-sjawhar41",
+    "step3_realStart": {
+      "at": "2026-09-13T10:40:29Z",
       "output": [
-        "warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41",
-        "STOPPED tmux session legion-sjawhar41 on private socket legion-sjawhar41",
+        "STARTED NATS container legion-smoke-nats-sjawhar41",
+        "STARTED listener (pid 4016825)",
+        "GREEN Envoy listener: {...\"status\":\"healthy\"}",
+        "GREEN webhook round-trip: listener accepted signed ping",
+        "SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: ...",
+        "STARTED daemon (pid 4017582)",
+        "GREEN Legion daemon: {\"project\":\"sjawhar41\",\"version\":26,...}",
+        "CREATED root issue LEGSMOKE-118",
+        "SKIPPED-BLOCKED branch protection: ...",
+        "RIG READY"
+      ],
+      "legionYaml": "project: sjawhar/41",
+      "natsContainer": "legion-smoke-nats-sjawhar41",
+      "daemonHealth": "GET http://127.0.0.1:19421/legion/v1/state -> HTTP 200 {\"project\":\"sjawhar41\",\"version\":26,\"issues\":{},\"trees\":{},\"admission\":{\"cap\":4,\"active\":[],\"queue\":[]},...}",
+      "listenerHealthz": "{\"status\":\"healthy\",...}",
+      "dockerPs": [
+        "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14261->4222/tcp, [::]:14261->4222/tcp"
+      ]
+    },
+    "step4_ownDownSh": {
+      "at": "2026-09-13T10:40:35Z",
+      "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  (real docker, no SMOKE_PROJECT in env)",
+      "output": [
         "STOPPED NATS container legion-smoke-nats-sjawhar41",
         "RIG DOWN"
       ],
       "exit": 0,
-      "after": "has-session legion-sjawhar41 -> no server running; docker ps -a: no legion-smoke-nats*; daemon and listener dead; 14251 19051 19411 19412 free; record kept (by design)"
+      "after": "docker ps -a: no legion-smoke-nats* (mine was the only one and the only one removed); daemon 4017582 and listener 4016825 dead (ps -p shows neither); 14261 19061 19421 19422 free; no legion-sjawhar41 tmux server (controller had not spawned in this ~1-minute run; tmux-stop path was exercised live in round 3 step 6c)"
     },
-    "cleanup": "/tmp/legion-smoke-41, /tmp/legion-smoke-throwaway, scratch launcher/watcher/fake-docker dir removed; no legion-smoke-nats* container; no legion-sjawhar41 tmux socket. One disposable root issue LEGSMOKE-116 created in LEGSMOKE (rig design)."
+    "cleanup": "/tmp/legion-smoke-41, scratch launcher, fake-docker dir and logs removed; no legion-smoke-nats* container; no legion-sjawhar41 socket. /tmp/legion41-review*.json belong to the reviewer and were left alone. One disposable root issue LEGSMOKE-118 created in LEGSMOKE (rig design)."
   },
   "commands": [
-    "cd $LEGION_WORKSPACE && jj git fetch  # head 9f7a4e85 = implement: record handoff (round 3) on 1b6a5da6 on reviewer's 7b05bea1",
-    "bun install; bash scripts/smoke/up.test.sh  # 19 PASS, exit 0; bash scripts/smoke/down.test.sh  # 5 PASS, exit 0",
-    "legion gh -- api repos/sjawhar/legion/commits/9f7a4e858eb678a2bfbb94e7076b03c21dfce7de/check-runs  # lint/pr-title/typecheck/test success, runs 34750449758 and 34750503515",
-    "jj diff --from bf338059 --to 9f7a4e85 --summary  # .legion/*, README.md, down.sh, down.test.sh, up.sh, up.test.sh",
-    "fingerprint (skill formula) at bf338059 -> 481c976a…, at 9f7a4e85 -> 5b4082b2…; function-body hash of project_slug/nats_container_name/listener_machine_id/ensure_nats/assert_port_free = 991306d6… at both",
-    "scratch launcher (deleted): env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/41 SMOKE_DIR=/tmp/legion-smoke-41 NATS_PORT=14251 ENVOY_PORT=19051 LEGION_DAEMON_PORT=19411 SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
-    "port squat: python3 -c 'socket bind 127.0.0.1:14251; listen; sleep' (hub start), then launcher -> refused; hub stop; launcher -> RIG READY",
-    "probe (fake docker on PATH, logging): SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # on the refused dir, before the real start",
-    "controller wait: poll GET http://127.0.0.1:19411/legion/v1/state controllerLocator + tmux -L legion-sjawhar41 list-windows every 10 s -> alive 10:09:23Z",
-    "SMOKE_DIR=/tmp/legion-smoke-throwaway SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # 6b",
-    "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/9999 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # 6c"
+    "cd $LEGION_WORKSPACE && jj git fetch  # head 06d0f9a3 = implement: record handoff (round 4) on a457a5c8 on tester's bbbe75dd",
+    "bun install; bash scripts/smoke/up.test.sh  # 19 PASS exit 0; bash scripts/smoke/down.test.sh  # 5 PASS exit 0",
+    "legion gh -- api repos/sjawhar/legion/commits/06d0f9a3692ea2133f96ad5562c62a8bbac2e7af/check-runs  # lint/pr-title/typecheck/test success, runs 34751942555 and 34751992947",
+    "jj diff --from 9f7a4e85 --to 06d0f9a3 --summary  # .legion/implement.json .legion/test.json scripts/smoke/up.sh scripts/smoke/up.test.sh",
+    "for f in down.sh down.test.sh README.md checkpoints.sh envoy-bridge.ts checkpoints.test.sh: jj file show -r <h> scripts/smoke/$f | sha256sum  # identical at both heads",
+    "jj file show -r <h> scripts/smoke/up.sh | sed '/^main() {/,/^}/d' | sha256sum  # 0ba55352… at both heads",
+    "scratch launcher (deleted): env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/41 SMOKE_DIR=/tmp/legion-smoke-41 NATS_PORT=14261 ENVOY_PORT=19061 LEGION_DAEMON_PORT=19421 SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
+    "python3 socket squat on 127.0.0.1:14261 (hub start) -> launcher -> refused; probe down.sh with fake docker; hub stop squat; launcher -> RIG READY; own down.sh (real docker)"
   ],
   "unitTests": {
     "up.test.sh": {
       "pass": 19,
       "exit": 0,
-      "newCase": "a start refused by the port check or by ensure_nats leaves no nats-container record"
+      "refusalCase": "a start refused by the port check or by ensure_nats leaves neither a nats-container record nor a legion.yaml"
     },
     "down.test.sh": {
       "pass": 5,
-      "exit": 0,
-      "newCase": "tears down only the rig the directory's legion.yaml names -- a directory without one stops no tmux server and removes no container, and a disagreeing SMOKE_PROJECT is warned about and ignored"
+      "exit": 0
     }
   },
-  "ci": "Tests at 9f7a4e858eb678a2bfbb94e7076b03c21dfce7de: runs 34750449758 and 34750503515, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists.",
+  "ci": "Tests at 06d0f9a3692ea2133f96ad5562c62a8bbac2e7af: runs 34751942555 and 34751992947, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists.",
   "observations": [
-    "The one failure (failures[0]) is a narrow ordering gap in 1b6a5da6's design, not a regression of anything tested in rounds 1-2: before round 3 the record was written first and a refused-at-ensure_nats directory made down.sh inspect only the (nonexistent) derived name — removing nothing; now the same directory makes it fall back to the legacy name. Both port-assert refusals (listener/daemon/worker-stream, which precede write_daemon_config) leave neither marker and are inert.",
-    "Environment scrub as in earlier rounds: LEGION_* and DISPATCH_TOKEN_FILE removed from the child env; secrets only via the `secrets` wrapper and envoy.json's dispatch.token, never printed.",
-    "Another tester's legacy-named `legion-smoke-nats` (14222) was live during 7a and disappeared from docker ps between 09:58Z and 10:09Z; none of my commands touched it (6b touched nothing; the fake-docker probe never reached the real docker — re-verified with `command -v docker` -> /usr/bin/docker and `docker ps -a` afterwards).",
-    "Tooling: `legion gh -- api --method PATCH … -F body=@file` is the reliable PR-body update path; `--input <file>`/`--input -` fail through the shim (`unexpected end of JSON input`), and `gh pr edit --body-file` hit GraphQL 5xx twice in round 2."
+    "Round-3 failures[0] is closed by a457a5c8: the same refused-start shape that made down.sh fall back to `docker rm -f legion-smoke-nats` now yields the never-started-a-rig refusal with zero docker invocations, verified on the identical directory and probe.",
+    "A refused start still leaves ${SMOKE_DIR}/webhook-mode and the empty daemon/gh-config/xdg-* dirs (written before the port asserts). down.sh keys on none of them, and checkpoints.sh only reads webhook-mode when asked to run against such a dir; harmless.",
+    "Environment scrub and secret handling as in rounds 1-3 (LEGION_* and DISPATCH_TOKEN_FILE removed from the child env; secrets via the `secrets` wrapper and envoy.json's dispatch.token, never printed).",
+    "Tooling: PR-body updates via `legion gh -- api --method PATCH repos/…/pulls/1010 -F body=@file` (reliable); `gh pr edit --body-file` and `api --input` are not, through the shim."
   ],
-  "documentationFeedback": "README reads correctly for what was observed. If the ordering fix lands, the coexistence paragraph's 'a refused start writes no record' can say 'writes neither legion.yaml nor the record'.",
+  "documentationFeedback": "None. README's 'a refused start writes no record' remains true and, with a457a5c8, understated in a safe direction (it writes neither file).",
+  "round3": {
+    "headSha": "9f7a4e858eb678a2bfbb94e7076b03c21dfce7de",
+    "verdictPerAcceptance": {
+      "1": "PASS (bare gates at 9f7a4e85: up.test.sh 19 PASS / exit 0, down.test.sh 5 PASS / exit 0). Name derivation, ensure_nats reuse rule and assert_port_free are byte-identical to the round-2 head: sha256 of the project_slug/nats_container_name/listener_machine_id/ensure_nats/assert_port_free function bodies = 991306d6… at both bf338059 and 9f7a4e85.",
+      "2": "PASS (round-1 live run at 431a0d7a stands; not repeated). Product changes since: d027061c (round 2, worker-stream check) and 1b6a5da6 (round 3: down.sh identity from legion.yaml + refusal, up.sh record write after ensure_nats, comment reword). checkpoints.sh / envoy-bridge.ts / checkpoints.test.sh unchanged since bf338059 (8aa385d3… / 87876bc2… / 5b0786de…). Whole-branch fingerprint (skill formula) 481c976a… at bf338059 -> 5b4082b2… at 9f7a4e85, changed by 1b6a5da6 alone. Round-3 step 3 also re-exercised the container-removal path live: own down.sh removed exactly legion-smoke-nats-sjawhar41.",
+      "3": "PASS: README teardown paragraph names `legion-smoke-nats-<slug>`, takes the project from legion.yaml, says SMOKE_PROJECT 'is therefore not needed for teardown; keep SMOKE_REPO exported in forward mode so down.sh can delete the repository webhook it recorded', and that a directory without legion.yaml stops no tmux server and removes no container; the ports sentence quotes ensure_nats verbatim: `NATS container legion-smoke-nats-<slug> is not mapped to configured port <NATS_PORT>` (up.sh: `fail \"NATS container ${nats_name} is not mapped to configured port ${nats_port}\"`). The old 'Keep SMOKE_REPO and SMOKE_PROJECT exported for teardown' sentence is removed.",
+      "4": "PASS (unchanged): PR body Base section names LEGION-10 (#957) merge commit 4b934e60, an ancestor of the head; branch not rebased.",
+      "5": "PASS (round-2 live run at bf338059 stands; assert_port_free and the main() port asserts unchanged since — only the comment above the worker-stream assert was reworded).",
+      "6": "PASS on both spec checks, live: (b) throwaway SMOKE_DIR with no legion.yaml + SMOKE_PROJECT=sjawhar/41 while the sjawhar/41 rig and its private tmux server were up -> `/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container`, RIG DOWN, exit 0; has-session legion-sjawhar41 still OK (@1 controller), docker ps unchanged, daemon/listener alive. (c) own SMOKE_DIR + SMOKE_PROJECT=sjawhar/9999 -> `warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41`, STOPPED tmux session legion-sjawhar41, STOPPED NATS container legion-smoke-nats-sjawhar41, RIG DOWN; afterwards no legion-sjawhar41 server, no legion-smoke-nats* container, ports free. FAIL on the intent ('only a directory that actually started a rig') for a directory left by a start refused at ensure_nats — see failures[0].",
+      "7": "PASS as worded, live: refused start (NATS port occupied) left no nats-container record; real start then wrote `legion-smoke-nats-sjawhar41`. But the same refused start leaves legion.yaml, which is what feeds failures[0]."
+    },
+    "failures": [
+      {
+        "criterion": "Acceptance 6 / requirement 'Teardown never removes another rig's container': down.sh acts only on a SMOKE_DIR that actually started a rig",
+        "evidence": "A start refused inside ensure_nats leaves ${SMOKE_DIR}/legion.yaml (write_daemon_config at up.sh:584 runs before go build and ensure_nats at up.sh:590) and, per acceptance 7, no nats-container record. That is the exact 'pre-record rig' shape down.sh's legacy fallback keys on. Live at 09:57Z: NATS_PORT 14251 occupied by a scratch listener; `up.sh` -> `error: NATS port 14251 is already in use` (exit 1); /tmp/legion-smoke-41 then held `legion.yaml` (`project: sjawhar/41`) and no `nats-container`. Probe at 09:58Z on that directory with a logging fake `docker` first on PATH (real docker never invoked): `SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh` printed `no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats` / `STOPPED NATS container legion-smoke-nats` / `RIG DOWN` (exit 0); fake argv log: `docker container inspect legion-smoke-nats`, `docker rm -f legion-smoke-nats`. At that moment `legion-smoke-nats` (port 14222) was another tester's live pre-PR rig on this machine — the real command would have removed it. Suggested fix in this PR: move `write_daemon_config` after `ensure_nats` beside the record write (nothing between them reads legion.yaml) so a refused start leaves neither marker; extend up.test.sh's refusal cases to assert legion.yaml is absent too."
+      }
+    ],
+    "liveRun": {
+      "rig": {
+        "SMOKE_PROJECT": "sjawhar/41",
+        "SMOKE_DIR": "/tmp/legion-smoke-41",
+        "NATS_PORT": 14251,
+        "ENVOY_PORT": 19051,
+        "LEGION_DAEMON_PORT": 19411,
+        "workerStreamPort": 19412,
+        "container": "legion-smoke-nats-sjawhar41",
+        "rootIssue": "LEGSMOKE-116",
+        "listenerPid": 2726911,
+        "daemonPid": 2727720,
+        "controller": "window @1 pane %1 on tmux -L legion-sjawhar41, alive at 10:09:23Z (first resync, ~10 min after boot)"
+      },
+      "preflight": "docker ps -a: only another tester's legacy-named `legion-smoke-nats` (Up 4 minutes, 0.0.0.0:14222->4222) — left alone; ports 14251 19051 19411 19412 free; no /tmp/legion-smoke-41; no legion-sjawhar41 tmux server",
+      "step7a_refused": {
+        "at": "2026-09-13T09:57:24Z",
+        "setup": "python3 socket bound to 127.0.0.1:14251 (hub-supervised, ss showed LISTEN 127.0.0.1:14251)",
+        "output": [
+          "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
+          "error: NATS port 14251 is already in use"
+        ],
+        "exit": 1,
+        "after": "ls /tmp/legion-smoke-41/nats-container -> No such file or directory; SMOKE_DIR contents: daemon/ deployment-instructions.md gh-config/ legion.yaml webhook-mode xdg-data/ xdg-state/; no *.pid/*.log; docker ps -a unchanged; 19051 19411 19412 free"
+      },
+      "step7a_probeDownShOnRefusedDir": {
+        "at": "2026-09-13T09:58:12Z",
+        "how": "fake docker on PATH logging argv and exiting 0; real docker untouched (verified: legion-smoke-nats still Up afterwards)",
+        "output": [
+          "no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats",
+          "STOPPED NATS container legion-smoke-nats",
+          "RIG DOWN"
+        ],
+        "fakeDockerArgv": [
+          "docker container inspect legion-smoke-nats",
+          "docker rm -f legion-smoke-nats"
+        ],
+        "meaning": "see failures[0]"
+      },
+      "step7a_realStart": {
+        "at": "2026-09-13T09:58:50Z",
+        "output": [
+          "STARTED NATS container legion-smoke-nats-sjawhar41",
+          "STARTED listener (pid 2726911)",
+          "GREEN Envoy listener: {...\"status\":\"healthy\"}",
+          "GREEN webhook round-trip: listener accepted signed ping",
+          "SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: ...",
+          "STARTED daemon (pid 2727720)",
+          "GREEN Legion daemon: {\"project\":\"sjawhar41\",...}",
+          "CREATED root issue LEGSMOKE-116",
+          "SKIPPED-BLOCKED branch protection: ...",
+          "RIG READY"
+        ],
+        "record": "legion-smoke-nats-sjawhar41",
+        "legionYamlProject": "sjawhar/41",
+        "dockerPs": [
+          "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14251->4222/tcp, [::]:14251->4222/tcp",
+          "legion-smoke-nats 6222/tcp, 8222/tcp, 0.0.0.0:14222->4222/tcp, [::]:14222->4222/tcp (another tester's; gone from docker ps by 10:09Z, not by any action of mine)"
+        ]
+      },
+      "step6b_throwaway": {
+        "at": "2026-09-13T10:09:42Z",
+        "command": "SMOKE_DIR=/tmp/legion-smoke-throwaway SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+        "dirContents": "(empty; no legion.yaml)",
+        "before": "has-session legion-sjawhar41 OK; list-windows: @1 controller; state controllerLocator {@1,%1}; docker ps: legion-smoke-nats-sjawhar41 …14251->4222",
+        "output": [
+          "/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container",
+          "RIG DOWN"
+        ],
+        "exit": 0,
+        "after": "has-session legion-sjawhar41 OK (still up); @1 controller; docker ps unchanged; listener 2726911 alive, daemon 2727720 alive"
+      },
+      "step6c_disagreement": {
+        "at": "2026-09-13T10:09:57Z",
+        "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/9999 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+        "before": "has-session legion-sjawhar41 OK; tmux -L legion-sjawhar9999 has-session -> error connecting … (No such file or directory); docker ps -a: legion-smoke-nats-sjawhar41 Up 11 minutes; legion.yaml project: sjawhar/41; record legion-smoke-nats-sjawhar41",
+        "output": [
+          "warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41",
+          "STOPPED tmux session legion-sjawhar41 on private socket legion-sjawhar41",
+          "STOPPED NATS container legion-smoke-nats-sjawhar41",
+          "RIG DOWN"
+        ],
+        "exit": 0,
+        "after": "has-session legion-sjawhar41 -> no server running; docker ps -a: no legion-smoke-nats*; daemon and listener dead; 14251 19051 19411 19412 free; record kept (by design)"
+      },
+      "cleanup": "/tmp/legion-smoke-41, /tmp/legion-smoke-throwaway, scratch launcher/watcher/fake-docker dir removed; no legion-smoke-nats* container; no legion-sjawhar41 tmux socket. One disposable root issue LEGSMOKE-116 created in LEGSMOKE (rig design)."
+    },
+    "unitTests": {
+      "up.test.sh": {
+        "pass": 19,
+        "exit": 0,
+        "newCase": "a start refused by the port check or by ensure_nats leaves no nats-container record"
+      },
+      "down.test.sh": {
+        "pass": 5,
+        "exit": 0,
+        "newCase": "tears down only the rig the directory's legion.yaml names -- a directory without one stops no tmux server and removes no container, and a disagreeing SMOKE_PROJECT is warned about and ignored"
+      }
+    },
+    "ci": "Tests at 9f7a4e858eb678a2bfbb94e7076b03c21dfce7de: runs 34750449758 and 34750503515, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists.",
+    "observations": [
+      "The one failure (failures[0]) is a narrow ordering gap in 1b6a5da6's design, not a regression of anything tested in rounds 1-2: before round 3 the record was written first and a refused-at-ensure_nats directory made down.sh inspect only the (nonexistent) derived name — removing nothing; now the same directory makes it fall back to the legacy name. Both port-assert refusals (listener/daemon/worker-stream, which precede write_daemon_config) leave neither marker and are inert.",
+      "Environment scrub as in earlier rounds: LEGION_* and DISPATCH_TOKEN_FILE removed from the child env; secrets only via the `secrets` wrapper and envoy.json's dispatch.token, never printed.",
+      "Another tester's legacy-named `legion-smoke-nats` (14222) was live during 7a and disappeared from docker ps between 09:58Z and 10:09Z; none of my commands touched it (6b touched nothing; the fake-docker probe never reached the real docker — re-verified with `command -v docker` -> /usr/bin/docker and `docker ps -a` afterwards).",
+      "Tooling: `legion gh -- api --method PATCH … -F body=@file` is the reliable PR-body update path; `--input <file>`/`--input -` fail through the shim (`unexpected end of JSON input`), and `gh pr edit --body-file` hit GraphQL 5xx twice in round 2."
+    ]
+  },
   "round2": {
     "headSha": "bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad",
     "verdictPerAcceptance": {
@@ -382,5 +508,5 @@
   },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T10:12:26.574Z"
+  "completed": "2026-09-13T10:43:01.059Z"
 }
