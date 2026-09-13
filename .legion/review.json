@@ -1,50 +1,36 @@
 {
-  "summary": "Round 5 at code head 350fc534 (PR head e84aa7ae): the round-4 fixes are verified clean (B6 watchdog guard, escalate-log truth, handleException single try/catch + orphan row, AGENTS.md wording, ensureController flake); both thermo passes report no blocking findings. REQUEST_CHANGES on one item outside the round-4 delta: main a0d0f33f landed #991 (LEGION-37), whose migrateV25State takes state v26 with a pendingAssignment rewrite; this branch's migrateV25State also claims v26 and its claim schema still types pendingAssignment as a string. GitHub reports the PR CONFLICTING; the deployed state.json is already v26 under #991's meaning. Rebase onto a0d0f33f, keep #991's step verbatim, renumber the pane-identity bump to migrateV26State -> v27 (version literal, z.literal, newLegionState, the !== guard, the chain, legion-state.test.ts rows and .bak names, PR body), and re-check the processes.ts/AGENTS.md overlap. Tester re-verifies the rebased head, then I review it and, if clean, COMMENT and later APPROVE the deletion-only head by SHA.",
-  "verdict": "changes_requested",
+  "summary": "Round 6 at head 7579d774 (rebased onto main 0d0a810d over #991): reviewed clean -- COMMENT 5190251848 naming SHA 7579d774. B7 satisfied against the code: main's migrateV25State verbatim, this branch's bump is migrateV26State -> v27 everywhere (interface literal, z.literal, newLegionState, !== 27 guard, chain); independently loaded a read-only copy of the live deployed state.json (v26 under #991: 54 trees, 164 roles, 49 locators, 7 {kind, task} pendings) through this branch's loadState -> v27 with every locator/pending JSON-identical, .v26.bak byte-identical, exactly one structural difference (version). #991 composition in processes.ts re-read and coherent (workerReady bystander retire through the identity-gated stop; handleException -> resumeWorker with the bystander pre-check). All round-5 items landed; my guard-removed B6 mutant fails the real-timer row while head passes. tsc clean; 56 + 427 pass / 3 gated, live-tmux rows 3, e2e 5; CI 34747573704 green; MERGEABLE against main 82757405. Both thermo passes: no blocking findings. Next: implementer pushes the .legion/ deletion as a deletion-only head and resolves the B7 thread (the review App cannot); I APPROVE that head by SHA. Five fast-follow wording/test-shape items listed in the body, for a later change, not the deletion push.",
+  "verdict": "clean",
   "review": {
-    "id": 5190120227,
-    "url": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5190120227",
-    "state": "CHANGES_REQUESTED",
-    "commit": "e84aa7ae0298de24f960a6a5de1001b945c23d85",
-    "code_head": "350fc5349c59",
-    "round": 5
+    "id": 5190251848,
+    "url": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5190251848",
+    "state": "COMMENTED",
+    "commit": "7579d7747027c01e10db29e814981bb41251ad79",
+    "round": 6
   },
-  "blocking": [
-    {
-      "id": "B7",
-      "path": "packages/daemon/src/daemon/legion-state.ts",
-      "line": 915,
-      "finding": "State version collision with #991 (fcd4bb85, LEGION-37, on main a0d0f33f): two different v26 schemas under one number; PR CONFLICTING/DIRTY; deployed state.json already v26 under #991's meaning.",
-      "fix": "Rebase onto a0d0f33f; keep #991's v25->v26 verbatim; renumber this branch's bump to migrateV26State -> v27 across legion-state.ts, legion-state.test.ts (v24/v25/v26 files -> 27; .v24/.v25/.v26.bak), PR body and any AGENTS.md mention; re-check processes.ts/AGENTS.md overlap with #991's pendingAssignment hunks."
-    }
-  ],
+  "blocking": [],
   "satisfied_threads": {
-    "round4": [
-      "r3998985495 (B6)",
-      "r3998985496",
-      "r3998985497"
-    ],
-    "note": "Verified against the code at 350fc534; the review App cannot resolve threads (resolveReviewThread forbidden) -- implementer resolves them on the rebase push, or the architect via `legion threads resolve` once #1003 is deployed."
+    "B7": "r3999124929 (PRRT_kwDORFy7ds6h3dLl) -- verified against legion-state.ts at 7579d774 and the deployed-state load; resolveReviewThread still returns 'Resource not accessible by integration' for the review App, so the implementer resolves it on the deletion push (or the architect via `legion threads resolve` once #1003 is deployed).",
+    "round4": "r3998985495, r3998985496, r3998985497 -- resolved by the implementer (confirmed via reviewThreads: 16 of 17 resolved; only B7 open)."
   },
-  "land_with_rebase": [
-    "worker-boot-watchdog.ts:273-276,288 -- retire() doc overclaims that a same-token cancel mid-await is caught; log text wrong for the disposed/superseded branches. Suggest 'cancelled, disposed, or superseded meanwhile; not re-armed'.",
-    "processes.ts:1764 -- second escalate log's parenthetical enumerates only queued/launch-failed/newer generation; log the observed status/generation instead."
-  ],
   "fast_follow": [
-    "B6 row: 'retire' filter assertion implied by the slice assertion; timers.activeCount()===0 inert under the fake sleep.",
-    "Re-arm row: the cancel(token,1)+spin+unchanged tail is inert.",
-    "handleException it.each: token thunks around constants; conditional `if (state.trees[root])` assertion."
+    "processes.ts:1843-1844 comment mechanism (a fresh read in the same method is still narrowed to never; the helper's own scope is what avoids it); :1840 'parked' is not a TreeState.status and the enumeration is redundant with the observed-state log.",
+    "legion-state.test.ts: #991's rows at :814/:874 bodies say 27 but titles say v26; row :993 implied by :814 + :1115; :985-989/:1013 subsets of the neighbouring toEqual(current).",
+    "worker-boot-watchdog.ts:266-285 retire() doc re-narrates retireUnconfirmedBoot's guard; 'retireWorkerLocator has cleared the locator' is loose (callers clear); 'claim and its locator untouched' overstates (capability revoked, watchdog cancelled before the failing stop -- pre-existing ordering).",
+    "worker-boot-watchdog.test.ts:462 B6 row's explicit 2_000 ms budget narrows headroom for nothing; drop it.",
+    "PR body: CI line lags (c908bc84 / 34746925567 vs 7579d774 / 34747573704); smoke-rig paragraph's 'v25 + .v24.bak' is the round-2 head's numbering -- qualify."
   ],
   "verification": {
     "tsc": "clean",
-    "suites": "worker-boot-watchdog 10; processes 244 pass/3 gated; runtime.contract 67; legion-state 41; index 34; tmux 8; proc-stat 4; e2e (LEGION_E2E=1 LEGION_TMUX_LIVE=1) 5",
-    "named": "B6 fail-first row, re-arm row, three handleException rows, remediated ensureController test -- pass; my round-4 dispose-mid-retire repro passes against the fix",
-    "ci": "34744461214/34744517358 (350fc534) and 34745609710 (e84aa7ae) green",
-    "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 350fc534: no blocking findings",
-    "main_state": "main a0d0f33f; branch base 0f744bc8; #991 changed processes.ts, legion-state.ts, AGENTS.md, worker-admission.ts, api/routes/workers.ts, reducers.ts and tests"
+    "suites": "legion-state + worker-boot-watchdog 56 pass; processes/index/api/runtime.contract/tmux/proc-stat/thermo-ops 427 pass / 3 gated / 0 fail; LEGION_TMUX_LIVE=1 live-tmux rows 3 pass; LEGION_E2E=1 LEGION_TMUX_LIVE=1 e2e 5 pass",
+    "mutant": "B6 real-timer row vs guard-removed copy (if (false) for the re-check) in /tmp: 0 pass / 1 fail (~380 ms, 11 extra events); head copy 1 pass",
+    "deployed_state": "/tmp/legion27-review/r6/deployed/driver.ts: v26 -> v27, 49 locators identical, 7 pendings identical, .v26.bak identical, structuralDiffs == ['state.version: 26 -> 27']",
+    "ci": "run 34747573704 success at 7579d774 (lint, typecheck, test, pr-title); PR MERGEABLE (BLOCKED = review required) against main 82757405",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at 7579d774: no blocking findings",
+    "interdiff": "branch over old base (round 5) vs over new base: only legion-state.ts (renumbering), processes.ts (log wording + describeTreeForLog), worker-boot-watchdog.ts (doc/log), AGENTS.md (context only), and the three test files differ; 17 files hunk-identical"
   },
-  "next": "Implementer rebases and renumbers; tester re-verifies the migration chain at the rebased head (v26-under-#991 fixture loads; v24/v25/v26 files -> 27); reviewer reviews the rebased head, COMMENTs clean if so, then APPROVEs the .legion/-deletion head by SHA.",
+  "next": "Implementer pushes the .legion/ deletion as a deletion-only head and resolves B7; reviewer APPROVEs that head by SHA; architect retro; merger publishes READY.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T07:52:52.365Z"
+  "completed": "2026-09-13T08:41:44.113Z"
 }
