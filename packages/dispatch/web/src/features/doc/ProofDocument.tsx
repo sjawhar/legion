@@ -17,11 +17,16 @@ import { api } from "../../api/client";
 import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { copyText } from "../../lib/clipboard";
 import {
+  badgeBlocking,
   badgeMed,
+  borderDefault,
+  dangerText,
+  linkHoverText,
+  linkText,
   secondaryButtonBorder,
-  secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
+  textMutedOnSurface,
 } from "../../theme/classes";
 import { answerAskInput } from "../inbox/answer-ask";
 import { useMargin } from "../margin/Margin";
@@ -52,12 +57,15 @@ import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
 import { VersionView } from "./VersionView";
 
-/** The document chrome reports its state upward so an issue can place its controls in the Spec
- * panel's toolbar. Project document pages retain their artifact-header toolbar. */
+const CONTROL_CHARACTERS = /\p{Cc}/gu;
+
+/** The document chrome reports its state upward so an issue can place its controls in the active
+ * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
   connection: ConnectionState;
   isNamingVersion: boolean;
   requestNamedVersion(): void;
+  copyBlockLink(): Promise<boolean>;
   versions: Version[];
 }
 
@@ -68,7 +76,6 @@ export interface ProofDocumentProps {
   isClosed: boolean;
   owner: MarginOwner;
   showDiff: boolean;
-  toolbar?: ReactNode;
   onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
   onVersionChange(version: number | null): void;
   user: AuthenticatedUser;
@@ -120,59 +127,104 @@ const renderTypedBlock: HostBlockRenderer = (node) => {
       ["div", { "data-proof-block-content": "" }, 0],
     ];
   }
+
   const options: string[] = [];
+  let blankOption: number | undefined;
   if (node.lastChild?.type.name === "bullet_list") {
-    node.lastChild.forEach((item) => {
+    node.lastChild.forEach((item, _offset, index) => {
       const separator = item.textContent.indexOf(": ");
       const label = (
         separator < 0 ? item.textContent : item.textContent.slice(0, separator)
       ).trim();
-      if (label !== "") options.push(label);
+      if (label === "") {
+        blankOption ??= index + 1;
+        return;
+      }
+      options.push(label);
     });
   }
+  const invalidAttribute =
+    typeof node.attrs.invalid === "string" && node.attrs.invalid.trim() !== ""
+      ? node.attrs.invalid.trim()
+      : undefined;
+  const question =
+    node.firstChild?.type.name === "bullet_list" ? "" : (node.firstChild?.textContent.trim() ?? "");
+  const malformedReason =
+    invalidAttribute ??
+    (question === ""
+      ? "The question is empty"
+      : blankOption === undefined
+        ? undefined
+        : `Option ${blankOption} has no label`);
+  const malformed = malformedReason !== undefined;
   const blockId = String(node.attrs.blockId);
   const answered = node.attrs.state === "answered";
   return [
     "section",
     {
-      class: "proof-typed-block proof-typed-block-ask",
-      "data-proof-block-type": "ask",
+      class: `proof-typed-block proof-typed-block-ask rounded-lg border p-3 ${borderDefault}`,
       "data-dispatch-ask-block": blockId,
+      "data-dispatch-ask-malformed": malformed ? "true" : undefined,
+      "data-proof-block-type": "ask",
     },
     [
       "header",
       { class: "mb-3 flex items-center gap-2" },
-      ["strong", {}, "Decision"],
-      ["span", { class: "text-sm" }, String(node.attrs.urgency)],
-      answered
+      malformed
+        ? [
+            "span",
+            {
+              class: `rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${badgeBlocking.bg} ${badgeBlocking.text}`,
+            },
+            "MALFORMED DECISION",
+          ]
+        : ["strong", {}, "Decision"],
+      malformed ? "" : ["span", { class: "text-sm" }, String(node.attrs.urgency)],
+      !malformed && answered
         ? ["span", { class: "text-sm" }, `Answered by ${String(node.attrs.answered_by)}`]
         : "",
     ],
-    ["div", { "data-proof-block-content": "" }, 0],
-    answered
-      ? ["p", { class: "mt-3 text-sm" }, String(node.attrs.answer ?? "Answered")]
-      : [
-          "form",
-          { class: "mt-3 grid gap-2", "data-dispatch-ask-form": blockId },
-          ...options.map((label) => [
-            "label",
-            { class: "flex min-h-11 items-center gap-2" },
+    malformed ? ["p", { class: `mb-2 text-sm font-medium ${dangerText}` }, malformedReason] : "",
+    [
+      "div",
+      {
+        class: malformed
+          ? `${textMutedOnSurface} [&_li:has(>p:empty)]:hidden [&_li:has(>p>br:only-child)]:hidden`
+          : "",
+        "data-proof-block-content": "",
+      },
+      0,
+    ],
+    malformed
+      ? [
+          "p",
+          { class: `mt-3 text-sm ${textMutedOnSurface}` },
+          "Fix the block text; the decision re-activates once it parses.",
+        ]
+      : answered
+        ? ["p", { class: "mt-3 text-sm" }, String(node.attrs.answer ?? "Answered")]
+        : [
+            "form",
+            { class: "mt-3 grid gap-2", "data-dispatch-ask-form": blockId },
+            ...options.map((label) => [
+              "label",
+              { class: "flex min-h-11 items-center gap-2" },
+              [
+                "input",
+                {
+                  name: "selected",
+                  type: node.attrs.multiple === true ? "checkbox" : "radio",
+                  value: label,
+                },
+              ],
+              label,
+            ]),
             [
-              "input",
-              {
-                name: "selected",
-                type: node.attrs.multiple === true ? "checkbox" : "radio",
-                value: label,
-              },
+              "textarea",
+              { class: "min-h-11 border p-2", name: "answer", placeholder: "Your answer" },
             ],
-            label,
-          ]),
-          [
-            "textarea",
-            { class: "min-h-11 border p-2", name: "answer", placeholder: "Your answer" },
+            ["button", { class: "min-h-11 rounded px-3", type: "submit" }, "Answer"],
           ],
-          ["button", { class: "min-h-11 rounded px-3", type: "submit" }, "Answer"],
-        ],
   ];
 };
 
@@ -276,7 +328,6 @@ export function ProofDocument({
   onToolbarChange,
   onVersionChange,
   showDiff,
-  toolbar,
   user,
   version,
 }: ProofDocumentProps): ReactNode {
@@ -288,6 +339,7 @@ export function ProofDocument({
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
+  const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const [dispatchLinkRoutes, setDispatchLinkRoutes] = useState<
     { reference: string; route: DispatchReferenceRoute }[]
   >([]);
@@ -420,12 +472,17 @@ export function ProofDocument({
     const text = String(data.get("answer") ?? "");
     answerBlockAsk.mutate({ ask, selected, text });
   };
-  const openBlockAsks = (asksQuery.data ?? []).filter(
-    (ask) =>
-      ask.state === "open" &&
-      typeof ask.block_id === "string" &&
-      ask.block_artifact?.id === artifact.id
-  );
+  const openBlockAsks = (asksQuery.data ?? [])
+    .filter(
+      (ask) =>
+        ask.state === "open" &&
+        typeof ask.block_id === "string" &&
+        ask.block_artifact?.id === artifact.id
+    )
+    .map((ask) => ({
+      ...ask,
+      question: ask.question.replace(CONTROL_CHARACTERS, ""),
+    }));
 
   const copyBlockLink = useCallback(async (): Promise<boolean> => {
     const blockId = editorRef.current?.blockIdAtSelection();
@@ -434,15 +491,28 @@ export function ProofDocument({
     }
     return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
   }, []);
+  useEffect(() => {
+    setOpenDecisionIndex((current) => Math.min(current, Math.max(openBlockAsks.length - 1, 0)));
+  }, [openBlockAsks.length]);
+
+  const openDecision = openBlockAsks[Math.min(openDecisionIndex, openBlockAsks.length - 1)];
 
   useEffect(() => {
     onToolbarChange?.({
       connection,
+      copyBlockLink,
       isNamingVersion: nameVersion.isPending,
       requestNamedVersion,
       versions,
     });
-  }, [connection, nameVersion.isPending, onToolbarChange, requestNamedVersion, versions]);
+  }, [
+    connection,
+    copyBlockLink,
+    nameVersion.isPending,
+    onToolbarChange,
+    requestNamedVersion,
+    versions,
+  ]);
 
   // Separate from the reporting effect above (whose cleanup would otherwise fire — and
   // transiently clear the parent's toolbar — on every dependency change, not just on unmount).
@@ -660,46 +730,50 @@ export function ProofDocument({
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {blockSchemaQuery.isError || schemaReadOnly ? <p>Reload to edit.</p> : null}
-      {version === undefined && openBlockAsks.length > 0 ? (
-        <nav aria-label="Open decisions" className="flex flex-wrap items-center gap-2">
-          <strong>{openBlockAsks.length} open decisions</strong>
-          {openBlockAsks.map((ask) => (
-            <a
-              className={`inline-flex min-h-11 items-center rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
-              href={`#b-${encodeURIComponent(ask.block_id ?? "")}`}
-              key={ask.id}
-              onClick={(event) => {
-                event.preventDefault();
-                const blockID = ask.block_id;
-                if (blockID === undefined || blockID === null) {
-                  return;
-                }
-                window.location.hash = `b-${encodeURIComponent(blockID)}`;
-                editorRef.current?.focusBlock(blockID);
-              }}
-            >
-              {ask.question}
-            </a>
-          ))}
-        </nav>
-      ) : null}
-      {toolbar === undefined && version !== undefined ? null : (
-        <div
-          className="flex min-w-0 flex-wrap items-center gap-2"
-          data-testid={toolbar === undefined ? undefined : "spec-document-toolbar"}
+      {version === undefined && openDecision !== undefined ? (
+        <nav
+          aria-label="Open decisions"
+          className="flex min-h-11 items-center gap-2 md:h-7 md:min-h-0"
         >
-          {toolbar}
-          {version === undefined ? (
+          <span
+            className={`inline-flex h-6 shrink-0 items-center rounded-full px-2 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
+          >
+            {openBlockAsks.length === 1
+              ? "1 open decision"
+              : `${openBlockAsks.length} open decisions`}
+          </span>
+          <a
+            className={`block min-w-0 max-w-[90ch] truncate text-sm font-medium underline ${linkText} ${linkHoverText}`}
+            href={`#b-${encodeURIComponent(openDecision.block_id ?? "")}`}
+            onClick={(event) => {
+              event.preventDefault();
+              const blockID = openDecision.block_id;
+              if (blockID === undefined || blockID === null) {
+                return;
+              }
+              window.location.hash = `b-${encodeURIComponent(blockID)}`;
+              editorRef.current?.focusBlock(blockID);
+            }}
+            title={openDecision.question}
+          >
+            {openDecision.question}
+          </a>
+          {openBlockAsks.length > 1 ? (
             <button
-              className={`ml-auto min-h-11 shrink-0 rounded border px-3 ${secondaryButtonBorder} ${secondaryButtonDisabledText} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
-              onClick={() => void copyBlockLink()}
+              aria-label="Next open decision"
+              className={`ml-auto flex min-h-11 min-w-11 items-center justify-center rounded-full md:min-h-7 md:min-w-7 ${secondaryButtonBorder} ${secondaryButtonHoverBorder} ${secondaryButtonText}`}
+              onClick={() =>
+                setOpenDecisionIndex((current) => (current + 1) % openBlockAsks.length)
+              }
               type="button"
             >
-              Copy link to block
+              <svg aria-hidden="true" className="h-3 w-3" fill="none" viewBox="0 0 16 16">
+                <path d="m6 3 5 5-5 5" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
             </button>
           ) : null}
-        </div>
-      )}
+        </nav>
+      ) : null}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
       which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
       <article

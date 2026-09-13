@@ -238,10 +238,7 @@ export function ApprovalChip({
     },
   });
 
-  if (approval === undefined) {
-    return null;
-  }
-  if (approval.state === "draft" && variant === "list") {
+  if (approval === undefined || approval.state === "draft") {
     return null;
   }
 
@@ -270,7 +267,7 @@ export function ApprovalChip({
         <>
           {approval.state === "approved" ? null : (
             <button
-              className={`rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               disabled={review.isPending}
               onClick={() => submitGuard.guard(() => review.mutate({ state: "approved" }))}
               type="button"
@@ -279,7 +276,7 @@ export function ApprovalChip({
             </button>
           )}
           <button
-            className={`rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
             disabled={review.isPending}
             onClick={() => setRequestChangesOpen(true)}
             type="button"

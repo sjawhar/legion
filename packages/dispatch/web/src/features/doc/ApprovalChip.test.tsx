@@ -42,21 +42,14 @@ test("renders nothing when the artifact carries no approval", () => {
   }
 });
 
-test("renders nothing for a draft document in list variant", () => {
-  const view = renderChip(artifact({ latest_version: 1, state: "draft" }), "list");
-  try {
-    expect(view.container.firstChild).toBeNull();
-  } finally {
-    view.unmount();
-  }
-});
-
-test("shows Draft in the header variant even though lists stay quiet", () => {
-  const view = renderChip(artifact({ latest_version: 1, state: "draft" }), "header");
-  try {
-    expect(screen.getByRole("button", { name: "Draft" })).not.toBeNull();
-  } finally {
-    view.unmount();
+test("renders nothing for a draft document in every variant", () => {
+  for (const variant of ["list", "header"] as const) {
+    const view = renderChip(artifact({ latest_version: 1, state: "draft" }), variant);
+    try {
+      expect(view.container.firstChild).toBeNull();
+    } finally {
+      view.unmount();
+    }
   }
 });
 

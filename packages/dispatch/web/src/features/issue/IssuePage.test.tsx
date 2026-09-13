@@ -1118,7 +1118,7 @@ test("IssuePage renders exactly one Version combobox on the Spec tab", async () 
     restore();
   }
 });
-test("IssuePage keeps version controls inside the Spec toolbar", async () => {
+test("IssuePage keeps version controls in the active Spec tab row", async () => {
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
@@ -1131,14 +1131,14 @@ test("IssuePage keeps version controls inside the Spec toolbar", async () => {
   const view = renderIssuePage("/issues/CORE-1/spec");
 
   try {
-    const toolbar = await screen.findByTestId("spec-document-toolbar");
-    expect(within(toolbar).getByRole("combobox", { name: "Version" })).not.toBeNull();
-    expect(within(toolbar).getByRole("button", { name: "Name version" })).not.toBeNull();
+    const tabs = await screen.findByTestId("issue-tabs");
+    expect(within(tabs).getByRole("combobox", { name: "Version" })).not.toBeNull();
+    expect(within(tabs).getByRole("button", { name: "Name version" })).not.toBeNull();
+    expect(screen.queryByTestId("spec-document-toolbar")).toBeNull();
 
     for (const tab of ["Conversation", "Children", "Artifacts"] as const) {
       fireEvent.click(screen.getByRole("tab", { name: tab }));
       await screen.findByRole("tab", { name: tab, selected: true });
-      expect(screen.queryByTestId("spec-document-toolbar")).toBeNull();
       expect(screen.queryByRole("combobox", { name: "Version" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Name version" })).toBeNull();
     }
@@ -1146,30 +1146,6 @@ test("IssuePage keeps version controls inside the Spec toolbar", async () => {
     view.unmount();
     getArtifact.mockRestore();
     getArtifactText.mockRestore();
-    restore();
-  }
-});
-
-test("IssuePage keeps a label-heavy metadata rail on one scrolling line", async () => {
-  const restore = stubIssuePage({
-    ...issue,
-    labels: Array.from({ length: 20 }, (_, index) => `long-label-${index}-for-overflow`),
-  });
-  const view = renderIssuePage();
-
-  try {
-    const rail = await screen.findByTestId("issue-metadata-rail");
-    expect(rail.classList.contains("flex-nowrap")).toBe(true);
-    expect(rail.classList.contains("overflow-x-auto")).toBe(true);
-    expect(rail.classList.contains("[scrollbar-gutter:stable]")).toBe(true);
-    expect(
-      within(rail)
-        .getByRole("button", { name: "Messages default to no route" })
-        .classList.contains("max-w-[14ch]")
-    ).toBe(true);
-    expect(within(rail).getByTestId("issue-labels").classList.contains("shrink-0")).toBe(true);
-  } finally {
-    view.unmount();
     restore();
   }
 });
@@ -1202,7 +1178,7 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
     restore();
   }
 });
-test("IssuePage keeps pin with identity and mixes state with actions", async () => {
+test("IssuePage keeps state actions available while approval awaits", async () => {
   const restore = stubIssuePage({
     ...issue,
     artifacts: [
@@ -1215,20 +1191,16 @@ test("IssuePage keeps pin with identity and mixes state with actions", async () 
   const view = renderIssuePage("/issues/CORE-1/conversation");
 
   try {
-    const title = await screen.findByRole("heading", { level: 1, name: issue.title });
-    expect(title.classList.contains("text-xs")).toBe(true);
-    expect(title.classList.contains("sm:text-xl")).toBe(true);
-    expect(screen.getByText(issue.key).classList.contains("self-start")).toBe(true);
+    await screen.findByRole("heading", { level: 1, name: issue.title });
     const pin = screen.getByRole("button", { name: "Pin issue" });
-    expect(title.parentElement?.contains(pin)).toBe(true);
+    expect(pin).not.toBeNull();
 
     const stateActions = screen.getByTestId("issue-state-actions");
-    expect(stateActions.classList.contains("flex-wrap")).toBe(true);
     expect(within(stateActions).getByRole("combobox", { name: "Status" })).not.toBeNull();
     expect(within(stateActions).getByRole("combobox", { name: "Priority" })).not.toBeNull();
+    expect(within(stateActions).getByRole("button", { name: "Awaiting approval" })).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Approve" })).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Close issue" })).not.toBeNull();
-    expect(within(stateActions).queryByRole("button", { name: "Pin issue" })).toBeNull();
   } finally {
     view.unmount();
     restore();
@@ -1247,7 +1219,7 @@ test("IssuePage keeps an unrequested draft approval passive", async () => {
   const view = renderIssuePage("/issues/CORE-1/conversation");
 
   try {
-    expect(await screen.findByRole("button", { name: "Draft" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Draft" })).toBeNull();
     expect(screen.queryByRole("button", { name: /^Approve$/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
   } finally {

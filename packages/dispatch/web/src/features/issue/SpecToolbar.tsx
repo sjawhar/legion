@@ -1,17 +1,19 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
 import {
+  dangerText,
   inputClasses,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
+  successText,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 
-/** Version controls belong to the issue's Spec panel, where they operate on its primary document. */
+/** Compact primary-Spec controls displayed at the end of the active issue tab row. */
 export function SpecToolbar({
   isClosed,
   onShowDiffChange,
@@ -27,15 +29,16 @@ export function SpecToolbar({
   toolbar: DocumentToolbar;
   version: number | undefined;
 }): ReactNode {
+  const [copyFeedback, setCopyFeedback] = useState<"copied" | "failed" | undefined>(undefined);
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <div className="flex w-full min-w-0 flex-wrap items-center gap-2 md:ml-auto md:w-auto">
       <label
-        className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium ${textSecondaryOnCanvas}`}
+        className={`flex min-h-11 min-w-0 items-center gap-2 text-sm font-medium md:min-h-8 ${textSecondaryOnCanvas}`}
       >
         Version
         <select
           aria-label="Version"
-          className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(false)}`}
+          className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal md:min-h-8 md:py-1 ${inputClasses(false)}`}
           onChange={(event) =>
             onVersionChange(event.target.value === "" ? null : Number(event.target.value))
           }
@@ -51,23 +54,48 @@ export function SpecToolbar({
         </select>
       </label>
       <button
-        className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+        aria-label="Name version"
+        className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
         disabled={isClosed || toolbar.isNamingVersion}
         onClick={toolbar.requestNamedVersion}
         type="button"
       >
-        Name version
+        Name
       </button>
-      {version === undefined ? null : (
+      <ConnectionDot connection={toolbar.connection} />
+      {version === undefined ? (
+        <>
+          <button
+            aria-label="Copy link to block"
+            className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+            onClick={() => {
+              void toolbar.copyBlockLink().then(
+                (copied) => setCopyFeedback(copied ? "copied" : "failed"),
+                () => setCopyFeedback("failed")
+              );
+            }}
+            type="button"
+          >
+            Copy link
+          </button>
+          {copyFeedback === undefined ? null : (
+            <span
+              className={`text-xs font-medium ${copyFeedback === "copied" ? successText : dangerText}`}
+              role="status"
+            >
+              {copyFeedback === "copied" ? "Copied" : "Copy failed - select the text"}
+            </span>
+          )}
+        </>
+      ) : (
         <button
-          className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           onClick={() => onShowDiffChange(!showDiff)}
           type="button"
         >
           {showDiff ? "Show version" : "Diff vs current"}
         </button>
       )}
-      <ConnectionDot connection={toolbar.connection} />
     </div>
   );
 }

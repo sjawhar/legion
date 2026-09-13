@@ -168,6 +168,21 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         onBeforeTabChange={(current) => {
           panelScroll.current[current] = window.scrollY;
         }}
+        toolbar={
+          activeTab === "spec" && specToolbar !== undefined ? (
+            <SpecToolbar
+              isClosed={isClosed}
+              onShowDiffChange={setSpecShowDiff}
+              onVersionChange={(version) => {
+                setSpecShowDiff(false);
+                selectDocumentVersion(primaryArtifact, version);
+              }}
+              showDiff={specShowDiff}
+              toolbar={specToolbar}
+              version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
+            />
+          ) : undefined
+        }
       />
       <div
         aria-hidden={activeTab !== "spec"}
@@ -190,21 +205,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
               selectDocumentVersion(primaryArtifact, version);
             }}
             showDiff={specShowDiff}
-            toolbar={
-              activeTab === "spec" && specToolbar !== undefined ? (
-                <SpecToolbar
-                  isClosed={isClosed}
-                  onShowDiffChange={setSpecShowDiff}
-                  onVersionChange={(version) => {
-                    setSpecShowDiff(false);
-                    selectDocumentVersion(primaryArtifact, version);
-                  }}
-                  showDiff={specShowDiff}
-                  toolbar={specToolbar}
-                  version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
-                />
-              ) : undefined
-            }
             version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}
           />
         ) : null}
