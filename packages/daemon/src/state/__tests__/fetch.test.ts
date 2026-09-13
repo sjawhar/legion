@@ -13,13 +13,17 @@ import {
 } from "../fetch";
 
 describe("defaultRunner", () => {
-  it("kills a command at the caller's budget and reports the kill as a timeout", async () => {
+  it("kills a command at the caller's budget and reports the kill as a timeout with the limit and wall time, not as aborted", async () => {
     const startedAt = performance.now();
-    const result = await defaultRunner(["sleep", "30"], { timeoutMs: 200 });
+    const result = await defaultRunner(["sleep", "30"], {
+      timeoutMs: 200,
+      signal: new AbortController().signal,
+    });
     expect(performance.now() - startedAt).toBeLessThan(10_000);
     expect(result.exitCode).toBe(143);
     expect(result.timedOut?.limitMs).toBe(200);
     expect(result.timedOut?.elapsedMs).toBeGreaterThanOrEqual(200);
+    expect(result.aborted).toBeUndefined();
   });
 
   it("reports no timeout for a command that exits on its own", async () => {
@@ -47,7 +51,7 @@ describe("defaultRunner", () => {
     expect(result.timedOut).toBeUndefined();
   });
 
-  it("kills a running command when the caller's signal aborts, and reports it as killed, never as a clean exit", async () => {
+  it("kills a running command when the caller's signal aborts and reports it as aborted, never as a timeout or a clean exit", async () => {
     const controller = new AbortController();
     const startedAt = performance.now();
     const pending = defaultRunner(["sleep", "30"], {
@@ -58,7 +62,20 @@ describe("defaultRunner", () => {
     const result = await pending;
     expect(performance.now() - startedAt).toBeLessThan(10_000);
     expect(result.exitCode).not.toBe(0);
-    expect(result.timedOut).toBeDefined();
+    expect(result.aborted).toBeTrue();
+    expect(result.timedOut).toBeUndefined();
+  });
+
+  it("reports a command whose signal was already aborted at spawn as aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await defaultRunner(["sleep", "30"], {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.aborted).toBeTrue();
+    expect(result.timedOut).toBeUndefined();
   });
 });
 

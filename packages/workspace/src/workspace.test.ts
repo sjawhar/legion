@@ -601,6 +601,31 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(existsSync(path.join(repoCloneDir, ".jj", "partial"))).toBeFalse();
   });
 
+  test("reports a clone the runner killed on the caller's abort as aborted, not as a plain exit-143 failure, and leaves nothing at the final path", async () => {
+    const stateDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+
+    await expect(
+      provisionIssueWorkspace(issue, {
+        extensionPackage,
+        stateDir,
+        repo: "acme/widgets",
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd) =>
+          cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone"
+            ? { exitCode: 143, stdout: "", stderr: "", aborted: true }
+            : { exitCode: 0, stdout: "", stderr: "" },
+      })
+    ).rejects.toThrow(/^Command aborted: jj git clone https:\/\/github\.com\/acme\/widgets /);
+    expect(existsSync(repoCloneDir)).toBeFalse();
+    expect(
+      (await readdir(path.dirname(repoCloneDir))).filter((entry) => entry.startsWith("widgets"))
+    ).toEqual([]);
+  });
+
   // The cleanup failure is made real with an unreadable (mode 000) directory inside the clone,
   // which root ignores — as root the test would pass for the wrong reason, so it is skipped.
   test.skipIf(process.getuid?.() === 0)(

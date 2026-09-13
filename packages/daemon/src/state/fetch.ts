@@ -16,19 +16,27 @@ import {
 
 /**
  * Result of running an external command.
+ *
+ * At most one of `timedOut` and `aborted` is present, and only when the runner itself killed a
+ * still-running command. A caller must never report either kill as an ordinary
+ * `Command failed (exit N)`.
  */
 export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
   /**
-   * Present only when the runner's own kill timer fired: the command did not
-   * exit within `limitMs`, so the runner sent it SIGTERM. `elapsedMs` is the
-   * wall time from spawn to exit, which includes any time a child kept the
-   * stdio pipes open after the kill. A caller must never report a kill as an
-   * ordinary `Command failed (exit N)`.
+   * The runner's own budget timer fired: the command did not exit within `limitMs`, so the
+   * runner sent it SIGTERM. `elapsedMs` is the wall time from spawn to exit, which includes any
+   * time a child kept the stdio pipes open after the kill.
    */
   timedOut?: { limitMs: number; elapsedMs: number };
+  /**
+   * The caller's `signal` aborted while the command was running (or was already aborted at
+   * spawn), so the runner killed it: the caller gave the command up, and nothing about the
+   * command itself is being reported — not a timeout, not an answer.
+   */
+  aborted?: true;
 }
 
 export interface CommandRunnerOptions {
@@ -41,10 +49,10 @@ export interface CommandRunnerOptions {
    */
   readonly timeoutMs?: number;
   /**
-   * Kills the command when aborted, exactly as the budget does: the caller is giving up on it
-   * (a daemon whose boot failed while a probe was still running) and must not leave the child
-   * behind — the kill timer alone dies with the caller's process. The result carries `timedOut`,
-   * never a clean exit.
+   * Kills the command when aborted, as the budget does: the caller is giving up on it (a daemon
+   * whose boot failed while a probe was still running) and must not leave the child behind — the
+   * kill timer alone dies with the caller's process. The report differs on purpose: the result
+   * carries `aborted`, never `timedOut` and never a clean exit.
    */
   readonly signal?: AbortSignal;
 }
@@ -77,24 +85,26 @@ export async function defaultRunner(
     stderr: "pipe",
   });
 
-  let killed = false;
-  const kill = () => {
+  let killedBy: "budget" | "signal" | undefined;
+  const kill = (cause: "budget" | "signal") => {
     // A child that has already exited — by exit code or by signal; its stdio pipes may still be
     // held open by a grandchild the runner is draining — was not killed by us: reporting a
     // timeout for it would send a probe that finished inside the timer's slack back into a retry
-    // it never needed.
-    if (proc.exitCode !== null || proc.signalCode !== null) return;
-    killed = true;
+    // it never needed. A second cause arriving while the first kill is still landing is not a
+    // second kill either: the first one is what the result reports.
+    if (proc.exitCode !== null || proc.signalCode !== null || killedBy !== undefined) return;
+    killedBy = cause;
     try {
       proc.kill();
     } catch {
       // Process may have already exited
     }
   };
-  const killTimeout = setTimeout(kill, limitMs);
+  const killTimeout = setTimeout(() => kill("budget"), limitMs);
   const signal = options?.signal;
-  if (signal?.aborted) kill();
-  else signal?.addEventListener("abort", kill, { once: true });
+  const onAbort = () => kill("signal");
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -102,9 +112,12 @@ export async function defaultRunner(
 
   const exitCode = await proc.exited;
   clearTimeout(killTimeout);
-  signal?.removeEventListener("abort", kill);
-  if (!killed) {
+  signal?.removeEventListener("abort", onAbort);
+  if (killedBy === undefined) {
     return { stdout, stderr, exitCode };
+  }
+  if (killedBy === "signal") {
+    return { stdout, stderr, exitCode, aborted: true };
   }
   return {
     stdout,
