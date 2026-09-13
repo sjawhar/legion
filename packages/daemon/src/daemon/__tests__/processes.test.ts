@@ -45,6 +45,20 @@ import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fa
 const root = "LEGION-42";
 const child = "LEGION-43";
 const grandchild = "LEGION-44";
+/** The App identity `manager()`'s default token lease answers for every role, and the six
+ * variables a pane or a daemon jj command carries for it. */
+const HARNESS_GIT_IDENTITY = {
+  name: "legion-implement[bot]",
+  email: "42+legion-implement[bot]@users.noreply.github.com",
+};
+const HARNESS_IDENTITY_ENV = {
+  JJ_USER: HARNESS_GIT_IDENTITY.name,
+  JJ_EMAIL: HARNESS_GIT_IDENTITY.email,
+  GIT_AUTHOR_NAME: HARNESS_GIT_IDENTITY.name,
+  GIT_AUTHOR_EMAIL: HARNESS_GIT_IDENTITY.email,
+  GIT_COMMITTER_NAME: HARNESS_GIT_IDENTITY.name,
+  GIT_COMMITTER_EMAIL: HARNESS_GIT_IDENTITY.email,
+};
 const tempDirs: string[] = [];
 const liveManagers: ProcessManager[] = [];
 
@@ -481,10 +495,7 @@ function manager(
         getToken: async () => ({
           token: "worker-token",
           expiresAt: "2099-01-01T00:00:00.000Z",
-          gitIdentity: {
-            name: "legion-implement[bot]",
-            email: "42+legion-implement[bot]@users.noreply.github.com",
-          },
+          gitIdentity: HARNESS_GIT_IDENTITY,
         }),
       },
     },
@@ -1004,9 +1015,9 @@ describe("ProcessManager", () => {
     // every other tree's commits (LEGION-44). Identity therefore rides the pane's environment —
     // `JJ_USER`/`JJ_EMAIL` (jj reads these over every config scope) and the four Git variables —
     // resolved from the same App lease `/worker/started` and `legion gh` use, before the pane opens.
-    // Which App a role acts as is `appRoleForLegionRole`'s to say (LEGION-42 is moving planner,
-    // tester, and architect to the review App); only the two roles every mapping agrees on are
-    // pinned to a named App here, the sub-architect is checked against whatever the mapping says.
+    // Which App a role acts as is `appRoleForLegionRole`'s to say; only the two roles every mapping
+    // agrees on are pinned to a named App here, the sub-architect is checked against whatever the
+    // mapping says.
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [child] };
@@ -4468,10 +4479,7 @@ describe("ProcessManager", () => {
             return {
               token: "worker-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
-              gitIdentity: {
-                name: "legion-implement[bot]",
-                email: "42+legion-implement[bot]@users.noreply.github.com",
-              },
+              gitIdentity: HARNESS_GIT_IDENTITY,
             };
           },
         },
@@ -7439,12 +7447,7 @@ describe("ProcessManager", () => {
       ENVOY_URL: "http://127.0.0.1:9020",
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      JJ_USER: "legion-implement[bot]",
-      JJ_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
-      GIT_AUTHOR_NAME: "legion-implement[bot]",
-      GIT_AUTHOR_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
-      GIT_COMMITTER_NAME: "legion-implement[bot]",
-      GIT_COMMITTER_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
+      ...HARNESS_IDENTITY_ENV,
       PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
       GH_CONFIG_DIR: path.join(stateDir, "gh"),
       GH_TOKEN: "",
@@ -8126,14 +8129,6 @@ describe("ProcessManager", () => {
     "-R",
     workspaceDir,
   ];
-  const harnessIdentityEnv = {
-    JJ_USER: "legion-implement[bot]",
-    JJ_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
-    GIT_AUTHOR_NAME: "legion-implement[bot]",
-    GIT_AUTHOR_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
-    GIT_COMMITTER_NAME: "legion-implement[bot]",
-    GIT_COMMITTER_EMAIL: "42+legion-implement[bot]@users.noreply.github.com",
-  };
   /** Records every `jj metaedit` the daemon runs, with the command's env and timeout budget and how
    * many prompts the worker had received when it ran (0 = before the assignment frame). */
   function recordingMetaedits(client: FakeWorkerRpcClient) {
@@ -8189,7 +8184,7 @@ describe("ProcessManager", () => {
     expect(metaedits[0]?.command).toEqual(
       adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
     );
-    expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    expect(metaedits[0]?.env).toMatchObject(HARNESS_IDENTITY_ENV);
     // `metaedit` snapshots the working copy: the slow budget, like every other daemon jj command
     // against a working copy, never the runner's generic one.
     expect(metaedits[0]?.timeoutMs).toBe(300_000);
@@ -8228,7 +8223,7 @@ describe("ProcessManager", () => {
     expect(metaedits[0]?.command).toEqual(
       adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
     );
-    expect(metaedits[0]?.env).toMatchObject(harnessIdentityEnv);
+    expect(metaedits[0]?.env).toMatchObject(HARNESS_IDENTITY_ENV);
     expect(metaedits[0]?.timeoutMs).toBe(300_000);
     expect(metaedits[0]?.promptsBefore).toBe(0);
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });

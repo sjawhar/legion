@@ -100,8 +100,7 @@ the children that do commit as an App. A token-manager
 failure fails the launch (counted in `launchFailures`): no pane opens without an identity. Every
 issue workspace is a `jj workspace` of the one shared clone, and jj's repository-scoped config is a
 single file for all of them (`~/.config/jj/repos/<hash>/config.toml`), so an identity written
-there — as the extension did at every worker boot before LEGION-44 — set the author and
-committer for every tree's commits at once. Provisioning (`packages/workspace`,
+there is the author and committer for every tree's commits at once. Provisioning (`packages/workspace`,
 `provisionIssueWorkspace`) probes that scope on every launch — `jj config list --repo
 --include-overridden`, since a daemon whose own environment carries `JJ_USER`/`JJ_EMAIL` (one
 started from inside a Legion pane) would otherwise be shown nothing for a value the repo file

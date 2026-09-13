@@ -281,22 +281,20 @@ async function writeOmpConfig(workspaceDir: string): Promise<void> {
   await writeFile(path.join(ompDir, "config.yml"), "", "utf8");
 }
 
-/** Removes the repository-scoped jj identity an earlier worker boot left on the shared clone.
- * Before LEGION-44 the extension ran `jj config set --repo user.name`/`user.email` at every
- * worker boot; `--repo` on a workspace writes the one config file every workspace of the clone
- * shares, so the last worker to boot, in any tree, set the author and committer for every other
- * tree's commits. Identity now rides each pane's environment (`JJ_USER`/`JJ_EMAIL`, read over
- * any config), so a leftover value is inert for panes but still wrong for anything else that
- * commits from the clone; it is removed here, once, logged, and nothing writes it again. Runs on
- * every provisioning so a pane still on the pre-upgrade plugin during a rollout is healed at the
- * next launch. A key is probed first (`jj config list --repo` exits 0 with empty stdout when
- * unset) because `jj config unset` exits 1 on a key that does not exist. The probe carries
- * `--include-overridden`: without it jj hides a repository value that a higher layer overrides,
- * and the daemon's own environment can carry `JJ_USER`/`JJ_EMAIL` (a daemon started from inside a
- * Legion pane inherits the pane's identity), which would make the probe print nothing for a value
- * the repo file does hold and the unset silently never run. A failed unset is re-probed once,
- * since two issues provisioning at the same time can both see the key and only one of them
- * removes it. */
+/** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
+ * workspace is the one config file every workspace of the clone shares, so a value there is the
+ * author and committer for every tree's commits at once; identity rides each pane's environment
+ * (`JJ_USER`/`JJ_EMAIL`, read over any config), so a value there is inert for panes but still
+ * wrong for anything else that commits from the clone. Removed here, once, logged; nothing writes
+ * it. Runs on every provisioning, not only workspace creation, so a value written between launches
+ * is removed at the next one. A key is probed first (`jj config list --repo` exits 0 with empty
+ * stdout when unset) because `jj config unset` exits 1 on a key that does not exist. The probe
+ * carries `--include-overridden`: without it jj hides a repository value that a higher layer
+ * overrides, and the daemon's own environment can carry `JJ_USER`/`JJ_EMAIL` (a daemon started
+ * from inside a Legion pane inherits the pane's identity), which would make the probe print
+ * nothing for a value the repo file does hold and the unset silently never run. A failed unset is
+ * re-probed once, since two issues provisioning at the same time can both see the key and only
+ * one of them removes it. */
 async function removeRepoScopedIdentity(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string
@@ -315,9 +313,7 @@ async function removeRepoScopedIdentity(
     const present = await run(deps, probe);
     if (present.exitCode !== 0) throw commandFailure(present, probe);
     if (present.stdout.trim() === "") continue;
-    console.error(
-      `[legion] removing repository-scoped jj ${key} from ${repoCloneDir}: an earlier worker boot wrote it, and one repo config is shared by every workspace of the clone; identity rides each pane's environment now`
-    );
+    console.error(`[legion] removing repository-scoped jj ${key} from ${repoCloneDir}`);
     const unset = ["jj", "config", "unset", "--repo", "-R", repoCloneDir, key];
     const removed = await run(deps, unset);
     if (removed.exitCode === 0) continue;

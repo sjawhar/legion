@@ -476,7 +476,7 @@ describe("provisionIssueWorkspace", () => {
     expect(
       (await runCommand([...STOCK_JJ, "bookmark", "set", "main", "-R", repoCloneDir])).exitCode
     ).toBe(0);
-    // What a pre-LEGION-44 worker boot left behind on the shared clone.
+    // A repository-scoped identity on the shared clone, which provisioning must remove.
     for (const [key, value] of [
       ["user.name", "stale-bot[bot]"],
       ["user.email", "1+stale-bot[bot]@users.noreply.github.com"],
@@ -660,12 +660,11 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     ]);
   });
 
-  test("removes a repository-scoped jj identity an earlier worker boot left on the shared clone, logging each key", async () => {
-    // Before LEGION-44 the extension ran `jj config set --repo user.name`/`user.email` at every
-    // worker boot. `--repo` on a workspace writes the one config file every workspace of the clone
-    // shares, so the last worker to boot — in any tree — set the author and committer for every
-    // other tree's commits. Identity rides each pane's environment now; a leftover value is removed
-    // here, where the clone's config writes already live, and nothing writes it again.
+  test("removes a repository-scoped jj identity from the shared clone, logging each key", async () => {
+    // `--repo` on a workspace is the one config file every workspace of the clone shares, so a
+    // `user.name`/`user.email` there is the author and committer for every tree's commits. Identity
+    // rides each pane's environment; a value found here is removed, where the clone's config
+    // writes already live, and nothing writes it.
     const stateDir = path.join(await temporaryDirectory(), "state");
     const issue = "WIDGETS-42";
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");

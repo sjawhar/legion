@@ -3580,9 +3580,7 @@ export class ProcessManager {
    * commit's author and refreshes only the committer, and the working copy is created by the
    * daemon's own `jj workspace add` under the daemon's identity and never recreated by a split
    * while `.omp/config.yml` sits in it; the pane environment alone would therefore leave every
-   * commit in the workspace authored by the daemon for the workspace's whole life (before
-   * LEGION-44: by whichever role last wrote the shared repo config when the workspace was added).
-   * Runs at every
+   * commit in the workspace authored by the daemon for the workspace's whole life. Runs at every
    * assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`, a `--resume`,
    * or a live idle worker prompted over its socket — under the same lease-derived variables the
    * pane carries and under `slow_command_timeout_seconds`, like every other daemon command that
