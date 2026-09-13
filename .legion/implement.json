@@ -1,0 +1,60 @@
+{
+  "pr": 1025,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1025",
+  "branch": "legion/LEGION-44",
+  "head": "831ae69f9bf0",
+  "commits": [
+    "a9df6b94612b daemon: carry each phase worker's commit identity in its pane environment",
+    "d0ff6975dd20 workspace: remove the repository-scoped jj identity earlier worker boots wrote",
+    "a23a5f536ca9 pi-envoy: stop writing the worker identity into the shared jj repo config",
+    "e5298bf2a3de docs: worker commit identity is the pane environment, not jj config",
+    "f8e10e957ccb workspace: probe the repository-scoped identity with --include-overridden",
+    "831ae69f9bf0 daemon: adopt the issue's working copy for the role at every assignment, so jj split keeps the right author"
+  ],
+  "filesChanged": [
+    "packages/daemon/src/daemon/github-app-env.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/workspace/src/workspace.ts",
+    "packages/workspace/src/workspace.test.ts",
+    "packages/pi-envoy/extensions/legion.ts",
+    "packages/pi-envoy/extensions/legion.test.ts",
+    "packages/pi-envoy/src/legion/workspace-helpers.ts (deleted)",
+    "packages/pi-envoy/AGENTS.md",
+    "skills/legion-worker/SKILL.md"
+  ],
+  "deviations": [
+    "New since the plan (architect ruling 2026-09-13, spec v6): every assignment delivery adopts the issue's working copy for the role before the prompt — `promptExistingWorker` (the one write of `state.phases[issue]`), kind `assignment` only, runs `jj metaedit --update-author -r '@ & description(exact:\"\")' -R <workspaceDir>` under the same lease-derived six variables (`workerIdentityEnv` → `gitIdentityEnv`, via `appRoleForLegionRole(role)`), through `ProcessManager.adoptWorkingCopy`. Why: jj keeps a rewritten commit's author and `jj split`/`jj describe` only refresh the committer; the working copy is created by the daemon's own `jj workspace add` under the daemon's identity (this box: user config `Sami Jawhar <sami@trajectorylabs.net>`) and, with `.omp/config.yml` always in it, is never recreated by a split — so the pane environment alone fixes the committer and leaves every commit in the workspace authored by the daemon operator. Evidence: legion/LEGION-42's commits are author legion-reviewer[bot] / committer legion-implementer[bot] (author = whatever repo config said when the daemon ran `workspace add`). Ordering chosen: metaedit BEFORE `client.prompt()` and before any state write, so a throw leaves the worker unprompted, `phases[issue]` and `pendingAssignment` untouched, and the claim byte-identical (asserted in processes.test.ts). `/worker/ready` propagates the throw (extension retries ready); the queue-promotion path counts it as a prompt failure as before. 'Nothing changed.' / 'No revisions to modify.' are exit 0.",
+    "New since the plan (same ruling): the provisioning probe is `jj config list --repo --include-overridden -R <clone> <key>`. Without the flag jj hides a repository value that a higher layer overrides, and the daemon's own environment can carry JJ_USER/JJ_EMAIL (a daemon started from inside a Legion pane inherits the pane's six variables after this change): the probe printed nothing for a value the repo file held, so the unset would silently never run. Verified on both jj builds: `# user.name = \"…\"` when overridden, plain when not, empty when absent; `jj config unset --repo` is unaffected by the env. The extension test helper `jjRepoConfig` carries the same flag (and strips the `# ` marker) so `legion.test.ts` is correct when run from a Legion pane — it failed in mine before the flag.",
+    "Task 1 Step 2 test per amendment (C): spawns reviewer (asserted review App), implementer (asserted code-writing App), and a sub-architect asserted against `identityEnvOf(appRoleForLegionRole(\"architect\"))` computed in the test; leases asserted as [{review}, {implement}, {appRoleForLegionRole(\"architect\")}]. Root architect and controller panes asserted to carry none of the six.",
+    "Bookmark pushed at @- with `--allow-backwards`: provisioning writes `.omp/config.yml` into every working copy, jj tracks it, so `@` is never empty/undescribed-pushable and `jj git push` refuses it; every other Legion branch on origin is free of `.omp/` too. Not in scope here, noted for the architect (see openQuestions).",
+    "The defect bit this run live: a reviewer on another tree wrote legion-reviewer[bot] into the shared repo config between the Task 1 and Task 2 commits; commits d0ff6975/a23a5f53/e5298bf2 were born committer legion-reviewer[bot] and were rewritten with `jj metaedit --force-rewrite` under the implementer identity before push (Omp-Session trailers intact). Every later jj command in this session ran under explicit JJ_USER/JJ_EMAIL — this pane predates the fix and carries none of the six."
+  ],
+  "trickyParts": [
+    "`jj config list --repo <key>` is env-sensitive: with JJ_USER/JJ_EMAIL set it reports 'No matching config key' for a value the repo file holds (the env layer overrides it and `list` hides overridden values unless `--include-overridden`). Any test or daemon command that reads repo-scoped identity must pass the flag.",
+    "`jj split` keeps the working-copy commit's author for both halves (verified fork 0.45.1 and stock 0.44.0): author = whoever created `@`; committer = the identity running the split. `jj metaedit --update-author` on an undescribed `@` is the only env-driven way to make the next split's author the current role; `describe --reset-author` does not exist in these builds.",
+    "`identityEnvOf`/`harnessIdentityEnv` in processes.test.ts assert the six variables on the recorded tmux `-e` env and on the recorded metaedit command's env; the harness default lease returns legion-implement[bot] for every appRole, so the exact-env test is mapping-independent as the amendment states.",
+    "`packages/workspace` has no CI job (pr-and-main.yaml: daemon only; envoy-and-contracts.yaml never lists it; release.yaml uses it only as a path filter). Its gate is the local run recorded in the PR body: 15 pass / 0 fail. The stock-jj test now seeds and removes a real repo-scoped identity through `mise x` and got the 60 s budget its sibling real-jj test already has (it crossed bun's 5 s default once)."
+  ],
+  "verification": {
+    "daemon": "bunx biome check --error-on-warnings src/ clean; tsc clean; bun test 1122 pass / 7 skip / 0 fail",
+    "workspace": "bunx biome check src/ clean; tsc clean; bun test 15 pass / 0 fail (no CI job; local run is the gate)",
+    "pi-envoy": "bun run lint clean; tsc clean; bun test 166 pass / 0 fail",
+    "tddFailuresObserved": "Task 1: exact-env toEqual missing six keys; role test reviewer.JJ_USER undefined; failure test spawnWorker resolved (tmux new-window attempted). Task 2: three exact-list tests missing the probes; stale/race/hard-failure tests no jj config commands; stock-jj test found user.name/user.email still set. Task 3: sentinel overwritten with 'Legion Worker' and user.email 'worker@example.test'. Adoption: both assignment tests recorded 0 metaedits before the implementation.",
+    "realJjSmoke": "Both builds: clone + `workspace add` under JJ_USER='Sami Jawhar' → @ authored Sami Jawhar; exact adoptWorkingCopy argv as implementer then `jj split -m 'implement: work'` → legion-implementer[bot]/legion-implementer[bot]; as reviewer then `jj split -m 'review: record handoff'` → legion-reviewer[bot]/legion-reviewer[bot]; against a described @ → 'No revisions to modify.', author unchanged."
+  },
+  "forTester": [
+    "Criterion 3 recipe (plan section `Tester`) plus the architect's handover case: `jj workspace add` under identity X; `jj metaedit --update-author -r '@ & description(exact:\"\")' -R <ws>` under identity Y; `jj describe -m …` under Y → author AND committer Y; then run the same metaedit against a described @ under identity Z → 'No revisions to modify.', author/committer unchanged. Quote `jj log -T` lines for both jj builds if you can (`mise x github:jj-vcs/jj@0.44.0 -- jj`).",
+    "Criterion 1 on a real pane: run this branch's daemon (smoke rig, SMOKE_WEBHOOK_MODE=envoy) and grep `/proc/<pane_pid>/environ` of a spawned worker for the six variables; the controller and root architect panes are the negative control (none). Then, in that worker's workspace, `jj log -r @ -T 'author.name()'` after the assignment was delivered should already be the role's App (adoption ran at /worker/ready), and its `jj split` commit carries that author and committer.",
+    "Criterion 5: after provisioning on this branch, `jj -R <clone> config list --repo --include-overridden user` prints nothing; a seeded `jj config set --repo -R <clone> user.name '\"stale\"'` before the next launch is removed with one `[legion] removing repository-scoped jj user.name …` daemon log line.",
+    "Negative control for the probe: with `JJ_USER=x` exported, `jj config list --repo -R <clone> user.name` prints nothing for a set key while `--include-overridden` prints `# user.name = …`."
+  ],
+  "openQuestions": [
+    "For the architect, not this PR's scope: provisioning's `.omp/config.yml` (writeOmpConfig) is tracked by jj in every working copy, so `@` is never empty; workers must point `legion/<KEY>` at `@-` (`--allow-backwards`, since provisioning re-points it at `@` on every launch) or jj refuses the push for lack of a description. Either ignore `.omp/` in the repo's `.gitignore` or have provisioning write it as untracked."
+  ],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T11:19:07.276Z"
+}
