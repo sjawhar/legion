@@ -55,7 +55,7 @@ bridge_pid=""
 
 # The rig's identity for teardown is the directory's legion.yaml (up.sh's write_daemon_config
 # writes it for every rig), never SMOKE_PROJECT -- so these cases export no SMOKE_PROJECT at all.
-printf 'project: omp\nnats_urls:\n  - nats://127.0.0.1:14222\n' >"${smoke_dir}/legion.yaml"
+printf 'project: omp\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${smoke_dir}/legion.yaml"
 tmux_log="${temporary_dir}/tmux.log"
 cat >"${fake_bin}/tmux" <<EOF
 #!/usr/bin/env bash
@@ -158,18 +158,22 @@ grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
 
 # Acceptance 1 (LEGION-41): down.sh removes exactly the container up.sh recorded for this rig at
 # ${SMOKE_DIR}/nats-container. The fake docker logs every argv and reports two rigs' containers
-# plus the fixed name as existing, so anything down.sh touched is on the log; `docker port` for
-# the fixed name answers whatever SMOKE_FAKE_LEGACY_PORT says (the acceptance-8 cases vary it).
+# plus the fixed name as existing (SMOKE_FAKE_LEGACY_ABSENT=1 hides the fixed name), so anything
+# down.sh touched is on the log; `docker port` for the fixed name prints the two lines the real
+# docker prints, IPv4 then IPv6, for the port SMOKE_FAKE_LEGACY_PORT names. Every port in these
+# fixtures is off the rig's 14222 default, so a comparison against a constant or against
+# ${NATS_PORT:-14222} cannot pass by accident.
 nats_smoke_dir="${temporary_dir}/smoke-nats"
 mkdir -p "$nats_smoke_dir"
-printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14222\n' >"${nats_smoke_dir}/legion.yaml"
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
 docker_log="${temporary_dir}/docker.log"
 cat >"${fake_bin}/docker" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"${docker_log}"
 case "\$*" in
-  'container inspect legion-smoke-nats-sjawhar16' | 'container inspect legion-smoke-nats-exampleorg24' | 'container inspect legion-smoke-nats') exit 0 ;;
-  'port legion-smoke-nats 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_LEGACY_PORT:-14222}" "\${SMOKE_FAKE_LEGACY_PORT:-14222}" ;;
+  'container inspect legion-smoke-nats-sjawhar16' | 'container inspect legion-smoke-nats-exampleorg24') exit 0 ;;
+  'container inspect legion-smoke-nats') [[ -z "\${SMOKE_FAKE_LEGACY_ABSENT:-}" ]] ;;
+  'port legion-smoke-nats 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_LEGACY_PORT:?}" "\${SMOKE_FAKE_LEGACY_PORT:?}" ;;
   'rm -f '*) exit 0 ;;
   *) exit 1 ;;
 esac
@@ -200,20 +204,16 @@ if grep -Eq '(inspect|rm -f) legion-smoke-nats$' "$docker_log"; then
 fi
 
 # Acceptance 8: no record (a rig started before the name was derived per project) means the
-# fixed name, which every such rig shared -- so it is removed only when its published port is the
-# NATS port this directory's legion.yaml names. Same port: this rig's container, removed.
+# fixed name, which every such rig shared -- so it is removed only when its published port equals
+# the NATS port this directory's legion.yaml names. Same port: this rig's container, removed.
 rm -f "${nats_smoke_dir}/nats-container"
 : >"$docker_log"
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14222 bash "$down_script" >"$output_file" 2>&1
-grep -Fxq 'port legion-smoke-nats 4222/tcp' "$docker_log" || {
-  printf 'expected down.sh to check the fixed-name container'"'"'s published port; docker log:\n%s\n' "$(<"$docker_log")" >&2
-  exit 1
-}
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
 grep -Fxq 'rm -f legion-smoke-nats' "$docker_log" || {
   printf 'expected down.sh to remove legion-smoke-nats when it is published on this rig'"'"'s NATS port; docker log:\n%s\n' "$(<"$docker_log")" >&2
   exit 1
 }
-[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on this rig's NATS port 14222, removing it"* && "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats'* ]] || {
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on this rig's NATS port 14731, removing it"* && "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats'* ]] || {
   cat "$output_file" >&2
   exit 1
 }
@@ -224,15 +224,37 @@ if grep -q '^rm -f ' "$docker_log"; then
   printf 'down.sh must not remove legion-smoke-nats when it is published on another port; docker log:\n%s\n' "$(<"$docker_log")" >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record and legion-smoke-nats is published on "*":14262"*", not this rig's NATS port 14222: it is another rig's container; leaving it"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; legion-smoke-nats is published on port 14262 14262, not this rig's NATS port 14731: it is another rig's container; leaving it"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
   cat "$output_file" >&2
   exit 1
 }
+# The comparison is exact, not a decimal-prefix match: a legion.yaml port whose digits prefix
+# the published port (1473 vs 14731) is another rig's container too.
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:1473\n' >"${nats_smoke_dir}/legion.yaml"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when the legion.yaml port merely prefixes the published port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"legion-smoke-nats is published on port 14731 14731, not this rig's NATS port 1473: it is another rig's container; leaving it"* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+# The published port must equal the rig's on every reported line, and a suffix match is no
+# match either (14731 vs 4731).
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=4731 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove legion-smoke-nats when the published port is a suffix of the legion.yaml port; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
 # legion.yaml without a parseable nats_urls entry: the ownership test cannot run, so nothing is
 # removed and the warning names the file.
 printf 'project: sjawhar/16\n' >"${nats_smoke_dir}/legion.yaml"
 : >"$docker_log"
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14222 bash "$down_script" >"$output_file" 2>&1
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 bash "$down_script" >"$output_file" 2>&1
 if grep -q '^rm -f ' "$docker_log"; then
   printf 'down.sh must not remove legion-smoke-nats when legion.yaml names no NATS port; docker log:\n%s\n' "$(<"$docker_log")" >&2
   exit 1
@@ -241,7 +263,19 @@ fi
   cat "$output_file" >&2
   exit 1
 }
-printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14222\n' >"${nats_smoke_dir}/legion.yaml"
+# No fixed-name container at all: a silent no-op, even when legion.yaml names no port -- the
+# container is looked for before the file is parsed.
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" SMOKE_FAKE_LEGACY_PORT=14731 SMOKE_FAKE_LEGACY_ABSENT=1 bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f \|^port ' "$docker_log"; then
+  printf 'down.sh must neither probe nor remove a fixed-name container that does not exist; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" != *'leaving legion-smoke-nats'* && "$(<"$output_file")" != *'legion-smoke-nats is published'* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${nats_smoke_dir}/legion.yaml"
 
 # A record that does not name a rig container is refused, not guessed around: nothing is removed.
 printf 'not-a-rig-container\n' >"${nats_smoke_dir}/nats-container"
@@ -294,7 +328,7 @@ fi
 # warned about and ignored -- the directory's project is the one stopped.
 disagree_dir="${temporary_dir}/env-disagrees"
 mkdir -p "$disagree_dir"
-printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14222\n' >"${disagree_dir}/legion.yaml"
+printf 'project: sjawhar/16\nnats_urls:\n  - nats://127.0.0.1:14731\n' >"${disagree_dir}/legion.yaml"
 : >"$tmux_log"
 PATH="${fake_bin}:${PATH}" SMOKE_DIR="$disagree_dir" SMOKE_PROJECT="sjawhar/99" bash "$down_script" >"$output_file" 2>&1
 grep -Fxq -- '-L legion-sjawhar16 kill-session -t legion-sjawhar16' "$tmux_log" || {

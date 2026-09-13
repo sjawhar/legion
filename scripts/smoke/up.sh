@@ -434,11 +434,31 @@ ensure_root_issue() {
   printf 'CREATED root issue %s\n' "$key"
 }
 
+# Ownership test for a NATS container, shared verbatim with down.sh: true only when
+# `docker port <container> 4222/tcp` reports at least one binding and every reported binding
+# (docker prints one line per address, `0.0.0.0:<port>` and `[::]:<port>`) carries exactly the
+# given host port -- one host port is bound by one rig, so an equal port means this rig's
+# container. Empty or unparseable output is a refusal, never a match.
+container_published_on() {
+  local container="$1"
+  local port="$2"
+  local published
+  local line
+  local seen=0
+  published="$(docker port "$container" 4222/tcp 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ :([0-9]+)$ && "${BASH_REMATCH[1]}" == "$port" ]] || return 1
+    seen=1
+  done <<<"$published"
+  ((seen))
+}
+
 ensure_nats() {
   local nats_name="$1"
 
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
-    [[ "$(docker port "$nats_name" 4222/tcp)" == *":${nats_port}"* ]] ||
+    container_published_on "$nats_name" "$nats_port" ||
       fail "NATS container ${nats_name} is not mapped to configured port ${nats_port}"
     if [[ "$(docker container inspect --format '{{.State.Running}}' "$nats_name")" == "true" ]]; then
       printf 'REUSED NATS container %s\n' "$nats_name"

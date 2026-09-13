@@ -23,11 +23,11 @@ project_slug() {
   printf '%s\n' "$project"
 }
 
-# Prints the project named by the directory's legion.yaml; fails when the file is unreadable or
-# has no such line.
+# Prints the project named by the directory's legion.yaml; fails when the file is missing,
+# unreadable, not a regular file, or has no such line.
 rig_project() {
   local line
-  [[ -r "$rig_config" ]] || return 1
+  [[ -f "$rig_config" && -r "$rig_config" ]] || return 1
   while IFS= read -r line; do
     if [[ "$line" =~ ^project:[[:space:]]*([^[:space:]]+)[[:space:]]*$ ]]; then
       printf '%s\n' "${BASH_REMATCH[1]}"
@@ -37,12 +37,13 @@ rig_project() {
   return 1
 }
 
-# Prints the NATS port from the directory's legion.yaml: the first `- nats://127.0.0.1:<port>`
-# list item under `nats_urls:` (write_daemon_config writes exactly that shape, one entry). Fails
-# when the file has no such entry.
+# Prints the NATS port from the directory's legion.yaml: the `- nats://127.0.0.1:<port>` list
+# item on the line directly under `nats_urls:` (write_daemon_config writes exactly that shape, one
+# entry). Fails when the file is not a readable regular file or has no such entry.
 rig_nats_port() {
   local line
   local in_nats_urls=0
+  [[ -f "$rig_config" && -r "$rig_config" ]] || return 1
   while IFS= read -r line; do
     if [[ "$line" =~ ^nats_urls:[[:space:]]*$ ]]; then
       in_nats_urls=1
@@ -57,6 +58,39 @@ rig_nats_port() {
     fi
   done <"$rig_config"
   return 1
+}
+
+# Ownership test for a NATS container, shared verbatim with up.sh's ensure_nats: true only when
+# `docker port <container> 4222/tcp` reports at least one binding and every reported binding
+# (docker prints one line per address, `0.0.0.0:<port>` and `[::]:<port>`) carries exactly the
+# given host port -- one host port is bound by one rig, so an equal port means this rig's
+# container. Empty or unparseable output is a refusal, never a match.
+container_published_on() {
+  local container="$1"
+  local port="$2"
+  local published
+  local line
+  local seen=0
+  published="$(docker port "$container" 4222/tcp 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" =~ :([0-9]+)$ && "${BASH_REMATCH[1]}" == "$port" ]] || return 1
+    seen=1
+  done <<<"$published"
+  ((seen))
+}
+
+# Prints the host ports `docker port <container> 4222/tcp` reports, space-separated, or `none`.
+published_ports() {
+  local published
+  local line
+  local ports=""
+  published="$(docker port "$1" 4222/tcp 2>/dev/null || true)"
+  while IFS= read -r line; do
+    [[ "$line" =~ :([0-9]+)$ ]] || continue
+    ports="${ports:+${ports} }${BASH_REMATCH[1]}"
+  done <<<"$published"
+  printf '%s\n' "${ports:-none}"
 }
 
 process_start_time() {
@@ -171,13 +205,13 @@ stop_tmux_session() {
 # existed) that is exactly the container named in it; the record is left in place so a repeat
 # teardown against the same scratch directory still names this rig's container. Without a record
 # the rig predates it and used the fixed name shared by every such rig, so the fixed-name
-# container is removed only when its published port is the NATS port this directory's legion.yaml
-# names -- the same ownership test up.sh's ensure_nats uses to reuse a container, exact because one
-# port is bound by one rig. A fixed-name container on another port is another rig's and is left.
+# container is removed only when container_published_on says its published port equals the NATS
+# port this directory's legion.yaml names -- the same ownership test up.sh's ensure_nats uses to
+# reuse a container. A fixed-name container on any other port is another rig's and is left. A
+# missing container is a silent no-op on both branches.
 remove_nats_container() {
   local nats_name
   local rig_port
-  local published
 
   if [[ -e "$nats_record" ]]; then
     if [[ ! -r "$nats_record" ]] || ! nats_name="$(<"$nats_record")"; then
@@ -191,15 +225,14 @@ remove_nats_container() {
     docker container inspect "$nats_name" >/dev/null 2>&1 || return 0
   else
     nats_name="$legacy_nats_name"
+    docker container inspect "$nats_name" >/dev/null 2>&1 || return 0
     rig_port="$(rig_nats_port)" || {
       warn "no ${nats_record} record and ${rig_config} has no nats_urls entry naming this rig's NATS port; leaving ${nats_name}"
       return 0
     }
-    docker container inspect "$nats_name" >/dev/null 2>&1 || return 0
-    published="$(docker port "$nats_name" 4222/tcp 2>/dev/null || true)"
-    if [[ "$published" != *":${rig_port}"* ]]; then
-      printf 'no %s record and %s is published on %s, not this rig'"'"'s NATS port %s: it is another rig'"'"'s container; leaving it\n' \
-        "$nats_record" "$nats_name" "${published:-no port}" "$rig_port"
+    if ! container_published_on "$nats_name" "$rig_port"; then
+      printf 'no %s record; %s is published on port %s, not this rig'"'"'s NATS port %s: it is another rig'"'"'s container; leaving it\n' \
+        "$nats_record" "$nats_name" "$(published_ports "$nats_name")" "$rig_port"
       return 0
     fi
     printf 'no %s record; %s is published on this rig'"'"'s NATS port %s, removing it\n' "$nats_record" "$nats_name" "$rig_port"

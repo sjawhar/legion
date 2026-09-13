@@ -460,9 +460,10 @@ chmod +x "${fake_bin}/curl"
 # Stubs every other main() dependency so the boot sequence runs with no real daemon, tmux pane,
 # Docker container, or Go build -- only relative call order and the root-issue POST body matter
 # here (`ensure_root_issue` itself, and its underlying curl invocation, are left real).
-# The real assert_port_free stays reachable as real_assert_port_free for the port-check case at
-# the end of this file; every other main() case below stubs it.
+# The real assert_port_free and ensure_nats stay reachable as real_* for the port-check and
+# container-reuse cases at the end of this file; every other main() case below stubs them.
 eval "$(declare -f assert_port_free | sed '1s/^assert_port_free /real_assert_port_free /')"
+eval "$(declare -f ensure_nats | sed '1s/^ensure_nats /real_ensure_nats /')"
 require_command() { :; }
 assert_port_free() { :; }
 ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
@@ -756,3 +757,48 @@ assert_no_rig_files 'ensure_nats refused'
   exit 1
 }
 printf 'PASS: a start refused by the port check or by ensure_nats leaves neither a nats-container record nor a legion.yaml\n'
+
+# ensure_nats reuses an existing container only when container_published_on says its published
+# port equals the configured NATS port -- the same exact test down.sh's legacy fallback runs. The
+# fake docker prints the two lines the real one prints (IPv4, IPv6) for SMOKE_FAKE_PORT; the
+# sourced up.sh fixed nats_port from NATS_PORT at source time (14222 unless the harness's caller
+# exported one), so the cases compare against that value and its decimal prefix.
+# shellcheck disable=SC2154 # nats_port is a readonly of the sourced up.sh (source=/dev/null above)
+configured_nats_port="$nats_port"
+docker_log="${fake_bin}/docker.log"
+cat >"${fake_bin}/docker" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${docker_log}"
+case "\$*" in
+  'container inspect legion-smoke-nats-sjawhar24') exit 0 ;;
+  'container inspect --format {{.State.Running}} legion-smoke-nats-sjawhar24') printf 'true\n' ;;
+  'port legion-smoke-nats-sjawhar24 4222/tcp') printf '0.0.0.0:%s\n[::]:%s\n' "\${SMOKE_FAKE_PORT:?}" "\${SMOKE_FAKE_PORT:?}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${fake_bin}/docker"
+: >"$docker_log"
+if ! (SMOKE_FAKE_PORT="$configured_nats_port" real_ensure_nats legion-smoke-nats-sjawhar24) >"$assertion_file" 2>&1; then
+  printf 'expected ensure_nats to reuse a container published on the configured port %s; output:\n%s\n' "$configured_nats_port" "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'REUSED NATS container legion-smoke-nats-sjawhar24'* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# A published port whose digits merely extend the configured port (14222 vs 142220) is not this
+# rig's container: exact comparison, not a decimal-prefix match.
+: >"$docker_log"
+if (SMOKE_FAKE_PORT="${configured_nats_port}0" real_ensure_nats legion-smoke-nats-sjawhar24) >"$assertion_file" 2>&1; then
+  printf 'expected ensure_nats to refuse a container whose published port merely extends the configured one; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"NATS container legion-smoke-nats-sjawhar24 is not mapped to configured port ${configured_nats_port}"* ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+if grep -q '^run \|^start ' "$docker_log"; then
+  printf 'ensure_nats must not start or create a container after refusing one; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+printf 'PASS: ensure_nats reuses an existing container only when its published port equals the configured NATS port exactly\n'
