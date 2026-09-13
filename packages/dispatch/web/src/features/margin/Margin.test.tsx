@@ -1127,3 +1127,187 @@ test("Margin links an orphaned ask to its original document version", async () =
     view.unmount();
   }
 });
+
+test("desktop margin resize handle supports keyboard adjustments and reset", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerWidth = window.innerWidth;
+  const innerWidthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  function ResizableMargin(): ReactNode {
+    const [width, setWidth] = useState(384);
+    return <Margin onWidthChange={setWidth} width={width} />;
+  }
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <ResizableMargin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const handle = await screen.findByRole("separator", { name: "Resize margin" });
+    expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
+      "width: 384px"
+    );
+
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
+        "width: 408px"
+      )
+    );
+
+    fireEvent.doubleClick(handle);
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
+        "width: 384px"
+      )
+    );
+  } finally {
+    view.unmount();
+    window.matchMedia = originalMatchMedia;
+    if (innerWidthDescriptor === undefined) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+    } else {
+      Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
+    }
+  }
+});
+
+test("margin keeps an ask draft through parent, width, and viewport layout updates", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerWidth = window.innerWidth;
+  const innerWidthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+  const changeListeners: Array<(event: Event) => void> = [];
+  let compact = false;
+  window.matchMedia = ((query: string) =>
+    ({
+      addEventListener: (type: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (type === "change" && typeof listener === "function") {
+          changeListeners.push(listener);
+        }
+      },
+      addListener: () => {},
+      dispatchEvent: () => true,
+      get matches() {
+        return query === "(max-width: 1279px)" && compact;
+      },
+      media: query,
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  function MarginHarness(): ReactNode {
+    const [parentRender, setParentRender] = useState(0);
+    const [width, setWidth] = useState(384);
+    return (
+      <>
+        <button onClick={() => setParentRender((current) => current + 1)} type="button">
+          Rerender parent
+        </button>
+        <output aria-label="Parent render">{parentRender}</output>
+        <Margin onWidthChange={setWidth} width={width} />
+      </>
+    );
+  }
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <OpenAskComposerButton />
+          <MarginHarness />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("No comments, asks, or suggestions on this document.");
+    fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
+    const question = await screen.findByLabelText("Question");
+    fireEvent.change(question, { target: { value: "Keep this draft" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Rerender parent" }));
+    expect(screen.getByLabelText("Parent render").textContent).toBe("1");
+    expect((screen.getByLabelText("Question") as HTMLTextAreaElement).value).toBe(
+      "Keep this draft"
+    );
+
+    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize margin" }), {
+      key: "ArrowLeft",
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("desktop-margin-shell").getAttribute("style")).toContain(
+        "width: 408px"
+      )
+    );
+    expect((screen.getByLabelText("Question") as HTMLTextAreaElement).value).toBe(
+      "Keep this draft"
+    );
+
+    act(() => {
+      compact = true;
+      for (const listener of changeListeners) {
+        listener(new Event("change"));
+      }
+    });
+    await waitFor(() => expect(screen.queryByTestId("desktop-margin-shell")).toBeNull());
+
+    act(() => {
+      compact = false;
+      for (const listener of changeListeners) {
+        listener(new Event("change"));
+      }
+    });
+    await waitFor(() =>
+      expect((screen.getByLabelText("Question") as HTMLTextAreaElement).value).toBe(
+        "Keep this draft"
+      )
+    );
+  } finally {
+    view.unmount();
+    window.matchMedia = originalMatchMedia;
+    if (innerWidthDescriptor === undefined) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+    } else {
+      Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
+    }
+  }
+});

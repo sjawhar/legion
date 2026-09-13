@@ -363,7 +363,7 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
 
-    const dividers = page.getByRole("separator");
+    const dividers = page.getByRole("list", { name: "Conversation turns" }).getByRole("separator");
     await expect(dividers).toHaveCount(3);
     expect(
       await dividers.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))

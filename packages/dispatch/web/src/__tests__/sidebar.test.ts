@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -144,5 +144,39 @@ test("sidebar never requests the full issue list", async () => {
     sidebar.getIssue.mockRestore();
     sidebar.listIssues.mockRestore();
     sidebar.listProjects.mockRestore();
+  }
+});
+
+test("sidebar keeps its hide control available while navigation loads", () => {
+  const getInbox = spyOn(api, "getInbox").mockImplementation(() => new Promise<never>(() => {}));
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  let hideCount = 0;
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/"] },
+      createElement(
+        QueryClientProvider,
+        { client: new QueryClient({ defaultOptions: { queries: { retry: false } } }) },
+        createElement(Sidebar, {
+          onHide: () => {
+            hideCount += 1;
+          },
+          user: { kind: "user", login: "alice" },
+        })
+      )
+    )
+  );
+
+  try {
+    expect(screen.getByText("Loading navigation…")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide sidebar" }));
+    expect(hideCount).toBe(1);
+  } finally {
+    view.unmount();
+    getInbox.mockRestore();
+    listIssues.mockRestore();
+    listProjects.mockRestore();
   }
 });

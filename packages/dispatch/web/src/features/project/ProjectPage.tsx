@@ -21,6 +21,7 @@ import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { userPreferenceStorageKey } from "../shell/userPreference";
 import { DocumentList } from "./DocumentList";
 import { IssueBoard } from "./IssueBoard";
 import { IssueList } from "./IssueList";
@@ -34,10 +35,6 @@ const tabs: readonly TabDefinition<ProjectTab>[] = [
 
 type IssueView = "list" | "board";
 
-function issueViewStorageKey(login: string): string {
-  return `dispatch.project.issue-view:${login}`;
-}
-
 export function ProjectPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
@@ -47,7 +44,8 @@ export function ProjectPage(): ReactNode {
   });
   const login = whoAmI.data?.login;
   const [issueView, setIssueView] = useState<IssueView>(() =>
-    login !== undefined && window.localStorage.getItem(issueViewStorageKey(login)) === "board"
+    login !== undefined &&
+    window.localStorage.getItem(userPreferenceStorageKey(login, "project.issue-view")) === "board"
       ? "board"
       : "list"
   );
@@ -56,7 +54,9 @@ export function ProjectPage(): ReactNode {
       return;
     }
     setIssueView(
-      window.localStorage.getItem(issueViewStorageKey(login)) === "board" ? "board" : "list"
+      window.localStorage.getItem(userPreferenceStorageKey(login, "project.issue-view")) === "board"
+        ? "board"
+        : "list"
     );
   }, [login]);
 
@@ -141,7 +141,10 @@ export function ProjectPage(): ReactNode {
                   onClick={() => {
                     setIssueView(view);
                     if (login !== undefined) {
-                      window.localStorage.setItem(issueViewStorageKey(login), view);
+                      window.localStorage.setItem(
+                        userPreferenceStorageKey(login, "project.issue-view"),
+                        view
+                      );
                     }
                   }}
                   type="button"

@@ -20,10 +20,11 @@ import { ThreadCard } from "./ThreadCard";
 import type { MarginTab } from "./useMarginItems";
 
 interface MarginSheetProps {
+  desktopControl?: ReactNode;
   model: MarginSheetModel;
 }
 
-export function MarginSheet({ model }: MarginSheetProps): ReactNode {
+export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactNode {
   const {
     actions,
     composer,
@@ -99,9 +100,10 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
             : sheet.expanded
               ? "max-h-[85dvh] overflow-y-auto p-4"
               : "h-16 overflow-hidden"
-        } xl:sticky xl:top-0 xl:order-3 xl:block xl:h-auto xl:max-h-dvh xl:w-96 xl:overflow-y-auto xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
+        } xl:sticky xl:top-0 xl:block xl:h-dvh xl:max-h-dvh xl:w-full xl:overflow-y-auto xl:border-t-0 xl:border-l xl:p-4 xl:shadow-none`}
         data-expanded={sheet.expanded ? "true" : "false"}
         data-testid="margin-sheet"
+        id="review-margin"
         ref={(element) => {
           dialog.containerRef.current = element;
           marginRef.current = element;
@@ -145,26 +147,31 @@ export function MarginSheet({ model }: MarginSheetProps): ReactNode {
         ) : null}
         {!isPhoneViewport || phoneThread === undefined ? (
           <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
-            <div className={`flex border-b ${borderDefault}`} role="tablist">
-              {(owner?.kind === "document"
-                ? (["comments"] as MarginTab[])
-                : (["comments", "pinned"] as MarginTab[])
-              ).map((name) => (
-                <button
-                  aria-selected={tab.value === name}
-                  className={
-                    tab.value === name
-                      ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                      : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
-                  }
-                  key={name}
-                  onClick={() => tab.set(name)}
-                  role="tab"
-                  type="button"
-                >
-                  {name === "comments" ? "Comments" : "Pinned"}
-                </button>
-              ))}
+            <div className={`flex items-center justify-between border-b ${borderDefault}`}>
+              <div className="flex" role="tablist">
+                {(owner?.kind === "document"
+                  ? (["comments"] as MarginTab[])
+                  : (["comments", "pinned"] as MarginTab[])
+                ).map((name) => (
+                  <button
+                    aria-selected={tab.value === name}
+                    className={
+                      tab.value === name
+                        ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                        : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
+                    }
+                    key={name}
+                    onClick={() => tab.set(name)}
+                    role="tab"
+                    type="button"
+                  >
+                    {name === "comments" ? "Comments" : "Pinned"}
+                  </button>
+                ))}
+              </div>
+              {desktopControl === undefined ? null : (
+                <span className="hidden xl:block">{desktopControl}</span>
+              )}
             </div>
             {owner === undefined ? (
               <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
