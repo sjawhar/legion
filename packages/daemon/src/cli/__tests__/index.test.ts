@@ -459,29 +459,43 @@ describe("legion start --check-config", () => {
   // resolveDaemonConfig refuse the file under test. PATH and HOME give the fixture a realistic
   // shape; resolveDaemonConfig reads neither.
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME };
+  /** Every non-App key a `legion.yaml` under test needs; each case appends its `github_apps`. */
+  const baseYaml = [
+    "project: acme/99",
+    "envoy_url: http://127.0.0.1:9020",
+    "dispatch_project: ACME",
+    "repos:",
+    "  - acme/widgets",
+    "nats_urls:",
+    "  - nats://one:4222",
+    "gates:",
+    "  design: off",
+  ];
+  const reviewAppYaml = ["  review:", '    app_id: "2"', '    private_key: "test"'];
+  const bothAppsYaml = [
+    "github_apps:",
+    "  implement:",
+    '    app_id: "1"',
+    '    private_key: "test"',
+    ...reviewAppYaml,
+  ];
+  function writeYaml(dir: string, lines: string[]): string {
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(configPath, lines.join("\n"));
+    return configPath;
+  }
 
   it("validates github_apps.<role>.private_key_command without executing it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const marker = path.join(dir, "spawned");
-    const configPath = path.join(dir, "legion.yaml");
-    fs.writeFileSync(
-      configPath,
-      [
-        "project: acme/99",
-        "envoy_url: http://127.0.0.1:9020",
-        "dispatch_project: ACME",
-        "repos:",
-        "  - acme/widgets",
-        "nats_urls:",
-        "  - nats://one:4222",
-        "gates:",
-        "  design: off",
-        "github_apps:",
-        "  implement:",
-        '    app_id: "1"',
-        `    private_key_command: "touch ${marker}; printf key"`,
-      ].join("\n")
-    );
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      "github_apps:",
+      "  implement:",
+      '    app_id: "1"',
+      `    private_key_command: "touch ${marker}; printf key"`,
+      ...reviewAppYaml,
+    ]);
 
     await cmdCheckConfig(undefined, configPath, env);
 
@@ -496,25 +510,14 @@ describe("legion start --check-config", () => {
     fs.writeFileSync(path.join(fakeBin, "secrets"), `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, {
       mode: 0o755,
     });
-    const configPath = path.join(dir, "legion.yaml");
-    fs.writeFileSync(
-      configPath,
-      [
-        "project: acme/99",
-        "envoy_url: http://127.0.0.1:9020",
-        "dispatch_project: ACME",
-        "repos:",
-        "  - acme/widgets",
-        "nats_urls:",
-        "  - nats://one:4222",
-        "gates:",
-        "  design: off",
-        "github_apps:",
-        "  implement:",
-        '    app_id: "1"',
-        "    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64",
-      ].join("\n")
-    );
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      "github_apps:",
+      "  implement:",
+      '    app_id: "1"',
+      "    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64",
+      ...reviewAppYaml,
+    ]);
     // The resolver spawns `secrets` from process.env.PATH (like private_key_command's `sh -c`),
     // so the fake goes first on the real PATH; a spawn under --check-config would leave the marker.
     const savedPath = process.env.PATH;
@@ -533,47 +536,37 @@ describe("legion start --check-config", () => {
 
   it("still rejects a github app with no private-key source, naming all three", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
-    const configPath = path.join(dir, "legion.yaml");
-    fs.writeFileSync(
-      configPath,
-      [
-        "project: acme/99",
-        "envoy_url: http://127.0.0.1:9020",
-        "dispatch_project: ACME",
-        "repos:",
-        "  - acme/widgets",
-        "nats_urls:",
-        "  - nats://one:4222",
-        "gates:",
-        "  design: off",
-        "github_apps:",
-        "  implement:",
-        '    app_id: "1"',
-      ].join("\n")
-    );
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      "github_apps:",
+      "  implement:",
+      '    app_id: "1"',
+      ...reviewAppYaml,
+    ]);
 
     await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
       "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret"
     );
   });
 
+  it("rejects a legion.yaml with only the implement App, naming github_apps.review", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      "github_apps:",
+      "  implement:",
+      '    app_id: "1"',
+      '    private_key: "test"',
+    ]);
+
+    await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
+      "github_apps.review is required"
+    );
+  });
+
   it("resolves Dispatch settings from the injected env, not the process environment", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
-    const configPath = path.join(dir, "legion.yaml");
-    fs.writeFileSync(
-      configPath,
-      [
-        "project: acme/99",
-        "envoy_url: http://127.0.0.1:9020",
-        "dispatch_project: ACME",
-        "repos:",
-        "  - acme/widgets",
-        "nats_urls:",
-        "  - nats://one:4222",
-        "gates:",
-        "  design: off",
-      ].join("\n")
-    );
+    const configPath = writeYaml(dir, [...baseYaml, ...bothAppsYaml]);
 
     await expect(
       cmdCheckConfig(undefined, configPath, { ...env, DISPATCH_URL: "http://127.0.0.1:1" })
@@ -590,19 +583,11 @@ describe("legion start --check-config", () => {
 
   it("refuses a timer setting above the 32-bit bound with the same message start-up gives", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
-    const configPath = path.join(dir, "legion.yaml");
-    const base = [
-      "project: acme/99",
-      "envoy_url: http://127.0.0.1:9020",
-      "dispatch_project: ACME",
-      "repos:",
-      "  - acme/widgets",
-      "nats_urls:",
-      "  - nats://one:4222",
-      "gates:",
-      "  design: off",
-    ];
-    fs.writeFileSync(configPath, [...base, "worker_boot_timeout_seconds: 2147484"].join("\n"));
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "worker_boot_timeout_seconds: 2147484",
+    ]);
 
     await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
       "worker_boot_timeout_seconds must be at most 2147483"
@@ -610,36 +595,23 @@ describe("legion start --check-config", () => {
 
     // The same parser accepts the bound itself; the registration deadline multiplies the boot
     // timeout by the intervals, so the default 3 intervals would overflow at the bound.
-    fs.writeFileSync(
-      configPath,
-      [
-        ...base,
-        "worker_boot_timeout_seconds: 2147483",
-        "worker_boot_registration_deadline_intervals: 1",
-      ].join("\n")
-    );
+    writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "worker_boot_timeout_seconds: 2147483",
+      "worker_boot_registration_deadline_intervals: 1",
+    ]);
     await cmdCheckConfig(undefined, configPath, env);
   });
 
   it("resolves relative instructions and state_dir against the --config file's directory, not the cwd", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-")));
-    const configPath = path.join(dir, "legion.yaml");
-    fs.writeFileSync(
-      configPath,
-      [
-        "project: acme/99",
-        "envoy_url: http://127.0.0.1:9020",
-        "dispatch_project: ACME",
-        "repos:",
-        "  - acme/widgets",
-        "nats_urls:",
-        "  - nats://one:4222",
-        "gates:",
-        "  design: off",
-        "state_dir: ./state",
-        "instructions: ./ops/deployment.md",
-      ].join("\n")
-    );
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "state_dir: ./state",
+      "instructions: ./ops/deployment.md",
+    ]);
     expect(process.cwd()).not.toBe(dir);
 
     const config = loadStartConfig(undefined, configPath, env, { resolveSecrets: false });

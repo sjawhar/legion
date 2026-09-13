@@ -5,8 +5,6 @@ import {
   type LegionRole,
   type SpawnWorkerResponse,
 } from "@legion/contracts";
-import type { CommandRunner } from "../state/fetch";
-import { defaultRunner } from "../state/fetch";
 import {
   CapabilityService,
   type ResolvedWorkerClaim,
@@ -94,9 +92,6 @@ export interface LegionApiProcessManager {
 export interface LegionApiDeps {
   state: LegionState;
   saveState?: () => Promise<void>;
-  runner?: CommandRunner;
-  /** The base of every `gh` child's environment — the daemon's `paneEnv`, never `process.env`. */
-  baseEnv: NodeJS.ProcessEnv;
   tokenManager: GitHubTokenSource;
   dispatchClient: DispatchClient;
   processManager: LegionApiProcessManager;
@@ -195,20 +190,18 @@ const ROUTES: Record<string, RouteEntry> = {
 };
 
 export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): LegionApi {
-  const runner = deps.runner ?? defaultRunner;
   const now = config.now ?? Date.now;
   const save = async (): Promise<void> => {
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const github = new GitHubService(config.repo, deps.tokenManager, runner, deps.baseEnv);
+  const github = new GitHubService(config.repo, deps.tokenManager);
 
   const ctx: RouteContext = {
     config,
     deps,
     now,
     save,
-    runner,
     grantTtlMs: GRANT_TTL_MS,
     auth,
     github,

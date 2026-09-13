@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, loadConfigFromFile, resolveDaemonConfig } from "../config";
+import {
+  type GitHubAppsConfig,
+  loadConfig,
+  loadConfigFromFile,
+  type ResolveDaemonConfigOptions,
+  resolveDaemonConfig,
+} from "../config";
 
 const requiredEnv = {
   LEGION_ID: "Acme/42",
@@ -10,6 +16,23 @@ const requiredEnv = {
   LEGION_REPOS: "acme/widgets",
   DISPATCH_PROJECT: "ACME",
 };
+
+/** Both Apps, as every valid deployment must configure them. */
+const BOTH_APPS: GitHubAppsConfig = {
+  implement: { appId: "1", privateKey: "test", installations: {} },
+  review: { appId: "2", privateKey: "test", installations: {} },
+};
+
+/** The review App as a `legion.yaml` fragment, for file fixtures that exercise the implement
+ * App's key-source rules and need the section to be complete. */
+const REVIEW_APP_YAML = ["  review:", '    app_id: "2"', '    private_key: "test"'];
+
+/** `resolveDaemonConfig` with both Apps supplied as the CLI override: the file fixtures below
+ * exercise other settings and carry no `github_apps` section of their own. A call that passes its
+ * own `cliOverrides` replaces this one wholesale (every such override already carries both Apps). */
+function resolveWithApps(options: ResolveDaemonConfigOptions) {
+  return resolveDaemonConfig({ cliOverrides: { githubApps: BOTH_APPS }, ...options });
+}
 
 describe("daemon config", () => {
   it("derives the typed lifecycle config from environment", () => {
@@ -27,7 +50,7 @@ describe("daemon config", () => {
         LEGION_OMP_INVOCATION: "custom-omp-from-env",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
 
@@ -60,7 +83,7 @@ describe("daemon config", () => {
           DISPATCH_MCP_URL: "http://127.0.0.1:18766/mcp",
         },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow("DISPATCH_MCP_URL was replaced by DISPATCH_URL");
@@ -74,7 +97,7 @@ describe("daemon config", () => {
           DISPATCH_URL: "http://127.0.0.1:18766",
         },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(
@@ -91,7 +114,7 @@ describe("daemon config", () => {
           DISPATCH_TOKEN: "   ",
         },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(
@@ -106,7 +129,7 @@ describe("daemon config", () => {
         DISPATCH_TOKEN: "some-token",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.dispatchToken).toBeUndefined();
@@ -116,7 +139,7 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.workerStopTimeoutSeconds).toBe(10);
@@ -128,7 +151,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_WORKER_BUDGET: "6" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow("worker_budget was replaced by worker_cap");
@@ -151,7 +174,7 @@ describe("daemon config", () => {
         DISPATCH_TOKEN: "test-dispatch-token",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
@@ -166,7 +189,7 @@ describe("daemon config", () => {
         DISPATCH_TOKEN: "  test-dispatch-token  \n",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.dispatchToken).toBe("test-dispatch-token");
@@ -180,7 +203,7 @@ describe("daemon config", () => {
         DISPATCH_TOKEN: "test-dispatch-token",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.dispatchUrl).toBe("http://127.0.0.1:18766");
@@ -194,7 +217,7 @@ describe("daemon config", () => {
           DISPATCH_URL: "not a url",
         },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(/DISPATCH_URL/);
@@ -208,7 +231,7 @@ describe("daemon config", () => {
           DISPATCH_URL: "http://127.0.0.1:18766/mcp",
         },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(/DISPATCH_URL must be the dispatch service base URL, not the \/mcp endpoint/);
@@ -218,7 +241,7 @@ describe("daemon config", () => {
     const { config } = resolveDaemonConfig({
       env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION" },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(config.dispatchProject).toBe("LEGION");
@@ -252,7 +275,7 @@ describe("daemon config", () => {
       ),
       "/tmp/legion-config"
     );
-    const { config } = resolveDaemonConfig({
+    const { config } = resolveWithApps({
       env: { ...requiredEnv, DISPATCH_TOKEN: "test-dispatch-token" },
       configFile: file,
     });
@@ -269,7 +292,7 @@ describe("daemon config", () => {
       env: requiredEnv,
       configFile: file,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
 
@@ -306,7 +329,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_APP_LOGINS: "legion-implement[bot]" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(message);
@@ -339,7 +362,7 @@ describe("daemon config", () => {
       ].join("\n"),
       "/tmp/legion-config"
     );
-    const { config } = resolveDaemonConfig({ configFile: file });
+    const { config } = resolveWithApps({ configFile: file });
 
     expect(config).toMatchObject({
       project: "acme7",
@@ -380,12 +403,12 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
 
-    const fromYaml = resolveDaemonConfig({ configFile: file });
+    const fromYaml = resolveWithApps({ configFile: file });
     expect(fromYaml.config.workerBootTimeoutSeconds).toBe(90);
 
     // Config-file value wins over env, matching every other lifecycle setting's precedence
     // (`resolveValue`: cli > config > env > default).
-    const fileBeatsEnv = resolveDaemonConfig({
+    const fileBeatsEnv = resolveWithApps({
       configFile: file,
       env: { LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "45" },
     });
@@ -397,7 +420,7 @@ describe("daemon config", () => {
         LEGION_WORKER_BOOT_TIMEOUT_SECONDS: "45",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(fromEnvOnly.workerBootTimeoutSeconds).toBe(45);
@@ -405,7 +428,7 @@ describe("daemon config", () => {
     const { config: withoutEither } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(withoutEither.workerBootTimeoutSeconds).toBe(120);
@@ -428,12 +451,12 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
 
-    const fromYaml = resolveDaemonConfig({ configFile: file });
+    const fromYaml = resolveWithApps({ configFile: file });
     expect(fromYaml.config.workerRpcTimeoutSeconds).toBe(20);
 
     // Config-file value wins over env, matching every other lifecycle setting's precedence
     // (`resolveValue`: cli > config > env > default).
-    const fileBeatsEnv = resolveDaemonConfig({
+    const fileBeatsEnv = resolveWithApps({
       configFile: file,
       env: { LEGION_WORKER_RPC_TIMEOUT_SECONDS: "8" },
     });
@@ -445,7 +468,7 @@ describe("daemon config", () => {
         LEGION_WORKER_RPC_TIMEOUT_SECONDS: "8",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(fromEnvOnly.workerRpcTimeoutSeconds).toBe(8);
@@ -453,7 +476,7 @@ describe("daemon config", () => {
     const { config: withoutEither } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(withoutEither.workerRpcTimeoutSeconds).toBe(5);
@@ -474,15 +497,15 @@ describe("daemon config", () => {
         "  design: off",
       ].join("\n");
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     const file = loadConfigFromFile(yaml(900), "/tmp/legion-config");
 
-    expect(resolveDaemonConfig({ configFile: file }).config.workerIdleRetireSeconds).toBe(900);
+    expect(resolveWithApps({ configFile: file }).config.workerIdleRetireSeconds).toBe(900);
     // Config-file value wins over env (`resolveValue`: cli > config > env > default).
     expect(
-      resolveDaemonConfig({ configFile: file, env: { LEGION_WORKER_IDLE_RETIRE_SECONDS: "30" } })
-        .config.workerIdleRetireSeconds
+      resolveWithApps({ configFile: file, env: { LEGION_WORKER_IDLE_RETIRE_SECONDS: "30" } }).config
+        .workerIdleRetireSeconds
     ).toBe(900);
     expect(
       resolveDaemonConfig({
@@ -496,7 +519,7 @@ describe("daemon config", () => {
 
     // `0` disables the timer: unlike every other seconds key it must survive both parsers.
     expect(
-      resolveDaemonConfig({ configFile: loadConfigFromFile(yaml(0), "/tmp/legion-config") }).config
+      resolveWithApps({ configFile: loadConfigFromFile(yaml(0), "/tmp/legion-config") }).config
         .workerIdleRetireSeconds
     ).toBe(0);
     expect(
@@ -524,13 +547,13 @@ describe("daemon config", () => {
 
   it("bounds worker_idle_retire_seconds at 2147483 from either source: the boundary is accepted, one more is a startup error naming the key, the bound, and 0 as the disable value", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     // 2147483 * 1000 = 2_147_483_000 ms fits a signed 32-bit timer delay; 2147484 * 1000 does not,
     // and the runtime would clamp it to 1 ms -- retiring every finished worker the instant it
     // went idle. The bound must sit exactly at the last whole second that fits.
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           [
             "project: acme/7",
@@ -598,7 +621,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_WORKER_IDLE_RETIRE_SECONDS: "" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       }).config.workerIdleRetireSeconds
     ).toBe(600);
@@ -644,13 +667,13 @@ describe("daemon config", () => {
 
   it("accepts resync_interval_seconds exactly at 2147483 from either source and refuses 2147484: the post-resolve check judges milliseconds", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     // The file value is multiplied into milliseconds by the file loader and the env value only in
     // resolveDaemonConfig's return, while a cliOverride is already milliseconds; the post-resolve
     // check therefore judges the field in milliseconds (2147483 s = 2_147_483_000 ms fits).
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           [
             "project: acme/7",
@@ -702,7 +725,7 @@ describe("daemon config", () => {
 
   it("refuses a cliOverride above the bound post-resolve, naming the field", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     expect(() =>
       resolveDaemonConfig({
@@ -717,13 +740,13 @@ describe("daemon config", () => {
 
   it("bounds the root registration deadline, the product of worker_boot_timeout_seconds and worker_boot_registration_deadline_intervals, at 2147483 s", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     // Each factor is within its own bound; only the product overflows the one timer that
     // multiplies them (the root/controller registration deadline). The file supplies the pair,
     // `requiredEnv` the rest.
     expect(() =>
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           "worker_boot_timeout_seconds: 1000000\nworker_boot_registration_deadline_intervals: 3\n",
           "/tmp/legion-config"
@@ -735,7 +758,7 @@ describe("daemon config", () => {
       "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483"
     );
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: loadConfigFromFile(
           "worker_boot_timeout_seconds: 2147483\nworker_boot_registration_deadline_intervals: 1\n",
           "/tmp/legion-config"
@@ -775,13 +798,13 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
 
-    const fromYaml = resolveDaemonConfig({ configFile: file });
+    const fromYaml = resolveWithApps({ configFile: file });
     expect(fromYaml.config.slowCommandTimeoutSeconds).toBe(900);
 
-    const fileBeatsEnv = resolveDaemonConfig({
+    const fileBeatsEnv = resolveWithApps({
       configFile: file,
       env: { LEGION_SLOW_COMMAND_TIMEOUT_SECONDS: "120" },
     });
@@ -802,7 +825,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_SLOW_COMMAND_TIMEOUT_SECONDS: "0" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow("LEGION_SLOW_COMMAND_TIMEOUT_SECONDS");
@@ -816,7 +839,7 @@ describe("daemon config", () => {
 
   it("resolves workerStreamPort: YAML beats env, env beats the port + 1 default", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     const file = loadConfigFromFile(
       [
@@ -834,9 +857,9 @@ describe("daemon config", () => {
       ].join("\n"),
       "/tmp/legion-config"
     );
-    expect(resolveDaemonConfig({ configFile: file }).config.workerStreamPort).toBe(19400);
+    expect(resolveWithApps({ configFile: file }).config.workerStreamPort).toBe(19400);
     expect(
-      resolveDaemonConfig({ configFile: file, env: { LEGION_WORKER_STREAM_PORT: "19500" } }).config
+      resolveWithApps({ configFile: file, env: { LEGION_WORKER_STREAM_PORT: "19500" } }).config
         .workerStreamPort
     ).toBe(19400);
     expect(
@@ -856,7 +879,7 @@ describe("daemon config", () => {
 
   it("rejects a worker_stream_port that is not a TCP port or collides with port", () => {
     const cliOverrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
     expect(() => loadConfigFromFile("worker_stream_port: 70000", "/tmp/legion-config")).toThrow(
       "worker_stream_port must be at most 65535"
@@ -906,12 +929,12 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
 
-    const fromYaml = resolveDaemonConfig({ configFile: file });
+    const fromYaml = resolveWithApps({ configFile: file });
     expect(fromYaml.config.workerBootRegistrationDeadlineIntervals).toBe(5);
 
     // Config-file value wins over env, matching every other lifecycle setting's precedence
     // (`resolveValue`: cli > config > env > default).
-    const fileBeatsEnv = resolveDaemonConfig({
+    const fileBeatsEnv = resolveWithApps({
       configFile: file,
       env: { LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "2" },
     });
@@ -923,7 +946,7 @@ describe("daemon config", () => {
         LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS: "2",
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(fromEnvOnly.workerBootRegistrationDeadlineIntervals).toBe(2);
@@ -931,7 +954,7 @@ describe("daemon config", () => {
     const { config: withoutEither } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(withoutEither.workerBootRegistrationDeadlineIntervals).toBe(3);
@@ -957,12 +980,12 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
 
-    const fromYaml = resolveDaemonConfig({ configFile: file });
+    const fromYaml = resolveWithApps({ configFile: file });
     expect(fromYaml.config.ompLaunchPrefix).toEqual(["secrets", "ANTHROPIC_API_KEY", "--"]);
 
     // Config-file value wins over env, matching every other lifecycle setting's precedence
     // (`resolveValue`: cli > config > env > default).
-    const fileBeatsEnv = resolveDaemonConfig({
+    const fileBeatsEnv = resolveWithApps({
       configFile: file,
       env: { LEGION_OMP_LAUNCH_PREFIX: "other-wrapper --" },
     });
@@ -974,7 +997,7 @@ describe("daemon config", () => {
         LEGION_OMP_LAUNCH_PREFIX: 'secrets ANTHROPIC_API_KEY GEMINI_API_KEY "OPENAI_API_KEY" --',
       },
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(fromEnvOnly.ompLaunchPrefix).toEqual([
@@ -988,7 +1011,7 @@ describe("daemon config", () => {
     const { config: withoutEither } = resolveDaemonConfig({
       env: requiredEnv,
       cliOverrides: {
-        githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+        githubApps: BOTH_APPS,
       },
     });
     expect(withoutEither.ompLaunchPrefix).toEqual([]);
@@ -1006,7 +1029,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets ''" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow(
@@ -1019,7 +1042,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets\\" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow("LEGION_OMP_LAUNCH_PREFIX has a trailing unescaped backslash");
@@ -1077,7 +1100,7 @@ describe("daemon config", () => {
         "/tmp/legion-config"
       );
     const overrides = {
-      githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+      githubApps: BOTH_APPS,
     };
 
     it("defaults to the tmux runtime, a loopback daemon_url on the configured port, and a loopback bind", () => {
@@ -1091,7 +1114,7 @@ describe("daemon config", () => {
     });
 
     it("resolves all three from YAML for a kubernetes deployment", () => {
-      const { config } = resolveDaemonConfig({
+      const { config } = resolveWithApps({
         configFile: yaml(
           "runtime: kubernetes",
           "daemon_url: http://legion-daemon.legion.svc:13370",
@@ -1117,7 +1140,7 @@ describe("daemon config", () => {
 
     it("requires daemon_url under the kubernetes runtime", () => {
       expect(() =>
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0"),
           env: requiredEnv,
           cliOverrides: overrides,
@@ -1133,7 +1156,7 @@ describe("daemon config", () => {
           cliOverrides: overrides,
         })
       ).toThrow("LEGION_DAEMON_URL must be a valid URL");
-      const { config } = resolveDaemonConfig({
+      const { config } = resolveWithApps({
         configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0", "daemon_url: http://h:1/"),
         env: requiredEnv,
         cliOverrides: overrides,
@@ -1143,7 +1166,7 @@ describe("daemon config", () => {
 
     it("rejects a non-loopback bind under the tmux runtime, from either source", () => {
       expect(() =>
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: yaml("bind: 0.0.0.0"),
           env: requiredEnv,
           cliOverrides: overrides,
@@ -1178,14 +1201,14 @@ describe("daemon config", () => {
       ).toThrow(refusal("http://127.0.0.1:13370", 14100));
       // A YAML value on another port, or another host, is just as wrong under tmux.
       expect(() =>
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: yaml("daemon_url: http://127.0.0.1:14100"),
           env: requiredEnv,
           cliOverrides: overrides,
         })
       ).toThrow(refusal("http://127.0.0.1:14100"));
       expect(() =>
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: yaml("port: 14100", "daemon_url: http://legion-daemon:14100"),
           env: requiredEnv,
           cliOverrides: overrides,
@@ -1197,7 +1220,7 @@ describe("daemon config", () => {
         resolveDaemonConfig({ env: requiredEnv, cliOverrides: overrides }).config.daemonUrl
       ).toBe("http://127.0.0.1:13370");
       expect(
-        resolveDaemonConfig({
+        resolveWithApps({
           configFile: yaml("port: 19370", "daemon_url: http://127.0.0.1:19370/"),
           env: requiredEnv,
           cliOverrides: overrides,
@@ -1212,7 +1235,7 @@ describe("daemon config", () => {
     });
 
     it("lets a YAML daemon_url beat LEGION_DAEMON_URL (kubernetes, where the value is free), so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
-      const { config } = resolveDaemonConfig({
+      const { config } = resolveWithApps({
         configFile: yaml(
           "runtime: kubernetes",
           "bind: 0.0.0.0",
@@ -1241,7 +1264,7 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
     expect(
-      resolveDaemonConfig({ configFile: relative, env: requiredEnv }).config.instructionsPath
+      resolveWithApps({ configFile: relative, env: requiredEnv }).config.instructionsPath
     ).toBe("/tmp/legion-config/deployment.md");
 
     const absolute = loadConfigFromFile(
@@ -1249,13 +1272,13 @@ describe("daemon config", () => {
       "/tmp/legion-config"
     );
     expect(
-      resolveDaemonConfig({ configFile: absolute, env: requiredEnv }).config.instructionsPath
+      resolveWithApps({ configFile: absolute, env: requiredEnv }).config.instructionsPath
     ).toBe("/srv/legion/deployment.md");
 
     // Config-file value wins over env, matching every other setting's precedence
     // (`resolveValue`: cli > config > env > default).
     expect(
-      resolveDaemonConfig({
+      resolveWithApps({
         configFile: relative,
         env: { ...requiredEnv, LEGION_INSTRUCTIONS: "/elsewhere/relative-looking.md" },
       }).config.instructionsPath
@@ -1266,7 +1289,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_INSTRUCTIONS: "relative/deployment.md" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       }).config.instructionsPath
     ).toBe("relative/deployment.md");
@@ -1275,7 +1298,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: requiredEnv,
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       }).config.instructionsPath
     ).toBeUndefined();
@@ -1292,7 +1315,7 @@ describe("daemon config", () => {
       resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_INSTRUCTIONS: "" },
         cliOverrides: {
-          githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          githubApps: BOTH_APPS,
         },
       })
     ).toThrow("LEGION_INSTRUCTIONS must not be empty");
@@ -1317,6 +1340,7 @@ describe("daemon config", () => {
         "  implement:",
         '    app_id: "1"',
         `    private_key_secret: ${name}`,
+        ...REVIEW_APP_YAML,
       ].join("\n");
     }
 
@@ -1416,6 +1440,7 @@ describe("daemon config", () => {
             '    app_id: "1"',
             '    private_key_command: "printf key"',
             "    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64",
+            ...REVIEW_APP_YAML,
           ].join("\n"),
           "/tmp/legion-config",
           { resolveSecrets: false }
@@ -1423,6 +1448,41 @@ describe("daemon config", () => {
       ).toThrow(
         "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret"
       );
+    });
+
+    it("requires both Apps: a section missing one role is refused naming the key, before any key command runs", () => {
+      const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "legion-config-")), "ran");
+      expect(() =>
+        loadConfigFromFile(
+          [
+            ...baseYaml,
+            "github_apps:",
+            "  implement:",
+            '    app_id: "1"',
+            `    private_key_command: "touch ${marker}; printf key"`,
+          ].join("\n"),
+          "/tmp/legion-config"
+        )
+      ).toThrow("github_apps.review is required");
+      expect(fs.existsSync(marker)).toBeFalse();
+      expect(() =>
+        loadConfigFromFile(
+          [...baseYaml, "github_apps:", ...REVIEW_APP_YAML].join("\n"),
+          "/tmp/legion-config"
+        )
+      ).toThrow("github_apps.implement is required");
+    });
+
+    it("requires the github_apps section itself, from the file or a CLI override carrying both roles", () => {
+      const file = loadConfigFromFile(baseYaml.join("\n"), "/tmp/legion-config");
+      expect(() => resolveDaemonConfig({ configFile: file })).toThrow("github_apps is required");
+      expect(() =>
+        resolveWithApps({
+          configFile: file,
+          cliOverrides: { githubApps: { implement: BOTH_APPS.implement } },
+        })
+      ).toThrow("github_apps.review is required");
+      expect(resolveWithApps({ configFile: file }).config.githubApps).toEqual(BOTH_APPS);
     });
 
     it("refuses an agent-tier key naming it, without ever fetching the value", () => {

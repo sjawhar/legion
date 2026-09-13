@@ -16,10 +16,13 @@ related_issues:
   - "sjawhar/legion#955"
   - "sjawhar/legion#962"
   - "sjawhar/legion#980"
+  - "LEGION-42"
+  - "sjawhar/legion#1021"
 symptoms:
   - "GitHub reports the PR CONFLICTING / DIRTY again while the previous rebase's CI is still queued"
   - "A tester's evidence was gathered at a head that no longer exists after a rebase"
   - "jj diff --from main@origin shows deletions of files the PR never touched"
+  - "GitHub reports MERGEABLE but the merge-commit CI is red on tests the branch does not contain"
 ---
 
 # Conflict-Only Rebases Keep the Diff Auditable
@@ -105,8 +108,51 @@ than reporting completion (LEGION-11 rebases 3 and 4 were one assignment). Prefe
 run list --branch … --json` with a grant over unauthenticated `api.github.com` polling — the
 shared IP rate-limits the latter within minutes, and a `null` body looks like "no run yet".
 
+## MERGEABLE is not "compatible": a red merge commit whose failing lines live only on main is a conflict in effect
+
+Sami's rule (2026-09-11) is "no unnecessary rebases (i.e. unless there are merge conflicts)".
+LEGION-42 (#1021) met a case GitHub's mergeability check cannot see. The branch **tightened a
+contract**: `loadGitHubApps` began refusing a `legion.yaml` without both GitHub Apps. Between
+the reviewer's read and the corrective push, `main` took #1016, which added `config.test.ts` and
+`cli/__tests__` cases that build a config with only the implement App — legal on `main`, refused
+by the branch. No line overlapped, so GitHub said `MERGEABLE`; but the merge commit CI runs —
+`main` + branch — failed its `test` job on those four cases with `github_apps is required` /
+`github_apps.review is required`.
+
+How to tell it apart from a CI refresh or a flake, in order:
+
+1. **The failing test names are not in your tree.** `grep` the branch for the test titles CI
+   printed; `jj file show -r main@origin <file> | grep` finds them. Failing lines that exist only
+   on `main` cannot be fixed by any commit on the branch alone.
+2. **`main` moved since the last green merge commit.** `jj log -r 'fork_point(main@origin | @-)..main@origin'`
+   names the commit that introduced them.
+3. **Re-running the job would fail again** — the merge commit is deterministic. `run rerun
+   --failed` is for a flake, not for this.
+
+That is a conflict in effect: the merge result is broken even though no hunk collided. The
+remedy is the skill's conflict-forced rebase — record the fingerprint at the current tip, rebase
+the whole chain, adapt `main`'s fixtures to the tightened contract (here: point the four new cases
+at the branch's own shared `BOTH_APPS`/`resolveWithApps`/`bothAppsYaml` fixtures, one commit,
+`test(daemon): main's LEGION-46 config fixtures carry both Apps`), run the merged tree's gates,
+push, fingerprint again, and post the rebase comment with both SHAs and both hashes. Tell the
+architect before rebasing and say why the MERGEABLE read does not apply.
+
+The fingerprint **changes** in this case — the adaptation adds executable test lines — and that
+is the honest result: it means a full tester round on the new head, not the bare-gate re-check an
+unchanged hash earns. Contrast the same PR's earlier textual rebase (`4e67eb28 → a49929e1`,
+two adjacent-insertion conflicts, both sides kept), whose fingerprint was byte-identical and
+earned bare gates only. Report which of the two you did; the tester's next step depends on it.
+
+Two habits that make this cheap. When a contract tightens, consolidate the fixtures that
+construct the old shape into one constant or helper *in the same PR*, so `main`'s new cases are a
+one-line follow-through each. And after any push on a tightened-contract branch, read the
+**merge-commit** CI, not just `mergeable`: a `MERGEABLE` PR with a red `test` job at the head is
+this pattern until proven a flake.
+
 ## Related
 
+- `one-role-keyed-table-decides-which-github-app-acts.md` — the tightened contract (#1021) that
+  produced the MERGEABLE-but-red case above.
 - `../github/conflicting-pr-gets-no-pull-request-ci.md` — why a conflicting PR gets no CI and
   the `pr view --json mergeable,mergeStateStatus` check.
 - `unchanged-diff-fingerprint-one-fileset-verified-by-a-pair.md` — the `legion-worker` skill's

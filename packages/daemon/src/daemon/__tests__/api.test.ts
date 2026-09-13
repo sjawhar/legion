@@ -10,7 +10,6 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
-import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
@@ -91,7 +90,6 @@ interface WorkerSessionResponse {
 describe("Legion HTTP API", () => {
   let api: LegionApi | undefined;
   let state: LegionState;
-  let commands: string[][];
   let publications: Array<{ topic: string; payload: string }>;
   let tokenRoles: string[];
   let releaseSlots: IssueKey[];
@@ -112,7 +110,6 @@ describe("Legion HTTP API", () => {
   let controllerSecret: string;
 
   beforeEach(() => {
-    commands = [];
     publications = [];
     tokenRoles = [];
     releaseSlots = [];
@@ -163,7 +160,6 @@ describe("Legion HTTP API", () => {
   afterEach(() => api?.stop());
 
   async function start(options?: {
-    runner?: CommandRunner;
     gates?: { design: "root-issues" | "off" };
     state?: LegionState;
     saveState?: () => Promise<void>;
@@ -181,17 +177,8 @@ describe("Legion HTTP API", () => {
     workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
-    const runner =
-      options?.runner ??
-      ((async (command) => {
-        commands.push(command);
-        return { stdout: "", stderr: "", exitCode: 0 };
-      }) satisfies CommandRunner);
-
     const deps: LegionApiDeps = {
       state: options?.state ?? state,
-      runner,
-      baseEnv: {},
       dispatchClient: options?.dispatchClient ?? fakeDispatchClient(),
       tokenManager: {
         getToken:
@@ -1595,8 +1582,8 @@ describe("Legion HTTP API", () => {
     expect(phase.body).toEqual({
       roleToken: testerToken,
       secret: expect.any(String),
-      gitName: "legion-implement[bot]",
-      gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
+      gitName: "legion-review[bot]",
+      gitEmail: "42+legion-review[bot]@users.noreply.github.com",
     });
 
     const recovered = await curlJson<WorkerSessionResponse>("/legion/v1/worker-session", {
@@ -1645,16 +1632,16 @@ describe("Legion HTTP API", () => {
       grantId: grant.body.grantId,
     });
     expect(token.body).toEqual({
-      token: "minted-implement-acme",
-      appLogin: "legion-implement[bot]",
+      token: "minted-review-acme",
+      appLogin: "legion-review[bot]",
     });
-    expect(tokenRoles).toEqual(["implement", "implement"]);
+    expect(tokenRoles).toEqual(["review", "review"]);
 
     const credential = await curl("/legion/v1/git-credential", {
       grantId: grant.body.grantId,
     });
     expect(credential.status).toBe(200);
-    expect(credential.body).toBe("username=x-access-token\npassword=minted-implement-acme");
+    expect(credential.body).toBe("username=x-access-token\npassword=minted-review-acme");
 
     now += 60_001;
     const expired = await json("/legion/v1/gh-token", {
@@ -1930,7 +1917,7 @@ describe("Legion HTTP API", () => {
 
     expect(started.response.status).toBe(200);
     expect(started.body.roleToken).toBe(token);
-    expect(started.body.gitName).toBe("legion-implement[bot]");
+    expect(started.body.gitName).toBe("legion-review[bot]");
     expect(state.roles[token]).toMatchObject({
       sessionId: "ses_tester",
       agentId: "agt_tester",

@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
-import type { DaemonConfig } from "../config";
+import type { DaemonConfig, GitHubAppRole } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
 import { type LegionState, newLegionState } from "../legion-state";
@@ -266,7 +266,10 @@ function config(stateDir: string): DaemonConfig {
     slowCommandTimeoutSeconds: 300,
     workerStreamPort: 0,
     gates: { design: "root-issues" },
-    githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    githubApps: {
+      implement: { appId: "1", privateKey: "test", installations: {} },
+      review: { appId: "2", privateKey: "test", installations: {} },
+    },
     dispatchUrl: "http://127.0.0.1:18766",
     dispatchToken: "test-dispatch-token",
     stateDir,
@@ -1405,7 +1408,9 @@ describe("startDaemon", () => {
     let resync: (() => void) | undefined;
     let resyncComplete: Promise<void> | undefined;
     let daemon: daemonIndex.DaemonHandle | undefined;
-    let tokenCalls = 0;
+    // Boot's own App-token leases (the startup probes) succeed; every lease after `startDaemon`
+    // resolves belongs to the resync CI fetch under test and fails.
+    let booted = false;
     console.log = (...values: unknown[]) => logs.push(values.join(" "));
 
     try {
@@ -1428,10 +1433,7 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => {
-              tokenCalls += 1;
-              // Boot takes one implement-role lease (the startup probe); every later lease
-              // belongs to the resync CI fetch under test.
-              if (tokenCalls > 1) throw new Error("GitHub App token request failed");
+              if (booted) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
                 expiresAt: "2026-08-25T00:00:00.000Z",
@@ -1456,6 +1458,7 @@ describe("startDaemon", () => {
           now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         },
       });
+      booted = true;
 
       if (!resync) throw new Error("Daemon did not schedule resync");
       resync();
@@ -3152,6 +3155,49 @@ describe("startDaemon", () => {
     } finally {
       first.server.stop();
       await first.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start when only the implement App is configured, naming the review App, before state is loaded", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    // A `legion.yaml` whose review App key cannot mint a token (the config loader already refuses
+    // a missing section): `TokenManager.getToken("review", …)` throws while the implement lease
+    // succeeds. Stubbed at the same `getToken` seam every other boot test in this file uses.
+    const tokenManager = {
+      getToken: async (role: GitHubAppRole) => {
+        if (role === "review") throw new Error("role_not_configured: review");
+        return {
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+    let loadedState = false;
+    const base = daemonDeps(daemonConfig);
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...base.deps,
+            tokenManager,
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+          },
+        })
+      ).rejects.toThrow("role_not_configured: review");
+      expect(loadedState).toBeFalse();
+      // The instance lock was released: a start with both Apps on the same state dir works.
+      const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+      await daemon.stop();
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });

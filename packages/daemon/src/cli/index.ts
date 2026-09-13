@@ -256,9 +256,8 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-/** Redeems the pane's grant for a GitHub App token: the App of the role running the command
- * (`appRoleForLegionRole` in the daemon — the review App for the reviewer, the implement App for
- * every other role). */
+/** Redeems the pane's grant for a GitHub App token: the App of the role running the command,
+ * chosen by `appRoleForLegionRole` (`daemon/github-apps.ts`) — the command never picks one. */
 async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",

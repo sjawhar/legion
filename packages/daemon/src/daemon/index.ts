@@ -316,7 +316,13 @@ async function startDaemonLocked(
     );
   })();
   probes.catch(() => {});
+  // Both GitHub Apps are proven before state is loaded or anything network-facing opens: the
+  // config loader already requires both sections, and this lease proves each key actually mints a
+  // token. `appRoleForLegionRole` sends the root architect (the first role to act) to the review
+  // App and the implementer to the implement App, so a deployment with a dead key for either would
+  // otherwise start and 500 on that role's first `legion gh`.
   await deps.tokenManager.getToken("implement", owner);
+  await deps.tokenManager.getToken("review", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -503,8 +509,6 @@ async function startDaemonLocked(
   const apiDeps: LegionApiDeps = {
     state,
     saveState: save,
-    runner,
-    baseEnv: environment.paneEnv,
     tokenManager: deps.tokenManager,
     processManager,
     dispatchClient: deps.dispatchClient,
