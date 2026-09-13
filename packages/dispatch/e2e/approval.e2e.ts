@@ -44,6 +44,9 @@ test("a spec's approval is a human review pinned to its version: requested by th
     await approve.check();
     await card.getByRole("button", { name: "Answer" }).click();
     await expect(card).toHaveCount(0);
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
 
     // The document header shows the approval pinned to version 1.
     await page.goto(`/issues/${issue.key}`);
