@@ -1711,14 +1711,18 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("a boot failure while a probe attempt is still running aborts that attempt's runner call, so its OMP child is killed rather than left behind", async () => {
+  it("a boot failure while a probe attempt is still running aborts that attempt's runner call, so its OMP child is killed rather than left behind, and the chain ends without promising a retry", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     // Resolves once the first probe attempt is in flight (its runner call has started).
     const attemptStarted = Promise.withResolvers<void>();
     let attemptSignal: AbortSignal | undefined;
     let abortedWhileRunning = false;
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let probeAttempts = 0;
+    const logged: string[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
     try {
       await expect(
         startDaemon(daemonConfig, {
@@ -1726,10 +1730,15 @@ describe("startDaemon", () => {
             ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
             runner: async (command, options) => {
               if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+              probeAttempts += 1;
               attemptSignal = options?.signal;
               attemptStarted.resolve();
               // The real runner would be blocked on a hung OMP here; it returns only when its
-              // signal aborts (the kill), reporting the kill exactly as the budget would.
+              // signal aborts. This fixture reports the kill as the budget's (`timedOut`) — the
+              // race where the budget timer fired as the daemon gave up — because at the daemon
+              // level that is the one shape whose mishandling is observable: an attempt the
+              // runner reports as `aborted` is never logged even when misclassified (the chain's
+              // rejection is swallowed before the hold), so `boot-probes.test.ts` pins that case.
               await new Promise<void>((resolve) => {
                 if (options?.signal?.aborted) return resolve();
                 options?.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -1754,6 +1763,11 @@ describe("startDaemon", () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(attemptSignal?.aborted).toBeTrue();
       expect(abortedWhileRunning).toBeTrue();
+      // The abandoned attempt is not a transient failure: nothing is logged as one, no retry is
+      // announced, and none runs — the start-up error above is the only thing to report.
+      expect(probeAttempts).toBe(1);
+      expect(logged).not.toContainEqual(expect.stringContaining("probe failed transiently"));
+      expect(logged).not.toContainEqual(expect.stringContaining("retrying in"));
     } finally {
       errorSpy.mockRestore();
       await rm(stateDir, { recursive: true, force: true });

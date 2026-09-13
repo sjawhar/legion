@@ -62,10 +62,13 @@ export interface BootProbeOptions {
   readonly signal?: AbortSignal;
 }
 
-/** The probe chain was cancelled by the daemon's own teardown while waiting to retry. */
+/** The probe chain was cancelled by the daemon's own teardown — while an attempt was running
+ * (the runner killed it on the signal) or while it was waiting to retry. */
 class ProbeAbortedError extends Error {
   constructor(name: string) {
-    super(`[legion] ${name} probe abandoned: the daemon stopped while it was waiting to retry`);
+    super(
+      `[legion] ${name} probe abandoned: the daemon stopped while it was running or waiting to retry`
+    );
     this.name = "ProbeAbortedError";
   }
 }
@@ -74,17 +77,24 @@ interface ProbeOutcome {
   readonly passed: boolean;
   /** `true` when the failure is a definitive negative (retrying cannot change it). */
   readonly definitive: boolean;
+  /** `true` when the runner killed the attempt because the caller's signal aborted: the daemon
+   * gave the probe up, so the attempt is neither a failure to log nor an answer to diagnose. */
+  readonly aborted?: boolean;
   readonly detail: string;
 }
 
-/** A runner kill is transient when the probe never got to answer — but a probe that printed its
- * negative marker and only then hung past the budget has answered: that answer is definitive, so
- * `negativeMarker` is classified first and the kill is reported only for a marker-less output. */
-function timedOutOutcome(
+/** Classifies a kill the runner made. A kill on the caller's abort is not the probe's failure at
+ * all — the caller is tearing down and its own error is what surfaces — so it is reported as
+ * `aborted` before anything else is read. A budget kill is transient when the probe never got to
+ * answer — but a probe that printed its negative marker and only then hung past the budget has
+ * answered: that answer is definitive, so `negativeMarker` is classified first and the kill is
+ * reported only for a marker-less output. */
+function killedOutcome(
   result: CommandResult,
   stderrTail: string,
   negativeMarker: string
 ): ProbeOutcome | undefined {
+  if (result.aborted) return { passed: false, definitive: false, aborted: true, detail: "" };
   if (result.timedOut === undefined) return undefined;
   if (`${result.stderr}\n${result.stdout}`.includes(negativeMarker)) return undefined;
   const { limitMs, elapsedMs } = result.timedOut;
@@ -101,8 +111,11 @@ function timedOutOutcome(
  * changes, `"exhausted"` when a bounded policy ran out of attempts while still transient, so the
  * message can say the probe never completed rather than misreport what it never answered. Each
  * transient failure is logged with the delay before the next try, so an operator watching the
- * supervisor log sees the daemon waiting out host load instead of a silent stall. A `signal`
- * aborted during the backoff ends the loop with `ProbeAbortedError` instead of a further attempt. */
+ * supervisor log sees the daemon waiting out host load instead of a silent stall. An aborted
+ * `signal` ends the loop with `ProbeAbortedError` — before an attempt, after one the runner killed
+ * on the abort, or after one that finished just as the daemon gave up — with no transient log and
+ * no retry announced: a line promising a retry that will not happen would mislead the operator
+ * reading the start-up error that follows it. */
 async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,
@@ -115,6 +128,7 @@ async function retryBootProbe(
     if (signal?.aborted) throw new ProbeAbortedError(name);
     const outcome = await attempt();
     if (outcome.passed) return;
+    if (outcome.aborted || signal?.aborted) throw new ProbeAbortedError(name);
     if (outcome.definitive) throw await makeError(outcome.detail, "definitive");
     if (policy.maxAttempts !== undefined && i + 1 >= policy.maxAttempts) {
       throw await makeError(outcome.detail, "exhausted");
@@ -159,8 +173,8 @@ export async function verifyOmpAgentsCapability(
         );
         const output = `${result.stderr}\n${result.stdout}`;
         const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-        const timedOut = timedOutOutcome(result, detail, OMP_AGENTS_MISSING_MARKER);
-        if (timedOut) return timedOut;
+        const killed = killedOutcome(result, detail, OMP_AGENTS_MISSING_MARKER);
+        if (killed) return killed;
         if (result.exitCode === 0 && output.includes(OMP_AGENTS_CAPABILITY_MARKER)) {
           return { passed: true, definitive: false, detail };
         }
@@ -296,8 +310,8 @@ export async function verifyLegionPluginLoaded(
         );
         lastExitCode = result.exitCode;
         const stderrTail = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
-        const timedOut = timedOutOutcome(result, stderrTail, LEGION_NOT_LOADED_MARKER);
-        if (timedOut) return timedOut;
+        const killed = killedOutcome(result, stderrTail, LEGION_NOT_LOADED_MARKER);
+        if (killed) return killed;
         const output = `${result.stderr}\n${result.stdout}`;
         if (result.exitCode === 0 && output.includes(LEGION_LOADED_MARKER)) {
           return { passed: true, definitive: false, detail: "" };
