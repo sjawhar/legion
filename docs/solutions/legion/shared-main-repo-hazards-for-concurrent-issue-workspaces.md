@@ -20,6 +20,8 @@ related_issues:
   - "LEGION-45"
   - "LEGION-37"
   - "LEGION-12"
+  - "LEGION-34"
+  - "sjawhar/legion#1003"
 ---
 
 # Every issue workspace is a jj workspace of one shared main repo: identity, op log, and active-phase hazards a worker must defend against, and how
@@ -75,6 +77,15 @@ copy diff, and re-apply whatever the rollback dropped. Never answer with your ow
 `op restore`: that rewinds the other tree in turn. Keep the edits you are about to squash in a
 scratch copy (`/tmp/…`) until the chain shows them landed, so a rollback costs a `cp`, not a
 re-edit.
+
+Confirmed again on LEGION-34 without any `undo`: a plain `jj git push` raced another workspace's
+bookmark push, jj's `reconcile divergent operations` re-minted this workspace's working-copy commit
+as a fresh empty one (the old change id went hidden), and the next command refused with the same
+stale-working-copy error. The only content of that commit was the daemon-provisioned, untracked
+`.omp/config.yml`, which `workspace update-stale` removes from disk — copy it aside first and put it
+back after (`cp .omp/config.yml /tmp/…; jj workspace update-stale; cp /tmp/… .omp/config.yml`), or
+the extension's provisioning is gone until the pane relaunches. Nothing tracked was touched; the
+chain and the bookmark were exactly where the push had left them.
 
 ## Hazard 3 — a daemon catch-up prompt can overwrite the active phase, so a real completion 409s (LEGION-37 acceptance 7)
 
