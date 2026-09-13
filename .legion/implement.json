@@ -1,7 +1,7 @@
 {
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
-  "headSha": "188f8d697265 (review round 2 fix; the pushed tip is the handoff commit on top of it, differing only in .legion/implement.json)",
+  "headSha": "361126e8b944 (round 3 test-stability fix; the pushed tip is the handoff commit on top of it, differing only in .legion/implement.json)",
   "commits": [
     "9d48d41d0185 daemon: deliver a worker prompt only when its turn is observed to start (LEGION-60) (was 372310dc3b21 before the conflict-forced rebase)",
     "48ad9b49c27f daemon: send worker-queued/worker-started and the other ProcessManager notices through the Envoy listener (was 208d87937e58)",
@@ -133,9 +133,18 @@
       "gates": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail (64 files), twice; bunx tsc --noEmit clean; bunx biome check src/ clean. The reviewer's repro harness now fails on its own `expect(claim.locator).toBeDefined()` at both caps, showing locator cleared, readyConfirmedAt unset, launchFailures 1, promptFailures untouched, task queued.",
       "notInThisRound": "The review body's design gap (a worker that keeps acking without a turn loops retire/relaunch with no terminal escalation) and turn attribution by order are filed as their own LEGION issue by the architect; not widened here. The fast-follow wording/fixture items (a)-(i) are left for the fast-follow.",
       "includes": "The reviewer's locally committed review handoff 537055d5 (review: record handoff) is pushed with this round."
+    },
+    {
+      "round": 3,
+      "headSha": "361126e8b944",
+      "kind": "test stability only; production code untouched",
+      "finding": "Tester round 2 (.legion/test.json round2.flakeFinding): the two `retires a ready-time worker whose socket closes after acknowledging its first task … (workerCap 1|2)` cases bounded their wait for the cold relaunch with flushEventLoopUntil, a 5000 setImmediate-tick budget, while the relaunch does real filesystem I/O (session-file stat, boot-token secret file, workspace .omp/config.yml, socket dir) before and after its tmux call; on this box (loadavg ~110-130) 2 of 8 whole-file processes.test.ts runs failed on `tmuxPaneId toBe(\"%302\")` after the daemon had already logged `respawning …`.",
+      "fix": "processes.test.ts: both cases now await the relaunch's worker-started publish through a publishRole hook resolving a Promise.withResolvers — the idiom the queued-promotion tests (e.g. `promotes the queued worker once the running one goes idle, publishing worker-started`) already use for exactly this real-I/O-before-tmux race. worker-started is published by promoteQueuedWorker only after launchWorker resolved (fresh claim written, token dequeued, persisted), so every assertion is deterministic behind it; a wait that never resolves fails on bun's own test timeout with the assertions unreached, never a false green. No assertion loosened or removed; the publications array the assertions read is the hook's own.",
+      "runs": "bun test src/daemon/__tests__/processes.test.ts x10 in a row at loadavg 97-101: 10 pass / 0 fail (264 pass, 0 fail each run).",
+      "gates": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail (64 files); bunx tsc --noEmit clean; bunx biome check src/ clean."
     }
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T15:27:05.621Z"
+  "completed": "2026-09-13T15:58:14.139Z"
 }
