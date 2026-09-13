@@ -19,9 +19,15 @@ trap 'rm -f "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$res
 export SMOKE_DIR="${fake_bin}/smoke"
 
 # up.sh sources dispatch-config.sh from its own directory (by BASH_SOURCE), so the stripped copy
-# needs that file beside it; the copy is what the harness sources, exactly as before.
-sed '$d' "$up_script" >"${source_dir}/up.sh"
+# needs that file beside it; the copy is what the harness sources, exactly as before. The copy
+# resolves repo_root from its own mktemp location, so it is pinned to this harness's project
+# root: main() must build and launch from the checkout whatever the cwd.
+sed -e '$d' -e "s|^repo_root=.*|repo_root=\"${project_root}\"|" "$up_script" >"${source_dir}/up.sh"
 cp "${project_root}/scripts/smoke/dispatch-config.sh" "${source_dir}/dispatch-config.sh"
+grep -Fxq "repo_root=\"${project_root}\"" "${source_dir}/up.sh" || {
+  printf 'fixture error: repo_root was not pinned in the sourced copy\n' >&2
+  exit 1
+}
 # shellcheck source=/dev/null
 source "${source_dir}/up.sh"
 
@@ -173,11 +179,6 @@ chmod +x "$fake_omp"
   printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\n' >&2
   exit 1
 }
-# A valid override is the whole answer: mise is never consulted for it.
-[[ "$(LEGION_OMP_PATH="$fake_omp" PATH="${fake_bin}/no-mise-here:/usr/bin:/bin" resolve_omp_path 2>&1)" == "$fake_omp" ]] || {
-  printf 'expected a valid LEGION_OMP_PATH to resolve without consulting mise\n' >&2
-  exit 1
-}
 if (LEGION_OMP_PATH="${fake_bin}/missing-omp" resolve_omp_path) >"$assertion_file" 2>&1; then
   printf 'expected a missing LEGION_OMP_PATH to fail\n' >&2
   exit 1
@@ -217,24 +218,38 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"${fake_mise_install}/bin/omp"
 chmod +x "${fake_mise_install}/bin/omp"
 cat >"${fake_bin}/mise" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$*" >>"\${SMOKE_MISE_CALL_LOG:-/dev/null}"
 [[ "\$1" == "where" ]] || { printf 'fake mise: unexpected subcommand %s\n' "\$1" >&2; exit 2; }
-printf '%s\n' "\$2" >>"\${SMOKE_MISE_WHERE_LOG:-/dev/null}"
 if [[ -n "\${SMOKE_MISE_WHERE_FAILS:-}" ]]; then
   printf 'mise ERROR %s not installed\n' "\$2" >&2
+  exit 1
+fi
+if [[ -n "\${SMOKE_MISE_CONFIG_ERROR:-}" ]]; then
+  printf 'mise ERROR Invalid TOML in config file: /etc/mise/config.toml\n' >&2
   exit 1
 fi
 printf '%s\n' "${fake_mise_install}"
 EOF
 chmod +x "${fake_bin}/mise"
-mise_where_log="${fake_bin}/mise-where.log"
-: >"$mise_where_log"
-[[ "$(unset LEGION_OMP_PATH; SMOKE_MISE_WHERE_LOG="$mise_where_log" resolve_omp_path)" == "${fake_mise_install}/bin/omp" ]] || {
+mise_call_log="${fake_bin}/mise-call.log"
+# A valid override is the whole answer: mise is never consulted for it.
+: >"$mise_call_log"
+[[ "$(LEGION_OMP_PATH="$fake_omp" SMOKE_MISE_CALL_LOG="$mise_call_log" resolve_omp_path 2>&1)" == "$fake_omp" ]] || {
+  printf 'expected a valid LEGION_OMP_PATH to resolve without consulting mise\n' >&2
+  exit 1
+}
+[[ ! -s "$mise_call_log" ]] || {
+  printf 'a valid LEGION_OMP_PATH must not invoke mise; calls:\n%s\n' "$(<"$mise_call_log")" >&2
+  exit 1
+}
+: >"$mise_call_log"
+[[ "$(unset LEGION_OMP_PATH; SMOKE_MISE_CALL_LOG="$mise_call_log" resolve_omp_path)" == "${fake_mise_install}/bin/omp" ]] || {
   printf 'expected an unset LEGION_OMP_PATH to resolve to bin/omp under the directory mise where prints\n' >&2
   exit 1
 }
 # The pin asked of mise is the one up.sh read from omp-pin.ts, not a literal of this harness.
-[[ -n "$omp_pin" && "$(<"$mise_where_log")" == "$omp_pin" ]] || {
-  printf 'expected mise where to be asked for the omp-pin.ts pin (%s); asked for:\n%s\n' "$omp_pin" "$(<"$mise_where_log")" >&2
+[[ -n "$omp_pin" && "$(<"$mise_call_log")" == "where ${omp_pin}" ]] || {
+  printf 'expected mise where to be asked for the omp-pin.ts pin (%s); calls:\n%s\n' "$omp_pin" "$(<"$mise_call_log")" >&2
   exit 1
 }
 # The install directory exists but its bin/omp is not executable: preflight still refuses.
@@ -248,17 +263,31 @@ fi
   exit 1
 }
 chmod +x "${fake_mise_install}/bin/omp"
-# `mise where` fails (pin not installed): preflight stops naming the exact mise install command.
+# `mise where` fails (pin not installed): mise's own line reaches the output, and preflight stops
+# naming the exact mise install command.
 if (unset LEGION_OMP_PATH; SMOKE_MISE_WHERE_FAILS=1 resolve_omp_path) >"$assertion_file" 2>&1; then
   printf 'expected preflight to fail when the pin is not installed\n' >&2
   exit 1
 fi
-[[ "$(<"$assertion_file")" == *"OMP pin ${omp_pin} is not installed"* && "$(<"$assertion_file")" == *"run: mise install ${omp_pin}"* ]] || {
+[[ "$(<"$assertion_file")" == *"mise ERROR ${omp_pin} not installed"* && "$(<"$assertion_file")" == *"OMP pin ${omp_pin} is not installed"* && "$(<"$assertion_file")" == *"run: mise install ${omp_pin}"* ]] || {
   cat "$assertion_file" >&2
   exit 1
 }
 
 printf 'PASS: an explicit LEGION_OMP_PATH override passes through; otherwise the omp-pin.ts pin must be installed under mise, and preflight names mise install when it is not\n'
+
+# `mise where` fails for another reason (a broken mise configuration): preflight shows mise's own
+# message and stops without the mise install remedy, which would not fix it.
+if (unset LEGION_OMP_PATH; SMOKE_MISE_CONFIG_ERROR=1 resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when mise where fails on a configuration error\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *'Invalid TOML in config file'* && "$(<"$assertion_file")" == *"mise where ${omp_pin} failed"* && "$(<"$assertion_file")" != *'mise install'* ]] || {
+  printf 'expected mise'"'"'s own message and no mise install remedy; output:\n%s\n' "$(<"$assertion_file")" >&2
+  exit 1
+}
+
+printf 'PASS: a mise failure other than not-installed stops preflight on mise'"'"'s own message, without the mise install remedy\n'
 
 printf '200' >"$response_file"
 if ! (assert_webhook_round_trip) >"$assertion_file" 2>&1; then
@@ -344,9 +373,9 @@ fi
 }
 printf 'PASS: the real daemon loader accepts the generated legion.yaml (--check-config prints Config OK)\n'
 
-# The pre-#941 gates block: `merge: human` under `gates:` is exactly what the loader must refuse.
-# Anchored on the `gates:` line itself, not on the design gate's value, which the rig changes
-# independently (root-issues before #971, off since).
+# The retired `merge: human` gates block is exactly what the loader must refuse.
+# Anchored on the `gates:` line itself, not on the design gate's value, which the rig sets
+# independently.
 sed 's/^gates:$/gates:\n  merge: human/' "${SMOKE_DIR}/legion.yaml" >"${SMOKE_DIR}/legion-gates-merge.yaml"
 grep -Fxq '  merge: human' "${SMOKE_DIR}/legion-gates-merge.yaml" || {
   printf 'fixture error: the gates.merge line was not inserted\n' >&2
@@ -361,7 +390,7 @@ fi
   printf 'expected "gates.merge is not a Legion setting" on stderr; stderr:\n%s\n' "$(<"$warning_file")" >&2
   exit 1
 }
-printf 'PASS: the real daemon loader rejects the pre-#941 gates.merge block\n'
+printf 'PASS: the real daemon loader rejects the retired gates.merge block\n'
 
 # LEGION-40: DISPATCH_URL/DISPATCH_TOKEN resolve from the environment, else from the same envoy.json
 # the production launcher reads. XDG_CONFIG_HOME points at harness-owned directories so every case
@@ -572,15 +601,24 @@ printf 'PASS: a missing OMP build stops up.sh in preflight before any process st
 # install's bin/omp, and exports nothing -- the daemon resolves the same pin itself.
 : >"$order_log"
 rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
-if ! (unset LEGION_OMP_PATH; main) >"$main_output_file" 2>&1; then
-  printf 'expected up.sh main() to succeed on the installed pin; output:\n%s\n' "$(<"$main_output_file")" >&2
-  exit 1
-fi
-[[ "$(<"$main_output_file")" == *'RIG READY'* && "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_mise_install}/bin/omp"* ]] || {
-  printf 'expected RIG READY and the pin install bin/omp as the selected OMP build; output:\n%s\n' "$(<"$main_output_file")" >&2
+main_status="$(set +e; (set -e; unset LEGION_OMP_PATH; main) >"$main_output_file" 2>&1; echo $?)"
+[[ "$main_status" == 0 ]] || {
+  printf 'expected up.sh main() to succeed on the installed pin (exit %s); output:\n%s\n' "$main_status" "$(<"$main_output_file")" >&2
   exit 1
 }
-if grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv 2>/dev/null; then
+[[ "$(<"$main_output_file")" == *'RIG READY'* && "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_mise_install}/bin/omp (mise where ${omp_pin})"* ]] || {
+  printf 'expected RIG READY and the pin install bin/omp as the selected OMP build, labelled mise where; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+# The glob below must match the argv files main() recorded in envoy mode, or the grep proves
+# nothing: with no file it fails on the literal pattern and the check would pass vacuously.
+for name in listener daemon envoy-bridge; do
+  [[ -f "${SMOKE_DIR}/start_process.${name}.argv" ]] || {
+    printf 'fixture error: main() recorded no start_process argv for %s\n' "$name" >&2
+    exit 1
+  }
+done
+if grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv; then
   printf 'expected no start_process env block to carry LEGION_OMP_PATH when the operator set none\n' >&2
   exit 1
 fi
@@ -590,17 +628,18 @@ printf 'PASS: with no override, preflight verifies the omp-pin.ts pin under mise
 rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
 export LEGION_OMP_PATH="$fake_omp"
 
-if ! main >"$main_output_file" 2>&1; then
-  printf 'expected up.sh main() to succeed; output:\n%s\n' "$(<"$main_output_file")" >&2
+main_status="$(set +e; (set -e; main) >"$main_output_file" 2>&1; echo $?)"
+[[ "$main_status" == 0 ]] || {
+  printf 'expected up.sh main() to succeed (exit %s); output:\n%s\n' "$main_status" "$(<"$main_output_file")" >&2
   exit 1
-fi
+}
 
 [[ "$(<"$main_output_file")" == *'RIG READY'* ]] || {
   printf 'expected up.sh main() to finish with RIG READY; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
 }
-[[ "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_omp}"* ]] || {
-  printf 'expected up.sh to print the selected OMP build; output:\n%s\n' "$(<"$main_output_file")" >&2
+[[ "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_omp} (LEGION_OMP_PATH override)"* ]] || {
+  printf 'expected up.sh to print the selected OMP build, labelled as the override; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
 }
 grep -Fxq "LEGION_OMP_PATH=${fake_omp}" "${SMOKE_DIR}/start_process.daemon.argv" || {
@@ -610,14 +649,14 @@ grep -Fxq "LEGION_OMP_PATH=${fake_omp}" "${SMOKE_DIR}/start_process.daemon.argv"
 # Every start_process call recorded its argv (listener, daemon, envoy-bridge): exactly one file
 # may carry LEGION_OMP_PATH, and it is the daemon's.
 [[ "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv)" == "${SMOKE_DIR}/start_process.daemon.argv" ]] || {
-  printf 'LEGION_OMP_PATH belongs in the daemon env block only; argv files carrying it:\n%s\n' "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv || true)" >&2
+  printf 'up.sh names LEGION_OMP_PATH explicitly in the daemon env block only; argv files carrying it:\n%s\n' "$(grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv || true)" >&2
   exit 1
 }
 grep -Fxq "omp_invocation: mise x ${omp_pin} -- omp" "${SMOKE_DIR}/legion.yaml" || {
   printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\n' >&2
   exit 1
 }
-printf 'PASS: an explicit LEGION_OMP_PATH override reaches the daemon env block only, and omp_invocation keeps the mise x <pin> -- omp form\n'
+printf 'PASS: an explicit LEGION_OMP_PATH override is named in the daemon env block and in no other start_process argv, and omp_invocation keeps the mise x <pin> -- omp form\n'
 
 # The Dispatch-ingress record lands beside the webhook-mode and design-gate records: `shared` by
 # default, `rig` when the operator says a scratch Dispatch publishes into the rig NATS, and
@@ -640,10 +679,11 @@ fi
 }
 : >"$order_log"
 rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
-if ! SMOKE_DISPATCH_INGRESS=rig main >"$main_output_file" 2>&1; then
-  printf 'expected up.sh main() to succeed with SMOKE_DISPATCH_INGRESS=rig; output:\n%s\n' "$(<"$main_output_file")" >&2
+main_status="$(set +e; (set -e; SMOKE_DISPATCH_INGRESS=rig main) >"$main_output_file" 2>&1; echo $?)"
+[[ "$main_status" == 0 ]] || {
+  printf 'expected up.sh main() to succeed with SMOKE_DISPATCH_INGRESS=rig (exit %s); output:\n%s\n' "$main_status" "$(<"$main_output_file")" >&2
   exit 1
-fi
+}
 [[ "$(<"${SMOKE_DIR}/dispatch-ingress")" == "rig" ]] || {
   printf 'expected main() to record dispatch-ingress rig; got %s\n' "$(<"${SMOKE_DIR}/dispatch-ingress")" >&2
   exit 1
