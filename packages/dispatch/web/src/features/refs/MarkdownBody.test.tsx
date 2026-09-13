@@ -38,6 +38,7 @@ test("raw unsupported HTML renders as literal text with no element created", asy
   try {
     expect(await within(view.container).findByText("<img src=x onerror=alert(1)>")).not.toBeNull();
     expect(view.container.querySelector("img")).toBeNull();
+    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBe("true");
   } finally {
     view.unmount();
   }

@@ -5,6 +5,10 @@ import { BrowserRouter } from "react-router-dom";
 
 import { isRetryableQueryError } from "./api/client";
 import { App } from "./app";
+import {
+  DeploymentResilience,
+  installChunkFailureRecovery,
+} from "./features/shell/DeploymentResilience";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -28,10 +32,13 @@ if (root === null) {
   throw new Error("Dispatch could not find its root element.");
 }
 
+installChunkFailureRecovery();
+
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
+        <DeploymentResilience />
         <App />
       </BrowserRouter>
     </QueryClientProvider>

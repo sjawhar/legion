@@ -6,6 +6,12 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: "web",
   plugins: [react(), tailwindcss()],
+  define: {
+    // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
+    __DISPATCH_BUILD__: JSON.stringify(
+      process.env.GITHUB_SHA ?? process.env.DISPATCH_BUILD ?? Date.now().toString()
+    ),
+  },
   resolve: {
     alias: {
       "@legion/contracts/repo": fileURLToPath(new URL("../../contracts/src/repo.ts", import.meta.url)),

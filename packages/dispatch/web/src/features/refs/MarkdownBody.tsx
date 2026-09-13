@@ -26,6 +26,11 @@ function loadHeadlessProof(blockSchema: BlockSchema): Promise<HeadlessProofEdito
   return created;
 }
 
+/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
+export async function warmMarkdownRenderer(): Promise<void> {
+  await loadHeadlessProof(await loadBlockSchema());
+}
+
 /** Proof's schema has no node for CommonMark's raw-HTML block/inline spans (a bare tag-shaped
  * substring outside a code span or fence, e.g. `<img src=x>`), so `parseMarkdown` throws for
  * it below. HTML-like text already inside a code span or fence parses safely as literal text
@@ -116,11 +121,13 @@ export function MarkdownBody({
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>([]);
+  const [isFallback, setIsFallback] = useState(false);
 
   useEffect(() => {
     let mounted = true;
     const root = variant === "inline" ? inlineRoot.current : blockRoot.current;
     const renderMarkdown = async () => {
+      setIsFallback(false);
       // Without the server schema (or Proof's headless engine) the text still renders, as
       // literal Markdown: readable, never lost. The cause is reported and the schema cache
       // does not retain the failure, so the next render tries the fetch again.
@@ -149,6 +156,7 @@ export function MarkdownBody({
         }
       }
       if (proof === undefined || parsed === undefined) {
+        setIsFallback(true);
         root.replaceChildren(document.createTextNode(markdown));
       } else {
         const serializer = DOMSerializer.fromSchema(proof.schema);
@@ -191,11 +199,19 @@ export function MarkdownBody({
   );
 
   return variant === "inline" ? (
-    <span className={markdownClassName} ref={inlineRoot}>
+    <span
+      className={markdownClassName}
+      data-markdown-fallback={isFallback || undefined}
+      ref={inlineRoot}
+    >
       {portals}
     </span>
   ) : (
-    <div className={`${markdownClassName} max-w-none`} ref={blockRoot}>
+    <div
+      className={`${markdownClassName} max-w-none`}
+      data-markdown-fallback={isFallback || undefined}
+      ref={blockRoot}
+    >
       {portals}
     </div>
   );
