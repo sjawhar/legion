@@ -4203,8 +4203,10 @@ describe("ProcessManager", () => {
     const stopGate = Promise.withResolvers<void>();
     const stuckRootClient = fakeWorkerRpcClient();
     stuckRootClient.shutdown = () => {};
-    let closeSettled = false;
-    const jjAfterClose: boolean[] = [];
+    // Every jj command's view of the tree record: provisioning's must all see `closed`, the mark
+    // the close writes after its removal step (`closeTree`'s own promise also spans the promotion
+    // sweep that follows the close, so it is not the instrument).
+    const treeStatusAtJj: Array<string | undefined> = [];
     const commands: string[][] = [];
     const { manager: processes } = manager(state, {
       config: config(stateDir),
@@ -4215,7 +4217,7 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => stuckRootClient,
       run: async (command) => {
         commands.push(command);
-        if (command[0] === "jj") jjAfterClose.push(closeSettled);
+        if (command[0] === "jj") treeStatusAtJj.push(state.trees[root]?.status);
         if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
         if (command[0] === "tmux" && command[3] === "new-window") {
           return { stdout: "@43 %9 12345\n", exitCode: 0 };
@@ -4228,18 +4230,15 @@ describe("ProcessManager", () => {
     });
 
     const closePromise = processes.closeTree(root);
-    // Registered before `admit`, so this reaction runs before `spawnRoot`'s own on the same promise.
-    void closePromise.then(() => {
-      closeSettled = true;
-    });
     let lines: string[];
     try {
       await stopArmed.promise;
 
       expect(processes.admit(root)).toBe("spawned");
-      // Negative wait: `admit`'s `startRoot` reaches `spawnRoot` → `awaitClosingTrees`, which
-      // logs the wait line and parks on the in-flight close by microtask hops alone — no file
-      // write and no injected `run` before it parks, so a tick budget is the whole event.
+      // `admit`'s `startRoot` reaches `spawnRoot` → `awaitClosingTrees`, which logs the wait line
+      // and parks on the in-flight close by microtask hops alone — no file write and no injected
+      // `run` before it parks, so a tick budget is the whole event.
+      // Negative wait: the launch parks on the close and nothing else is in flight.
       await flushEventLoop(50);
       // The reopened root's spawn is waiting on the close: no provisioning command yet.
       expect(commands.filter((c) => c[0] === "jj")).toEqual([]);
@@ -4262,15 +4261,188 @@ describe("ProcessManager", () => {
     expect(commands.some((c) => c[0] === "jj" && c[1] === "abandon")).toBeFalse();
     expect(existsSync(dir)).toBeTrue();
     expect(lines).toContain(
-      `[legion] kept every workspace of tree ${root} at its close: the tree record is "active", not lingering (re-admitted while closing)`
+      `[legion] kept every workspace of tree ${root} at its close: the tree record is "active", not lingering`
     );
-    // Provisioning ran (`update-stale` on the surviving directory) and every jj command of it came
-    // after the close had settled.
+    // Provisioning ran (`update-stale` on the surviving directory) and every jj command of it saw
+    // the record already `closed`: the removal step, which precedes that mark, was over.
     expect(
       commands.some((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "update-stale")
     ).toBeTrue();
-    expect(jjAfterClose.length).toBeGreaterThan(0);
-    expect(jjAfterClose.every(Boolean)).toBeTrue();
+    expect(treeStatusAtJj.length).toBeGreaterThan(0);
+    expect(treeStatusAtJj.every((status) => status === "closed")).toBeTrue();
+  });
+
+  it("settles a close whose freed slot promotes a queued child of the closing tree, and provisions that child without it ever waiting on the close", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    // A human moved the finished root back to `todo`: the reducer's `admit` lands mid-close.
+    state.issues[root] = { key: root, title: "Reopened root", status: "todo", children: [child] };
+    // The child was moved to `todo` while its parent lingered, so it was admitted as its own root
+    // (`liveAncestorTree` sees no live ancestor); its first launch failed, and `spawnRoot`'s catch
+    // left it `queued` in the admission queue with the cap's one slot free.
+    state.issues[child] = {
+      key: child,
+      title: "Child re-admitted as its own root",
+      status: "todo",
+      parent: root,
+      children: [],
+    };
+    tree(state);
+    state.trees[root].status = "lingering";
+    state.trees[child] = { root: child, generation: 1, status: "queued", launchFailures: 1 };
+    state.admission.queue.push(child);
+    await mkdir(path.join(stateDir, "repos", "github.com", "sjawhar", "legion", ".jj"), {
+      recursive: true,
+    });
+    const rootDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    const childDir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-43");
+    await mkdir(rootDir, { recursive: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The root never confirms its graceful shutdown: the stop arms its timeout sleep (the event
+    // the test awaits) and the sleep resolves only when the test says.
+    const stopArmed = Promise.withResolvers<void>();
+    const stopGate = Promise.withResolvers<void>();
+    const stuckRootClient = fakeWorkerRpcClient();
+    stuckRootClient.shutdown = () => {};
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: () => {
+        stopArmed.resolve();
+        return stopGate.promise;
+      },
+      connectWorkerRpc: async () => stuckRootClient,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@43 %9 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "split-window") {
+          return { stdout: "%9 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "list") {
+          return { stdout: "default\nlegion-42\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const closePromise = processes.closeTree(root);
+    let lines: string[];
+    try {
+      await stopArmed.promise;
+      expect(processes.admit(root)).toBe("spawned");
+      stopGate.resolve();
+      // Before the fix this never settled: the close's own slot release promoted the child from
+      // inside the frame `closingTrees` still named, and the child's launch then waited on that
+      // close. Bun's per-test timeout is the failure, with every assertion below unreached.
+      await closePromise;
+      await processes.drainSpawns();
+    } finally {
+      lines = errors.mock.calls.map((call) => String(call[0]));
+      errors.mockRestore();
+    }
+
+    // The freed slot promoted the child, whose launch provisioned a fresh workspace and recorded
+    // a running root — and it never had to wait on the close, because the sweep started only once
+    // `closingTrees` had forgotten the tree. What the close then does to the reopened root itself
+    // is LEGION-143's subject and is not pinned here.
+    expect(
+      commands.some(
+        (c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "add" && c[3] === childDir
+      )
+    ).toBeTrue();
+    expect(managedState.trees[child]).toMatchObject({ status: "active" });
+    expect(managedState.trees[child]?.locator).toBeDefined();
+    expect(lines).toContain(
+      `[legion] launch of ${root} waits for the close of tree ${root} to finish`
+    );
+    expect(lines).not.toContain(
+      `[legion] launch of ${child} waits for the close of tree ${root} to finish`
+    );
+  });
+
+  it("keeps every workspace when the sweep retries a close whose first attempt failed after the root was re-admitted: the record reads lingering again, but the tree holds an admission slot", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Reopened root", status: "todo", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    await mkdir(path.join(stateDir, "repos", "github.com", "sjawhar", "legion", ".jj"), {
+      recursive: true,
+    });
+    const dir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(dir, { recursive: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The first close: the root never confirms its graceful shutdown (the stop arms its timeout
+    // sleep — the event awaited — and the sleep resolves when the test says), then its kill fails,
+    // so the close throws StopFailed and rewrites the record `lingering` over the mid-close
+    // `admit`'s `active`. Every later sleep resolves at once and every later kill succeeds.
+    const stopArmed = Promise.withResolvers<void>();
+    const stopGate = Promise.withResolvers<void>();
+    let firstSleep = true;
+    let killFailed = false;
+    const stuckRootClient = fakeWorkerRpcClient();
+    stuckRootClient.shutdown = () => {};
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: () => {
+        if (!firstSleep) return Promise.resolve();
+        firstSleep = false;
+        stopArmed.resolve();
+        return stopGate.promise;
+      },
+      connectWorkerRpc: async () => stuckRootClient,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        if (command[0] === "tmux" && command[3] === "kill-pane" && !killFailed) {
+          killFailed = true;
+          return { stdout: "", stderr: "lost server", exitCode: 1 };
+        }
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@43 %9 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "tmux" && command[3] === "split-window") {
+          return { stdout: "%9 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "list") {
+          return { stdout: "default\nlegion-42\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const firstClose = processes.closeTree(root);
+    let lines: string[];
+    try {
+      await stopArmed.promise;
+      expect(processes.admit(root)).toBe("spawned");
+      stopGate.resolve();
+      await expect(firstClose).rejects.toThrow(StopFailed);
+      // The failed stop's own bookkeeping: `lingering` again, yet the slot `admit` took is held.
+      expect(managedState.trees[root]?.status).toBe("lingering");
+      expect(managedState.admission.active).toEqual([root]);
+      // The re-admitted root's launch was waiting on that close and now runs to completion.
+      await processes.drainSpawns();
+      // The linger sweep's retry.
+      await processes.closeTree(root);
+    } finally {
+      lines = errors.mock.calls.map((call) => String(call[0]));
+      errors.mockRestore();
+    }
+
+    // Status alone would have read `lingering` and removed the re-admitted root's workspace.
+    expect(
+      commands.some((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "forget")
+    ).toBeFalse();
+    expect(commands.some((c) => c[0] === "jj" && c[1] === "abandon")).toBeFalse();
+    expect(existsSync(dir)).toBeTrue();
+    expect(lines).toContain(
+      `[legion] kept every workspace of tree ${root} at its close: the tree holds an admission slot`
+    );
   });
 
   it("requests control directives on the sanitized tree generation topic", async () => {

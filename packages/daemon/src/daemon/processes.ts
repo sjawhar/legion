@@ -391,8 +391,11 @@ export class ProcessManager {
    * cannot resume -- the durable status stays whatever it was (`active`/`lingering`) until the
    * final `closed` save, or (on a stop failure) `lingering` with a fresh `lingerUntil` for the
    * periodic sweep to retry. Also makes `closeTree` idempotent: a second call for the same tree
-   * while one is already running awaits the same in-flight promise instead of racing it. */
-  private readonly closingTrees = new Map<IssueKey, Promise<void>>();
+   * while one is already running awaits the same in-flight promise instead of racing it. The
+   * promise resolves to whether the close released an admission slot -- the slot a mid-close
+   * `admit` took -- which `closeTree` hands on to the promotion sweep only after this map has
+   * forgotten the tree (see there). */
+  private readonly closingTrees = new Map<IssueKey, Promise<boolean>>();
   /** In-flight `launchWorker` calls, per tree, removed on settle regardless of outcome. Once
    * `closingTrees` names a tree no new launch can start for it (`spawnWorker`'s entry and
    * in-queue checks both throw `TreeClosingError` first) -- so `closeTreeLocked`'s fixed-point
@@ -1672,22 +1675,38 @@ export class ProcessManager {
    * stop attempt. A claim whose stop fails (`StopFailed` — a real runtime stop failure, not the
    * routine "process already gone" case) is never deleted and its locator never cleared: the
    * tree is left `lingering` with a fresh `lingerUntil` so the periodic sweep retries the close,
-   * and this call throws `StopFailed` rather than reporting a false success.
+   * and this call throws `StopFailed` rather than reporting a false success. The admission slot
+   * a mid-close `admit` took is released by `closeTreeLocked` but handed on only here, once
+   * `closingTrees` no longer names the tree: the promotion sweep launches roots
+   * (`advancePromotionSweep` → `startRoot`), and a launched root first awaits any in-flight close
+   * of its own tree or an ancestor's (`awaitClosingTrees`) — so a queued child of this tree,
+   * promoted from inside the frame `closingTrees` still named, would wait on the very close that
+   * was promoting it and neither would ever settle (found in LEGION-104's review). Nothing the
+   * fence protects needs it any longer by then: every claim is deleted and the record reads
+   * `closed`, which `isTreeGone` refuses launches for on its own.
    */
   async closeTree(treeKey: IssueKey, options?: { stopRoot?: boolean }): Promise<void> {
     const inFlight = this.closingTrees.get(treeKey);
-    if (inFlight) return inFlight;
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
     const closing = this.closeTreeLocked(treeKey, options).finally(() => {
       this.closingTrees.delete(treeKey);
     });
     this.closingTrees.set(treeKey, closing);
-    return closing;
+    const releasedSlot = await closing;
+    if (releasedSlot) await this.beginPromotionSweep();
   }
 
+  /** Returns whether the close released an admission slot: only a tree `admit` re-activated
+   * mid-close holds one by the time it closes (`beginLinger` and `recordRootExit` released it
+   * before the close began). The slot is spliced here but never handed on from inside this frame
+   * — `closeTree` starts the promotion sweep once `closingTrees` has forgotten the tree. */
   private async closeTreeLocked(
     treeKey: IssueKey,
     options?: { stopRoot?: boolean }
-  ): Promise<void> {
+  ): Promise<boolean> {
     const tree = this.requireTree(treeKey);
     this.cancelRootRegistrationDeadline(treeKey);
     if (tree.status !== "lingering") {
@@ -1818,7 +1837,10 @@ export class ProcessManager {
     if (rootStatus !== "done" && rootStatus !== "backlog" && rootStatus !== "icebox") {
       await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
     }
-    await this.releaseSlot(treeKey);
+    const admission = this.deps.state.admission;
+    const slot = admission.active.indexOf(treeKey);
+    const releasedSlot = slot !== -1;
+    if (releasedSlot) admission.active.splice(slot, 1);
     // Every stopped claim above (one with a locator) is already deleted; this also clears any
     // remaining claim under the tree that never had a locator to stop in the first place (a
     // claim still queued, never launched, when the tree closed), which the fixed-point loop
@@ -1853,6 +1875,7 @@ export class ProcessManager {
     // Deleting this tree's claims may have freed running-worker slots other trees' queues are
     // waiting on.
     this.workerAdmission.promoteWorkerQueue();
+    return releasedSlot;
   }
 
   /**
@@ -3055,21 +3078,28 @@ export class ProcessManager {
   /** The workspaces a closing tree leaves behind (LEGION-104): once every process under the tree
    * is stopped, the root's workspace goes unless the root is parked (`backlog`/`icebox`), and each
    * descendant's goes when that issue is `done`; everything else is kept and named. Runs only
-   * while the tree record is still `lingering`: `admit` reuses the record mid-close for a root a
-   * human moved back to `todo` (it sets `active` and `startRoot`s it — `spawnRoot` then waits on
-   * this close, `awaitClosingTrees`), and deleting the directory that root is about to provision
-   * into would be the one thing worse than leaving it. Each issue is re-checked at its turn: a
-   * child that got its own tree record meanwhile (re-admitted as a root while this tree closed)
-   * belongs to that tree now. A removal that fails is logged once with the issue, the directory,
-   * and the error, and the close goes on — the leftover is today's state, and the next
-   * provisioning of that issue repairs whichever half state it finds (`createWorkspace`). Nothing
-   * retries. Sits before `tree.status = "closed"` so a crash mid-removal leaves the tree
-   * `lingering` for the sweep to re-run the close and the idempotent removal. */
+   * while the tree record is still `lingering` and the tree holds no admission slot: `admit`
+   * reuses the record mid-close for a root a human moved back to `todo` (it sets `active`, takes a
+   * slot, and `startRoot`s it — `spawnRoot` then waits on this close, `awaitClosingTrees`), and
+   * deleting the directory that root is about to provision into would be the one thing worse than
+   * leaving it. The status alone is not proof: a close whose stop failed rewrites the record
+   * `lingering` for the sweep's retry over that `active`, while the slot `admit` took stays held
+   * — so the retry keys on the slot. Each issue is re-checked at its turn: a child that got its
+   * own tree record meanwhile (re-admitted as a root while this tree closed) belongs to that tree
+   * now. A removal that fails is logged once with the issue, the directory, and the error, and
+   * the close goes on — the leftover is today's state, and the next provisioning of that issue
+   * repairs whichever half state it finds (`createWorkspace`). Nothing retries. Sits before
+   * `tree.status = "closed"` so a crash mid-removal leaves the tree `lingering` for the sweep to
+   * re-run the close and the idempotent removal. */
   private async removeTreeWorkspaces(treeKey: IssueKey, tree: TreeState): Promise<void> {
-    if (tree.status !== "lingering") {
-      console.error(
-        `[legion] kept every workspace of tree ${treeKey} at its close: the tree record is "${tree.status}", not lingering (re-admitted while closing)`
-      );
+    const keptEvery =
+      tree.status !== "lingering"
+        ? `the tree record is "${tree.status}", not lingering`
+        : this.deps.state.admission.active.includes(treeKey)
+          ? "the tree holds an admission slot"
+          : undefined;
+    if (keptEvery) {
+      console.error(`[legion] kept every workspace of tree ${treeKey} at its close: ${keptEvery}`);
       return;
     }
     const issues = [
