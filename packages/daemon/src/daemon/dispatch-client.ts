@@ -106,7 +106,7 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
 }
 
 /** One of the two Dispatch reads outside resync (the other is `register_gate`'s approval read in
- * `api/routes/issues.ts`): `migrateV24State`'s resolver for a v24 design gate. Reads
+ * `api/routes/issues.ts`): `migrateV27State`'s resolver for a v27 design gate. Reads
  * the issue once and returns its primary artifact's id (the spec document) with the highest
  * version number that artifact carries. Throws naming the issue when the primary artifact is
  * missing from the issue's `artifacts` or has no versions — the caller refuses to start on it. */

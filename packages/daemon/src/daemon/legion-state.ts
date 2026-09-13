@@ -229,7 +229,7 @@ export interface LegionState {
   pendingStatusWrites: Record<IssueKey, PendingStatusWrite>;
 }
 
-/** Reads a root issue's spec document from Dispatch for `migrateV24State`: the id of the issue's
+/** Reads a root issue's spec document from Dispatch for `migrateV27State`: the id of the issue's
  * primary artifact and the highest version number it carries. */
 export type SpecArtifactResolver = (
   issue: IssueKey
@@ -238,8 +238,8 @@ export type SpecArtifactResolver = (
 export interface LegionStateInit {
   project: string;
   cap: number;
-  /** Required only when the file on disk is a v24 state with a design gate to keep (see
-   * `migrateV24State`); every other load never calls it. */
+  /** Required only when the file on disk is a v27 state with a design gate to keep (see
+   * `migrateV27State`); every other load never calls it. */
   resolveSpecArtifact?: SpecArtifactResolver;
 }
 

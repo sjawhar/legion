@@ -1224,7 +1224,7 @@ describe("legion state", () => {
         await expect(loadState(file, initialState)).rejects.toThrow(
           "Cannot migrate the design gate for LEGION-1"
         );
-        // Nothing was written: the v24 file survives intact for a retry once Dispatch is back.
+        // Nothing was written: the v27 file survives intact for a retry once Dispatch is back.
         expect(await readdir(tempDir)).toEqual(["state.json"]);
       } finally {
         warnSpy.mockRestore();
@@ -1238,6 +1238,68 @@ describe("legion state", () => {
       await writeFile(file, JSON.stringify({ ...current, version: 27 }), "utf8");
 
       expect(await loadState(file, initialState)).toEqual(current);
+    });
+
+    it("migrates a v24 file end to end through 25 (#993), 26 (#991), and 27 (#981) to a v28 gate, composing every step", async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-through-v28-"));
+      const file = path.join(tempDir, "state.json");
+      // What a pre-LEGION-33 daemon wrote: a v24 file whose root tree carries a locator without
+      // #981's process identity, whose architect claim carries a bare-string pending assignment
+      // (#991 classifies it), and whose gate is a human-approved ask (this branch resolves it).
+      const architectToken = roleToken(initialState.project, "LEGION-1", "architect");
+      const source = {
+        ...v27File(),
+        version: 24,
+        trees: {
+          "LEGION-1": {
+            ...active("LEGION-1"),
+            locator: {
+              runtime: "tmux",
+              tmuxSession: "legion-omp",
+              tmuxWindowId: "@1",
+              tmuxPaneId: "%1",
+              socketPath: "/state/workers/architect.sock",
+            },
+          },
+        },
+        roles: {
+          [architectToken]: {
+            issue: "LEGION-1",
+            role: "architect",
+            generation: 1,
+            pendingAssignment: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+          },
+        },
+        gates: { "LEGION-1": { designAskId: "ask-1", designApproved: "ask-1" } },
+      };
+      await writeFile(file, JSON.stringify(source), "utf8");
+
+      const migrated = await loadState(file, {
+        ...initialState,
+        resolveSpecArtifact: async () => ({ artifactId: "art-a", latestVersion: 4 }),
+      });
+
+      expect(migrated.version).toBe(28);
+      // #991's step classified the bare string; #981's step left the identity-less locator as it
+      // was (both identity fields optional); this branch's step resolved the gate.
+      const claim = migrated.roles[architectToken];
+      if (!claim || !("issue" in claim)) throw new Error("architect claim was not migrated");
+      expect(claim.pendingAssignment).toEqual({
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      });
+      expect(migrated.trees["LEGION-1"]?.locator).toEqual({
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/architect.sock",
+      });
+      expect(migrated.gates).toEqual({
+        "LEGION-1": { artifactId: "art-a", latestVersion: 4, approvedVersion: 4 },
+      });
+      expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(JSON.stringify(source));
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(28);
     });
   });
 
