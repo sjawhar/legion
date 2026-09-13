@@ -14,6 +14,7 @@ module: daemon
 related_issues:
   - "LEGION-30"
   - "sjawhar/legion#973"
+  - "sjawhar/legion#991"
 ---
 
 # Idle-expiry timers: judge every condition at expiry, re-arm on the declines that can change while the subject stays idle, and guard against a cancel that resolves
@@ -33,10 +34,14 @@ it.
 
 `onIdle` fires once per transition into idle. A worker that finishes its turn while it is still
 `phases[issue].phase` declines at expiry — correct — and then never transitions to idle again. When
-`/worker/started` or `promptExistingWorker` later rewrites `phases[issue]` for another role, nothing
-fires: the clock's map entry was deleted at expiry, and the only arm site was the trigger that will
-never recur. The worker stays resident for the life of its tree. The tester's rig showed a reviewer
-idle 8.7 minutes, not the active phase for 5.7 of them, no clock pending.
+`promptExistingWorker` later delivers another role's architect assignment and rewrites
+`phases[issue]`, nothing fires: the clock's map entry was deleted at expiry, and the only arm site
+was the trigger that will never recur. The worker stays resident for the life of its tree. The
+tester's rig showed a reviewer idle 8.7 minutes, not the active phase for 5.7 of them, no clock
+pending. (When this was written, `/worker/started` also rewrote `phases[issue]` for whatever role
+registered; LEGION-37, #991, removed that — the assignment delivery in `promptExistingWorker` is
+now the one writer. The rule is unchanged: the phase still moves without this worker's
+involvement.)
 
 The fix is in the expiry itself: when the predicate declines on a condition that can change while
 the subject stays idle (here: the role is the active phase, or a `pendingAssignment` is queued),
@@ -79,17 +84,19 @@ Every `client.prompt()` site runs inside the token's `mutateClaim` section, and 
 `runState` to `"running"` synchronously before sending. Re-arming from inside the same callback —
 with no `await` between the top-of-callback identity/idle/disposed checks and the arm — means the
 re-arm can never interleave with a prompt and the checks it relies on still hold. A re-arm from a
-`phases[issue]` write site (the rejected alternative: three sites — worker registration, prompting,
-phase completion) would have coupled every phase write to the timer; one self-re-arming expiry
-keeps the timer in one place.
+`phases[issue]` write site (the rejected alternative — at the time three sites: worker
+registration, prompting, phase completion; since #991 one site, the assignment delivery) would have
+coupled every phase write to the timer; one self-re-arming expiry keeps the timer in one place.
 
 ## Why the unit tests missed Rule 1 and the rig caught it
 
 The eleven original tests each seeded one state and fired once. None mutated `phases[issue]`
 *between* an expiry and a second fire, because nothing in the unit picture suggested the phase
 could move without the worker's involvement. On the rig the phase moved the natural way: the
-architect resumed a retired planner, and that planner's `/worker/started` rewrote `phases[issue]`.
-A state-mutation-between-fires test is cheap once you know to write it; knowing to write it came
+architect resumed a retired planner, and that planner's `/worker/started` rewrote `phases[issue]`
+— the very overwrite LEGION-37 (#991) later removed; today the same ordering arises when the
+architect's `spawn_worker` for another role is *delivered*, which is the one write left. A
+state-mutation-between-fires test is cheap once you know to write it; knowing to write it came
 from running the real mechanism. See
 `docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md`.
 
