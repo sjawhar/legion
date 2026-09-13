@@ -32,7 +32,7 @@ The Envoy role lane needs a different contract: a role message is live-only and 
 
 Make the listener the sole core-NATS subscriber for a role lane. At delivery time, it reads the current role holder from the authoritative registry, verifies the holder's session registration is fresh, then sends the original envelope to that holder's direct agent subject with NATS request-reply.
 
-The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout from a registered, live receiver is `receipt_timeout` (LEGION-108: the receiver has the envelope and has not acknowledged it — a slow holder, not a lost message); a missing receiver, a stale registration, or a request that could not be sent is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.
+The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout after the forward was published to a registered, live-looking holder is `receipt_timeout` (LEGION-108): no receipt arrived, usually because the holder is busy — but a holder whose registration is still fresh while its process is already gone times out the same way and never had the envelope, so the listener cannot tell slow from dead; the Legion daemon probes the process to decide (the parent contract, LEGION-101) and treats a live process as having the message. A missing receiver, a stale registration, or a request that could not be sent is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.
 
 Session registry and KV checks remain valuable gates, but they must not be promoted into proof of active delivery. They establish that a route was recently registered; the receipt establishes that a live receiver accepted this specific message.
 
@@ -88,6 +88,13 @@ if err := client.RequestCoreTo(
     item,
     2*time.Second,
 ); err != nil {
+    if errors.Is(err, nats.ErrTimeout) {
+        // Forwarded, no receipt: a slow holder, or one that died inside the
+        // registry's stale window. The daemon probes it; the listener does not.
+        publishDeliveryException(client, item, "receipt_timeout")
+        return
+    }
+    // The forward itself failed: the holder never received anything.
     publishDeliveryException(client, item, "delivery_failed")
     return
 }
@@ -104,7 +111,7 @@ if (reply !== "" && subject === agentSubject(sessionID)) {
 }
 ```
 
-This makes a fresh-but-deaf holder and a stopped holder observable as `receipt_timeout` (fresh but deaf) and `delivery_failed` (stopped), while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy.
+This makes a fresh-but-deaf holder observable as `receipt_timeout` and a holder whose registration has gone stale as `delivery_failed`, while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy.
 
 ## Related
 
