@@ -220,7 +220,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: dispatch-e2e-test-results
+          name: dispatch-e2e-test-results-${{ github.run_attempt }}
           path: packages/dispatch/e2e/test-results
 
   claude-envoy-bridge:
