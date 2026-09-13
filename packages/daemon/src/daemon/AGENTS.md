@@ -215,8 +215,9 @@ startup too, with Node's error naming that target path. Every pane it launches �
 sub-architects, phase workers, controller — carries that file as the last part of its system
 prompt, after the role prompt and (for roots and workers) the addressing fragment. All of a pane's
 parts travel in exactly **one** `--append-system-prompt` argument, joined by blank lines: OMP's flag
-is last-wins (its argv handler assigns `appendSystemPrompt`, on both the production pin
-`18.1.18-sami.20260912-203541` and the repository pin `18.1.18-sami.20260912-104423`), so several
+is last-wins (its argv handler assigns `appendSystemPrompt`: `packages/coding-agent/src/cli/flag-tables.ts`
+on the repository pin `18.1.21-sami.20260914-060332`, as on the earlier pins `18.1.18-sami.20260912-203541`
+and `18.1.18-sami.20260912-104423`), so several
 flags would hand the model only the final fragment — with `instructions` configured, a pane would
 get neither its role prompt nor its addressing line nor the root's gate policy, which previously let a
 real architect skip an armed gate. The value is one double-quoted shell word:
