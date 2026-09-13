@@ -152,12 +152,12 @@ a {
   display: none;
 }
 
-/* The editor selection bar is fixed by the Proof library. When a compact review sheet opens,
-   moving the bar above the sheet's touch target leaves its close control usable while preserving
-   selection actions for a reader who continues reviewing the document. */
+/* On touch screens the library docks the selection bar at the viewport bottom.
+   An expanded margin sheet owns that space, so it suppresses the bar. */
 @media (max-width: 1279px) {
-  body:has([data-testid="margin-sheet"][data-expanded="true"]) .dispatch-action-bar {
-    transform: translateY(-10rem);
+  body:has([data-testid="margin-sheet"][data-expanded="true"])
+    .dispatch-action-bar[data-touch="true"] {
+    display: none;
   }
 }
 
