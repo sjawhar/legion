@@ -159,10 +159,9 @@ chmod +x "$fake_omp"
   printf 'expected an explicit executable LEGION_OMP_PATH to pass through unchanged\n' >&2
   exit 1
 }
-# A valid LEGION_OMP_PATH must win before HOME is ever read: under set -u an unset HOME would
-# otherwise surface as `HOME: unbound variable` even though no default path is needed.
-[[ "$(env -u HOME -u XDG_STATE_HOME LEGION_OMP_PATH="$fake_omp" bash -uc 'source "$1"; resolve_omp_path' _ "$source_file" 2>&1)" == "$fake_omp" ]] || {
-  printf 'expected a valid LEGION_OMP_PATH to resolve without reading HOME\n' >&2
+# A valid override is the whole answer: mise is never consulted for it.
+[[ "$(LEGION_OMP_PATH="$fake_omp" PATH="${fake_bin}/no-mise-here:/usr/bin:/bin" resolve_omp_path 2>&1)" == "$fake_omp" ]] || {
+  printf 'expected a valid LEGION_OMP_PATH to resolve without consulting mise\n' >&2
   exit 1
 }
 if (LEGION_OMP_PATH="${fake_bin}/missing-omp" resolve_omp_path) >"$assertion_file" 2>&1; then
@@ -195,39 +194,57 @@ fi
   cat "$assertion_file" >&2
   exit 1
 }
-fake_state_home="${fake_bin}/xdg-state"
-default_omp="${fake_state_home}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
-mkdir -p "$(dirname "$default_omp")"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$default_omp"
-chmod +x "$default_omp"
-[[ "$(unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path)" == "$default_omp" ]] || {
-  printf 'expected an unset LEGION_OMP_PATH to resolve to the production rpc-fix build under XDG_STATE_HOME\n' >&2
-  exit 1
-}
-# The default build present but not executable: the -x guard on the default path, not -f.
-chmod -x "$default_omp"
-if (unset LEGION_OMP_PATH; XDG_STATE_HOME="$fake_state_home" resolve_omp_path) >"$assertion_file" 2>&1; then
-  printf 'expected preflight to fail when the default build is not executable\n' >&2
+# Unset LEGION_OMP_PATH: the daemon resolves the pin with `mise where` and never installs, so
+# preflight runs the same lookup. A fake mise on the harness PATH stands in for the operator's
+# mise: `where` prints an install directory (whose bin/omp preflight then checks), or fails.
+fake_mise_install="${fake_bin}/mise-install"
+mkdir -p "${fake_mise_install}/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' >"${fake_mise_install}/bin/omp"
+chmod +x "${fake_mise_install}/bin/omp"
+cat >"${fake_bin}/mise" <<EOF
+#!/usr/bin/env bash
+[[ "\$1" == "where" ]] || { printf 'fake mise: unexpected subcommand %s\n' "\$1" >&2; exit 2; }
+printf '%s\n' "\$2" >>"\${SMOKE_MISE_WHERE_LOG:-/dev/null}"
+if [[ -n "\${SMOKE_MISE_WHERE_FAILS:-}" ]]; then
+  printf 'mise ERROR %s not installed\n' "\$2" >&2
   exit 1
 fi
-[[ "$(<"$assertion_file")" == *"${default_omp} is missing or not executable"* ]] || {
+printf '%s\n' "${fake_mise_install}"
+EOF
+chmod +x "${fake_bin}/mise"
+mise_where_log="${fake_bin}/mise-where.log"
+: >"$mise_where_log"
+[[ "$(unset LEGION_OMP_PATH; SMOKE_MISE_WHERE_LOG="$mise_where_log" resolve_omp_path)" == "${fake_mise_install}/bin/omp" ]] || {
+  printf 'expected an unset LEGION_OMP_PATH to resolve to bin/omp under the directory mise where prints\n' >&2
+  exit 1
+}
+# The pin asked of mise is the one up.sh read from omp-pin.ts, not a literal of this harness.
+[[ -n "$omp_pin" && "$(<"$mise_where_log")" == "$omp_pin" ]] || {
+  printf 'expected mise where to be asked for the omp-pin.ts pin (%s); asked for:\n%s\n' "$omp_pin" "$(<"$mise_where_log")" >&2
+  exit 1
+}
+# The install directory exists but its bin/omp is not executable: preflight still refuses.
+chmod -x "${fake_mise_install}/bin/omp"
+if (unset LEGION_OMP_PATH; resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when the installed pin has no executable bin/omp\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"${fake_mise_install}/bin/omp is missing or not executable"* && "$(<"$assertion_file")" == *"run: mise install ${omp_pin}"* ]] || {
   cat "$assertion_file" >&2
   exit 1
 }
-chmod +x "$default_omp"
-if (unset LEGION_OMP_PATH; XDG_STATE_HOME="${fake_bin}/no-state" resolve_omp_path) >"$assertion_file" 2>&1; then
-  printf 'expected preflight to fail when neither LEGION_OMP_PATH nor the default build exists\n' >&2
+chmod +x "${fake_mise_install}/bin/omp"
+# `mise where` fails (pin not installed): preflight stops naming the exact mise install command.
+if (unset LEGION_OMP_PATH; SMOKE_MISE_WHERE_FAILS=1 resolve_omp_path) >"$assertion_file" 2>&1; then
+  printf 'expected preflight to fail when the pin is not installed\n' >&2
   exit 1
 fi
-[[ "$(<"$assertion_file")" == *"${fake_bin}/no-state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix is missing or not executable"* &&
-  "$(<"$assertion_file")" == *'export LEGION_OMP_PATH='* &&
-  "$(<"$assertion_file")" == *"bump omp_pin and remove resolve_omp_path's default branch"* &&
-  "$(<"$assertion_file")" == *'fix/rpc-extension-send-rejection'* ]] || {
+[[ "$(<"$assertion_file")" == *"OMP pin ${omp_pin} is not installed"* && "$(<"$assertion_file")" == *"run: mise install ${omp_pin}"* ]] || {
   cat "$assertion_file" >&2
   exit 1
 }
 
-printf 'PASS: resolves the OMP build from LEGION_OMP_PATH or the production rpc-fix default, failing closed otherwise\n'
+printf 'PASS: an explicit LEGION_OMP_PATH override passes through; otherwise the omp-pin.ts pin must be installed under mise, and preflight names mise install when it is not\n'
 
 printf '200' >"$response_file"
 if ! (assert_webhook_round_trip) >"$assertion_file" 2>&1; then
@@ -464,6 +481,26 @@ preflight_status="$(set +e; (set -e; LEGION_OMP_PATH="${fake_bin}/missing-omp" m
 }
 printf 'PASS: a missing OMP build stops up.sh in preflight before any process starts\n'
 
+# No override: preflight verifies the omp-pin.ts pin through the fake mise on PATH, prints the
+# install's bin/omp, and exports nothing -- the daemon resolves the same pin itself.
+: >"$order_log"
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
+if ! (unset LEGION_OMP_PATH; main) >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed on the installed pin; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$main_output_file")" == *'RIG READY'* && "$(<"$main_output_file")" == *"GREEN OMP build: ${fake_mise_install}/bin/omp"* ]] || {
+  printf 'expected RIG READY and the pin install bin/omp as the selected OMP build; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+if grep -l '^LEGION_OMP_PATH=' "${SMOKE_DIR}"/start_process.*.argv 2>/dev/null; then
+  printf 'expected no start_process env block to carry LEGION_OMP_PATH when the operator set none\n' >&2
+  exit 1
+fi
+printf 'PASS: with no override, preflight verifies the omp-pin.ts pin under mise and exports no LEGION_OMP_PATH to the daemon\n'
+
+: >"$order_log"
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
 export LEGION_OMP_PATH="$fake_omp"
 
 if ! main >"$main_output_file" 2>&1; then
@@ -493,7 +530,7 @@ grep -Fxq "omp_invocation: mise x ${omp_pin} -- omp" "${SMOKE_DIR}/legion.yaml" 
   printf 'expected legion.yaml to keep the mise x <pin> -- omp invocation\n' >&2
   exit 1
 }
-printf 'PASS: exports the resolved OMP build as LEGION_OMP_PATH for the daemon only and keeps omp_invocation pinned\n'
+printf 'PASS: an explicit LEGION_OMP_PATH override reaches the daemon env block only, and omp_invocation keeps the mise x <pin> -- omp form\n'
 
 daemon_ready_line="$(grep -n '^wait_for_json:Legion daemon$' "$order_log" | head -1 | cut -d: -f1)"
 bridge_ready_line="$(grep -n '^wait_for_envoy_bridge$' "$order_log" | head -1 | cut -d: -f1)"

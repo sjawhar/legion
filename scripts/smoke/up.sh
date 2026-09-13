@@ -72,16 +72,15 @@ resolve_webhook_mode() {
   esac
 }
 
-# Picks the OMP build every daemon-spawned pane runs (controller, roots, workers). `omp_pin`
-# predates oh-my-pi fix/rpc-extension-send-rejection (0e57a6ca), so a headless controller on the
-# pinned release crashes on its first prompt with "send did not invoke the agent"; until a tagged
-# release carries that fix the rig runs the same rpc-fix build production does, or whatever
-# LEGION_OMP_PATH names. Never falls back to the pin: that reproduces the crash later, in the
-# controller, instead of stopping here in preflight. This function never consults `omp_pin`, so
-# bumping it alone changes nothing here: retiring the default means bumping `omp_pin` AND deleting
-# the default branch below, leaving only the LEGION_OMP_PATH override.
+# Verifies the OMP build every daemon-spawned pane runs (controller, roots, workers) before
+# anything starts. LEGION_OMP_PATH is an explicit operator override for a non-release build:
+# an absolute executable path, exported to the daemon only (main's start_process env block).
+# Otherwise the daemon resolves `omp_pin` itself with `mise where` and never installs, so the
+# same lookup runs here in preflight: a pin that is not installed stops the rig now, naming the
+# exact `mise install` command, instead of after NATS and the listener are already up. There is
+# no default path and no guess.
 resolve_omp_path() {
-  local default_path
+  local install_dir
 
   if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
     # The daemon's environment.ts rejects a relative LEGION_OMP_PATH at startup; stop here instead.
@@ -90,11 +89,11 @@ resolve_omp_path() {
     printf '%s\n' "$LEGION_OMP_PATH"
     return
   fi
-  # Evaluated only here so a valid LEGION_OMP_PATH never trips `set -u` on an unset HOME.
-  default_path="${XDG_STATE_HOME:-$HOME/.local/state}/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix"
-  [[ -f "$default_path" && -x "$default_path" ]] ||
-    fail "no OMP build with the rpc-extension fix: ${default_path} is missing or not executable; export LEGION_OMP_PATH=<absolute executable omp>, or, once a tagged oh-my-pi release carries fix/rpc-extension-send-rejection (0e57a6ca), bump omp_pin and remove resolve_omp_path's default branch so only the LEGION_OMP_PATH override remains"
-  printf '%s\n' "$default_path"
+  install_dir="$(mise where "$omp_pin" 2>/dev/null)" ||
+    fail "OMP pin ${omp_pin} is not installed (mise where failed); run: mise install ${omp_pin}"
+  [[ -f "${install_dir}/bin/omp" && -x "${install_dir}/bin/omp" ]] ||
+    fail "OMP pin ${omp_pin} is installed at ${install_dir} but ${install_dir}/bin/omp is missing or not executable; run: mise install ${omp_pin}"
+  printf '%s\n' "${install_dir}/bin/omp"
 }
 
 normalize_github_webhook_secret() {
@@ -592,14 +591,20 @@ main() {
     printf 'SKIPPED-BLOCKED webhook ingress: %s\n' "$(webhook_ingress_block_reason)"
   fi
 
-  # LEGION_OMP_PATH is exported for the daemon only: legion.yaml keeps `omp_invocation: mise x
-  # <pin> -- omp` (the loader requires that form) and environment.ts honours LEGION_OMP_PATH over
-  # it, so every pane the daemon spawns runs the build resolve_omp_path selected.
+  # legion.yaml keeps `omp_invocation: mise x <pin> -- omp` (the loader requires that form) and the
+  # daemon resolves the pin itself with `mise where`. Only an explicit operator override travels to
+  # the daemon, as LEGION_OMP_PATH in this env block and nowhere else; environment.ts honours it
+  # over the pin, so every pane the daemon spawns runs the build resolve_omp_path verified.
+  local -a daemon_env=(
+    ENVOY_NATS_URL="$nats_url"
+    ENVOY_URL="http://127.0.0.1:${listener_port}"
+    LEGION_DAEMON_PORT="$daemon_port"
+  )
+  if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
+    daemon_env+=(LEGION_OMP_PATH="$omp_path")
+  fi
   start_process daemon env \
-    ENVOY_NATS_URL="$nats_url" \
-    ENVOY_URL="http://127.0.0.1:${listener_port}" \
-    LEGION_DAEMON_PORT="$daemon_port" \
-    LEGION_OMP_PATH="$omp_path" \
+    "${daemon_env[@]}" \
     DISPATCH_URL="$DISPATCH_URL" \
     DISPATCH_TOKEN="$DISPATCH_TOKEN" \
     LEGION_STATE_DIR="${smoke_dir}/daemon" \
