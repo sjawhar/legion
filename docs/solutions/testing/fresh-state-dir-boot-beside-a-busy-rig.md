@@ -16,6 +16,11 @@ module: packages/daemon, scripts/smoke
 related_issues:
   - "LEGION-21"
   - "sjawhar/legion#962"
+  - "LEGION-52"
+  - "sjawhar/legion#1018"
+  - "LEGION-41"
+  - "sjawhar/legion#1010"
+  - "LEGION-94"
 ---
 
 # A Real Daemon Boot on a Fresh State Dir Beside a Busy Smoke Rig
@@ -102,6 +107,45 @@ The architect ruled it rides in the PR as its own commit — because a PR hold w
 fails, post-fix boot creates `legions.json` under the fresh directory), unit test, and PR-body
 line. Neither silent option is acceptable: fixing it unannounced widens a reviewed diff; leaving
 it "for later" is the deferral the rules forbid.
+
+## The same contention one day later, and what has changed since (LEGION-52)
+
+LEGION-52's rounds (2026-09-13) hit every part of this note's setup, on a box with three live
+rigs, and some of the workarounds are now history:
+
+- **The fixed container name is fixed on `main`.** The implementer's first scratch boots ran
+  beside another session's rig holding `legion-smoke-nats` and ports 14222/19020/19370; the tester
+  ran `up.sh` as a copy with `nats_name=legion-smoke-nats-legion52` and its own
+  `SMOKE_DIR`/`NATS_PORT`/`ENVOY_PORT`/`LEGION_DAEMON_PORT`. LEGION-41 (#1010) since derives the
+  NATS container name and the listener machine id per rig, so a fresh checkout no longer needs
+  the copy — but a branch forked before #1010 still does; check `scripts/smoke/up.sh` on your
+  branch, not on `main`.
+- **The shared Dispatch project makes the unfiltered `envoy`-mode bridge unsafe with siblings.**
+  Every rig's root issue lives in `LEGSMOKE`, and the checked-in bridge relays *every* LEGSMOKE
+  issue event into the rig's NATS. With three rigs live, LEGSMOKE-141/138/139/119 were `todo`
+  roots of other rigs; the daemon would have admitted them as its own. The tester instead ran a
+  per-root issue relay (LEGION-61's `scripts/smoke/issue-relay.ts`, replaying one root and its
+  children from `SMOKE_ROOT_ISSUE`) as a supervised process after `RIG READY`, with
+  `SMOKE_WEBHOOK_MODE=none` recorded — which also means `checkpoints.sh 1–5` print
+  `SKIPPED-BLOCKED` (the script gates on the recorded mode) and the equivalent facts are read
+  from `state.json` and Dispatch by hand. Until the bridge filters by root, a rig beside other
+  rigs needs a relay of that shape; write down which one you used and why in the PR's E2E line.
+- **A docs-only branch still runs the whole package workflow, flakes included.** A doc-comment
+  change under `packages/contracts/src` matches `packages/contracts/**` in
+  `.github/workflows/envoy-and-contracts.yaml`'s `dispatch` filter, so every push of the branch —
+  including the `.legion/`-only handoff pushes each phase makes — ran the seven-minute Dispatch
+  dashboard browser suite, which failed three consecutive attempts on one run with a different
+  fixed-timeout scenario each time (`doc.e2e.ts:105`, `inbox.e2e.ts:236`, `approval.e2e.ts:24`;
+  filed as LEGION-94 with the four failure records). The rule held: re-run the failed job
+  (`legion gh -- run rerun <run-id> --failed`), never push a commit to refresh CI. Budget the
+  round for it: five implementer rounds on a docs PR meant five full workflow runs.
+- **The scratch runner scrubs the pane's own identity.** A worker pane carries `LEGION_*`,
+  `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`, `OMP_PROFILE`, and (on this box) a stale `LEGION_OMP_PATH`
+  pointing at an rpcfix build whose natives fail to load under a fresh profile. The runner that
+  worked `env -u`'d all of them and set `OMP_PROFILE`/`PI_PROFILE` to the scratch profile, so the
+  daemon resolved the pinned OMP through `mise where` and read the scratch profile's plugin
+  manifest — the one the negative and positive controls vary. Without the scrub, the first attempt
+  refused on `dispatch_project is required` and the second probed the wrong OMP.
 
 ## Related
 

@@ -8,12 +8,18 @@ tags:
   - strict-schema
   - deploy-ordering
   - version-gate
+  - pane-contract
+  - LEGION_GRANT_FILE
 date: 2026-09-12
 status: active
 module: packages/daemon, packages/contracts, packages/pi-envoy
 related_issues:
   - "LEGION-21"
   - "sjawhar/legion#962"
+  - "LEGION-20"
+  - "sjawhar/legion#975"
+  - "LEGION-52"
+  - "sjawhar/legion#1018"
 ---
 
 # A Daemon/Plugin Contract Version Gate
@@ -134,9 +140,90 @@ automatic could have caught it: `daemon-api-version.test.ts` pins the two number
   `docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`,
   where the same thing happened to the state version on this branch.
 
+## The number covers the pane contract too (LEGION-52)
+
+LEGION-52 (#1018) widened what the contract number means without changing the gate: it also
+covers the **pane contract** — every environment variable the daemon sets on a pane that the
+plugin reads or writes. Sixteen of them at the time of writing; the authoritative list is the doc
+comment on `LEGION_DAEMON_API_VERSION` in `packages/contracts/src/legion-daemon-api.ts`, and the
+same list is repeated verbatim in `packages/daemon/src/daemon/AGENTS.md`, `packages/pi-envoy/AGENTS.md`,
+and the pi-envoy `CHANGELOG.md` (`boot-probes.ts` points at the constant instead of repeating it).
+The rule that follows: a change to one of those variables bumps the constant and the manifest in
+the same commit, exactly like an HTTP shape change. Three things the round taught:
+
+- **A list that says "every" is verified with two greps, one per side, and the count is
+  checked 1:1.** The first draft was "verified against `processes.ts`" and still missed
+  `LEGION_CONTROL_SUBJECT` (root panes only, `processes.ts` root env), `ENVOY_NATS_URL`, and
+  `ENVOY_URL` (every pane; read not by the plugin's own files but by `@legion/envoy-client`'s
+  `defaults.ts`). The reviewer found them by reading the three pane environments in
+  `processes.ts` (root, worker, controller) plus `credentialProcessEnvironment` and the runtime's
+  `<NAME>_FILE` pointer, then every `process.env.*`/`env.*` read in `extensions/legion.ts`,
+  `src/legion/classify.ts` (`requiredSecret` maps `X` to `X_FILE`), and `envoy-client`. Daemon-set
+  but plugin-unread variables (`LEGION_PROJECT`, `LEGION_ROOT_WORKSPACE`, `PATH`, the emptied
+  `GH_*`) are deliberately not on the list. Do both greps; a list recalled from a prior commit is
+  not a verification.
+- **Four verbatim copies stay equal only under a script.** The corrective round checked the
+  four texts with a small Python loop extracting the backticked names between `LEGION_GRANT_FILE`
+  and `LEGION_CONTROLLER` and comparing them to a canonical array; anything less and one copy
+  drifts. The next author who adds a variable either updates all four in one commit and re-runs
+  that check, or converts the three prose copies to point at the constant the way
+  `boot-probes.ts` already does.
+- **What a real skew prints, per direction — and the daemon gates only one direction.** A plugin
+  from before the credential file on a daemon that names it never writes the file; every worker
+  then fails at its first `legion gh`/`jj git push`, after the work is done, with `grantFrom`'s
+  (`packages/daemon/src/cli/index.ts`) `LEGION_GRANT_FILE names <path>, which could not be read:
+  ENOENT …: the pi-envoy extension in this pane did not write it — the installed plugin predates
+  LEGION-54; install the released plugin in the profile and relaunch the pane`. That is the
+  direction the contract gate catches at boot. The reverse — a plugin newer than the daemon, on a
+  pane launched without `LEGION_GRANT_FILE` — is not something a daemon can gate (it cannot check
+  a plugin newer than itself); the plugin's `tool_call` hook blocks every bash command itself with
+  `LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin;
+  restart the daemon on the matching release`. `LEGION_GRANT is missing` is neither: the 2026-09-13
+  incident that produced it was daemon and plugin at the **same** contract with 1.17.1's `env`
+  delivery dropped by the secretsd bash shim (`../legion/grant-delivery-plugin-omp-contract.md`) —
+  the first draft of the daemon `AGENTS.md` cited it as the skew the gate now catches, and a
+  contract number would have been equal on both sides. Before quoting an error string as a
+  contract's failure mode, read it out of the source (and the test that pins it) rather than out
+  of the incident you remember.
+
+## When another branch takes the number first: a contract integer is a skew detector, not a changelog
+
+LEGION-52 first landed as a code change: bump 1 → 2 on both sides so that a daemon on `main`
+would refuse every pre-credential-file release. Fifty-two minutes after its first handoff,
+LEGION-20 (#975) merged its own 1 → 2 for the `stateGate`/`GatesRegister` shapes, and release
+1.23.0 — the first to declare 2 — also carried the credential file. The tester caught it on the
+first round by booting the branch daemon against a copy of the installed 1.23.0 tree (it passed
+the gate, which the PR body said it would refuse). On rebase the branch's constant and manifest
+edits collapsed to nothing and the pull request became docs-only.
+
+The decision that followed is the transferable part, because it is the *opposite* of the state
+schema rule in `../legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`. A
+migration version keys a step; two branches cannot share one, so the second renumbers. A contract
+integer only has to *differ from the number every incompatible release declares*; two branches
+that each need "a bump since the last release" are both satisfied by one bump. Bumping to 3 would
+have refused 1.23.0 — a release that already has the behaviour — for no change in behaviour and
+forced the operator to reinstall. So: when `main` has moved the counter under you, check whether
+the release that first declares the new number already carries what your branch needs; if it
+does, do not renumber, drop your bump, and land the rule and the history instead. Check at every
+phase boundary (`jj file show -r main@origin packages/contracts/src/legion-daemon-api.ts | grep
+LEGION_DAEMON_API_VERSION`, and `npm view @sjawhar/pi-legion-envoy@<v> legion` for the release),
+not only when GitHub says CONFLICTING — this collision produced a clean rebase.
+
+A rebase that turns a fix PR into a docs PR also changes the review discipline: the "Thermo"
+line is skipped (docs-only), the E2E proof becomes "the branch daemon boots against a copy of the
+installed release and passes the gate", and every historical statement in the diff is checked
+against `main` rather than against the branch's own earlier commits — the first history text this
+PR wrote said contract 2 *was* the credential file, which was true on the branch and false on
+`main`.
+
 ## Related
 
 - `packages/daemon/src/daemon/AGENTS.md`, "OMP invocation and daemon tools": the gate, the bump
   rule, and the load probe, as the current contract.
 - `docs/solutions/daemon/handoff-schema-migration-patterns.md`: versioning of persisted state,
   the other place a shape change needs a number.
+- `../legion/release-bound-claims-are-verified-against-tags-and-tarballs.md`: how the "first
+  release that writes the credential file" bound in this contract's history was checked (and
+  first got wrong).
+- `../legion/grant-delivery-plugin-omp-contract.md`: the 2026-09-13 incident that is *not* a
+  contract skew.

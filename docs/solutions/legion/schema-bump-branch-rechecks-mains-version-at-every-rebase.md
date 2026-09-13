@@ -129,6 +129,22 @@ rather than a rebase, so the approved SHAs stay real —
 `long-lived-branch-mechanics-jj-new-and-merge-not-rebase.md` §2 — and say what the merge
 renumbered in the PR body's "Merge with main" note.
 
+## Not every serial renumbers: the daemon/plugin contract integer (LEGION-52)
+
+The bullet above says `LEGION_DAEMON_API_VERSION` is "the same kind of serial" — for the *check*,
+yes; for the *remedy*, no. LEGION-52 (#1018) bumped it 1 → 2 so a daemon would refuse every
+plugin release without the credential file; LEGION-20 (#975) took 2 on `main` 52 minutes after
+the first handoff, and release 1.23.0 — the first to declare 2 — already wrote the credential
+file. A migration version keys a step, so two branches cannot share one and the second renumbers;
+a contract integer only has to differ from what every incompatible release declares, so one bump
+satisfied both branches. Bumping to 3 would have refused 1.23.0 for no behaviour change. The
+branch dropped its bump on rebase (a clean one — GitHub never said CONFLICTING) and landed the
+widened rule and the history as a docs PR. The check is the same `file show -r main@origin …
+| grep` at every phase boundary; the decision differs: for a contract integer, look at what the
+release declaring the new number already contains before renumbering. Detail in
+`../daemon/plugin-daemon-api-contract-version-gate.md`, "When another branch takes the number
+first".
+
 ## Related
 
 - `conflict-only-rebases-keep-the-diff-auditable.md` — the added/removed-line identity check for
