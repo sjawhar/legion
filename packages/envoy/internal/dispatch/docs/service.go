@@ -72,9 +72,12 @@ type Service struct {
 	rooms             sync.Map
 	nextConnection    atomic.Uint64
 	stopping          atomic.Bool
-	settleWG          sync.WaitGroup
-	suppressMu        sync.Mutex
-	suppressed        map[string][]*suppressSlot
+	// afterSettleWarm runs after settleRoom has warmed the live document and before it
+	// reads it. Nil outside tests; tests use it to evict the room in that window.
+	afterSettleWarm func(room string)
+	settleWG        sync.WaitGroup
+	suppressMu      sync.Mutex
+	suppressed      map[string][]*suppressSlot
 }
 
 type roomState struct {
@@ -453,6 +456,18 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			return
 		}
 	}
+	// Hold the live document for the whole settlement. An Evict that lands after the
+	// generation check above (its timer Stop misses a timer that already fired) closes the
+	// room and bumps the generation; reading the room again later would return nil and every
+	// later step would dereference it. A nil here means exactly that eviction: the next access
+	// reloads the durable document and schedules its own settlement, so this one just ends.
+	if s.afterSettleWarm != nil {
+		s.afterSettleWarm(room)
+	}
+	doc := s.srv.GetDoc(room)
+	if doc == nil {
+		return
+	}
 
 	ctx := context.Background()
 	tx, err := s.store.Pool.Begin(ctx)
@@ -474,7 +489,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	tree, err := treeOf(s.srv.GetDoc(room))
+	tree, err := treeOf(doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
