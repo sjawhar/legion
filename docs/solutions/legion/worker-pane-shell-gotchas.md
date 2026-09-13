@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, and a `(divergent)` change left behind by `jj squash` on the shared operation log"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours (fixed in LEGION-74, proved in LEGION-43), a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, and a `(divergent)` change left behind by `jj squash` on the shared operation log"
 category: legion
 tags:
   - legion
@@ -46,6 +46,10 @@ related_issues:
   - "sjawhar/legion#1011"
   - "LEGION-53"
   - "sjawhar/legion#1028"
+  - "LEGION-74"
+  - "sjawhar/legion#1007"
+  - "LEGION-43"
+  - "sjawhar/legion#1022"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -318,17 +322,30 @@ What still works, and what to do:
   `/home/ubuntu/legion-ws-RunDaemon` and comes back on its own; it runs `main`, not your branch, so its restarts are
   never evidence about your change.
 
-## 10. `$OMP_SESSION_ID` in your pane is not your session
+## 10. `$OMP_SESSION_ID` in your pane is not your session (fixed in LEGION-74, proved in LEGION-43)
 
 The Legion PR footer (`<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->`) needs this session's live id.
-`printenv OMP_SESSION_ID` in a worker pane returned an id inherited from whatever OMP session started the daemon: the
-daemon's private tmux server is forked from the daemon's own environment and every pane inherits it. Until LEGION-74
-the daemon's strip list covered secrets only; the allow-list (`PANE_ENV_ALLOW_LIST` in
-`packages/daemon/src/daemon/environment.ts`) now excludes `OMP_SESSION_ID` and the boot-time server scrub removes it
-from an older server, but a pane opened before that first restart keeps what it inherited. On LEGION-13 the pane's
-value decoded (UUIDv7, first 48 bits are epoch millis) to
-2026-09-09T01:51Z, three days before the worker was spawned; the implementer's two review-thread replies went out with
-that id in their footer and had to be edited.
+Before LEGION-74, `printenv OMP_SESSION_ID` in a worker pane returned an id inherited from whatever OMP session started
+the daemon: the daemon's private tmux server is forked from the daemon's own environment and hands it to every pane,
+and the daemon's strip list covered secrets only. On LEGION-13 the pane's value decoded (UUIDv7, first 48 bits are
+epoch millis) to 2026-09-09T01:51Z, three days before the worker was spawned; the implementer's two review-thread
+replies went out with that id in their footer and had to be edited.
+
+LEGION-74 (sjawhar/legion#1007) fixed the daemon: panes, probes, and daemon children inherit only an allow-list of
+variables (`PANE_ENV_ALLOW_LIST` in `packages/daemon/src/daemon/environment.ts`), which never names `OMP_SESSION_ID`,
+and at every boot the daemon scrubs both of the surviving tmux server's environment tables — the global one it was
+forked with and the session one an operator attach fills — of every name the allow-list does not carry, before any
+pane may open (`TmuxRuntime.scrubServerEnvironment`; the daemon guide's private-server section has the detail).
+LEGION-43 (sjawhar/legion#1022) proved it on the smoke rig: checkpoint 13 refuses `OMP_SESSION_ID` in any recorded
+pane's environment and in the server's global table, and the acceptance-6 cycle — a pre-LEGION-74 daemon up, only the
+daemon killed, the fixed daemon started against the surviving server — shows `show-environment -g` losing the id and
+every pane launched afterwards reading `0`.
+
+The OMP build a pane runs mints its own session id in memory and never exports it to the commands its bash tool runs
+(the LEGION-43 pull request carries the evidence from the pinned fork tag). So in a pane launched after a fixed daemon
+booted, `$OMP_SESSION_ID` is **unset** — never another session's id. A value there means the pane itself predates that
+boot: it was launched by an older daemon and survived the restart; `tmux -L legion-<project> show-environment -g` no
+longer lists the variable, and a fresh pane will not carry it.
 
 Get the id from `envoy_whoami` (`session_id`) or from `legion state` → `roles["legion-<project>-<KEY>-<role>"].sessionId`;
 the two agree, and both are the id the daemon registered at `/worker/started`. Never from the environment, and — per
