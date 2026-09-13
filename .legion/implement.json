@@ -1,0 +1,46 @@
+{
+  "filesChanged": [
+    "scripts/smoke/checkpoints.sh",
+    "scripts/smoke/checkpoints.test.sh",
+    "scripts/smoke/README.md"
+  ],
+  "pullRequest": {
+    "number": 1055,
+    "url": "https://github.com/sjawhar/legion/pull/1055",
+    "head": "e5bda9922269072b5a2407d6f7a24b4595bc8178",
+    "testsRun": 34772406556
+  },
+  "verification": {
+    "harness": "bash scripts/smoke/checkpoints.test.sh: 43 PASS lines, exit 0 (14 new cases: checkpoint 5 pass/fail on identity, email, trailer, head branch, empty and 100-commit lists, missing SMOKE_IMPLEMENTER_LOGIN; smoke_pr one match used, two named; checkpoint 7 implementer- and reviewer-committed deletion pass, human-committed fails, approval-before-deletion fails, 31-review page-2 approval found, no-deletion fails)",
+    "acceptance1Grep": "grep -rnF -e 'implementer+ses_' -e 'Legion-Session' -e 'legion/issue-' scripts/smoke prints nothing",
+    "shellcheck": "shellcheck -x scripts/smoke/checkpoints.sh scripts/smoke/checkpoints.test.sh clean",
+    "liveProof": {
+      "pullRequest": 1035,
+      "issue": "LEGION-75",
+      "command": "SMOKE_DIR=/tmp/legion-85-smoke SMOKE_WEBHOOK_MODE=envoy SMOKE_BRANCH_PROTECTION=1 SMOKE_REPO=sjawhar/legion SMOKE_PROJECT=sjawhar/legion SMOKE_PR=1035 SMOKE_RETRO_COMMIT=ac002051a9a95dd48e297580e5363a3a5a4c6c0e SMOKE_IMPLEMENTER_LOGIN='legion-implementer[bot]' SMOKE_REVIEWER_LOGIN='legion-reviewer[bot]' bash scripts/smoke/checkpoints.sh <5|7>",
+      "checkpoint5": "CHECKPOINT 5 OK: PR #1035 on legion/LEGION-75: 12 commits carry App bot identity (legion-implementer[bot] committed 9) and an Omp-Session trailer",
+      "checkpoint7": "CHECKPOINT 7 OK: .legion deletion 7097b62bd627251d9fd605993343b0a579990e6d committed by legion-implementer[bot], legion-reviewer[bot] approved after it, retro ac002051a9a95dd48e297580e5363a3a5a4c6c0e is durable, and the final diff has no .legion path",
+      "negativeControls": [
+        "checkpoint 5 on #1011 -> CHECKPOINT 5 FAILED: PR #1011 commit cbab905dca9b9c3273441058cebf9555ec3196f9: commit.message carries no Omp-Session: <uuid> trailer line (LEGION-115)",
+        "checkpoint 7 on #1035 with SMOKE_RETRO_COMMIT=98c5ebf2 -> CHECKPOINT 7 FAILED: 98c5ebf2... has no docs/solutions change",
+        "SMOKE_PR unset against sjawhar/legion -> CHECKPOINT 5 FAILED: SMOKE_PR is unset and sjawhar/legion has 53 legion/<KEY> pull requests: ...; set SMOKE_PR to the one this exercise opened"
+      ],
+      "note": "SMOKE_PROJECT is a top-level require_env of checkpoints.sh and must be set beside the spec's variables. gh must resolve to the daemon's worker-bin/gh shim (legion gh --); this pane predates worker-bin on PATH, so PATH was prefixed with <state_dir>/worker-bin for the run."
+    }
+  },
+  "trickyParts": [
+    "Author vs committer in a shared jj workspace: the author is inherited from whoever created the working-copy commit, the committer is the role that made the commit. Checkpoint 5 accepts either App on both fields and requires at least one implementer-committed commit; checkpoint 7 accepts either App on the deletion commit (spec v4 after the survey found 3/18 reviewer-committed deletions).",
+    "The two App logins contain regex-special brackets, so email matching splits on the first '+' and compares the remainder to '<login>@users.noreply.github.com' instead of interpolating the login into a regex.",
+    "gh api pages reviews 30 per request; #1007 (32 reviews) and #1024 have their approvals past page 1, so the old checkpoint 7 read falsely failed. pr_reviews uses gh api --paginate | jq -s 'add // []' and is shared with checkpoint 8. The fake gh proves the flag is passed (GH_LOG grep) and serves --paginate as concatenated pages (31-review case).",
+    "Acceptance 1's grep forbids the retired strings anywhere in scripts/smoke, so the negative fixtures use shapes that do not spell them (a trailer key mid-line; a feature/<KEY> head)."
+  ],
+  "deviations": [
+    "Checkpoint 8's reviews read now goes through pr_reviews and its dead 'set SMOKE_PR' guard is gone (smoke_pr always returns a number or fails) -- the one change outside checkpoints 5 and 7, approved by the architect and recorded in spec v4.",
+    "Live proof ran against #1035 (LEGION-75), not the spec's example #1011 (LEGION-40), because #1011 has two commits without the Omp-Session trailer (cbab905d, 4e0742b5) -- reported to the architect, filed as LEGION-115; checkpoint 5 stays strict as the architect ruled."
+  ],
+  "openQuestions": [],
+  "surveyed": "18 finished legion/<KEY> PRs on 2026-09-13: App bot identity on every author/committer in all 18; trailer on every commit in 15 (#1011 x2, #1030 x1, #1007 x3 unattributed); .legion deletion implementer-committed in 15, reviewer-committed in 3 (#1018, #1023, #1029).",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T17:44:48.684Z"
+}
