@@ -27,7 +27,7 @@
  * Subcommands:
  *   bun run.ts prompt  [--short]
  *   bun run.ts drive   --rig <dir> --port <n> --omp <binary> [--profile l12rig] [--short]
- *                      [--label <name>] [--no-secrets]
+ *                      [--label <name>] [--no-secrets] [--prompt-file <path>]
  *   bun run.ts tui     (same options; interactive `omp` under `tmux -L l12rig`)
  *   bun run.ts analyze --rig <dir> --transcript <file> --standin-log <file> --omp-log <file>
  *                      [--label <name>]
