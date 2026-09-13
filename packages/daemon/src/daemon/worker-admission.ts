@@ -7,7 +7,12 @@ import {
   type PendingAssignment,
   type WorkerRoleClaim,
 } from "./legion-state";
-import { PromptNotStarted, StopFailed, TreeClosingError } from "./process-errors";
+import {
+  PromptNotStarted,
+  type PromptNotStartedReason,
+  StopFailed,
+  TreeClosingError,
+} from "./process-errors";
 import type { WorkerRpcClient } from "./worker-rpc";
 
 /** Bounds a claim's `launchFailures` (cold-launch attempts) or `promptFailures` (queued
@@ -390,25 +395,29 @@ export class WorkerAdmission {
    * prompt (`resumeOrQueueExisting`) and `/worker/ready`'s delivery — do with a task the worker
    * acknowledged but never started: leave it on the claim (`enqueueIdleWorker`, locator untouched
    * — the pane is alive), place the role on the promotion queue so the next drain retries it
-   * under the same cap-aware decision every promotion goes through, count the failure
-   * (`recordPromptFailure`, retiring the worker at the threshold so the queued task relaunches
-   * cold with `--resume`), persist, and tell the architect `worker-queued` — it hears
-   * `worker-started` when the retry or a late start commits. Deliberately no drain trigger: an
-   * immediate re-prompt of the same client would widen the window in which a merely slow worker
-   * receives the task twice; the retry is the next drain (an idle/dead event, the 60 s sweep) or
-   * the late start. The caller holds `token`'s role lock. */
+   * under the same cap-aware decision every promotion goes through, count the failure for a
+   * `"no-turn"` reason (`recordPromptFailure`, retiring the worker at the threshold so the queued
+   * task relaunches cold with `--resume`), persist, and tell the architect `worker-queued` — it
+   * hears `worker-started` when the retry or a late start commits. A `"socket-closed"` reason is
+   * counted against nothing: that is a death, and the socket-close handler (`markWorkerDead`)
+   * alone retires the worker — the task is only kept and queued here so that retirement's own
+   * drain finds it. Deliberately no drain trigger: an immediate re-prompt of the same client would
+   * widen the window in which a merely slow worker receives the task twice; the retry is the next
+   * drain (an idle/dead event, the 60 s sweep) or the late start. The caller holds `token`'s role
+   * lock. */
   async queueUnstartedPrompt(
     token: string,
     treeKey: IssueKey,
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim,
-    pending: PendingAssignment
+    pending: PendingAssignment,
+    reason: PromptNotStartedReason
   ): Promise<void> {
     await this.withAdmissionLock(async () => {
       this.enqueueIdleWorker(token, claim, pending);
     });
-    await this.recordPromptFailure(token);
+    if (reason === "no-turn") await this.recordPromptFailure(token);
     await this.deps.persist();
     this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
   }
@@ -465,7 +474,7 @@ export class WorkerAdmission {
       if (!(error instanceof PromptNotStarted)) throw error;
       notStarted = true;
       console.error(`[legion] ${token}: ${error.message}; queued for promotion`);
-      await this.queueUnstartedPrompt(token, treeKey, issue, role, claim, pending);
+      await this.queueUnstartedPrompt(token, treeKey, issue, role, claim, pending, error.reason);
       return { kind: "queued" };
     } finally {
       this.release(token);
@@ -682,9 +691,14 @@ export class WorkerAdmission {
         // prompt was refused or acknowledged without a turn. Stop draining instead of looping
         // straight back into the same broken client (deliberately no `promoteWorkerQueue()` call
         // here — that would just re-peek this same head and retry the same broken prompt again,
-        // widening the window in which a merely slow worker receives the task twice).
+        // widening the window in which a merely slow worker receives the task twice). A socket
+        // that closed during the wait is counted against nothing: that is the worker's death,
+        // and the socket-close handler (`markWorkerDead`) alone retires it — counting it here
+        // too would, at the threshold, race that retirement with a second one.
         this.launching.delete(token);
-        await this.recordPromptFailure(token);
+        if (!(error instanceof PromptNotStarted) || error.reason === "no-turn") {
+          await this.recordPromptFailure(token);
+        }
         await this.deps.persist();
         return false;
       }

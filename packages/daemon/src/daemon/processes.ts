@@ -29,7 +29,12 @@ import {
   type TreeState,
   type WorkerRoleClaim,
 } from "./legion-state";
-import { PromptNotStarted, StopFailed, TreeClosingError } from "./process-errors";
+import {
+  PromptNotStarted,
+  type PromptNotStartedReason,
+  StopFailed,
+  TreeClosingError,
+} from "./process-errors";
 import {
   awaitShutdown,
   boundedWait,
@@ -855,12 +860,21 @@ export class ProcessManager {
     const receipt = await client.prompt(pending.task);
     const outcome = await this.awaitTurnStart(client, receipt);
     if (!outcome.started) {
-      receipt.turnStarted
-        .then(() => this.commitLateStart(token, issue, role, sessionId, pending))
-        .catch((error) => {
-          console.error(`[legion] late-start commit for ${token} failed:`, error);
-        });
-      throw new PromptNotStarted(token, this.workerRpcTimeoutMs, outcome.observation);
+      // A closed socket's receipt can never settle — nothing more arrives on that connection —
+      // so the late-start continuation is left only for a socket that is still up.
+      if (outcome.reason === "no-turn") {
+        receipt.turnStarted
+          .then(() => this.commitLateStart(token, issue, role, sessionId, pending))
+          .catch((error) => {
+            console.error(`[legion] late-start commit for ${token} failed:`, error);
+          });
+      }
+      throw new PromptNotStarted(
+        token,
+        this.workerRpcTimeoutMs,
+        outcome.reason,
+        outcome.observation
+      );
     }
     await this.commitPromptDelivery(token, issue, role, sessionId, pending, afterPrompt);
   }
@@ -868,44 +882,78 @@ export class ProcessManager {
   /** Waits, bounded by `workerRpcTimeoutMs` on the injectable clock, for the turn `receipt`
    * describes to start. A start already observed (an `agent_start` that preceded the
    * acknowledgement) is answered without building a timer. Otherwise the receipt is raced against
-   * the socket closing (`socket closed`: the socket is gone, `onWorkerClientClosed` owns what
-   * happens next — no `get_state` is attempted) and the bound. At the bound the receipt is
-   * abandoned FIRST — a silent restore of the client's pre-prompt `runState`, so the answer that
-   * follows is never an idle *transition* on a worker that was idle before the prompt (a
-   * transition-fired restore would re-enter promotion synchronously mid-failure) — THEN the
-   * spec's second signal is asked for once: a `get_state` answer reporting a stream in progress
-   * is a started turn (the client settles the receipt from it); `isStreaming: false` or a failed
-   * call is not. That `get_state` is also, for `/worker/ready` (whose fresh client sits at
+   * the socket closing and the bound. A closed socket is answered as `socket-closed` — a dead
+   * worker, not a slow one; no `get_state` is attempted, and `onWorkerClientClosed` owns what
+   * happens to the claim. At the bound the receipt is abandoned FIRST — a silent restore of the
+   * client's pre-prompt `runState`, so the answer that follows is never an idle *transition* on a
+   * worker that was idle before the prompt (a transition-fired restore would re-enter promotion
+   * synchronously mid-failure; on the ready path the fresh client sits at `"unknown"`, so there
+   * the confirming answer IS its first idle transition and fires `promoteWorkerQueue` — safe
+   * because that drain peeks the queue head before `queueUnstartedPrompt` has enqueued this
+   * token) — THEN the spec's second signal is asked for once: a `get_state` answer reporting a
+   * stream in progress is a started turn (the client settles the receipt from it). The receipt
+   * is consulted again however that call ended — an `agent_start` that lands while `get_state`
+   * is in flight or failing is a started turn — and a socket that closed meanwhile is
+   * `socket-closed` whatever `get_state` said; only then is `isStreaming: false` or a failed call
+   * `no-turn`. That `get_state` is also, for `/worker/ready` (whose fresh client sits at
    * `"unknown"` — `clientFor` never asks `get_state`), the one thing that seeds the client idle so
    * the queued retry is promotable at all. */
   private async awaitTurnStart(
     client: WorkerRpcClient,
     receipt: PromptReceipt
-  ): Promise<{ started: true } | { started: false; observation: string }> {
+  ): Promise<
+    { started: true } | { started: false; reason: PromptNotStartedReason; observation: string }
+  > {
     if (receipt.hasStarted) return { started: true };
+    // The close handler settles `client.closed` synchronously when the socket goes; this flag is
+    // set one microtask later, well before a `get_state` rejection that same close caused can
+    // propagate back here (it crosses the request's own `finally`/`then` chain first).
+    let socketClosed = false;
+    const closed = client.closed.then(
+      () => {
+        socketClosed = true;
+      },
+      () => {
+        socketClosed = true;
+      }
+    );
     const { timedOut, cancel } = boundedWait(this.workerRpcTimeoutMs, this.deps.sleep);
     const outcome = await Promise.race([
       receipt.turnStarted.then(() => "started" as const),
-      client.closed.then(
-        () => "closed" as const,
-        () => "closed" as const
-      ),
+      closed.then(() => "closed" as const),
       timedOut.then(() => "timeout" as const),
     ]);
     cancel();
     if (outcome === "started") return { started: true };
-    if (outcome === "closed") return { started: false, observation: "socket closed" };
+    if (outcome === "closed") {
+      return { started: false, reason: "socket-closed", observation: "socket closed" };
+    }
     receipt.abandonWait();
+    let stateFailure: string | undefined;
     try {
       await client.getState(this.workerRpcTimeoutMs);
     } catch (error) {
-      return {
-        started: false,
-        observation: `get_state failed: ${error instanceof Error ? error.message : String(error)}`,
-      };
+      stateFailure = error instanceof Error ? error.message : String(error);
     }
     if (receipt.hasStarted) return { started: true };
-    return { started: false, observation: "get_state: isStreaming=false" };
+    if (socketClosed) {
+      return {
+        started: false,
+        reason: "socket-closed",
+        observation:
+          stateFailure === undefined
+            ? "socket closed"
+            : `socket closed (get_state failed: ${stateFailure})`,
+      };
+    }
+    if (stateFailure !== undefined) {
+      return {
+        started: false,
+        reason: "no-turn",
+        observation: `get_state failed: ${stateFailure}`,
+      };
+    }
+    return { started: false, reason: "no-turn", observation: "get_state: isStreaming=false" };
   }
 
   /** The one commit block a delivered prompt runs — shared by the in-bound path and the late
@@ -1120,6 +1168,26 @@ export class ProcessManager {
           );
         } catch (error) {
           if (!(error instanceof PromptNotStarted) || root === undefined) throw error;
+          if (error.reason === "socket-closed") {
+            // The boot did NOT succeed: the shim's socket closed before any turn began, so this
+            // is a worker that died right after saying "got it", not one that swallowed the
+            // prompt. Nothing is confirmed, cancelled, or queued here. The claim is left exactly
+            // as the socket-close handler expects an unconfirmed boot — locator recorded,
+            // `pendingAssignment` on the claim, watchdog armed — and that handler
+            // (`onWorkerClientClosed` -> `retireUnconfirmedBoot`, queued behind this critical
+            // section) is the one place that retires it: locator cleared and its slot released,
+            // `launchFailures` counted, the task re-queued and relaunched cold with `--resume`
+            // (`worker-started` to the architect), or `worker-died` at the threshold. Confirming
+            // here instead would route that handler to `retireUnconfirmedBoot`'s confirmed-claim
+            // early return and strand a dead locator holding a `worker_cap` slot with the task
+            // still on it. Should the handler's one reconnect succeed instead (the shim was only
+            // restarting), the claim stays an unconfirmed boot under its watchdog — the same
+            // shape a prompt the close made *reject* has always left.
+            console.error(
+              `[legion] ${token}: ${error.message}; boot left unconfirmed for the socket-close handler to retire`
+            );
+            return;
+          }
           // The boot DID succeed -- registered, ready, socket answering -- so it is confirmed
           // exactly as a delivered prompt would have confirmed it. Left unconfirmed, the claim
           // would be stranded: `promoteQueuedWorker` stops on `readyConfirmedAt === undefined`
@@ -1136,7 +1204,15 @@ export class ProcessManager {
           console.error(
             `[legion] ${token}: ${error.message}; boot confirmed, task queued for promotion`
           );
-          await this.workerAdmission.queueUnstartedPrompt(token, root, issue, role, claim, pending);
+          await this.workerAdmission.queueUnstartedPrompt(
+            token,
+            root,
+            issue,
+            role,
+            claim,
+            pending,
+            error.reason
+          );
           return;
         }
       } else {

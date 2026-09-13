@@ -26,18 +26,27 @@ export class StopFailed extends Error {
   }
 }
 
+/** Why an acknowledged prompt's turn was not observed to start. `"no-turn"`: the socket is still
+ * up and the worker simply started nothing within the bound — a swallowed prompt, which every
+ * prompt site counts and retries exactly like a refusal. `"socket-closed"`: the shim's socket
+ * closed before any turn began — a dead worker (or shim), not a slow one; nothing about the
+ * prompt is counted, and the socket-close handler (`onWorkerClientClosed`) owns what happens to
+ * the claim, so no prompt site touches it twice. */
+export type PromptNotStartedReason = "no-turn" | "socket-closed";
+
 /** Thrown by `ProcessManager.promptExistingWorker` when a live worker's shim acknowledged a
  * prompt but no turn was observed to start (`agent_start`, or `get_state` reporting a stream)
  * within `boundMs`. The acknowledgement alone is not delivery: OMP answers it before the turn
- * begins and can accept a message that starts none. Every prompt site treats this exactly like a
- * refused prompt — counted, retried on the next drain, retired at the threshold — so it lives in
- * this shared module for the same reason `TreeClosingError`/`StopFailed` do (both `processes.ts`
- * and `worker-admission.ts` import it). `observation` names the second signal's answer:
- * `get_state: isStreaming=false`, `get_state failed: <message>`, or `socket closed`. */
+ * begins and can accept a message that starts none. `reason` says which of the two outcomes this
+ * is (see `PromptNotStartedReason`); it lives in this shared module for the same reason
+ * `TreeClosingError`/`StopFailed` do (both `processes.ts` and `worker-admission.ts` import it).
+ * `observation` names what was seen: `get_state: isStreaming=false`, `get_state failed:
+ * <message>`, or `socket closed` (optionally with the `get_state` failure the close caused). */
 export class PromptNotStarted extends Error {
   constructor(
     readonly token: string,
     readonly boundMs: number,
+    readonly reason: PromptNotStartedReason,
     observation: string
   ) {
     super(
