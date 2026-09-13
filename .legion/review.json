@@ -1,0 +1,61 @@
+{
+  "pr": 1021,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1021",
+  "reviewedHead": "9562b3a4cca61ac3650f2aad2a7d4b758664f94b",
+  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
+  "specVersion": 3,
+  "reviewId": 5190473685,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1021#pullrequestreview-5190473685",
+  "reviewState": "COMMENT",
+  "roundVerdict": "clean — no correctness finding; COMMENT because the head carries .legion/. The .legion/ deletion may proceed; I approve the head whose tree differs from 9562b3a4 by that deletion alone (it carries the tester's c16e6183 and this review.json commit, both removed by the deletion).",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/api/github.ts",
+      "line": 35,
+      "description": "GitHubService.gh(command, appRole = \"implement\") is dead code (no callers in packages/daemon) and the last implicit default to the implement App. Not a defect of this PR. Thread PRRT_kwDORFy7ds6h4RFG (comment 3999439110, anchored at line 12 because line 35 is outside the diff), answered Accepted: not a defect (3999439701); deletion named in the PR body's Fast-follow line.",
+      "thread": "PRRT_kwDORFy7ds6h4RFG"
+    }
+  ],
+  "acceptance": {
+    "1": "PASS. APP_ROLE_FOR_LEGION_ROLE: Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (github-apps.ts:13-35); api/github.ts's appRoleForLegionRole, MODE_TO_ROLE/modeToRole, catchup WORKER_MODE deleted, no reference survives in packages/, skills/, docs/. github-apps.test.ts iterates LEGION_ROLES against the six-role table and pins tester → review.",
+    "2": "PASS. credentials.ts:51,64, workers.ts:225, catchup.ts:304 call appRoleForLegionRole; every role reaching it is validated (legionRole() in api/http.ts:98, parseRoleToken/isLegionRole). api.test.ts tester case pins legion-review[bot] / minted-review-acme on /worker/started, /gh-token, /git-credential.",
+    "3": "PASS, verified on GitHub under my own grant: check runs 103708837443 (legion-smoke#36) and 103711307756 (#37) app.slug=legion-reviewer app.id=3202653 conclusion=success; comments 5652671849 and 5652769689 by legion-reviewer[bot].",
+    "4": "PASS, verified on GitHub: legion-smoke#36/#37 PR author, head commits 66553606/bb066842 (author and committer) and comments 5652671771/5652769634 all legion-implementer[bot]; both runs' negative controls recorded (tester push refused, tester POST /git/refs 403, implementer POST /check-runs 403).",
+    "5": "PASS. Daemon AGENTS.md GitHub Apps states the six-role mapping once naming the exhaustive Record; cli/index.ts:167-168 points at it.",
+    "6": "PASS. SKILL.md completion gate 426-447, skills/AGENTS.md, roles/planner.md, roles/tester.md say only the implementer and merger push; tester's c16e6183 is local above origin's 9562b3a4 with pushAttempted false."
+  },
+  "verifiedOnGitHub": {
+    "ci": "9562b3a4: Tests run 34752717333 (lint, typecheck, test, pr-title success); Legion Envoy and Contracts run 34752717364 (pi-envoy success, siblings path-skipped); MERGEABLE / BLOCKED (branch protection)",
+    "threadsBeforeReview": 0,
+    "threadsOpened": 1,
+    "commitIdentity": "all branch commits author legion-reviewer[bot] (271566912), committer legion-implementer[bot] (271566630); Omp-Session trailers correct (implementer 01a09a3c… on code + implement handoffs, tester 01a09a55… on test handoffs). Hazard 1 of docs/solutions/legion/shared-main-repo-hazards (LEGION-44), not this PR; acceptable for merge."
+  },
+  "thermo": {
+    "head": "9562b3a4cca61ac3650f2aad2a7d4b758664f94b",
+    "deepReview": "findings-non-blocking: no unvalidated role path into the mapping; worst case getToken throws role_not_configured, never a silent implement; catch-up App unchanged; explicit \"implement\" literals at index.ts:124/315/398 and credentials.ts:13 are daemon-own reads, correct.",
+    "codeQuality": "findings-non-blocking: exhaustive Record in github-apps.ts is the right boundary; wrapper justified; imports per convention; wording duplication across SKILL.md/role prompts noted (Fast-follow)."
+  },
+  "fastFollowAdded": [
+    "delete dead GitHubService.gh() and its runner constructor arg (api/github.ts:35)",
+    "docs/solutions/legion/app-identity-acceptance-needs-an-in-role-probe.md:26-34 states the pre-LEGION-42 mapping as present and points at api/github.ts",
+    "docs/solutions/daemon/external-red-and-phase-ownership.md:22,89-90 and docs/solutions/legion/worker-pane-shell-gotchas.md:206 give the push refusal as the REST text / 403; git says remote: Repository not found.",
+    "skills/legion-worker/SKILL.md:91-92 names the merger as pushing; completion gate 426-452 restates who pushes three times; 450-452 orphan wrap",
+    "daemon AGENTS.md:80-84 'every credential a pane redeems' should name the provisioning-credential exception (credentials.ts:13)"
+  ],
+  "observationsForArchitect": [
+    "index.ts:315 boot probe proves only the implement App while github_apps.review is optional (config.ts:556-558); after this PR a review-less legion.yaml passes legion start and the root architect's first legion gh fails 500 role_not_configured: review. Spec Errors row scopes one-App deployments as unchanged; one line beside the probe would refuse at boot. This deployment has both Apps.",
+    "[INFERENCE] on a private repository a review-App token cannot jj git fetch either; pre-existing for the reviewer, now also tester/planner/architect. Public here; unobserved.",
+    "This PR makes LEGION-44's identity flip the common case: four roles now provision the reviewer identity into the shared clone's repo config.",
+    "Pane env carries OMP_SESSION_ID=01a083dd-4579-7000-8202-9898ac713e12, not this session (01a09a62-c6e6-7000-91b1-35b232c9e093, per daemon state and the JJ_CONFIG attribution overlay); a worker that reads $OMP_SESSION_ID for its Legion footer would misattribute. Likely inherited from the daemon's own environment."
+  ],
+  "prBodyEdits": "Thermo line filled (verdict, review id); Fast-follow line extended with reviewer additions (a)-(e)",
+  "pushAttempted": false,
+  "nextStep": "architect sends the implementer to push the .legion/ deletion (carrying c16e6183 and this review.json commit, running legion threads resolve first so PRRT_kwDORFy7ds6h4RFG closes on my Accepted: reply); I then approve that head by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T11:06:27.442Z"
+}
