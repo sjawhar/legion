@@ -11,6 +11,7 @@ import {
   ProcessStopFailed,
   type Runtime,
   type SpawnSpec,
+  sameProcess,
   shellPath,
   type TmuxLocator,
 } from "./runtime";
@@ -296,9 +297,11 @@ export class TmuxRuntime implements Runtime {
    * Every tmux locator recorded for `issue`, in the order a spawn should prefer their windows:
    * what state records (the tree's root locator first, then each worker claim's -- see
    * `deps.issueLocators`), then the pane this runtime opened `issue`'s newest window with
-   * (`issueWindows`, kept until that pane fails to verify). `ProcessManager` stores the very
-   * locator object `spawn` returned, so once that launch's claim is persisted `issueLocators`
-   * already yields it -- deduplicated by reference, so the pane is verified once.
+   * (`issueWindows`, kept until that pane fails to verify). Once that launch's claim is
+   * persisted, state records the same pane too -- as a copy, not the object `spawn` returned:
+   * `/process/started` and `/worker/started` replace the stored locator with a spread of it --
+   * so the entry is deduplicated by process identity (`sameProcess`: pane id, pid, start
+   * ticks), and each pane is verified once.
    */
   private recordedLocators(issue: IssueKey): TmuxLocator[] {
     const found: TmuxLocator[] = [];
@@ -306,7 +309,7 @@ export class TmuxRuntime implements Runtime {
       if (locator.runtime === "tmux") found.push(locator);
     }
     const opened = this.issueWindows.get(issue);
-    if (opened && !found.includes(opened)) found.push(opened);
+    if (opened && !found.some((locator) => sameProcess(locator, opened))) found.push(opened);
     return found;
   }
 
@@ -324,8 +327,11 @@ export class TmuxRuntime implements Runtime {
    * workers land in the fresh window, and a dead window's stale locators clear through their own
    * probes. A pane that could not be verified either way (`listing-failed`) is simply not reused:
    * opening a fresh window has no destructive consequence, unlike the verdicts `probe` and `stop`
-   * refuse to fake. A stale `issueWindows` entry that no longer verifies is dropped here so
-   * nothing hands it out again.
+   * refuse to fake. Any `issueWindows` entry that did not verify is dropped here -- including one
+   * that merely could not be listed -- so nothing hands it out again; when a tmux hiccup, not a
+   * dead pane, was the reason, the cost is one extra window for the issue (the pane itself is
+   * untouched and its persisted locator still names its window), which is the cheap side of that
+   * trade.
    */
   private async probedWindowId(issue: IssueKey): Promise<string | undefined> {
     for (const locator of this.recordedLocators(issue)) {
@@ -522,7 +528,7 @@ export class TmuxRuntime implements Runtime {
       return;
     }
     if (verdict.reason === "listing-failed") {
-      throw new ProcessStopFailed(locator, verdict.detail);
+      throw new ProcessStopFailed(locator, describePaneVerdict(tmuxLocator, verdict));
     }
     if (verdict.reason !== "pane-gone") {
       console.error(

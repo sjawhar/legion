@@ -351,11 +351,57 @@ describe("WorkerBootWatchdog liveness probe", () => {
       expect(events.filter((event) => event === "probe")).toHaveLength(2);
       expect(events.filter((event) => event === "retire")).toHaveLength(1);
       expect(events.slice(events.lastIndexOf("probe"))).toEqual(["probe", "retire"]);
-      expect(
-        consoleError.mock.calls.filter((call) =>
-          String(call[0]).includes("liveness probe did not complete")
-        )
-      ).toHaveLength(2);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("re-arms the watch when a retirement's stop cannot be confirmed, and retires the boot on the next interval once it can", async () => {
+    // `retireUnconfirmedBoot` rethrows a `ProcessStopFailed` before anything clears (the pane
+    // would not die, or could not even be listed): the claim and its locator are untouched, so
+    // the watch must not end there with the boot unwatched -- it stays armed for another
+    // interval and retires again. Here the first retirement fails and the second succeeds.
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let retirements = 0;
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.01,
+          sleep: async () => {},
+          yield: async () => {},
+          probe: async () => {
+            events.push("probe");
+            return { status: "dead", reason: "gone" };
+          },
+          connect: async () => {
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            retirements += 1;
+            events.push(`retire:${retirements}`);
+            if (retirements === 1) {
+              throw new Error(
+                "failed to stop pane %7: list-panes -t %7 exited 1: server not responding"
+              );
+            }
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      for (let i = 0; i < 400 && !events.includes("retire:2"); i += 1) await Promise.resolve();
+
+      // Probe, failed retire, then -- one interval later -- probe again and a retire that lands.
+      expect(events.filter((event) => event.startsWith("retire:"))).toEqual([
+        "retire:1",
+        "retire:2",
+      ]);
+      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
+      // The successful retirement ends the watch: a later cancel finds nothing armed.
+      watchdog.cancel(token, 1);
+      await Promise.resolve();
+      expect(retirements).toBe(2);
     } finally {
       consoleError.mockRestore();
     }

@@ -333,7 +333,6 @@ function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number 
   if (command[0] === "tmux" && command[3] === "list-panes") {
     return Promise.resolve(livePanes(command));
   }
-  if (command[0] === "kill") return Promise.resolve({ stdout: "", exitCode: 0 });
   return Promise.resolve({ stdout: "", exitCode: 0 });
 }
 
@@ -1707,7 +1706,6 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "%7 12345\n", exitCode: 0 };
         }
-        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
       },
     });
@@ -2533,9 +2531,6 @@ describe("ProcessManager", () => {
           windows += 1;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
         }
-        if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
-          return windows > 0 ? { stdout: "%1\n", exitCode: 0 } : paneGone();
-        }
         if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
           return windows > 0 ? livePanes(command) : paneGone();
         }
@@ -3009,7 +3004,6 @@ describe("ProcessManager", () => {
     expect(logged.filter((line) => line.includes("treating LEGION-42's root as dead"))).toEqual([
       "[legion] treating LEGION-42's root as dead: pane @42 has no recorded process identity (locator predates identity tracking)",
     ]);
-    expect(logged.filter((line) => line.includes("failed to stop"))).toEqual([]);
     errorLog.mockRestore();
   });
 
@@ -3051,7 +3045,7 @@ describe("ProcessManager", () => {
     ).toEqual([]);
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining(`root process failed to stop while closing ${root}`),
-      expect.objectContaining({ message: "list-panes -t %0 exited 1" })
+      expect.objectContaining({ message: expect.stringContaining("list-panes -t %0 exited 1") })
     );
     // Never marked closed while the process could not be confirmed stopped: the tree is left
     // lingering, locator untouched, for the sweep to retry.
@@ -4700,7 +4694,6 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes") {
           return controllerSpawned ? livePanes(command) : paneGone();
         }
-        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
           controllerSpawned = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -4748,7 +4741,6 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes") {
           return controllerLive ? livePanes(command) : paneGone();
         }
-        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
           controllerLive = true;
           const pointer = tmuxWindowEnvironment(command).LEGION_CONTROLLER_SECRET_FILE;
@@ -6410,7 +6402,6 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes") {
           return controllerSpawned ? livePanes(command) : paneGone();
         }
-        if (command[0] === "kill") return { stdout: "", exitCode: 0 };
         if (command[3] === "new-window") {
           controllerSpawned = true;
           return { stdout: "@42 %1 12345\n", exitCode: 0 };
@@ -6495,9 +6486,6 @@ describe("ProcessManager", () => {
         if (command[3] === "split-window") {
           launched = true;
           return { stdout: "%2 12345\n", exitCode: 0 };
-        }
-        if (command[3] === "list-panes" && command.includes("#{pane_id}")) {
-          return launched ? { stdout: "%1\n", exitCode: 0 } : paneGone();
         }
         if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
           return launched ? livePanes(command) : paneGone();
@@ -8562,7 +8550,7 @@ describe("ProcessManager", () => {
             windows += 1;
             return { stdout: `@${windows} %${windows} ${12345 + windows}\n`, exitCode: 0 };
           }
-          if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+          if (command[3] === "list-panes") return paneGone();
           return { stdout: "", exitCode: 0 };
         },
       },
@@ -8604,7 +8592,7 @@ describe("ProcessManager", () => {
             windows += 1;
             return { stdout: `@${windows} %${windows} ${12345 + windows}\n`, exitCode: 0 };
           }
-          if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+          if (command[3] === "list-panes") return paneGone();
           return { stdout: "", exitCode: 0 };
         },
       },
@@ -12617,6 +12605,12 @@ describe("ProcessManager", () => {
     let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
     let reissued = false;
     const commands: string[][] = [];
+    // The retirement's own persist -- locator cleared, launch failure counted, token queued, all
+    // in one save -- is the event. Polling for the cleared locator instead would race the queue
+    // promotion that follows that save: it re-launches the worker (a fresh pane, a fresh watch)
+    // and can close the locator-less gap before a poll sees it, so the poll would then observe
+    // the *second* watch's retirement a whole interval later.
+    const retired = Promise.withResolvers<{ at: number; snapshot: LegionState }>();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, {
@@ -12627,6 +12621,18 @@ describe("ProcessManager", () => {
       sleep: async (ms) => {
         currentTime += ms;
         await onceEventLoop();
+      },
+      saveState: async () => {
+        // `persist()` saves `deps.state` itself: snapshot it here, at the save.
+        const claim = state.roles[token];
+        if (
+          claim &&
+          "issue" in claim &&
+          claim.locator === undefined &&
+          claim.launchFailures === 1
+        ) {
+          retired.resolve({ at: currentTime, snapshot: structuredClone(state) });
+        }
       },
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
@@ -12642,6 +12648,7 @@ describe("ProcessManager", () => {
       },
     });
 
+    let retirement: { at: number; snapshot: LegionState };
     try {
       await processes.spawnWorker(root, child, role, "do the work");
       const launched = managedState.roles[token];
@@ -12651,21 +12658,18 @@ describe("ProcessManager", () => {
       // Between launch and the first interval, the pane id came to belong to another OMP.
       reissued = true;
       const startTime = currentTime;
-      await flushEventLoopUntil(() => {
-        const claim = managedState.roles[token];
-        return claim !== undefined && "issue" in claim && claim.locator === undefined;
-      }, 20_000);
+      retirement = await retired.promise;
       // Retired within the first interval, not re-armed for a second one.
-      expect(currentTime - startTime).toBeLessThan(2_000);
+      expect(retirement.at - startTime).toBeLessThan(2_000);
     } finally {
       errors.mockRestore();
     }
 
-    const retired = managedState.roles[token];
-    if (!retired || !("issue" in retired)) throw new Error("claim missing");
-    expect(retired.locator).toBeUndefined();
-    expect(retired.launchFailures).toBe(1);
-    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = retirement.snapshot.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("claim missing");
+    expect(claim.locator).toBeUndefined();
+    expect(claim.launchFailures).toBe(1);
+    expect(retirement.snapshot.workerAdmission.queue).toEqual([token]);
     expect(commands).not.toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
 

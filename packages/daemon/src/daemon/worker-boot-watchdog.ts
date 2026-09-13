@@ -263,6 +263,32 @@ export class WorkerBootWatchdog {
       }
     };
 
+    /** `retireUnconfirmedBoot`, with a stop it could not confirm -- a `ProcessStopFailed`: the
+     * pane would not die, or could not even be listed -- treated exactly like a probe that
+     * could not complete: `retireWorkerLocator` rethrows before anything clears, so the claim
+     * and its locator are untouched, and the watch stays armed for one more interval and
+     * retires again then, rather than ending here with the boot unwatched until a restart.
+     * Returns whether the watch is finished. The armed entry is removed before the call, never
+     * after: the retirement's own cancel of this token's watch must not flip `cancelled` on the
+     * very watch that is retiring it; a failed retirement puts the entry back under the same
+     * generation so a later `/worker/ready` or tree close still cancels it. */
+    const retire = async (): Promise<boolean> => {
+      if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
+      try {
+        await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
+        return true;
+      } catch (error) {
+        console.error(
+          `[legion] worker ${issue}/${role} could not be retired; re-arming the watch rather than leaving its boot unwatched:`,
+          error
+        );
+        if (!cancelled && !this.disposed && !this.armed.has(token)) {
+          this.armed.set(token, { generation, cancel });
+        }
+        return false;
+      }
+    };
+
     const watch = async (): Promise<void> => {
       let aliveButUnconfirmedIntervals = 0;
       while (!cancelled) {
@@ -291,23 +317,18 @@ export class WorkerBootWatchdog {
             await this.yieldToEventLoop();
             continue;
           }
-          if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
           console.error(
             `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
           );
-          await this.deps.retireUnconfirmedBoot(token, locator, generation, {
-            treeKey,
-            issue,
-            role,
-          });
-          return;
+          if (await retire()) return;
+          await this.yieldToEventLoop();
+          continue;
         }
-        if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
         console.error(
           `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
         );
-        await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
-        return;
+        if (await retire()) return;
+        await this.yieldToEventLoop();
       }
     };
 

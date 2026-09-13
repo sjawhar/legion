@@ -33,7 +33,8 @@ read correctly.
 
 ## 1. Id-matching fixtures need ids that are prefixes of one another, longer id listed first
 
-`panePid` selects a `list-panes` row with `rows.find((r) => r[0] === target)`. The first fixture used pane ids
+`lookupPane` (then named `panePid`, before it grew its `present | absent | failed` verdict) selects a `list-panes`
+row with `rows.find((r) => r[0] === target)`. The first fixture used pane ids
 `%1531 / %1533 / %1534` with targets `%1533` and `%1535`. No id is a prefix of another, so **six** wrong
 implementations passed all four cases: `r[0].startsWith(target)`, `target.startsWith(r[0])`, `r[0].includes(target)`,
 `target.includes(r[0])`, `new RegExp(target).test(r[0])`, and a line-based `line.includes(target)`. The reversed
@@ -44,8 +45,14 @@ The fix is one case whose rows contain a prefix chain with the **longer id first
 
 ```ts
 const prefixes = "%150 446716\n%1 3715931\n%15 4141285\n";
-expect(await panePid(server({ stdout: prefixes, exitCode: 0 }), "%15")).toBe(4141285);
-expect(await panePid(server({ stdout: prefixes, exitCode: 0 }), "%1")).toBe(3715931);
+expect(await lookupPane(server({ stdout: prefixes, exitCode: 0 }), "%15")).toEqual({
+  status: "present",
+  pid: 4141285,
+});
+expect(await lookupPane(server({ stdout: prefixes, exitCode: 0 }), "%1")).toEqual({
+  status: "present",
+  pid: 3715931,
+});
 ```
 
 Order matters because `find` returns the first match. With ascending order (`%1, %15, %150`) the exact row is reached
@@ -58,6 +65,10 @@ Rule: when a fixture proves exact matching of ids that can be prefixes of one an
 and put the ambiguous, longer id **before** the exact one in the underlying data.
 
 ## 2. Assert the contract, not the cadence the fixture happens to produce
+
+(The events named below are from the #945-era watchdog, whose pane check was `isOmpPane` on a pid; the watch now
+asks `Runtime.probe` -- `TmuxRuntime.verifyPaneProcess` -- and the same rule applies to its `probe`/`connect`/`retire`
+events.)
 
 The watchdog pid-probe case first asserted
 `expect(events).toEqual(["workerClient", "isOmpPane:3003090", "workerClient", "retire"])`. The leading `workerClient`

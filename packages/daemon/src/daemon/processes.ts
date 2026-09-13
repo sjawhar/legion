@@ -1967,15 +1967,18 @@ export class ProcessManager {
   /** Probes a tree's recorded locator for liveness through the runtime. A tree with no locator
    * is dead (`gone`). A process that is present but not the recorded one -- the reissued-pane
    * case the identity check exists for, or a legacy locator with no identity -- is logged here,
-   * once, with both identities (this is the decision point; the resurrection that follows hands
-   * the verdict down rather than re-deciding it) and reported dead so the ordinary path resumes
-   * the root onto a fresh, fully-recorded process. A probe the runtime could not complete (a
-   * failed `list-panes`) throws through, exactly as `probeLocator` documents. */
+   * once, with both identities, and reported dead so the ordinary path resumes the root onto a
+   * fresh, fully-recorded process. This is the decision point and the only place that logs it:
+   * the resurrection that follows (`resurrectDeadTree`) re-probes through the silent
+   * `probeLocator` -- so a root that came back alive between the two is never replaced -- and
+   * hands that fresh verdict to its stop, which decides nothing again. A probe the runtime
+   * could not complete (a failed `list-panes`) throws through, exactly as `probeLocator`
+   * documents. */
   private async probeTree(treeKey: IssueKey): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
     const tree = this.deps.state.trees[treeKey];
     const locator = tree?.locator;
     if (!locator) return { status: "dead", reason: "gone" };
-    const result = await this.probeLocator(locator, `${treeKey}`);
+    const result = await this.probeLocator(locator, treeKey);
     if (result.status === "dead" && result.reason === "not-recorded-process") {
       console.error(`[legion] treating ${treeKey}'s root as dead: ${result.detail}`);
     }
@@ -1987,8 +1990,11 @@ export class ProcessManager {
    * that can (LEGION-24) lands, the lifecycle policy for it lands here with it — until then it is
    * loud, never a default. A runtime that cannot complete the probe at all (tmux: `list-panes`
    * failed for a reason that does not prove the pane gone) throws instead of returning either
-   * verdict, and every caller's own failure handling logs and retries later -- a resync tick, a
-   * nak'd exception, a re-armed deadline -- without clearing anything. */
+   * verdict, and every caller's own failure handling logs and retries later without clearing
+   * anything: the resync `onProbe` on its next tick, a registration deadline by re-arming
+   * itself, the boot watchdog by re-arming its interval, the linger sweep on its next pass.
+   * `handleException` only logs -- the core-NATS exception lane has no redelivery -- and leaves
+   * the retry to those. */
   private async probeLocator(
     locator: Locator,
     subject: string
@@ -2093,11 +2099,32 @@ export class ProcessManager {
     await this.closeTree(treeKey);
   }
 
+  /**
+   * Recovers the role a core-NATS delivery exception names: the controller through
+   * `ensureController`, a tree's root architect by probing its process (alive: told to reclaim
+   * its role and redelivered the missed event; dead: resurrected), any other role through
+   * `resumeWorker`. The exception lane has no redelivery -- core NATS has no nak, and the event
+   * pump only records a rejected handler in memory, surfaced at shutdown -- so a liveness probe
+   * the runtime could not complete (a failed `list-panes`), or a recovery that failed past it,
+   * is logged here, naming the role token, and nothing is cleared: the retry is the resync
+   * backstop (a confirmed root), the registration deadline (an unconfirmed one), or the next
+   * controller-bound effect or exception.
+   */
   async handleException(exception: ExceptionInfo): Promise<void> {
     const parsed = parseRoleToken(this.deps.state.project, exception.roleToken);
     if (!parsed) return;
+    const logFailure = (error: unknown): void => {
+      console.error(
+        `[legion] failed to recover ${exception.roleToken} after a delivery exception; nothing was cleared, and this lane has no redelivery -- the resync backstop, the registration deadline, or the next exception retries:`,
+        error
+      );
+    };
     if ("controller" in parsed) {
-      await this.ensureController();
+      try {
+        await this.ensureController();
+      } catch (error) {
+        logFailure(error);
+      }
       return;
     }
 
@@ -2105,14 +2132,18 @@ export class ProcessManager {
     if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
 
     if (parsed.role === "architect" && parsed.issue === root) {
-      if ((await this.probe(root)) === "alive") {
-        await this.controlDirective(root, {
-          type: "reclaim-architect",
-          issue: parsed.issue,
-          redeliver: exception.original,
-        });
-      } else {
-        await this.resurrect(root);
+      try {
+        if ((await this.probe(root)) === "alive") {
+          await this.controlDirective(root, {
+            type: "reclaim-architect",
+            issue: parsed.issue,
+            redeliver: exception.original,
+          });
+        } else {
+          await this.resurrect(root);
+        }
+      } catch (error) {
+        logFailure(error);
       }
       return;
     }
@@ -3106,13 +3137,17 @@ export class ProcessManager {
   }
 
   /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. The
-   * verdict is taken once here, silently: `probe` (the caller's decision point) has already
-   * logged why the root is being treated as dead, and the verdict is handed down to
-   * `removeTreeProcess` so the stop does not decide -- or log -- the same thing again. */
+   * probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
+   * resurrection replayed after the launch hold, a root that came back between two probes) --
+   * but silently: the caller's own decision point (`probeTree`) has already logged why the root
+   * is being treated as dead, and this verdict is handed down to `removeTreeProcess` so the stop
+   * does not decide -- or log -- the same thing again. A probe that cannot complete throws
+   * through to the caller, which re-arms or retries (`escalateOrRetryUnconfirmedRoot`, the
+   * resync tick, `handleException`'s log) without touching the tree. */
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     const verdict = tree.locator
-      ? await this.probeLocator(tree.locator, `${treeKey}`)
+      ? await this.probeLocator(tree.locator, treeKey)
       : ({ status: "dead", reason: "gone" } satisfies ProbeResult);
     if (verdict.status === "alive") return;
     const resumeSessionFile = tree.locator?.ompSessionFile;

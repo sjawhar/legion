@@ -164,14 +164,6 @@ class FakeTmuxServer {
     return undefined;
   }
 
-  pids(): Set<number> {
-    const pids = new Set<number>();
-    for (const window of this.windows.values()) {
-      for (const pane of window.panes.values()) pids.add(pane.pid);
-    }
-    return pids;
-  }
-
   /** `/proc/<pid>/stat` for a live pane's process: field 22 is that pane's `startTicks`. Rejects
    * (ENOENT) for a pid no pane runs, exactly like the real file once the process is gone. */
   async procStat(pid: number): Promise<string> {
@@ -210,9 +202,6 @@ class FakeTmuxServer {
     command: string[]
   ): Promise<{ stdout: string; stderr?: string; exitCode: number }> => {
     this.commands.push(command);
-    if (command[0] === "kill") {
-      return { stdout: "", exitCode: this.pids().has(Number(command[2])) ? 0 : 1 };
-    }
     if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
     const verb = command[3];
     const target = command[command.indexOf("-t") + 1];
@@ -306,8 +295,10 @@ class FakeTmuxServer {
 interface TmuxHarness extends Harness {
   server: FakeTmuxServer;
   stateDir: string;
-  /** Every locator `spawn` returned, in order — what `issueLocators` hands the runtime. */
+  /** Every locator `spawn` returned, in order — what `issueLocators` hands the runtime. A test
+   * that swaps one for a copy (as `/process/started` does) re-keys it with `registerLocator`. */
   locators: Locator[];
+  registerLocator: (locator: Locator, issue: IssueKey) => void;
   socketPaths: string[];
   /** The `timeoutMs` each dial was given. */
   timeouts: Array<number | undefined>;
@@ -391,6 +382,9 @@ async function tmuxHarness(
     server,
     stateDir,
     locators,
+    registerLocator: (locator, issue) => {
+      issueOf.set(locator, issue);
+    },
     socketPaths,
     timeouts,
     cmdlineReads,
@@ -496,7 +490,7 @@ describe("TmuxRuntime", () => {
   const tmuxArgv = (...rest: string[]): string[] => ["tmux", "-L", "legion-omp", ...rest];
   /** The one tmux round trip `verifyPaneProcess` makes for a pane that verifies: the watched
    * pane's own pid from its window listing. Existence and identity come from the `/proc` reads
-   * that follow, never from a signal probe. */
+   * that follow. */
   const verifyArgv = (paneId: string): string[][] => [
     tmuxArgv("list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}"),
   ];
@@ -632,6 +626,32 @@ describe("TmuxRuntime", () => {
     expect(worker.runtime === "tmux" && worker.tmuxWindowId).toBe("@43");
     expect(harness.server.commands.filter((c) => c[3] === "split-window")).toHaveLength(0);
     expect(root.tmuxWindowId).toBe("@42");
+  });
+
+  it("verifies a recorded pane once even when state holds a copy of the launched locator, not the object spawn returned", async () => {
+    const harness = await tmuxHarness();
+    const root = await harness.runtime.spawn("root", harness.makeSpec("architect"));
+    if (root.runtime !== "tmux" || !root.tmuxPaneId) throw new Error("tmux locator");
+    // `/process/started` and `/worker/started` replace the stored locator with a spread copy:
+    // same pane, same identity, a different object. Make state look exactly like that.
+    const index = harness.locators.indexOf(root);
+    expect(index).toBeGreaterThanOrEqual(0);
+    const copy: Locator = { ...root };
+    harness.locators.splice(index, 1, copy);
+    // (The harness keys issues by locator object; re-key the copy so `issueLocators` yields it.)
+    const issue = harness.makeSpec("architect").issue;
+    if (!issue) throw new Error("spec without issue");
+    harness.registerLocator(copy, issue);
+    // The pane no longer runs the recorded process, so every recorded window fails to verify --
+    // the path that walks the whole list. The copy and the in-memory window entry name the same
+    // pane, so it is listed once, not twice.
+    harness.server.reissuePane(root.tmuxPaneId);
+    harness.server.commands.length = 0;
+    const worker = await harness.runtime.spawn("worker", harness.makeSpec("implementer"));
+    expect(worker.runtime === "tmux" && worker.tmuxWindowId).toBe("@43");
+    expect(
+      harness.server.commands.filter((c) => c[3] === "list-panes" && c[5] === root.tmuxPaneId)
+    ).toHaveLength(1);
   });
 
   it("a concurrent second spawn on an issue splits into the window the first one is opening", async () => {
@@ -872,6 +892,33 @@ describe("TmuxRuntime", () => {
     });
   });
 
+  it("probe propagates an EACCES from the /proc cmdline read, and reads an ENOENT there as the process no longer being OMP", async () => {
+    // The OMP check runs after a successful stat read, so the process existed a moment ago: a
+    // cmdline that has vanished since (ENOENT) means it exited in between -- not OMP any more.
+    // Any other read error is the host's fault, never evidence about the pane, and propagates.
+    let fault: (NodeJS.ErrnoException & { code: string }) | undefined;
+    const harness = await tmuxHarness({
+      readProcessCmdline: async () => {
+        if (fault) throw fault;
+        return "omp\0";
+      },
+    });
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    if (locator.runtime !== "tmux") throw new Error("tmux locator");
+    fault = Object.assign(new Error("EACCES: /proc/12345/cmdline"), { code: "EACCES" });
+    await expect(harness.runtime.probe(locator)).rejects.toBe(fault);
+    fault = Object.assign(new Error("ENOENT: /proc/12345/cmdline"), { code: "ENOENT" });
+    expect(await harness.runtime.probe(locator)).toEqual({
+      status: "dead",
+      reason: "not-recorded-process",
+      detail: expect.stringMatching(
+        new RegExp(`pid 12345.*recorded pid 12345 start ${locator.paneStartTicks}`)
+      ),
+    });
+    fault = undefined;
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
+  });
+
   it("graceful stop dials the socket without negotiating, sends shutdown, and kills the pane when the close never comes", async () => {
     const harness = await tmuxHarness({ neverCloses: true });
     const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
@@ -1044,7 +1091,7 @@ describe("TmuxRuntime", () => {
     // the caller cleared the locator of a possibly-live process.
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
-    for (const [listing, message] of [
+    for (const [listing, detail] of [
       [{ exitCode: 1, stderr: "" }, "list-panes -t %1 exited 1"],
       [
         { exitCode: 1, stderr: "tmux: server not responding" },
@@ -1058,7 +1105,9 @@ describe("TmuxRuntime", () => {
         (error: unknown) => error
       );
       expect(failure).toBeInstanceOf(ProcessStopFailed);
-      expect((failure as ProcessStopFailed).message).toBe(message);
+      // The same sentence `probe` rejects with for this listing (see the probe row below): the
+      // argv, exit code, and stderr are the contract; the pane id names what could not be seen.
+      expect((failure as ProcessStopFailed).message).toBe(`cannot verify pane %1: ${detail}`);
       expect((failure as ProcessStopFailed).locator).toBe(locator);
       expect(harness.server.commands).toEqual([
         tmuxArgv("list-panes", "-t", "%1", "-F", "#{pane_id} #{pane_pid}"),
