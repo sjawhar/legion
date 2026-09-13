@@ -1,0 +1,102 @@
+{
+  "pr": 998,
+  "prUrl": "https://github.com/sjawhar/legion/pull/998",
+  "headSha": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+  "filesChanged": [
+    "packages/daemon/src/daemon/api/routes/workers.ts",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-retro/SKILL.md",
+    "skills/legion-architect/SKILL.md",
+    "packages/pi-envoy/roles/tester.md",
+    "packages/pi-envoy/roles/reviewer.md",
+    "packages/pi-envoy/roles/merger.md",
+    "packages/pi-envoy/roles/implementer.md"
+  ],
+  "commits": [
+    {
+      "sha": "a112b2cc8f7563fb47e3f1b446552924e3cd2058",
+      "subject": "daemon: an implementer completion advances the status only from in_progress"
+    },
+    {
+      "sha": "006cc8653f2d773c45c8bbfb49dc585b361b25ce",
+      "subject": "skills(legion-worker, legion-retro, legion-architect): retro's docs commit keeps the approval; an unchanged-diff rebase is a confirmation; no handoff file after the .legion deletion"
+    },
+    {
+      "sha": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+      "subject": "roles(tester, reviewer, merger, implementer): the same rules in the role prompts"
+    }
+  ],
+  "verification": {
+    "tdd": "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\": before workers.ts change → 1 pass, 1 fail (retro test received [{issue: \"WIDGETS-1\", status: \"testing\"}]); after → 2 pass",
+    "unit": [
+      "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\" → 2 pass",
+      "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"reviewer completes\" → 2 pass",
+      "cd packages/daemon && bun test → 980 pass, 5 skip, 0 fail (985 tests, 57 files)"
+    ],
+    "lint": "cd packages/daemon && bunx biome check src/ → Checked 147 files. No fixes applied.",
+    "typecheck": "cd packages/daemon && bunx tsc --noEmit → clean",
+    "greps": {
+      "skills/legion-worker/SKILL.md": {
+        "does not void the reviewer": 1,
+        "approved head still equals the current head": 0,
+        "bare gates": 2,
+        "handoff complete` alone": 1,
+        "^## The unchanged-diff check": 1,
+        "fences": 24
+      },
+      "skills/legion-retro/SKILL.md": {
+        "does not void": 1,
+        "legion handoff complete": 1,
+        "--summary": 1,
+        "fences": 4
+      },
+      "skills/legion-architect/SKILL.md": {
+        "status: \"retro\"": 0,
+        "is a confirmation, not a round": 1,
+        "is that confirmation": 1,
+        "does not void the approval": 1,
+        "quoted in READY": 1,
+        "fences": 12
+      },
+      "packages/pi-envoy/roles/tester.md": {
+        "bare gates only": 1,
+        "never recreate": 1,
+        "fences": 2
+      },
+      "packages/pi-envoy/roles/reviewer.md": {
+        "a confirmation, not a round": 1,
+        "does not void your approval": 1,
+        "fences": 4
+      },
+      "packages/pi-envoy/roles/merger.md": {
+        "approved head equals the current head": 0,
+        "do not void the approval": 1,
+        "--summary": 4,
+        "fences": 2
+      },
+      "packages/pi-envoy/roles/implementer.md": {
+        "never recreate": 1,
+        "fences": 2
+      },
+      "packages/daemon/src/daemon/AGENTS.md": {
+        "is never followed by": 1
+      }
+    },
+    "ci": "Tests run 34738890552 and Legion Envoy and Contracts run 34738796676 at dd22435122bd; first Tests run 34738796688 passed test/lint/typecheck and failed only pr-title (non-conventional title), fixed by retitling"
+  },
+  "deviations": [
+    "skills/legion-retro/SKILL.md passage C: the plan's exact text `legion handoff complete --summary '<two sentences for the architect>'` would make the plan's own tester check `grep -c -- '--summary' → 1` return 2 (the merger's --summary on line 23 plus this line). Written as `legion handoff complete` alone (its summary: two sentences for the architect) so the grep contract holds; meaning unchanged.",
+    "PR title: the plan's title `Old Legion pull requests loop through test → review → retro (LEGION-59)` fails this repository's pr-title check (conventional subject required, .github/workflows/pr-and-main.yaml). Retitled to `fix(daemon,skills): retro's docs commit and an unchanged-diff rebase no longer restart test → review → retro (LEGION-59)`."
+  ],
+  "trickyParts": [
+    "The daemon's grant preamble: a bash call that re-exports LEGION_GRANT with any other value makes `legion gh`/`jj git push` fail with `Unable to redeem LEGION_GRANT (403)` or an askpass error; issue only the command, never a second export block.",
+    "After every `jj split`, the bookmark sits on the undescribed working copy holding .omp/config.yml; push needs `jj bookmark set legion/LEGION-59 -r @- --allow-backwards` first.",
+    "The live daemon runs main: this tree's own .legion deletion push and retro completions still PATCH `testing` until the daemon is restarted on code containing a112b2cc; the status half of acceptance 4 is proven by the unit tests and the tester's throwaway daemon (architect ruling)."
+  ],
+  "openQuestions": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T04:53:57.187Z"
+}
