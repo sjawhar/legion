@@ -43,45 +43,54 @@ CI's sandbox.
 
 ## smoke-btw.sh
 
-Real targeted Dispatch smoke against the installed plugin. It starts one isolated OMP TUI session,
-waits for that session's exact work directory to appear in the live listener registry, and targets
-only that session with a message on an existing open Dispatch issue. A correlated reply must appear
-on the same issue before the script tears down the session and confirms its registry entry clears.
-It never targets a role or an existing session.
+Real targeted Dispatch smoke against the installed plugin. It starts one isolated OMP TUI session
+whose initial message (the prompt is `omp`'s argument, not typed keystrokes) asks for one bash
+command that creates a sentinel file and then sleeps 45 seconds, waits for that session's exact
+work directory to appear in the live listener registry and for the sentinel to exist, then targets
+only that session with a message on an existing open Dispatch issue while the sleep is still
+running. A correlated reply must appear on the same issue before the script tears down the session
+and confirms its registry entry clears. It never targets a role or an existing session. The
+spawned session is pointed at the same Dispatch the script talks to (`DISPATCH_URL`, plus a 0600
+token file when the script holds a bearer), so its reply lands where the script looks for it.
 
 ### Usage
 
 ```bash
-MODE=btw DISPATCH_SMOKE_ISSUE=CORE-1 \
-  DISPATCH_AUTH_HEADER='Cookie: dispatch_session=…' \
-  packages/pi-envoy/scripts/smoke-btw.sh
+MODE=btw DISPATCH_SMOKE_ISSUE=CORE-1 packages/pi-envoy/scripts/smoke-btw.sh
 ```
 
 Set `MODE=btw` (the default) for an ephemeral reply, or `MODE=steer` to prove the primary-turn
 delivery path. `ENVOY_URL` defaults to `http://127.0.0.1:9020`, `DISPATCH_URL` defaults to
 `http://127.0.0.1:8766`, and `OMP_BIN` defaults to `omp`. `DISPATCH_SMOKE_ISSUE` names the open
-issue that will receive the smoke card; `DISPATCH_AUTH_HEADER` supplies one human-authenticated
-HTTP header, such as the current Dispatch cookie or a configured trusted identity header.
+issue that will receive the smoke card.
+
+Who asks: by default the script is an agent. It authenticates with the same Dispatch bearer the
+installed plugin resolves (`DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
+`~/.config/opencode/envoy.json`) and names itself in the message's `actor` as `SMOKE_ACTOR_SESSION`
+(default `smoke-btw-<hex>`; pass your own Envoy session id when you run it from a session), so the
+card on the issue is visibly agent-authored. Set `DISPATCH_AUTH_HEADER` to one human-authenticated
+HTTP header (the current Dispatch cookie or a trusted identity header) to ask as a human instead,
+exactly as the dashboard would; `actor` is then omitted.
 
 The script requires live Envoy, Dispatch, and model credentials; it is never a fake-listener test or
-a CI step. A 404 from the targeted message path prints `SKIP` and exits zero, meaning the installed
-Dispatch server predates these routes and the live smoke cannot be performed until this lane deploys.
+a CI step. A 404 from the targeted message path prints `SKIP` and exits zero, meaning the server does
+not support targeted messages. A `400 ACTOR_KIND` on a bearer run prints `SKIP` too, meaning
+the server requires a human-authenticated targeted message; use a compatible server or pass
+`DISPATCH_AUTH_HEADER`.
 
 ### Timeouts
 
-Role claim (60s) and post-kill teardown (15s) bound infrastructure round
-trips only. Delivery (90s) is generous by comparison because that window
-spans real Envoy delivery *plus* the time for a live model turn to notice the
-steered message and write `received.txt` — an actual model call, not a fixed
-mechanical step. Every wait is a wall-clock deadline (not a fixed iteration
-count), so a blackholed Envoy fails at its stated timeout instead of quietly
-stretching it.
+Session registration and post-kill teardown bound infrastructure round trips only.
+Delivery (90s) is generous by comparison because that window spans real Envoy delivery
+plus the time for a live model turn to notice the targeted message and post the correlated
+Dispatch reply. Every wait is a wall-clock deadline (not a fixed iteration count), so a
+blackholed Envoy fails at its stated timeout instead of quietly stretching it.
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Role claimed, message delivered, and teardown (session gone, role 404) all verified within their timeouts. |
+| 0 | `PASS:` delivery, correlated reply, and teardown verified; or `SKIP:` server lacks this smoke path. |
 | 1 | Any assertion failed — see the `FAIL:` line for which one, plus a captured pane or HTTP status. |
 
 Cleanup (`tmux kill-session`, `rm -rf` the temp dir) runs in an exit trap on

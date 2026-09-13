@@ -382,6 +382,65 @@ test("hides targeted-message retries on a closed issue", async () => {
   }
 });
 
+test("a targeted message asked by a session names that session as the asker", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const asker = { id: "s2", kind: "session", origin: { session_title: "reviewer" } } as const;
+    const question: Event = {
+      actor: asker,
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: asker,
+        body: "Is the build green?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-2",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "session:s1",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const sent: Event = {
+      actor: asker,
+      created_at: "2026-09-12T00:00:01Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "btw",
+        message_id: "message-2",
+        session_id: "s1",
+        state: "sent",
+        title: "planner",
+      },
+      seq: 2,
+      type: "message.delivery",
+    };
+    api.getIssueEvents = async () => [question, sent];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Asking planner (BTW) ·");
+
+    expect(screen.getByText("reviewer")).toBeTruthy();
+    expect(screen.queryByText("alice")).toBeNull();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
 test("renders a message composer for an open issue but not a closed one", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;

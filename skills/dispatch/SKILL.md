@@ -357,9 +357,10 @@ It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 char
 
 ### Targeted agent messages
 
-A human can target the issue message at a live Envoy session or role as **BTW**, **Aside**, or
-**Steer**. The incoming Dispatch frame names the issue and includes a `reply_with` instruction;
-reply on the same open issue with the existing tool, never a new targeted send:
+A human — or any bearer caller over HTTP, such as a test rig — can target the issue message at a
+live Envoy session or role as **BTW**, **Aside**, or **Steer**. The incoming Dispatch frame names
+the issue and includes a `reply_with` instruction; reply on the same open issue with the existing
+tool, never a new targeted send:
 
 ```ts
 dispatch_message({
@@ -369,9 +370,11 @@ dispatch_message({
 })
 ```
 
-`in_reply_to` correlates the answer under the human's message in its Conversation card. A BTW
+`in_reply_to` correlates the answer under the asker's message in its Conversation card. A BTW
 delivery can post its answer automatically; use this call when the frame asks the primary agent to
-reply. Agent bearers cannot set `target` or `delivery`.
+reply. `dispatch_message` itself never carries `target` or `delivery`: agent-to-agent traffic goes
+through Envoy or the hub. A bearer that targets over HTTP names its own session in `actor`
+(`{kind: "session", id}`), and the card shows that session as the author.
 
 ## What comes back
 
