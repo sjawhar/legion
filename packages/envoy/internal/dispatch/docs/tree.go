@@ -27,7 +27,14 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 	return pmdoc.StripAnchorMarks(tree), nil
 }
 
+// errDocUnloaded is returned for a room whose live document is not resident (evicted, or never
+// warmed). Callers that can reload do so; nothing dereferences a nil document.
+var errDocUnloaded = errors.New("document is not loaded")
+
 func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
+	if doc == nil {
+		return nil, errDocUnloaded
+	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
