@@ -1827,21 +1827,29 @@ export class ProcessManager {
     try {
       await onRetry();
     } catch (error) {
-      // The retry is `resurrect`, whose own re-probe and stop can fail exactly as the probe that
-      // brought us here can (a `list-panes` that proves nothing about the pane): the runtime
-      // refused to fake a verdict, so nothing was cleared -- and the deadline was cancelled
-      // above. Left there, the root would sit active and unconfirmed with its locator intact
-      // until a restart: the resync backstop probes only confirmed roots. Re-arm this same
-      // generation's deadline, as `retireUnconfirmedRoot`'s stop-failure branch does, unless the
-      // throw was a spawn failure that already moved the tree on (`spawnRoot`'s own accounting
-      // queues or launch-fails it, so `treeStillUnconfirmed` declines) or a newer generation has
-      // since taken the tree over. Logged here, once; the deadline's own catch never sees it.
-      console.error(
-        `[legion] failed to resurrect an unconfirmed root for ${treeKey}; re-arming its registration deadline rather than leaving it unwatched:`,
-        error
-      );
+      // The retry is `resurrect`. Two things in it can throw: its own re-probe, exactly as the
+      // probe that brought us here can (a `list-panes` that proves nothing about the pane -- the
+      // runtime refused to fake a verdict, so nothing was cleared), and the `spawnRoot` that
+      // follows (its own accounting has already queued or launch-failed the tree). Its stop
+      // cannot: `removeTreeProcess` logs a stop failure and clears the locator in `finally`.
+      // Either way the deadline was cancelled above. For the first case the root would sit
+      // active and unconfirmed with its locator intact until a restart -- the resync backstop
+      // probes only confirmed roots -- so re-arm this same generation's deadline, as
+      // `retireUnconfirmedRoot`'s stop-failure branch does; for the second, or when a newer
+      // generation has since taken the tree over, `treeStillUnconfirmed` declines and the tree
+      // is already where its own path put it. Logged here, once, saying which; the deadline's
+      // own catch never sees it.
       if (this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) {
+        console.error(
+          `[legion] failed to resurrect an unconfirmed root for ${treeKey}; its locator is untouched and its registration deadline is re-armed:`,
+          error
+        );
         this.armRootRegistrationDeadline(treeKey, generation);
+      } else {
+        console.error(
+          `[legion] failed to resurrect an unconfirmed root for ${treeKey}; the tree has already moved on (queued, launch-failed, or a newer generation), so no deadline is re-armed:`,
+          error
+        );
       }
     }
   }
@@ -2104,35 +2112,25 @@ export class ProcessManager {
    * `ensureController`, a tree's root architect by probing its process (alive: told to reclaim
    * its role and redelivered the missed event; dead: resurrected), any other role through
    * `resumeWorker`. The exception lane has no redelivery -- core NATS has no nak, and the event
-   * pump only records a rejected handler in memory, surfaced at shutdown -- so a liveness probe
-   * the runtime could not complete (a failed `list-panes`), or a recovery that failed past it,
-   * is logged here, naming the role token, and nothing is cleared: the retry is the resync
-   * backstop (a confirmed root), the registration deadline (an unconfirmed one), or the next
-   * controller-bound effect or exception.
+   * pump only records a rejected handler in memory, surfaced at shutdown -- so every failure
+   * past parsing the token (a liveness probe the runtime could not complete, a recovery that
+   * failed past it, a token naming an issue no tree records) is logged here, naming the role
+   * token, and nothing more is done with it: the retry is the resync backstop (a confirmed
+   * root), the registration deadline (an unconfirmed one), or the next controller-bound effect
+   * or exception. What each failing step left behind is that step's own business (a probe
+   * throw clears nothing; a failed `spawnRoot` has already done its own rollback).
    */
   async handleException(exception: ExceptionInfo): Promise<void> {
     const parsed = parseRoleToken(this.deps.state.project, exception.roleToken);
     if (!parsed) return;
-    const logFailure = (error: unknown): void => {
-      console.error(
-        `[legion] failed to recover ${exception.roleToken} after a delivery exception; nothing was cleared, and this lane has no redelivery -- the resync backstop, the registration deadline, or the next exception retries:`,
-        error
-      );
-    };
-    if ("controller" in parsed) {
-      try {
+    try {
+      if ("controller" in parsed) {
         await this.ensureController();
-      } catch (error) {
-        logFailure(error);
+        return;
       }
-      return;
-    }
-
-    const root = this.rootForIssue(parsed.issue);
-    if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
-
-    if (parsed.role === "architect" && parsed.issue === root) {
-      try {
+      const root = this.rootForIssue(parsed.issue);
+      if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
+      if (parsed.role === "architect" && parsed.issue === root) {
         if ((await this.probe(root)) === "alive") {
           await this.controlDirective(root, {
             type: "reclaim-architect",
@@ -2142,13 +2140,15 @@ export class ProcessManager {
         } else {
           await this.resurrect(root);
         }
-      } catch (error) {
-        logFailure(error);
+        return;
       }
-      return;
+      await this.resumeWorker(root, parsed.issue, parsed.role);
+    } catch (error) {
+      console.error(
+        `[legion] failed to recover ${exception.roleToken} after a delivery exception; this lane has no redelivery -- the resync backstop, the registration deadline, or the next exception retries:`,
+        error
+      );
     }
-
-    await this.resumeWorker(root, parsed.issue, parsed.role);
   }
 
   /**

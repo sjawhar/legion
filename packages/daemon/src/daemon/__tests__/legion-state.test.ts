@@ -1112,7 +1112,7 @@ describe("legion state", () => {
     }
   });
 
-  it("migrates v24 state to v25 as a pure version bump, leaving PR records untouched", async () => {
+  it("migrates a v24 file through v25 to v26 as pure version bumps, leaving PR records untouched", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
