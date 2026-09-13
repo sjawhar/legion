@@ -1,8 +1,8 @@
 {
   "pr": 998,
   "prUrl": "https://github.com/sjawhar/legion/pull/998",
-  "round": 2,
-  "roundReason": "Reviewer round 1 REQUEST_CHANGES at code head dd22435122bdc6c3b985be6073a6b7b165fbcb0c (review 5189754771): blocking fileset bug in the fingerprint command; architect ruling on workers.ts:42 (spawn writes in_progress; completion reads the known status); eight wording items; explicit-status test nit.",
+  "round": 3,
+  "roundReason": "Tester round 2 failures[0]: the /worker/spawn todo branch is unreachable for a released child (admitted as its own tree; spawnTree writes in_progress; the parent's spawn_worker is refused) and reachable only when a human moves an active issue back to todo, which the daemon must not override. Architect ruling (spec v6): drop the branch and its test.",
   "filesChanged": [
     "skills/legion-worker/SKILL.md",
     "packages/daemon/src/daemon/api/routes/workers.ts",
@@ -57,6 +57,13 @@
         "wording 2, 3, 5"
       ],
       "shaBeforeRebase": "3514e21ca83187f4853d70022091e2eb126ca027"
+    },
+    {
+      "sha": "5005733ce03ee178f22b84cc0ef487cd483de51f",
+      "subject": "daemon: spawn_worker writes in_progress for the corrective round alone",
+      "fixes": [
+        "tester round-2 failures[0]"
+      ]
     }
   ],
   "whatChanged": {
@@ -150,7 +157,19 @@
     "fileset": "'~(.legion | docs/solutions)'",
     "verificationAfterRebase": "cd packages/daemon && bun test -> 1032 pass, 6 skip, 0 fail; biome check src/ clean; tsc --noEmit clean; every grep count identical"
   },
+  "round3": {
+    "commit": "5005733ce03ee178f22b84cc0ef487cd483de51f",
+    "dropped": "spawnStatus `if (current === \"todo\") return \"in_progress\"` and the test 'writes in_progress when the architect spawns the first worker for a child released at todo'",
+    "added": "test 'writes nothing when the architect spawns a worker for an issue a human moved back to todo' (RED with the branch present: received [{issue: WIDGETS-1, status: in_progress}]; GREEN after the drop)",
+    "kept": "the spawn-time in_progress write for an implementer while state.prs has key === issue with reviewDecision === changes_requested and the known status is not in_progress; knownIssueStatus; the completion guard; the four other spawn tests and the three completion tests",
+    "reworded": [
+      "workers.ts spawnStatus doc comment",
+      "packages/daemon/src/daemon/AGENTS.md /worker/spawn row",
+      "skills/legion-architect/SKILL.md step 6 item 2"
+    ],
+    "verification": "cd packages/daemon && bun test -t 'architect spawns|implementer completes|reviewer completes' -> 10 pass; bun test -> 1032 pass, 6 skip, 0 fail (one earlier full run showed a single timing flake in processes.test.ts 'promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees', untouched by this PR; it passed 3/3 in isolation and in two further full runs); biome check src/ clean; tsc --noEmit clean; every plan grep unchanged except 'set nothing by hand' in the architect skill 2 -> 1 (item 2 now reads 'you set nothing by hand'; the pr-review row keeps its own)"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T06:14:47.540Z"
+  "completed": "2026-09-13T06:41:56.039Z"
 }
