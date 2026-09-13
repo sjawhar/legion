@@ -29,6 +29,36 @@ function server(
   };
 }
 
+const ok = { stdout: "", stderr: "", exitCode: 0 };
+
+/** A fake server whose reply to each verb (`cmd[3]`) may depend on how many times that verb has
+ * run so far (`nth`, 1-based) and on whether another verb has run at all (`ran`); records every
+ * argv. The scripts below spell out tmux's behaviour around a private server dying under the
+ * daemon: `has-session` answers present once, then `no server running` until a `new-session`. */
+function scripted(
+  reply: (
+    verb: string,
+    nth: number,
+    ran: (verb: string) => boolean
+  ) => { stdout: string; stderr?: string; exitCode: number },
+  commands: string[][]
+): TmuxServer {
+  const counts = new Map<string, number>();
+  return {
+    socket: "legion-omp",
+    run: async (cmd) => {
+      commands.push(cmd);
+      const verb = cmd[3] ?? "";
+      const nth = (counts.get(verb) ?? 0) + 1;
+      counts.set(verb, nth);
+      return reply(verb, nth, (other) => (counts.get(other) ?? 0) > 0);
+    },
+  };
+}
+
+const NO_SERVER = "no server running on /tmp/tmux-1000/legion-omp";
+const verbs = (commands: string[][]) => commands.map((cmd) => cmd[3]);
+
 describe("lookupPane", () => {
   it("returns the target pane's own pid from its window's listing, over the private server", async () => {
     const commands: string[][] = [];
@@ -457,5 +487,116 @@ describe("openWindow", () => {
       }
     );
     expect(message).toBe("tmux new-window failed (exit 1): tmux printed nothing on stderr");
+  });
+
+  // The stuck-controller retirement (LEGION-89): the controller's window was the private session's
+  // only one, so its pane closing tears session and server down — after the respawn's
+  // `has-session` answered present and before its `new-window` ran.
+  it("recreates the session and opens the window on a second attempt when has-session said present and new-window found the server gone", async () => {
+    const commands: string[][] = [];
+    const fake = scripted((verb, nth, ran) => {
+      if (verb === "has-session") {
+        return nth === 1 || ran("new-session")
+          ? ok
+          : { stdout: "", stderr: NO_SERVER, exitCode: 1 };
+      }
+      if (verb === "new-window") {
+        return nth === 1
+          ? { stdout: "", stderr: NO_SERVER, exitCode: 1 }
+          : { stdout: "@7 %9 4242\n", stderr: "", exitCode: 0 };
+      }
+      return ok;
+    }, commands);
+    await expect(
+      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
+    ).resolves.toEqual({
+      windowId: "@7",
+      paneId: "%9",
+      pid: 4242,
+      recovered: "tmux new-window failed (exit 1): no server running on /tmp/tmux-1000/legion-omp",
+    });
+    // Re-asked, recreated as a first launch does (bootstrap window, killed afterwards), opened.
+    expect(verbs(commands)).toEqual([
+      "has-session",
+      "new-window",
+      "has-session",
+      "new-session",
+      "set-option",
+      "new-window",
+      "kill-window",
+      "set-option",
+    ]);
+    expect(commands[6]).toEqual([
+      "tmux",
+      "-L",
+      "legion-omp",
+      "kill-window",
+      "-t",
+      "legion-omp:__legion_bootstrap",
+    ]);
+    expect(commands[7]?.slice(3, 5)).toEqual(["set-option", "-w"]);
+  });
+
+  it("throws a new-window failure as before when the session is still there, without a second attempt", async () => {
+    const commands: string[][] = [];
+    const fake = scripted((verb) => {
+      if (verb === "new-window") {
+        return { stdout: "", stderr: "create window failed: fork failed", exitCode: 1 };
+      }
+      return ok;
+    }, commands);
+    await expect(
+      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
+    ).rejects.toThrow("tmux new-window failed (exit 1): create window failed: fork failed");
+    expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(1);
+    expect(verbs(commands).filter((verb) => verb === "new-session")).toHaveLength(0);
+    expect(verbs(commands).filter((verb) => verb === "has-session")).toHaveLength(2);
+  });
+
+  it("throws a new-window failure as before inside a session this call created, still killing the bootstrap window", async () => {
+    const commands: string[][] = [];
+    const fake = scripted((verb, _nth, ran) => {
+      if (verb === "has-session")
+        return ran("new-session") ? ok : { stdout: "", stderr: "", exitCode: 1 };
+      if (verb === "new-window") return { stdout: "", stderr: "X", exitCode: 1 };
+      return ok;
+    }, commands);
+    await expect(
+      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
+    ).rejects.toThrow("tmux new-window failed (exit 1): X");
+    expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(1);
+    expect(verbs(commands).filter((verb) => verb === "has-session")).toHaveLength(1);
+    expect(
+      commands.some((cmd) => cmd[3] === "kill-window" && cmd[5] === "legion-omp:__legion_bootstrap")
+    ).toBe(true);
+  });
+
+  it("names both attempts when the second new-window fails too", async () => {
+    const commands: string[][] = [];
+    const fake = scripted((verb, nth, ran) => {
+      if (verb === "has-session") {
+        return nth === 1 || ran("new-session")
+          ? ok
+          : { stdout: "", stderr: NO_SERVER, exitCode: 1 };
+      }
+      if (verb === "new-window") {
+        return nth === 1
+          ? { stdout: "", stderr: NO_SERVER, exitCode: 1 }
+          : { stdout: "", stderr: "Y", exitCode: 1 };
+      }
+      return ok;
+    }, commands);
+    let message = "";
+    await openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp").catch(
+      (error: Error) => {
+        message = error.message;
+      }
+    );
+    expect(message.startsWith("tmux new-window failed (exit 1): Y")).toBe(true);
+    expect(message).toContain("on the second attempt");
+    expect(message).toContain("after has-session reported legion-omp present and then gone");
+    expect(message).toContain("first attempt: tmux new-window failed (exit 1): no server running");
+    expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(2);
+    expect(verbs(commands).filter((verb) => verb === "new-session")).toHaveLength(1);
   });
 });
