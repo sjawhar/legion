@@ -46,6 +46,20 @@ describe("defaultRunner", () => {
     expect(result.exitCode).toBe(143);
     expect(result.timedOut).toBeUndefined();
   });
+
+  it("kills a running command when the caller's signal aborts, and reports it as killed, never as a clean exit", async () => {
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const pending = defaultRunner(["sleep", "30"], {
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    const result = await pending;
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.timedOut).toBeDefined();
+  });
 });
 
 // =============================================================================

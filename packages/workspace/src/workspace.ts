@@ -23,6 +23,8 @@ export interface WorkspaceCommandOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** Budget after which the runner kills the command. */
   readonly timeoutMs?: number;
+  /** Kills the command when aborted, like the budget does. */
+  readonly signal?: AbortSignal;
 }
 
 export interface ProvisionIssueWorkspaceDeps {

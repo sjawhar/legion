@@ -40,6 +40,13 @@ export interface CommandRunnerOptions {
    * provisioning) pass their own budget.
    */
   readonly timeoutMs?: number;
+  /**
+   * Kills the command when aborted, exactly as the budget does: the caller is giving up on it
+   * (a daemon whose boot failed while a probe was still running) and must not leave the child
+   * behind — the kill timer alone dies with the caller's process. The result carries `timedOut`,
+   * never a clean exit.
+   */
+  readonly signal?: AbortSignal;
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -71,7 +78,7 @@ export async function defaultRunner(
   });
 
   let killed = false;
-  const killTimeout = setTimeout(() => {
+  const kill = () => {
     // A child that has already exited — by exit code or by signal; its stdio pipes may still be
     // held open by a grandchild the runner is draining — was not killed by us: reporting a
     // timeout for it would send a probe that finished inside the timer's slack back into a retry
@@ -83,7 +90,11 @@ export async function defaultRunner(
     } catch {
       // Process may have already exited
     }
-  }, limitMs);
+  };
+  const killTimeout = setTimeout(kill, limitMs);
+  const signal = options?.signal;
+  if (signal?.aborted) kill();
+  else signal?.addEventListener("abort", kill, { once: true });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -91,6 +102,7 @@ export async function defaultRunner(
 
   const exitCode = await proc.exited;
   clearTimeout(killTimeout);
+  signal?.removeEventListener("abort", kill);
   if (!killed) {
     return { stdout, stderr, exitCode };
   }

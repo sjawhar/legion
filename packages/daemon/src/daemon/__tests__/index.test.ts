@@ -1711,6 +1711,54 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("a boot failure while a probe attempt is still running aborts that attempt's runner call, so its OMP child is killed rather than left behind", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    // Resolves once the first probe attempt is in flight (its runner call has started).
+    const attemptStarted = Promise.withResolvers<void>();
+    let attemptSignal: AbortSignal | undefined;
+    let abortedWhileRunning = false;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
+            runner: async (command, options) => {
+              if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+              attemptSignal = options?.signal;
+              attemptStarted.resolve();
+              // The real runner would be blocked on a hung OMP here; it returns only when its
+              // signal aborts (the kill), reporting the kill exactly as the budget would.
+              await new Promise<void>((resolve) => {
+                if (options?.signal?.aborted) return resolve();
+                options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+              });
+              abortedWhileRunning = true;
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 143,
+                timedOut: { limitMs: 300_000, elapsedMs: 1_000 },
+              };
+            },
+            sleep: async () => {},
+            loadState: async () => {
+              await attemptStarted.promise;
+              throw new Error("state.json is corrupt");
+            },
+            saveState: async () => {},
+          },
+        })
+      ).rejects.toThrow("state.json is corrupt");
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(attemptSignal?.aborted).toBeTrue();
+      expect(abortedWhileRunning).toBeTrue();
+    } finally {
+      errorSpy.mockRestore();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig: DaemonConfig = {

@@ -55,9 +55,10 @@ export interface BootProbeOptions {
   /** Per-attempt runner budget (`slow_command_timeout_seconds` in ms). */
   readonly timeoutMs: number;
   readonly retry: ProbeRetryPolicy;
-  /** Aborts a probe that is between attempts: a daemon whose boot failed for another reason
-   * (state load, NATS, the API bind) cancels its pending backoff and must not spawn another OMP
-   * afterwards. Checked after every sleep; the probe then rejects with `ProbeAbortedError`. */
+  /** Aborts the probe: a daemon whose boot failed for another reason (state load, NATS, the
+   * API bind) must neither spawn another OMP after its pending backoff nor leave an attempt's
+   * OMP child running behind it. Passed to every runner call (which kills the child on abort)
+   * and checked after every sleep; the probe then rejects with `ProbeAbortedError`. */
   readonly signal?: AbortSignal;
 }
 
@@ -154,7 +155,7 @@ export async function verifyOmpAgentsCapability(
             "sh",
             probePath,
           ],
-          { timeoutMs: options.timeoutMs }
+          { timeoutMs: options.timeoutMs, signal: options.signal }
         );
         const output = `${result.stderr}\n${result.stdout}`;
         const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
@@ -291,7 +292,7 @@ export async function verifyLegionPluginLoaded(
             "sh",
             probePath,
           ],
-          { timeoutMs: options.timeoutMs }
+          { timeoutMs: options.timeoutMs, signal: options.signal }
         );
         lastExitCode = result.exitCode;
         const stderrTail = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
