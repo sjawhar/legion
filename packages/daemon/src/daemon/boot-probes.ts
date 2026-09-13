@@ -12,6 +12,7 @@ import { withOmpLaunchPrefix } from "./processes";
  * (packages/daemon/docker/worker.Dockerfile's last step): one module so the daemon and the image
  * gate are the same code. */
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
+const OMP_AGENTS_MISSING_MARKER = "LEGION_OMP_AGENTS=missing";
 const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
   process.stderr.write(pi.agents ? "LEGION_OMP_AGENTS=available\\n" : "LEGION_OMP_AGENTS=missing\\n");
 }
@@ -62,9 +63,16 @@ interface ProbeOutcome {
   readonly detail: string;
 }
 
-/** A runner kill is transient before any marker logic: the probe never got to answer. */
-function timedOutOutcome(result: CommandResult, stderrTail: string): ProbeOutcome | undefined {
+/** A runner kill is transient when the probe never got to answer — but a probe that printed its
+ * negative marker and only then hung past the budget has answered: that answer is definitive, so
+ * `negativeMarker` is classified first and the kill is reported only for a marker-less output. */
+function timedOutOutcome(
+  result: CommandResult,
+  stderrTail: string,
+  negativeMarker: string
+): ProbeOutcome | undefined {
   if (result.timedOut === undefined) return undefined;
+  if (`${result.stderr}\n${result.stdout}`.includes(negativeMarker)) return undefined;
   const { limitMs, elapsedMs } = result.timedOut;
   const detail = `command timed out after ${limitMs / 1000} s (ran ${(elapsedMs / 1000).toFixed(1)} s)`;
   return {
@@ -130,7 +138,7 @@ export async function verifyOmpAgentsCapability(
         );
         const output = `${result.stderr}\n${result.stdout}`;
         const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-        const timedOut = timedOutOutcome(result, detail);
+        const timedOut = timedOutOutcome(result, detail, OMP_AGENTS_MISSING_MARKER);
         if (timedOut) return timedOut;
         if (result.exitCode === 0 && output.includes(OMP_AGENTS_CAPABILITY_MARKER)) {
           return { passed: true, definitive: false, detail };
@@ -141,7 +149,7 @@ export async function verifyOmpAgentsCapability(
         const transient =
           result.exitCode !== 0 &&
           output.includes(OMP_AGENTS_CAPABILITY_MARKER) &&
-          !output.includes("LEGION_OMP_AGENTS=missing");
+          !output.includes(OMP_AGENTS_MISSING_MARKER);
         return { passed: false, definitive: !transient, detail };
       },
       async (detail) =>
@@ -162,6 +170,7 @@ export async function verifyOmpAgentsCapability(
 // plugin is disabled (`omp plugin disable`) or unregistered, in which case OMP's
 // ambient discovery silently skips it and every spawned session is Legion-less.
 const LEGION_LOADED_MARKER = "LEGION_PLUGIN_LOADED=yes";
+const LEGION_NOT_LOADED_MARKER = "LEGION_PLUGIN_LOADED=no";
 /** Caps how much of a failed launch probe's stderr lands in the thrown error message — a
  * misbehaving launch prefix (e.g. a wrapper that dumps a stack trace) must not blow up the
  * daemon's own startup-failure log line; the tail is kept since that's where the actual error
@@ -262,7 +271,7 @@ export async function verifyLegionPluginLoaded(
         );
         lastExitCode = result.exitCode;
         const stderrTail = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
-        const timedOut = timedOutOutcome(result, stderrTail);
+        const timedOut = timedOutOutcome(result, stderrTail, LEGION_NOT_LOADED_MARKER);
         if (timedOut) return timedOut;
         const output = `${result.stderr}\n${result.stdout}`;
         if (result.exitCode === 0 && output.includes(LEGION_LOADED_MARKER)) {
