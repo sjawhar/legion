@@ -31,6 +31,12 @@ write_single_issue_state() {
   local role="${2:-planner}"
   printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-1-architect":{"issue":"LEGSMOKE-1","role":"architect","sessionId":"ses_arch"},"legion-exampleorg24-legsmoke-1-'"$role"'":{"issue":"LEGSMOKE-1","role":"'"$role"'","sessionId":"ses_'"$role"'","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%5"}}},"admission":{"active":["LEGSMOKE-1"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
 }
+# The armed rig at the moment checkpoint 3 runs: the architect asked for approval and PARKED.
+# Here it decomposed first — child LEGSMOKE-2 exists in `triage` (the skill allows creating
+# children before the approval request) — but released nothing and claimed no worker.
+write_parked_state() {
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"triage","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-1-architect":{"issue":"LEGSMOKE-1","role":"architect","sessionId":"ses_arch"}},"admission":{"active":["LEGSMOKE-1"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
 write_state '{}'
 printf 'off\n' >"${smoke_dir}/design-gate"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
@@ -195,14 +201,27 @@ printf 'PASS: checkpoint 3 fails under gates.design: off when a gate was registe
 printf 'root-issues\n' >"${smoke_dir}/design-gate"
 awaiting_artifacts="${temporary_dir}/artifacts-awaiting.json"
 printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"awaiting","latest_version":1,"requested_by":{"kind":"session","id":"arch"},"ask_id":"ask-design"}}]' >"$awaiting_artifacts"
-ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3
-expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and a child issue observed'
+triage_children="${temporary_dir}/children-triage.json"
+printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"triage"}]' >"$triage_children"
+# Before the human acts: gate registered at the spec's current version, document awaiting, and
+# the architect parked — a child may exist in triage, nothing released, no worker claimed.
+write_parked_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$triage_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'
+# An architect that released a child while the document is still awaiting moved before approval.
+ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3 && { printf 'checkpoint 3 passed with a child released while the spec awaits approval\n' >&2; exit 1; }
+expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (todo) was released while the spec document is still awaiting approval"
+printf 'PASS: checkpoint 3 under root-issues proves the architect parked, and fails naming a child released before approval\n'
+write_parked_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
 # A Dispatch server without document approval (or a spec nobody requested approval of) reports no
 # open request: the checkpoint must fail naming the missing request, never pass on a gate that can
 # never be satisfied.
-run_checkpoint 3 && { printf 'checkpoint 3 passed without an open approval request on the spec document\n' >&2; exit 1; }
+CHILDREN_FILE="$triage_children" run_checkpoint 3 && { printf 'checkpoint 3 passed without an open approval request on the spec document\n' >&2; exit 1; }
 expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has no open approval request on its registered spec document'
 printf 'PASS: checkpoint 3 under root-issues requires an open approval request on the registered spec document\n'
+# After the human approves, the architect releases the child (the default state): checkpoint 4
+# needs the recorded approval first, then the release.
+write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
 run_checkpoint 4 && { printf 'checkpoint 4 passed before the daemon recorded the approval\n' >&2; exit 1; }
 expect_output 'CHECKPOINT 4 FAILED: daemon has not recorded the spec approval for LEGSMOKE-1'
 write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
@@ -221,12 +240,20 @@ expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval
 CHILDREN_FILE="$no_children" run_checkpoint 4
 expect_output 'CHECKPOINT 4 OK: a planner phase worker is claimed on the root (single-issue tree)'
 printf 'root-issues\n' >"${smoke_dir}/design-gate"
-write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
+# Armed, single-issue, before approval: the architect registered the gate and parked — no child,
+# no worker. This is exactly what the real architect produced in every rig run.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}' architect
 ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$no_children" run_checkpoint 3
-expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and a planner phase worker on the root (single-issue tree) observed'
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'
+# A worker claimed on the root while the document still awaits approval is an early move.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$no_children" run_checkpoint 3 && { printf 'checkpoint 3 passed with a phase worker claimed while the spec awaits approval\n' >&2; exit 1; }
+expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: a planner on LEGSMOKE-1 phase worker is claimed while the spec document is still awaiting approval"
+# After approval the architect spawns the worker: checkpoint 4 passes on the claim.
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
 CHILDREN_FILE="$no_children" run_checkpoint 4
 expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a planner phase worker is claimed on the root (single-issue tree)'
-printf 'PASS: checkpoints 3 and 4 accept a single-issue tree whose root carries a phase-worker claim, in both design-gate modes\n'
+printf 'PASS: checkpoints 3 and 4 accept a single-issue tree: parked before approval, a phase worker on the root after; a worker claimed while awaiting fails naming the early move\n'
 # Neither a child nor a phase worker: the tree has not moved past the gate, and the failure says so.
 printf 'off\n' >"${smoke_dir}/design-gate"
 write_single_issue_state '{}' architect

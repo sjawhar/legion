@@ -273,6 +273,31 @@ tree_progress() {
   fail "${root} has neither a Dispatch child issue nor a phase-worker role claim on the root: the tree has not moved past the gate"
 }
 
+# The architect parked on the gate: the human has not approved yet, so nothing may have moved past
+# it. A child issue may exist in `triage` or `backlog` (the skill allows decomposing before the
+# approval request) but none may be `todo` or later, and no phase-worker role (anything but the
+# architect) may be claimed on the root or on any child in daemon state. Fails naming what moved.
+architect_parked() {
+  local root="$1"
+  local daemon_state="$2"
+  local children
+  local moved
+  children="$(dispatch_children "$root")"
+  moved="$(jq -r --arg root "$root" '
+    [.[] | select(.parent == $root and (.status | IN("todo", "in_progress", "testing", "needs_review", "retro", "done"))) | "\(.key) (\(.status))"]
+    | first // empty
+  ' <<<"$children")"
+  [[ -z "$moved" ]] ||
+    fail "${root}'s architect moved before approval: child issue ${moved} was released while the spec document is still awaiting approval"
+  moved="$(jq -r --arg root "$root" --argjson children "$children" '
+    ([$children[] | .key] + [$root]) as $tree |
+    [.roles | to_entries[] | select((.value.issue | IN($tree[])) and .value.role != "architect") | "\(.value.role) on \(.value.issue)"]
+    | first // empty
+  ' <<<"$daemon_state")"
+  [[ -z "$moved" ]] ||
+    fail "${root}'s architect moved before approval: a ${moved} phase worker is claimed while the spec document is still awaiting approval"
+}
+
 # The daemon's design gate is a human's approval of the root spec document at a version. What this
 # checkpoint proves depends on the policy the rig recorded (`stored_design_gate`):
 # - `root-issues`: before the human acts, the architect must have registered the document
@@ -280,10 +305,12 @@ tree_progress() {
 #   open approval request on it (`approval.state == "awaiting"`, from `dispatch_request_approval`).
 # - `off`: the architect was told in its system prompt that the gate is off, so it must have
 #   registered no gate and requested no approval — nothing waits in anyone's inbox.
-# Either way the spec is posted as the root's primary `spec.md` and the tree has moved past the
-# gate — the architect created a child issue, or (a single-issue tree, which the legion-architect
-# skill allows) it spawned a phase worker on the root itself. No `Approve` ask is involved in
-# either mode.
+# Under `root-issues` the checkpoint proves the architect asked and WAITED: with the document still
+# awaiting approval, no child issue may be released and no phase worker may be claimed
+# (`architect_parked`) — a compliant architect is parked on `design-approved` at this moment, and
+# on a single-issue tree there is nothing else to observe. Under `off` it proves the tree moved
+# past the (absent) gate — a child issue, or a phase worker on the root itself (`tree_progress`).
+# Either way the spec is posted as the root's primary `spec.md`. No `Approve` ask is involved.
 checkpoint_three() {
   local root
   local design_gate
@@ -331,23 +358,23 @@ checkpoint_three() {
       fail "recorded design-gate policy '${design_gate}' is neither off nor root-issues"
       ;;
   esac
-  progress="$(tree_progress "$root" "$daemon_state")"
   case "$design_gate" in
     root-issues)
-      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and %s observed\n' "$progress"
+      architect_parked "$root" "$daemon_state"
+      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)\n'
       ;;
     off)
+      progress="$(tree_progress "$root" "$daemon_state")"
       printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and %s observed\n' "$progress"
       ;;
   esac
 }
 
 # Under `root-issues`, between checkpoints 3 and 4 a human approves the root spec document (the
-# document header's Approve, or the approval ask with Approve), and the daemon records that
-# approval on the gate (`approvedVersion == latestVersion`) before it lets the architect release
-# anything. Under `off` there is no gate to check; only the release itself is observed — a child
-# released into admission or an active tree, or a phase-worker role claim on the root itself (a
-# single-issue tree).
+# document header's Approve, or the approval ask with Approve); this checkpoint proves the approval
+# opened the gate (`approvedVersion == latestVersion`) and the tree then moved — a child released
+# into admission or an active tree, or a phase-worker role claim on the root itself (a
+# single-issue tree). Under `off` there is no gate to check; only the move itself is observed.
 checkpoint_four() {
   local root
   local design_gate

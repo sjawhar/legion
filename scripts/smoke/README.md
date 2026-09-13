@@ -150,13 +150,15 @@ worker is claimed on the root (a single-issue tree). No `Approve` question is op
 and there is no operator command for the gate.
 
 `SMOKE_DESIGN_GATE=root-issues` arms the gate for the human-approval exercise. Checkpoint 3 then
-proves the architect asked for approval: the daemon's gate names the root's primary `spec.md`
-document at its current version, and Dispatch shows that document with an open approval request
-(`approval.state` is `awaiting`). Then a human approves the document — the `Approve` control in the
+proves the architect asked and waited: the daemon's gate names the root's primary `spec.md`
+document at its current version, Dispatch shows that document with an open approval request
+(`approval.state` is `awaiting`), and nothing has moved past the gate — no child issue is
+released (`todo` or later; children in `triage` or `backlog` are fine) and no phase worker is
+claimed on the root or a child. Then a human approves the document — the `Approve` control in the
 document's header on the Dispatch dashboard, or the approval question in the Inbox answered
-`Approve`. Checkpoint 4 proves the daemon recorded that approval (`approvedVersion` equals
-`latestVersion` on the gate) and work started: a child was released or a phase worker is claimed
-on the root. This is the human-controlled design gate.
+`Approve`. Checkpoint 4 proves the approval opened the gate (`approvedVersion` equals
+`latestVersion`) and the tree moved: a child was released or a phase worker is claimed on the
+root. This is the human-controlled design gate.
 
 Document approval needs a Dispatch server that includes the server half of document reviews
 (the `approval` field on every artifact read). Run the `root-issues` exercise against a scratch
@@ -170,8 +172,8 @@ the missing approval request rather than passing on a gate that can never be sat
 | --- | --- | --- |
 | 1 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue has progressed past `triage`; daemon state records a controller window/pane locator for a live tmux window. |
 | 2 | `SMOKE_ROOT_ISSUE` optional | The root Dispatch issue is `in_progress`, is admitted, and has a recorded architect window/pane locator for a live tmux window. |
-| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact and has moved past the gate: a child issue or a phase worker on the root (the output names which). Under the recorded `design-gate` `off` (default): no gate is registered for the root and no approval request is open on the spec. Under `root-issues`: the daemon's registered gate names that document at its current version and Dispatch shows an open approval request on it (`approval.state == "awaiting"`). |
-| 4 | `SMOKE_ROOT_ISSUE` optional | A child in a released lifecycle status is tracked in active admission or an active/queued tree, or a phase worker is claimed on the root (the output names which); under `root-issues`, the daemon has also recorded the human's approval on the gate (`approvedVersion == latestVersion`). |
+| 3 | `SMOKE_ROOT_ISSUE` optional | Root has a posted primary `spec.md` artifact. Under the recorded `design-gate` `off` (default): no gate is registered for the root, no approval request is open on the spec, and the tree has moved past the gate — a child issue or a phase worker on the root (the output names which). Under `root-issues`: the architect asked and waited — the daemon's registered gate names that document at its current version, Dispatch shows an open approval request on it (`approval.state == "awaiting"`), and no child is released nor any phase worker claimed yet (a released child or a claimed worker fails naming the early move). |
+| 4 | `SMOKE_ROOT_ISSUE` optional | The tree moved: a child in a released lifecycle status is tracked in active admission or an active/queued tree, or a phase worker is claimed on the root (the output names which); under `root-issues`, the human's approval opened the gate first (`approvedVersion == latestVersion`). |
 | 5 | `SMOKE_PR` optional | A Legion branch has implementation identity and `Legion-Session:` commit attribution. |
 | 6 | `SMOKE_ARCHITECT_WINDOW`, `SMOKE_VERDICT_FRAGMENT`, `SMOKE_RAW_CHECK_FRAGMENT` | One architect verdict appears in the pane; raw check noise is absent. |
 | 7 | `SMOKE_BRANCH_PROTECTION=1`, `SMOKE_PR`, `SMOKE_RETRO_COMMIT`, `SMOKE_REVIEWER_LOGIN` | Reviewer `.legion` deletion precedes its approval; retro is durable; final PR diff has no `.legion` path; records the pre-merge base for checkpoint 8. |

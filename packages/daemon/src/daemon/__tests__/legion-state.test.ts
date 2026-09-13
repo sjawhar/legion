@@ -1213,7 +1213,7 @@ describe("legion state", () => {
         await expect(loadState(file, initialState)).rejects.toThrow(
           "Cannot migrate the design gate for LEGION-1"
         );
-        // Nothing was written: the v23 file survives intact for a retry once Dispatch is back.
+        // Nothing was written: the v24 file survives intact for a retry once Dispatch is back.
         expect(await readdir(tempDir)).toEqual(["state.json"]);
       } finally {
         warnSpy.mockRestore();

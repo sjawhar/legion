@@ -105,7 +105,7 @@ export function createDispatchClient(options: DispatchClientOptions): DispatchCl
   };
 }
 
-/** The one Dispatch read outside resync: `migrateV23State`'s resolver for a v23 design gate. Reads
+/** The one Dispatch read outside resync: `migrateV24State`'s resolver for a v24 design gate. Reads
  * the issue once and returns its primary artifact's id (the spec document) with the highest
  * version number that artifact carries. Throws naming the issue when the primary artifact is
  * missing from the issue's `artifacts` or has no versions — the caller refuses to start on it. */
