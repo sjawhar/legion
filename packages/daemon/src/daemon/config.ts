@@ -106,8 +106,7 @@ export interface DaemonConfig {
    * retired one would relaunch it through the no-holder recovery — one relaunch per wake costs more
    * than one idle process per child issue. `worker_idle_retire_seconds` /
    * `LEGION_WORKER_IDLE_RETIRE_SECONDS`; default 600; the literal `0` disables the timer entirely (a
-   * finished worker then stays resident until its tree closes); at most
-   * `MAX_WORKER_IDLE_RETIRE_SECONDS`. */
+   * finished worker then stays resident until its tree closes); at most `MAX_TIMER_SECONDS`. */
   workerIdleRetireSeconds: number;
   /** Seconds before a single worker RPC request over a `legion worker-shim` unix socket
    * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs the connect-time
@@ -185,12 +184,14 @@ const DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS = 120;
 const DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS = 3;
 const DEFAULT_WORKER_RPC_TIMEOUT_SECONDS = 5;
 const DEFAULT_WORKER_IDLE_RETIRE_SECONDS = 600;
-/** The largest whole number of seconds whose millisecond delay still fits the signed 32-bit timer
- * delay `armIdleRetire` hands to `setTimeout` (`seconds * 1000 <= 2_147_483_647`). Beyond it the
- * runtime clamps the delay to 1 ms — every finished worker retired the instant it went idle, the
- * feature inverted for an operator who set a huge value to mean "never" — so a larger value is a
- * startup error that points at `0`, the real disable value. */
-const MAX_WORKER_IDLE_RETIRE_SECONDS = 2_147_483;
+/** The largest whole number of seconds whose millisecond delay fits the signed 32-bit delay
+ * `setTimeout` accepts (`seconds * 1000 <= 2_147_483_647`). Beyond it Bun clamps the delay to 1 ms
+ * and the timer fires at once — a boot watchdog that retires every booting worker, a resync that
+ * spins, an idle-retire that fires the instant a worker goes idle — so every duration setting that
+ * reaches a timer is refused above this bound rather than clamped. */
+const MAX_TIMER_SECONDS = 2_147_483;
+/** `MAX_TIMER_SECONDS` in whole hours (596), the bound for `linger_hours`. */
+const MAX_TIMER_HOURS = Math.floor(MAX_TIMER_SECONDS / 3600);
 /** Also the per-attempt budget `legion probe-image` uses (`IMAGE_PROBE_TIMEOUT_MS`). */
 export const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
@@ -308,44 +309,52 @@ function readNumber(value: unknown, field: string): number | undefined {
   return value;
 }
 
-function readPositiveInteger(value: unknown, field: string): number | undefined {
+/** The one place an upper bound is refused: `<field> must be at most <max>`, with an optional
+ * `; <hint>` naming the escape hatch (e.g. the disable value). */
+function checkAtMost(number: number, field: string, max: number, hint?: string): number {
+  if (number > max) {
+    throw new Error(`${field} must be at most ${max}${hint === undefined ? "" : `; ${hint}`}`);
+  }
+  return number;
+}
+
+function readPositiveInteger(value: unknown, field: string, max?: number): number | undefined {
   const number = readNumber(value, field);
   if (number === undefined) return undefined;
   if (!Number.isSafeInteger(number) || number <= 0) {
     throw new Error(`${field} must be a positive integer`);
   }
-  return number;
+  return max === undefined ? number : checkAtMost(number, field, max);
 }
 
-function parseEnvPositiveInteger(value: string | undefined, field: string): number | undefined {
+function parseEnvPositiveInteger(
+  value: string | undefined,
+  field: string,
+  max?: number
+): number | undefined {
   if (value === undefined || value === "") return undefined;
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) {
     throw new Error(`${field} must be a positive integer`);
   }
-  return number;
+  return max === undefined ? number : checkAtMost(number, field, max);
 }
 
 /** The one validation every source of `worker_idle_retire_seconds` (file, environment, cli
- * override) funnels through: a whole number from `0` (the timer disabled) to
- * `MAX_WORKER_IDLE_RETIRE_SECONDS` inclusive. `-0` is rejected explicitly — the YAML loader hands
- * it through as a negative zero, and `-0 < 0` is false — because "disabled" must be the literal
- * `0`, never a value that merely computes to zero. */
+ * override) funnels through: a whole number from `0` (the timer disabled) to `MAX_TIMER_SECONDS`
+ * inclusive. `-0` is rejected explicitly — the YAML loader hands it through as a negative zero, and
+ * `-0 < 0` is false — because "disabled" must be the literal `0`, never a value that merely
+ * computes to zero. */
 function checkIdleRetireSeconds(number: number, field: string): number {
   if (!Number.isInteger(number) || number < 0 || Object.is(number, -0)) {
     throw new Error(`${field} must be a non-negative integer`);
   }
-  if (number > MAX_WORKER_IDLE_RETIRE_SECONDS) {
-    throw new Error(
-      `${field} must be at most ${MAX_WORKER_IDLE_RETIRE_SECONDS} (the largest whole number of seconds whose millisecond delay fits a 32-bit timer); use 0 to disable idle retirement`
-    );
-  }
-  return number;
+  return checkAtMost(number, field, MAX_TIMER_SECONDS, "use 0 to disable idle retirement");
 }
 
 /** As `readPositiveInteger`, but for `worker_idle_retire_seconds`, the one lifecycle number where
  * zero is a meaningful setting ("never retire an idle worker") rather than the typo it would be for
- * a cap or a timeout — and the one with an upper bound (see `MAX_WORKER_IDLE_RETIRE_SECONDS`). */
+ * a cap or a timeout. */
 function readIdleRetireSeconds(value: unknown, field: string): number | undefined {
   const number = readNumber(value, field);
   if (number === undefined) return undefined;
@@ -670,11 +679,8 @@ export function loadConfigFromFile(
 
   const project = readString(config.project, "project");
   if (project !== undefined) fields.legionId = requireNonEmpty(project, "project");
-  const port = readPositiveInteger(config.port, "port");
-  if (port !== undefined) {
-    if (port > 65535) throw new Error("port must be at most 65535");
-    fields.port = port;
-  }
+  const port = readPositiveInteger(config.port, "port", 65535);
+  if (port !== undefined) fields.port = port;
   const runtime = parseRuntime(readString(config.runtime, "runtime"), "runtime");
   if (runtime !== undefined) fields.runtime = runtime;
   const daemonUrl = readString(config.daemon_url, "daemon_url");
@@ -718,24 +724,27 @@ export function loadConfigFromFile(
     );
   }
 
-  for (const [fileKey, configKey] of [
+  // Counts have no upper bound; every duration that reaches a timer is bounded at
+  // `MAX_TIMER_SECONDS` (`linger_hours`, a deadline swept by the linger interval, at its hour form).
+  const lifecycleKeys: ReadonlyArray<readonly [string, string, number?]> = [
     ["admission_cap", "admissionCap"],
     ["worker_cap", "workerCap"],
     ["max_recursion_depth", "maxRecursionDepth"],
-    ["linger_hours", "lingerHours"],
+    ["linger_hours", "lingerHours", MAX_TIMER_HOURS],
     ["max_fix_attempts", "maxFixAttempts"],
-    ["worker_stop_timeout_seconds", "workerStopTimeoutSeconds"],
-    ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds"],
-    ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds"],
+    ["worker_stop_timeout_seconds", "workerStopTimeoutSeconds", MAX_TIMER_SECONDS],
+    ["tree_stop_timeout_seconds", "treeStopTimeoutSeconds", MAX_TIMER_SECONDS],
+    ["worker_boot_timeout_seconds", "workerBootTimeoutSeconds", MAX_TIMER_SECONDS],
     ["worker_boot_registration_deadline_intervals", "workerBootRegistrationDeadlineIntervals"],
-    ["worker_rpc_timeout_seconds", "workerRpcTimeoutSeconds"],
-    ["slow_command_timeout_seconds", "slowCommandTimeoutSeconds"],
-  ] as const) {
-    const value = readPositiveInteger(config[fileKey], fileKey);
+    ["worker_rpc_timeout_seconds", "workerRpcTimeoutSeconds", MAX_TIMER_SECONDS],
+    ["slow_command_timeout_seconds", "slowCommandTimeoutSeconds", MAX_TIMER_SECONDS],
+  ];
+  for (const [fileKey, configKey, max] of lifecycleKeys) {
+    const value = readPositiveInteger(config[fileKey], fileKey, max);
     if (value !== undefined) fields[configKey] = value;
   }
   // Outside the positive-integer loop above on purpose: `0` is a valid value here (it disables the
-  // idle-retire timer) and the key carries an upper bound no other lifecycle number has.
+  // idle-retire timer).
   const workerIdleRetireSeconds = readIdleRetireSeconds(
     config.worker_idle_retire_seconds,
     "worker_idle_retire_seconds"
@@ -745,14 +754,16 @@ export function loadConfigFromFile(
   }
   const resyncIntervalSeconds = readPositiveInteger(
     config.resync_interval_seconds,
-    "resync_interval_seconds"
+    "resync_interval_seconds",
+    MAX_TIMER_SECONDS
   );
   if (resyncIntervalSeconds !== undefined) fields.resyncIntervalMs = resyncIntervalSeconds * 1000;
-  const workerStreamPort = readPositiveInteger(config.worker_stream_port, "worker_stream_port");
-  if (workerStreamPort !== undefined) {
-    if (workerStreamPort > 65535) throw new Error("worker_stream_port must be at most 65535");
-    fields.workerStreamPort = workerStreamPort;
-  }
+  const workerStreamPort = readPositiveInteger(
+    config.worker_stream_port,
+    "worker_stream_port",
+    65535
+  );
+  if (workerStreamPort !== undefined) fields.workerStreamPort = workerStreamPort;
 
   const stateDir = readString(config.state_dir, "state_dir");
   if (stateDir !== undefined) {
@@ -963,7 +974,7 @@ export function resolveDaemonConfig(
   const lingerHours = resolveValue(
     opts.cliOverrides?.lingerHours,
     fileNumber(fields, "lingerHours"),
-    parseEnvPositiveInteger(env.LEGION_LINGER_HOURS, "LEGION_LINGER_HOURS"),
+    parseEnvPositiveInteger(env.LEGION_LINGER_HOURS, "LEGION_LINGER_HOURS", MAX_TIMER_HOURS),
     DEFAULT_LINGER_HOURS
   );
   const maxFixAttempts = resolveValue(
@@ -975,7 +986,11 @@ export function resolveDaemonConfig(
   const resyncIntervalMs = resolveValue(
     opts.cliOverrides?.resyncIntervalMs,
     fileNumber(fields, "resyncIntervalMs"),
-    parseEnvPositiveInteger(env.LEGION_RESYNC_INTERVAL_SECONDS, "LEGION_RESYNC_INTERVAL_SECONDS"),
+    parseEnvPositiveInteger(
+      env.LEGION_RESYNC_INTERVAL_SECONDS,
+      "LEGION_RESYNC_INTERVAL_SECONDS",
+      MAX_TIMER_SECONDS
+    ),
     DEFAULT_RESYNC_INTERVAL_MS
   );
   const workerStopTimeoutSeconds = resolveValue(
@@ -983,7 +998,8 @@ export function resolveDaemonConfig(
     fileNumber(fields, "workerStopTimeoutSeconds"),
     parseEnvPositiveInteger(
       env.LEGION_WORKER_STOP_TIMEOUT_SECONDS,
-      "LEGION_WORKER_STOP_TIMEOUT_SECONDS"
+      "LEGION_WORKER_STOP_TIMEOUT_SECONDS",
+      MAX_TIMER_SECONDS
     ),
     DEFAULT_WORKER_STOP_TIMEOUT_SECONDS
   );
@@ -992,7 +1008,8 @@ export function resolveDaemonConfig(
     fileNumber(fields, "treeStopTimeoutSeconds"),
     parseEnvPositiveInteger(
       env.LEGION_TREE_STOP_TIMEOUT_SECONDS,
-      "LEGION_TREE_STOP_TIMEOUT_SECONDS"
+      "LEGION_TREE_STOP_TIMEOUT_SECONDS",
+      MAX_TIMER_SECONDS
     ),
     DEFAULT_TREE_STOP_TIMEOUT_SECONDS
   );
@@ -1001,7 +1018,8 @@ export function resolveDaemonConfig(
     fileNumber(fields, "workerBootTimeoutSeconds"),
     parseEnvPositiveInteger(
       env.LEGION_WORKER_BOOT_TIMEOUT_SECONDS,
-      "LEGION_WORKER_BOOT_TIMEOUT_SECONDS"
+      "LEGION_WORKER_BOOT_TIMEOUT_SECONDS",
+      MAX_TIMER_SECONDS
     ),
     DEFAULT_WORKER_BOOT_TIMEOUT_SECONDS
   );
@@ -1019,7 +1037,8 @@ export function resolveDaemonConfig(
     fileNumber(fields, "workerRpcTimeoutSeconds"),
     parseEnvPositiveInteger(
       env.LEGION_WORKER_RPC_TIMEOUT_SECONDS,
-      "LEGION_WORKER_RPC_TIMEOUT_SECONDS"
+      "LEGION_WORKER_RPC_TIMEOUT_SECONDS",
+      MAX_TIMER_SECONDS
     ),
     DEFAULT_WORKER_RPC_TIMEOUT_SECONDS
   );
@@ -1037,7 +1056,8 @@ export function resolveDaemonConfig(
     fileNumber(fields, "slowCommandTimeoutSeconds"),
     parseEnvPositiveInteger(
       env.LEGION_SLOW_COMMAND_TIMEOUT_SECONDS,
-      "LEGION_SLOW_COMMAND_TIMEOUT_SECONDS"
+      "LEGION_SLOW_COMMAND_TIMEOUT_SECONDS",
+      MAX_TIMER_SECONDS
     ),
     DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS
   );
@@ -1064,29 +1084,45 @@ export function resolveDaemonConfig(
     throw new Error(`worker_stream_port must differ from port (both ${port.value})`);
   }
 
-  const lifecycleNumbers: Record<string, number> = {
-    admissionCap: admissionCap.value,
-    workerCap: workerCap.value,
-    maxRecursionDepth: maxRecursionDepth.value,
-    lingerHours: lingerHours.value,
-    maxFixAttempts: maxFixAttempts.value,
-    resyncIntervalMs: resyncIntervalMs.value,
-    workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
-    treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
-    workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
-    workerBootRegistrationDeadlineIntervals: workerBootRegistrationDeadlineIntervals.value,
-    workerRpcTimeoutSeconds: workerRpcTimeoutSeconds.value,
-    slowCommandTimeoutSeconds: slowCommandTimeoutSeconds.value,
+  // A file value arrives here already in milliseconds (`loadConfigFromFile`), a cliOverride is
+  // milliseconds by contract, and only the env value is still seconds; the post-resolve check
+  // below and the returned config both judge the millisecond form.
+  const resyncIntervalMsValue =
+    resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1);
+  // Every source ends here, and for a cliOverride this is the only guard: a positive integer, and
+  // for each duration that reaches a timer, at most `MAX_TIMER_SECONDS` in the field's own unit.
+  const lifecycleNumbers: Record<string, { value: number; max?: number }> = {
+    admissionCap: { value: admissionCap.value },
+    workerCap: { value: workerCap.value },
+    maxRecursionDepth: { value: maxRecursionDepth.value },
+    lingerHours: { value: lingerHours.value, max: MAX_TIMER_HOURS },
+    maxFixAttempts: { value: maxFixAttempts.value },
+    resyncIntervalMs: { value: resyncIntervalMsValue, max: MAX_TIMER_SECONDS * 1000 },
+    workerStopTimeoutSeconds: { value: workerStopTimeoutSeconds.value, max: MAX_TIMER_SECONDS },
+    treeStopTimeoutSeconds: { value: treeStopTimeoutSeconds.value, max: MAX_TIMER_SECONDS },
+    workerBootTimeoutSeconds: { value: workerBootTimeoutSeconds.value, max: MAX_TIMER_SECONDS },
+    workerBootRegistrationDeadlineIntervals: {
+      value: workerBootRegistrationDeadlineIntervals.value,
+    },
+    workerRpcTimeoutSeconds: { value: workerRpcTimeoutSeconds.value, max: MAX_TIMER_SECONDS },
+    slowCommandTimeoutSeconds: { value: slowCommandTimeoutSeconds.value, max: MAX_TIMER_SECONDS },
   };
-  for (const [field, value] of Object.entries(lifecycleNumbers)) {
+  for (const [field, { value, max }] of Object.entries(lifecycleNumbers)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`${field} must be a positive integer`);
     }
+    if (max !== undefined) checkAtMost(value, field, max);
   }
-  // `workerIdleRetireSeconds` is the one lifecycle number that admits 0 (timer disabled) and carries
-  // an upper bound, so it is validated here rather than in the positive-integer loop above (this
-  // also covers a cliOverride, which the file and env parsers never see).
+  // `workerIdleRetireSeconds` is the one lifecycle number that admits 0 (timer disabled), so it is
+  // validated here rather than in the positive-integer loop above.
   checkIdleRetireSeconds(workerIdleRetireSeconds.value, "workerIdleRetireSeconds");
+  // The root and controller registration deadlines (`processes.ts`) are one timer for the product
+  // of these two, so each factor fitting on its own is not enough.
+  checkAtMost(
+    workerBootTimeoutSeconds.value * workerBootRegistrationDeadlineIntervals.value,
+    "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals",
+    MAX_TIMER_SECONDS
+  );
 
   const gates = resolveValue(opts.cliOverrides?.gates, fileGates(fields), undefined, {
     design: "root-issues",
@@ -1134,7 +1170,7 @@ export function resolveDaemonConfig(
       maxRecursionDepth: maxRecursionDepth.value,
       lingerHours: lingerHours.value,
       maxFixAttempts: maxFixAttempts.value,
-      resyncIntervalMs: resyncIntervalMs.value * (resyncIntervalMs.source === "env" ? 1000 : 1),
+      resyncIntervalMs: resyncIntervalMsValue,
       workerStopTimeoutSeconds: workerStopTimeoutSeconds.value,
       treeStopTimeoutSeconds: treeStopTimeoutSeconds.value,
       workerBootTimeoutSeconds: workerBootTimeoutSeconds.value,
