@@ -7,16 +7,16 @@
   ],
   "pr": 1021,
   "prUrl": "https://github.com/sjawhar/legion/pull/1021",
-  "headTested": "a49929e18c15267fdf7f27da3af581550919b094",
+  "headTested": "b5d699e6f7a144bb8cc881d04bc77071da266ffe",
   "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
-  "specVersion": 4,
+  "specVersion": 5,
   "acceptance": {
     "1": "PASS. github-apps.ts: one exhaustive Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (architect/planner/tester/reviewer → review; implementer/merger → implement). MODE_TO_ROLE, modeToRole, catchup's WORKER_MODE absent repo-wide (only mentioned in .legion/implement.json). github-apps.test.ts: 'maps every Legion role to exactly one App' (iterates LEGION_ROLES) and 'runs the tester as the review App, never the code-writing one'. (round 3: github-apps.ts unchanged, still holds)",
     "2": "PASS. api/routes/credentials.ts (handleGitCredential, handleGhToken) and api/routes/workers.ts (/worker/started lease) import appRoleForLegionRole from ../../github-apps; catchup.ts too. api.test.ts 'reissues a daemon-registered worker session capability and keeps grants short-lived' pins gitName legion-review[bot], appLogin legion-review[bot], tokenRoles ['review','review'] and git-credential 200 for a tester; 'registers a worker session from a valid worker boot token without touching the issue's active phase' pins gitName legion-review[bot]. api/github.ts's gh() keeps a default appRole of 'implement' for the daemon's own reads — a default argument, not a role mapping. (round 3: routes unchanged, still holds)",
     "3": "PASS (live, independent of the implementer's run). Tester grant through this branch's startLegionApi + real TokenManager: /worker/started 200 gitName=legion-reviewer[bot]; /gh-token 200 appLogin=legion-reviewer[bot]; /git-credential 200 with the same token. POST /repos/sjawhar/legion-smoke/check-runs → 201 app.slug=legion-reviewer app.id=3202653 https://github.com/sjawhar/legion-smoke/runs/103711307756; POST /issues/37/comments → 201 user.login=legion-reviewer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769689. Read back via legion gh: app_slug=legion-reviewer, conclusion=success.",
     "4": "PASS (live). Implementer grant: /worker/started gitName=legion-implementer[bot]; /gh-token appLogin=legion-implementer[bot]; git push origin legion42-tester-proof/2026-09-13T10-41-26-374Z exit 0; commit bb06684217d42c849a1c4ba97b4296c47034cb70 author.login=committer.login=legion-implementer[bot]; POST /pulls 201 #37 user.login=legion-implementer[bot]; POST /issues/37/comments 201 user.login=legion-implementer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769634.",
-    "5": "PASS. packages/daemon/src/daemon/AGENTS.md GitHub Apps section states the mapping once and names appRoleForLegionRole (github-apps.ts). packages/daemon/src/cli/index.ts redeemGitHubToken comment now reads 'chosen by appRoleForLegionRole (daemon/github-apps.ts) — the command never picks one' with no restated mapping. (round 3: AGENTS.md boot bullet + GitHub Apps section updated for both-App leases and the provisioning exception; cli comment unchanged)",
-    "6": "PASS. skills/legion-worker/SKILL.md completion gate: only the implementer and merger can push; planner/tester/reviewer/architects commit locally and do not push, the commit rides the implementer's next push; a refused push is expected. skills/AGENTS.md, packages/pi-envoy/roles/planner.md and roles/tester.md say the same. Live: this tester committed 'test: record handoff' locally with jj split and attempted NO push. (round 3: SKILL.md gate names the implementer as the one pusher exactly once; this round's handoff again committed locally with no push)"
+    "5": "PASS. packages/daemon/src/daemon/AGENTS.md GitHub Apps section states the mapping once and names appRoleForLegionRole (github-apps.ts). packages/daemon/src/cli/index.ts redeemGitHubToken comment now reads 'chosen by appRoleForLegionRole (daemon/github-apps.ts) — the command never picks one' with no restated mapping. (round 3: AGENTS.md boot bullet + GitHub Apps section updated for both-App leases and the provisioning exception; cli comment unchanged) (round 4: AGENTS.md config.ts row + 'twice over' GitHub Apps section; cli comment unchanged)",
+    "6": "PASS. skills/legion-worker/SKILL.md completion gate: only the implementer and merger can push; planner/tester/reviewer/architects commit locally and do not push, the commit rides the implementer's next push; a refused push is expected. skills/AGENTS.md, packages/pi-envoy/roles/planner.md and roles/tester.md say the same. Live: this tester committed 'test: record handoff' locally with jj split and attempted NO push. (round 3: SKILL.md gate names the implementer as the one pusher exactly once; this round's handoff again committed locally with no push) (round 4: SKILL.md nit (i) applied; this round's handoff again committed locally with no push)"
   },
   "negativeControls": {
     "testerGitPush": "exit 128 'remote: Repository not found.'; remote head after = bb06684217d42c849a1c4ba97b4296c47034cb70 (unchanged)",
@@ -35,10 +35,11 @@
     "legion-reviewer (3202653)": "actions:write, checks:write, issues:write, metadata:read, packages:read, pull_requests:write"
   },
   "pushAttempted": false,
-  "prBodyE2E": "round 1 block, round 2 re-check line, and round 3 block (boot-probe refusal + negative control, dead code, rebase check, bare gates) — all before Fast-follow, tester Legion footer",
+  "prBodyE2E": "rounds 1–3 kept; round 4 block adds the check-config refusals with marker controls, boot-probe blob check, runner-plumbing sweep, #1016 rebase check, bare gates — before Fast-follow, tester Legion footer",
   "headTestedPrevious": [
     "02dc6def3159520055e5d957ad16c62de4b39f5a",
-    "9562b3a4cca61ac3650f2aad2a7d4b758664f94b"
+    "9562b3a4cca61ac3650f2aad2a7d4b758664f94b",
+    "a49929e18c15267fdf7f27da3af581550919b094"
   ],
   "recheck": {
     "kind": "docs-only re-check 02dc6def → 9562b3a4; code head 4108e121b83f425a2131e5392bc649a0b4f1bb8f unchanged; bare gates only; live sandbox proof (acceptance 3/4) not repeated",
@@ -93,7 +94,53 @@
     "docs": "SKILL.md L88-92 '(and, for the implementer, pushed)'; completion gate L432-455 states once that only the implementer pushes, merger pushes nothing, no orphaned wrap; daemon AGENTS.md boot bullet names both leases and the GitHub Apps section names the provisioning-credential and CI-read exceptions",
     "pushAttempted": false
   },
+  "round4": {
+    "kind": "full round for corrective commits 32718890 (both Apps required at config load; dead runner plumbing dropped), f193e4c9 (AGENTS.md/SKILL.md docs), 417aacdc (main's LEGION-46 fixtures carry both Apps), above the rebase onto main 9a6708fe (carries #1016); spec v5",
+    "result": "PASS on every item",
+    "checkConfig": {
+      "surface": "bun packages/daemon/src/cli/index.ts start acme/99 --check-config --config <scratch yaml> from this branch, under env -i HOME PATH (operator shell, not a pane); every private_key_command is `touch <marker>; printf key`; script /tmp/legion42-checkconfig-proof/run.sh (throwaway); live daemon untouched",
+      "implementOnly": "exit 1, stderr `error: github_apps.review is required` at loadGitHubApps (config.ts:660); both markers absent",
+      "reviewOnly": "exit 1, stderr `error: github_apps.implement is required` at loadGitHubApps; both markers absent",
+      "noGithubApps": "exit 1, stderr `error: github_apps is required` at resolveDaemonConfig (config.ts:1245); both markers absent",
+      "bothApps": "exit 0, stdout `Config OK: project=acme99`; both markers absent (negative control — --check-config resolves no key)",
+      "presentation": "stderr is Bun's uncaught-error frame around the message; runCli rethrows non-CliError and is untouched by this PR (main→head diff of cli/index.ts is the redeemGitHubToken comment only) — pre-existing, not a regression",
+      "unitLocks": [
+        "cli/__tests__/index.test.ts :: rejects a legion.yaml with only the implement App, naming github_apps.review",
+        "config.test.ts :: requires both Apps: a section missing one role is refused naming the key, before any key command runs",
+        "config.test.ts :: requires the github_apps section itself, from the file or a CLI override carrying both roles"
+      ]
+    },
+    "bootProbe": "index.ts blob a49929e1→b5d699e6 differs only by the probe comment and the removed `runner,` argument to startLegionApi; the implement-then-review leases before loadState are unchanged, so round 3's real-surface proof stands; index.test.ts 'refuses to start when only the implement App is configured…' 1 pass",
+    "runnerPlumbing": "grep for ctx.runner / deps.runner / RouteContext runner / defaultRunner / CommandRunner across api.ts, api/**, api.test.ts: empty; index.ts startLegionApi call passes no runner; tsc clean (lsp: no language server in this pane, grep + tsc used)",
+    "rebase": {
+      "fileSet": "compare/main...b5d699e6 = spec v5 Design table + consequences (api.ts, api/context.ts, catchup.ts, config.test.ts, github-apps.test.ts, index.test.ts, cli/__tests__/index.test.ts, planner.md, tester.md, skills/AGENTS.md) + .legion/{implement,review,test}.json",
+      "prCommitsIncludeRebasedHandoffs": [
+        "a775dd52c598 test: record handoff (my r3 d3c31a5a)",
+        "37eb8610ebb9 review: record handoff (round 2)"
+      ],
+      "mainOverlapInBase": "#1016 94bb173f (cli/__tests__/index.test.ts, daemon AGENTS.md, config.test.ts, config.ts), #1017 c5be7944, #1015 29b471f8, #975 b2971198",
+      "mechanicalCheck": "1406 main-added lines checked; all present at head except 37 in cli/__tests__/index.test.ts (18 from #1016, 16 from #1017) and config.test.ts (3 from #1016) that 417aacdc/32718890 deliberately rewrote onto the shared baseYaml/bothAppsYaml/BOTH_APPS fixtures; every test those lines belonged to is present and passes by name",
+      "tests1016Present": [
+        "refuses a timer setting above the 32-bit bound with the same message start-up gives",
+        "refuses every timer setting above its bound from the file, naming the key and the bound",
+        "refuses every timer setting above its bound from its LEGION_* variable, naming the variable and the bound",
+        "accepts resync_interval_seconds exactly at 2147483 from either source and refuses 2147484: the post-resolve check judges milliseconds",
+        "refuses a cliOverride above the bound post-resolve, naming the field",
+        "bounds the root registration deadline, the product of worker_boot_timeout_seconds and worker_boot_registration_deadline_intervals, at 2147483 s"
+      ],
+      "tests1017Present": [
+        "validates github_apps.<role>.private_key_secret without running secrets",
+        "still rejects a github app with no private-key source, naming all three"
+      ],
+      "suiteForThoseFiles": "config.test.ts + cli/__tests__/index.test.ts: 129 pass / 0 fail",
+      "mainAheadOfForkPoint": "#1020 49e88116 (LEGION-45) rewrote SKILL.md's 'Shared operation safety' paragraph on main AFTER this PR's fork point; not a reverted hunk — this PR edits other regions of SKILL.md, GitHub says MERGEABLE, CI ran on the merge ref; no rebase per Sami's conflict-only rule. Noted for the merger."
+    },
+    "mappingUnchanged": "github-apps.ts blob sha256 172fb8fddcb24bd51074f5358a56599d2dbd3352e72e1bbe541c93b95d03be97 at both 4108e121 and b5d699e6 — round-1 sandbox proof stands for acceptance 3/4",
+    "docsNits": "SKILL.md gate drops 'and the issue bookmark exists locally' (i); AGENTS.md config.ts row states github_apps required with both roles, refused before any key command; GitHub Apps section 'required, twice over' and names provisioningToken, /provisioning-credential, createCiStatusFetcher, first boot lease (h); probe comment (g) and index.test.ts nits (j) applied",
+    "bareGates": "CI at b5d699e6: Tests run 34759329236 success (re-run 34759408511 success), Legion Envoy and Contracts run 34759329274 success (pi-envoy; siblings skipped); local packages/daemon bun test 1183 pass / 7 skip / 0 fail, biome 160 files clean, tsc clean; MERGEABLE / BLOCKED (not CONFLICTING); not rebased by me",
+    "pushAttempted": false
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T12:18:44.822Z"
+  "completed": "2026-09-13T13:59:58.540Z"
 }
