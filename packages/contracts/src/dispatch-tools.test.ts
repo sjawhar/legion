@@ -146,6 +146,22 @@ describe("dispatchToolSpecs", () => {
     });
   });
 
+  test("dispatch_issue accepts only the four coarse priority buckets", () => {
+    const schema = schemaFor("dispatch_issue");
+
+    expect(
+      schema.safeParse({ project: "DSP", title: "Native workspace", priority: 2 })
+    ).toMatchObject({
+      data: { priority: 2 },
+      success: true,
+    });
+    for (const priority of [-1, 4, 1.5]) {
+      expect(
+        schema.safeParse({ project: "DSP", title: "Native workspace", priority }).success
+      ).toBe(false);
+    }
+  });
+
   test("rejects an ask with more than eight options", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({

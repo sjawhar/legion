@@ -518,10 +518,12 @@ function issueSummary(
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
+  if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
+    ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     `Route: ${issue.route ?? "none"}`,
     ...(specApproval === undefined
@@ -713,6 +715,7 @@ export async function executeDispatchTool(
       const external = optionalString(args, "external");
       const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
+      const priority = optionalNumber(args, "priority");
       const labels = args.labels;
       try {
         const created = await client.issue({
@@ -722,6 +725,7 @@ export async function executeDispatchTool(
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
+          ...(priority === undefined ? {} : { priority: priority as 0 | 1 | 2 | 3 }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });

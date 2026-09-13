@@ -433,6 +433,27 @@ describe("executeDispatchTool", () => {
       { body: expect.objectContaining({ labels: ["frontend", "urgent"] }) },
     ]);
   });
+
+  test("dispatch_issue forwards an initial priority", async () => {
+    const requests: Array<{ readonly body: unknown }> = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ body: JSON.parse(String(init?.body)) });
+      return response({ key: "LEGION-13", title: "Priority work" });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "Priority work", priority: 1 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual([{ body: expect.objectContaining({ priority: 1 }) }]);
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -1825,6 +1846,7 @@ describe("executeDispatchTool", () => {
           open_asks: [],
           last_seq: 0,
           labels: ["frontend", "urgent"],
+          priority: 1,
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
@@ -1858,6 +1880,7 @@ describe("executeDispatchTool", () => {
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
+    expect(result.text).toContain("Priority: P1");
   });
 
   test("keeps an issue summary readable when its references are unavailable", async () => {
@@ -1868,6 +1891,7 @@ describe("executeDispatchTool", () => {
           key: "DSP-42",
           title: "Dispatch issue",
           status: "open",
+          priority: null,
           route: null,
           open_asks: [],
           last_seq: 0,

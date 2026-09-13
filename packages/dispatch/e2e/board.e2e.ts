@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject } from "./api";
+import { createIssue, createProject, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -166,6 +166,30 @@ test("project board persists reordering, lets humans close and reopen, and expla
     if (testInfo.project.name === "iphone") {
       await expect(page.getByRole("button", { name: "Board" })).toHaveCSS("min-height", "44px");
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("project list and board cards show an issue priority", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Prioritized card" });
+  await patchIssue(issue.key, { priority: 1 });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE");
+    await expect(
+      page.getByRole("list", { name: "triage issues" }).getByText("P1", { exact: true })
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Board" }).click();
+    await expect(
+      page
+        .getByRole("article", { name: `${issue.key} Prioritized card` })
+        .getByText("P1", { exact: true })
+    ).toBeVisible();
   } finally {
     await context.close();
   }

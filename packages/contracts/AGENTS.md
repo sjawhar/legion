@@ -32,7 +32,7 @@ the native Dispatch tool suite:
   `dispatch_artifact`, `dispatch_read`, and `dispatch_search`. It defines their names, descriptions,
   and field shapes; `dispatch_message.in_reply_to` is the same-issue message-reply correlation used
   for a targeted agent's answer. Host adapters consume `dispatchToolSpecs` directly.
-- `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters); project-document arguments accept the document's artifact id, slug, or filename.
+- `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters) and an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest); project-document arguments accept the document's artifact id, slug, or filename.
 - `dispatch_ask` creates a question by default and accepts only `kind: "action"` for a human to-do. Action asks have server-fixed `Done` / `Can't` options; `approval` remains server-created through `dispatch_request_approval`.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the

@@ -103,6 +103,10 @@ export const dispatchToolSpecs = [
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
         .describe("Optional initial labels, at most 20 labels of up to 40 characters.")
         .optional(),
+      priority: z
+        .number({ int: true, min: 0, max: 3 })
+        .describe("Optional coarse priority: P0 is highest and P3 is lowest.")
+        .optional(),
     }),
   },
   {

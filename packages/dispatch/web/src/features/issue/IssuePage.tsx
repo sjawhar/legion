@@ -234,10 +234,23 @@ function IssueHeader({
     },
   });
   const updateIssue = useMutation({
-    mutationFn: (input: Partial<Pick<Issue, "route" | "status" | "title">>) =>
+    mutationFn: (input: Partial<Pick<Issue, "priority" | "route" | "status" | "title">>) =>
       api.patchIssue(issue.key, input),
-    onMutate: async () => {
+    onMutate: async (input) => {
       await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
+      const previous = queryClient.getQueryData<IssueDetails>(["issue", issue.key]);
+      const priority = input.priority;
+      if (priority !== undefined) {
+        queryClient.setQueryData<IssueDetails>(["issue", issue.key], (current) =>
+          current === undefined ? undefined : { ...current, priority }
+        );
+      }
+      return { previous };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData<IssueDetails>(["issue", issue.key], context.previous);
+      }
     },
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
@@ -400,6 +413,27 @@ function IssueHeader({
                 {status}
               </option>
             ))}
+          </select>
+        </label>
+        <label
+          className={`flex shrink-0 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+        >
+          Priority
+          <select
+            className={`rounded px-2 py-1 font-normal disabled:cursor-not-allowed ${inputClasses(false)} ${surfaceMutedDisabledBg} ${secondaryButtonDisabledText}`}
+            disabled={isClosed || updateIssue.isPending}
+            onChange={(event) =>
+              drafts.requestPrioritySubmit(
+                event.target.value === "" ? null : (Number(event.target.value) as 0 | 1 | 2 | 3)
+              )
+            }
+            value={issue.priority ?? ""}
+          >
+            <option value="">—</option>
+            <option value="0">P0</option>
+            <option value="1">P1</option>
+            <option value="2">P2</option>
+            <option value="3">P3</option>
           </select>
         </label>
         {isClosed ? null : (

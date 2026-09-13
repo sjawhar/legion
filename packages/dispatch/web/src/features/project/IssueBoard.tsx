@@ -44,6 +44,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { PriorityBadge } from "../issue/PriorityBadge";
 import { buildIssuePath } from "../refs/routes";
 import {
   type BoardColumn,
@@ -142,6 +143,7 @@ function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean
         >
           {statusLabels[issue.status as IssueStatus] ?? issue.status}
         </span>
+        <PriorityBadge priority={issue.priority} />
         {(issue.labels ?? []).map((label) => (
           <span
             className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}

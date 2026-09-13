@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
-import type { Ask, IssueDetails, Subscriber } from "../../api/types";
+import type { Ask, InboxRow, IssueDetails, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/Margin";
 import { IssuePage } from "./IssuePage";
@@ -40,6 +40,7 @@ const issue: IssueDetails = {
   project: "CORE",
   route: null,
   status: "todo",
+  priority: null,
   rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
@@ -79,7 +80,7 @@ function issueWithExternalLink(url: string): IssueDetails {
 
 function stubIssuePage(
   nextIssue: IssueDetails,
-  inbox: Ask[] = [],
+  inbox: InboxRow[] = [],
   subscribers: Subscriber[] = []
 ): () => void {
   const originalGetIssue = api.getIssue;
@@ -415,7 +416,7 @@ test("IssuePage continues to unfurl GitHub issues through the issues endpoint", 
 });
 
 test("IssuePage opens the Spec tab and leaves open asks out of the main column", async () => {
-  const restore = stubIssuePage(issue, [openIssueAsk]);
+  const restore = stubIssuePage(issue, [{ ...openIssueAsk, priority: issue.priority }]);
   const view = renderIssuePage("/issues/CORE-1");
 
   try {

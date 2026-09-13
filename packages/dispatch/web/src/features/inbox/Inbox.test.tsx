@@ -4,10 +4,10 @@ import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Ask } from "../../api/types";
+import type { InboxRow } from "../../api/types";
 import { Inbox } from "./Inbox";
 
-function artifactAsk(): Ask {
+function artifactAsk(): InboxRow {
   return {
     anchor: null,
     answer: null,
@@ -23,12 +23,13 @@ function artifactAsk(): Ask {
     opened_event_id: 1,
     options: [],
     question: "Does this design need review?",
+    priority: null,
     state: "open",
     urgency: "med",
   };
 }
 
-function issueAsk(overrides: Partial<Ask> = {}): Ask {
+function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
   return {
     anchor: null,
     answer: null,
@@ -44,6 +45,7 @@ function issueAsk(overrides: Partial<Ask> = {}): Ask {
     options: [],
     question: "Which approach?",
     state: "open",
+    priority: null,
     urgency: "med",
     ...overrides,
   };
@@ -187,25 +189,27 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
   }
 });
 
-test("Inbox sorts Waiting on you oldest first and hides the blocker line when empty", async () => {
-  const oldest = issueAsk({
+test("Inbox preserves server priority order within Waiting on you", async () => {
+  const p2 = issueAsk({
     created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-    id: "ask-oldest",
-    question: "Oldest action",
+    id: "ask-p2",
+    priority: 2,
+    question: "P2 earlier action",
   });
-  const recent = issueAsk({
+  const p0 = issueAsk({
     created_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
-    id: "ask-recent",
-    question: "Recent action",
+    id: "ask-p0",
+    priority: 0,
+    question: "P0 later action",
   });
   const agentWaits = issueAsk({
     id: "ask-agent",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
     question: "Waiting on agent",
   });
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([recent, agentWaits, oldest]);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([p0, agentWaits, p2]);
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
-    ask: [oldest, recent, agentWaits].find((ask) => ask.id === id) ?? oldest,
+    ask: [p0, p2, agentWaits].find((ask) => ask.id === id) ?? p0,
     edits: [],
     replies: [],
   }));
@@ -226,7 +230,7 @@ test("Inbox sorts Waiting on you oldest first and hides the blocker line when em
       within(section)
         .getAllByTestId(/^ask-ask-/)
         .map((card) => card.dataset.testid)
-    ).toEqual(["ask-ask-oldest", "ask-ask-recent"]);
+    ).toEqual(["ask-ask-p0", "ask-ask-p2"]);
     expect(screen.getByText("Blocked on you: 2 items, oldest 2d")).toBeTruthy();
   } finally {
     view.unmount();

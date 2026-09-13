@@ -101,12 +101,15 @@ export interface ExternalLink {
   readonly kind?: string;
 }
 
+export type IssuePriority = 0 | 1 | 2 | 3;
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
   readonly number: number;
   readonly title: string;
   readonly status: string;
+  readonly priority: IssuePriority | null;
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
@@ -121,7 +124,10 @@ export interface Issue {
 }
 
 export interface IssueSummary
-  extends Pick<Issue, "key" | "title" | "status" | "rank" | "parent" | "updated_at" | "last_seq"> {
+  extends Pick<
+    Issue,
+    "key" | "title" | "status" | "priority" | "rank" | "parent" | "updated_at" | "last_seq"
+  > {
   readonly labels?: string[];
   readonly open_asks: number;
 }
@@ -229,6 +235,12 @@ export interface Ask {
    *  A human reply on an open ask means the asker owes the next turn (a clarification). */
   readonly last_reply?: AskLastReply | null;
   readonly edited_at: string | null;
+}
+
+/** An open ask as returned by the human Inbox. */
+export interface InboxRow extends Ask {
+  /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
+  readonly priority: IssuePriority | null;
 }
 
 export interface AskBlockArtifact {
@@ -687,6 +699,7 @@ export interface CreateIssueInput {
   readonly spec?: string;
   readonly force?: boolean;
   readonly labels?: string[];
+  readonly priority?: IssuePriority | null;
 
   readonly actor?: Actor;
 }
@@ -701,6 +714,7 @@ export interface UpdateIssueInput {
   readonly status?: string;
   readonly rank?: IssueRankInput;
   readonly labels?: string[];
+  readonly priority?: IssuePriority | null;
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
   readonly actor?: Actor;
@@ -871,6 +885,7 @@ export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
   labels: z.array(z.string()).optional(),
   status: z.string().optional(),
+  priority: z.number().int().min(0).max(3).nullable().optional(),
   rank: z.string().optional(),
   route: z.string().nullish(),
 });

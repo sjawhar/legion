@@ -11,6 +11,7 @@ import type {
   AskResolution,
   Comment,
   CreateCommentInput,
+  InboxRow,
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -358,8 +359,8 @@ export function AskCard({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
     onMutate: async () => {
       await queryClient.cancelQueries({ queryKey: ["inbox"] });
-      const previous = queryClient.getQueryData<Ask[]>(["inbox"]);
-      queryClient.setQueryData<Ask[]>(["inbox"], (current) =>
+      const previous = queryClient.getQueryData<InboxRow[]>(["inbox"]);
+      queryClient.setQueryData<InboxRow[]>(["inbox"], (current) =>
         current?.filter((currentAsk) => currentAsk.id !== ask.id)
       );
       return previous;

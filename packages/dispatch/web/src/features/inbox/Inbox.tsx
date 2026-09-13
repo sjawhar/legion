@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Ask } from "../../api/types";
+import type { InboxRow } from "../../api/types";
 import {
   badgeLow,
   borderStrong,
@@ -12,6 +12,7 @@ import {
   linkText,
   textMutedOnCanvas,
 } from "../../theme/classes";
+import { PriorityBadge } from "../issue/PriorityBadge";
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { AskCard } from "./AskCard";
@@ -31,7 +32,7 @@ function ReplyChip({ children }: { children: ReactNode }): ReactNode {
  *  (an agent) owes the next turn, so the viewer is told who they're waiting on. Otherwise, if
  *  an agent replied last on a row still needing the viewer, that reply is surfaced so the
  *  viewer knows to look before answering. */
-function InboxRowChip({ ask }: { ask: Ask }): ReactNode {
+function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   if (ask.last_reply?.author.kind === "user") {
     return <ReplyChip>Waiting on {actorLabel(ask.author)}</ReplyChip>;
   }
@@ -41,7 +42,7 @@ function InboxRowChip({ ask }: { ask: Ask }): ReactNode {
   return null;
 }
 
-function InboxRow({ ask }: { ask: Ask }): ReactNode {
+function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
   const owner = ask.issue?.key ?? ask.issue_key;
   const title = ask.issue?.title ?? owner ?? "Unassigned ask";
   return (
@@ -73,6 +74,7 @@ function InboxRow({ ask }: { ask: Ask }): ReactNode {
           </Link>
         )}
         <InboxRowChip ask={ask} />
+        <PriorityBadge priority={ask.priority} />
       </div>
       <AskCard ask={ask} />
     </li>
@@ -113,7 +115,7 @@ export function Inbox(): ReactNode {
           <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on you</h2>
           <ul className="space-y-3">
             {waiting.map((ask) => (
-              <InboxRow ask={ask} key={ask.id} />
+              <InboxItem ask={ask} key={ask.id} />
             ))}
           </ul>
         </section>
@@ -123,7 +125,7 @@ export function Inbox(): ReactNode {
           <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Needs you</h2>
           <ul className="space-y-3">
             {needsYou.map((ask) => (
-              <InboxRow ask={ask} key={ask.id} />
+              <InboxItem ask={ask} key={ask.id} />
             ))}
           </ul>
         </section>
@@ -133,7 +135,7 @@ export function Inbox(): ReactNode {
           <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
           <ul className="space-y-3">
             {waitingOnAgents.map((ask) => (
-              <InboxRow ask={ask} key={ask.id} />
+              <InboxItem ask={ask} key={ask.id} />
             ))}
           </ul>
         </section>

@@ -32,7 +32,9 @@ export interface BoardColumn {
 export function groupIssuesByStatus(issues: readonly IssueSummary[]): BoardColumn[] {
   return issueStatuses.map((status) => ({
     status,
-    issues: issues.filter((issue) => issue.status === status),
+    issues: issues
+      .filter((issue) => issue.status === status)
+      .sort((left, right) => left.rank.localeCompare(right.rank)),
   }));
 }
 

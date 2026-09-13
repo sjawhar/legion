@@ -25,6 +25,7 @@ type inboxAsk struct {
 	model.Ask
 	Issue     *inboxIssue         `json:"issue,omitempty"`
 	Document  *inboxDocument      `json:"document,omitempty"`
+	Priority  *int                `json:"priority"`
 	LastReply *model.AskLastReply `json:"last_reply"`
 }
 
@@ -36,7 +37,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select a.id::text, a.issue_key, a.artifact_id::text, a.block_id, a.block_artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
 		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at, a.kind, a.approval,
-		       i.key, i.title, ar.project_key, ar.slug, ar.name,
+		       i.key, i.title, i.priority, ar.project_key, ar.slug, ar.name,
 		       lr.author, lr.created_at
 		from asks a
 		left join issues i on i.key = a.issue_key
@@ -50,7 +51,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		where a.state = 'open'
 		  and (i.key is null or i.closed_at is null)
 		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
-		order by coalesce(lr.author->>'kind' = 'user', false) asc,
+		order by coalesce(lr.author->>'kind' = 'user', false) asc, i.priority asc nulls last,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project)
 	if err != nil {
@@ -68,7 +69,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
 			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
-			&issueKey, &issueTitle, &documentProject, &documentSlug, &documentName,
+			&issueKey, &issueTitle, &ask.Priority, &documentProject, &documentSlug, &documentName,
 			&lastReplyAuthor, &lastReplyAt,
 		); err != nil {
 			s.writeHandlerError(w, err)

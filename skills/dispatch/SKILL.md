@@ -78,13 +78,13 @@ exactly one owner to every owner-scoped tool: `issue` for an issue, or `project`
 [References](#references) for the resulting ref shape). On first use, an external issue reference creates its native issue in the
 project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
 
-Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys rather than writing a priority value.
+Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest).
 
 Architects create newly tracked child work with:
 ```ts
-dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[] })
+dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3 })
 ```
-`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. It returns
+`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. Set `priority` on creation only when the human's intent makes the bucket clear; otherwise priority remains the human's decision. It returns
 `details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
