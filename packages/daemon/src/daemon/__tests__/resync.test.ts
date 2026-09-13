@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
-import { type LegionState, newLegionState, type PrState } from "../legion-state";
+import { type IssueNode, type LegionState, newLegionState, type PrState } from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
 import { checkPr, fakeDispatchClient } from "./ci-fixtures";
@@ -1225,6 +1225,66 @@ describe("runResync", () => {
     ]);
     expect(state.issues[child]).toMatchObject({ status: "done", lastAppliedSeq: 52 });
     expect(detailReads).toBe(0);
+  });
+
+  it("drops a queued entry whose issue is already done, logs it once, and leaves todo and daemon-owned entries alone", async () => {
+    const state = newLegionState("omp", 1);
+    const finished = "LEGION-56" as IssueKey;
+    const waiting = "LEGION-57" as IssueKey;
+    const demoted = "LEGION-58" as IssueKey;
+    const seed: ReadonlyArray<readonly [IssueKey, IssueNode["status"]]> = [
+      [finished, "done"],
+      [waiting, "todo"],
+      [demoted, "in_progress"],
+    ];
+    for (const [key, status] of seed) {
+      state.issues[key] = { key, title: key, status, children: [] };
+      state.trees[key] = { root: key, generation: 0, status: "queued", launchFailures: 0 };
+    }
+    state.admission.queue = [finished, waiting, demoted];
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      dispatchClient: fakeDispatchClient({
+        // Dispatch agrees with every local status: the drift heal replays nothing, so only the
+        // sweep can act.
+        listIssues: async () =>
+          seed.map(([key, status]) => ({
+            key,
+            title: key,
+            status,
+            parent: null,
+            updated_at: "2026-09-13T09:05:00Z",
+            last_seq: 7,
+            open_asks: 0,
+          })) as never,
+      }),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push(effects);
+        // The pump's executor for this test: what `onDequeue` -> `ProcessManager.dequeue` does.
+        for (const effect of effects) {
+          if (effect.kind !== "dequeue") continue;
+          state.admission.queue.splice(state.admission.queue.indexOf(effect.issue), 1);
+          delete state.trees[effect.issue];
+        }
+        expect(envelope.event_id).toBe(`resync:${finished}:dequeue`);
+      },
+    });
+
+    expect(dispatched).toEqual([
+      [
+        { kind: "dequeue", issue: finished },
+        {
+          kind: "log",
+          message: `dropped ${finished} from the admission queue at resync: Dispatch status "done"`,
+        },
+      ],
+    ]);
+    expect(state.admission.queue).toEqual([waiting, demoted]);
+    expect(state.trees[finished]).toBeUndefined();
+    expect(state.trees[waiting]?.status).toBe("queued");
+    expect(state.trees[demoted]?.status).toBe("queued");
   });
 
   it("drops a pending done write only after Dispatch confirms the issue is already done", async () => {

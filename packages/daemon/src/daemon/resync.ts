@@ -4,7 +4,7 @@ import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
-import type { LegionState } from "./legion-state";
+import { type LegionState, staleQueueEntryReason } from "./legion-state";
 import {
   acceptGitHubFence,
   type CiSnapshot,
@@ -226,6 +226,27 @@ async function healStatusDrift(deps: RunResyncDeps, now: number): Promise<number
   return healed;
 }
 
+/** Drops every `admission.queue` entry whose issue has left the waiting line -- the same rule as
+ * `reconcileAdmission`'s boot sweep (`staleQueueEntryReason`) -- through the same `dequeue`
+ * effect the reducers emit, so removal always runs `ProcessManager.dequeue`. Runs after
+ * `healStatusDrift`, so the status judged is the one Dispatch currently reports: an entry whose
+ * status changed since the last run was already dequeued by the heal's own reducer replay and is
+ * not seen here; this catches what the reducer never saw (an entry queued before the effect
+ * existed, LEGION-56). One `log` line per entry, in the same `applyEffects` call. */
+async function sweepStaleQueue(deps: RunResyncDeps, now: number): Promise<void> {
+  for (const issue of [...deps.state.admission.queue]) {
+    const reason = staleQueueEntryReason(deps.state, issue);
+    if (reason === undefined) continue;
+    await deps.applyEffects(
+      [
+        { kind: "dequeue", issue },
+        { kind: "log", message: `dropped ${issue} from the admission queue at resync: ${reason}` },
+      ],
+      { event_id: `resync:${issue}:dequeue`, issued_at: now }
+    );
+  }
+}
+
 /** Root-issue consistency anomalies a healed drift scan cannot itself explain: an issue Dispatch
  * still considers alive but whose tree/admission bookkeeping has fallen out of step with its own
  * status. A root whose tree is `queued` is waiting for an admission slot the daemon itself owns
@@ -349,6 +370,7 @@ export async function runResync(
 
   lastRunAt.set(deps.state, now);
   const healed = await healStatusDrift(deps, now);
+  await sweepStaleQueue(deps, now);
   await retryPendingStatusWrites(deps);
   const ciFetchFailureDetails = await reconcilePrs(deps, now);
   const anomalies = await reportRootAnomalies(deps, now);
