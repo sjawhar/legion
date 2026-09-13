@@ -1,0 +1,90 @@
+{
+  "passed": 9,
+  "failed": 0,
+  "failures": [],
+  "head": "910c527f49695bd26cb4362022dfb1004c7f1ed6",
+  "codeHead": "3a9b01eb2d55",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/991",
+  "proof": "dispatch://LEGION-37/artifact/tester-proof-md",
+  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-tar-gz",
+  "acceptance": [
+    {
+      "criterion": "1 /worker/started for a non-active role with no pending assignment leaves phases[issue] unchanged",
+      "verdict": "pass",
+      "evidence": "api.test.ts 'registers a worker session ... without touching the issue's active phase' and 'keeps the implementer as the active phase when a finished reviewer's relaunch registers ...' (mutation 1 fails both). Rig: POST /worker/started for the finished planner (same session, no assignment) with implementer active -> 200, log '[legion] legion-sjawhar370-legsmoke-91-planner registered session 01a098c5-... while LEGSMOKE-91's active phase is implementer; the phase changes only when an architect assignment is delivered', {phases, roles} diff empty (tester-proof.md 'Acceptance 1 on the real daemon'; evidence 1-reregister-*)."
+    },
+    {
+      "criterion": "2 the architect's most recent assignment becomes the active phase once delivered (fresh spawn at ready, or prompted into a live worker)",
+      "verdict": "pass",
+      "evidence": "Rig: planner assignment (migrated from v24) delivered at /worker/ready 03:18:04Z -> phases[LEGSMOKE-91]={planner,01a098c5}; implementer 03:23:05Z -> {implementer,01a098ca}; tester 03:26:03Z -> {tester,01a098cc} (state-d-delivered, state-1-implementer-active, state-e-after-ready). Unit: existing api/processes cases reworded to the assignment write."
+    },
+    {
+      "criterion": "3 spawn_worker into a live worker (resumed) sets the phase; a reconnect-only resume does not",
+      "verdict": "pass",
+      "evidence": "Rig: spawn_worker implementer against the live idle implementer -> {status:resumed}, no new pane, phases tester->implementer (state-3-*); daemon restart (c) reconnected both live shims with {phases, roles} byte-identical (state-c-*). Unit: processes.test.ts prompt path."
+    },
+    {
+      "criterion": "4 the newer worker's completion is accepted after an older worker relaunched",
+      "verdict": "pass",
+      "evidence": "api.test.ts 'accepts the implementer's completion after a finished reviewer relaunched' (mutation 1 fails it). Rig: after the finished planner re-registered, the live implementer's `legion handoff complete` -> '[handoff] Warning: phase recorded; no architect was live to receive the summary' (202 path, no 409); phases[LEGSMOKE-91].completed recorded (4-log.txt, state-4-after)."
+    },
+    {
+      "criterion": "5 events route to the active phase's worker after a relaunch",
+      "verdict": "pass (unit only)",
+      "evidence": "api.test.ts 'keeps the implementer as the active phase ... and keeps routing to the implementer' (routeActive -> publish to the implementer's role token; mutation 1 fails it). Not drivable on the rig in SMOKE_WEBHOOK_MODE=none (no PR in state.prs, no ingress)."
+    },
+    {
+      "criterion": "6 daemon AGENTS.md states the active phase changes only on an architect assignment",
+      "verdict": "pass",
+      "evidence": "jj diff -r 3a9b01eb packages/daemon/src/daemon/AGENTS.md: /worker/started row ('Never writes the issue's active phase ...'), /worker/ready row ({kind: assignment|catchup}), spawn_worker invariant bullet (one writer; catch-up eligibility; sub-architect exemption; never replaces a pending assignment)."
+    },
+    {
+      "criterion": "7 a catch-up never writes phases[issue] and is not sent to a role that is neither active nor holding a pending assignment; a sub-architect is exempt",
+      "verdict": "pass",
+      "evidence": "processes.test.ts 'skips the catch-up for a finished phase worker ...' (mutation 3), 'delivers a queued catch-up at worker/ready without touching the issue's active phase' and 'resumes a sub-architect ...' (mutation 2; the sub-architect test seeds phases[child]=planner at line 5721 and asserts the prompt at 5737 and the unchanged phase at 5740). Rig (a1) idle-live finished planner and (a2) idle-retired planner: exception -> one 'no catch-up for ...' line, no pane, {phases, roles} identical; (b) dead active implementer: --resume relaunch with pendingAssignment {kind: catchup}, same session re-registered, catch-up delivered, phases unchanged throughout (a1-*, a2-*, b-*)."
+    },
+    {
+      "criterion": "8 a catch-up never replaces a queued architect assignment",
+      "verdict": "pass",
+      "evidence": "processes.test.ts 'leaves a booting claim's architect assignment untouched ...' and 'drops a catch-up inside the role lock ...' (mutation 4 fails the latter). Rig (e): fresh spawn_worker tester + exception 0.8 s later while booting -> '[legion] dropping catch-up for ...tester: the architect's assignment is queued and reaches the worker first', assignment intact, delivered at ready (e-*)."
+    },
+    {
+      "criterion": "9 the architect skill states phases are strictly sequential and a different-role spawn_worker supersedes the active phase",
+      "verdict": "pass",
+      "evidence": "jj diff -r 3a9b01eb skills/legion-architect/SKILL.md: exactly the one sentence added to the spawn_worker bullet; no other skill text changed."
+    }
+  ],
+  "unit": {
+    "tsc": "bunx tsc --noEmit exit 0",
+    "biome": "bunx biome check src/: 147 files, no fixes, exit 0",
+    "tests": "bun test legion-state.test.ts api.test.ts processes.test.ts reducers.test.ts: 374 pass / 0 fail / 3 skip (377 tests) on two clean runs; one earlier run had 4 root-spawn fixture flakes, all green in isolation; 3 skips are LEGION_TMUX_LIVE-gated. index.test.ts 31 pass.",
+    "mutations": [
+      "1 restore phases write in handleWorkerStarted -> 4 api.test.ts cases fail (registers ... without touching; keeps the implementer ... keeps routing; accepts the implementer's completion ...; rolls back the claim mutation ...)",
+      "2 promptExistingWorker writes phases for every kind -> 'delivers a queued catch-up at worker/ready ...' and 'resumes a sub-architect ...' fail",
+      "3 remove resumeWorker bystander skip -> 'skips the catch-up for a finished phase worker ...' fails",
+      "4 remove deliverToWorker lock-side guard (pre-check kept) -> 'drops a catch-up inside the role lock ...' fails"
+    ]
+  },
+  "rig": {
+    "surface": "scripts/smoke/up.sh at 910c527f, SMOKE_WEBHOOK_MODE=none, SMOKE_DIR=/tmp/legion37-tester-rig, SMOKE_PROJECT=sjawhar/370 (tmux -L legion-sjawhar370), NATS 14370, listener 19170, daemon 19470/19471, Dispatch issues LEGSMOKE-90 (root) / LEGSMOKE-91 (child), production OMP invocation 18.1.18-sami.20260912-203541, real omp --mode rpc phase workers; production (legion-sjawharlegion, 13370/13371) untouched; torn down with scripts/smoke/down.sh",
+    "scenarios": {
+      "d": "main checkout's daemon wrote v24 state.json with bare-string pendingAssignment; this head booted on it: state.json.v24.bak byte-identical to main's file, v25 {kind: assignment, task}, delivered at ready after the boot watchdog relaunched the orphaned boot",
+      "a1": "finished planner idle-live + exception -> skipped, one log line, no pane, {phases, roles} identical",
+      "a2": "planner idle-retired by the daemon (600 s) + exception -> skipped, no pane, identical; positive control: spawn_worker planner -> --resume, phase moves to planner",
+      "b": "implementer pane killed + exception -> --resume relaunch, pendingAssignment {kind: catchup}, same session re-registered, catch-up delivered at ready, phases unchanged",
+      "c": "daemon restart with finished planner idle beside the live implementer -> {phases, roles} identical after reconnect",
+      "e": "booting tester claim with an assignment + exception -> dropping catch-up log, assignment intact, delivered at ready",
+      "e0": "negative control: exception for a role with no claim -> resumeWorker no-op log, nothing else"
+    }
+  },
+  "observations": [
+    "Live reproduction on the unfixed production daemon (cited from the architect): production state.json at 03:14 UTC had phases[LEGION-37]=implementer while the tester was the assigned phase, after the implementer's --resume relaunch re-registered.",
+    "A phase worker whose /worker/started falls into a daemon-down gap (the deliberate main->branch swap in (d)) stayed alive without registering until the boot watchdog's 3 alive-but-unconfirmed intervals retired and relaunched it; pre-existing boot behaviour, outside this issue.",
+    "loadState migrates in memory and writes only the .bak; disk state.json is rewritten on the first save after boot (for a few seconds it still read version 24). Pre-existing migration design.",
+    "Not hit on this run: the LEGION-39 negotiate_protocol timeout on a --resume relaunch; the LEGION-11 boot-time revokeSessionCapability TypeError (no dead confirmed worker at either restart).",
+    "Tester-side trap (not a code finding): with the profile's pi-legion-envoy 1.17.0 text-injected LEGION_GRANT preamble, a model that repeats the injected preamble in its own later commands shadows the fresh grant with a stale one and every `legion gh`/credential call 403s ('Unable to redeem LEGION_GRANT'); the fix is to emit commands without the preamble."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T03:46:30.122Z"
+}
