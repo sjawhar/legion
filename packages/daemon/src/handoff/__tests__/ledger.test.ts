@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -316,5 +317,49 @@ describe("handoff ledger", () => {
     expect(handoff).not.toBeNull();
     expect(handoff?.learningsInjected).toBeUndefined();
     expect(handoff?.learningsHelpful).toBeUndefined();
+  });
+
+  it("refuses an implement handoff with no production-like proof and writes nothing", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+
+    expect(() =>
+      writePhaseHandoff(workspaceDir as string, "implement", { filesChanged: ["a.ts"] })
+    ).toThrow(/proof/);
+    expect(existsSync(path.join(getLegionDir(workspaceDir), "implement.json"))).toBe(false);
+
+    writePhaseHandoff(workspaceDir, "implement", { filesChanged: ["a.ts"], proof: [proof] });
+    expect(readPhaseHandoff(workspaceDir, "implement")).toMatchObject({
+      proof: [{ criterion: "1" }],
+    });
+  });
+
+  it("names the file and the failing field on stderr when a committed handoff fails validation", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+    ensureLegionDir(workspaceDir);
+    const filePath = path.join(getLegionDir(workspaceDir), "implement.json");
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        phase: "implement",
+        completed: new Date().toISOString(),
+        filesChanged: ["a.ts"],
+      }),
+      "utf-8"
+    );
+
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      expect(readPhaseHandoff(workspaceDir, "implement")).toBeNull();
+    } finally {
+      console.error = original;
+    }
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(filePath);
+    expect(errors[0]).toContain("proof");
   });
 });
