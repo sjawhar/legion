@@ -12,6 +12,7 @@ import {
 import path from "node:path";
 import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "@legion/contracts";
 import {
+  describePhaseHandoffProblems,
   HANDOFF_PHASES,
   HANDOFF_SCHEMA_VERSION,
   LEGION_DIR_NAME,
@@ -67,13 +68,19 @@ export function writePhaseHandoff<T extends object>(
   phase: HandoffPhase,
   data: T
 ): void {
-  ensureLegionDir(workspaceDir);
   const payload = {
     ...data,
     schemaVersion: HANDOFF_SCHEMA_VERSION,
     phase,
     completed: new Date().toISOString(),
   };
+  // The one path every phase handoff is written through: a payload this phase's schema rejects
+  // never reaches the branch, and the refusal names the field (LEGION-53).
+  const problems = describePhaseHandoffProblems(payload);
+  if (problems.length > 0) {
+    throw new Error(`Invalid ${phase} handoff: ${problems.join("; ")}`);
+  }
+  ensureLegionDir(workspaceDir);
   atomicWriteJson(getPhaseFilePath(workspaceDir, phase), payload);
 }
 
@@ -86,7 +93,18 @@ export function readPhaseHandoff(workspaceDir: string, phase: HandoffPhase): Pha
 
     const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
     const handoff = validatePhaseHandoff(parsed);
-    if (!handoff || handoff.phase !== phase) {
+    if (!handoff) {
+      // Failing open is the contract (the phase reads as missing), but never silently: the
+      // next worker has to be able to see which field cost it the predecessor's handoff.
+      console.error(
+        `[handoff] Ignoring ${filePath}: ${describePhaseHandoffProblems(parsed).join("; ")}`
+      );
+      return null;
+    }
+    if (handoff.phase !== phase) {
+      console.error(
+        `[handoff] Ignoring ${filePath}: phase is "${handoff.phase}", expected "${phase}"`
+      );
       return null;
     }
     return handoff;

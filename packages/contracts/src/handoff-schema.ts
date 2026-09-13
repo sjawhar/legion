@@ -28,6 +28,24 @@ export interface RequiredSkills {
   review?: string[];
 }
 
+/** One production-like proof: the changed behaviour exercised on the surface a user reaches
+ * it through, never a unit suite. The implementer records its own before its phase completes;
+ * the tester verifies that one and records its own (LEGION-53). */
+export interface Proof {
+  /** The acceptance line this proves. */
+  criterion: string;
+  /** The real surface: a scratch daemon, a smoke rig, a sandbox repository, a browser, a stack. */
+  surface: string;
+  /** The exact command, run id, or URL. */
+  command: string;
+  /** What happened. */
+  observed: string;
+  /** The commit the proof was taken at. */
+  headSha: string;
+  /** The deliberately broken input and the refusal or failure it produced. */
+  negativeControl: string;
+}
+
 export interface BaseHandoff {
   schemaVersion: 1;
   phase: HandoffPhase;
@@ -60,6 +78,8 @@ export interface PlanHandoff extends BaseHandoff {
 export interface ImplementHandoff extends BaseHandoff {
   phase: "implement";
   filesChanged?: string[];
+  /** Required, non-empty: this phase is not complete without its own production-like proof. */
+  proof: Proof[];
   trickyParts?: string[];
   deviations?: string[];
   openQuestions?: string[];
@@ -73,6 +93,10 @@ export interface TestHandoff extends BaseHandoff {
   passed?: number;
   failed?: number;
   failures?: Array<{ criterion: string; evidence: string }>;
+  /** This tester's verdict on the implementer's own proof, and how it checked. */
+  implementerProof: { verdict: "verified" | "rejected"; how: string };
+  /** The tester's own proof. Required when this handoff reports no failure. */
+  proof?: Proof[];
   documentationFeedback?: string;
   observations?: string[];
 }
@@ -102,6 +126,18 @@ export type PhaseHandoff =
 
 const isoTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 const handoffPhase = z.enum(HANDOFF_PHASES);
+const nonEmpty = z.string().min(1);
+
+const proofSchema = z
+  .object({
+    criterion: nonEmpty,
+    surface: nonEmpty,
+    command: nonEmpty,
+    observed: nonEmpty,
+    headSha: nonEmpty,
+    negativeControl: nonEmpty,
+  })
+  .passthrough();
 
 const routingHintsSchema = z
   .object({
@@ -120,14 +156,16 @@ const baseHandoffSchema = z.object({
   learningsHelpful: z.array(z.string()).optional(),
 });
 
-const architectSchema = baseHandoffSchema.extend({
-  phase: z.literal("architect"),
-  scope: z.enum(["trivial", "small", "medium", "large"]).optional(),
-  components: z.array(z.string()).optional(),
-  subIssues: z.array(z.string()).optional(),
-  routingHints: routingHintsSchema,
-  concerns: z.array(z.string()).optional(),
-});
+const architectSchema = baseHandoffSchema
+  .extend({
+    phase: z.literal("architect"),
+    scope: z.enum(["trivial", "small", "medium", "large"]).optional(),
+    components: z.array(z.string()).optional(),
+    subIssues: z.array(z.string()).optional(),
+    routingHints: routingHintsSchema,
+    concerns: z.array(z.string()).optional(),
+  })
+  .passthrough();
 
 const requiredSkillsSchema = z
   .object({
@@ -138,57 +176,81 @@ const requiredSkillsSchema = z
   .passthrough()
   .optional();
 
-const planSchema = baseHandoffSchema.extend({
-  phase: z.literal("plan"),
-  taskCount: z.number().optional(),
-  independentTasks: z.number().optional(),
-  routingHints: routingHintsSchema,
-  concerns: z.array(z.string()).optional(),
-  workflowRecommendation: z.string().optional(),
-  requiredSkills: requiredSkillsSchema,
-});
+const planSchema = baseHandoffSchema
+  .extend({
+    phase: z.literal("plan"),
+    taskCount: z.number().optional(),
+    independentTasks: z.number().optional(),
+    routingHints: routingHintsSchema,
+    concerns: z.array(z.string()).optional(),
+    workflowRecommendation: z.string().optional(),
+    requiredSkills: requiredSkillsSchema,
+  })
+  .passthrough();
 
-const implementSchema = baseHandoffSchema.extend({
-  phase: z.literal("implement"),
-  filesChanged: z.array(z.string()).optional(),
-  trickyParts: z.array(z.string()).optional(),
-  deviations: z.array(z.string()).optional(),
-  openQuestions: z.array(z.string()).optional(),
-  subPlanningNeeded: z.boolean().optional(),
-  discoveredComplexity: z.array(z.string()).optional(),
-  suggestedSubWorkers: z.number().optional(),
-});
+const implementSchema = baseHandoffSchema
+  .extend({
+    phase: z.literal("implement"),
+    filesChanged: z.array(z.string()).optional(),
+    proof: z.array(proofSchema).min(1),
+    trickyParts: z.array(z.string()).optional(),
+    deviations: z.array(z.string()).optional(),
+    openQuestions: z.array(z.string()).optional(),
+    subPlanningNeeded: z.boolean().optional(),
+    discoveredComplexity: z.array(z.string()).optional(),
+    suggestedSubWorkers: z.number().optional(),
+  })
+  .passthrough();
 
-const testSchema = baseHandoffSchema.extend({
-  phase: z.literal("test"),
-  passed: z.number().optional(),
-  failed: z.number().optional(),
-  failures: z
-    .array(z.object({ criterion: z.string(), evidence: z.string() }).passthrough())
-    .optional(),
-  documentationFeedback: z.string().optional(),
-  observations: z.array(z.string()).optional(),
-});
+// A passing test handoff needs the tester's own proof; one that reports a failure does not.
+const testSchema = baseHandoffSchema
+  .extend({
+    phase: z.literal("test"),
+    passed: z.number().optional(),
+    failed: z.number().optional(),
+    failures: z
+      .array(z.object({ criterion: z.string(), evidence: z.string() }).passthrough())
+      .optional(),
+    implementerProof: z
+      .object({ verdict: z.enum(["verified", "rejected"]), how: nonEmpty })
+      .passthrough(),
+    proof: z.array(proofSchema).min(1).optional(),
+    documentationFeedback: z.string().optional(),
+    observations: z.array(z.string()).optional(),
+  })
+  .passthrough()
+  .refine(
+    (handoff) =>
+      (handoff.failures?.length ?? 0) > 0 ||
+      (handoff.failed ?? 0) > 0 ||
+      (handoff.proof?.length ?? 0) > 0,
+    {
+      path: ["proof"],
+      message: "a passing test handoff needs the tester's own production-like proof",
+    }
+  );
 
-const reviewSchema = baseHandoffSchema.extend({
-  phase: z.literal("review"),
-  critical: z.number().optional(),
-  important: z.number().optional(),
-  minor: z.number().optional(),
-  verdict: z.enum(["approved", "changes_requested"]).optional(),
-  keyFindings: z
-    .array(
-      z.object({ severity: z.string(), file: z.string(), description: z.string() }).passthrough()
-    )
-    .optional(),
-});
+const reviewSchema = baseHandoffSchema
+  .extend({
+    phase: z.literal("review"),
+    critical: z.number().optional(),
+    important: z.number().optional(),
+    minor: z.number().optional(),
+    verdict: z.enum(["approved", "changes_requested"]).optional(),
+    keyFindings: z
+      .array(
+        z.object({ severity: z.string(), file: z.string(), description: z.string() }).passthrough()
+      )
+      .optional(),
+  })
+  .passthrough();
 
 const phaseHandoffSchema = z.discriminatedUnion("phase", [
-  architectSchema.passthrough(),
-  planSchema.passthrough(),
-  implementSchema.passthrough(),
-  testSchema.passthrough(),
-  reviewSchema.passthrough(),
+  architectSchema,
+  planSchema,
+  implementSchema,
+  testSchema,
+  reviewSchema,
 ]);
 
 const handoffMessageSchema = z.object({
@@ -205,6 +267,18 @@ export function isHandoffPhase(value: unknown): value is HandoffPhase {
 export function validatePhaseHandoff(value: unknown): PhaseHandoff | null {
   const result = phaseHandoffSchema.safeParse(value);
   return result.success ? (result.data as PhaseHandoff) : null;
+}
+
+/** Every reason `validatePhaseHandoff` rejects `value`, each naming its field path, so a write
+ * refusal and a read warning can both say which field is missing or malformed. Empty for a
+ * valid handoff. */
+export function describePhaseHandoffProblems(value: unknown): string[] {
+  const result = phaseHandoffSchema.safeParse(value);
+  if (result.success) return [];
+  return result.error.issues.map((issue) => {
+    const field = issue.path.length > 0 ? issue.path.map(String).join(".") : "<root>";
+    return `${field}: ${issue.message}`;
+  });
 }
 
 export function validateHandoffMessage(value: unknown): HandoffMessage | null {

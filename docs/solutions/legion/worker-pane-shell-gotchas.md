@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, and a bash tool `jq` that is jaq, not the jq your script runs"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, and a `(divergent)` change left behind by `jj squash` on the shared operation log"
 category: legion
 tags:
   - legion
@@ -44,6 +44,8 @@ related_issues:
   - "sjawhar/legion#1015"
   - "LEGION-40"
   - "sjawhar/legion#1011"
+  - "LEGION-53"
+  - "sjawhar/legion#1028"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -60,6 +62,8 @@ symptoms:
   - "bash tool: Unable to connect. Is the computer able to access the url?"
   - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
   - "The Legion PR footer names a session id three days older than the worker; printenv OMP_SESSION_ID disagrees with envoy_whoami"
+  - "jj log shows (divergent) next to your commit after jj squash --into; a second visible commit shares its change id"
+  - "Error: Change ID `xxxx` is divergent — Hint: Use change offset to select single revision"
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
   - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
@@ -480,3 +484,27 @@ turns jq's `null` (which `-r` would print as the literal `null`, the production 
   record which engine each result came from.
 - Do not write "the `jq` on PATH is jaq" into a script comment or a plan premise. `type -P jq` from a child bash is the
   fact to quote; the tool shell's builtin is a fact about your session, not about the box.
+
+## 15. `jj squash --into` on the shared operation log can leave a `(divergent)` twin of your commit (from LEGION-53)
+
+Every issue workspace on this box shares one repository operation log (`.jj/repo` → the shared clone), and other
+trees' workers are committing into it at the same time. On LEGION-53 two `jj squash --from @ --into <commit>`
+calls (folding biome format fixes into their owning commits) each printed `Concurrent modification detected,
+resolving automatically.`, and the later `jj split` of the handoff file came back marked `(divergent)`: the working
+copy's change id now named two visible commits — the described handoff commit the bookmark pointed at, and
+`ebd6cba55383`, an undescribed sibling on the same parent holding the pre-squash working-copy content. Nothing was
+lost and the push was correct (`jj git push --bookmark` pushes the commit the bookmark names), but the twin stays
+visible in every workspace's `jj log`, and any revset that names the change id by prefix fails with
+``Change ID `tzzoplly` is divergent``.
+
+What to do: before every push, `jj -R "$LEGION_WORKSPACE" log -r 'change_id(<your change>)'` and read
+`(divergent)` as a warning, not an error. Point the bookmark at the commit you mean by **commit id**, push, and
+report the stray commit id to the architect in the handoff's `deviations` — a worker never runs `jj abandon`
+(skill rule; the shared log is why), so it is not yours to clean up, and it must not be squashed into your branch
+either. A `jj op restore` would make it worse for every other tree (LEGION-45). The cause is the shared log's
+automatic reconciliation of two operations that both rewrote the same change; the way to make it rarer is to keep
+`squash`/`split` sequences short and to run each as its own bash call rather than chained with `&&` behind slow
+commands. This is not the two-editors-in-one-working-copy divergence of
+[one-jj-actor-per-shared-workspace](../delegation/one-jj-actor-per-shared-workspace.md), whose recovery is to squash
+the stale copy into `@`: here the twin holds content the branch already carries, and squashing it in would re-add the
+lines the earlier squash removed.

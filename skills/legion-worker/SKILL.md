@@ -263,8 +263,15 @@ left open <thread URL> — newest reply by <login> is not an acceptance
 **Thermo:** thermonuclear-deep-review + thermonuclear-code-quality run once at <head-sha>:
 <verdict>. (omitted entirely on a docs-only PR — no thermo pass runs)
 
-**E2E:** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
+**E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
 Negative control: <deliberately broken input> → <refusal or failure observed>.
+
+**E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
+Negative control: <deliberately broken input> → <refusal or failure observed>.
+Verified the implementer's proof by <re-running its command | driving the same surface independently>.
+
+**Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
+(written by the implementer after the merge lands; `pending <what is missing>` until then)
 
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
@@ -309,12 +316,26 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
-- The tester fills in the `E2E` section: the real surface a user reaches the criterion
+- **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
+  The proof is the changed behaviour exercised on the surface a user reaches it through — a
+  scratch daemon, a smoke rig, a sandbox repository, a real browser, a devN stack, a local stack
+  with real migrations — with the exact command or run id, what was observed, the head SHA, and
+  one negative control. The same proof goes into `.legion/implement.json` as its required `proof`
+  array (`legion handoff write --phase implement` refuses a payload without one and names the
+  field), and into the PR body, because the reviewer and the merger verify facts on GitHub and
+  never from a handoff. A unit or integration test is a regression lock, never proof of a
+  criterion.
+- **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
+  the implementer's command or drives the same surface independently, records the verdict in
+  `.legion/test.json` as `implementerProof` (`{verdict, how}`), and records its own proof beside
+  it. A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
+  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
+  the architect return the issue to the implementer — the agent that developed the change owns
+  proving it. The tester's own proof names the real surface a user reaches the criterion
   through, the exact command or run id, what was observed, the head SHA, and one negative
-  control — a deliberately broken input and the refusal or failure it produced. A unit or
-  integration test is a regression lock, never proof of a criterion. The surface is
+  control — a deliberately broken input and the refusal or failure it produced. The surface is
   **production-like** — a devN stack, staging, or a local stack with real migrations, one that
-  has the resource the change touches — and the `E2E` line carries a **link** to that run,
+  has the resource the change touches — and each `E2E` line carries a **link** to that run,
   screenshot, or e2e; the merge queue does not approve a user-facing change without it, and a
   green unit suite is not it. Sami, 2026-09-13, verbatim: "They need to test everything in a
   production-like environment before merging, and it is the agent that develops the feature
@@ -340,6 +361,7 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
+  Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
   still carries `.legion/`; `APPROVE` only for a head that carries no `.legion/` — the head
@@ -381,8 +403,9 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   `no file changes above the approved head`); then the same with `'~docs/solutions'` appended,
   which must print nothing. Then it publishes `READY #<n> at <tip-sha>` naming the approved
   head, the tip, and that summary, plus the PR body's gate facts, to the merge queue's role
-  (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
-  merges under its own authority.
+  (`notifications.role.pr-queue`) with `envoy_publish`. The READY packet names both the
+  implementer's and the tester's `E2E` lines; a missing one is reported to the architect instead
+  of published. The merger never merges; the queue merges under its own authority.
 - **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the
@@ -392,6 +415,29 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
   failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
   implementer owns the fix and the next slot.
+  The record has three places: the PR body's `Production:` line, one pull-request comment
+  carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
+  read GitHub, the architect reads the issue. When the deploy that carries the merge has not
+  happened (a shared profile still holding the previous plugin release, a daemon still running
+  the previous commit, a slot nobody has run), open an action ask — `dispatch_ask` with
+  `kind: "action"` — naming the exact install or restart step, keep the `Production:` line at
+  `pending <what is missing>`, and complete the check once the human answers Done. Never record
+  a staging pass as the production check, and never let the architect sign off on a `pending`
+  line.
+
+## When no surface reaches the changed path
+
+No surface reaches the changed path is a report to the architect, never a reason to complete the phase.
+Say which surface is missing and what it would have to do — a rig that can spawn the role, a
+sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
+the architect with `envoy_publish` to its role topic. The architect creates a child issue in this
+tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. Sami,
+2026-09-13, verbatim: "If there's anything blocking that, we need to fix it: if it's
+infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's skills, we need
+to fix the skills." A code path whose first execution would be after the merge — a deploy
+workflow's inline step, a post-merge helper, a production-only resource — is untested until you
+have executed it somewhere production-like; completing with a unit-test-only handoff is the
+failure this rule exists to stop.
 
 ## The unchanged-diff check
 
@@ -439,6 +485,10 @@ Write the phase-specific handoff:
 cd -- "$LEGION_WORKSPACE" && \
   legion handoff write --phase <p> --data '<JSON object of phase-specific fields only>'
 ```
+
+`legion handoff write` validates the payload against the phase's schema before writing: an
+implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
+carries no `proof` of its own, exits 1 naming the field and writes nothing.
 
 Then verify the durable artifact exists:
 

@@ -105,6 +105,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 
 **Phase roles:** architect → plan → implement → test → review → merge
 **Retro:** runs after the reviewer approves the cleaned head and before the merger publishes `READY`.
+**Production check:** after the merge lands, the implementer — the agent that developed the change — drives it in production and records that on the pull request and the issue; the architect signs off only then.
 
 Statuses above are native Dispatch issue statuses, not GitHub labels — the daemon writes
 `in_progress`/`testing`/`needs_review`/`retro` via `DispatchClient.setStatus` for the issues it

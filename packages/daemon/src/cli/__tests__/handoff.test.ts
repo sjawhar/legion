@@ -23,6 +23,15 @@ function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-handoff-"));
 }
 
+const proofJson = JSON.stringify({
+  criterion: "1",
+  surface: "branch CLI in a scratch workspace",
+  command: "bun packages/daemon/src/cli/index.ts handoff write --phase implement",
+  observed: "exit 0",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  negativeControl: "the same payload without proof -> exit 1",
+});
+
 function getSubCommand(command: unknown, name: string): RunnableCommand {
   const subCommands = (command as RunnableCommand).subCommands;
   if (!subCommands || !(name in subCommands)) {
@@ -134,7 +143,7 @@ describe("handoff command", () => {
 
     await runCommand(write, {
       phase: "implement",
-      data: '{"filesChanged":["src/file.ts"]}',
+      data: `{"filesChanged":["src/file.ts"],"proof":[${proofJson}]}`,
       workspace: workspaceDir,
     });
 
@@ -170,7 +179,7 @@ describe("handoff command", () => {
     await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
     await runCommand(write, {
       phase: "implement",
-      data: '{"filesChanged":["a.ts"]}',
+      data: `{"filesChanged":["a.ts"],"proof":[${proofJson}]}`,
     });
     await runCommand(read, {});
 
@@ -348,5 +357,30 @@ describe("handoff command", () => {
     expect(exitCode).toBe(1);
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("[handoff] Failed to write message:");
+  });
+
+  it("exits non-zero naming proof when an implement handoff carries none", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    try {
+      await runCommand(write, { phase: "implement", data: '{"filesChanged":["a.ts"]}' });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
+    expect(errors.join("\n")).toContain("proof");
+    expect(fs.existsSync(path.join(tempDir, ".legion", "implement.json"))).toBe(false);
+  });
+
+  it("writes and reads an implement handoff that carries its proof", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    const read = getSubCommand(handoffCommand, "read");
+
+    await runCommand(write, { phase: "implement", data: `{"proof":[${proofJson}]}` });
+    await runCommand(read, { phase: "implement" });
+
+    const calls = (console.log as ReturnType<typeof mock>).mock.calls;
+    const parsed = JSON.parse(calls[calls.length - 1]?.[0] as string) as Record<string, unknown>;
+    expect(parsed.proof).toEqual([JSON.parse(proofJson)]);
+    expect(exitCode).toBeUndefined();
   });
 });

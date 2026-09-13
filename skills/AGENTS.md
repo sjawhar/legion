@@ -42,3 +42,6 @@ A clean review ends with the `.legion/` deletion pushed by the implementer at th
 direction, which the reviewer then approves; retro records its learning in
 `docs/solutions/` and writes no handoff. GitHub comments and reviews carry the required Legion
 footer so the daemon can attribute artifacts to their worker session.
+The implement handoff carries the implementer's own production-like proof and the test handoff the
+tester's verdict on it plus the tester's own; `legion handoff write` refuses a payload the phase's
+schema rejects and names the field. Retro's message goes to the Dispatch issue (`dispatch_message`), never a GitHub issue.

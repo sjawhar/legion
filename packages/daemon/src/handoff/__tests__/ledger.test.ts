@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,16 @@ import {
   writeMessage,
   writePhaseHandoff,
 } from "../ledger";
+
+const proof = {
+  criterion: "1",
+  surface: "scratch workspace",
+  command: "legion handoff write --phase implement",
+  observed: "exit 0",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  negativeControl: "the same payload without proof -> exit 1",
+};
+const implementerProof = { verdict: "verified", how: "re-ran its command" };
 
 describe("handoff ledger", () => {
   let workspaceDir: string | null = null;
@@ -122,6 +133,7 @@ describe("handoff ledger", () => {
       JSON.stringify({
         completed: new Date().toISOString(),
         phase: "implement",
+        proof: [proof],
         schemaVersion: 2,
       }),
       "utf-8"
@@ -211,13 +223,14 @@ describe("handoff ledger", () => {
     ensureLegionDir(workspaceDir);
     const legionDir = getLegionDir(workspaceDir);
 
-    // trickyParts should be string[], not a string
+    // trickyParts should be string[], not a string; the proof is valid so the type is the one fault
     await writeFile(
       path.join(legionDir, "implement.json"),
       JSON.stringify({
         schemaVersion: 1,
         phase: "implement",
         completed: new Date().toISOString(),
+        proof: [proof],
         trickyParts: "not an array",
       }),
       "utf-8"
@@ -251,6 +264,8 @@ describe("handoff ledger", () => {
         phase: "test",
         completed: "Tuesday",
         passed: 5,
+        implementerProof,
+        proof: [proof],
       }),
       "utf-8"
     );
@@ -263,8 +278,8 @@ describe("handoff ledger", () => {
     const phases = [
       { phase: "architect" as const, extra: { scope: "small" } },
       { phase: "plan" as const, extra: { taskCount: 3 } },
-      { phase: "implement" as const, extra: { filesChanged: ["a.ts"] } },
-      { phase: "test" as const, extra: { passed: 5, failed: 0 } },
+      { phase: "implement" as const, extra: { filesChanged: ["a.ts"], proof: [proof] } },
+      { phase: "test" as const, extra: { passed: 5, failed: 0, implementerProof, proof: [proof] } },
       { phase: "review" as const, extra: { verdict: "approved" } },
     ];
 
@@ -294,6 +309,7 @@ describe("handoff ledger", () => {
     // All phases should validate without learnings fields
     writePhaseHandoff(workspaceDir, "implement", {
       filesChanged: ["b.ts"],
+      proof: [proof],
       trickyParts: ["none"],
     });
 
@@ -301,5 +317,49 @@ describe("handoff ledger", () => {
     expect(handoff).not.toBeNull();
     expect(handoff?.learningsInjected).toBeUndefined();
     expect(handoff?.learningsHelpful).toBeUndefined();
+  });
+
+  it("refuses an implement handoff with no production-like proof and writes nothing", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+
+    expect(() =>
+      writePhaseHandoff(workspaceDir as string, "implement", { filesChanged: ["a.ts"] })
+    ).toThrow(/proof/);
+    expect(existsSync(path.join(getLegionDir(workspaceDir), "implement.json"))).toBe(false);
+
+    writePhaseHandoff(workspaceDir, "implement", { filesChanged: ["a.ts"], proof: [proof] });
+    expect(readPhaseHandoff(workspaceDir, "implement")).toMatchObject({
+      proof: [{ criterion: "1" }],
+    });
+  });
+
+  it("names the file and the failing field on stderr when a committed handoff fails validation", async () => {
+    workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+    ensureLegionDir(workspaceDir);
+    const filePath = path.join(getLegionDir(workspaceDir), "implement.json");
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        phase: "implement",
+        completed: new Date().toISOString(),
+        filesChanged: ["a.ts"],
+      }),
+      "utf-8"
+    );
+
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      expect(readPhaseHandoff(workspaceDir, "implement")).toBeNull();
+    } finally {
+      console.error = original;
+    }
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(filePath);
+    expect(errors[0]).toContain("proof");
   });
 });

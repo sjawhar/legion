@@ -114,3 +114,22 @@ and change every hit in the same commit; the tester's greps for the new phrase e
   typecheck, test); fill the `CI:` line verbatim from `gh run view <run-id> --json jobs,headSha,conclusion`.
   A template line that names a check or job no workflow here defines is fixed in the template
   (LEGION-38, #1008), never explained away in the PR body or recorded here as a workaround.
+
+## 7. A plan's greps are re-run against `main@origin` at every rebase, and a superseding `main` change retires a check
+
+LEGION-53's plan (written 2026-09-13 10:37Z) checked `grep -c 'dispatch_comment' skills/legion-retro/SKILL.md ≥ 1`
+for the retro comment it moved off GitHub. Before the branch was reviewed, LEGION-78 (#1015) landed on `main` and
+made that same post a `dispatch_message` (the right tool: `dispatch_comment` anchors a quote or answers an ask). The
+conflict-forced rebase surfaced it as a two-sided conflict in the retro skill; keeping `main`'s block and adding the
+plan's new body lines was the resolution, and the plan's check became `dispatch_message` (2 hits) with the removed
+phrase (`legion gh -- issue comment`) still 0. Two habits from that:
+
+- After a rebase, run every `testerChecks` grep again **and** `jj log -r '<old base>..main@origin' -- <each file the
+  plan edits>`; a `main` commit on the same file since the plan was written can supersede a check's target phrase,
+  and the correct outcome is to say so in the PR body and the handoff's `deviations`, not to re-add the retired
+  phrase to make the grep pass.
+- Match the plan's grep to the text as written, backticks included. The plan's proof grep
+  `spawn_worker the \*\*implementer\*\* with the production-check task` returned 0 against a sentence that reads
+  `` `spawn_worker` the **implementer** with the production-check task `` — the phrase was present; the grep
+  lacked the backtick. Run the plan's greps before committing (§2) and, when one returns 0 on text you can see, fix
+  the grep in the handoff's deviations rather than reflowing the sentence to fit it.

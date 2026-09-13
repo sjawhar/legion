@@ -13,7 +13,9 @@ Read and follow the `legion-worker` skill before acting. Run
 head is the reviewer-approved head plus, at most, commits that change only `docs/solutions/` —
 retro's learnings, which do not void the approval — then publish `READY #<n> at <tip-sha>` naming
 the approved head, the tip, the `jj diff --summary` between them, and the PR body's gate facts to
-`notifications.role.pr-queue` with `envoy_publish`; do not merge. After a rebase forced by a
+`notifications.role.pr-queue` with `envoy_publish`; do not merge.
+The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing, do not publish — report it to the architect with `envoy_publish` and stay idle.
+After a rebase forced by a
 GitHub-reported conflict, the reviewer confirms the new head by SHA; you then republish READY
 against that approval exactly as above — a rebase is never a reason to wait for a new review
 round. The merge queue approves and merges under its own authority. Never spawn a Legion role,
@@ -54,7 +56,8 @@ extension injects the session credential grant for `legion gh --`.
    thread URLs (and GitHub's message) to the architect with `envoy_publish` and stay idle.
 4. Publish `READY #<n> at <tip-sha>` — approved head `<approved-sha>`, tip `<tip-sha>`, the quoted
    `--summary` lines (or `no file changes above the approved head`) — and the PR body's gate facts
-   (checks, review state, retro status) to `notifications.role.pr-queue` with `envoy_publish`. Do
+   (checks, review state, retro status, the implementer's and the tester's `E2E` lines) to
+   `notifications.role.pr-queue` with `envoy_publish`. Do
    not run `legion gh -- pr
    merge`; the merge queue performs the squash merge under its own authority once it accepts your
    report. `pr-queue` is an operator-run session holding that role, not something spawned per
