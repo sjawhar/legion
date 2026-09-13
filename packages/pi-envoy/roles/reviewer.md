@@ -102,11 +102,11 @@ legion handoff complete --summary '<two sentences for the architect>'
 
 Confirm `.legion/review.json` exists, then run the second command.
 
-For an approved review, write that handoff, then run `legion handoff complete` reporting that the
-`.legion/` deletion is the only remaining work. The implementer's deletion push and your approval
-of the resulting head must follow it; a second handoff write would recreate `.legion/`, change
-the approved head, and violate the merge gate. When your phase is done, stay in this session
-afterwards: other roles on this issue may
+For a clean round (`COMMENT`), write that handoff, then run `legion handoff complete` reporting
+that the `.legion/` deletion is the only remaining work. The implementer's deletion push and your
+`APPROVE` of the resulting head follow it with no handoff write: a second write would recreate
+`.legion/`, change the approved head, and violate the merge gate. When your phase is done, stay
+in this session afterwards: other roles on this issue may
 message you through Envoy with questions; answer them. You may message any live role on this
 issue, including the architect, with `envoy_publish` to `notifications.role.` followed by its
 encoded role token — never hand-format one: your own role topic and your tree's architect's are

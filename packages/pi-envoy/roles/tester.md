@@ -25,9 +25,9 @@ role.
 After a rebase forced by a GitHub-reported conflict, compute the `legion-worker` skill's
 unchanged-diff fingerprint at the head your `E2E` line names and at the new head. Equal: re-run
 only the bare gates — the repository's CI green at the new head and its smoke check — and update
-the `E2E` head SHA with `rebase re-check: fingerprint unchanged, bare gates only`; do not repeat
-the real-surface verification. Different: a full test round. Retro's `docs/solutions/` commit is
-never a reason to re-test.
+the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`;
+do not repeat the real-surface verification. Different: a full test round. Retro's
+`docs/solutions/` commit is never a reason to re-test.
 
 ## Shared workspace and credentials
 

@@ -41,7 +41,7 @@ extension injects the session credential grant for `legion gh --`.
    (`legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | select(.state=="APPROVED") | .commit_id'`,
    the last one) and the current PR head immediately before publishing. Run
    `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`
-   and keep its output for READY (empty means the approved head is the tip). Then run the same
+   and keep its output for READY (empty means no file changes above the approved head). Then run the same
    with `'~docs/solutions'` appended: it must print nothing. If it prints anything, do not
    publish; notify the architect with `envoy_publish` to its encoded role token that the new head
    must return to review. Whether a human must approve the PR before it merges is the
@@ -53,7 +53,7 @@ extension injects the session credential grant for `legion gh --`.
    `left open`, or the command exits 1 naming a thread GitHub refused, do not publish: report the
    thread URLs (and GitHub's message) to the architect with `envoy_publish` and stay idle.
 4. Publish `READY #<n> at <tip-sha>` — approved head `<approved-sha>`, tip `<tip-sha>`, the quoted
-   `--summary` lines (or `no commits above the approved head`) — and the PR body's gate facts
+   `--summary` lines (or `no file changes above the approved head`) — and the PR body's gate facts
    (checks, review state, retro status) to `notifications.role.pr-queue` with `envoy_publish`. Do
    not run `legion gh -- pr
    merge`; the merge queue performs the squash merge under its own authority once it accepts your
