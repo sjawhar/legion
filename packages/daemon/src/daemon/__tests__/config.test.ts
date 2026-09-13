@@ -897,6 +897,8 @@ describe("daemon config", () => {
       LEGION_BOOT_TOKEN_FILE: "/leaked/legion-acme7-acme-7-architect",
       LEGION_CONTROLLER_SECRET: "leaked-controller-secret",
       LEGION_CONTROLLER_SECRET_FILE: "/leaked/legion-acme7-controller",
+      LEGION_GRANT: "leaked-grant",
+      LEGION_GRANT_FILE: "/leaked/legion-acme7-acme-7-architect-grant",
     };
     const saved = Object.fromEntries(Object.keys(leaked).map((key) => [key, process.env[key]]));
     // Set directly on process.env (not resolveDaemonConfig's env param): executePrivateKeyCommand

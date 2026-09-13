@@ -167,6 +167,8 @@ describe("resolveDaemonEnvironment", () => {
       "LEGION_BOOT_TOKEN_FILE",
       "LEGION_CONTROLLER_SECRET",
       "LEGION_CONTROLLER_SECRET_FILE",
+      "LEGION_GRANT",
+      "LEGION_GRANT_FILE",
     ];
     const environment = await resolveDaemonEnvironment(
       `mise x ${OMP_PIN} -- omp`,
@@ -178,6 +180,8 @@ describe("resolveDaemonEnvironment", () => {
           DISPATCH_URL: "http://leaked-from-daemon-process",
           LEGION_BOOT_TOKEN: "leaked-from-the-launching-pane",
           LEGION_BOOT_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer",
+          LEGION_GRANT: "leaked-from-the-launching-pane",
+          LEGION_GRANT_FILE: "/leaked/legion-omp-legion-6-implementer-grant",
         },
         run: async (command) => {
           if (command.join(" ") === "/tools/mise env --json") {

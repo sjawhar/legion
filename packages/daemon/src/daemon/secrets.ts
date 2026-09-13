@@ -19,6 +19,14 @@ export function secretFilePath(stateDir: string, name: string): string {
   return path.join(secretsDir(stateDir), name);
 }
 
+/** The grant file a pane's `LEGION_GRANT_FILE` names: `<role token>-grant`. The daemon never
+ * writes it — the pi-envoy extension does, before each of the pane's bash commands, with the grant
+ * it minted for that command — but the daemon names it on the pane and prunes it exactly like the
+ * pane's boot-token file, for as long as the pane's locator lives. */
+export function grantSecretName(roleToken: string): string {
+  return `${roleToken}-grant`;
+}
+
 /** Writes `value` to `<stateDir>/secrets/<name>` (created or overwritten in place) and returns that
  * path. Re-applies 0700/0600 explicitly on every call: `mkdir`'s mode is umask-masked and ignored
  * for an existing directory, and `writeFile`'s mode applies only on create. */

@@ -423,6 +423,8 @@ describe("startDaemon", () => {
       expect(started).toBe(true);
       expect(state.admission.active).toEqual([issue]);
       expect(state.trees[issue]?.status).toBe("active");
+      // Installed before any pane can launch: the shim every pane's PATH puts first.
+      expect((await stat(path.join(stateDir, "worker-bin", "gh"))).mode & 0o777).toBe(0o700);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

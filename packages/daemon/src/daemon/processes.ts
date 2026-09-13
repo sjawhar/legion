@@ -32,8 +32,14 @@ import {
   sameProcess,
   shellPath,
 } from "./runtime";
-import { DISPATCH_TOKEN_SECRET, pruneSecretFiles, secretFilePath } from "./secrets";
+import {
+  DISPATCH_TOKEN_SECRET,
+  grantSecretName,
+  pruneSecretFiles,
+  secretFilePath,
+} from "./secrets";
 import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
+import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { WorkerRpcClient } from "./worker-rpc";
 
@@ -2210,6 +2216,7 @@ export class ProcessManager {
 
     const generation = tree.generation;
     const bootToken = await this.deps.mintBootToken(tree.root, generation);
+    const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
     const env = {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
@@ -2226,7 +2233,7 @@ export class ProcessManager {
       LEGION_CREDENTIAL_HELPER: this.deps.credentialHelper,
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      PATH: this.deps.processPath,
+      ...this.credentialProcessEnvironment(architectToken),
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     };
@@ -2243,7 +2250,6 @@ export class ProcessManager {
       priorSessionFile,
       "resurrecting"
     );
-    const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
     // Cleared before the process starts, not after `runtime.spawn` resolves: the root is a real
     // OMP process outside this event loop, so a fast root's own `/process/started` +
     // `/process/ready` can land before this continuation even runs again (interleaved with the
@@ -2258,7 +2264,7 @@ export class ProcessManager {
     // Tracked before the runtime writes it: a name whose write then fails is a harmless no-op
     // `rm --force` at the next prune. The caller (`spawnRoot`) holds the file exempt from pruning
     // for the whole launch.
-    this.processSecretFiles.add(architectToken);
+    this.trackProcessSecrets(architectToken);
     const locator = await this.runtime.spawn("root", {
       issue: tree.root,
       role: "architect",
@@ -2538,7 +2544,7 @@ export class ProcessManager {
         ENVOY_URL: this.deps.config.envoyUrl,
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
-        PATH: this.deps.processPath,
+        ...this.credentialProcessEnvironment(token),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -2552,7 +2558,7 @@ export class ProcessManager {
       );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
-      this.processSecretFiles.add(token);
+      this.trackProcessSecrets(token);
       const locator = await this.runtime.spawn("worker", {
         issue,
         role,
@@ -2695,7 +2701,7 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       // Tracked before the runtime writes it — see `spawnTree`.
-      this.processSecretFiles.add(token);
+      this.trackProcessSecrets(token);
       const env = {
         LEGION_CONTROLLER: "1",
         LEGION_ROLE: "controller",
@@ -2703,7 +2709,7 @@ export class ProcessManager {
         LEGION_PROJECT: this.deps.state.project,
         ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
         ENVOY_URL: this.deps.config.envoyUrl,
-        PATH: this.deps.processPath,
+        ...this.credentialProcessEnvironment(token),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -2924,6 +2930,36 @@ export class ProcessManager {
     );
   }
 
+  /** The credential environment a root, worker, or controller pane carries for life — never per
+   * command. `LEGION_GRANT_FILE` names the 0600 file under `<state_dir>/secrets` the pi-envoy
+   * extension writes each bash command's freshly minted grant to (and `legion credential`,
+   * `legion gh`, and `legion handoff complete` read ahead of `LEGION_GRANT`); the daemon only names
+   * it here and prunes it with the pane's boot-token file (`trackProcessSecrets`). PATH puts
+   * `<state_dir>/worker-bin` (the `gh` shim `index.ts` installs at startup) first exactly once:
+   * `processPath` is the daemon's own resolved PATH, which never contains it — the daemon's `gh`
+   * must never resolve to the shim. `GH_CONFIG_DIR` isolates a raw `gh` from any operator login
+   * state, and the emptied `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` (tmux renders `''` as `-e KEY=`,
+   * an empty variable) keep an ambient token or host from shadowing the per-call one `legion gh`
+   * redeems. */
+  private credentialProcessEnvironment(token: string): Record<string, string> {
+    const stateDir = this.deps.config.stateDir;
+    return {
+      PATH: `${workerBinDir(stateDir)}${path.delimiter}${this.deps.processPath}`,
+      GH_CONFIG_DIR: path.join(stateDir, "gh"),
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
+      GH_HOST: "",
+      LEGION_GRANT_FILE: secretFilePath(stateDir, grantSecretName(token)),
+    };
+  }
+
+  /** Tracks both files a pane's role token names — its boot-token/controller-secret file and its
+   * grant file — so the steady-state prune reaps them together once the pane's locator clears. */
+  private trackProcessSecrets(token: string): void {
+    this.processSecretFiles.add(token);
+    this.processSecretFiles.add(grantSecretName(token));
+  }
+
   /** Holds `<state_dir>/secrets/<token>` exempt from pruning while a launch for that role is in
    * flight. The launch owner (`spawnRoot`, `launchWorker`, `spawnController`) takes the hold
    * before anything is written and releases it only once the process's locator is stored in
@@ -2945,35 +2981,41 @@ export class ProcessManager {
     };
   }
 
-  /** Every secret file some live process still needs: the shared Dispatch bearer, one per tree
-   * root with a locator, one per worker claim with a locator, the controller's when it has a
-   * locator, and every launch currently in flight. */
+  /** Every secret file some live process still needs: the shared Dispatch bearer, and — for each
+   * tree root with a locator, each worker claim with a locator, the controller when it has a
+   * locator, and every launch currently in flight — both the process's own secret file and its
+   * grant file. */
   private liveSecretFiles(): Set<string> {
     const project = this.deps.state.project;
-    const live = new Set<string>([DISPATCH_TOKEN_SECRET, ...this.launchingSecrets.keys()]);
-    if (this.deps.state.controllerLocator) live.add(controllerToken(project));
+    const tokens = [...this.launchingSecrets.keys()];
+    if (this.deps.state.controllerLocator) tokens.push(controllerToken(project));
     for (const tree of Object.values(this.deps.state.trees)) {
-      if (tree.locator) live.add(roleToken(project, tree.root, "architect"));
+      if (tree.locator) tokens.push(roleToken(project, tree.root, "architect"));
     }
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
-      if ("issue" in claim && claim.locator) live.add(token);
+      if ("issue" in claim && claim.locator) tokens.push(token);
     }
-    return live;
+    return new Set<string>([
+      DISPATCH_TOKEN_SECRET,
+      ...tokens.flatMap((token) => [token, grantSecretName(token)]),
+    ]);
   }
 
   /** The boot-time half of secret-file hygiene (`index.ts`): lists `<state_dir>/secrets` and
    * removes everything no live locator references — files a previous daemon process left behind
-   * between clearing a locator and its save's prune. The survivors (every process's file a
-   * reconnected locator still references) join `processSecretFiles`, so the steady-state prune reaps
-   * them the moment that locator clears, exactly like a file written on this manager's behalf —
-   * a process's secret file lives as long as its locator, across daemon restarts too.
-   * Best-effort and never throws. */
+   * between clearing a locator and its save's prune. Every name a live locator references joins
+   * `processSecretFiles` — whether the file exists yet or not (a grant file is written by the
+   * extension later in the pane's life; an absent name is a no-op `rm --force`) — so the
+   * steady-state prune reaps it the moment that locator clears, exactly like a file written on
+   * this manager's behalf: a process's secret files live as long as its locator, across daemon
+   * restarts too. Best-effort and never throws. */
   async pruneSecretFiles(): Promise<void> {
+    const live = this.liveSecretFiles();
+    for (const name of live) {
+      if (name !== DISPATCH_TOKEN_SECRET) this.processSecretFiles.add(name);
+    }
     try {
-      const { kept } = await pruneSecretFiles(this.deps.config.stateDir, this.liveSecretFiles());
-      for (const name of kept) {
-        if (name !== DISPATCH_TOKEN_SECRET) this.processSecretFiles.add(name);
-      }
+      await pruneSecretFiles(this.deps.config.stateDir, live);
     } catch (error) {
       console.error("[legion] failed to prune process secret files:", error);
     }

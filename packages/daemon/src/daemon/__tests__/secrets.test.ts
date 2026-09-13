@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   DISPATCH_TOKEN_SECRET,
+  grantSecretName,
   pruneSecretFiles,
   secretFilePath,
   secretsDir,
@@ -47,18 +48,38 @@ describe("pruneSecretFiles", () => {
     await writeSecretFile(stateDir, DISPATCH_TOKEN_SECRET, "dispatch");
     await writeSecretFile(stateDir, "legion-omp-legion-42-architect", "root");
     await writeSecretFile(stateDir, "legion-omp-legion-43-tester", "stale");
+    // Grant files are named by the daemon and written by the extension; prune treats them as
+    // any other pane file, kept exactly while their name is in keep.
+    await writeFile(
+      secretFilePath(stateDir, grantSecretName("legion-omp-legion-42-architect")),
+      "g"
+    );
+    await writeFile(secretFilePath(stateDir, grantSecretName("legion-omp-legion-43-tester")), "g");
 
     const result = await pruneSecretFiles(
       stateDir,
-      new Set([DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect", "never-written"])
+      new Set([
+        DISPATCH_TOKEN_SECRET,
+        "legion-omp-legion-42-architect",
+        grantSecretName("legion-omp-legion-42-architect"),
+        "never-written",
+      ])
     );
 
     expect(result).toEqual({
-      removed: ["legion-omp-legion-43-tester"],
-      kept: [DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect"],
+      removed: ["legion-omp-legion-43-tester", "legion-omp-legion-43-tester-grant"],
+      kept: [
+        DISPATCH_TOKEN_SECRET,
+        "legion-omp-legion-42-architect",
+        "legion-omp-legion-42-architect-grant",
+      ],
     });
     expect((await readdir(secretsDir(stateDir))).sort()).toEqual(
-      [DISPATCH_TOKEN_SECRET, "legion-omp-legion-42-architect"].sort()
+      [
+        DISPATCH_TOKEN_SECRET,
+        "legion-omp-legion-42-architect",
+        "legion-omp-legion-42-architect-grant",
+      ].sort()
     );
   });
 
