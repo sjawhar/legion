@@ -171,6 +171,36 @@ describe("parseShellEnvironment", () => {
     expect(parseShellEnvironment("", undefined)).toEqual([]);
   });
 
+  it("decides marker or entry by structure, so an entry named `unset X` is an entry and a broken marker swallows nothing", () => {
+    // Not creatable by a shell (`export 'unset X'=1` is not a valid identifier) but settable via
+    // set-environment or a crafted envp: the `=` on the line makes it an entry, name and all.
+    expect(parseShellEnvironment('unset X="v"; export unset X;\n', undefined)).toEqual(["unset X"]);
+    expect(
+      parseShellEnvironment(
+        'unset GONE;\nunset X="a;\nb"; export unset X;\nA="1"; export A;\n',
+        undefined
+      )
+    ).toEqual(["unset X", "A"]);
+    // A marker missing its `;` used to skip to the next `;\n`, swallowing the entry after it.
+    const swallowing = 'unset GONE\nA="leaked-value"; export A;\n';
+    let message = "";
+    try {
+      parseShellEnvironment(swallowing, undefined);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      "tmux show-environment -s (global): malformed unset marker at byte 0, cannot read the table"
+    );
+    expect(message).not.toContain("leaked");
+    expect(message).not.toContain("GONE");
+    for (const dump of ["unset X;", "unset ;\n", "unset X\n"]) {
+      expect(() => parseShellEnvironment(dump, { session: "legion-omp" })).toThrow(
+        "tmux show-environment -s (session legion-omp): malformed unset marker at byte 0, cannot read the table"
+      );
+    }
+  });
+
   it("fails loudly on any other shape, naming the table and the byte offset — never the text there", () => {
     const cases: Array<[string, string]> = [
       ['A="leaked-value', "unterminated value at byte 15"],
@@ -189,9 +219,6 @@ describe("parseShellEnvironment", () => {
       expect(message).toBe(`tmux show-environment -s (global): ${detail}, cannot read the table`);
       expect(message).not.toContain("leaked");
     }
-    expect(() => parseShellEnvironment("unset X", { session: "legion-omp" })).toThrow(
-      "tmux show-environment -s (session legion-omp): unterminated unset marker at byte 0, cannot read the table"
-    );
   });
 });
 

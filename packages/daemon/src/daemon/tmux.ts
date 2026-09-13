@@ -64,11 +64,15 @@ const SHELL_ESCAPED = new Set(["$", "`", '"', "\\"]);
  * value's own newlines in place, and each variable it unsets for new panes as `unset NAME;` (a
  * marker: it reaches no pane, so it is not a name here). A name is everything up to the first `=`
  * (tmux refuses `=` in a name; a space, `"` or `;` in one is fine — `A B`, `Q"N`, `X;` all print and
- * parse). The closing `"` is the first *unescaped* one, and the entry closes only on the exact
- * `; export <the same NAME>;` — so a multi-line value's continuation line, whatever it contains
- * (`HOME;=x`, `key = value`, the `=`-padded last line of a PEM, even the text `"; export X;`
- * escaped), can never read as a name, and no per-name probe is needed. Anything else is a parse
- * failure that names the table and the byte offset — never the text at it, which is a value.
+ * parse). Marker or entry is decided by structure, never by the `unset ` prefix alone: a line is a
+ * marker only when it is exactly `unset <NAME>;` followed by a newline and NAME contains no `=`
+ * (a set entry always has `NAME="` on its first line) — so an entry *named* `unset X` parses as
+ * the entry it is, and a marker missing its `;` swallows nothing. The closing `"` is the first
+ * *unescaped* one, and the entry closes only on the exact `; export <the same NAME>;` — so a
+ * multi-line value's continuation line, whatever it contains (`HOME;=x`, `key = value`, the
+ * `=`-padded last line of a PEM, even the text `"; export X;` escaped), can never read as a name,
+ * and no per-name probe is needed. Anything else is a parse failure that names the table and the
+ * byte offset — never the text at it, which is a value.
  */
 export function parseShellEnvironment(dump: string, table: EnvironmentTable): string[] {
   const names: string[] = [];
@@ -79,14 +83,17 @@ export function parseShellEnvironment(dump: string, table: EnvironmentTable): st
   };
   let i = 0;
   while (i < dump.length) {
-    if (dump.startsWith("unset ", i)) {
-      const end = dump.indexOf(";\n", i);
-      if (end === -1) fail(i, "unterminated unset marker");
-      i = end + 2;
+    const lineEnd = dump.indexOf("\n", i);
+    const line = dump.slice(i, lineEnd === -1 ? dump.length : lineEnd);
+    if (line.startsWith("unset ") && !line.includes("=")) {
+      // No `=` on the line, so it cannot open a set entry: it is a marker or nothing.
+      if (lineEnd === -1 || !line.endsWith(";") || line.length === "unset ;".length) {
+        fail(i, "malformed unset marker");
+      }
+      i = lineEnd + 1;
       continue;
     }
     const eq = dump.indexOf("=", i);
-    const lineEnd = dump.indexOf("\n", i);
     if (eq === -1 || eq === i || (lineEnd !== -1 && lineEnd < eq)) fail(i, "expected NAME=");
     const name = dump.slice(i, eq);
     if (dump[eq + 1] !== '"') fail(eq + 1, 'expected `"` after NAME=');
