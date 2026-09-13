@@ -228,7 +228,10 @@ function claimOf(rig: Rig): WorkerRoleClaim {
  * the promotion queue, reconnected exactly as a daemon restart's `reconnectWorkers` would (the
  * real `get_state` seeds it idle) with launches enabled — the state every case starts from.
  * `fixtureEnv` selects the stand-in's behaviour. `jj`/`git` are refused by the runner: a
- * cold relaunch's workspace provisioning must never reach the network from a test. */
+ * cold relaunch's workspace provisioning must never reach the network from a test. The one jj
+ * command the prompt path itself runs — `adoptWorkingCopy`'s `jj metaedit` on the issue's working
+ * copy, before every assignment prompt — is answered as a no-op instead: this rig has no
+ * workspace, and a refused adoption would fail the delivery the cases below are about. */
 async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Rig> {
   await ensureSession();
   const stateDir = await scratchDir();
@@ -259,6 +262,9 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
   const publications: string[] = [];
   const runner: ProcessManagerDeps["run"] = async (command, options) => {
     commands.push(command);
+    if (command[0] === "jj" && command[1] === "metaedit") {
+      return { stdout: "", stderr: "Nothing changed.\n", exitCode: 0 };
+    }
     if (command[0] === "jj" || command[0] === "git") {
       return { stdout: "", stderr: "workspace provisioning is not part of this rig", exitCode: 1 };
     }

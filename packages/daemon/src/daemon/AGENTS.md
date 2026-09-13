@@ -84,6 +84,43 @@ implementer, tester, merger — runs as the **implement** App (`github_apps.impl
 git identity lease minted at `/worker/started` — goes through that mapping, so the App a command
 acts as is the App of the role that runs it, never a choice the command makes.
 
+A phase worker's commit identity is its pane environment, never a config write. `launchWorker`
+(`processes.ts`) resolves the role's App identity from the token lease
+(`appRoleForLegionRole` → `TokenManager.getToken(...).gitIdentity`) before the pane opens and
+sets `JJ_USER`/`JJ_EMAIL` — which jj reads over every config scope — and
+`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` for plain git
+(`gitIdentityEnv` in `github-app-env.ts`, the same mapping `buildRoleEnv` uses for the daemon's
+own commands) on every pane `launchWorker` opens — the phase workers, and the sub-architects that
+`spawn_worker` opens on child issues. The architect pane `spawnTree` opens for every admitted tree
+(a root issue's, or a child's once `waves/release` admits it as its own tree) and the controller
+pane never commit and carry none. Those six variables are pane-only exports like the boot token:
+none of them is in `PANE_ENV_ALLOW_LIST` (`environment.ts`), so a daemon started from inside a
+worker pane never hands that pane's App identity to anything it spawns — the private tmux server,
+the architect and controller panes — and `buildRoleEnv`/`adoptWorkingCopy` set them explicitly on
+the children that do commit as an App. A token-manager
+failure fails the launch (counted in `launchFailures`): no pane opens without an identity. Every
+issue workspace is a `jj workspace` of the one shared clone, and jj's repository-scoped config is
+a single file for all of them (`~/.config/jj/repos/<hash>/config.toml`), so an identity written
+there is the author and committer for every tree's commits at once. Provisioning
+(`packages/workspace`, `provisionIssueWorkspace`) probes that scope on every launch — `jj config
+list --repo --include-overridden`, because `ProvisionIssueWorkspaceDeps.run` is injected and the
+package cannot assume a runner that strips `JJ_USER`/`JJ_EMAIL` from the command's environment;
+without the flag a value the repo file holds is hidden whenever a higher layer overrides it — and
+removes a leftover `user.name` or `user.email` once, with a
+`[legion] removing repository-scoped jj …` log line; nothing writes them again. The environment
+settles the committer; the author needs one more step, because jj keeps a rewritten commit's
+author: `jj split`/`jj describe` carve a phase's work out of the issue's working-copy commit, which
+the daemon's own `jj workspace add` created under the daemon's identity and which a split never
+recreates while `.omp/config.yml` sits in it. So every assignment delivery
+(`promptExistingWorker`, the one write of the active phase — a fresh launch's `/worker/ready`, a
+`--resume`, or a live idle worker prompted over its socket; never a catch-up) first adopts the
+working copy for the role (`adoptWorkingCopy`: `jj metaedit --update-author -r '@ &
+description(exact:"")' -R <workspaceDir>` under the same six variables, under
+`slow_command_timeout_seconds`), before the prompt frame and before any state write; a described
+working copy is a previous phase's work and keeps its author, and a failing `metaedit` fails the
+delivery with the command's failure (jj's stderr, or the runner's timeout or abort report) so no
+worker is prompted whose commits would carry the wrong author.
+
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it
 holds `pull_requests: write` and no `contents` permission — so it can post reviews and reply on

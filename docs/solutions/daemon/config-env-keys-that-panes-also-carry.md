@@ -84,8 +84,21 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
   -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u LEGION_OMP_PATH
   -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN
-  -u GITHUB_TOKEN -u GH_HOST …`. The checkpoints script must run under the same scrub
-  (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
+  -u GITHUB_TOKEN -u GH_HOST -u JJ_USER -u JJ_EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL
+  -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL …`. Two kinds of key are in that list. One kind
+  never reaches a child whether or not the shell scrubbed it: since LEGION-74 the daemon builds
+  every child and pane environment from `PANE_ENV_ALLOW_LIST` (`environment.ts`), which passes no
+  `LEGION_*`, `DISPATCH_*`, `GH_*`, or commit-identity name (`JJ_USER`/`JJ_EMAIL`, the Git
+  author/committer variables — LEGION-44's pane-only exports), so a worker pane's App identity
+  never reaches the private tmux server, the root-architect pane, or the controller pane, and the
+  daemon's own `jj workspace add` runs under the user config, never the launching pane's App. The
+  other kind the daemon **reads for itself** before any allow-list applies, and scrubbing it is
+  what makes the run yours: `LEGION_DAEMON_URL` is refused on tmux when it names another daemon
+  (the guard above) and is honoured as the daemon's URL on kubernetes; `LEGION_STATE_DIR` names the
+  outer daemon's state directory, whose instance lock refuses a second daemon; `LEGION_OMP_PATH` is
+  honoured as the OMP override (next bullet); `LEGION_MAX_RECURSION_DEPTH` and every other
+  `LEGION_*` key `resolveDaemonConfig` reads is the outer daemon's setting. The checkpoints script
+  must run under the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
 - `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
   carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see
   `omp-pin-bump-behavioral-proof.md`, "One operator observation"), every pane inherits it, and a

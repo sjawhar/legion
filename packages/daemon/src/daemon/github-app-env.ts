@@ -39,15 +39,28 @@ export function buildGitHubTokenEnv(token: string, baseEnv: NodeJS.ProcessEnv): 
   return env;
 }
 
+/** The six variables that make a process commit as `gitIdentity`: `JJ_USER`/`JJ_EMAIL`, which jj
+ * reads over every config scope (the Git variables mean nothing to jj), and the four Git
+ * author/committer variables for plain git. One mapping for the daemon's own commands
+ * (`buildRoleEnv`) and for every phase-worker pane (`ProcessManager.workerIdentityEnv`). */
+export function gitIdentityEnv(gitIdentity: {
+  name: string;
+  email: string;
+}): Record<string, string> {
+  return {
+    JJ_USER: gitIdentity.name,
+    JJ_EMAIL: gitIdentity.email,
+    GIT_AUTHOR_NAME: gitIdentity.name,
+    GIT_AUTHOR_EMAIL: gitIdentity.email,
+    GIT_COMMITTER_NAME: gitIdentity.name,
+    GIT_COMMITTER_EMAIL: gitIdentity.email,
+  };
+}
+
 export function buildRoleEnv(
   token: string,
   gitIdentity: { name: string; email: string },
   baseEnv: NodeJS.ProcessEnv
 ): NodeJS.ProcessEnv {
-  const env = buildGitHubTokenEnv(token, baseEnv);
-  env.GIT_AUTHOR_NAME = gitIdentity.name;
-  env.GIT_AUTHOR_EMAIL = gitIdentity.email;
-  env.GIT_COMMITTER_NAME = gitIdentity.name;
-  env.GIT_COMMITTER_EMAIL = gitIdentity.email;
-  return env;
+  return Object.assign(buildGitHubTokenEnv(token, baseEnv), gitIdentityEnv(gitIdentity));
 }

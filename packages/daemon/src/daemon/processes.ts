@@ -10,14 +10,21 @@ import {
   type SpawnWorkerResponse,
   sanitizeToken,
 } from "@legion/contracts";
-import { provisionIssueWorkspace, type WorkspaceSpec } from "@legion/workspace";
+import {
+  commandFailure,
+  issueWorkspaceDir,
+  provisionIssueWorkspace,
+  type WorkspaceSpec,
+} from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
+import { appRoleForLegionRole } from "./api/github";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
+import { gitIdentityEnv } from "./github-app-env";
 import {
   activePhaseLabel,
   isActivePhase,
@@ -898,7 +905,11 @@ export class ProcessManager {
    * of admission bookkeeping) since only the caller knows whether this prompt represents a new
    * admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a queue promotion) or none at
    * all (`/worker/ready` resuming a worker whose slot was already counted via its locator from
-   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking). */
+   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking).
+   * For an `assignment` the issue's working copy is first adopted for the role
+   * (`adoptWorkingCopy`), before the prompt frame and before any state write, so a working copy
+   * that cannot be adopted leaves the worker unprompted and the claim untouched; a rejecting
+   * `adoptWorkingCopy` propagates like a refused prompt, having committed nothing. */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -908,6 +919,7 @@ export class ProcessManager {
     pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
+    if (pending.kind === "assignment") await this.adoptWorkingCopy(issue, role);
     const receipt = await client.prompt(pending.task);
     const outcome = await this.awaitTurnStart(client, receipt);
     if (!outcome.started) {
@@ -3207,6 +3219,7 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const workspace = await this.provisionWorkspace(issue);
+      const identity = await this.workerIdentityEnv(role);
       const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
 
@@ -3231,6 +3244,7 @@ export class ProcessManager {
         ENVOY_URL: this.deps.config.envoyUrl,
         GIT_CONFIG_COUNT: "0",
         GIT_TERMINAL_PROMPT: "0",
+        ...identity,
         ...this.credentialProcessEnvironment(token),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
@@ -3649,6 +3663,58 @@ export class ProcessManager {
       roleTopic(controllerToken(this.deps.state.project)),
       JSON.stringify(payload)
     );
+  }
+
+  /** The commit identity a phase worker's pane carries for its whole life: the GitHub App its role
+   * acts as (`appRoleForLegionRole` — the mapping `/worker/started`'s lease and `legion gh` use),
+   * read from the token manager's lease *before* the pane opens, so no worker ever commits without
+   * one and a token-manager failure is a launch failure, never a pane with a generic author.
+   * Environment, not `jj config`: every issue workspace is a workspace of the one shared clone, and
+   * jj's repository-scoped config is a single file for all of them — a worker that wrote its
+   * identity there set the author and committer for every other tree's commits (LEGION-44). Root
+   * architect and controller panes never commit and carry none of these. */
+  private async workerIdentityEnv(role: LegionRole): Promise<Record<string, string>> {
+    const [owner] = this.deps.config.repo.split("/") as [string, string];
+    const lease = await this.deps.workerCatchup.tokenManager.getToken(
+      appRoleForLegionRole(role),
+      owner
+    );
+    return gitIdentityEnv(lease.gitIdentity);
+  }
+
+  /** Makes `issue`'s working-copy commit — the commit every `jj split`/`jj describe` of the phase
+   * about to run carves its work out of — authored by `role`'s App identity. jj keeps a rewritten
+   * commit's author and refreshes only the committer, and the working copy is created by the
+   * daemon's own `jj workspace add` under the daemon's identity and never recreated by a split
+   * while `.omp/config.yml` sits in it; the pane environment alone would therefore leave every
+   * commit in the workspace authored by the daemon for the workspace's whole life. Runs at every
+   * assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`, a `--resume`,
+   * or a live idle worker prompted over its socket — under the same lease-derived variables the
+   * pane carries and under `slow_command_timeout_seconds`, like every other daemon command that
+   * snapshots a working copy (`metaedit` snapshots it first). `@ & description(exact:"")` touches
+   * only an undescribed working copy: a described one is a previous phase's work and keeps its
+   * author. "Nothing changed." and "No revisions to modify." are exit 0; a failure is the
+   * assignment's failure, so no worker is prompted whose commits would carry the wrong author,
+   * and a kill by the runner is reported as the runner saw it (`commandFailure`: the budget and
+   * wall time, or the abort), never as a bare `exit 143`. */
+  private async adoptWorkingCopy(issue: IssueKey, role: LegionRole): Promise<void> {
+    const command = [
+      "jj",
+      "metaedit",
+      "--update-author",
+      "-r",
+      '@ & description(exact:"")',
+      "-R",
+      issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue),
+    ];
+    const result = await this.deps.run(command, {
+      env: await this.workerIdentityEnv(role),
+      timeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
+    });
+    if (result.exitCode !== 0) {
+      const failure = commandFailure({ ...result, stderr: result.stderr ?? "" }, command);
+      throw new Error(`Could not adopt ${issue}'s working copy for ${role}: ${failure.message}`);
+    }
   }
 
   /** The credential environment a root, worker, or controller pane carries for life — never per

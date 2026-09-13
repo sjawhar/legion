@@ -201,6 +201,16 @@ async function realJjRig(command: readonly string[], stateDir: string) {
   return { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps };
 }
 
+/** The repository-scoped identity probes every provisioning runs (`removeRepoScopedIdentity`);
+ * an `unset` follows a probe only when it printed a value. `--include-overridden` makes the probe
+ * see a value the daemon's own `JJ_USER`/`JJ_EMAIL` would otherwise hide. */
+function identityProbe(repoCloneDir: string, key: string): string[] {
+  return ["jj", "config", "list", "--repo", "--include-overridden", "-R", repoCloneDir, key];
+}
+function identityProbeCommands(repoCloneDir: string): string[][] {
+  return [identityProbe(repoCloneDir, "user.name"), identityProbe(repoCloneDir, "user.email")];
+}
+
 describe("provisionIssueWorkspace", () => {
   test("clones a missing repository into a temporary sibling, renames it into place, then fetches and provisions its issue workspace", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
@@ -272,6 +282,7 @@ describe("provisionIssueWorkspace", () => {
       ],
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
+      ...identityProbeCommands(repoCloneDir),
     ]);
     // The bookmark is created in the new workspace, on its own working copy — and a brand-new
     // issue has no bookmark to miss, so nothing is logged.
@@ -280,8 +291,9 @@ describe("provisionIssueWorkspace", () => {
     expect(logged).toEqual([]);
     // Every provisioning command runs under the slow budget, not the runner's generic default.
     expect(calls.map((call) => call.opts?.timeoutMs)).toEqual(calls.map(() => commandTimeoutMs));
+    // Provisioning reads the clone's jj config (the identity probes) and never sets a key in it.
     expect(
-      calls.flatMap(({ cmd }) => cmd).some((argument) => argument.startsWith("user."))
+      calls.some(({ cmd }) => cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "set")
     ).toBeFalse();
     expect(existsSync(path.join(repoCloneDir, ".jj"))).toBeTrue();
     expect(
@@ -421,6 +433,7 @@ describe("provisionIssueWorkspace", () => {
         repoCloneDir,
       ],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
+      ...identityProbeCommands(repoCloneDir),
     ]);
     expect(calls.some((call) => call.cmd[1] === "bookmark")).toBeFalse();
     expect(logged).toEqual([]);
@@ -463,6 +476,26 @@ describe("provisionIssueWorkspace", () => {
     expect(
       (await runCommand([...STOCK_JJ, "bookmark", "set", "main", "-R", repoCloneDir])).exitCode
     ).toBe(0);
+    // A repository-scoped identity on the shared clone, which provisioning must remove.
+    for (const [key, value] of [
+      ["user.name", "stale-bot[bot]"],
+      ["user.email", "1+stale-bot[bot]@users.noreply.github.com"],
+    ] as const) {
+      expect(
+        (
+          await runCommand([
+            ...STOCK_JJ,
+            "config",
+            "set",
+            "--repo",
+            "-R",
+            repoCloneDir,
+            key,
+            JSON.stringify(value),
+          ])
+        ).exitCode
+      ).toBe(0);
+    }
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
@@ -490,7 +523,19 @@ describe("provisionIssueWorkspace", () => {
     ]);
     expect(credential.exitCode).toBe(0);
     expect(credential.stdout.trim()).toBe(credentialHelper);
-  });
+    const repoIdentity = await runCommand([
+      ...STOCK_JJ,
+      "config",
+      "list",
+      "--repo",
+      "--include-overridden",
+      "-R",
+      repoCloneDir,
+      "user",
+    ]);
+    expect(repoIdentity.exitCode).toBe(0);
+    expect(repoIdentity.stdout.trim()).toBe("");
+  }, 60_000);
   test("runs the supplied pinned credential helper instead of a PATH Legion and fails loudly", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
     const helperDir = await temporaryDirectory();
@@ -611,7 +656,147 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ["jj", "workspace", "update-stale"],
       ["jj", "git", "fetch", "-R", repoCloneDir],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
+      ...identityProbeCommands(repoCloneDir),
     ]);
+  });
+
+  test("removes a repository-scoped jj identity from the shared clone, logging each key", async () => {
+    // `--repo` on a workspace is the one config file every workspace of the clone shares, so a
+    // `user.name`/`user.email` there is the author and committer for every tree's commits. Identity
+    // rides each pane's environment; a value found here is removed, where the clone's config
+    // writes already live, and nothing writes it.
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    const repoConfig = new Map<string, string>([
+      ["user.name", 'user.name = "legion-reviewer[bot]"'],
+      ["user.email", 'user.email = "3202653+legion-reviewer[bot]@users.noreply.github.com"'],
+    ]);
+    const calls: string[][] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace(issue, {
+        extensionPackage,
+        repo: "acme/widgets",
+        stateDir,
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd) => {
+          calls.push(cmd);
+          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+            await mkdir(workspaceDir, { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "config") {
+            const key = cmd.at(-1) ?? "";
+            if (cmd[2] === "list") {
+              return { exitCode: 0, stdout: repoConfig.get(key) ?? "", stderr: "" };
+            }
+            if (cmd[2] === "unset" && !repoConfig.delete(key)) {
+              return { exitCode: 1, stdout: "", stderr: `Error: "${key}" doesn't exist` };
+            }
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      identityProbe(repoCloneDir, "user.name"),
+      ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
+      identityProbe(repoCloneDir, "user.email"),
+      ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.email"],
+    ]);
+    expect(repoConfig.size).toBe(0);
+    expect(logged.filter((line) => line.includes("repository-scoped jj"))).toEqual([
+      expect.stringContaining(`removing repository-scoped jj user.name from ${repoCloneDir}`),
+      expect.stringContaining(`removing repository-scoped jj user.email from ${repoCloneDir}`),
+    ]);
+  });
+
+  test("treats a stale identity another provisioning removed first as already gone", async () => {
+    // Two issues provisioning the same clone at once both see the key; the second `unset` finds it
+    // gone (exit 1). A re-probe that finds nothing is success, not a launch failure.
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    let nameProbes = 0;
+    const calls: string[][] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await provisionIssueWorkspace("WIDGETS-42", {
+        extensionPackage,
+        repo: "acme/widgets",
+        stateDir,
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd) => {
+          calls.push(cmd);
+          if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+            await mkdir(workspaceDir, { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "config" && cmd.at(-1) === "user.name") {
+            if (cmd[2] === "list") {
+              nameProbes += 1;
+              // Present on the first probe, gone by the re-probe after the failed unset.
+              return { exitCode: 0, stdout: nameProbes === 1 ? 'user.name = "x"' : "", stderr: "" };
+            }
+            return { exitCode: 1, stdout: "", stderr: 'Error: "user.name" doesn\'t exist' };
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      identityProbe(repoCloneDir, "user.name"),
+      ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
+      identityProbe(repoCloneDir, "user.name"),
+      identityProbe(repoCloneDir, "user.email"),
+    ]);
+  });
+
+  test("fails the provision loudly when a stale identity cannot be removed", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        provisionIssueWorkspace("WIDGETS-42", {
+          extensionPackage,
+          repo: "acme/widgets",
+          stateDir,
+          provisioningToken: async () => "installation-token",
+          credentialHelper,
+          commandTimeoutMs,
+          run: async (cmd) => {
+            if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            if (cmd[0] === "jj" && cmd[1] === "config" && cmd.at(-1) === "user.name") {
+              if (cmd[2] === "list") return { exitCode: 0, stdout: 'user.name = "x"', stderr: "" };
+              return { exitCode: 1, stdout: "", stderr: "Error: Permission denied (os error 13)" };
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        })
+      ).rejects.toThrow(
+        `Command failed (exit 1): jj config unset --repo -R ${repoCloneDir} user.name\nError: Permission denied (os error 13)`
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   test("leaves an existing bookmark that points at another workspace's commit untouched after its remote branch is deleted", async () => {
@@ -954,6 +1139,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       addAt(commit),
       ...credentialConfigCommands(gitDir, credentialHelper),
+      ...identityProbeCommands(repoCloneDir),
     ]);
     expect(logged).toEqual([]);
   });
@@ -1026,6 +1212,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       addAtMain,
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
+      ...identityProbeCommands(repoCloneDir),
     ]);
     const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark" && call.cmd[2] === "set");
     expect(bookmarkSet?.opts?.cwd).toBe(workspaceDir);

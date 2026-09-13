@@ -32,36 +32,45 @@ related_issues:
 main clone (`~/.local/state/legion/<team>/repos/github.com/<owner>/<repo>`). Every concurrent
 tree's workers therefore share one `.jj/repo`: one operation log, one repo-scoped config, one set
 of bookmarks. LEGION-30 ran while five other trees were active and hit three distinct hazards of
-that sharing. Each is now a daemon issue; until they land, the defences below are the worker's
-job. The legion-worker skill's rules ("never `jj undo`/`op restore`", "carve commits by path") are
-partly these hazards written down.
+that sharing. Hazard 1 is closed by the daemon (LEGION-44); Hazards 2 and 3 are daemon issues,
+and until they land the defences below are the worker's job. The legion-worker skill's rules
+("never `jj undo`/`op restore`", "carve commits by path") are partly these hazards written down.
 
-## Hazard 1 — commit identity is repo-scoped, so another tree's provisioning flips yours (LEGION-44)
+## Hazard 1 — commit identity is repo-scoped, so another tree's provisioning flips yours (LEGION-44, closed)
 
-The daemon writes the phase's git identity into the *repo* config
-(`~/.config/jj/repos/<hash>/config.toml` for the shared clone), not a per-workspace or per-process
-one. Whichever role any tree most recently provisioned owns `user.name`/`user.email` for every
-concurrent commit everywhere. Observed: a corrective-round fix commit carried committer
-`legion-reviewer[bot]` (author correct); a handoff commit was born with a *reviewer author*
-because another tree's reviewer had just been provisioned. The `Omp-Session` trailer (a
-per-process `JJ_CONFIG` overlay) was correct throughout — only the identity flipped.
+jj's repository-scoped config (`~/.config/jj/repos/<hash>/config.toml`) is one file for every
+workspace of the shared clone, so a `user.name`/`user.email` written there by any tree's worker
+boot became the committer for every concurrent commit everywhere. Observed on LEGION-30: a
+corrective-round fix commit carried committer `legion-reviewer[bot]` (author correct); a handoff
+commit was born with a *reviewer author* because another tree's reviewer had just booted. The
+`Omp-Session` trailer (a per-process `JJ_CONFIG` overlay) was correct throughout — only the
+identity flipped.
 
-Defence: pin the identity on every write the daemon's config would otherwise supply.
+Since LEGION-44 nothing writes identity into any jj config scope. Your identity is your pane's
+environment: the daemon puts `JJ_USER`/`JJ_EMAIL` and the four Git author/committer variables,
+resolved from your role's GitHub App lease, on the pane when it opens it (jj reads `JJ_USER`/
+`JJ_EMAIL` over every config scope), and at every assignment it re-authors the workspace's
+undescribed working-copy commit for your role (`jj metaedit --update-author`), because `jj split`
+and `jj describe` keep that commit's author and only refresh the committer. Provisioning removes
+the repository-scoped identity earlier boots left behind, once, logged. The jj facts behind each
+of those three steps, and the two failure-mode decisions the design took, are in
+[jj-commit-identity-is-per-process-and-the-working-copy-is-adopted-at-assignment](jj-commit-identity-is-per-process-and-the-working-copy-is-adopted-at-assignment.md).
+
+There is nothing to pin. **Never set or override `user.name`/`user.email` in any jj or Git scope
+— not `jj config set`, not `--config`, not `git config`.** `--config` outranks the pane
+environment: a pinned value would put the wrong App back on your commits, which is the defect this
+closed. Verify before a push instead:
 
 ```bash
-PIN=(--config 'user.name="legion-implementer[bot]"' \
-     --config 'user.email="271566630+legion-implementer[bot]@users.noreply.github.com"')
-jj -R "$LEGION_WORKSPACE" "${PIN[@]}" commit <paths> -m "..."
-jj -R "$LEGION_WORKSPACE" "${PIN[@]}" split -m "..." <paths>
-jj -R "$LEGION_WORKSPACE" "${PIN[@]}" squash --into <change> <paths>
-# a commit already born with the wrong author:
-jj -R "$LEGION_WORKSPACE" "${PIN[@]}" metaedit <change> --author 'legion-implementer[bot] <...>'
+jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'
 ```
 
-`--config` values are TOML: the brackets in the bot name need the quotes. Check
-`jj log -T 'author.email() ++ " | " ++ committer.email()'` over your chain before every push.
-`metaedit --author` keeps the author timestamp; `describe --reset-author` does not exist in the
-pinned jj build.
+Both columns must be your role's App on every commit you made — not on the whole list: earlier
+phases' commits are legitimately authored by their own role's App, and a conflict-forced rebase
+legitimately sets the committer of every rebased commit, other roles' included, to the rebaser. If
+one of your own commits is wrong, the pane environment is wrong — a pane opened before the daemon
+that set it, or a command run outside the pane with the variables unset — and the fix is to report
+it to the architect, not to pin.
 
 ## Hazard 2 — another workspace's `jj undo` / `op restore` rewinds your operations (LEGION-45)
 
