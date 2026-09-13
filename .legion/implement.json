@@ -1,0 +1,61 @@
+{
+  "pr": 1030,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1030",
+  "headSha": "208d87937e58",
+  "commits": [
+    "372310dc3b21 daemon: deliver a worker prompt only when its turn is observed to start (LEGION-60)",
+    "208d87937e58 daemon: send worker-queued/worker-started and the other ProcessManager notices through the Envoy listener"
+  ],
+  "filesChanged": [
+    "packages/daemon/src/daemon/worker-rpc.ts",
+    "packages/daemon/src/daemon/process-errors.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/worker-admission.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/worker-rpc.test.ts",
+    "packages/daemon/src/daemon/__tests__/fake-runtime.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/real-prompt-delivery-e2e.test.ts",
+    "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts",
+    "packages/daemon/src/daemon/__tests__/worker-boot-watchdog.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.thermo-ops.test.ts",
+    "packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts",
+    "packages/daemon/src/cli/__tests__/fixtures/delayed-start-omp-rpc.ts",
+    "packages/pi-envoy/src/legion/tools.ts",
+    "skills/legion-architect/SKILL.md",
+    "scripts/smoke/up.sh",
+    "scripts/smoke/down.sh",
+    "scripts/smoke/README.md"
+  ],
+  "verification": {
+    "unit": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1141 pass, 0 fail (64 files) at 208d87937e58; bunx tsc --noEmit clean; bunx biome check src/ clean; bash scripts/smoke/up.test.sh and down.test.sh all PASS; packages/pi-envoy tsc + bun test src/legion 16 pass.",
+    "integration": "LEGION_E2E=1 bun test src/daemon/__tests__/real-prompt-delivery-e2e.test.ts: 3 pass on a real tmux server (legion-realprompt) with a real legion worker-shim and the delayed-start-omp-rpc.ts stand-in (starts / acks-and-never-starts / starts late), run twice.",
+    "rig": {
+      "surface": "scripts/smoke/up.sh with SMOKE_DIR=/tmp/legion60-smoke/rig SMOKE_NATS_NAME=legion60-smoke-nats NATS_PORT=14272 ENVOY_PORT=19030 LEGION_DAEMON_PORT=19380 SMOKE_PROJECT=sjawhar/60 SMOKE_WORKER_CAP=1 SMOKE_WEBHOOK_MODE=envoy (later none), OMP_PROFILE=legion60-smoke — a profile copied from ~/.omp/profiles/legion whose plugins/ installed @sjawhar/pi-legion-envoy built from this branch (version 1.22.2-legion60.372310dc3b21, daemon API contract 1) beside the profile's other plugins; SMOKE_OMP_LAUNCH_PREFIX='env OMP_PROFILE=legion60-smoke secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --'. Root issue LEGSMOKE-129, child LEGSMOKE-131 (real controller, architects, planner, implementer, tester, reviewer as omp --mode rpc panes).",
+      "positive": "Head 372310dc3b21. The LEGSMOKE-131 architect (reached over the rig listener's POST /v1/messages/publish on its role topic) called spawn_worker planner while the tester held the single slot -> {status: queued} at 12:05:28Z; state.json: queue [legion-sjawhar60-legsmoke-131-planner], pendingAssignment = the smoke task, promptFailures 0. When the tester finished, the promotion prompted the planner and committed at 12:06:12Z: queue [], phases[LEGSMOKE-131] = {phase: planner, sessionId: 01a09a94-7a2c-7000-99b5-9322f643d8fb}, promptFailures 0; the planner pane gained one agent_start/agent_end pair (1 -> 2) and its OMP transcript gained the user message and the assistant reply PLANNER-RESUMED-OK; no 'started no turn' line in the daemon log. The worker-started notice was rejected by the rig listener as 'invalid envelope: event_id is required' at 12:06:02Z (pre-existing raw-NATS publish; fixed in 208d87937e58).",
+      "negativeControl": "Head 208d87937e58. Daemon stopped (SIGTERM); the real planner pane %5 killed; the ack-only stand-in (bun packages/daemon/src/cli/index.ts worker-shim --socket .../planner-standin.sock -- bun packages/daemon/src/cli/__tests__/fixtures/delayed-start-omp-rpc.ts, no delay env) opened as pane @7 %11 pid 3214030 start ticks 166765880 in the rig's tmux session; state.json planner claim repointed (tmuxWindowId/tmuxPaneId/panePid/paneStartTicks/socketPath), ompSessionFile kept, pendingAssignment set to the negative-control task, token pushed on workerAdmission.queue; daemon started 12:16:52Z. Boot's first drain prompted the stand-in (fixture prompt log line 1 at 12:17:07Z), daemon log: '[legion] failed to prompt queued worker legion-sjawhar60-legsmoke-131-planner: PromptNotStarted: worker legion-sjawhar60-legsmoke-131-planner acknowledged the prompt but started no turn within 5000ms (get_state: isStreaming=false)', promptFailures 1 at 12:17:12Z with queue and pendingAssignment intact; the 60 s sweeps repeated it: promptFailures 2 at 12:18:16Z, 3 at ~12:19:16Z (fixture log exactly 3 lines, daemon log exactly 3 failed-to-prompt lines); at 3 the stand-in pane was killed and the daemon logged '[legion] respawning LEGSMOKE-131 by resuming OMP session .../2026-09-13T11-43-37-004Z_01a09a94-7a2c-7000-99b5-9322f643d8fb.jsonl'; the new pane %12 (pid 3311586, generation 2) carries --resume= that file; /worker/ready delivered the queued task: the planner transcript shows the user message at 12:19:25Z and the reply NEGATIVE-CONTROL-OK at 12:19:29Z; state: queue [], pendingAssignment cleared, promptFailures 0, readyConfirmedAt set. Listener log 12:19:16Z: worker-started {issue: LEGSMOKE-131, role: planner} received and role forwarded, 0 invalid envelopes since restart; the architect transcript line 73 (12:19:40Z) reads 'Planner worker-started observed'. Later the rig's own implementer promotion showed worker-queued then worker-started at the architect (12:25:38Z / 12:25:52Z).",
+      "evidence": "/tmp/legion60-smoke/evidence/ on this box: state.positive-1-queued.json, positive-1-summary.json, planner-pane.before.txt/after.txt, state.negative-0-before.json, negative-0-staged.json, state.negative-1-failure1.json, state.negative-2-failure2.json, state.negative-4-relaunched.json, standin-prompts.log (3 lines), daemon.log.negative-run.txt, listener.log.txt. The raw OMP transcript files of the rig's architect and planner were lost when the scratch profile ~/.omp/profiles/legion60-smoke was removed (the copy step aborted before running); their relevant lines are quoted above and in the PR body. Rig torn down with down.sh at ~12:27Z (tmux server legion-sjawhar60, container legion60-smoke-nats, daemon, listener all stopped)."
+    }
+  },
+  "trickyParts": [
+    "The plan expected /worker/ready's confirming get_state to drive the retry through the client's idle transition; it cannot: onIdle -> promoteWorkerQueue reads queue[0] synchronously before queueUnstartedPrompt has pushed the token. All three not-started paths therefore retry on the next drain (idle/dead event or the 60 s sweep) and never immediately; processes.test.ts A5-ready asserts exactly that.",
+    "awaitTurnStart checks receipt.hasStarted after the get_state instead of parsing data.isStreaming itself: the client settles the receipt from an isStreaming:true answer, so there is one definition of 'turn observed'. The fake client mirrors that (getState with isStreaming:true starts the pending receipt).",
+    "In the real-tmux e2e the third failure's retirement makes the shim socket close, onWorkerClientClosed's reconnect is refused, and markWorkerDead's promoteWorkerQueue cold-launches the queued assignment on its own — so the test asserts the property (no fourth prompt, launch attempted) rather than a launch count. The fake client reconnects to itself, which is why the unit test needs an explicit fourth drain.",
+    "A superseded receipt never settles: a later prompt() on the same client replaces the one slot, so a late start after a retry was sent resolves the retry's receipt, not the first one; commitLateStart compares the task by value so either path commits the same delivery once."
+  ],
+  "deviations": [
+    "Added a second commit (208d87937e58) not in the plan: ProcessManager's role notices (worker-queued, worker-started, worker-died, launch-failed, revive-failed, redelivered exception payloads) were published with a bare nats.publish that the Envoy listener rejects as an invalid envelope, so none ever reached an architect; the dep is now publishRole, wired to envoyPublish. Found because the rig listener logged the rejection at the exact moment the promoted prompt committed. The boot-redrive index.test.ts case asserts the architect's worker-started arrives through envoyPublish.",
+    "Added SMOKE_NATS_NAME and SMOKE_WORKER_CAP to scripts/smoke/up.sh (and SMOKE_NATS_NAME to down.sh, both documented in the README): the container name was hardcoded, so a second rig could not run beside LEGION-44's, and worker_cap was hardcoded to 6 where the plan's recipe needs 1.",
+    "The rig's daemon API contract is 1 on this branch while the installed profile plugin is 1.23.0 / contract 2 (main moved on); rather than rebase (forbidden except on a conflict) the rig ran a dedicated OMP profile with the plugin built from this commit — the deployment rule for a contract skew. The branch will need main's contract-2 plugin only after it merges into main; nothing in this change touches the LegionDaemonApi shapes.",
+    "The negative control's queued entry was hand-authored in state.json (pendingAssignment + queue push) while the daemon was stopped, not produced by a live spawn_worker: the plan's recipe already hand-edits the same claim's locator, and after the positive path no worker held the slot, so a live spawn would have taken the direct resumed path instead of queueing.",
+    "Cross-rig interference on the shared LEGSMOKE project: LEGION-44's rig admitted this rig's LEGSMOKE-129/131 and this rig admitted their LEGSMOKE-132/133 (reduceIssueUpdated admits any issue seen created that moves to todo; every bridge relays every project). Contained by stopping this rig's bridge (SMOKE_WEBHOOK_MODE=none on restart) and excising the foreign trees from state.json; before their ownership was known this session PATCHed LEGSMOKE-132 to backlog (11:53Z) then done (11:55Z); its owner moved it back to in_progress and was told. Not fixed in this PR; recorded for the retro."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T12:30:50.887Z"
+}
