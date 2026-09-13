@@ -1,104 +1,48 @@
 {
-  "summary": "Round 1 on PR #1079 at head 888e3e65952ae9ece2af90fa1a617623e63d9b8a: REQUEST_CHANGES. One correctness finding against the LEGION-101 contract: RequestCoreTo's Conn.Flush() (FlushTimeout(10s) in nats.go v1.50.0) returns the same nats.ErrTimeout sentinel as the receipt wait, so a forward still sitting in the client's buffer during a NATS reconnect or a stalled connection is reported as receipt_timeout, which the daemon treats as delivered and the message is lost; it was delivery_failed and recovered before this change. One gate item: the PR body has no E2E (tester) line. One small hardening: an explicit dedupe_key beginning envoy.role.forward. on a role topic gets a 200 and is silently dropped by roleTopicDelivery's first guard. Every other contract clause is met; CI green at the head; MERGEABLE; no .omp/config.yml on the branch.",
-  "verdict": "changes_requested",
+  "summary": "Round 2 on PR #1079 at head 753a70602d23d6ea73e639b3aec8e5a0e08186a7 (code head b869bf3290ba): clean. COMMENT review 5195446340 (not APPROVE: the head still carries .legion/). The round-1 blocking finding is fixed at the source: bus.ErrReceiptTimeout is minted only in RequestCoreTo's receipt wait after PublishRequest and a window-bounded FlushTimeout both succeeded; a flush timeout is %w-wrapped and stays delivery_failed. Verified by reading every exit against nats.go v1.50.0, by running the paused-server lock (PASS, pause taken) and by fault-injecting the flush branch to return the sentinel (FAIL), reverted with jj restore on nats.go. The reserved envoy.role.forward. dedupe_key prefix is a 400 naming dedupe_key before holder resolution and publish. Docs read true (acceptance line 6). All seven round-1 threads carry my Accepted: reply as newest comment. CI green at the head after one rerun of envoy-go (an unrelated dispatch/docs flake, filed as LEGION-149); MERGEABLE. The .legion/ deletion is the only remaining work.",
+  "verdict": "approved",
+  "round": 2,
   "pr": {
     "number": 1079,
     "url": "https://github.com/sjawhar/legion/pull/1079",
-    "headReviewed": "888e3e65952ae9ece2af90fa1a617623e63d9b8a",
-    "codeHead": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
-    "reviewUrl": "https://github.com/sjawhar/legion/pull/1079#pullrequestreview-5194835304",
-    "reviewId": 5194835304
+    "headReviewed": "753a70602d23d6ea73e639b3aec8e5a0e08186a7",
+    "codeHead": "b869bf3290ba",
+    "reviewUrl": "https://github.com/sjawhar/legion/pull/1079#pullrequestreview-5195446340",
+    "reviewId": 5195446340,
+    "reviewEvent": "COMMENT"
   },
   "verifiedOnGitHub": {
-    "ci": "Legion Envoy and Contracts run 34814916154 (envoy-go success), Tests run 34814916147 (lint/typecheck/test success), PR Title run 34814953013 success, all at 888e3e65952ae9ece2af90fa1a617623e63d9b8a",
-    "mergeable": "MERGEABLE / BLOCKED (awaiting review), not CONFLICTING",
-    "threadsBefore": 0,
-    "e2eImplementer": "present; surface listener Go suite on nats:2.10 testcontainer, command, observation, head fc7c2ab3 (ancestor of 888e3e65), negative control both keys -> 400",
-    "e2eTester": "MISSING from the PR body; evidence exists in .legion/test.json but the charter refuses approval until the line is in the body",
-    "branchHygiene": "jj file list -r 888e3e65 .omp is empty; skills/** and packages/pi-envoy/** untouched"
+    "ci": "Tests run 34820963379 success; PR Title run 34820963340 success; Legion Envoy and Contracts run 34820963388 success after `legion gh -- run rerun 34820963388 --failed` re-ran envoy-go (job 103903867291 success). First attempt failed on TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce in internal/dispatch/docs (anchor_blocks_test.go:42: asks block_id = <nil>) — untouched Postgres-backed package; bus and listener passed in the same run; same dispatch/docs code passed at 251fbd90 (run 34817295775). Filed as LEGION-149.",
+    "mergeable": "MERGEABLE / BLOCKED (awaiting review), not CONFLICTING; headRefOid 753a70602d23",
+    "threads": "7 opened by me in round 1; each answered by the implementer with its fixing commit; each now answered by me with `Accepted: fixed in <commit> — …` (reply ids 4003330627, 4003330790, 4003330960, 4003331124, 4003331243, 4003331421, 4003331601); none resolved yet — the implementer's `legion threads resolve` resolves them. Each REST reply made GitHub synthesise an empty COMMENTED review shell (as the implementer's replies did); those are not verdicts.",
+    "e2eImplementer": "present at fc7c2ab3 with negative control",
+    "e2eTester": "present at 251fbd90 (ancestor of 753a7060) with round-2 evidence A–E, own paused-container probe, three negative controls each tripping exactly one lock",
+    "branchHygiene": "jj file list -r 753a7060 .omp is empty; skills/** and packages/pi-envoy/** untouched; diff above 251fbd90 is architecture.md, request_core_test.go, and handoffs only"
   },
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at 888e3e65 as two reviewer subagents with those charters (named agents not installed in this pane). Deep review: one blocking (the Flush sentinel), one hardening (reserved prefix), stale sibling docs. Code quality: no blocking defects; wording and test-hygiene notes folded into inline comments and the fast-follow.",
+  "verifiedMyself": {
+    "lock": "cd packages/envoy && mise x go@1.26 -- go test ./internal/bus/ -count=1 -v -run TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout -> --- PASS (1.94s), no SKIP",
+    "faultInjection": "nats.go flush branch `return fmt.Errorf(\"bus: flush forward: %w\", err)` -> `return ErrReceiptTimeout`: the same test --- FAIL (1.70s), exit 1; reverted with `jj restore packages/envoy/internal/bus/nats.go`; `-run TestRequestCoreTo` -> ok (3 tests)",
+    "exitsTraced": "RequestCoreTo: Marshal/ensureConn/SubscribeSync/PublishRequest errors raw; pre-flush remaining<=0 plain error (avoids FlushTimeout ErrBadTimeout); FlushTimeout error %w-wrapped (errors.Is nats.ErrTimeout true, ErrReceiptTimeout false); loop remaining<=0 and NextMsg nats.ErrTimeout -> ErrReceiptTimeout; other NextMsg errors raw -> delivery_failed (contract: not known to have reached the holder); empty receipt -> nil",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 753a7060 on the round-2 delta as reviewer subagents with those charters: nothing blocking; notes folded into the fast-follow"
+  },
   "contractCheck": {
-    "no_holder": "met (roleTopicDelivery line 309)",
-    "delivery_failed": "met for lookup failed, stale cleanup, stale holder, non-timeout forward errors",
-    "receipt_timeout": "NOT met in one case: Flush() ErrTimeout is misreported as receipt_timeout (blocking finding)",
-    "exceptionPayload": "met: original_topic, event_id, payload, original dedupe_key (publishDeliveryException uses item, never the forward prefix)",
-    "publishDedupeKey": "met: verbatim; exclusive with idempotency_key -> 400 expected [dedupe_key, idempotency_key] before any publish; empty string absent",
-    "sendUnchanged": "met: check is publish-only; validateMessageBody and sendHandler untouched; TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey locks it",
-    "dedupeCacheOnlyDelivered": "met: recordDedupe true on delivered branch only; clearAttempt true on both forward failures; locked by TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly"
+    "no_holder": "met",
+    "delivery_failed": "met — round-1 gap closed at the source",
+    "receipt_timeout": "met — keyed on bus.ErrReceiptTimeout alone; locked by the 4-row seam test, the no-subscriber bus test, the paused-server test",
+    "exceptionPayload": "met",
+    "publishDedupeKey": "met — exclusive with idempotency_key (400 naming both); reserved prefix (400 naming dedupe_key); empty absent; nothing published on a 400; both checks precede holder resolution",
+    "sendUnchanged": "met",
+    "dedupeCacheOnlyDelivered": "met"
   },
-  "findings": [
-    {
-      "severity": "blocking",
-      "path": "packages/envoy/cmd/listener/delivery.go",
-      "line": 374,
-      "issue": "nats.ErrTimeout from RequestCoreTo can come from Conn.Flush() (FlushTimeout(10s)), not only the receipt wait; during RECONNECTING the PUB is buffered client-side and Flush times out, so a never-sent forward is reported receipt_timeout",
-      "fix": "in internal/bus RequestCoreTo return a distinct sentinel (e.g. bus.ErrReceiptTimeout) only from the receipt wait (remaining<=0 and NextMsg ErrTimeout); delivery.go checks errors.Is(err, bus.ErrReceiptTimeout); optionally FlushTimeout(time.Until(deadline)); lock: inject nats.ErrTimeout via forwardRole and assert delivery_failed"
-    },
-    {
-      "severity": "gate",
-      "path": "PR body",
-      "issue": "E2E (tester) line missing",
-      "fix": "tester adds surface, command, observation, head, negative control to the PR body"
-    },
-    {
-      "severity": "hardening",
-      "path": "packages/envoy/cmd/listener/api.go",
-      "line": 328,
-      "issue": "explicit dedupe_key with the reserved envoy.role.forward. prefix on a role topic answers 200 and is silently dropped by roleTopicDelivery's first guard",
-      "fix": "400 naming dedupe_key before publish; one test row"
-    },
-    {
-      "severity": "docs-in-scope",
-      "path": "packages/envoy/docs/architecture.md",
-      "line": 74,
-      "issue": "lines 74 and 86 still say two seconds -> delivery_failed and reason is no_holder or delivery_failed",
-      "fix": "name the three reasons; that file cuts no release"
-    },
-    {
-      "severity": "minor",
-      "path": "packages/envoy/cmd/listener/delivery.go",
-      "line": 40,
-      "issue": "forwardRole comment claims ErrTimeout means the holder never answered",
-      "fix": "name the receipt sentinel after the blocking fix"
-    },
-    {
-      "severity": "minor",
-      "path": "packages/envoy/AGENTS.md",
-      "line": 90,
-      "issue": "'Every reason emits an exception and clears the attempt cache' overstates: only the two forward failures roll back an entry",
-      "fix": "reword as suggested inline"
-    },
-    {
-      "severity": "minor",
-      "path": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
-      "line": 35,
-      "issue": "'A missing receiver ... is delivery_failed' ambiguous against the preceding receipt_timeout sentence",
-      "fix": "'a holder absent from the session registry'"
-    },
-    {
-      "severity": "minor",
-      "path": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
-      "line": 91,
-      "issue": "Correct snippet must test the receipt sentinel once it exists",
-      "fix": "errors.Is(err, bus.ErrReceiptTimeout)"
-    },
-    {
-      "severity": "minor-optional",
-      "path": "packages/envoy/cmd/listener/api_test.go",
-      "line": 1068,
-      "issue": "byte-for-byte 400 body compare pins the English sentence beyond the contract",
-      "fix": "decode and assert Expected == [dedupe_key, idempotency_key]"
-    }
+  "docsRead": "packages/envoy/AGENTS.md lines 90, 92, publish row, optional-fields sentence; packages/envoy/docs/architecture.md lines 70–95; docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md line 35 and lines 86–114 — all true against RequestCoreTo and roleTopicDelivery. Spec v5 records both round-1 decisions.",
+  "fastFollow": "Test hygiene in request_core_test.go and siblings (t.Skipf -> t.Fatalf on pause failure since Docker is a hard prerequisite and CI runs go test without -v; docker.Close via t.Cleanup after the unpause; logStatus column instead of the inline map in RoleForwardErrorSelectsTheReason; RejectsReservedDedupeKeyPrefix asserts Expected not the sentence; drop the shadowed `remaining :=`); plus the pi-envoy/skills two-reason wording with LEGION-109's plugin PR.",
+  "nextStep": "Implementer: `legion threads resolve --pr 1079 --repo sjawhar/legion`, then push exactly one commit deleting .legion/ on top of 753a7060. Reviewer: re-read that head, confirm it differs from 753a7060 by the deletion alone (jj diff --from 753a7060 --to <head> --summary lists only .legion/*), confirm all seven threads isResolved: true via gh api graphql, then APPROVE by SHA with `legion gh -- pr review --approve`. No handoff write after this one.",
+  "filed": [
+    "LEGION-149 (CI flake, dispatch/docs TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce)"
   ],
-  "notesForArchitect": [
-    "Spec Design names errors.Is(err, nats.ErrTimeout) as the mechanism; the Flush finding shows it insufficient against the spec's own 'emitted only when the forward request was published and the wait for the reply timed out'. Amend the Design sentence when the fix lands (a bus-level receipt sentinel).",
-    "Sequencing, not a finding: packages/daemon/src/daemon/events.ts exceptionInfo accepts only no_holder/delivery_failed today, so until LEGION-107 lands a receipt_timeout is dropped at the daemon, including a holder dead inside the stale window that used to be delivery_failed. The parent spec accepts this ('deploying them in any order is safe'; resync probe is the backstop)."
-  ],
-  "fastFollow": "plugin-package and skills copies of the two-reason wording (packages/pi-envoy/AGENTS.md 14-16, packages/pi-envoy/README.md 11-12, skills/envoy/SKILL.md 151-152) land with LEGION-109's plugin PR since those paths cut a pi-envoy release.",
-  "nextRound": "After the corrective push: answer each of the 7 threads with Accepted:/Still open:, re-check CI and mergeable at the new head, verify the E2E (tester) line, then COMMENT if clean (head still carries .legion/) and direct the .legion/ deletion; APPROVE only the head that differs by that deletion alone.",
-  "notRun": "no rig, scratch daemon, NATS container outside go test, tmux server, formatters, bun test, or go test ./... (standing order 2026-09-13). No Go test re-run was needed: findings are code-reading facts against nats.go v1.50.0 source.",
+  "notRun": "no rig, scratch daemon, NATS container outside go test, tmux server, formatters, bun test, or go test ./... (standing order 2026-09-13).",
+  "verdictNote": "Clean round: the code is approved; the GitHub review event is COMMENT because the head still carries .legion/. APPROVE follows on the deletion head, by SHA, with no further handoff write.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-14T07:05:05.849Z"
+  "completed": "2026-09-14T08:24:46.216Z"
 }
