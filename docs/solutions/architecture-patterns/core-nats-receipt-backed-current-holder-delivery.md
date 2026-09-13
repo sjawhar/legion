@@ -32,7 +32,7 @@ The Envoy role lane needs a different contract: a role message is live-only and 
 
 Make the listener the sole core-NATS subscriber for a role lane. At delivery time, it reads the current role holder from the authoritative registry, verifies the holder's session registration is fresh, then sends the original envelope to that holder's direct agent subject with NATS request-reply.
 
-The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout after the forward was published to a registered, live-looking holder is `receipt_timeout` (LEGION-108): no receipt arrived, usually because the holder is busy — but a holder whose registration is still fresh while its process is already gone times out the same way and never had the envelope, so the listener cannot tell slow from dead; the Legion daemon probes the process to decide (the parent contract, LEGION-101) and treats a live process as having the message. A missing receiver, a stale registration, or a request that could not be sent is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.
+The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout after the forward was published and flushed to a registered, live-looking holder is `receipt_timeout` (LEGION-108): no receipt arrived, usually because the holder is busy — but a holder whose registration is still fresh while its process is already gone times out the same way and never had the envelope, so the listener cannot tell slow from dead; the Legion daemon probes the process to decide (the parent contract, LEGION-101) and treats a live process as having the message. The signal is receipt-only: `bus.Client.RequestCoreTo` returns its `ErrReceiptTimeout` sentinel from the receipt wait alone, and a flush that fails or times out (the nats client's `Flush` returns the same `nats.ErrTimeout` a receipt wait would, so it must never be the key) is an ordinary error — the forward is still buffered in a reconnecting or stalled connection and is not known to have left the process. A holder absent from the session registry, a stale registration, or a request that could not be published or flushed is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.
 
 Session registry and KV checks remain valuable gates, but they must not be promoted into proof of active delivery. They establish that a route was recently registered; the receipt establishes that a live receiver accepted this specific message.
 
@@ -88,9 +88,11 @@ if err := client.RequestCoreTo(
     item,
     2*time.Second,
 ); err != nil {
-    if errors.Is(err, nats.ErrTimeout) {
-        // Forwarded, no receipt: a slow holder, or one that died inside the
-        // registry's stale window. The daemon probes it; the listener does not.
+    if errors.Is(err, bus.ErrReceiptTimeout) {
+        // Published and flushed, no receipt: a slow holder, or one that died
+        // inside the registry's stale window. The daemon probes it; the
+        // listener does not. Never key on nats.ErrTimeout here: the client's
+        // Flush returns that same sentinel while the forward is still buffered.
         publishDeliveryException(client, item, "receipt_timeout")
         return
     }
