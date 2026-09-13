@@ -1,0 +1,90 @@
+{
+  "summary": "Round 1 review of pull request #1037 is clean: no correctness finding stands against reviewed head b87ab6f9c0a2c5b8fe5c34c8bc859f7228c861c8 (code head fb9b26175cfe6667bcae501ad912a4324a151919; the two commits above it add only .legion/ handoffs). Submitted one COMMENT review (no inline threads) via the native review API with the Legion footer, and updated the PR body Threads/Thermo lines. Not approved yet: the head still carries .legion/. Next: the implementer pushes exactly the .legion/ deletion on top of b87ab6f9; I then confirm the new head differs from b87ab6f9 by that deletion alone and APPROVE it by SHA.",
+  "prNumber": 1037,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1037",
+  "reviewedHead": "b87ab6f9c0a2c5b8fe5c34c8bc859f7228c861c8",
+  "codeHead": "fb9b26175cfe6667bcae501ad912a4324a151919",
+  "round": 1,
+  "event": "COMMENT",
+  "roundState": "clean",
+  "review": {
+    "id": 5191287928,
+    "url": "https://github.com/sjawhar/legion/pull/1037#pullrequestreview-5191287928",
+    "author": "legion-reviewer[bot]",
+    "submittedAt": "2026-09-13T15:59:16Z"
+  },
+  "critical": 0,
+  "important": 0,
+  "minor": 8,
+  "blocking": [],
+  "threadsOpened": [],
+  "verifiedOnGitHub": {
+    "ci": "Tests run 34765931889 at b87ab6f9: lint, pr-title, typecheck, test all pass",
+    "threads": "0 unresolved, 0 resolved (none opened)",
+    "e2e": "tester smoke rig at fb9b26175cfe (ancestor of b87ab6f9 confirmed with jj): boot sweep dropped seeded done issue with the exact log line and promoted the todo entry behind it; live close removed a queued issue on one event; negative control left admission byte-identical",
+    "mergeable": "MERGEABLE, not CONFLICTING; no rebase needed"
+  },
+  "specChecks": [
+    "isStaleQueuedStatus in legion-state.ts is the one status list, never default; the icebox literal is added in no other non-test file",
+    "reducers emit {kind: dequeue} and never touch admission.queue or trees; ProcessManager.dequeue is the only executor and deletes a tree record only when status is queued",
+    "onDequeue awaited inside the pump dispatch before saveState (persist failure fatal); index.ts wires it to processManager.dequeue",
+    "boot sweep after admission.cap = ... and before demote/promote, console.error with the exact spec line; resync sweep after healStatusDrift through applyEffects([dequeue, log]) inside runExclusive",
+    "no state version bump (version 28 unchanged); api/state.ts and catchup.ts untouched",
+    "five re-seeded tests (four processes.test.ts, one index.test.ts) gained only state.issues nodes; assertions unchanged",
+    "daemon AGENTS.md documents the effect and both sweeps accurately",
+    "new tests assert observable contracts (effects, admission/trees state, exact log lines, one pane opened for the surviving issue, onDequeue -> save -> ack order); six changed test files pass locally (510 tests)"
+  ],
+  "thermo": {
+    "deepReview": "clean, 0 blocking, 3 Minor / 2 Not-a-defect",
+    "codeQuality": "clean, 0 blocking, 7 Minor / 5 Not-a-defect",
+    "head": "b87ab6f9c0a2c5b8fe5c34c8bc859f7228c861c8"
+  },
+  "keyFindings": [
+    {
+      "severity": "Not blocking",
+      "file": "packages/daemon/src/daemon/resync.ts",
+      "description": "sweepStaleQueue awaits between entries; expireLinger (outside the lane) can promote the next stale entry in that window, so with two or more stale entries at once the log effect could claim a drop for an entry that was promoted. Needs two or more stale entries the boot sweep did not clear plus a linger expiring in the window; pre-change code promoted every stale entry. Optional hardening: staleQueueEntryReason(...) === undefined in advancePromotionSweep candidate filter."
+    },
+    {
+      "severity": "Not blocking",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "removeQueued deletes a queued record whose worker claims may survive a launch-failed -> todo -> done chain (admit() does not touch state.roles). Every claim path guards the tree lookup; claims are stale either way."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "Fast-follow: boot sweep comment narrates history (a daemon that predates the dequeue effect, LEGION-56); describe current behaviour instead."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/reducers.ts",
+      "description": "Fast-follow: comment queued by a daemon that predates LEGION-57 narrates history."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/resync.ts",
+      "description": "Fast-follow: comment before the effect existed, LEGION-56 narrates history."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "description": "Fast-follow: line 57 says an active tree still lingers instead, but triage on an active tree does nothing; uses double hyphen where the file uses em dashes."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "description": "Fast-follow: launch-failed root legitimately sits in the queue is a fixture-only shape; the console.error spy in the dequeue no-op test cannot fail."
+    },
+    {
+      "severity": "Minor",
+      "file": "packages/daemon/src/daemon/__tests__/reducers.test.ts",
+      "description": "Fast-follow: the re-admit half of the LEAVING_THE_LINE loop repeats identically per row; dispatchIssueWithStatus duplicates dispatchIssueWithKey payload guard."
+    }
+  ],
+  "fastFollow": "Comment and doc wording only (listed in keyFindings); no behaviour change. Lands in a fast-follow, not this PR.",
+  "nextStep": "Architect sends the implementer to push exactly the .legion/ deletion on top of b87ab6f9c0a2c5b8fe5c34c8bc859f7228c861c8 (no threads to resolve). Then resume the reviewer: it confirms via jj diff --from b87ab6f9 --to <new head> --summary that only .legion/ files are removed, and submits one APPROVE naming the new head by SHA. Retro then commits docs/solutions/ on top; the merger verifies and publishes READY.",
+  "approvalCondition": "new head = b87ab6f9c0a2c5b8fe5c34c8bc859f7228c861c8 + the .legion/ deletion alone; CI green at that head.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T16:01:13.777Z"
+}
