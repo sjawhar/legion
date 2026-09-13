@@ -29,6 +29,7 @@ import {
   type ControlDirective,
   designGateFragment,
   locatorsForIssue,
+  MAX_ROLE_REDELIVERIES,
   ProcessManager,
   type ProcessManagerDeps,
   StopFailed,
@@ -3701,6 +3702,50 @@ describe("ProcessManager", () => {
       },
     ]);
     expect(publications).toEqual([]);
+  });
+
+  it("stops republishing one role message to a live architect after MAX_ROLE_REDELIVERIES late-receipt exceptions, while still telling it to reclaim its role", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "architect");
+    const original = {
+      topic: `notifications.role.${token}`,
+      payload: '{"type":"phase-complete","issue":"LEGION-42"}',
+      eventId: "evt-1",
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    // `liveRun`: the architect's pane probes alive, so every exception takes the reclaim branch.
+    const { manager: processes, publications, controlRequests } = manager(state, { run: liveRun });
+    try {
+      // Each exception carries a fresh event id (the listener minted one per republish) but the
+      // same payload: that is the loop LEGION-103 describes, and payload is what identifies it.
+      for (let attempt = 1; attempt <= MAX_ROLE_REDELIVERIES + 2; attempt += 1) {
+        await processes.handleException({
+          roleToken: token,
+          reason: "delivery_failed",
+          original: { ...original, eventId: `evt-${attempt}` },
+        });
+      }
+      const redelivered = publications.filter((p) => p.subject === original.topic);
+      expect(redelivered).toHaveLength(MAX_ROLE_REDELIVERIES);
+      // The architect is still told to reclaim on every exception; only the republish stops.
+      expect(controlRequests).toHaveLength(MAX_ROLE_REDELIVERIES + 2);
+      expect(
+        errorLog.mock.calls.filter(([m]) => String(m).includes("not redelivering"))
+      ).toHaveLength(1);
+
+      // A different message to the same role is counted on its own.
+      await processes.handleException({
+        roleToken: token,
+        reason: "delivery_failed",
+        original: { ...original, payload: '{"type":"design-approved"}', eventId: "evt-x" },
+      });
+      expect(publications.filter((p) => p.subject === original.topic)).toHaveLength(
+        MAX_ROLE_REDELIVERIES + 1
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("resumes a live worker directly (its shim socket answers) with a state-derived catch-up, never the raw missed event", async () => {
