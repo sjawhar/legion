@@ -1,83 +1,91 @@
 {
-  "summary": "LEGION-75 at PR https://github.com/sjawhar/legion/pull/1035, head 7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c (code commit d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866): changes requested. One correctness class stands: not every failure path of `push-main` goes through `fail_outstanding`, so a red run can still hide the successful publish the spec forbids hiding — `git fetch origin main` failing (the tester's finding; reproduced, exit 128, no ::error::, no job summary) and a modify/delete conflict on the manifest (main deleted it; passes the exact-match gate, `git show HEAD:$manifest` dies, exit 128, rebase left in progress, working-tree manifest truncated to 0 bytes; reproduced), plus the jq / git add / rebase --continue lines in the same block. Everything else verified correct: exact conflict rule (Case 2b aborts), GIT_EDITOR=true load-bearing, HEAD:$manifest rewrite changes only the version (pi_envoy's .omp.extensions rewrite is restored before `tag`), three release.yaml call sites match their jobs' tag dirs, identical-version race ends exit 0, dead-script deletion has no live caller. Review posted as legion-reviewer[bot] in one submission with six inline threads: https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117.",
-  "verdict": "changes_requested",
-  "critical": 2,
+  "summary": "LEGION-75 round 2 at PR https://github.com/sjawhar/legion/pull/1035, branch head 9f25030998ff999de328962a8cf72d9afd719f6f (code commit 98c5ebf21c8e2886da1928e2189bb3f95ea7ba7d): code clean; not approved because the head still carries .legion/. All six round-1 threads are closed by the code as written and each carries my `Accepted: fixed in 98c5ebf2…` reply as the newest comment, so `legion threads resolve` can resolve them. Both blockers reproduced fixed by hand (unreachable origin → exit 1 with the ::error:: sentence and job summary; main-deleted manifest → exit 1 naming the path, no rebase left, manifest intact; failing jq shim → guarded abort with the release-succeeded message). Empty-resolution race still exits 0. Checks green at 9f250309 and 98c5ebf2; test 33/33 at head; thermo at 9f250309 found no correctness finding. Review: https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191358791 (COMMENT). Next: implementer runs `legion threads resolve` and pushes exactly the .legion/ deletion; I approve that head by SHA.",
+  "round": 2,
+  "verdict": "approved",
+  "verdictNote": "Code clean at 98c5ebf2; APPROVE withheld only because the head carries .legion/. The review event is COMMENT; the approval follows the .legion/ deletion push, named by SHA.",
+  "critical": 0,
   "important": 0,
-  "minor": 4,
+  "minor": 0,
   "review": {
-    "url": "https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117",
-    "id": 5191040117,
-    "state": "CHANGES_REQUESTED",
-    "commitId": "7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c",
-    "codeCommit": "d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866",
+    "url": "https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191358791",
+    "id": 5191358791,
+    "state": "COMMENTED",
+    "commitId": "9f25030998ff999de328962a8cf72d9afd719f6f",
+    "codeCommit": "98c5ebf21c8e2886da1928e2189bb3f95ea7ba7d",
     "author": "legion-reviewer[bot]",
-    "threadsOpened": 6
+    "round1Review": "https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117"
   },
-  "keyFindings": [
+  "threads": [
     {
-      "severity": "blocking",
-      "file": ".github/scripts/release-push.sh:80",
-      "description": "`git fetch origin main` failing exits 128 under set -e with no ::error:: and no job summary; route through fail_outstanding (`|| fail_outstanding \"Fetching main from origin failed on attempt $attempt.\"`) and add a test case with origin pointed at a nonexistent path asserting non-zero exit, the ::error:: sentence, and the summary file."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903164",
+      "finding": "fetch failure bypassed fail_outstanding (blocking)",
+      "confirmed": "release-push.sh:82 `git fetch origin main || fail_outstanding …`; by hand: exit 1, ::error:: + summary, no rebase; Case 5",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000149831)"
     },
     {
-      "severity": "blocking",
-      "file": ".github/scripts/release-push.sh:97",
-      "description": "Modify/delete conflict (main deleted the manifest) lists exactly $manifest under --diff-filter=U, passes the gate, then `git show HEAD:$manifest` dies: exit 128, no fail_outstanding, .git/rebase-merge left behind, manifest truncated to 0 bytes by the redirect. Tighten the resolvable shape to `[ \"$conflicted\" != \"$manifest\" ] || ! git cat-file -e \"HEAD:$manifest\"`, write jq output via temp file + mv, and guard lines 97-99 (or wrap 80-99) so any non-zero exit routes through fail_outstanding; add a modify/delete test case."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903166",
+      "finding": "modify/delete conflict passed the gate; truncated manifest; rebase left in progress (blocking)",
+      "confirmed": "release-push.sh:90 cat-file gate, :103-110 guarded list with temp file, rm -f, abort, fail_outstanding; by hand: main-deleted manifest → exit 1 naming the path, no rebase, manifest 42 bytes; failing jq → guarded abort, no .tmp, manifest restored; Case 6",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000149921)"
     },
     {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.sh:28",
-      "description": "Header's 'Every failure here says…' becomes true once the two blocking threads land; otherwise narrow the sentence."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903168",
+      "finding": "header overstated (minor)",
+      "confirmed": "release-push.sh:26-33 enumerates the covered failure kinds; true as written now",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000150003)"
     },
     {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.sh:87",
-      "description": "`git rebase --abort || true` prints `fatal: No rebase in progress?` before the real ::error:: when the rebase failed before starting; 2>/dev/null or abort only when rebase-merge exists. Cosmetic."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903171",
+      "finding": "spurious `fatal: No rebase in progress?` (minor)",
+      "confirmed": "release-push.sh:91,108 `2>/dev/null || true`; cat-file probe silenced; zero fatal: lines before ::error:: by hand",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000150097)"
     },
     {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.test.sh:12",
-      "description": "Test inherits the developer's global/system git config (commit.gpgsign=true fails the seed commit); export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 for hermeticity. CI unaffected."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903173",
+      "finding": "test inherited global git config (minor)",
+      "confirmed": "release-push.test.sh:18 `export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000150164)"
     },
     {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.test.sh:89",
-      "description": "Case 1 does not assert that main's other manifest edits survive the resolution (a REBASE_HEAD: regression would still pass); have clone a's bump set another key and assert it on origin/main."
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903175",
+      "finding": "Case 1 did not assert main's other manifest edits survive (minor)",
+      "confirmed": "release-push.test.sh:97-98,105 `.description` set on a's bump and asserted on origin/main",
+      "myReply": "Accepted: fixed in 98c5ebf2 (comment 4000150213)"
     }
   ],
-  "testerFindingDecision": "Blocking. Spec requirement 3 ('a red run must not hide a successful publish') is categorical, the script header (lines 28-31) promises it for every failure, the fix is one `|| fail_outstanding` plus a deterministic test, and 'pre-existing' does not carry it: a transient fetch failure against github.com is exactly the red run an operator has to decode.",
-  "declined": "thermonuclear-code-quality's proposal to replace the rebase with `git reset --hard FETCH_HEAD` + re-commit: the spec's Rejected section already rules it out (cannot tell a real divergence from a clean run). Not a finding.",
   "verifiedAgainstGitHub": {
-    "checksAtHead": "7a612252: lint, pr-title, typecheck, test all success (Tests runs 34762712783 and 34762738235)",
-    "threadsBeforeReview": 0,
-    "e2e": "PR body E2E names release-push.sh push-main against a real bare git origin, the commands, a negative control, head a20cf9b8 (ancestor of 7a612252)",
+    "checksAtHead": "9f250309: lint, pr-title, typecheck, test all success (Tests run 34766658965); 98c5ebf2: same four success (run 34765902884)",
+    "threadsNewestCommentBeforeMyReplies": "implementer's `Accepted: fixed in 98c5ebf2…` on all six",
     "prState": {
-      "mergeable": "MERGEABLE",
-      "mergeStateStatus": "BLOCKED",
-      "headRefOid": "7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c"
-    },
-    "rebase": "none (not CONFLICTING)"
+      "mergeable": "UNKNOWN",
+      "mergeStateStatus": "UNKNOWN",
+      "headRefOid": "9f25030998ff999de328962a8cf72d9afd719f6f",
+      "note": "UNKNOWN on three reads while GitHub recomputes after main advanced to caa53e79 (cli-v1.9.3 bump); local `git merge-tree --write-tree caa53e79 9f250309` exits 0 — no conflict; no rebase"
+    }
   },
   "verifiedByHand": [
-    ".github/scripts/release-push.test.sh at head: Results: 22 passed, 0 failed, exit 0 (git 2.43.0, jaq 2.3.0)",
-    "unreachable origin (remote set-url to nonexistent path): EXIT=128, no ::error::, no summary file",
-    "identical bump already on main: clean rebase drops the empty commit, `Everything up-to-date`, exit 0, no rebase left (reachable in production because release.yaml:358 skips npm publish for an existing version)",
-    "modify/delete conflict (clone a `git rm -r packages/pkg` + push; b bumps): CONFLICT (modify/delete) → `Resolving the … version-line conflict` → `fatal: path … exists on disk, but not in 'HEAD'`, EXIT=128, no summary, .git/rebase-merge present, manifest 0 bytes",
-    "release.yaml: cli tag/push packages/daemon (131/152), envoy_plugin packages/envoy-plugin (250/273), pi_envoy packages/pi-envoy (375/398); each `id: version` writes version=; manifests written with the same `jq '.version = $v'`; pi_envoy's .omp.extensions rewrite restored at 365-370 before tag; fetch-depth: 0 on all three checkouts",
-    "verify-envoy-release-workflow.sh: targeted .github/workflows/release-envoy-and-plugin.yaml which does not exist; only references are .legion handoff prose, docs/superpowers/plans/2026-04-12-fix-ci-docker-build-gating.md and docs/solutions/envoy/multi-layer-service-consolidation.md (historical)"
+    "release-push.test.sh at head: Results: 33 passed, 0 failed, exit 0; working-tree script blob 4c213ed8 == 98c5ebf2:.github/scripts/release-push.sh",
+    "unreachable origin: exit 1, `::error::Fetching main from origin failed on attempt 1. The release itself succeeded…`, summary line written, no rebase",
+    "main deleted the manifest: exit 1, `::error::…conflicts in: packages/pkg/package.json. Only a conflict confined to …, with the file still present on main, is resolved automatically…`, summary 1 line, no rebase, manifest 42 bytes at 1.0.1, origin tip `a: remove pkg`",
+    "failing jq shim during a real Case 1 conflict: `Resolving…` → `jq: simulated failure` → `::error::Resolving … failed; the rebase was aborted…`, exit 1, no rebase, no .tmp, manifest restored to 1.0.2, b HEAD = bump commit, origin still 1.0.1",
+    "empty resolution (main at 1.0.1 + adjacent description; b bumps 1.0.1): CONFLICT → Resolving → `Everything up-to-date`, exit 0, no summary, no rebase, origin manifest keeps the description"
   ],
-  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 7a612252: deep found one Major (modify/delete bypass, confirmed by hand) and four Minors; quality found no blockers, the same bypass class, and cosmetic fast-follows; its structural simplification declined per the spec's Rejected section. Thermo line for the PR body is in the review; the implementer should carry it into its single body edit (LEGION-90).",
-  "fastFollow": "script/test cosmetics, batched: trailing blank line at EOF in both scripts; ${conflicted//$'\\n'/ } instead of printf|tr; push_main's set +e/set -e toggle → rc=0; out=$(…) || rc=$?; the three inline $([ \"$rc\" != 0 ] && echo true || echo false) copies; Case 2/2b regexes pin punctuation rather than path tokens.",
-  "nextRound": "Implementer: fix the two blocking threads (fetch through fail_outstanding; modify/delete gate + temp-file write + guards on 97-99), add the two test cases (unreachable origin; modify/delete), optionally the Minors, run release-push.test.sh, one PR body edit carrying Threads + Thermo, `legion threads resolve` before the push. Tester re-runs. Reviewer answers each thread with Accepted:/Still open: and reviews the new head.",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 9f250309 on the round-2 delta: no Blocking/Major/Minor correctness finding (deep enumerated every command in lines 77-111 and verified the guarded list, empty resolution, .tmp lifecycle, cat-file gate, attempt accounting, and Cases 1/5/6 by hand; quality confirmed the header matches the code sentence by sentence). Three cosmetic test-file items batched into fast-follow.",
+  "fastFollow": "Round 2 test cosmetics: Case 5's `clone is not left mid-rebase` check cannot fail and its checks 3-4 re-pin Case 3's suffix; test header fixture inventory omits Cases 5/6; Case 6's `origin/main is untouched` is entailed by its exit-code check. Round 1's: trailing blank line at EOF, ${conflicted//$'\\n'/ }, the set +e toggle, inline exit-code copies, Case 2/2b regex pinning. None changes behaviour.",
+  "notFindings": [
+    "Opposite modify/delete shape (bump commit deletes the manifest while main modifies it): unreachable because `release-push.sh tag` always stages a modification — implementer's note, agreed.",
+    "ThermoDeep observation: a two-commits-ahead clone whose second commit conflicts would get the manifest-resolution message for the second commit's conflict; unreachable in release.yaml (one bump commit on the triggering main commit)."
+  ],
+  "nextRound": "Implementer: `legion threads resolve --pr 1035 --repo sjawhar/legion` (all six newest comments are my Accepted:), then push exactly the .legion/ deletion (carrying this handoff commit away with it). Reviewer: verify the new head differs from 9f250309 only by the .legion/ deletion and every thread shows isResolved: true, then APPROVE by SHA.",
   "skillsFollowed": [
     "legion-worker",
     "verification-before-completion"
   ],
-  "noProjectWideRuns": "No formatter, biome, tsc, or bun test run; only release-push.test.sh, mktemp scratch git experiments, legion gh reads/one POST, and the two thermo agents.",
-  "incident": "The LEGION daemon was unreachable (127.0.0.1:13370 connection refused, no daemon process) for a few minutes at ~14:38Z; every bash call failed at the grant hook. A port watcher saw it return (new pid 355468); nothing was posted during the gap.",
+  "noProjectWideRuns": "No formatter, biome, tsc, or bun test run; only release-push.test.sh, mktemp scratch git experiments, legion gh reads, six thread replies, one review POST, and the two thermo agents.",
+  "incident": "The LEGION daemon was unreachable again for ~2 minutes at ~16:29Z (127.0.0.1:13370 connection refused, no daemon process; new pid 3433043 afterwards). The review POST failed once at the grant hook during the gap and was retried after confirming nothing had landed. Second occurrence today (round 1 saw one at ~14:38Z).",
   "learningsInjected": [],
   "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T14:43:52.913Z"
+  "completed": "2026-09-13T16:33:14.859Z"
 }
