@@ -1,0 +1,82 @@
+{
+  "verdict": "PASS",
+  "passed": 5,
+  "failed": 0,
+  "failures": [],
+  "codeHead": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+  "prHead": "22f205921a800ccc36681560cfd78534ce5aca91",
+  "prHeadNote": "22f20592 = dd224351 + .legion/implement.json; CI green at 22f20592: Tests run 34738977974 (lint, typecheck, test, pr-title) and Legion Envoy and Contracts run 34738977886 (pi-envoy; others skipped); ci-green wake received for 22f205921a80",
+  "acceptance": {
+    "1_2_5_reads": "All 22 plan greps return the stated counts at the code head (see greps); every edited Markdown file has an even fence count (worker 24, retro 4, architect 14, tester 2, reviewer 4, merger 2, implementer 2). Each changed file read end to end (worker skill 200-428 covering every hunk; retro skill whole; architect skill 150-266 covering every hunk; tester/reviewer/merger/implementer role prompts whole; daemon AGENTS.md phase/complete row; workers.ts phaseCompleteStatus + doc comment; api.test.ts two new tests). No sentence says the merger requires approved head == tip, that an implementer completion always writes testing, or that a phase writes a handoff after the .legion deletion. 'still equals' / 'equals the current head' occur nowhere under skills/, packages/pi-envoy/roles/, or packages/daemon/src/daemon/AGENTS.md.",
+    "3_live_tree": "Not observable before the merge: proven on this tree's own end-game (retro -> merger -> done with no second review round), observed by the architect at sign-off from this issue's Dispatch event history and the merger's READY on notifications.role.pr-queue. Recorded as scoping in the PR body E2E section.",
+    "4_unit": "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t 'implementer completes' -> 2 pass; -t 'reviewer completes' -> 2 pass (untouched); bun test (packages/daemon) -> 980 pass, 5 skip, 0 fail (985 tests, 57 files).",
+    "4_rig": "Throwaway daemon from the PR head (scratch team sjawhar/5959, state_dir /tmp/legion59-rig/daemon, ports 19590/19591, private tmux server legion-sjawhar5959, isolated NATS 14359, listener from this head on 19159, envoy-bridge for Dispatch events, logging proxy in front of Dispatch on 19580). Scratch issue LEGSMOKE-96 (http://sami-agents:8766/issues/LEGSMOKE-96). Driven over the daemon HTTP API: /process/started (root boot token from state_dir/secrets), /worker/spawn implementer, /worker/started, /grants, /phase/complete. Issue at retro: /phase/complete -> 202, zero requests from the daemon to Dispatch (proxy log unchanged), Dispatch status stayed retro, no issue event, pendingStatusWrites [], one daemon log line (no-holder catch-up record). Negative control at in_progress: /phase/complete -> 202, exactly one PATCH /api/v1/issues/LEGSMOKE-96 {status: testing} -> 200 through the proxy, Dispatch status testing, event 3687 by legion-daemon:LEGSMOKE, daemon consumed dispatch-3687. Positive control for the instrumentation: the daemon's own in_progress PATCH on admission was captured by the same proxy. Rig torn down (legion stop, tmux kill-server, listener/proxy/bridge stopped, NATS container removed, /tmp/legion59-rig deleted, ports free); LEGSMOKE-96 set done. Live daemon (pid 2691308, 127.0.0.1:13370), its state dir, and its tmux server never touched; no legion restart.",
+    "4_live_after_merge": "Expected and not a finding: this issue's own history will show testing after retro because the live daemon runs main until restarted on code containing a112b2cc. The first end-game under the restarted daemon is the implementer's post-merge production verification."
+  },
+  "greps": {
+    "skills/legion-worker/SKILL.md": {
+      "does not void the reviewer": 1,
+      "approved head still equals the current head": 0,
+      "bare gates": 2,
+      "handoff complete` alone": 1,
+      "^## The unchanged-diff check": 1
+    },
+    "skills/legion-retro/SKILL.md": {
+      "does not void": 1,
+      "legion handoff complete": 1,
+      "--summary": 1
+    },
+    "skills/legion-architect/SKILL.md": {
+      "status: \"retro\"": 0,
+      "is a confirmation, not a round": 1,
+      "is that confirmation": 1,
+      "does not void the approval": 1,
+      "quoted in READY": 1
+    },
+    "packages/pi-envoy/roles/tester.md": {
+      "bare gates only": 1,
+      "never recreate": 1
+    },
+    "packages/pi-envoy/roles/reviewer.md": {
+      "a confirmation, not a round": 1,
+      "does not void your approval": 1
+    },
+    "packages/pi-envoy/roles/merger.md": {
+      "approved head equals the current head": 0,
+      "do not void the approval": 1,
+      "--summary": 4
+    },
+    "packages/pi-envoy/roles/implementer.md": {
+      "never recreate": 1
+    },
+    "packages/daemon/src/daemon/AGENTS.md": {
+      "is never followed by": 1
+    }
+  },
+  "commands": [
+    "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\" -> 2 pass, 0 fail",
+    "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"reviewer completes\" -> 2 pass, 0 fail",
+    "cd packages/daemon && bun test -> 980 pass, 5 skip, 0 fail (985 tests, 57 files, 37 s)"
+  ],
+  "rigTimeline": [
+    "05:04:56Z LEGSMOKE-96 created (triage); rig daemon consumed dispatch-3660",
+    "05:23:23Z PATCH todo (tester) -> admitted, tree gen 1, root pane @2 %2; 05:23:29Z daemon PATCH in_progress (event 3682, via proxy)",
+    "05:23:52Z POST /process/started -> 200 (architect capability); 05:23:53Z POST /worker/spawn implementer -> {status: spawned}, pane @2 %3",
+    "05:24:21Z PATCH retro (tester, event 3683); POST /worker/started -> 200; POST /grants -> 200; BEFORE: Dispatch retro, proxy 3 lines, daemon log 15 lines",
+    "05:24:37Z POST /phase/complete -> 202; AFTER 05:24:45Z: Dispatch retro (unchanged), proxy +0 lines, daemon log +1 (no-holder catch-up), phases[LEGSMOKE-96].completed recorded, no event after 3683",
+    "05:25:27Z PATCH in_progress (tester, event 3686); /worker/started again (same boot token, same sessionId) -> 200; /grants -> 200",
+    "05:25:28Z POST /phase/complete -> 202; AFTER 05:25:36Z: Dispatch testing, proxy +1 line (PATCH {status: testing} -> 200), event 3687 by legion-daemon:LEGSMOKE, daemon consumed dispatch-3687",
+    "05:26:21Z teardown: legion stop sjawhar/5959, tmux server gone, listener/proxy/bridge stopped, legion59-rig-nats removed; 05:26:42Z LEGSMOKE-96 set done"
+  ],
+  "observations": [
+    "The rig daemon was started from this workspace's working copy (jj diff --from dd224351 --to @ --summary = A .legion/implement.json, A .omp/config.yml), i.e. the PR's code head.",
+    "A daemon started from inside a Legion worker pane inherits the pane's LEGION_TREE/LEGION_ROLE/LEGION_OMP_PATH; the first rig attempt's omp_launch_prefix saw LEGION_TREE=LEGION-59 in the probe's environment and went inert, so the pi.agents probe timed out at 300 s. Fixed by starting the daemon with LEGION_*/JJ_CONFIG/DISPATCH_*/ENVOY_* scrubbed (env -u), after which both probes passed. Not a defect in this PR; a rig-procedure gotcha for docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md.",
+    "Text-injection grant preamble (installed pi-legion-envoy 1.17.0): reproducing the injected `export LEGION_GRANT=...` lines in a later bash command overrides the real grant and makes `legion gh` fail with `Unable to redeem LEGION_GRANT (403)`. The implementer's trickyParts note is accurate; issuing the bare command (or `eval` -> `tool.bash`) avoids it.",
+    "Status wobble recorded by the plan (a tester completion always writes needs_review) is untouched by this PR and was not exercised.",
+    "Tester rules for this tree, from the architect: never rebase; after a conflict-forced rebase with an unchanged fingerprint re-run only the bare gates (CI green at the new head, bash scripts/smoke/up.test.sh) and update the E2E head SHA; once .legion/ is deleted on this branch never recreate it and report with legion handoff complete alone."
+  ],
+  "documentationFeedback": "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md should say the rig daemon must be started with the tester pane's LEGION_* environment scrubbed (env -u LEGION_TREE ... or an operator-style shell); otherwise the boot probes inherit LEGION_TREE/LEGION_ROLE and a role-keyed launch prefix misfires. It should also name the logging Dispatch proxy trick as the request-level proof for 'the daemon issued no PATCH'.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T05:34:37.701Z"
+}
