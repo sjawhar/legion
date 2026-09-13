@@ -1,0 +1,1407 @@
+{
+  "goal": "Make the implementer's own production-like proof a required, machine-checked part of the implement handoff and the tester's verdict on it a required part of the test handoff; state the same rule in the worker/retro/architect skills, the seven role prompts, and the three documents; and record the post-merge production check as the step that precedes the architect's sign-off. One pull request. No daemon behaviour change.",
+  "architecture": "The rule is enforced in exactly one place: packages/contracts/src/handoff-schema.ts, which both writePhaseHandoff and readPhaseHandoff already go through. A new shared Proof shape becomes a required non-empty array on ImplementHandoff and (conditionally) on TestHandoff, plus a required implementerProof verdict on TestHandoff. The ledger refuses a write the phase schema rejects and names the field, and prints one stderr line before returning null on read. Everything else in the pull request is text that states the same rule in the voice of each role.",
+  "spec": "dispatch://LEGION-53 primary document, version 2 (Acceptance 1-6, Requirements, Design, Errors, Testing, Rejected). Its Rejected section is settled: no retro-after-merge, no new verifier role, no schema-version bump, no daemon-side enforcement, no split into child issues.",
+  "globalConstraints": [
+    "HANDOFF_SCHEMA_VERSION stays 1. Do not bump it, do not add a migration.",
+    "No daemon behaviour change: nothing under packages/daemon/src/daemon/ changes except the one comment in reducers.ts (lines 841-843).",
+    "Biome: double quotes, semicolons, ES5 trailing commas, 100-char width. Strict TS. `node:` prefix for builtins, `type` keyword for type-only imports. No barrel files.",
+    "Every phrase a tester check greps for MUST sit on a single line in the file (docs/solutions/legion/text-only-skill-pr-mechanics.md section 2: grep is line-oriented and a sentence wrapped at column 100 counts 0). The exact one-line phrases are in this plan's testerChecks.",
+    "skills/legion-worker/SKILL.md and packages/pi-envoy/roles/*.md are two copies of one rule: change both in the same commit (same document, section 5). After editing, run `grep -rn 'E2E (implementer)' skills packages/pi-envoy/roles AGENTS.md` and read every hit together.",
+    "packages/pi-envoy/extensions/legion.test.ts has a drift guard ('keeps the Step-one skill-discovery section and closing envoy-addressing paragraph identical, word for word, across every roles/<role>.md'). Do NOT edit either the '## Step one' paragraph or the closing 'When your phase is done, stay in this session afterwards:' paragraph of any role prompt. Add the new sentences to the body paragraphs between them.",
+    "A plan or spec file never enters the pull request. No docs/plans/*, no docs/superpowers/plans/*.",
+    "Correctness findings land in this pull request; cleanup is one named fast-follow. No deferrals (Sami, 2026-09-11: \"My rule is no deferrals.\").",
+    "Never write to /home/ubuntu/legion-ws-RunDaemon, $LEGION_STATE_DIR, ~/.omp/profiles/legion, or the live tmux server legion-sjawharlegion. Never restart, signal, or write to the live daemon (docs/solutions/legion/worker-pane-shell-gotchas.md section 9)."
+  ],
+  "fileStructure": [
+    {
+      "path": "packages/contracts/src/handoff-schema.ts",
+      "change": "modify",
+      "responsibility": "The Proof interface and its Zod schema; ImplementHandoff.proof (required, non-empty); TestHandoff.implementerProof (required) and .proof (required when no failure is reported); describePhaseHandoffProblems(), the one field-naming formatter both the write refusal and the read warning use."
+    },
+    {
+      "path": "packages/contracts/src/handoff-schema.test.ts",
+      "change": "modify",
+      "responsibility": "Two new tests (implement proof, test implementerProof/proof); the existing test's implement payload gains a proof."
+    },
+    {
+      "path": "packages/daemon/src/handoff/ledger.ts",
+      "change": "modify",
+      "responsibility": "writePhaseHandoff validates the assembled payload before creating or writing anything and throws naming the field; readPhaseHandoff prints one stderr line naming the file and the failing field (or the phase mismatch) before returning null."
+    },
+    {
+      "path": "packages/daemon/src/handoff/__tests__/ledger.test.ts",
+      "change": "modify",
+      "responsibility": "Two new tests (write refusal writes nothing; read warns naming file and field); four existing fixtures updated so each still isolates the field it is about."
+    },
+    {
+      "path": "packages/daemon/src/cli/__tests__/handoff.test.ts",
+      "change": "modify",
+      "responsibility": "Two new tests through handoffCommand (exit 1 naming proof; write+read round-trip carrying the proof); two existing implement payloads gain a proof."
+    },
+    {
+      "path": "packages/daemon/src/knowledge/__tests__/collector.test.ts",
+      "change": "modify",
+      "responsibility": "Its writePhaseHandoff(…, 'implement', …) fixture gains a proof."
+    },
+    {
+      "path": "packages/daemon/src/knowledge/__tests__/feedback-logger.test.ts",
+      "change": "modify",
+      "responsibility": "Same fixture change."
+    },
+    {
+      "path": "skills/legion-worker/SKILL.md",
+      "change": "modify",
+      "responsibility": "PR body template (E2E (implementer), E2E (tester), Production); the implementer's own proof obligation; the tester's verify-and-add obligation and the send-back rule; the reviewer's refusal; the merger's READY; the post-merge record and its action ask; a new passage for 'no surface reaches the changed path'; the completion gate names the refusal."
+    },
+    {
+      "path": "skills/legion-retro/SKILL.md",
+      "change": "modify",
+      "responsibility": "Step 5's record shape and the corrective-child rule; the first check reads both proofs; the retro comment goes through dispatch_comment, not `legion gh -- issue comment`."
+    },
+    {
+      "path": "skills/legion-architect/SKILL.md",
+      "change": "modify",
+      "responsibility": "Section 6's order gains the production check; section 7 closes only after the implementer's report; the pr-merged wake spawns the implementer; the phase-complete wake handles a rejected implementer proof and a post-merge implementer report; a missing proof surface becomes a child issue."
+    },
+    {
+      "path": "packages/pi-envoy/roles/implementer.md",
+      "change": "modify",
+      "responsibility": "Stops saying 'leave the E2E section for the tester'; states the pre-merge proof, the handoff field, and the post-merge production check."
+    },
+    {
+      "path": "packages/pi-envoy/roles/tester.md",
+      "change": "modify",
+      "responsibility": "Verify the implementer's proof, record the verdict, add its own, send back a handoff without one."
+    },
+    {
+      "path": "packages/pi-envoy/roles/reviewer.md",
+      "change": "modify",
+      "responsibility": "Refuse approval when either E2E line is missing."
+    },
+    {
+      "path": "packages/pi-envoy/roles/merger.md",
+      "change": "modify",
+      "responsibility": "READY names both E2E lines."
+    },
+    {
+      "path": "packages/pi-envoy/roles/planner.md",
+      "change": "modify",
+      "responsibility": "Name the production-like surface and exact command per criterion, and that the implementer proves it before completing."
+    },
+    {
+      "path": "packages/pi-envoy/roles/architect.md",
+      "change": "modify",
+      "responsibility": "Post-merge production check precedes sign-off; a missing surface is a child issue; a rejected implementer proof goes back to the implementer."
+    },
+    {
+      "path": "packages/pi-envoy/roles/architect-root.md",
+      "change": "modify",
+      "responsibility": "Same two sentences in the root architect's voice."
+    },
+    {
+      "path": "AGENTS.md",
+      "change": "modify",
+      "responsibility": "The Issue Lifecycle section gains the production-check line."
+    },
+    {
+      "path": "skills/AGENTS.md",
+      "change": "modify",
+      "responsibility": "Durable artifacts paragraph: the implement and test handoffs carry the proof; retro's comment is a Dispatch comment."
+    },
+    {
+      "path": "packages/daemon/src/daemon/reducers.ts",
+      "change": "modify",
+      "responsibility": "Lines 841-843: the merge is the cue to send the implementer to production, then sign off."
+    }
+  ],
+  "tasks": [
+    {
+      "name": "Task 1 - the shared Proof shape and the two handoff schemas",
+      "commit": "feat(contracts): require a production-like proof in the implement and test handoffs",
+      "files": {
+        "modify": [
+          "packages/contracts/src/handoff-schema.ts",
+          "packages/contracts/src/handoff-schema.test.ts",
+          "packages/daemon/src/handoff/__tests__/ledger.test.ts (fixtures only)",
+          "packages/daemon/src/cli/__tests__/handoff.test.ts (fixtures only)",
+          "packages/daemon/src/knowledge/__tests__/collector.test.ts (fixture only)",
+          "packages/daemon/src/knowledge/__tests__/feedback-logger.test.ts (fixture only)"
+        ]
+      },
+      "interfaces": {
+        "produces": [
+          "export interface Proof { criterion: string; surface: string; command: string; observed: string; headSha: string; negativeControl: string }",
+          "ImplementHandoff.proof: Proof[]  (required, non-empty)",
+          "TestHandoff.implementerProof: { verdict: \"verified\" | \"rejected\"; how: string }  (required)",
+          "TestHandoff.proof?: Proof[]  (non-empty when present; required when the handoff reports no failure)",
+          "export function describePhaseHandoffProblems(value: unknown): string[]  — one `<field path>: <message>` line per Zod issue, [] when valid"
+        ],
+        "consumes": [
+          "validatePhaseHandoff (unchanged signature), HANDOFF_SCHEMA_VERSION (stays 1)"
+        ]
+      },
+      "decisions": [
+        "headSha is validated as a non-empty string, not a 40-hex regex. The spec's Errors table refuses only a missing or malformed field; a format rule the spec does not state would reject a legitimate short change id, and a wrong SHA is visible to the tester and reviewer anyway.",
+        "proofSchema and implementerProofSchema are `.passthrough()`, matching every other nested object in this file (failures items, keyFindings items): an undeclared extra key reaches the next worker rather than nulling the file.",
+        "\"reports no failures\" is defined once: `(failures?.length ?? 0) > 0 || (failed ?? 0) > 0` is a reported failure; anything else needs the tester's own proof.",
+        "Zod 4 accepts a `.refine()`d ZodObject as a discriminatedUnion member — verified in this workspace against zod 4.3.6: the union routed `phase: \"test\"` to the refined member and reported `proof: custom a passing test handoff needs the tester's own proof`. docs/solutions/daemon/handoff-schema-migration-patterns.md says a `.transform()` member becomes ZodEffects and is rejected — that was Zod 3. Task 1 Step 2's test is what proves it here; do not take either document's word for it.",
+        "Because a refined schema cannot take `.passthrough()` afterwards, each phase schema now ends in `.passthrough()` at its own definition and `phaseHandoffSchema` is built from the five schemas directly (today it calls `.passthrough()` at the union site)."
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "title": "Write the failing contracts tests",
+          "detail": "In packages/contracts/src/handoff-schema.test.ts add the two tests below, and add a `proof` to the existing test's implement payload (its assertion otherwise starts returning null).",
+          "code": [
+            "const proof = {",
+            "  criterion: \"1\",",
+            "  surface: \"branch CLI in a scratch workspace\",",
+            "  command: \"bun packages/daemon/src/cli/index.ts handoff write --phase implement\",",
+            "  observed: \"exit 1 naming proof\",",
+            "  headSha: \"0123456789abcdef0123456789abcdef01234567\",",
+            "  negativeControl: \"the same payload without proof -> exit 1\",",
+            "};",
+            "",
+            "test(\"an implement handoff needs at least one complete production-like proof\", () => {",
+            "  const base = { schemaVersion: 1, phase: \"implement\", completed: \"2026-09-13T00:00:00.000Z\" };",
+            "  expect(validatePhaseHandoff(base)).toBeNull();",
+            "  expect(describePhaseHandoffProblems(base).join(\"; \")).toContain(\"proof\");",
+            "  expect(validatePhaseHandoff({ ...base, proof: [] })).toBeNull();",
+            "  const { negativeControl: _dropped, ...incomplete } = proof;",
+            "  expect(describePhaseHandoffProblems({ ...base, proof: [incomplete] }).join(\"; \")).toContain(",
+            "    \"proof.0.negativeControl\"",
+            "  );",
+            "  expect(validatePhaseHandoff({ ...base, proof: [proof] })).toMatchObject({ proof: [proof] });",
+            "});",
+            "",
+            "test(\"a test handoff carries its verdict on the implementer's proof, and its own unless it reports a failure\", () => {",
+            "  const base = { schemaVersion: 1, phase: \"test\", completed: \"2026-09-13T00:00:00.000Z\" };",
+            "  expect(describePhaseHandoffProblems({ ...base, passed: 3, failed: 0 }).join(\"; \")).toContain(",
+            "    \"implementerProof\"",
+            "  );",
+            "  const verified = { ...base, passed: 3, failed: 0, implementerProof: { verdict: \"verified\", how: \"re-ran its command\" } };",
+            "  expect(validatePhaseHandoff(verified)).toBeNull();",
+            "  expect(describePhaseHandoffProblems(verified).join(\"; \")).toContain(\"proof\");",
+            "  expect(validatePhaseHandoff({ ...verified, proof: [proof] })).toMatchObject({ proof: [proof] });",
+            "  const rejected = {",
+            "    ...base,",
+            "    failed: 1,",
+            "    failures: [{ criterion: \"production-like proof\", evidence: \"implement.json carried none\" }],",
+            "    implementerProof: { verdict: \"rejected\", how: \"read .legion/implement.json and the PR body\" },",
+            "  };",
+            "  expect(validatePhaseHandoff(rejected)).toMatchObject({ implementerProof: { verdict: \"rejected\" } });",
+            "  expect(validatePhaseHandoff({ ...base, failed: 2, implementerProof: { verdict: \"rejected\", how: \"re-ran it\" } })).not.toBeNull();",
+            "});"
+          ]
+        },
+        {
+          "step": 2,
+          "title": "Run them and watch them fail",
+          "detail": "From packages/contracts: `bun test src/handoff-schema.test.ts`. Expect failures naming `describePhaseHandoffProblems is not a function` / `Received: {...}` where null was expected. Record the red output for the PR body's red-to-green table."
+        },
+        {
+          "step": 3,
+          "title": "Add the Proof interface and the two handoff fields",
+          "detail": "packages/contracts/src/handoff-schema.ts. Insert Proof after RequiredSkills (line 29), extend ImplementHandoff (line 60) and TestHandoff (line 71).",
+          "code": [
+            "/** One production-like proof: the changed behaviour exercised on the surface a user reaches",
+            " * it through, never a unit suite. The implementer records its own before its phase completes;",
+            " * the tester verifies that one and records its own (LEGION-53). */",
+            "export interface Proof {",
+            "  /** The acceptance line this proves. */",
+            "  criterion: string;",
+            "  /** The real surface: a scratch daemon, a smoke rig, a sandbox repository, a browser, a stack. */",
+            "  surface: string;",
+            "  /** The exact command, run id, or URL. */",
+            "  command: string;",
+            "  /** What happened. */",
+            "  observed: string;",
+            "  /** The commit the proof was taken at. */",
+            "  headSha: string;",
+            "  /** The deliberately broken input and the refusal or failure it produced. */",
+            "  negativeControl: string;",
+            "}",
+            "",
+            "// in ImplementHandoff, beside filesChanged:",
+            "  /** Required, non-empty: this phase is not complete without its own production-like proof. */",
+            "  proof: Proof[];",
+            "",
+            "// in TestHandoff, beside failures:",
+            "  /** This tester's verdict on the implementer's own proof, and how it checked. */",
+            "  implementerProof: { verdict: \"verified\" | \"rejected\"; how: string };",
+            "  /** The tester's own proof. Required when this handoff reports no failure. */",
+            "  proof?: Proof[];"
+          ]
+        },
+        {
+          "step": 4,
+          "title": "Add the Zod schemas, the cross-field rule, and describePhaseHandoffProblems",
+          "detail": "Same file. `nonEmpty` is a new local const beside `isoTimestamp` (line 103). Move `.passthrough()` from the union site onto each phase schema and build the union from them directly.",
+          "code": [
+            "const nonEmpty = z.string().min(1);",
+            "",
+            "const proofSchema = z",
+            "  .object({",
+            "    criterion: nonEmpty,",
+            "    surface: nonEmpty,",
+            "    command: nonEmpty,",
+            "    observed: nonEmpty,",
+            "    headSha: nonEmpty,",
+            "    negativeControl: nonEmpty,",
+            "  })",
+            "  .passthrough();",
+            "",
+            "// in implementSchema:",
+            "  proof: z.array(proofSchema).min(1),",
+            "",
+            "// testSchema, refined (a passing handoff needs the tester's own proof):",
+            "const testSchema = baseHandoffSchema",
+            "  .extend({",
+            "    phase: z.literal(\"test\"),",
+            "    passed: z.number().optional(),",
+            "    failed: z.number().optional(),",
+            "    failures: z",
+            "      .array(z.object({ criterion: z.string(), evidence: z.string() }).passthrough())",
+            "      .optional(),",
+            "    implementerProof: z",
+            "      .object({ verdict: z.enum([\"verified\", \"rejected\"]), how: nonEmpty })",
+            "      .passthrough(),",
+            "    proof: z.array(proofSchema).min(1).optional(),",
+            "    documentationFeedback: z.string().optional(),",
+            "    observations: z.array(z.string()).optional(),",
+            "  })",
+            "  .passthrough()",
+            "  .refine(",
+            "    (handoff) =>",
+            "      (handoff.failures?.length ?? 0) > 0 ||",
+            "      (handoff.failed ?? 0) > 0 ||",
+            "      (handoff.proof?.length ?? 0) > 0,",
+            "    {",
+            "      path: [\"proof\"],",
+            "      message: \"a passing test handoff needs the tester's own production-like proof\",",
+            "    }",
+            "  );",
+            "",
+            "const phaseHandoffSchema = z.discriminatedUnion(\"phase\", [",
+            "  architectSchema,",
+            "  planSchema,",
+            "  implementSchema,",
+            "  testSchema,",
+            "  reviewSchema,",
+            "]);",
+            "",
+            "/** Every reason `validatePhaseHandoff` rejects `value`, each naming its field path, so a write",
+            " * refusal and a read warning can both say which field is missing or malformed. Empty for a",
+            " * valid handoff. */",
+            "export function describePhaseHandoffProblems(value: unknown): string[] {",
+            "  const result = phaseHandoffSchema.safeParse(value);",
+            "  if (result.success) return [];",
+            "  return result.error.issues.map((issue) => {",
+            "    const field = issue.path.length > 0 ? issue.path.map(String).join(\".\") : \"<root>\";",
+            "    return `${field}: ${issue.message}`;",
+            "  });",
+            "}"
+          ]
+        },
+        {
+          "step": 5,
+          "title": "Run the contracts tests green",
+          "detail": "From packages/contracts: `bun test src/handoff-schema.test.ts` -> all pass. Record the counts."
+        },
+        {
+          "step": 6,
+          "title": "Update every existing fixture that writes an implement or test handoff",
+          "detail": "These files write handoffs the stricter schema now rejects; each read-back assertion would return null. Add a `proof` (and, for test handoffs, `implementerProof`). Two of them matter for more than compilation: ledger.test.ts:208-239 asserts a wrong-typed `trickyParts` nulls the file and ledger.test.ts:241-258 asserts a non-ISO `completed` does — both hand-written payloads must now carry a valid proof, or the null no longer isolates the field the test is about.",
+          "sites": [
+            "packages/contracts/src/handoff-schema.test.ts:20-26 — add proof to the implement payload.",
+            "packages/daemon/src/handoff/__tests__/ledger.test.ts:120-129 — implement.json with schemaVersion 2: leave as is (it fails on schemaVersion; add proof anyway so the reason stays singular).",
+            "packages/daemon/src/handoff/__tests__/ledger.test.ts:215-225 — add a valid proof beside the wrong-typed trickyParts.",
+            "packages/daemon/src/handoff/__tests__/ledger.test.ts:247-257 — add implementerProof and proof beside completed: \"Tuesday\".",
+            "packages/daemon/src/handoff/__tests__/ledger.test.ts:263-269 — the phases loop: implement gains proof, test gains implementerProof + proof.",
+            "packages/daemon/src/handoff/__tests__/ledger.test.ts:295-298 — add proof.",
+            "packages/daemon/src/cli/__tests__/handoff.test.ts:135-139 and :171-174 — add proof to both implement payloads.",
+            "packages/daemon/src/knowledge/__tests__/collector.test.ts:124-128 — add proof.",
+            "packages/daemon/src/knowledge/__tests__/feedback-logger.test.ts:155-158 — add proof."
+          ]
+        },
+        {
+          "step": 7,
+          "title": "Commit",
+          "detail": "Path-scoped, never a bare working copy (the daemon-provisioned .omp/config.yml must stay untracked).",
+          "code": [
+            "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split \\",
+            "  -m 'feat(contracts): require a production-like proof in the implement and test handoffs' \\",
+            "  packages/contracts/src/handoff-schema.ts packages/contracts/src/handoff-schema.test.ts \\",
+            "  packages/daemon/src/handoff/__tests__/ledger.test.ts \\",
+            "  packages/daemon/src/cli/__tests__/handoff.test.ts \\",
+            "  packages/daemon/src/knowledge/__tests__/collector.test.ts \\",
+            "  packages/daemon/src/knowledge/__tests__/feedback-logger.test.ts"
+          ]
+        }
+      ],
+      "acceptance": "From packages/contracts, `bun test src/handoff-schema.test.ts` passes; from packages/daemon, `bun test src/handoff src/cli src/knowledge` passes. An implement payload without proof, an empty proof array, a proof element missing any of the six fields, a test payload without implementerProof, and a no-failure test payload without proof each validate to null, and describePhaseHandoffProblems names the field path."
+    },
+    {
+      "name": "Task 2 - the ledger refuses an invalid write and says why on read",
+      "commit": "feat(daemon): refuse a handoff the phase schema rejects and name the field on read",
+      "files": {
+        "modify": [
+          "packages/daemon/src/handoff/ledger.ts",
+          "packages/daemon/src/handoff/__tests__/ledger.test.ts",
+          "packages/daemon/src/cli/__tests__/handoff.test.ts"
+        ]
+      },
+      "interfaces": {
+        "consumes": [
+          "describePhaseHandoffProblems from @legion/contracts (Task 1)"
+        ],
+        "produces": [
+          "writePhaseHandoff throws `Invalid <phase> handoff: <field>: <message>[; …]` and writes nothing",
+          "readPhaseHandoff prints `[handoff] Ignoring <file>: <field>: <message>` (or the phase mismatch) on stderr, returns null"
+        ]
+      },
+      "decisions": [
+        "packages/daemon/src/cli/index.ts needs no source change. `runHandoff` (line 447) already catches any thrown error, prints `[handoff] Failed to write handoff: <message>`, and exits 1 (a non-CliError exits 1). Validating again in the CLI would be a second copy of the rule in a second place; the ledger is the one path every writer takes (`legion handoff write`, and the knowledge fixtures). Task 2's CLI-level tests assert the end-to-end behaviour through `handoffCommand` so the exit code and message are pinned where a worker actually meets them.",
+        "Validation happens before `ensureLegionDir`, so a refused write creates no .legion/ directory and no file — the spec's Errors row says nothing is written.",
+        "The stderr line is `console.error`, matching the existing `[handoff] Failed to read …` line in the same function; the ledger has no logger seam and tests capture console.error already."
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "title": "Write the failing ledger tests",
+          "detail": "packages/daemon/src/handoff/__tests__/ledger.test.ts, two new `it` blocks.",
+          "code": [
+            "it(\"refuses an implement handoff with no production-like proof and writes nothing\", async () => {",
+            "  workspaceDir = await mkdtemp(path.join(os.tmpdir(), \"legion-handoff-\"));",
+            "",
+            "  expect(() => writePhaseHandoff(workspaceDir, \"implement\", { filesChanged: [\"a.ts\"] })).toThrow(",
+            "    /proof/",
+            "  );",
+            "  expect(existsSync(path.join(getLegionDir(workspaceDir), \"implement.json\"))).toBe(false);",
+            "",
+            "  writePhaseHandoff(workspaceDir, \"implement\", {",
+            "    filesChanged: [\"a.ts\"],",
+            "    proof: [",
+            "      {",
+            "        criterion: \"1\",",
+            "        surface: \"scratch workspace\",",
+            "        command: \"legion handoff write --phase implement\",",
+            "        observed: \"exit 0\",",
+            "        headSha: \"0123456789abcdef0123456789abcdef01234567\",",
+            "        negativeControl: \"the same payload without proof -> exit 1\",",
+            "      },",
+            "    ],",
+            "  });",
+            "  expect(readPhaseHandoff(workspaceDir, \"implement\")).toMatchObject({",
+            "    proof: [{ criterion: \"1\" }],",
+            "  });",
+            "});",
+            "",
+            "it(\"names the file and the failing field on stderr when a committed handoff fails validation\", async () => {",
+            "  workspaceDir = await mkdtemp(path.join(os.tmpdir(), \"legion-handoff-\"));",
+            "  ensureLegionDir(workspaceDir);",
+            "  const filePath = path.join(getLegionDir(workspaceDir), \"implement.json\");",
+            "  await writeFile(",
+            "    filePath,",
+            "    JSON.stringify({",
+            "      schemaVersion: 1,",
+            "      phase: \"implement\",",
+            "      completed: new Date().toISOString(),",
+            "      filesChanged: [\"a.ts\"],",
+            "    }),",
+            "    \"utf-8\"",
+            "  );",
+            "",
+            "  const errors: string[] = [];",
+            "  const original = console.error;",
+            "  console.error = (...args: unknown[]) => {",
+            "    errors.push(args.map(String).join(\" \"));",
+            "  };",
+            "  try {",
+            "    expect(readPhaseHandoff(workspaceDir, \"implement\")).toBeNull();",
+            "  } finally {",
+            "    console.error = original;",
+            "  }",
+            "  expect(errors).toHaveLength(1);",
+            "  expect(errors[0]).toContain(filePath);",
+            "  expect(errors[0]).toContain(\"proof\");",
+            "});"
+          ],
+          "note": "`existsSync` needs adding to the node:fs imports of the test file (it currently imports from node:fs/promises only)."
+        },
+        {
+          "step": 2,
+          "title": "Write the failing CLI tests",
+          "detail": "packages/daemon/src/cli/__tests__/handoff.test.ts, two new `it` blocks in the existing describe (its beforeEach already mocks process.exit, console.log, console.error).",
+          "code": [
+            "it(\"exits non-zero naming proof when an implement handoff carries none\", async () => {",
+            "  const write = getSubCommand(handoffCommand, \"write\");",
+            "  try {",
+            "    await runCommand(write, { phase: \"implement\", data: '{\"filesChanged\":[\"a.ts\"]}' });",
+            "  } catch {}",
+            "",
+            "  expect(exitCode).toBe(1);",
+            "  const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();",
+            "  expect(errors.join(\"\\n\")).toContain(\"proof\");",
+            "  expect(fs.existsSync(path.join(tempDir, \".legion\", \"implement.json\"))).toBe(false);",
+            "});",
+            "",
+            "it(\"writes and reads an implement handoff that carries its proof\", async () => {",
+            "  const write = getSubCommand(handoffCommand, \"write\");",
+            "  const read = getSubCommand(handoffCommand, \"read\");",
+            "  const proof = {",
+            "    criterion: \"1\",",
+            "    surface: \"branch CLI in a scratch workspace\",",
+            "    command: \"bun packages/daemon/src/cli/index.ts handoff write --phase implement\",",
+            "    observed: \"exit 0\",",
+            "    headSha: \"0123456789abcdef0123456789abcdef01234567\",",
+            "    negativeControl: \"the same payload without proof -> exit 1\",",
+            "  };",
+            "",
+            "  await runCommand(write, { phase: \"implement\", data: JSON.stringify({ proof: [proof] }) });",
+            "  await runCommand(read, { phase: \"implement\" });",
+            "",
+            "  const calls = (console.log as ReturnType<typeof mock>).mock.calls;",
+            "  const parsed = JSON.parse(calls[calls.length - 1]?.[0] as string) as Record<string, unknown>;",
+            "  expect(parsed.proof).toEqual([proof]);",
+            "  expect(exitCode).toBeUndefined();",
+            "});"
+          ]
+        },
+        {
+          "step": 3,
+          "title": "Run both suites and watch them fail",
+          "detail": "From packages/daemon: `bun test src/handoff/__tests__/ledger.test.ts src/cli/__tests__/handoff.test.ts`. Expect the refusal tests to fail on 'Received function did not throw' / exitCode undefined, and the stderr test on `Expected length: 1, Received length: 0`."
+        },
+        {
+          "step": 4,
+          "title": "Implement the refusal and the warning",
+          "detail": "packages/daemon/src/handoff/ledger.ts: import describePhaseHandoffProblems; replace writePhaseHandoff (lines 65-78) and the middle of readPhaseHandoff (lines 87-92).",
+          "code": [
+            "export function writePhaseHandoff<T extends object>(",
+            "  workspaceDir: string,",
+            "  phase: HandoffPhase,",
+            "  data: T",
+            "): void {",
+            "  const payload = {",
+            "    ...data,",
+            "    schemaVersion: HANDOFF_SCHEMA_VERSION,",
+            "    phase,",
+            "    completed: new Date().toISOString(),",
+            "  };",
+            "  // The one path every phase handoff is written through: a payload this phase's schema rejects",
+            "  // never reaches the branch, and the refusal names the field (LEGION-53).",
+            "  const problems = describePhaseHandoffProblems(payload);",
+            "  if (problems.length > 0) {",
+            "    throw new Error(`Invalid ${phase} handoff: ${problems.join(\"; \")}`);",
+            "  }",
+            "  ensureLegionDir(workspaceDir);",
+            "  atomicWriteJson(getPhaseFilePath(workspaceDir, phase), payload);",
+            "}",
+            "",
+            "// inside readPhaseHandoff, replacing the silent null:",
+            "    const parsed = JSON.parse(readFileSync(filePath, \"utf-8\")) as unknown;",
+            "    const handoff = validatePhaseHandoff(parsed);",
+            "    if (!handoff) {",
+            "      // Failing open is the contract (the phase reads as missing), but never silently: the",
+            "      // next worker has to be able to see which field cost it the predecessor's handoff.",
+            "      console.error(",
+            "        `[handoff] Ignoring ${filePath}: ${describePhaseHandoffProblems(parsed).join(\"; \")}`",
+            "      );",
+            "      return null;",
+            "    }",
+            "    if (handoff.phase !== phase) {",
+            "      console.error(",
+            "        `[handoff] Ignoring ${filePath}: phase is \"${handoff.phase}\", expected \"${phase}\"`",
+            "      );",
+            "      return null;",
+            "    }",
+            "    return handoff;"
+          ]
+        },
+        {
+          "step": 5,
+          "title": "Run both suites green, then the whole daemon package once",
+          "detail": "From packages/daemon: the two files first, then `bun test` (the package suite; never `bun test` from the repository root — see docs/solutions/legion/worker-pane-shell-gotchas.md section 2). Record both counts."
+        },
+        {
+          "step": 6,
+          "title": "Commit",
+          "code": [
+            "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split \\",
+            "  -m 'feat(daemon): refuse a handoff the phase schema rejects and name the field on read' \\",
+            "  packages/daemon/src/handoff/ledger.ts \\",
+            "  packages/daemon/src/handoff/__tests__/ledger.test.ts \\",
+            "  packages/daemon/src/cli/__tests__/handoff.test.ts"
+          ],
+          "note": "ledger.test.ts and cli/handoff.test.ts are touched by Task 1 (fixtures) and Task 2 (new tests). jj path scoping is all-or-nothing per file, so do Task 1's edits, split Task 1, then Task 2's edits, then split Task 2 — in that order (text-only-skill-pr-mechanics.md section 1). Verify each commit with `jj -R \"$LEGION_WORKSPACE\" diff -r <commit> --stat`."
+        }
+      ],
+      "acceptance": "`legion handoff write --phase implement` with no proof exits 1, the message names proof, and no file is written; with a well-formed proof it writes and `legion handoff read --phase implement` returns it. Reading a hand-written old-shape implement.json prints exactly one stderr line naming the file and `proof` and returns null. The daemon package suite is green."
+    },
+    {
+      "name": "Task 3 - the same rule in the worker, retro, and architect skills, the seven role prompts, and the three documents",
+      "commit": "docs(skills): the implementer proves before merge and checks production after",
+      "files": {
+        "modify": [
+          "skills/legion-worker/SKILL.md",
+          "skills/legion-retro/SKILL.md",
+          "skills/legion-architect/SKILL.md",
+          "packages/pi-envoy/roles/planner.md",
+          "packages/pi-envoy/roles/implementer.md",
+          "packages/pi-envoy/roles/tester.md",
+          "packages/pi-envoy/roles/reviewer.md",
+          "packages/pi-envoy/roles/merger.md",
+          "packages/pi-envoy/roles/architect.md",
+          "packages/pi-envoy/roles/architect-root.md",
+          "AGENTS.md",
+          "skills/AGENTS.md",
+          "packages/daemon/src/daemon/reducers.ts"
+        ]
+      },
+      "decisions": [
+        "Every sentence a check greps for is written on one line, however wide. The exact strings are in this plan's testerChecks; write them first, then wrap the prose around them.",
+        "The three `Sami, 2026-09-13, verbatim:` quotes already in skills/legion-worker/SKILL.md (lines 288-296) and skills/legion-retro/SKILL.md (lines 26-29) stay exactly as they are. Do not reflow, re-quote, or paraphrase a Sami quote.",
+        "The retro comment moves to `dispatch_comment` because Legion never writes a GitHub issue (root AGENTS.md, Issue Lifecycle) and Dispatch comments carry session provenance natively — so the block loses the `<!-- legion: … -->` footer, which the worker skill reserves for GitHub PR artifacts.",
+        "The post-merge production record has three places, all named in the skill: the PR body's `Production:` line, one PR comment carrying the Legion footer, and a `dispatch_comment` on the issue. The reviewer and merger read GitHub, the architect reads the issue; each needs its own copy."
+      ],
+      "edits": [
+        {
+          "file": "skills/legion-worker/SKILL.md",
+          "changes": [
+            {
+              "where": "The PR body template, lines 235-236 (the single `**E2E:**` block).",
+              "replaceWith": [
+                "**E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.",
+                "Negative control: <deliberately broken input> → <refusal or failure observed>.",
+                "",
+                "**E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.",
+                "Negative control: <deliberately broken input> → <refusal or failure observed>.",
+                "Verified the implementer's proof by <re-running its command | driving the same surface independently>.",
+                "",
+                "**Production:** <what was checked in production, how, what was observed> — merge commit <sha>.",
+                "(written by the implementer after the merge lands; `pending <what is missing>` until then)"
+              ]
+            },
+            {
+              "where": "The bullet at lines 281-308 that begins `- The tester fills in the `E2E` section:`. Split it into an implementer bullet and a tester bullet. Keep the existing production-like definition, the Sami quote, the environment/secret-scrub sentence, and the whole rebase re-check paragraph — they move into the tester bullet unchanged.",
+              "newImplementerBullet": [
+                "- **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.** The proof is the changed behaviour exercised on the surface a user reaches it through — a scratch daemon, a smoke rig, a sandbox repository, a real browser, a devN stack, a local stack with real migrations — with the exact command or run id, what was observed, the head SHA, and one negative control. The same proof goes into `.legion/implement.json` as its required `proof` array (`legion handoff write --phase implement` refuses a payload without one and names the field), and into the PR body, because the reviewer and the merger verify facts on GitHub and never from a handoff. A unit or integration test is a regression lock, never proof of a criterion."
+              ],
+              "newTesterBullet": [
+                "- **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs the implementer's command or drives the same surface independently, records the verdict in `.legion/test.json` as `implementerProof` (`{verdict, how}`), and records its own proof beside it. A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill: record it in `failures` with `implementerProof.verdict: \"rejected\"`, complete the phase, and let the architect return the issue to the implementer — the agent that developed the change owns proving it."
+              ]
+            },
+            {
+              "where": "The reviewer bullet (lines 309-336), first sentence.",
+              "addSentence": "Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line."
+            },
+            {
+              "where": "The merger bullet (lines 343-354), in the READY sentence.",
+              "addSentence": "The READY packet names both the implementer's and the tester's `E2E` lines; a missing one is reported to the architect instead of published."
+            },
+            {
+              "where": "The post-merge bullet (lines 355-364) — extend it; keep its Sami quote and the 2026-09-12 staging evidence verbatim.",
+              "addParagraph": [
+                "The record has three places: the PR body's `Production:` line, one pull-request comment carrying the Legion footer, and a `dispatch_comment` on the issue — the reviewer and merger read GitHub, the architect reads the issue. When the deploy that carries the merge has not happened (a shared profile still holding the previous plugin release, a daemon still running the previous commit, a slot nobody has run), open an action ask — `dispatch_ask` with `kind: \"action\"` — naming the exact install or restart step, keep the `Production:` line at `pending <what is missing>`, and complete the check once the human answers Done. Never record a staging pass as the production check, and never let the architect sign off on a `pending` line."
+              ]
+            },
+            {
+              "where": "New subsection immediately after the post-merge bullet, before `## The unchanged-diff check`.",
+              "newSection": [
+                "## When no surface reaches the changed path",
+                "",
+                "No surface reaches the changed path is a report to the architect, never a reason to complete the phase.",
+                "Say which surface is missing and what it would have to do — a rig that can spawn the role, a",
+                "sandbox that holds the resource, a credential, a command that does not exist yet — and send it to",
+                "the architect with `envoy_publish` to its role topic. The architect creates a child issue in this",
+                "tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. Sami,",
+                "2026-09-13, verbatim: \"If there's anything blocking that, we need to fix it: if it's",
+                "infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's skills, we need",
+                "to fix the skills.\" A code path whose first execution would be after the merge — a deploy",
+                "workflow's inline step, a post-merge helper, a production-only resource — is untested until you",
+                "have executed it somewhere production-like; completing with a unit-test-only handoff is the",
+                "failure this rule exists to stop."
+              ]
+            },
+            {
+              "where": "`## Completion gate: handoff write, verification, and persistence` (line 403), after the first code block.",
+              "addSentence": "`legion handoff write` validates the payload against the phase's schema before writing: an implement handoff without a well-formed `proof`, or a test handoff that reports no failure and carries no `proof` of its own, exits 1 naming the field and writes nothing."
+            }
+          ]
+        },
+        {
+          "file": "skills/legion-retro/SKILL.md",
+          "changes": [
+            {
+              "where": "Merge-gate ordering step 5 (lines 26-29) — keep the Sami quote verbatim, add the record shape and the corrective rule.",
+              "addParagraph": [
+                "   The record is the pull request's `Production:` line, one pull-request comment, and a",
+                "   `dispatch_comment` on the issue, each naming what was driven, how, what was observed, and the",
+                "   merge commit. A defect the production check finds becomes a corrective child issue of the same tree,",
+                "   owned by the architect and implemented by the same implementer; the parent stays open until it lands."
+              ]
+            },
+            {
+              "where": "`## Two perspectives` item 1 (lines 41-46) — it currently says \"the PR's `E2E` line\".",
+              "replaceWith": [
+                "1. Re-read the issue, its acceptance criteria, the PR, test evidence, and review evidence.",
+                "   Confirm the PR carries both proofs: the implementer's own `E2E (implementer)` line and the tester's `E2E (tester)` line,",
+                "   each naming a production-like surface (a scratch daemon, a smoke rig, a sandbox repository, a devN",
+                "   stack, staging, or a local stack with real migrations), a command or run id, an observation, a head",
+                "   SHA, and a negative control. If either is missing, or links only a unit suite, the retro's first",
+                "   durable learning is that gap and the issue goes back — to the implementer for its own proof, to the",
+                "   tester for the tester's — before `READY`.",
+                "   Do not rebase or create a new branch; work on the existing issue branch."
+              ]
+            },
+            {
+              "where": "The `## Durable outputs` comment block (lines 74-95): replace the `legion gh -- issue comment` bash block with a Dispatch comment.",
+              "replaceWith": [
+                "Commit the documentation on the existing issue branch, advance its existing bookmark, and push",
+                "that branch. Do not create a replacement branch or bookmark. Then post the retro comment on the",
+                "Dispatch issue — Legion never writes a GitHub issue, and a Dispatch comment carries this session's",
+                "provenance natively, so it needs no `<!-- legion: … -->` footer (that footer is for GitHub pull-request",
+                "artifacts only):",
+                "",
+                "```text",
+                "dispatch_comment({",
+                "  issue: \"<KEY>\",",
+                "  body: \"## Retro Complete\\n\\n**Learnings documented in:**\\n- docs/solutions/<path>.md\\n\\n**Key takeaways:**\\n- <reusable lesson>\\n\\n**Proofs read:** implementer <surface/command>, tester <surface/command>.\\n\\n**Production check:** <what the implementer will drive after the merge, or the action ask it opened>\"",
+                "})",
+                "```",
+                "",
+                "The Dispatch issue comment and `docs/solutions/` commit are the only retro outputs. Never write a",
+                "handoff, phase artifact, local feedback log, or completion label; `.legion/` was deleted before",
+                "retro and nothing recreates it. Report completion with `legion handoff complete` alone (its",
+                "summary: two sentences for the architect) — no `legion handoff write`."
+              ]
+            },
+            {
+              "where": "`## Completion check` bullet \"The learning documents and issue comment both exist.\"",
+              "replaceWith": [
+                "- The learning documents exist and the retro comment is on the Dispatch issue (never a GitHub issue).",
+                "- Both proofs were read, and any gap in either is recorded as a learning."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "skills/legion-architect/SKILL.md",
+          "changes": [
+            {
+              "where": "Section 6's numbered order (lines 203-220): insert a new step 5 after the merger step.",
+              "addStep": [
+                "5. the merge queue merges; you then `spawn_worker` the **implementer** once more with the",
+                "   production-check task. It drives the changed path in production through the user's own access",
+                "   path and records what it saw on the pull request and on this issue. Close only after the implementer's production report exists.",
+                "   A defect it finds is a corrective child issue of this tree, not a note on a closed one; a deploy",
+                "   the implementer cannot perform is its action ask, and the issue waits for it."
+              ]
+            },
+            {
+              "where": "Section 6's first paragraph (lines 199-201) — the sign-off conditions.",
+              "addSentence": "Sign-off also requires the implementer's production report: a `Production:` line that names what was driven, how, what was observed, and the merge commit — never a `pending` one, and never a staging pass."
+            },
+            {
+              "where": "Section 7 (lines 243-249) — first sentence.",
+              "replaceWith": [
+                "After the merge result, the implementer's production report, and sign-off are recorded, post the",
+                "sign-off and close this issue through the Legion write surface:"
+              ]
+            },
+            {
+              "where": "The `pr-merged` wake row (line 270) — replace its procedure.",
+              "replaceWith": [
+                "| `pr-merged` | Payload `{type:\"pr-merged\", pr, mergeCommitSha}`. The merge queue landed the PR. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |"
+              ]
+            },
+            {
+              "where": "The `phase-complete` wake row (line 264) — append three sentences before its closing `|`.",
+              "addSentences": [
+                "An `implementer` completion that follows the merge is its production report: read the record on the pull request and the issue, then run step 7 — the issue is already at `retro`, the daemon writes no status for this completion, and you set `done` yourself.",
+                "A `tester` completion whose handoff carries `implementerProof.verdict: \"rejected\"`, or a failure naming the production-like proof, goes back to the **implementer** with that finding — never forward to the reviewer, and never by supplying the proof from another role.",
+                "A worker that reports no surface reaches the changed path gets a child issue in this tree (infrastructure, tooling, or a skill) and a resume once it lands; that report is never a reason to advance the phase."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/implementer.md",
+          "changes": [
+            {
+              "where": "Lines 11-19, the paragraph that ends `leave the `E2E` section for the tester`.",
+              "replaceFragment": "leave the `E2E` section for the tester",
+              "with": "fill the `E2E (implementer)` line yourself when the PR opens"
+            },
+            {
+              "where": "Same paragraph, replacing its last sentence (`Exercise the changed behavior through its real surface before reporting it.`).",
+              "replaceWith": [
+                "Before your phase completes, prove the change on a production-like surface — the surface a user reaches the criterion through, not a unit suite — and record that proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `legion handoff write --phase implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.",
+                "After the merge queue lands the pull request, the architect sends you back one more time: drive the changed path in production through the user's own access path and record it as the PR body's `Production:` line, a pull-request comment, and a `dispatch_comment` on the issue. A staging pass is not that check. A deploy you cannot perform yourself is an action ask (`dispatch_ask` with `kind: \"action\"`) naming the exact install or restart step; the architect signs off only once the record is real."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/tester.md",
+          "changes": [
+            {
+              "where": "Lines 11-23, after the `Record the exact command or run id …` sentence.",
+              "addSentences": [
+                "Verify the implementer's own proof first — re-run its command or drive the same surface independently — and record the verdict in `.legion/test.json` as `implementerProof` (`{verdict: \"verified\" | \"rejected\", how}`).",
+                "A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill: record it in `failures`, set `implementerProof.verdict: \"rejected\"`, complete the phase, and let the architect send the issue back to the implementer.",
+                "Then add your own proof: the `E2E (tester)` line in the PR body and the `proof` array in your handoff, which `legion handoff write --phase test` requires whenever you report no failure."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/reviewer.md",
+          "changes": [
+            {
+              "where": "Line 11-13, the `Verify as GitHub facts, never from handoffs:` list.",
+              "replaceFragment": "the tester's\n`E2E` section names a surface, ids, and a head that is an ancestor of the one you review",
+              "with": "both `E2E` lines are present — the implementer's own and the tester's — each naming a production-like surface, a command or run id, an observation, a head that is an ancestor of the one you review, and a negative control"
+            },
+            {
+              "where": "Same paragraph, after the review-event sentence.",
+              "addSentence": "Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line, never `APPROVE` and never `COMMENT` as if it were clean."
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/merger.md",
+          "changes": [
+            {
+              "where": "Line 11-20 (the READY paragraph) and step 4 of `## Verification`.",
+              "addSentence": "The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing, do not publish — report it to the architect with `envoy_publish` and stay idle."
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/planner.md",
+          "changes": [
+            {
+              "where": "Lines 11-20, after `name the real surface a user proves it on …`.",
+              "addSentences": [
+                "Name the production-like surface and the exact command for each criterion, since the implementer must prove the change on that surface before its phase completes and the tester must be able to re-run what you named.",
+                "If no surface can reach a criterion today, building it is part of this plan — a task of this issue, or a prerequisite child issue you report to the architect — never a criterion the implementer is expected to skip."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/architect.md",
+          "changes": [
+            {
+              "where": "The `Before merge, send the implementer back in …` paragraph (lines 60-63).",
+              "addSentences": [
+                "After the merge lands, `spawn_worker` the implementer once more for the production check: it drives the changed path in production and records it on the pull request and the issue. Close only after the implementer's production report exists.",
+                "A tester completion that rejects the implementer's proof goes back to the implementer; a worker that reports no surface reaches the changed path gets a child issue in this tree to build it."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/pi-envoy/roles/architect-root.md",
+          "changes": [
+            {
+              "where": "After the `Necessary work remains your responsibility …` paragraph (lines 38-41).",
+              "addSentences": [
+                "The merge is not the close: after the queue lands a pull request, `spawn_worker` the implementer for the production check, and sign off only once its record exists on the pull request and the issue.",
+                "A tester completion that rejects the implementer's proof goes back to the implementer; a worker that reports no surface reaches the changed path gets a child issue in this tree to build it."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "AGENTS.md",
+          "changes": [
+            {
+              "where": "The Issue Lifecycle section, immediately after the `**Retro:**` line (line 107).",
+              "addLines": [
+                "**Production check:** after the merge lands, the implementer — the agent that developed the change — drives it in production and records that on the pull request and the issue; the architect signs off only then."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "skills/AGENTS.md",
+          "changes": [
+            {
+              "where": "The `## Durable artifacts` paragraph (lines 36-41).",
+              "addLines": [
+                "The implement handoff carries the implementer's own production-like proof and the test handoff the",
+                "tester's verdict on it plus the tester's own; `legion handoff write` refuses a payload the phase's",
+                "schema rejects and names the field. Retro's comment goes to the Dispatch issue, never a GitHub issue."
+              ]
+            }
+          ]
+        },
+        {
+          "file": "packages/daemon/src/daemon/reducers.ts",
+          "changes": [
+            {
+              "where": "Lines 841-843, the comment that calls a merge the architect's cue to sign off.",
+              "replaceWith": [
+                "    // a stale \"opened\" redelivery from recreating it. The wake differs -- a merge is the",
+                "    // architect's cue to send the implementer to check the change in production and to sign off",
+                "    // once that record exists, an unmerged close its cue to decide whether the work is reopened,",
+                "    // reassigned, or cancelled."
+              ]
+            }
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "title": "Apply every text edit above, in file order",
+          "detail": "Write the grep-target sentences on one line each (see testerChecks). Do not touch any role prompt's `## Step one` paragraph or its closing `When your phase is done, stay in this session afterwards:` paragraph — legion.test.ts compares both across all six LEGION_ROLES prompts word for word."
+        },
+        {
+          "step": 2,
+          "title": "Read every statement of each rule together",
+          "detail": "`grep -rn 'E2E (implementer)\\|E2E (tester)\\|Production:\\|production check' skills packages/pi-envoy/roles AGENTS.md` and read the hits as one document: a new rule must not contradict another statement of the same step in the same file (text-only-skill-pr-mechanics.md section 4). In particular check the reviewer's `## Final review gate` and the worker skill's merge-gate bullets still describe one order."
+        },
+        {
+          "step": 3,
+          "title": "Fence and one-line checks",
+          "detail": "`grep -c '^```' <file>` must be even for every edited markdown file (an unclosed fence renders the rest of the file inside a code block). Then run every grep in this plan's testerChecks and confirm each returns the stated count before committing — a mismatch here is a whitespace reflow; found by the tester it is a corrective round."
+        },
+        {
+          "step": 4,
+          "title": "Run the pi-envoy suite",
+          "detail": "From packages/pi-envoy: `bun test extensions/legion.test.ts` — the prompt-file and drift-guard tests must stay green. Clear the LEGION_*/DISPATCH_* families if the suite complains about pane env (worker-pane-shell-gotchas.md section 2 — the suite already does this in beforeEach)."
+        },
+        {
+          "step": 5,
+          "title": "Commit",
+          "code": [
+            "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split \\",
+            "  -m 'docs(skills): the implementer proves before merge and checks production after' \\",
+            "  skills/legion-worker/SKILL.md skills/legion-retro/SKILL.md skills/legion-architect/SKILL.md \\",
+            "  skills/AGENTS.md AGENTS.md packages/pi-envoy/roles/planner.md \\",
+            "  packages/pi-envoy/roles/implementer.md packages/pi-envoy/roles/tester.md \\",
+            "  packages/pi-envoy/roles/reviewer.md packages/pi-envoy/roles/merger.md \\",
+            "  packages/pi-envoy/roles/architect.md packages/pi-envoy/roles/architect-root.md \\",
+            "  packages/daemon/src/daemon/reducers.ts"
+          ]
+        }
+      ],
+      "acceptance": "Every testerChecks grep returns its stated count; `bun test extensions/legion.test.ts` green from packages/pi-envoy; no markdown file has an odd number of fence lines; no two statements of one lifecycle step contradict each other."
+    }
+  ],
+  "proofPlan": [
+    {
+      "criterion": "1 — `legion handoff write --phase implement` refuses a payload with no well-formed `proof`, exits non-zero, names the field; with one it writes and `legion handoff read` returns it.",
+      "surface": "The branch's own CLI in a scratch workspace on this machine. The pane's `legion` is `<state_dir>/bin/legion`, which re-execs the LIVE daemon's checkout (main) — docs/solutions/legion/worker-pane-shell-gotchas.md section 13 — so the branch's entry point is the only honest surface before the merge.",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && bun install --frozen-lockfile   # once per workspace",
+        "S=$(mktemp -d /tmp/l53-proof1.XXXX)",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"]}'; echo \"exit=$?\"",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff write --phase test --workspace \"$S\" --data '{\"passed\":3,\"failed\":0,\"implementerProof\":{\"verdict\":\"verified\",\"how\":\"re-ran its command\"}}'; echo \"exit=$?\"",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"],\"proof\":[{\"criterion\":\"1\",\"surface\":\"branch CLI in a scratch workspace\",\"command\":\"bun packages/daemon/src/cli/index.ts handoff write --phase implement\",\"observed\":\"exit 1 naming proof without it, exit 0 with it\",\"headSha\":\"<full head sha>\",\"negativeControl\":\"the same payload without proof -> exit 1\"}]}'; echo \"exit=$?\"",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff read --phase implement --workspace \"$S\"",
+        "test -f \"$S/.legion/test.json\"; echo \"test.json exists=$?\"   # must be 1 (absent): the refused write created nothing"
+      ],
+      "expected": "exit 1 with `[handoff] Failed to write handoff: Invalid implement handoff: proof: …` for the first; exit 1 naming `proof` for the second (a passing test handoff needs the tester's own); exit 0 for the third; the fourth prints the proof array; no test.json.",
+      "negativeControl": "The first and second commands are the negative control — a payload the rule refuses. Quote both exit codes and both messages.",
+      "secondObservation": "The same two commands through the rig's `<state_dir>/bin/legion` launcher inside a rig worker pane (see the rig's tester task): the branch CLI as a pane resolves it, with the pane's own grant delivery."
+    },
+    {
+      "criterion": "2 — `legion handoff read` of a handoff that fails validation prints one stderr line naming the file and the failing field, and returns null.",
+      "surface": "Same branch CLI and scratch workspace.",
+      "commands": [
+        "# overwrite the good file with an old-shape one using the write tool (the profile's bash",
+        "# interceptor blocks `> file` redirection — worker-pane-shell-gotchas.md via the grant-rig note):",
+        "#   write $S/.legion/implement.json with",
+        "#   {\"schemaVersion\":1,\"phase\":\"implement\",\"completed\":\"2026-09-13T00:00:00.000Z\",\"filesChanged\":[\"a.ts\"]}",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff read --phase implement --workspace \"$S\" 2>/tmp/l53-read-stderr.txt; echo \"exit=$?\"",
+        "cat /tmp/l53-read-stderr.txt   # exactly one line, naming $S/.legion/implement.json and proof",
+        "# and the phase-mismatch line, same mechanism:",
+        "#   write $S/.legion/plan.json with a valid implement handoff (phase: \"implement\")",
+        "cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts handoff read --phase plan --workspace \"$S\""
+      ],
+      "expected": "stdout `null`, exit 0, and one stderr line `[handoff] Ignoring <path>/implement.json: proof: Invalid input: expected array, received undefined`; the plan read prints `null` with `… phase is \"implement\", expected \"plan\"`.",
+      "negativeControl": "Re-writing the valid proof-carrying file and reading it again: stdout is the handoff and the stderr file is empty. Quote both."
+    },
+    {
+      "criterion": "3 — a daemon-spawned planner, implementer, tester, reviewer, and merger pane receives a role prompt stating the rule.",
+      "surface": "The scratch daemon rig below (own team sjawhar/53, state dir, ports, NATS, tmux server, and OMP profile), started from the branch head, whose panes load the branch's plugin tree. The evidence is the argv the pane's own shell handed OMP after `\"$(cat …)\"` expansion — the same instrument packages/daemon/src/daemon/__tests__/real-deployment-instructions-e2e.test.ts uses.",
+      "commands": [
+        "# after the five spawns (see rig.driver):",
+        "for R in planner implementer tester reviewer merger; do echo \"== $R\"; grep -c 'E2E (implementer)' /tmp/legion53-rig/argv/$R-*.txt; done",
+        "grep -n 'E2E (implementer)\\|E2E (tester)\\|Production:\\|no surface reaches' /tmp/legion53-rig/argv/implementer-*.txt",
+        "grep -n 'implementerProof\\|test failure, not a gap' /tmp/legion53-rig/argv/tester-*.txt",
+        "grep -n 'Approval is refused while either' /tmp/legion53-rig/argv/reviewer-*.txt",
+        "grep -n 'names both the implementer' /tmp/legion53-rig/argv/merger-*.txt",
+        "grep -n 'production-like surface and the exact command' /tmp/legion53-rig/argv/planner-*.txt",
+        "tmux -L legion-sjawhar53 list-panes -a -F '#{window_id} #{pane_id} #{pane_start_command}'"
+      ],
+      "expected": "One recorded argv file per role, each carrying its own role's sentences verbatim, and one live pane per role on the rig's private tmux server.",
+      "negativeControl": "The same five spawns on a rig whose profile still holds the released plugin and whose daemon runs from `main` (/home/ubuntu/legion-ws-RunDaemon, read-only, `bun run` only) — every grep returns 0. Run this leg first."
+    },
+    {
+      "criterion": "4 — the worker, retro, and architect skills state the same rule, and the architect's `pr-merged` procedure sends the implementer to production and closes only after its report.",
+      "surface": "The same rig: a real OMP worker pane whose profile's `@sjawhar/pi-legion-envoy/dist/skills` is this branch's `skills/` tree, resolving `skill://legion-worker`, `skill://legion-retro`, and `skill://legion-architect` the way a production pane does.",
+      "commands": [
+        "# the tester pane's task (rig.driver.taskText) asks it to quote the passages; read its answer from",
+        "# its session transcript:",
+        "ls -t ~/.omp/profiles/l53rig/agent/sessions/*/*.jsonl | head -3",
+        "# and independently, the text the pane would resolve:",
+        "PKG=$HOME/.omp/profiles/l53rig/plugins/node_modules/@sjawhar/pi-legion-envoy",
+        "grep -n 'E2E (implementer)' \"$PKG/dist/skills/legion-worker/SKILL.md\"",
+        "grep -n 'A defect the production check finds' \"$PKG/dist/skills/legion-retro/SKILL.md\"",
+        "grep -n 'dispatch_comment' \"$PKG/dist/skills/legion-retro/SKILL.md\"",
+        "grep -n 'Close only after the implementer' \"$PKG/dist/skills/legion-architect/SKILL.md\"",
+        "grep -n 'spawn_worker the \\*\\*implementer\\*\\* with the production-check task' \"$PKG/dist/skills/legion-architect/SKILL.md\""
+      ],
+      "expected": "The worker's own verbatim quotes in its transcript, matching the four greps.",
+      "negativeControl": "`grep -c 'legion gh -- issue comment' \"$PKG/dist/skills/legion-retro/SKILL.md\"` returns 0 — the GitHub-issue-comment form is gone, and Legion never writes a GitHub issue."
+    },
+    {
+      "criterion": "5 — the PR body template carries `E2E (implementer)`, `E2E (tester)`, and `Production:`, and the merger's READY names both E2E lines.",
+      "surface": "This pull request itself, and the merger's READY message to `notifications.role.pr-queue`.",
+      "commands": [
+        "cd -- \"$LEGION_WORKSPACE\" && legion gh -- pr view <n> --repo sjawhar/legion --json body --jq '.body' | grep -n 'E2E (implementer)\\|E2E (tester)\\|Production:'"
+      ],
+      "expected": "All three lines present in this PR's own body from the moment it opens (the `Production:` line as `pending …` until the merge lands), and the READY message naming both E2E lines.",
+      "negativeControl": "None applicable: this criterion is the artifact itself. The reviewer's refusal rule is the control — a body missing either line is `REQUEST_CHANGES`."
+    },
+    {
+      "criterion": "6 — this issue's own lifecycle follows the new rule end to end, including the post-merge production check.",
+      "surface": "Production for this repository is the Legion daemon running on this machine (team `sjawhar/legion`, port 13370, checkout /home/ubuntu/legion-ws-RunDaemon, state dir /home/ubuntu/.local/state/legion/sjawhar-legion) plus the published `@sjawhar/pi-legion-envoy` package installed in `~/.omp/profiles/legion/plugins` (1.22.2 today) that every live pane loads.",
+      "commands": [
+        "# a. the deployed CLI carries the rule (needs the daemon restarted on the merged main):",
+        "S=$(mktemp -d /tmp/l53-prod.XXXX)",
+        "legion handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"]}'; echo \"exit=$?\"",
+        "legion handoff write --phase implement --workspace \"$S\" --data '{\"filesChanged\":[\"a.ts\"],\"proof\":[{\"criterion\":\"6\",\"surface\":\"the live sjawhar/legion daemon on this machine\",\"command\":\"legion handoff write --phase implement\",\"observed\":\"exit 1 naming proof, then exit 0\",\"headSha\":\"<merge commit>\",\"negativeControl\":\"the same payload without proof -> exit 1\"}]}'; echo \"exit=$?\"",
+        "legion handoff read --phase implement --workspace \"$S\"",
+        "# b. the deployed role prompt carries the rule — the file a live pane cats:",
+        "grep -n 'E2E (implementer)' /home/ubuntu/legion-ws-RunDaemon/packages/pi-envoy/roles/implementer.md",
+        "tmux -L legion-sjawharlegion list-panes -a -F '#{pane_start_command}' | grep -c 'roles/implementer.md'",
+        "# c. the published plugin's skills carry the rule — what `skill://legion-worker` resolves to:",
+        "npm view @sjawhar/pi-legion-envoy version",
+        "jq -r .version ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json",
+        "grep -n 'E2E (tester)' ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/skills/legion-worker/SKILL.md"
+      ],
+      "expected": "(a) exit 1 naming proof, then exit 0 and the proof read back; (b) the grep hits and a live pane whose start command names that file; (c) the installed version at or above the release built from the merge, and the grep hit in its `dist/skills`.",
+      "blockedPath": "All three halves depend on an operator action Legion does not perform: installing the new `@sjawhar/pi-legion-envoy` release into `~/.omp/profiles/legion/plugins` and restarting the `sjawhar/legion` daemon from the merged `main` (a worker never restarts, signals, or writes to that daemon — worker-pane-shell-gotchas.md section 9; and `legion-ws-RunDaemon` is read-only to us). Until it happens, keep the PR body's `Production:` line at `pending: plugin <version> installed and the daemon restarted on <merge sha>` and open one action ask: `dispatch_ask({issue: \"LEGION-53\", kind: \"action\", question: \"Install @sjawhar/pi-legion-envoy <version> into the legion profile and restart the sjawhar/legion daemon on main at <merge sha>, then answer Done — the production check for LEGION-53 needs the deployed CLI, role prompt, and skills.\"})`. Complete the check and the record after the answer; the architect signs off only then.",
+      "negativeControl": "The first command of (a) is the control. Before the restart, record the same command's exit 0 on the old build and say so: that is the before/after pair that proves the deployment, not just the branch."
+    }
+  ],
+  "proofRig": {
+    "name": "The scratch-daemon proof rig (acceptance 3 and 4)",
+    "why": "Acceptance 3 and 4 are about what a daemon-spawned pane actually receives and what a real worker resolves `skill://legion-worker` to. A unit test proves neither: the role prompt is `\"$(cat <path>)\"`-expanded by the pane's own shell, and the skills come from the installed @sjawhar/pi-legion-envoy package's `dist/skills`, not from the checkout. This is the scratch-daemon pattern of docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md with the production-plugin-tree mode of docs/solutions/testing/proof-rig-loads-the-production-plugin-tree.md.",
+    "isolation": {
+      "team/project": "sjawhar/53 -> slug sjawhar53 (checked against `legion legions`: sjawhar/999, proof/1, b2smoke874610, sjawhar/legion are taken; sjawhar/53 is free)",
+      "state_dir": "/tmp/legion53-rig/daemon",
+      "port / worker_stream_port": "19590 / 19591 (both verified free)",
+      "dispatch sink": "127.0.0.1:19592 (see dispatchSink below)",
+      "NATS": "docker run -d --name legion53-nats -p 127.0.0.1:14342:4222 nats:2.10 -js (14342 verified free)",
+      "tmux server": "tmux -L legion-sjawhar53 — never legion-sjawharlegion",
+      "OMP profile": "l53rig (the live one is `legion`; `setup.sh` refuses to run when the two resolve to the same directory)",
+      "never touched": "/home/ubuntu/legion-ws-RunDaemon, $LEGION_STATE_DIR, ~/.omp/profiles/legion, tmux -L legion-sjawharlegion, the live daemon's ports 13370/13371"
+    },
+    "pluginTree": {
+      "step": "Build the rig profile from the production plugin tree with only the Legion plugin swapped:",
+      "commands": [
+        "SRC=\"$LEGION_WORKSPACE\"; RIG=/tmp/legion53-rig; mkdir -p \"$RIG\"",
+        "RIG_PLUGINS=production RIG_LEGION_BUILD=branch RIG_PROFILE=l53rig \\",
+        "  sh \"$SRC/packages/pi-envoy/scripts/grant-rig/setup.sh\" \"$SRC\" \"$RIG\"",
+        "# setup.sh's branch mode copies dist/envoy.js and dist/legion.js only. The skills a pane",
+        "# resolves come from the package's dist/skills (package.json omp.skills), which prepack.sh",
+        "# builds as `cp -r ../../skills dist/skills` — do the same by hand so `skill://legion-worker`",
+        "# in a rig pane is THIS BRANCH's text:",
+        "PKG=\"$HOME/.omp/profiles/l53rig/plugins/node_modules/@sjawhar/pi-legion-envoy\"",
+        "rm -rf \"$PKG/dist/skills\" && cp -r \"$SRC/skills\" \"$PKG/dist/skills\"",
+        "grep -c 'E2E (implementer)' \"$PKG/dist/skills/legion-worker/SKILL.md\"   # must be >= 1 before the run"
+      ],
+      "note": "Everything else in that tree — secretsd (whose bash-tool replacement is why this mode exists), superpowers, codegraph, knives — stays at the production pins. The rig profile's package.json still reads 1.22.2; the contract gate only needs `legion.daemonApiVersion == 1`, which this issue does not change."
+    },
+    "ompWrapper": {
+      "why": "Two things at once: the expanded system prompt per role (acceptance 3), and an inert root architect and controller so the driver — not a live agent — owns `/process/started` and `/worker/spawn`. `isOmpPane` checks the pane's root process cmdline contains \"omp\" (runtime-tmux.ts:451-456) and the pane's root process is the `legion worker-shim` whose argv carries the omp path, so an inert inner process still probes alive.",
+      "file": "/tmp/legion53-rig/rig-omp (chmod 0755), pointed at by LEGION_OMP_PATH",
+      "code": [
+        "#!/bin/bash",
+        "# Records the argv this pane's shell actually handed OMP (post-\"$(cat …)\" expansion), then",
+        "# runs the real OMP for phase workers and nothing for the root architect and controller.",
+        "set -euo pipefail",
+        "RIG=/tmp/legion53-rig",
+        "mkdir -p \"$RIG/argv\"",
+        "OUT=\"$RIG/argv/${LEGION_ROLE:-${LEGION_CONTROLLER:+controller}}-$$.txt\"",
+        "{",
+        "  printf 'LEGION_ROLE=%s LEGION_ISSUE=%s LEGION_TREE=%s LEGION_CONTROLLER=%s\\n' \\",
+        "    \"${LEGION_ROLE:-}\" \"${LEGION_ISSUE:-}\" \"${LEGION_TREE:-}\" \"${LEGION_CONTROLLER:-}\"",
+        "  for a in \"$@\"; do printf '<<<ARG>>>\\n%s\\n' \"$a\"; done",
+        "} >\"$OUT\"",
+        "if [[ -n \"${LEGION_CONTROLLER:-}\" || \"${LEGION_ROLE:-}\" == architect ]]; then",
+        "  exec sleep 86400   # inert: never registers, so the driver owns /process/started",
+        "fi",
+        "exec \"$REAL_OMP\" \"$@\""
+      ],
+      "realOmp": "REAL_OMP is the build the live daemon's panes run — read it from the live legion.yaml, never hard-coded: `OMP_TOOL=$(sed -n 's/^omp_invocation: *\"mise x \\([^ ]*\\) -- omp\".*/\\1/p' ~/.config/legion/sjawhar-legion/legion.yaml); REAL_OMP=$(mise where \"$OMP_TOOL\")/bin/omp` (today 18.1.18-sami.20260912-203541). Export it in the wrapper or bake the absolute path in; record the value in the PR body.",
+      "probes": "The daemon's two boot probes run through LEGION_OMP_PATH and the launch prefix too; they carry no LEGION_ROLE, so the wrapper execs the real OMP and both probes pass (`pi.agents`, and `LEGION_PLUGIN_LOADED=yes` from the rig profile's swapped plugin)."
+    },
+    "dispatchSink": {
+      "why": "`createDispatchClient` does `options.baseUrl.replace(...)` at boot, so `dispatch_url` cannot be omitted — an unset one is a TypeError before the API serves. A local sink also gives request-level evidence of every status write the daemon attempts (the logging-proxy pattern in scratch-daemon-rig-proves-what-unit-tests-cannot.md).",
+      "file": "/tmp/legion53-rig/dispatch-sink.ts, run under `hub start` (never a foreground loop)",
+      "code": [
+        "const log = Bun.file(\"/tmp/legion53-rig/dispatch-sink.log\").writer();",
+        "Bun.serve({",
+        "  port: 19592,",
+        "  hostname: \"127.0.0.1\",",
+        "  async fetch(request) {",
+        "    const url = new URL(request.url);",
+        "    const body = request.method === \"GET\" ? \"\" : await request.text();",
+        "    log.write(`${new Date().toISOString()} ${request.method} ${url.pathname} ${body}\\n`);",
+        "    log.flush();",
+        "    if (url.pathname.endsWith(\"/issues\")) return Response.json({ issues: [] });",
+        "    return Response.json({});",
+        "  },",
+        "});"
+      ],
+      "env": "DISPATCH_TOKEN=rig-not-a-real-token (any non-empty value; the sink ignores it)"
+    },
+    "seedState": {
+      "why": "A tree only becomes spawnable through admission. Rather than relay real Dispatch events, seed one queued tree: boot's `reconcileAdmission()` promotes every queued tree once the launch hold releases (processes.ts:498-536, advancePromotionSweep at 2282-2313 needs only `tree.status === \"queued\"` and the key on `admission.queue`), and `spawnTree` opens the root pane, writes the boot-token file, and records the locator.",
+      "file": "/tmp/legion53-rig/seed-state.ts, run once before the first boot",
+      "code": [
+        "const [srcRoot, stateDir] = process.argv.slice(2);",
+        "const { newLegionState, saveState } = await import(`${srcRoot}/packages/daemon/src/daemon/legion-state.ts`);",
+        "const issue = \"LEGRIG-1\";",
+        "const state = newLegionState(\"sjawhar53\", 2);",
+        "state.issues[issue] = { key: issue, title: \"LEGION-53 proof rig\", children: [], status: \"todo\" };",
+        "state.trees[issue] = { root: issue, generation: 0, status: \"queued\", launchFailures: 0 };",
+        "state.admission.queue.push(issue);",
+        "await saveState(`${stateDir}/state.json`, state);",
+        "console.log(`seeded ${issue}`);"
+      ],
+      "fallback": "If promotion declines (nothing in `$RIG/daemon.log` about spawning LEGRIG-1 and no pane on `tmux -L legion-sjawhar53`), fall back to the route LEGION-30's rig used: a real Dispatch issue in LEGSMOKE plus `scripts/smoke/envoy-bridge.ts` relaying `notifications.dispatch.issue.>` from production NATS into the rig NATS, and move the issue to `todo`. Say in the PR body which route the run used."
+    },
+    "yaml": {
+      "file": "/tmp/legion53-rig/legion.yaml",
+      "content": [
+        "project: sjawhar/53",
+        "port: 19590",
+        "worker_stream_port: 19591",
+        "dispatch_project: LEGSMOKE",
+        "dispatch_url: http://127.0.0.1:19592",
+        "nats_urls:",
+        "  - nats://127.0.0.1:14342",
+        "repos:",
+        "  - sjawhar/legion",
+        "state_dir: /tmp/legion53-rig/daemon",
+        "admission_cap: 2",
+        "worker_cap: 6",
+        "worker_boot_timeout_seconds: 900   # the inert root never registers; keep its registration deadline out of a 20-minute run",
+        "worker_idle_retire_seconds: 0      # keep every worker pane resident for inspection",
+        "omp_invocation: \"mise x <the live daemon's pin, read from ~/.config/legion/sjawhar-legion/legion.yaml> -- omp\"",
+        "omp_launch_prefix:",
+        "  - env",
+        "  - OMP_PROFILE=l53rig",
+        "  - secrets",
+        "  - ANTHROPIC_API_KEY",
+        "  - GEMINI_API_KEY",
+        "  - OPENAI_API_KEY",
+        "  - --",
+        "gates:",
+        "  design: off",
+        "github_apps:",
+        "  implement:",
+        "    app_id: \"3202636\"",
+        "    private_key_command: 'printf \"%s\" \"$GH_AGENT_APP_PRIVATE_KEY_B64\" | base64 --ignore-garbage --decode'",
+        "  review:",
+        "    app_id: \"3202653\"",
+        "    private_key_command: 'printf \"%s\" \"$GH_REVIEW_APP_PRIVATE_KEY_B64\" | base64 --ignore-garbage --decode'"
+      ],
+      "notes": [
+        "`instructions` is deliberately unset — the live daemon's is commented out, so the rig matches production and the role prompt is the pane's last file-backed fragment.",
+        "`omp_launch_prefix` mirrors the live daemon's list with OMP_PROFILE pointed at the rig profile, so panes load the rig's plugin tree (branch dist + branch skills).",
+        "The daemon is started with LEGION_OMP_PATH set to the wrapper, an explicit operator override environment.ts honours over the pin."
+      ]
+    },
+    "boot": {
+      "commands": [
+        "docker run -d --name legion53-nats -p 127.0.0.1:14342:4222 nats:2.10 -js",
+        "# supervised, never a foreground loop (hub start):",
+        "#   name dispatch-sink: bun /tmp/legion53-rig/dispatch-sink.ts",
+        "mkdir -p /tmp/legion53-rig/daemon",
+        "cd -- \"$SRC\" && bun /tmp/legion53-rig/seed-state.ts \"$SRC\" /tmp/legion53-rig/daemon",
+        "# supervised: name legion53-daemon",
+        "cd -- \"$SRC\" && secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \\",
+        "  env DISPATCH_TOKEN=rig-not-a-real-token \\",
+        "      LEGION_OMP_PATH=/tmp/legion53-rig/rig-omp \\",
+        "      ENVOY_NATS_URL=nats://127.0.0.1:14342 \\",
+        "  bun run packages/daemon/src/cli/index.ts start sjawhar/53 --config /tmp/legion53-rig/legion.yaml",
+        "# ready (boot runs both OMP probes; allow a minute or two under load):",
+        "until curl -sf http://127.0.0.1:19590/legion/v1/state >/dev/null; do sleep 2; done"
+      ],
+      "note": "`secrets` is how this box supplies keys (skill://using-secrets). The GitHub App keys are needed because the daemon clones sjawhar/legion into the rig state dir to provision each worker's workspace."
+    },
+    "driver": {
+      "why": "The inert root pane never registers, so the driver claims the architect capability itself and spawns each role exactly as an architect would.",
+      "commands": [
+        "TOKEN=legion-sjawhar53-legrig-1-architect   # roleToken lower-cases the issue key",
+        "BOOT=$(cat /tmp/legion53-rig/daemon/secrets/$TOKEN)",
+        "# /process/started takes the boot token (no capability) and returns the architect capability:",
+        "SECRET=$(curl -sf -X POST http://127.0.0.1:19590/legion/v1/process/started \\",
+        "  -H 'content-type: application/json' \\",
+        "  -d '{\"tree\":\"LEGRIG-1\",\"generation\":1,\"rootSessionId\":\"rig-driver\",\"agentId\":\"rig\",\"bootToken\":\"'$BOOT'\",\"ompSessionFile\":\"/tmp/legion53-rig/root.jsonl\"}' \\",
+        "  | jq -r .secret)",
+        "# then one spawn per role (planner, implementer, tester, reviewer, merger):",
+        "for ROLE in planner implementer tester reviewer merger; do",
+        "  curl -sf -X POST http://127.0.0.1:19590/legion/v1/worker/spawn -H 'content-type: application/json' \\",
+        "    -d '{\"tree\":\"LEGRIG-1\",\"sessionId\":\"rig-driver\",\"secret\":\"'$SECRET'\",\"issue\":\"LEGRIG-1\",\"role\":\"'$ROLE'\",\"task\":\"<the task text below>\"}'",
+        "done"
+      ],
+      "generationNote": "`generation` must equal `state.trees[\"LEGRIG-1\"].generation` at that moment (1 after the first spawn; a mismatch answers 409 `Stale process generation`). Read it from /tmp/legion53-rig/daemon/state.json rather than assuming — `GET /legion/v1/state` is redacted and carries no `phases`.",
+      "taskText": "Give the planner/implementer/reviewer/merger a trivial task ('Print the phrase READY and stop; do not modify the workspace'). Give the tester the acceptance-4 task: \"Read skill://legion-worker and skill://legion-retro. Quote, verbatim, the sentence containing 'E2E (implementer)', the sentence containing 'A test handoff whose predecessor carried no proof', the retro sentence containing 'A defect the production check finds', and the retro comment tool name. Then run, in a scratch directory, `legion handoff write --phase implement --workspace <scratch> --data '{\\\"filesChanged\\\":[\\\"a.ts\\\"]}'` and quote its exit code and message. Do not modify $LEGION_WORKSPACE.\" That last command exercises the rig's own `<state_dir>/bin/legion` launcher, which re-execs this daemon's checkout — the branch CLI as a pane resolves it."
+    },
+    "evidence": [
+      "/tmp/legion53-rig/argv/<role>-<pid>.txt — the expanded system prompt per role (acceptance 3). `grep -c 'E2E (implementer)' /tmp/legion53-rig/argv/implementer-*.txt` etc.",
+      "The tester pane's transcript (under ~/.omp/profiles/l53rig/agent/sessions/…) with its verbatim quotes and the `legion handoff write` exit line (acceptance 4 and a second observation for 1).",
+      "`tmux -L legion-sjawhar53 list-panes -a -F '#{window_id} #{pane_id} #{pane_start_command}'` — one pane per role, each naming `roles/<role>.md`.",
+      "/tmp/legion53-rig/dispatch-sink.log — every status write the daemon attempted (expected: the admission `in_progress` PATCH for LEGRIG-1; nothing else).",
+      "/tmp/legion53-rig/daemon.log — no `launch-failed`, no `worker-died`."
+    ],
+    "negativeControls": [
+      "Before the skills copy: `grep -c 'E2E (implementer)' $PKG/dist/skills/legion-worker/SKILL.md` returns 0 (the installed 1.22.2 text), and a worker spawned then quotes the OLD sentence — run this leg first, once, so the after-run is attributable to the branch rather than to the rig.",
+      "The inert-pane guard: `grep -c 'E2E (implementer)' /tmp/legion53-rig/argv/architect-*.txt` is 0 for the root architect prompt only if architect-root.md genuinely lacks the phrase — check what the file says and assert the sentence that IS there, never a bare zero."
+    ],
+    "teardown": [
+      "legion stop sjawhar/53   (or stop the supervised process)",
+      "tmux -L legion-sjawhar53 kill-server",
+      "docker rm -f legion53-nats; stop the dispatch sink",
+      "rm -rf /tmp/legion53-rig ~/.omp/profiles/l53rig",
+      "Confirm `tmux -L legion-sjawharlegion list-panes -a` is identical before and after, and that `legion legions` still lists sjawhar/legion on 13370."
+    ]
+  },
+  "testerChecks": [
+    {
+      "check": "grep -c 'E2E (implementer)' skills/legion-worker/SKILL.md",
+      "expect": ">= 2"
+    },
+    {
+      "check": "grep -c 'E2E (tester)' skills/legion-worker/SKILL.md",
+      "expect": ">= 2"
+    },
+    {
+      "check": "grep -n '^\\*\\*Production:\\*\\*' skills/legion-worker/SKILL.md",
+      "expect": "1 hit (the template line)"
+    },
+    {
+      "check": "grep -c 'A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill' skills/legion-worker/SKILL.md packages/pi-envoy/roles/tester.md",
+      "expect": "1 per file"
+    },
+    {
+      "check": "grep -c 'Approval is refused while either' skills/legion-worker/SKILL.md packages/pi-envoy/roles/reviewer.md",
+      "expect": "1 per file"
+    },
+    {
+      "check": "grep -c 'No surface reaches the changed path is a report to the architect, never a reason to complete the phase' skills/legion-worker/SKILL.md packages/pi-envoy/roles/implementer.md",
+      "expect": "1 per file"
+    },
+    {
+      "check": "grep -c 'A defect the production check finds becomes a corrective child issue of the same tree' skills/legion-retro/SKILL.md",
+      "expect": "1"
+    },
+    {
+      "check": "grep -c 'legion gh -- issue comment' skills/legion-retro/SKILL.md",
+      "expect": "0"
+    },
+    {
+      "check": "grep -c 'dispatch_comment' skills/legion-retro/SKILL.md",
+      "expect": ">= 1"
+    },
+    {
+      "check": "grep -c 'Close only after the implementer' skills/legion-architect/SKILL.md packages/pi-envoy/roles/architect.md",
+      "expect": "1 per file"
+    },
+    {
+      "check": "grep -c 'production-check task' skills/legion-architect/SKILL.md",
+      "expect": ">= 2 (section 6 and the pr-merged row)"
+    },
+    {
+      "check": "grep -c 'Nothing else follows a merge' skills/legion-architect/SKILL.md",
+      "expect": "0 (the old pr-merged sentence is gone)"
+    },
+    {
+      "check": "grep -c 'leave the `E2E` section for the tester' packages/pi-envoy/roles/implementer.md",
+      "expect": "0"
+    },
+    {
+      "check": "grep -c 'Production check' AGENTS.md",
+      "expect": ">= 1"
+    },
+    {
+      "check": "grep -c \"architect's cue to send the implementer\" packages/daemon/src/daemon/reducers.ts",
+      "expect": "1"
+    },
+    {
+      "check": "for f in skills/legion-worker/SKILL.md skills/legion-retro/SKILL.md skills/legion-architect/SKILL.md AGENTS.md skills/AGENTS.md packages/pi-envoy/roles/*.md; do echo \"$f $(grep -c '^```' $f)\"; done",
+      "expect": "every count even"
+    },
+    {
+      "check": "cd packages/pi-envoy && bun test extensions/legion.test.ts",
+      "expect": "green (prompt-file and Step-one/closing drift guards)"
+    },
+    {
+      "check": "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit && bun test",
+      "expect": "clean, clean, green"
+    },
+    {
+      "check": "cd packages/contracts && bun test",
+      "expect": "green"
+    }
+  ],
+  "risks": [
+    "An old-shape `implement.json` or `test.json` committed on another tree's in-flight branch stops validating the moment this merges: `legion handoff read` returns null for that phase and prints the new stderr line naming `proof`. That is the spec's intent (Acceptance 2 checks exactly this shape) and the stderr line is what makes it diagnosable — a worker re-writes the handoff with its proof, or reads the file directly. Say this in the PR body's deployment section, where the person restarting the daemon will see it.",
+    "docs/solutions/daemon/handoff-schema-migration-patterns.md says a non-ZodObject member breaks `z.discriminatedUnion`. That was Zod 3. On zod 4.3.6 in this workspace a `.refine()`d member routes and reports correctly (probe run 2026-09-13). Task 1 Step 2's own test is the proof; do not trust either document over the run.",
+    "Every acceptance phrase must sit on one line or its grep returns 0 (text-only-skill-pr-mechanics.md section 2 — the LEGION-18 plan made this exact mistake). Run the testerChecks before committing, not after.",
+    "`packages/pi-envoy/extensions/legion.test.ts` compares the `## Step one` paragraph and the closing envoy-addressing paragraph word for word across all six `LEGION_ROLES` prompts. Adding a sentence to either in one file turns that test red; add to the body paragraphs instead.",
+    "The rig's inert root architect never registers, so its per-tree registration deadline would retire and relaunch it and, at MAX_LAUNCH_FAILURES, mark the tree `launch-failed` — which revokes the architect capability the driver is using. `worker_boot_timeout_seconds: 900` keeps that out of a 20-minute run; if a run goes long, re-read `state.json` and re-do `/process/started` on the current generation.",
+    "Each pane costs about 450 MB. Five workers plus the inert root and controller is roughly 3 GB; check free memory before the run and keep `worker_cap: 6`.",
+    "The rig's plugin-tree copy is ~240 MB and is reused across runs; `RIG_REFRESH_PLUGINS=1` re-copies. `setup.sh` refuses (exit 2) if the rig profile and the source profile resolve to the same directory — never pass `RIG_PROFILE=legion`.",
+    "A credentialed command (`legion gh`, `jj git push`, `legion handoff complete`) must be first in its own bash call: the grant lives 60 seconds from the start of the call (worker-pane-shell-gotchas.md section 1).",
+    "After `jj split`, the issue bookmark sits on the empty working copy; move it with `jj bookmark set legion/LEGION-53 -r @- --allow-backwards` before pushing (worker-pane-shell-gotchas.md section 3)."
+  ],
+  "ordering": "Strictly sequential, one implementer. Task 1 -> Task 2 -> Task 3, each its own commit, because Task 2 consumes Task 1's exported formatter and Tasks 1 and 2 both touch ledger.test.ts and cli/handoff.test.ts (jj path scoping is all-or-nothing per file, so the edits must be sequenced between splits). Then: open the PR with the `E2E (implementer)` line already filled from the Task-1/2 proofs, run the rig for acceptance 3 and 4 before reporting completion, and add the rig's proof to `.legion/implement.json` and the PR body.",
+  "spec_coverage": [
+    {
+      "spec": "Acceptance 1",
+      "covered_by": "Task 1 + Task 2; proofPlan[0]"
+    },
+    {
+      "spec": "Acceptance 2",
+      "covered_by": "Task 2 step 4 (read warning) + its ledger test; proofPlan[1]"
+    },
+    {
+      "spec": "Acceptance 3",
+      "covered_by": "Task 3 (role prompts); proofPlan[2] via proofRig"
+    },
+    {
+      "spec": "Acceptance 4",
+      "covered_by": "Task 3 (worker/retro/architect skills); proofPlan[3] via proofRig"
+    },
+    {
+      "spec": "Acceptance 5",
+      "covered_by": "Task 3 (PR body template) + this tree's own PR body and READY; proofPlan[4]"
+    },
+    {
+      "spec": "Acceptance 6",
+      "covered_by": "This tree's own lifecycle; proofPlan[5], including the action ask for the operator install/restart"
+    },
+    {
+      "spec": "Requirement: implementer proves before completion, handoff carries it",
+      "covered_by": "Task 1 (ImplementHandoff.proof), Task 2 (write refusal), Task 3 (worker skill + implementer prompt)"
+    },
+    {
+      "spec": "Requirement: a handoff without a proof is incomplete; the tester sends it back",
+      "covered_by": "Task 1 (implementerProof verdict), Task 3 (tester bullet/prompt, architect phase-complete row)"
+    },
+    {
+      "spec": "Requirement: tester verifies and adds its own; reviewer refuses; merger names both",
+      "covered_by": "Task 1 (TestHandoff), Task 3 (tester/reviewer/merger)"
+    },
+    {
+      "spec": "Requirement: post-merge production check by the same implementer, recorded, before close",
+      "covered_by": "Task 3 (worker post-merge bullet, architect section 6 step 5 + section 7 + pr-merged row, retro step 5); proofPlan[5]"
+    },
+    {
+      "spec": "Requirement: a missing rig/sandbox/credential/skill is an issue to fix",
+      "covered_by": "Task 3 (worker skill's new 'When no surface reaches the changed path' section, implementer/architect prompts, architect phase-complete row)"
+    },
+    {
+      "spec": "Requirement: `legion handoff write --phase implement` refuses and names the field",
+      "covered_by": "Task 2"
+    },
+    {
+      "spec": "Requirement: a failing read is reported on stderr and still treated as missing",
+      "covered_by": "Task 2"
+    },
+    {
+      "spec": "Requirement: retro stays pre-merge; production recorded on PR and issue; defect -> corrective child",
+      "covered_by": "Task 3 (retro step 5, architect section 6)"
+    },
+    {
+      "spec": "Requirement: the planner names the surface and command per criterion",
+      "covered_by": "This plan's proofPlan; Task 3 (planner prompt)"
+    },
+    {
+      "spec": "Design: Proof shape, schema version stays 1",
+      "covered_by": "Task 1 (globalConstraints pin the version)"
+    },
+    {
+      "spec": "Errors table, all nine rows",
+      "covered_by": "Rows 1-3: Task 1 + Task 2 with tests. Rows 4-9 (tester send-back, missing surface, reviewer refusal, merger refusal, production defect, deploy not yet done): Task 3 text, each with a testerChecks grep"
+    },
+    {
+      "spec": "Testing 1-6",
+      "covered_by": "proofPlan 1-6"
+    },
+    {
+      "spec": "Rejected",
+      "covered_by": "globalConstraints: no version bump, no daemon enforcement, no new role, no retro move, one PR"
+    }
+  ],
+  "notes_for_implementer": [
+    "Read skill://legion-worker first, then this plan, then the spec document (dispatch_doc_read on LEGION-53, version 2). The spec's Rejected section is settled.",
+    "Read docs/solutions/legion/worker-pane-shell-gotchas.md sections 1, 2, 3, 9, 13 and docs/solutions/legion/text-only-skill-pr-mechanics.md before the first commit; between them they cover every mechanical trap this pull request walks into.",
+    "Read docs/solutions/testing/proof-rig-loads-the-production-plugin-tree.md and docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md before building the rig; the second one's 'Reusable procedure' is the shape of the run.",
+    "`bun test` from the repository root is not a CI entry point. Run `bun test` from packages/daemon, packages/contracts, and packages/pi-envoy separately.",
+    "The PR body opens with the merge queue's READY format and the `E2E (implementer)` line already filled — this issue is the first case of its own rule, and a PR body that leaves it for the tester fails acceptance 6.",
+    "Paste command output into the PR body once per round, after that round's last push: every body edit re-runs the whole Tests workflow (text-only-skill-pr-mechanics.md section 6)."
+  ],
+  "taskCount": 3,
+  "independentTasks": 0,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, three sequential commits, one pull request. No parallel workers: the schema, the ledger, the skills, and the seven role prompts are one contract and the two test files are touched by two tasks.",
+  "concerns": [
+    "The stricter schema makes a pre-change implement/test handoff on another tree's in-flight branch read as missing (with a new stderr line naming the field). Intended by the spec; must be stated in the PR body's deployment section.",
+    "Acceptance 6 cannot complete until an operator installs the new plugin release into ~/.omp/profiles/legion/plugins and restarts the sjawhar/legion daemon on the merged main. That is one action ask, opened by the implementer after the merge; the architect's sign-off waits for it.",
+    "The rig needs secretsd keys (ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY for the launch prefix; GH_AGENT_APP_PRIVATE_KEY_B64 and GH_REVIEW_APP_PRIVATE_KEY_B64 for workspace provisioning). If a grant is refused, that is a blocker to report, not a reason to fall back to a unit test."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the push, PR, handoff, and completion contract this pull request both follows and edits.",
+      "test-driven-development — every task writes its test first and records the red output; the PR body's red-to-green table is built from it.",
+      "writing-skills — three SKILL.md files and seven role prompts are the deliverable; this skill is how they are edited and verified.",
+      "using-secrets — the rig's launch prefix and workspace provisioning need secretsd keys; `secrets get` never prints a value.",
+      "verification-before-completion — no completion claim before the proofPlan commands have been run and their output quoted."
+    ],
+    "test": [
+      "legion-worker — the tester's charter, the E2E section, and the unchanged-diff fingerprint rules.",
+      "verification-before-completion — evidence before assertions; re-run the implementer's proof rather than reading its handoff.",
+      "using-secrets — the rig legs need the same keys the implementer used.",
+      "systematic-debugging — a rig that does not reproduce is a debugging problem, not a pass."
+    ],
+    "review": [
+      "legion-worker — the review gate, the one-review-per-round rule, and the approval conditions this PR changes.",
+      "writing-skills — judging whether the new skill and prompt text is unambiguous and internally consistent is most of this review."
+    ]
+  },
+  "learningsInjected": [
+    "legion/worker-pane-shell-gotchas.md",
+    "legion/text-only-skill-pr-mechanics.md",
+    "testing/proof-rig-loads-the-production-plugin-tree.md",
+    "testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
+    "testing/driving-a-real-omp-worker-against-a-stand-in-daemon.md",
+    "daemon/handoff-schema-migration-patterns.md"
+  ],
+  "learningsHelpful": [
+    "legion/worker-pane-shell-gotchas.md",
+    "legion/text-only-skill-pr-mechanics.md",
+    "testing/proof-rig-loads-the-production-plugin-tree.md",
+    "testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T10:37:28.975Z"
+}
