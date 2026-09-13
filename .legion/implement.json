@@ -77,7 +77,27 @@
   "openQuestions": [],
   "subPlanningNeeded": false,
   "testerNotes": "Acceptance 7 (compiled binary) recipe is in the plan's 'For the tester' section; bun build --compile of an entry importing the module. Negative control: a second copy started while the first holds is refused with the exact 'already running (pid H, lock file X)' message.",
+  "corrective": {
+    "round": 1,
+    "trigger": "tester finding F1 (.legion/test.json; https://github.com/sjawhar/legion/pull/1004#issuecomment-5651797778): 'is never inherited by a spawned process: the descriptor is close-on-exec' flaky 3/150 file loops, 1/2 full suites",
+    "rootCause": "Bun.spawn vforks; the child marks inherited fds CLOEXEC via close_range and relies on execve to close them; the kernel resumes the vfork parent from exec_mmap(), before do_close_on_exec(), so Bun.spawn can return while the child still holds a dup of the lock descriptor. flock is per open file description, so release() drops nothing until that dup closes. Test predicate was wrong; module untouched.",
+    "change": "packages/daemon/src/daemon/__tests__/instance-lock.test.ts only: the child is `sh -c 'echo ready; exec sleep 30'` with stdout piped and the test reads 'ready' before lock.release() (sh printing proves its exec completed). Extracted `firstLine(child, role)` shared with spawnHolder's 'locked' wait. Linux /proc/self/fdinfo CLOEXEC-bit assertion kept. No retries, no sleeps. instance-lock.ts unchanged.",
+    "commit": "4a0bb5f5c0c3 test(daemon): wait for the spawned child to pass exec before releasing the instance lock (LEGION-35)",
+    "evidence": {
+      "a_fileLoop150UnderLoad": "START: load=107.72 112.22 120.02 cmd: bun test packages/daemon/src/daemon/__tests__/instance-lock.test.ts\nRESULT: 150 pass, 0 fail of 150 (busy=32, load=155.86 132.56 126.42, wall=188s)",
+      "b_daemonSuite": {
+        "run1": "997 pass | 6 skip | 0 fail | Ran 1003 tests across 60 files. [39.93s]",
+        "run2": "(fail) ProcessManager > reconnectRoots re-arms the registration deadline for an active tree with a locator that never confirmed before a restart [136.89ms] | 996 pass | 6 skip | 1 fail | Ran 1003 tests across 60 files. [48.44s]",
+        "run3": "997 pass | 6 skip | 0 fail | Ran 1003 tests across 60 files. [42.30s]",
+        "note": "Runs 1 and 3 fully green (997 pass, 6 skip, 0 fail). Run 2's single failure is `ProcessManager > reconnectRoots re-arms the registration deadline for an active tree with a locator that never confirmed before a restart` (processes.test.ts:5220, `expect(windowCount).toBe(1)` got 0 after `flushEventLoopUntil(..., 20_000)` ticks) — fully mocked ProcessManager code with no instance-lock involvement; processes.ts and processes.test.ts are not touched by this branch (jj diff from base zmqrrsnovmwv) and that test is byte-identical between our base and main@origin. Isolated: that single test alone 27 pass, 3 fail of 30 at ambient load ~130. Pre-existing host-load flake on main, outside this round's binding scope (test file + PR body only); routed to the architect in the completion summary."
+      },
+      "c_typeCheckAndLint": "cd packages/daemon && bunx tsc --noEmit → exit 0; biome check packages/daemon/src/daemon/__tests__/instance-lock.test.ts → Checked 1 file, No fixes applied, exit 0",
+      "singleFileGreen": "bun test instance-lock.test.ts → 12 pass, 0 fail"
+    },
+    "prBody": "Race-reproduction section now leads with the tester's three-contender figure on the pre-fix module (RESULT: 32 pass, 18 fail of 50, failing iterations listed) and keeps the implementer's two-contender 1/50 line labelled marginal; the After block carries both 50/50 and the corrective 150/150 lines. CI line updated after watching the run on the new head.",
+    "unrelatedFlakeForArchitect": "processes.test.ts 'reconnectRoots re-arms the registration deadline for an active tree with a locator that never confirmed before a restart' fails ~10% (3/30 isolated, 1/3 full suites) at host load ~130-150: flushEventLoopUntil's 20_000-tick bound is exhausted before the mocked resurrection lands. Pre-existing on main; not LEGION-35's; needs its own issue."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T06:22:31.510Z"
+  "completed": "2026-09-13T07:06:30.023Z"
 }
