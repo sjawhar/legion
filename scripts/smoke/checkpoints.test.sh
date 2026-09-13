@@ -23,6 +23,14 @@ printf 'envoy\n' >"${smoke_dir}/webhook-mode"
 write_state() {
   printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
 }
+# The same rig as a single-issue tree: LEGSMOKE-1 has no child, and the architect spawned a
+# planner on the root itself (`roles` carries a non-architect claim with issue == root). `$1` is
+# the gates record, `$2` the role claimed on the root (default planner; pass "architect" to model
+# a tree that has not moved past the gate at all).
+write_single_issue_state() {
+  local role="${2:-planner}"
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-1-architect":{"issue":"LEGSMOKE-1","role":"architect","sessionId":"ses_arch"},"legion-exampleorg24-legsmoke-1-'"$role"'":{"issue":"LEGSMOKE-1","role":"'"$role"'","sessionId":"ses_'"$role"'","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%5"}}},"admission":{"active":["LEGSMOKE-1"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
 write_state '{}'
 printf 'off\n' >"${smoke_dir}/design-gate"
 # LEGSMOKE-1 is this rig's own root; LEGSMOKE-99 is a second parentless issue with no relation to
@@ -45,7 +53,11 @@ case "$request" in
     fi
     ;;
   *"/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1"*)
-    printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
+    if [[ -n "${CHILDREN_FILE:-}" ]]; then
+      cat "$CHILDREN_FILE"
+    else
+      printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
+    fi
     ;;
   *"/api/v1/issues/LEGSMOKE-1"*)
     printf '%s' '{"key":"LEGSMOKE-1","status":"in_progress"}'
@@ -161,7 +173,7 @@ expect_output() {
 # Default rig (`gates.design: off`): the architect registered no gate and requested no approval;
 # checkpoints 3 and 4 pass on the spec, the child, and the release alone.
 run_checkpoint 3
-expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off)'
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a child issue observed'
 grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1/artifacts' "$curl_log"
 grep -Fq 'http://dispatch.test/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1' "$curl_log"
 ! grep -Fq '/asks?state=' "$curl_log" || {
@@ -184,7 +196,7 @@ printf 'root-issues\n' >"${smoke_dir}/design-gate"
 awaiting_artifacts="${temporary_dir}/artifacts-awaiting.json"
 printf '%s' '[{"id":"art-spec","name":"spec.md","primary":true,"versions":[{"number":1}],"approval":{"state":"awaiting","latest_version":1,"requested_by":{"kind":"session","id":"arch"},"ask_id":"ask-design"}}]' >"$awaiting_artifacts"
 ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3
-expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and child issue observed'
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and a child issue observed'
 # A Dispatch server without document approval (or a spec nobody requested approval of) reports no
 # open request: the checkpoint must fail naming the missing request, never pass on a gate that can
 # never be satisfied.
@@ -198,6 +210,31 @@ run_checkpoint 4
 expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'
 printf 'PASS: checkpoint 4 under root-issues requires the recorded approval at the current spec version\n'
 printf 'off\n' >"${smoke_dir}/design-gate"
+
+# Single-issue tree (the legion-architect skill allows one): no child issue exists, but the
+# architect spawned a phase worker on the root. Checkpoints 3 and 4 pass on that claim and say so.
+no_children="${temporary_dir}/children-none.json"
+printf '%s' '[]' >"$no_children"
+write_single_issue_state '{}'
+CHILDREN_FILE="$no_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker on the root (single-issue tree) observed'
+CHILDREN_FILE="$no_children" run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: a planner phase worker is claimed on the root (single-issue tree)'
+printf 'root-issues\n' >"${smoke_dir}/design-gate"
+write_single_issue_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
+ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$no_children" run_checkpoint 3
+expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and a planner phase worker on the root (single-issue tree) observed'
+CHILDREN_FILE="$no_children" run_checkpoint 4
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a planner phase worker is claimed on the root (single-issue tree)'
+printf 'PASS: checkpoints 3 and 4 accept a single-issue tree whose root carries a phase-worker claim, in both design-gate modes\n'
+# Neither a child nor a phase worker: the tree has not moved past the gate, and the failure says so.
+printf 'off\n' >"${smoke_dir}/design-gate"
+write_single_issue_state '{}' architect
+CHILDREN_FILE="$no_children" run_checkpoint 3 && { printf 'checkpoint 3 passed with neither a child issue nor a phase worker\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has neither a Dispatch child issue nor a phase-worker role claim on the root'
+CHILDREN_FILE="$no_children" run_checkpoint 4 && { printf 'checkpoint 4 passed with neither a released child nor a phase worker\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: neither a child is released into admission or an active tree nor a phase worker is claimed on LEGSMOKE-1'
+printf 'PASS: checkpoints 3 and 4 fail naming the root when neither a child issue nor a phase worker exists\n'
 write_state '{}'
 
 # none mode: no Dispatch issue event reaches the rig NATS, so 1-4 and 12 are blocked with the

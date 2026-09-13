@@ -248,6 +248,31 @@ checkpoint_two() {
   printf 'CHECKPOINT 2 OK: Dispatch reports %s in_progress; architect locator is live\n' "$root"
 }
 
+# How the tree moved past the gate: a Dispatch child issue under the root (the decomposed path),
+# or a phase-worker role claim on the root itself in daemon state (a single-issue tree: any role
+# other than the architect, e.g. planner or implementer). Prints which one was observed, or fails
+# naming the root when neither is.
+tree_progress() {
+  local root="$1"
+  local daemon_state="$2"
+  local children
+  local worker
+  children="$(dispatch_children "$root")"
+  if jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children"; then
+    printf 'a child issue\n'
+    return
+  fi
+  worker="$(jq -er --arg root "$root" '
+    [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
+    | first // empty
+  ' <<<"$daemon_state")" || true
+  if [[ -n "$worker" ]]; then
+    printf 'a %s phase worker on the root (single-issue tree)\n' "$worker"
+    return
+  fi
+  fail "${root} has neither a Dispatch child issue nor a phase-worker role claim on the root: the tree has not moved past the gate"
+}
+
 # The daemon's design gate is a human's approval of the root spec document at a version. What this
 # checkpoint proves depends on the policy the rig recorded (`stored_design_gate`):
 # - `root-issues`: before the human acts, the architect must have registered the document
@@ -255,8 +280,10 @@ checkpoint_two() {
 #   open approval request on it (`approval.state == "awaiting"`, from `dispatch_request_approval`).
 # - `off`: the architect was told in its system prompt that the gate is off, so it must have
 #   registered no gate and requested no approval — nothing waits in anyone's inbox.
-# Either way the spec is posted as the root's primary `spec.md` and a child issue exists. No
-# `Approve` ask is involved in either mode.
+# Either way the spec is posted as the root's primary `spec.md` and the tree has moved past the
+# gate — the architect created a child issue, or (a single-issue tree, which the legion-architect
+# skill allows) it spawned a phase worker on the root itself. No `Approve` ask is involved in
+# either mode.
 checkpoint_three() {
   local root
   local design_gate
@@ -264,7 +291,7 @@ checkpoint_three() {
   local gate_artifact
   local gate_version
   local artifacts
-  local children
+  local progress
 
   root="$(dispatch_root_key)"
   design_gate="$(stored_design_gate)"
@@ -304,15 +331,13 @@ checkpoint_three() {
       fail "recorded design-gate policy '${design_gate}' is neither off nor root-issues"
       ;;
   esac
-  children="$(dispatch_children "$root")"
-  jq -e --arg root "$root" 'any(.[]; .parent == $root)' >/dev/null <<<"$children" ||
-    fail "${root} has no Dispatch child issue"
+  progress="$(tree_progress "$root" "$daemon_state")"
   case "$design_gate" in
     root-issues)
-      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and child issue observed\n'
+      printf 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and %s observed\n' "$progress"
       ;;
     off)
-      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and child issue observed\n'
+      printf 'CHECKPOINT 3 OK: posted spec artifact, no design gate or approval request (gates.design: off), and %s observed\n' "$progress"
       ;;
   esac
 }
@@ -320,11 +345,14 @@ checkpoint_three() {
 # Under `root-issues`, between checkpoints 3 and 4 a human approves the root spec document (the
 # document header's Approve, or the approval ask with Approve), and the daemon records that
 # approval on the gate (`approvedVersion == latestVersion`) before it lets the architect release
-# anything. Under `off` there is no gate to check; only the release itself is observed.
+# anything. Under `off` there is no gate to check; only the release itself is observed — a child
+# released into admission or an active tree, or a phase-worker role claim on the root itself (a
+# single-issue tree).
 checkpoint_four() {
   local root
   local design_gate
   local daemon_state
+  local released
 
   root="$(dispatch_root_key)"
   design_gate="$(stored_design_gate)"
@@ -347,11 +375,20 @@ checkpoint_four() {
             $tree_status == "active")
       )
     ] | length > 0
-  ' >/dev/null <<<"$daemon_state" || fail "no child is released into admission or an active tree"
+  ' >/dev/null <<<"$daemon_state" && released="a released child is tracked by admission or tree state"
+  if [[ -z "${released:-}" ]]; then
+    released="$(jq -er --arg root "$root" '
+      [.roles | to_entries[] | select(.value.issue == $root and .value.role != "architect") | .value.role]
+      | first // empty
+    ' <<<"$daemon_state")" || true
+    [[ -n "$released" ]] ||
+      fail "neither a child is released into admission or an active tree nor a phase worker is claimed on ${root}"
+    released="a ${released} phase worker is claimed on the root (single-issue tree)"
+  fi
   if [[ "$design_gate" == root-issues ]]; then
-    printf 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state\n'
+    printf 'CHECKPOINT 4 OK: spec approval recorded on the gate; %s\n' "$released"
   else
-    printf 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state\n'
+    printf 'CHECKPOINT 4 OK: %s\n' "$released"
   fi
 }
 
