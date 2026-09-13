@@ -263,28 +263,38 @@ export class WorkerBootWatchdog {
       }
     };
 
-    /** `retireUnconfirmedBoot`, with a stop it could not confirm -- a `ProcessStopFailed`: the
-     * pane would not die, or could not even be listed -- treated exactly like a probe that
-     * could not complete: `retireWorkerLocator` rethrows before anything clears, so the claim
-     * and its locator are untouched, and the watch stays armed for one more interval and
-     * retires again then, rather than ending here with the boot unwatched until a restart.
-     * Returns whether the watch is finished. The armed entry is removed before the call, never
-     * after: the retirement's own cancel of this token's watch must not flip `cancelled` on the
-     * very watch that is retiring it; a failed retirement puts the entry back under the same
-     * generation so a later `/worker/ready` or tree close still cancels it. */
+    /** `retireUnconfirmedBoot`, with a rejection -- in practice a `ProcessStopFailed`: the pane
+     * would not die, or could not even be listed; `retireWorkerLocator` rethrows before anything
+     * clears, so the claim and its locator are untouched -- treated exactly like a probe that
+     * could not complete: the watch stays armed for one more interval and retires again then,
+     * rather than ending here with the boot unwatched until a restart. Returns whether the watch
+     * is finished. The armed entry is removed before the call, never after: the retirement's own
+     * cancel of this token's watch must not flip `cancelled` on the very watch that is retiring
+     * it. That also means a `cancelAll()` (daemon dispose) or a same-token cancel landing during
+     * the await finds no entry to cancel -- so the catch re-checks: a cancelled or disposed
+     * watch, or one a newer arm has superseded (`armed` already holds this token), is finished
+     * here, never looped for another interval of timers, dials, and a second retirement that
+     * would persist after the daemon's final save. Only a watch that is none of those puts its
+     * entry back under the same generation, so a later `/worker/ready` or tree close still
+     * cancels it. */
     const retire = async (): Promise<boolean> => {
       if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
       try {
         await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
         return true;
       } catch (error) {
+        if (cancelled || this.disposed || this.armed.has(token)) {
+          console.error(
+            `[legion] worker ${issue}/${role} could not be retired, and its watch was cancelled meanwhile; leaving it to the next arm:`,
+            error
+          );
+          return true;
+        }
         console.error(
-          `[legion] worker ${issue}/${role} could not be retired; re-arming the watch rather than leaving its boot unwatched:`,
+          `[legion] worker ${issue}/${role} could not be retired; re-arming the watch for one more interval:`,
           error
         );
-        if (!cancelled && !this.disposed && !this.armed.has(token)) {
-          this.armed.set(token, { generation, cancel });
-        }
+        this.armed.set(token, { generation, cancel });
         return false;
       }
     };
@@ -299,7 +309,8 @@ export class WorkerBootWatchdog {
           if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
           return;
         }
-        if (await this.probeAlive(token, locator)) {
+        const alive = await this.probeAlive(token, locator);
+        if (alive) {
           aliveButUnconfirmedIntervals += 1;
           const deadline = this.deps.registrationDeadlineIntervals();
           if (aliveButUnconfirmedIntervals < deadline) {
@@ -317,17 +328,14 @@ export class WorkerBootWatchdog {
             await this.yieldToEventLoop();
             continue;
           }
-          console.error(
-            `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
-          );
-          if (await retire()) return;
-          await this.yieldToEventLoop();
-          continue;
         }
         console.error(
-          `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
+          alive
+            ? `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
+            : `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
         );
         if (await retire()) return;
+        // Same macrotask boundary as the slow-boot re-arm above, for the same reason.
         await this.yieldToEventLoop();
       }
     };

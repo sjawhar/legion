@@ -398,12 +398,69 @@ describe("WorkerBootWatchdog liveness probe", () => {
         "retire:2",
       ]);
       expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
-      // The successful retirement ends the watch: a later cancel finds nothing armed.
+      // The successful retirement ends the watch: with the fake `sleep`/`yield` a still-running
+      // loop would probe again within a few microtasks, and `events` would grow.
+      for (let i = 0; i < 50; i += 1) await Promise.resolve();
+      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
       watchdog.cancel(token, 1);
-      await Promise.resolve();
-      expect(retirements).toBe(2);
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
     } finally {
       consoleError.mockRestore();
+    }
+  });
+
+  it("ends the watch, running nothing further, when cancelAll() lands while a retirement is in flight and that retirement then fails", async () => {
+    // The armed entry is removed before the retirement runs (so the retirement's own cancel of
+    // this token cannot flip `cancelled` on the very watch retiring it), which means a
+    // `cancelAll()` -- daemon dispose -- landing mid-await finds nothing to cancel. When the
+    // retirement then fails, the watch must still be finished: no further interval (real
+    // timers, connect dials), no `list-panes` probe, no second `retireUnconfirmedBoot` (which
+    // would `persist()` after the daemon's final save), no timer left behind.
+    const timers = trackRealTimers();
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const retiring = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.01,
+          sleep: async () => {},
+          yield: async () => {},
+          probe: async () => {
+            events.push("probe");
+            return { status: "dead", reason: "gone" };
+          },
+          connect: async () => {
+            events.push("connect");
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            events.push("retire");
+            retiring.resolve();
+            await release.promise;
+            throw new Error(
+              "failed to stop pane %7: list-panes -t %7 exited 1: server not responding"
+            );
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      await retiring.promise;
+      // Dispose lands while the retirement is in flight; then the retirement fails.
+      watchdog.cancelAll();
+      const seenAtCancel = events.length;
+      release.resolve();
+      for (let i = 0; i < 400; i += 1) await Promise.resolve();
+
+      expect(events.slice(seenAtCancel)).toEqual([]);
+      expect(events.filter((event) => event === "retire")).toEqual(["retire"]);
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+      timers.restore();
     }
   });
 });
