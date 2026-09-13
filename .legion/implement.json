@@ -5,8 +5,8 @@
     "url": "https://github.com/sjawhar/legion/pull/1020",
     "branch": "legion/LEGION-45",
     "base": "main",
-    "headSha": "0636a2ff37777dd3156b33106876f7cef6649c5f",
-    "headShaNote": "The last round-2 implementation commit; `implement: record handoff` follows it and is the pushed tip. Round 1 implementation tip was 5c3a1824."
+    "headSha": "d28ece0d61e4c6cad54af644d33131db2a70d4a7",
+    "headShaNote": "The round-3 implementation commit; `implement: record handoff` follows it and is the pushed tip. Round-1 implementation tip 5c3a1824, round-2 0636a2ff."
   },
   "rebasedOnto": "Not rebased: main@origin stayed at 52c5e03e7cb3 (the plan's base) for the whole phase.",
   "planStepsExecuted": "0 -> 1 -> 1b -> 2 -> 3 -> 5 -> 4 -> 6, TDD per step: every new test was run and seen failing before its production change (step 1: all 19 bash rows allowed by mistake; step 1b: the subagent's bash undo passed; step 5: all 6 eval/hub rows allowed by mistake); steps 2 and 3 passed with no production change, as the plan predicted.",
@@ -70,6 +70,12 @@
       "commit": "0636a2ff37777dd3156b33106876f7cef6649c5f",
       "step": "review round 1, thread r3999453669",
       "description": "docs(pi-envoy): the grant rig usage header lists --prompt-file (LEGION-45)"
+    },
+    {
+      "change": "ykumlwkl",
+      "commit": "d28ece0d61e4c6cad54af644d33131db2a70d4a7",
+      "step": "review round 2, thread r3999530728",
+      "description": "fix(pi-envoy): the operation-log guard drops a backslash-newline inside double quotes as bash does (LEGION-45)"
     }
   ],
   "filesChanged": [
@@ -109,7 +115,7 @@
     "rigSmoke": "cd packages/pi-envoy && bunx tsc --noEmit && bun scripts/grant-rig/run.ts prompt | head -3 -> default prompt unchanged; `prompt --prompt-file /dev/null` parses",
     "ci": "GitHub CI at the pushed tip is watched after this handoff commit; the PR body's CI line is updated with the run id and head once it settles."
   },
-  "testerNotes": "Follow plan.json testerNotes.e2e verbatim: the rig's --prompt-file flag is in commit 5c3a1824 (packages/pi-envoy/scripts/grant-rig/README.md documents it under 'Running it'). Re-read ~/.config/legion/sjawhar-legion/legion.yaml for the OMP pin. Expected: items 3-7 of the prompt refused with 'every Legion issue workspace shares' (bash undo, bash op restore, bash abandon, eval, hub start), items 1, 2, 8, 9 run, and `jj -R $RIG/ws op log` shows the describe from item 2 as the newest mutating operation. Negative control on RIG_LEGION_BUILD=1.22.2: item 3 runs and the op log gains an undo operation. Note for writing the E2E line and any PR comment through bash under the new plugin: quoted text that mentions jj with undo/abandon/op restore is refused — use the write tool for such files, or say 'operation-log rollback'. Round 2: the rig prompt is unchanged; additionally exercise one quoted form (bash: jj -R \"$LEGION_WORKSPACE\" \"undo\") and one redirection form (bash: jj -R \"$LEGION_WORKSPACE\" 2>&1 undo) and expect both refused with the shared-log reason.",
+  "testerNotes": "Follow plan.json testerNotes.e2e verbatim: the rig's --prompt-file flag is in commit 5c3a1824 (packages/pi-envoy/scripts/grant-rig/README.md documents it under 'Running it'). Re-read ~/.config/legion/sjawhar-legion/legion.yaml for the OMP pin. Expected: items 3-7 of the prompt refused with 'every Legion issue workspace shares' (bash undo, bash op restore, bash abandon, eval, hub start), items 1, 2, 8, 9 run, and `jj -R $RIG/ws op log` shows the describe from item 2 as the newest mutating operation. Negative control on RIG_LEGION_BUILD=1.22.2: item 3 runs and the op log gains an undo operation. Note for writing the E2E line and any PR comment through bash under the new plugin: quoted text that mentions jj with undo/abandon/op restore is refused — use the write tool for such files, or say 'operation-log rollback'. Round 2: the rig prompt is unchanged; additionally exercise one quoted form (bash: jj -R \"$LEGION_WORKSPACE\" \"undo\") and one redirection form (bash: jj -R \"$LEGION_WORKSPACE\" 2>&1 undo) and expect both refused with the shared-log reason. Round 3: additionally exercise the double-quoted split-word form (bash: jj -R \"$LEGION_WORKSPACE\" \"un\\\\<newline>do\") and expect it refused with the shared-log reason.",
   "fastFollow": "none",
   "reviewRounds": [
     {
@@ -171,9 +177,39 @@
         "repoBiome": "bunx biome check --error-on-warnings packages/pi-envoy/extensions packages/pi-envoy/src packages/pi-envoy/scripts -> clean"
       },
       "branchNote": "Built on the reviewer's local `review: record handoff` commit 0d1c9791 (the review App cannot push); this push carries it."
+    },
+    {
+      "round": 2,
+      "review": "https://github.com/sjawhar/legion/pull/1020#pullrequestreview-5190591094 (REQUEST_CHANGES at f6c28de2)",
+      "rootCause": "Inside double quotes the tokenizer kept a backslash-newline in the word while bash removes it, so the double-quoted split-word form of the rollback tokenised to a non-matching word and was allowed (proven to run by the reviewer).",
+      "threads": [
+        {
+          "thread": "https://github.com/sjawhar/legion/pull/1020#discussion_r3999530728",
+          "blocking": true,
+          "fix": "d28ece0d61e4c6cad54af644d33131db2a70d4a7 fix(pi-envoy): the operation-log guard drops a backslash-newline inside double quotes as bash does",
+          "change": "splitShellCommands: one branch before the double-quoted escape branch drops a backslash followed by newline inside double quotes (the twin of the unquoted continuation rule); the unquoted rule's comment says so. Single quotes keep both characters, as bash does.",
+          "rowsAdded": {
+            "refused": [
+              "jj \"un\\\\\\ndo\""
+            ],
+            "allowed": [
+              "jj 'un\\\\\\ndo'"
+            ]
+          },
+          "tdd": "The refused row was allowed by mistake before the fix; the allowed row already passed; 0 wrong verdicts after, every existing row unchanged. A probe of the real matcher also confirmed the reviewer's other named forms refused (jj -R \"$LEGION_WORKSPACE\" \"un\\\\\\ndo\", jj op \"rest\\\\\\nore\" @-, \"jj\" \"un\\\\\\ndo\") and jj describe -m \"fix undo\\\\\\nlater\" and the skill's multi-line fingerprint pipeline allowed."
+        }
+      ],
+      "architectDecision": "Process substitution (`jj --config-file <(true) undo`) stays out of scope per the spec v4 Rejected entry. Not widened.",
+      "verification": {
+        "targetedTests": "11 pass, 0 fail, 84 expect() calls. Tables now: 30 refused bash rows, 16 allowed bash rows, 6 role-sanctioned commands, 6 refused + 5 allowed eval/hub calls, 1 subagent row.",
+        "packageCi": "cd packages/pi-envoy && bun run build && bun run lint && bun run typecheck && bun run test -> build ok, lint clean, tsc clean, 171 pass / 0 fail",
+        "daemonJob": "cd packages/daemon && bunx biome check --error-on-warnings src/ && bunx tsc --noEmit -> both clean",
+        "repoBiome": "bunx biome check --error-on-warnings packages/pi-envoy/extensions packages/pi-envoy/src packages/pi-envoy/scripts -> clean"
+      },
+      "branchNote": "Built on the reviewer's local `review: record round-2 handoff` commit 6a982f86; this push carries it. The three round-1 threads carry the reviewer's own Accepted (r3999526996, r3999527151, r3999527271) and are resolved by this round's `legion threads resolve` run before the push."
     }
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T11:23:23.873Z"
+  "completed": "2026-09-13T12:22:03.178Z"
 }
