@@ -1,0 +1,138 @@
+{
+  "pr": {
+    "number": 1003,
+    "url": "https://github.com/sjawhar/legion/pull/1003",
+    "head": "caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "base": "main",
+    "bookmark": "legion/LEGION-34",
+    "title": "feat(cli): legion threads resolve resolves the review threads the reviewer accepted (LEGION-34)"
+  },
+  "commits": [
+    {
+      "sha": "ff165ff8a73b",
+      "message": "feat(cli): legion threads resolve resolves the review threads the reviewer accepted"
+    },
+    {
+      "sha": "caa02ad28b47",
+      "message": "docs(legion): who resolves review threads and why the review App cannot"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/src/cli/review-threads.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/cli/__tests__/review-threads.test.ts",
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-architect/SKILL.md",
+    "packages/pi-envoy/roles/reviewer.md",
+    "packages/pi-envoy/roles/implementer.md",
+    "packages/pi-envoy/roles/merger.md",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "AGENTS.md",
+    "docs/solutions/daemon/external-red-and-phase-ownership.md",
+    "packages/pi-envoy/CHANGELOG.md"
+  ],
+  "deviations": [
+    "`--repo <owner>/<name>` is a required flag (nothing in a pane's environment names the repository; the daemon's state response carries none and adding one is a daemon-API bump). Accepted by the architect before implementation.",
+    "`skills/legion-architect/SKILL.md` gains one paragraph after the sign-off order: the action ask for a thread GitHub refuses to resolve. Accepted by the architect before implementation."
+  ],
+  "trickyParts": [
+    "cmdGh's grant redemption is extracted verbatim into `redeemGitHubToken` (same request body, same error strings, same child env); `legion gh`'s 22 existing tests are the regression lock. PR #992 (LEGION-54) rewrites `grantFrom` and cmdGh's spawn line; if it lands first and GitHub reports CONFLICTING, the plan's step-1 note records the cmdGh resolution.",
+    "GraphQL Bot logins are the bare App slug (`legion-implementer`), never `<slug>[bot]`; the acceptance rule compares the opener's and newest comment's logins from the same query, never against `/gh-token`'s `appLogin`.",
+    "The bash tool prepends the real `LEGION_GRANT` to every command; a second, imitated `export LEGION_GRANT=` line in the command text shadows it and every `legion …`/credential-helper call answers 403 (`could not read Username` from `jj git push`). Running grant-needing commands through the eval kernel's `tool.bash` bridge, with the shell command in a script file, kept the command text clean.",
+    "The shared jj op log (one repo, ~25 issue workspaces) raced my `git push` with another workspace's op; the automatic reconcile re-minted this workspace's working-copy commit as an empty one and hid the old one whose only content was the 0-byte, extension-provisioned `.omp/config.yml`. `jj workspace update-stale` with that file backed up and restored recovered it; nothing tracked was lost.",
+    "No `pr-checks-result` job exists in this repository's workflows; the PR body's CI line cites the `Tests` workflow run (34741048302) at the head instead."
+  ],
+  "liveRuns": {
+    "surface": "branch CLI `bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion` from the implementer pane against the real daemon and GitHub, at head caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "run1_empty": {
+      "output": [
+        "no unresolved threads"
+      ],
+      "exit": 0
+    },
+    "threads": {
+      "A": {
+        "commentId": 3998865225,
+        "threadId": "PRRT_kwDORFy7ds6h2yAp",
+        "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998865225",
+        "replies": [
+          "Accepted: not a defect — implementer live check A."
+        ]
+      },
+      "B": {
+        "commentId": 3998865298,
+        "threadId": "PRRT_kwDORFy7ds6h2yBh",
+        "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998865298",
+        "replies": [
+          "Still open: implementer live check B (negative control).",
+          "Accepted: not a defect — negative control complete."
+        ]
+      }
+    },
+    "run2_after_A_accepted_B_still_open": {
+      "output": [
+        "resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998865225",
+        "left open https://github.com/sjawhar/legion/pull/1003#discussion_r3998865298 — newest reply by legion-implementer is not an acceptance"
+      ],
+      "exit": 0,
+      "github": {
+        "PRRT_kwDORFy7ds6h2yAp": {
+          "isResolved": true
+        },
+        "PRRT_kwDORFy7ds6h2yBh": {
+          "isResolved": false
+        }
+      }
+    },
+    "run3_after_B_accepted": {
+      "output": [
+        "resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998865298"
+      ],
+      "exit": 0,
+      "github": {
+        "PRRT_kwDORFy7ds6h2yAp": {
+          "isResolved": true
+        },
+        "PRRT_kwDORFy7ds6h2yBh": {
+          "isResolved": true
+        }
+      }
+    },
+    "run4_empty": {
+      "output": [
+        "no unresolved threads"
+      ],
+      "exit": 0
+    },
+    "malformedRepo": {
+      "command": "threads resolve --pr 1 --repo nope",
+      "stderr": "--repo must be <owner>/<name> (got \"nope\")",
+      "exit": 1
+    },
+    "malformedPr": {
+      "command": "threads resolve --pr abc --repo sjawhar/legion",
+      "stderr": "--pr must be a pull request number (got \"abc\")",
+      "exit": 1
+    }
+  },
+  "unitTests": {
+    "file": "packages/daemon/src/cli/__tests__/review-threads.test.ts",
+    "command": "cd packages/daemon && bun test src/cli/__tests__/review-threads.test.ts src/cli/__tests__/index.test.ts",
+    "result": "25 pass, 0 fail",
+    "lint": "bunx biome check --error-on-warnings src/ clean",
+    "typecheck": "bunx tsc --noEmit clean"
+  },
+  "ci": {
+    "Tests": 34741048302,
+    "Legion Envoy and Contracts": 34741048337,
+    "head": "caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "conclusion": "success"
+  },
+  "acceptance3": "main ruleset 12331919: required_review_thread_resolution: false (recorded in the PR body and the spec's Requirements table).",
+  "prBodyEdits": 1,
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T05:49:22.118Z"
+}
