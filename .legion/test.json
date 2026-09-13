@@ -1,0 +1,70 @@
+{
+  "summary": "LEGION-75 at PR https://github.com/sjawhar/legion/pull/1035, branch head a20cf9b81674b7447a0c53837ed6ac065a648365 (code commit d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866): all five acceptance lines pass. Verified with my own commands, not the implementer's handoff: the checked-in bash test at the PR head gives `Results: 22 passed, 0 failed` exit 0; each of Cases 1, 2, 2b and 3 was also reproduced by hand in a fresh mktemp -d with scratch scripts that use only release-push.sh (never the test file's helpers); the pi-envoy manifest is 1.24.0 on main@origin, the newest tag and the newest GitHub release alike; the header comment covers the race, the rule, the abort and the summary; the three release.yaml push-main call sites pass the same package dir as their job's tag call plus the version output; pr-and-main.yaml job test runs the test as step 2 and the PR's Tests run shows that step green. The production `Push version bump` step itself cannot be observed from this PR: nothing under packages/ changes, so merging triggers no release; it first runs on the next Release Packages run.",
+  "passed": 5,
+  "failed": 0,
+  "failures": [],
+  "skillsFollowed": [
+    "legion-worker",
+    "verification-before-completion"
+  ],
+  "headSha": "a20cf9b81674b7447a0c53837ed6ac065a648365",
+  "codeCommit": "d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866",
+  "environment": "git 2.43.0, jaq 2.3.0 (jq clone; runner has jq 1.7 and agrees, see CI step log)",
+  "acceptance": [
+    {
+      "criterion": "1 — same-package race: exit 0, origin/main at the higher version, one bump commit per release",
+      "verdict": "pass",
+      "checkedInTest": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/release-push.test.sh → `Results: 22 passed, 0 failed` / `PASS: release-push.sh push-main`, EXIT=0, at @- = a20cf9b81674b7447a0c53837ed6ac065a648365 (2.67 s wall).",
+      "byHand": "/tmp/legion-75-case1.sh (scratch; bare origin seeded with packages/pkg/package.json at 1.0.0 + README, clone A bumps 1.0.1 and pushes, clone B — cloned before A's push — bumps 1.0.2 and runs `release-push.sh push-main packages/pkg 1.0.2`): push rejected `(fetch first)` → `CONFLICT (content): Merge conflict in packages/pkg/package.json` → `Resolving the packages/pkg/package.json version-line conflict to v1.0.2` (grep -c = 1) → `Successfully rebased and updated refs/heads/main.` → `e655678..2eb9157  main -> main`; exit 0; origin/main .version = 1.0.2; `git log --oneline origin/main` = `2eb9157 chore: release pkg v1.0.2 [skip ci]` / `e655678 chore: release pkg v1.0.1 [skip ci]` / `d857708 seed`; no .git/rebase-merge or rebase-apply left in B."
+    },
+    {
+      "criterion": "2 — conflict elsewhere: non-zero exit, message names the file, rebase aborted, origin untouched",
+      "verdict": "pass",
+      "byHand": "/tmp/legion-75-case2.sh Case 2 (A pushes `README.md` = `from A`; B commits `README.md` = `from B` then bumps 1.0.1): exit 1; `::error::Rebasing the version-bump commit onto main (9e80af17…) conflicts in: README.md. Only a conflict confined to packages/pkg/package.json is resolved automatically. The release itself succeeded: …`; `git status` in B: `## main...origin/main [ahead 2, behind 1]`, no rebase in progress, no rebase-merge/rebase-apply dir; origin/main .version 1.0.0, README `from A`, tip unchanged from before push-main (rev-parse equal).",
+      "variant2b": "Case 2b (A pushes README + bump 1.0.1 in one commit; B commits README + bump 1.0.2): exit 1; `::error::… conflicts in: README.md packages/pkg/package.json. Only a conflict confined to packages/pkg/package.json is resolved automatically. …`; `Resolving the` line count 0 (not resolved); no rebase in progress; origin/main tip unchanged, .version stays 1.0.1."
+    },
+    {
+      "criterion": "3 — five rejections: non-zero exit, log and job summary say publish/tag/release succeeded and only the manifest push is outstanding",
+      "verdict": "pass",
+      "byHand": "/tmp/legion-75-case3.sh (always-rejecting pre-receive hook printing `REJECTED-BY-HAND-HOOK` installed on the bare origin after seeding; GITHUB_STEP_SUMMARY=<mktemp>/step-summary.md): exit 1; `REJECTED-BY-HAND-HOOK` count 5 and `[remote rejected]` count 5 (exactly five attempts, one `git fetch origin main` + `Current branch main is up to date.` between each); `::error::The version-bump commit for packages/pkg v1.0.1 lost the push race to main 5 times. The release itself succeeded: the package artifacts are published, the tag and the GitHub release exist; only this version-bump push to main is outstanding. main's packages/pkg/package.json keeps the older version until the next release, which computes versions from tags and is unaffected.`; summary file = one line: `**Version bump for packages/pkg v1.0.1 did not land on main.** ` + the same message verbatim; origin/main tip unchanged, .version 1.0.0.",
+      "ciMechanismLive": "Tests run 34762283378, job test, step 3 `Test release scripts`: conclusion success; its log shows Case 3's six PASS lines including `PASS: job summary says the same` and the final `Results: 22 passed, 0 failed`."
+    },
+    {
+      "criterion": "4 — pi-envoy manifest level with the newest published release",
+      "verdict": "pass (planner's finding confirmed: 1.24.0 everywhere, no bump needed)",
+      "evidence": "after `jj git fetch` (Nothing changed): main@origin = a7c01347fd69; `jj file show -r main@origin packages/pi-envoy/package.json | jq -r .version` = 1.24.0; `git ls-remote --tags origin 'pi-legion-envoy-v*' | sort -V | tail -1` = pi-legion-envoy-v1.24.0 (local tags agree); `legion gh -- release list --repo sjawhar/legion` filtered to pi-legion-envoy-v*, newest by publishedAt = pi-legion-envoy-v1.24.0 at 2026-09-13T13:30:46Z, isLatest true (then v1.23.1 11:58:18Z, v1.23.0 10:58:12Z)."
+    },
+    {
+      "criterion": "5 — header comment describes the race and the resolution rule",
+      "verdict": "pass",
+      "evidence": "release-push.sh lines 9–31: same-package race (`The race that needs help is two releases of the *same* package … both bumps rewrite the one \"version\" line of the same package.json from the same base and the rebase conflicts`), the one rule (`One rule resolves it: when the only conflicted path is the released package's package.json, take main's copy of that file, set its .version to the version being released … continue the rebase, and push again`), abort on other paths (`Any other conflicted path is a real divergence: the rebase is aborted and the step fails naming the paths`), and the failure summary (`Every failure here says, in the log and in the job summary, that the publish, tag and GitHub release already succeeded and only this push to main is outstanding`)."
+    }
+  ],
+  "workflowWiring": {
+    "releaseYaml": "Bun.YAML.parse of .github/workflows/release.yaml: exactly 3 `release-push.sh push-main` and 3 `release-push.sh tag` occurrences. Per job (push dir == that job's tag dir, version arg): cli → packages/daemon, `\"${{ steps.version.outputs.version }}\"` (line 152; tag at 131; `id: version` at 64); envoy_plugin → packages/envoy-plugin (line 273; tag 250; id 194); pi_envoy → packages/pi-envoy (line 398; tag 375; id 297). Each push-main step is guarded `if: steps.version.outputs.skip != 'true'`.",
+    "prAndMainYaml": "job test steps: [actions/checkout@v5, `Test release scripts` (run: .github/scripts/release-push.test.sh), Setup Bun, Install daemon live-test tools, Verify daemon live-test tools, Install dependencies, Pre-pull daemon E2E NATS image, Test daemon]; the test needs only git+jq so running before Setup Bun is correct.",
+    "ciRun": "legion gh -- run view 34762283378: name Tests, status completed, conclusion success, headSha d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866; jobs lint/pr-title/test/typecheck all success; job test step #3 `Test release scripts` success; `--log` shows every PASS line and `Results: 22 passed, 0 failed` / `PASS: release-push.sh push-main` (14:18:38–14:18:39Z, ~0.8 s).",
+    "deletedScript": "`git ls-tree a20cf9b8 .github/scripts/` = release-bump.sh, release-push.sh, release-push.test.sh (all 100755); verify-envoy-release-workflow.sh absent. Repo-wide grep for `verify-envoy-release-workflow`: only .legion/plan.json + .legion/implement.json (handoff prose) and docs/superpowers/plans/2026-04-12-fix-ci-docker-build-gating.md (excluded historical record). No caller remains in .github/, packages/, scripts/, or live docs."
+  },
+  "prState": {
+    "command": "legion gh -- pr view 1035 --repo sjawhar/legion --json mergeable,mergeStateStatus,headRefOid,state,baseRefName",
+    "result": {
+      "baseRefName": "main",
+      "headRefOid": "a20cf9b81674b7447a0c53837ed6ac065a648365",
+      "mergeStateStatus": "BLOCKED",
+      "mergeable": "MERGEABLE",
+      "state": "OPEN"
+    },
+    "note": "MERGEABLE (no conflict) — no rebase performed. BLOCKED is branch protection awaiting review."
+  },
+  "productionVerification": "Nothing under packages/ changes in this PR, so merging it triggers no Release Packages run; the production `Push version bump` step with the new push-main can only be observed on the next Release Packages run (any package). A same-package race — the `Resolving the packages/<dir>/package.json version-line conflict to v<version>` line followed by a green push — needs two releases of one package to land close together; that is the implementer's post-merge production check.",
+  "observations": [
+    "Outside the five acceptance lines, for the architect/reviewer: when origin is unreachable (remote path does not exist), `git push` fails and then `git fetch origin main` fails under `set -e`, so push-main exits 128 with git's `fatal: … does not appear to be a git repository` and no `::error::`/job-summary line. The plan's global constraint says every push-main failure should state the release succeeded; this path does not. Pre-existing behaviour (the old script had the same shape), low likelihood in Actions (GitHub unreachable mid-step), deterministic to reproduce: `git remote add origin /nonexistent.git` then `release-push.sh push-main packages/pkg 1.0.1` → EXIT=128. Not a failing verdict on any acceptance line; naming it so nobody reads exit 128 as covered."
+  ],
+  "negativeControl": "Case 2 by hand — a conflicting README.md change racing in → exit 1, `::error::Rebasing the version-bump commit onto main (<sha>) conflicts in: README.md. Only a conflict confined to packages/pkg/package.json is resolved automatically. The release itself succeeded: …`, rebase aborted (no rebase-merge/rebase-apply dir, `git status` clean of rebase), origin/main tip and manifest (1.0.0) untouched.",
+  "scratchScripts": "/tmp/legion-75-case1.sh, /tmp/legion-75-case2.sh, /tmp/legion-75-case3.sh — throwaway, each builds under mktemp -d and removes it; not committed.",
+  "noProjectWideRuns": "No formatter, biome, tsc, or bun test run; the only commands were release-push.test.sh, the three scratch scripts, bash -n-free reads, YAML parse, and legion gh reads.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T14:27:02.447Z"
+}
