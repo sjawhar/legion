@@ -7,9 +7,22 @@ export type LegionSessionKind =
   | { kind: "phase-worker"; role: LegionRole; tree: string; issue: string }
   | { kind: "not-legion" };
 
+/** The refusal for a pane that carries both launch markers -- the daemon's own
+ * `LEGION_CONTROLLER` beside a `LEGION_TREE` its launcher inherited from an outer Legion pane
+ * (a smoke rig or scratch daemon started from inside one). Typed so `extensions/legion.ts` can
+ * report exactly this refusal on the pane and continue as not Legion's, while every other
+ * classification throw still escapes (LEGION-88). The message is unchanged. */
+export class ConflictingLaunchMarkersError extends Error {
+  readonly variables = ["LEGION_CONTROLLER", "LEGION_TREE"] as const;
+  constructor() {
+    super("Legion session has both controller and tree launch markers");
+    this.name = "ConflictingLaunchMarkersError";
+  }
+}
+
 export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
   if (env.LEGION_CONTROLLER !== undefined && env.LEGION_TREE !== undefined) {
-    throw new Error("Legion session has both controller and tree launch markers");
+    throw new ConflictingLaunchMarkersError();
   }
 
   // The controller marker is LEGION_CONTROLLER alone. The daemon also sets

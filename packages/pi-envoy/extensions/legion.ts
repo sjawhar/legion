@@ -8,7 +8,9 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
   classifySession,
+  ConflictingLaunchMarkersError,
   generation,
+  type LegionSessionKind,
   requiredControllerCapability,
   requiredEnvironment,
   requiredSecret,
@@ -53,6 +55,14 @@ let exitProcess: (code: number) => never = (code) => process.exit(code) as never
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
 }
+
+/** The one sentence a pane launched with both `LEGION_CONTROLLER` and `LEGION_TREE` shows: both
+ * variables, the likely cause, and what happens next. Written to the pane's human-visible channel
+ * and to `console.error` by `session_start`, which then continues as `not-legion` -- claiming
+ * nothing, exiting nothing, so the reason stays on the pane until the daemon retires it at its
+ * registration deadline (LEGION-88). */
+export const CONFLICTING_LAUNCH_MARKERS_NOTICE =
+  "Legion is not claiming a role in this pane: it was launched with both LEGION_CONTROLLER and LEGION_TREE set, which normally means the launcher (a smoke rig or scratch daemon started from inside a Legion pane) inherited LEGION_TREE from that outer pane, so this session continues as an ordinary session that is not Legion's.";
 
 // Bounds retries of the transient `/process/ready` and `/worker/ready` bootstrap requests.
 const READY_RETRY_ATTEMPTS = 3;
@@ -717,12 +727,32 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
+  /** Reports a pane launched with both launch markers -- once on the pane's human-visible
+   * channel and once on stderr for the pane's log -- and claims nothing: the session proceeds
+   * exactly like the `not-legion` case, never exiting, so the reason stays on the pane until the
+   * daemon retires it at its registration deadline and its own log line points here (LEGION-88).
+   * The channels are chosen from source evidence, not a live-pane proof (the smoke rig that would
+   * have shown it was stopped by the 2026-09-13 standing order): `ui.notify` is the inline notice
+   * envoy.ts's own `session_start` uses for its warnings, and `console.error` reaches the pane's
+   * terminal because `legion worker-shim` spawns OMP with `stderr: "inherit"`. */
+  const refuseConflictingMarkers = (context: SessionContext): void => {
+    console.error(`[legion] ${CONFLICTING_LAUNCH_MARKERS_NOTICE}`);
+    context.ui.notify(CONFLICTING_LAUNCH_MARKERS_NOTICE, "warning");
+  };
+
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
-    const classification = classifySession(process.env);
+    let classification: LegionSessionKind;
+    try {
+      classification = classifySession(process.env);
+    } catch (error) {
+      if (!(error instanceof ConflictingLaunchMarkersError)) throw error;
+      refuseConflictingMarkers(context);
+      return;
+    }
     switch (classification.kind) {
       case "controller": {
         const sessionID = context.sessionManager.getSessionId();
@@ -757,8 +787,17 @@ export default function legionExtension(pi: PiApi): void {
     // one clone), and a `task` subagent's bash runs in the same pane against it, so this guard is
     // judged from the pane's environment ahead of the subagent exemption below -- the one gate that
     // reaches a subagent -- and before any grant is minted. Classified once per instance, on the
-    // first call: a throw for a malformed LEGION_ROLE stays inside the handler, never at load.
-    phaseWorkerPane ??= classifySession(process.env).kind === "phase-worker";
+    // first call: a throw for a malformed LEGION_ROLE stays inside the handler, never at load. A
+    // pane with both launch markers is not a phase worker and is classified once, silently --
+    // `session_start` already announced the refusal (LEGION-88).
+    if (phaseWorkerPane === undefined) {
+      try {
+        phaseWorkerPane = classifySession(process.env).kind === "phase-worker";
+      } catch (error) {
+        if (!(error instanceof ConflictingLaunchMarkersError)) throw error;
+        phaseWorkerPane = false;
+      }
+    }
     if (phaseWorkerPane) {
       const jjAttempt = jjLogRewriteAttempt(toolCall);
       if (jjAttempt !== undefined) {

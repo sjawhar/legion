@@ -74,7 +74,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
-const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
+const {
+  default: legionExtension,
+  CONFLICTING_LAUNCH_MARKERS_NOTICE,
+  setLegionBootstrapExitForTests,
+} = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -1311,6 +1315,76 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+  });
+  test("a pane launched with both controller and tree markers is told why on the pane and continues as not Legion's: no request, no claim, no exit, tool calls ungated", async () => {
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    const notices: [string, string][] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    // Exactly the bug's shape: the daemon's own controller marker beside a LEGION_TREE the
+    // launcher inherited from an outer Legion pane (LEGION-88).
+    process.env.LEGION_CONTROLLER = "1";
+    process.env.LEGION_TREE = "LEGION-1";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      return Response.json({
+        session_id: "ses_both_markers",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("tool_call handler was not registered");
+    const base = sessionContext("ses_both_markers");
+    const context: SessionContext = {
+      ...base,
+      ui: { ...base.ui, notify: (message, level) => notices.push([message, level]) },
+    };
+    const errorLog = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      await sessionStart({}, context);
+
+      // Nothing Legion-specific ran: no daemon route, no role claim, no exit -- the session
+      // proceeds exactly like the `not-legion` case, and the pane stays up.
+      expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+      expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
+      expect(exits).toEqual([]);
+      expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+      // The refusal is reported once on the pane's human-visible channel and once on stderr.
+      expect(notices.filter(([message]) => message === CONFLICTING_LAUNCH_MARKERS_NOTICE)).toEqual(
+        [[CONFLICTING_LAUNCH_MARKERS_NOTICE, "warning"]]
+      );
+      expect(errors.filter((line) => line.includes(CONFLICTING_LAUNCH_MARKERS_NOTICE))).toHaveLength(
+        1
+      );
+
+      // The tool_call hook classifies the same pane once more: a both-markers pane is not a
+      // phase worker, so nothing is gated and nothing throws.
+      await expect(
+        toolCall(
+          { toolName: "bash", toolCallId: "call-both-markers", input: { command: "jj undo" } },
+          context
+        )
+      ).resolves.toBeUndefined();
+    } finally {
+      console.error = errorLog;
+    }
   });
   test("never bootstraps, claims a role, or exits for a subagent session, even with root-architect environment", async () => {
     const requests: { readonly path: string }[] = [];
