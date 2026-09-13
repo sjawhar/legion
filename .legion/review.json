@@ -1,83 +1,60 @@
 {
   "verdict": "changes_requested",
-  "round": 3,
+  "round": 4,
   "critical": 1,
-  "important": 1,
-  "minor": 1,
-  "reviewedCodeHead": "883cd3dfcff0",
-  "prHeadSha": "8d5855cfb7bbf7b8fc37179b4961dcb36bfc4067",
-  "mergeBase": "195674ab0592",
+  "important": 0,
+  "minor": 3,
+  "reviewedHead": "df6a77061b78d42616abbba7e0a6f3e4804f8601",
+  "mergeBase": "0f744bc8811e (branch on main 419a0590 per GitHub)",
   "pr": "https://github.com/sjawhar/legion/pull/981",
-  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5189671202",
+  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5189888847",
   "previousReviews": [
-    "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188293250",
-    "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5188762941"
+    "5188293250",
+    "5188762941",
+    "5189671202"
   ],
   "verified": {
-    "ci": "PR head 8d5855cf: pr-title/lint/typecheck/test SUCCESS (run 34739747901); code head 883cd3df: runs 34739339255 + 34739406529 SUCCESS. mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review required).",
-    "threads": "Round-1 threads (4) resolved by others. Round-2 threads (6) each answered once by the implementer; all six verified satisfied against the code; the review App cannot resolve threads (resolveReviewThread -> Resource not accessible by integration, re-confirmed this round) so the implementer resolves them with the next push. This review opened 3 new threads.",
-    "rebase": "Branch src delta byte-identical across the rebase onto 195674ab (tester diff-of-diffs; spot-checked); AGENTS.md 0 conflict markers, #995 DaemonConfig sentence verbatim; f20c3072 drops only the deleted persist dep from #956's e2e fixture; 80c9cfb1 adds isProcessGoneError contract rows (mutant-tested by the tester).",
-    "smokeRig": "dispatch://LEGION-27/artifact/smoke-rig-evidence.md assessed honest: internally consistent (S2 legacy upgrade v24->v25 + .v24.bak, no-identity -> --resume fresh window, legacy window never repointed; S1 x2 decision lines name exact stranger pids, all strangers alive, root+controller resurrected); its Not-proven section correctly limits S2's graceful-shutdown attribution (no independent observer; no-kill is by construction of refuseKill) and separates it from the observed S1 liveness claims. Caveats accepted: ran when the branch sat on 4d516a1f (src proven byte-identical since); two rig gaps worked around outside the PR and named for the architect.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 883cd3df (ThermoDeep3, ThermoQuality3). Neither blocking; both independently found and reproduced B5 and recommend landing it in this PR.",
-    "localRuns": "tsc clean; tmux/contract/watchdog/proc-stat/state 123 pass; processes.test.ts 237 pass / 3 gated skip; LEGION_E2E=1 LEGION_TMUX_LIVE=1 real-shutdown + deployment-instructions e2e 5 pass. Reproduced B5 via /tmp/legion27-review/r3/strand.test.ts (1 pass: sleepCalls 1, tree active/unconfirmed/launchFailures 1/locator intact)."
+    "ci": "df6a7706 run 34743086332 SUCCESS (pr-title/lint/typecheck/test); MERGEABLE, mergeStateStatus BLOCKED (review required); prior heads cc2e3020 (34742913998) and 0c6f3c18 (34742420479) green.",
+    "round3Threads": "All three satisfied against the code: B5 r3998846681 (escalateOrRetryUnconfirmedRoot try/catch + re-arm, regression test discriminating), r3998846683 (handleException catches + logs naming the role token on both branches; docs consistent; two rows in b32a3a36), r3998846684 (recordedLocators sameProcess dedupe; contract row with a spread copy). The App cannot resolve threads (re-confirmed) -- the implementer resolves them with the next push.",
+    "fastFollow": "Every round-3 fast-follow item landed (kill fixture branches, #{pane_id}-only branches, bare exit-1 fakes, panePid( in docs, ${treeKey}, wording pins, stop message via describePaneVerdict, isOmpPane EACCES row, AGENTS.md probe-throw clause moved to the process-failure-recovery bullet). #957 boot-retire test seeds a verified identity and passes for the reason named.",
+    "migration": "migrateV25State mirrors migrateV24State (#993) as a pure bump appended to the chain; v24 file -> 26 with .v24.bak and v25 file -> 26 with .v25.bak both pass; deployed state.json is v25 so the live upgrade takes exactly the v25->v26 row.",
+    "localRuns": "tsc clean; processes 243 pass/3 gated; runtime.contract 67; watchdog 9; tmux 8; legion-state 41; index 34; proc-stat 4; LEGION_E2E=1 LEGION_TMUX_LIVE=1 real-shutdown + deployment-instructions e2e 5 pass. Named rows (B5 regression, both handleException rows, sameProcess dedupe row, watchdog stop-unconfirmed re-arm row, EACCES cmdline row, migration rows, #957 boot-retire) all pass.",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at df6a7706 (ThermoDeep4, ThermoQuality4): neither blocking on its own; both independently found and reproduced B6; I reproduced it a third time (/tmp/legion27-review/r4/dispose-leak.test.ts: events after cancelAll = ['probe','retire:2'])."
   },
-  "priorItems": {
-    "B3": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125105",
-      "status": "satisfied",
-      "evidence": "tmux.lookupPane present|absent|failed, absent only on PANE_GONE_STDERR or a successful listing missing the row; verifyPaneProcess listing-failed; TmuxRuntime.probe throws; TmuxRuntime.stop: graceful ask -> refuseKill return -> verify -> kill | ProcessStopFailed(detail) | refuse. Discriminating tests at tmux/contract/ProcessManager levels."
-    },
-    "B4": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125111",
-      "status": "satisfied",
-      "evidence": "missing-pane-id throw deleted; no-identity path: graceful ask, kill refused, locator clears; contract row + ProcessManager test."
-    },
-    "removeTreeProcess": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125116",
-      "status": "satisfied"
-    },
-    "isProcessGoneError": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125119",
-      "status": "satisfied",
-      "evidence": "ENOENT/ESRCH-only catch in readPaneStartTicks and isOmpPane; kill -0 removed and judged sufficient (isOmpPane runs only after a successful stat read; zombie -> not-omp; EACCES/EIO/EMFILE rethrow pinned for probe and stop)."
-    },
-    "legionStateComment": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125122",
-      "status": "satisfied"
-    },
-    "recordedLocatorsDedupe": {
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998125124",
-      "status": "satisfied with a nit carried forward (reference identity not stable past /worker/started and /process/started spread copies; benign; see keyFindings)"
-    }
-  },
+  "hotLoopAnswer": "None. Resync (600 s; probe effects only from resync, never the durable lane -> resync failed + reschedule, never fatal); registration deadline (workerBootTimeout x intervals; a probe throw at the deadline re-arms WITHOUT touching launchFailures; only the mixed case -- deadline probe finds the pane gone, resurrection's re-probe fails -- counts +1 per cycle, legitimate and matching the pre-PR per-cycle count); watchdog (one interval per failed retirement; launchFailures increments only after retireWorkerLocator resolves); linger sweep (60 s); handleException log-only. Acceptable at those intervals.",
   "keyFindings": [
     {
       "severity": "blocking",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 1732,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846681",
-      "description": "B5. escalateOrRetryUnconfirmedRoot cancels the registration deadline (1706) then awaits onRetry = resurrect; resurrectDeadTree re-probes (2967-2969); if that second list-panes fails for a non-PANE_GONE reason, probeLocator throws and only armRootRegistrationDeadline's .catch (1518) logs. Tree left active + unconfirmed, locator intact, launchFailures+1, no deadline re-armed; resync.probeActiveRoots skips unconfirmed trees, so nothing revisits the root until daemon restart or an architect exception. Newly reachable (pre-PR probe never threw); reproduced with a scripted runtime. Contradicts AGENTS.md's 'the controller and root registration deadlines log and retry instead of clearing anything'. Fix: try/catch around onRetry (or in retireUnconfirmedRoot), log, re-arm if treeStillUnconfirmed -- same shape as the stop-failure branch at 1800; or thread the already-taken verdict into resurrect so resurrectDeadTree does not re-probe. Regression test required (second probe throws -> locator intact, second deadline armed). Controller analogue self-heals via ensureController on every controller-bound effect; no change asked."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 1994,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846683",
-      "description": "Land with B5: handleException (1986 ensureController, 1994 probe) is a probe caller the round-2 handling list omitted. On the core-NATS exception lane a probe/controllerAlive throw is pushed by events.ts track() (362-373) onto the pump's in-memory failures with no log and no redelivery (core NATS has no nak); surfaces only as an AggregateError from drain() at shutdown; a live root's reclaim-architect redeliver is lost. Silent failures sink is pre-existing; routing a plausible transient tmux fault into it is new, and probeLocator's doc ('a nak'd exception', 1876-1877) plus the AGENTS.md caller list describe a retry that does not exist on this lane. Fix: catch + console.error naming the role token in handleException (resync/onUndeliverable are the retry); reword the doc and AGENTS.md list."
+      "file": "packages/daemon/src/daemon/worker-boot-watchdog.ts",
+      "line": 285,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985495",
+      "description": "B6. retire() deletes the armed entry before awaiting retireUnconfirmedBoot; a cancelAll() (daemon dispose) or same-token cancel landing during that await cannot flip `cancelled`. When the retirement then rejects, the catch correctly declines to re-insert (!this.disposed) but returns false and watch() continues while(!cancelled): another full interval with real timers (controller.signal never aborted), probeAlive (list-panes), and a second retireUnconfirmedBoot -> mutateClaim -> persist() after the daemon's final save; same for a superseded watch (this.armed.has(token)). Pre-round-3 the loop always returned after the retire. Contradicts cancelAll()'s contract ('no background timer may outlive the watchdog'). Reproduced three times. Production exposure bounded (every cancelAll() path is followed by process exit before the 120 s interval) but a reproduced defect in code this PR adds, in the lifecycle-hygiene class the PR is about. Fix: `if (cancelled || this.disposed || this.armed.has(token)) return true;` before the re-insert; one sibling test row asserting no probe/retire after cancelAll()."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts",
-      "line": 308,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998846684",
-      "description": "recordedLocators reference dedupe is dead in steady state: /process/started and /worker/started spread-copy the stored locator, so the issueWindows entry and the state locator become distinct equal-identity objects; benign (state locator listed first; one redundant list-panes + stat on the all-fail path) but the doc claim is false. Dedupe with sameProcess or by tmuxPaneId, or drop the claim. probedWindowId also drops the entry on a transient listing-failed (cosmetic extra window) -- worth a doc sentence."
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1744,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985496",
+      "description": "Land with B6: comment (and AGENTS.md:52) says the resurrection can fail on 'its own re-probe and stop ... nothing was cleared'; removeTreeProcess swallows the StopFailed and clears the locator in finally, so only the re-probe and spawnRoot propagate -- drop 'and stop'/'or stop'. The re-arm log line announces a re-arm the following treeStillUnconfirmed may decline (spawnRoot throw already re-queued/launch-failed the tree)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "line": 6011,
+      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985497",
+      "description": "Land with B6: `publications toEqual([])` cannot catch a reclaim-architect being sent (controlDirective goes through natsRequest -> controlRequests). Assert controlRequests is []."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2046,
+      "description": "Land with B6: handleException's `throw new Error('No Legion tree records issue')` and resumeWorker's outer workerCatchup await still reject silently on the exception lane while the new doc says every failure is logged; one outer try/catch after `parsed` covers both and drops the logFailure closure."
     }
   ],
-  "fastFollow": "Watchdog StopFailed at the registration deadline leaves a boot unwatched until restart (pre-existing shape; optional re-arm). probeTree doc says the resurrection hands the verdict down but resurrectDeadTree re-probes. AGENTS.md:53 probe-throw clause belongs in bullet 51. stop's listing-failed message bare vs probe's via describePaneVerdict. Test fixtures: two #{pane_id}-only list-panes branches (processes.test.ts 2376-2381, 5705-5710) shadow the real branch; two bare exit-1 list-panes fakes (7757, 7799) contradict paneGone()'s doc; kill argv fixture branches + 'never from a signal probe' comment describe the removed kill -0; docs/solutions/testing/mutation-proof-probe-tests.md still present-tense panePid; watchdog 'liveness probe did not complete' count and B4 'failed to stop' negative match pin wording; `${treeKey}` no-op template. Optional isOmpPane EACCES row. ThermoQuality3 observed one 1/7 flake in 'ensureController retires a stuck controller pane...' (passes in isolation; likely pre-existing tick-bounded wait) -- watch CI.",
-  "hotLoopAssessment": "No probe caller loops hot on a persistently failing tmux: resync (interval, default 600 s; probe effects only from resync, never inside applyDurableEvent -> never DurableFatalFailure), linger sweep (60 s), root registration deadline (workerBootTimeout x intervals, re-armed on probe failure in retireUnconfirmedRoot), watchdog (workerBootTimeout interval; deadline bounds), onUndeliverable/boot/held-recovery caught + logged. Every Runtime.stop caller leaves the locator/claim intact on the new ProcessStopFailed.",
-  "refuseKillJudgment": "Unchanged from round 2: keep. Passed only after a same-locator not-recorded-process verdict; identity cannot revert; stopProcess preserves it through the cached-client downgrade.",
-  "nextRound": "Review the B5 fix head (+ regression test, + handleException log/doc fix if landed together), confirm the six round-2 threads were resolved, CI green, tester re-verification; then COMMENT while .legion/ is present and APPROVE the head that differs from the reviewed one by the .legion/ deletion alone.",
+  "fastFollow": "Watchdog re-arm test tail cannot fail once retire:2 was seen (spin more microtasks, assert events unchanged); the two exhausted-branch sites duplicate `if (await retire()) return; await yieldToEventLoop();`; retire()'s doc names ProcessStopFailed but the catch is unconditional; the two handleException rows could be one it.each; legion-state.test.ts:929 title says 'v24 to v25' while asserting 26. Working-copy note: the jj working copy holds a provisioning .omp/config.yml (child of df6a7706, not in the PR) -- must not ride along on the deletion push.",
+  "smokeRigNote": "Artifact assessed in round 3 (honest incl. Not-proven); PR body explains its v24->v25 wording vs the composed v25->v26 bump after #993.",
+  "nextRound": "On the B6 fix head (+ test row, + the three land-with items if taken) after the tester's pass: COMMENT stating clean and the SHA; then the implementer pushes the .legion/ deletion and I APPROVE that deletion-only head by SHA.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T05:36:40.391Z"
+  "completed": "2026-09-13T06:50:42.419Z"
 }
