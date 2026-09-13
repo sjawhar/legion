@@ -1,8 +1,8 @@
 {
   "pr": 998,
   "prUrl": "https://github.com/sjawhar/legion/pull/998",
-  "round": 3,
-  "roundReason": "Tester round 2 failures[0]: the /worker/spawn todo branch is unreachable for a released child (admitted as its own tree; spawnTree writes in_progress; the parent's spawn_worker is refused) and reachable only when a human moves an active issue back to todo, which the daemon must not override. Architect ruling (spec v6): drop the branch and its test.",
+  "round": 4,
+  "roundReason": "Reviewer round 2 REQUEST_CHANGES at 07a170cc (review 5189951838): knownIssueStatus had no supersession fence, so a pending in_progress from a failed PATCH outranked a human's later echoed move until resync; plus one inaccurate architect-skill sentence and seven wording/duplication items.",
   "filesChanged": [
     "skills/legion-worker/SKILL.md",
     "packages/daemon/src/daemon/api/routes/workers.ts",
@@ -15,55 +15,80 @@
   ],
   "round1Commits": [
     {
-      "sha": "fff4b2a93abd416fc358fa0d688c7c9c1bb11a04",
+      "sha": "1b9adeeca07aaf68b180891cebc3a243e59e4340",
       "subject": "daemon: an implementer completion advances the status only from in_progress",
-      "shaBeforeRebase": "a112b2cc8f7563fb47e3f1b446552924e3cd2058"
+      "shaBeforeRebase": "a112b2cc8f7563fb47e3f1b446552924e3cd2058",
+      "shaBeforeRebase2": "fff4b2a93abd416fc358fa0d688c7c9c1bb11a04"
     },
     {
-      "sha": "b12956ddad9eafdd5b91650513172f2c932af0fd",
+      "sha": "a0379cf60d24b03680e5dc338d098004132fccc3",
       "subject": "skills(legion-worker, legion-retro, legion-architect): retro's docs commit keeps the approval; an unchanged-diff rebase is a confirmation; no handoff file after the .legion deletion",
-      "shaBeforeRebase": "006cc8653f2d773c45c8bbfb49dc585b361b25ce"
+      "shaBeforeRebase": "006cc8653f2d773c45c8bbfb49dc585b361b25ce",
+      "shaBeforeRebase2": "b12956ddad9eafdd5b91650513172f2c932af0fd"
     },
     {
-      "sha": "3d166c33736e217c9ca222c1a79ae6026d6187f3",
+      "sha": "7936442ae688f8bb742fbe6e306b4d77d7d66114",
       "subject": "roles(tester, reviewer, merger, implementer): the same rules in the role prompts",
-      "shaBeforeRebase": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c"
+      "shaBeforeRebase": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+      "shaBeforeRebase2": "3d166c33736e217c9ca222c1a79ae6026d6187f3"
     }
   ],
   "commits": [
     {
-      "sha": "20607c949dd708e51c7c6f6546173953950043fe",
+      "sha": "ccd10eacc135416b4cccb1e2b7184ebf7bf19541",
       "subject": "skills(legion-worker): the unchanged-diff fingerprint excludes with one fileset",
       "fixes": [
         "thread 3998885581 (blocking fileset)",
         "wording 1, 5, 6, 7"
       ],
-      "shaBeforeRebase": "3b44a4d779c399f0f5a4890365061ec367af6150"
+      "shaBeforeRebase": "3b44a4d779c399f0f5a4890365061ec367af6150",
+      "shaBeforeRebase2": "20607c949dd708e51c7c6f6546173953950043fe"
     },
     {
-      "sha": "1dbbfd0857154147145b3881d7534feebf4d069d",
+      "sha": "597e54f2e4d2363cbcf015658bbce13b319e85f8",
       "subject": "daemon: spawn_worker writes in_progress for a child at todo and a corrective implementer; completion reads the status as the daemon knows it",
       "fixes": [
         "thread 3998885586 (workers.ts:42 ruling)",
         "thread 3998885590 (explicit in_progress in the positive test)",
         "wording 4, 8"
       ],
-      "shaBeforeRebase": "0f52a0a95df1f72b1cf94a3c7f1b8589182d5a09"
+      "shaBeforeRebase": "0f52a0a95df1f72b1cf94a3c7f1b8589182d5a09",
+      "shaBeforeRebase2": "1dbbfd0857154147145b3881d7534feebf4d069d"
     },
     {
-      "sha": "d30cb314d3ef14b67409fb4ba929ffbfb0519f1f",
+      "sha": "6229db3df0dd5a93693b6a925d610e4825491b06",
       "subject": "roles(tester, reviewer, merger): review round-1 wording",
       "fixes": [
         "wording 2, 3, 5"
       ],
-      "shaBeforeRebase": "3514e21ca83187f4853d70022091e2eb126ca027"
+      "shaBeforeRebase": "3514e21ca83187f4853d70022091e2eb126ca027",
+      "shaBeforeRebase2": "d30cb314d3ef14b67409fb4ba929ffbfb0519f1f"
     },
     {
-      "sha": "5005733ce03ee178f22b84cc0ef487cd483de51f",
+      "sha": "4433b9bee1711baf958586db418d76fa934583db",
       "subject": "daemon: spawn_worker writes in_progress for the corrective round alone",
       "fixes": [
         "tester round-2 failures[0]"
-      ]
+      ],
+      "shaBeforeRebase2": "5005733ce03ee178f22b84cc0ef487cd483de51f"
+    },
+    {
+      "sha": "647ba2de8de4f6926232bf9d2969450b581ae701",
+      "subject": "daemon: a pending status write counts only while the echoed status still matches its statusAtRecord",
+      "fixes": [
+        "thread 3999033803 (blocking fence)",
+        "wording 1 (checkPr), 2 (one changesRequested), 3 (recordingDispatchClient in the pending-write test), 4 (admission's write, not a spawn's — test comment and AGENTS.md), 5 (knownIssueStatus defined once in AGENTS.md), 7 (planner-at-in_progress test dropped)"
+      ],
+      "shaBeforeRebase2": "51a488cf28ffe4ee044660d6ab6c07da769d1877"
+    },
+    {
+      "sha": "3276b7172d652660975382137826a315373dad3c",
+      "subject": "skills(legion-architect): a human's review never moves the status; step 6 item 2 back to one sentence",
+      "fixes": [
+        "thread 3999033805 (phase-complete row sentence)",
+        "wording 6 (step 6 item 2 one sentence)"
+      ],
+      "shaBeforeRebase2": "36b01e311fb1d3bd1f9a73359d46908f6b1b3893"
     }
   ],
   "whatChanged": {
@@ -169,7 +194,48 @@
     ],
     "verification": "cd packages/daemon && bun test -t 'architect spawns|implementer completes|reviewer completes' -> 10 pass; bun test -> 1032 pass, 6 skip, 0 fail (one earlier full run showed a single timing flake in processes.test.ts 'promotes a queued tree waiting behind a slot the terminal launch-failed escalation frees', untouched by this PR; it passed 3/3 in isolation and in two further full runs); biome check src/ clean; tsc --noEmit clean; every plan grep unchanged except 'set nothing by hand' in the architect skill 2 -> 1 (item 2 now reads 'you set nothing by hand'; the pr-review row keeps its own)"
   },
+  "round4": {
+    "commits": [
+      {
+        "sha": "647ba2de8de4f6926232bf9d2969450b581ae701",
+        "subject": "daemon: a pending status write counts only while the echoed status still matches its statusAtRecord",
+        "fixes": [
+          "thread 3999033803 (blocking fence)",
+          "wording 1 (checkPr), 2 (one changesRequested), 3 (recordingDispatchClient in the pending-write test), 4 (admission's write, not a spawn's — test comment and AGENTS.md), 5 (knownIssueStatus defined once in AGENTS.md), 7 (planner-at-in_progress test dropped)"
+        ],
+        "shaBeforeRebase2": "51a488cf28ffe4ee044660d6ab6c07da769d1877"
+      },
+      {
+        "sha": "3276b7172d652660975382137826a315373dad3c",
+        "subject": "skills(legion-architect): a human's review never moves the status; step 6 item 2 back to one sentence",
+        "fixes": [
+          "thread 3999033805 (phase-complete row sentence)",
+          "wording 6 (step 6 item 2 one sentence)"
+        ],
+        "shaBeforeRebase2": "36b01e311fb1d3bd1f9a73359d46908f6b1b3893"
+      }
+    ],
+    "fence": "knownIssueStatus = pending && echoed === pending.statusAtRecord ? pending.status : echoed (resync's retryPendingWrite rule). TDD: new test 'writes no status when an implementer completes after a human's move superseded the daemon's pending in_progress write' (observed icebox, pending {in_progress, statusAtRecord: todo}) RED with [{WIDGETS-1, testing}], GREEN after; the existing pending-write test (observed todo) still writes testing; the corrective-spawn path is unchanged.",
+    "verification": "cd packages/daemon && bun test -t 'implementer completes|architect spawns|reviewer completes' -> 10 pass (11 before the subsumed planner test was dropped); bun test -> 1032 pass, 6 skip, 0 fail; biome check src/ clean; tsc --noEmit clean; plan greps unchanged ('set nothing by hand' back to 2 in the architect skill: item 2 and the pr-review row)"
+  },
+  "rebase2": {
+    "reason": "GitHub reported PR #998 CONFLICTING/DIRTY at 018525d4 right after the round-4 push; main had moved 0f744bc8 -> 45f33bd8, and #1003 (legion threads resolve, LEGION-34) edited six of this PR's files",
+    "command": "jj rebase -s 'roots(main@origin..@)' -d main@origin (whole chain, 18 commits)",
+    "conflicts": {
+      "skills/legion-worker/SKILL.md": "reviewer bullet: #1003's 'When you re-review after a corrective push…' paragraph appended after this PR's fingerprint sentences; merger bullet: #1003's 'runs legion threads resolve … does not publish while any left open line remains' clause folded into this PR's bullet (at a0379cf6, again at ccd10eac where the bullet became 'proves that rule with two commands')",
+      "packages/pi-envoy/roles/implementer.md": "#1003's 'Before every push that answers a review…' paragraph kept, this PR's rebase paragraph after it",
+      "packages/pi-envoy/roles/merger.md": "opening paragraph: #1003's 'Run legion threads resolve (step 3 below), then' folded in; #1003's step 3 (threads resolve) inserted, this PR's publish step renumbered 4 (at 7936442a, again at 6229db3d for the 'no file changes' wording)"
+    },
+    "tipBefore": "018525d4911ad475d0bd736b26236ce239d81ecb",
+    "tipAfter": "2c0fdde4a8a243845ef2daff11d55474dc82145a",
+    "fingerprintBefore": "32f4d0b3f5a4352e4511fe910d1739481f5b28ef648bfe1c13d08e9a6f5ebd75",
+    "fingerprintAfter": "d89c12390eefb044b3241586b39b82a61e897d0085b47aa5d644203dce52b92a",
+    "result": "changed",
+    "fingerprintDelta": "8 of 10 files identical; skills/legion-worker/SKILL.md (merger bullet) and packages/pi-envoy/roles/merger.md (opening paragraph, step 3/4) differ exactly by the #1003 sentences merged into paragraphs this PR rewrites — the added/removed lines against the new base include them",
+    "fileset": "'~(.legion | docs/solutions)'",
+    "verificationAfterRebase": "cd packages/daemon && bun test -> 1035 pass, 6 skip, 0 fail; biome check src/ clean; tsc --noEmit clean; every plan grep unchanged; no 'approved head (still) equals the current head' in the worker skill or merger.md"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T06:41:56.039Z"
+  "completed": "2026-09-13T07:16:54.335Z"
 }
