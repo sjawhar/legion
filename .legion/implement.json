@@ -1,0 +1,95 @@
+{
+  "summary": "deliver() in packages/pi-envoy/extensions/envoy.ts now publishes the receipt on the reply inbox immediately after renderInbound() returns, under the unchanged guard (reply !== \"\" && subject === agentSubject(sessionID)), wrapped so a failed publish is logged with the event id and delivery continues; the trailing publish is deleted and nothing else in deliver() moves. Dedupe on dedupe_key is byte-identical. Proven by five envoy.test.ts changes (red recorded before the code change), CI's exact pi-envoy steps, and PR #1083.",
+  "pr": "https://github.com/sjawhar/legion/pull/1083",
+  "prNumber": 1083,
+  "head": "727e60296638",
+  "filesChanged": [
+    "packages/pi-envoy/extensions/envoy.ts",
+    "packages/pi-envoy/extensions/envoy.test.ts",
+    "packages/pi-envoy/AGENTS.md",
+    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+    "skills/envoy/SKILL.md"
+  ],
+  "testSummary": "bun run test in packages/pi-envoy at 727e60296638: 178 pass, 0 fail, 574 expect() calls, Ran 178 tests across 7 files.",
+  "ciStepsLocal": {
+    "command": "cd packages/contracts && bun run build && cd ../pi-envoy && bun run lint && bun run typecheck && bun run test && bun run build",
+    "contractsBuild": "exit 0 (index.js 0.56 MB)",
+    "lint": "biome lint extensions/ src/: Checked 20 files. No fixes applied. exit 0",
+    "typecheck": "tsc --noEmit: exit 0",
+    "test": "178 pass, 0 fail, 574 expect() calls across 7 files (run with the pane's JJ_CONFIG/JJ_USER/JJ_EMAIL unset to mirror CI; see deviations)",
+    "build": "dist/envoy.js 1.23 MB, dist/legion.js 1.27 MB, exit 0"
+  },
+  "red": {
+    "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject|redelivery|targeted BTW|failed receipt publish'",
+    "beforeFix": "5 fail, 0 pass, 88 filtered out (plan predicted 4 fail + 1 pass; see deviations for the fifth)",
+    "afterFix": "5 pass, 0 fail, 21 expect() calls"
+  },
+  "proof": [
+    {
+      "criterion": "1 — receipt before pi.sendMessage and before any fetch",
+      "surface": "bun test in packages/pi-envoy (CI job pi-envoy, workflow 'Legion Envoy and Contracts'); the recorded call sequence from the mocked NATS publish, fetch, and sendMessage",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject request before'",
+      "observed": "calls === ['publish _INBOX.receipt', 'sendMessage'] with no fetch recorded; pre-fix the same test recorded ['sendMessage'] only",
+      "headSha": "727e60296638",
+      "negativeControl": "the same test on the pre-fix deliver(): FAIL, expected 'publish _INBOX.receipt' missing (red recorded before the code change)"
+    },
+    {
+      "criterion": "2 — a duplicate (same dedupe_key) is acknowledged and not injected twice",
+      "surface": "same suite",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'deduplicates a redelivery after successful injection'",
+      "observed": "fixture.messages length 2; published === ['_INBOX.first', '_INBOX.duplicate', '_INBOX.next']",
+      "headSha": "727e60296638",
+      "negativeControl": "pre-fix: '_INBOX.next' absent when the third injection landed (ack after injection)"
+    },
+    {
+      "criterion": "3 — a BTW frame's receipt precedes pi.askEphemeral resolving and the reply POST",
+      "surface": "same suite",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'answers a targeted BTW delivery ephemerally'",
+      "observed": "calls === ['publish _INBOX.btw', 'askEphemeral', 'fetch /api/v1/messages/message-1/reply']",
+      "headSha": "727e60296638",
+      "negativeControl": "pre-fix: calls === ['askEphemeral', 'fetch /api/v1/messages/message-1/reply'] (receipt last)"
+    },
+    {
+      "criterion": "4 — sendMessage throws after the receipt: logged with the event id, dedupe key not recorded",
+      "surface": "same suite",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'permits redelivery after a failed injection'",
+      "observed": "one console.warn naming evt-retry-after-failure with an Error; published === ['_INBOX.failed', '_INBOX.retried', '_INBOX.after']; the re-send injected (delivered length 2)",
+      "headSha": "727e60296638",
+      "negativeControl": "pre-fix: published === ['_INBOX.retried', '_INBOX.after'] — the throw skipped the trailing publish"
+    },
+    {
+      "criterion": "Errors row — publishing the receipt itself fails: logged, the rest of deliver still runs",
+      "surface": "same suite",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'failed receipt publish'",
+      "observed": "messages[0] 'receipt lost' and messages[1] 'receipt kept' both injected; published === ['_INBOX.kept']; one warning naming evt-receipt-lost",
+      "headSha": "727e60296638",
+      "negativeControl": "pre-fix: published === [] at the second injection and no 'acknowledge' warning — the trailing publish threw out of deliver() after injection"
+    },
+    {
+      "criterion": "5 — pre-merge smoke withdrawn; the PR names the release; post-deploy smoke by the operator",
+      "surface": "none pre-merge, by Sami's standing order of 2026-09-13: no smoke rig, scratch daemon, kind cluster, throwaway NATS, scratch tmux server, throwaway OMP profile, or scratch plugin tree; smoke-delivery.sh not run; ~/.omp/profiles/legion and ~/.omp/plugins untouched",
+      "command": "PR #1083 body, Release paragraph",
+      "observed": "names 1.28.1 (latest tag at open: pi-legion-envoy-v1.28.0; main's packages/pi-envoy/package.json 1.28.0), the operator's install, and smoke-delivery.sh against the installed plugin at the operator's timing",
+      "headSha": "727e60296638",
+      "negativeControl": "n/a — no surface exercised pre-merge by order"
+    }
+  ],
+  "trickyParts": [
+    "The receipt block sits after renderInbound() and before the subscriptionRemovedTopics loop: a frame renderInbound throws on is still never acknowledged (spec Errors row 1), and the receipt precedes the dedupe check, the inbox update, armAskReminder (workspace base only; removed on main by #1074), postDispatchReply, askEphemeral, and sendMessage.",
+    "Exactly one `.publish(reply)` remains in envoy.ts; no new import (agentSubject and ensureConnection already existed); the dedupeKeys.add block is byte-identical.",
+    "The fixture's publish mock gained onPublish (ordered recording) and failPublishes (throw once); afterEach resets both.",
+    "gh probes the cwd's .git and the workspace's colocated gitdir points at a stale /home/ubuntu/... worktree path, so `legion gh -- pr create` had to run from /tmp with explicit --repo/--head/--base (no repository read needed)."
+  ],
+  "deviations": [
+    "Red was 5 fail / 0 pass, not the plan's 4 fail / 1 pass: test 1c (dedupe) also failed pre-fix because the third receipt `_INBOX.next` had not been published when sendMessage resolved the awaited promise — i.e. it observes the old ack-after-injection order too and is deterministic under the new order. Kept as written; it pins the contract LEGION-107 relies on.",
+    "Release: the latest tag is pi-legion-envoy-v1.28.0 (1.28.0 landed after planning), so the fix cuts 1.28.1, not 1.27.3; the PR body says so and will be updated with the actual tag after the merge.",
+    "The full pi-envoy suite in this pane shows one failure unrelated to this change: legion.test.ts 'binds a booted worker's jj identity to LEGION_WORKSPACE' reads user.name from a scratch jj repo, and the pane's attribution overlay (JJ_USER/JJ_EMAIL/JJ_CONFIG exported by the extension) overrides it ('legion-implementer[bot]' instead of 'Legion Worker'). With those three variables unset (CI has none of them) the test passes and the suite is 178 pass / 0 fail.",
+    "Added the architect's task 3c: skills/envoy/SKILL.md 'Legion exception lane' paragraph names receipt_timeout, narrows delivery_failed to 'not forwarded at all', states no_holder, keeps the liveness-signal guidance. Only that paragraph; included in the fix commit.",
+    "Bookmark move needed --allow-backwards: the split left legion/LEGION-109 on the undescribed working copy, and @- is its parent; pointed it at the fix commit and pushed (no origin bookmark existed before)."
+  ],
+  "openQuestions": [],
+  "smokeWithdrawn": "Sami's standing order via the operator, 2026-09-13 19:00Z: no smoke rig of any kind pre-merge; pre-merge proof is the unit suite plus CI. Post-deploy proof is the operator's smoke-delivery.sh run against the installed release and the LEGION-101 production hour.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T07:07:00.101Z"
+}
