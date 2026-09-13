@@ -141,8 +141,8 @@ export interface ProcessManagerDeps {
   revokeSessionCapability(sessionId: string): void;
   now(): number;
   /** `<state_dir>/deployment-instructions.md`, materialized by `index.ts` at boot when
-   * `config.instructionsPath` is set — appended to every launched pane's system prompt as its
-   * last `--append-system-prompt "$(cat <this file>)"` fragment. Undefined: no fragment. */
+   * `config.instructionsPath` is set — the last part of every launched pane's one
+   * `--append-system-prompt` value, as `$(cat <this file>)`. Undefined: no instructions part. */
   deploymentInstructionsFile?: string;
 }
 
@@ -154,7 +154,7 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
  * throw. */
 export { StopFailed, TreeClosingError } from "./process-errors";
 
-/** Builds the second `--append-system-prompt` fragment every root and phase-worker process gets,
+/** Builds the addressing fragment every root and phase-worker process gets in its system prompt,
  * so the model can address the architect (and derive a sibling's topic) without hand-encoding a
  * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
 export function addressingFragment(
@@ -172,30 +172,43 @@ export function addressingFragment(
   );
 }
 
-/** The ordered `--append-system-prompt` arguments every daemon-launched OMP process receives:
- * the packaged role prompt, the addressing fragment (every root and phase worker; the controller
- * has none), then the deployment instructions file when configured. Both file-backed fragments
- * are `"$(cat <path>)"` expanded by the process's own shell — never inlined into the command
- * (size and quoting). One builder for `issueInnerCommand` and `spawnController` alike, so the two
- * launch sites cannot drift. */
+/** Escapes `text` for the inside of a POSIX double-quoted shell word: `\`, `"`, `$`, and `` ` ``
+ * are the four characters the shell still interprets there. Used for the inline addressing text
+ * that shares one double-quoted `--append-system-prompt` value with the `$(cat …)` fragments. */
+function shellDoubleQuoted(text: string): string {
+  return text.replaceAll(/[\\"$`]/g, (character) => `\\${character}`);
+}
+
+/** The one `--append-system-prompt` argument every daemon-launched OMP process receives. OMP's
+ * flag is last-wins (its argv handler assigns `appendSystemPrompt`), so several flags would hand
+ * the model only the final fragment — with deployment instructions configured, a pane would get
+ * neither its role prompt nor its addressing line nor the root's gate policy. Every fragment is
+ * therefore joined into a single value, in order: the packaged role prompt, the addressing
+ * fragment (every root and phase worker; the controller has none), then the deployment
+ * instructions file when configured, separated by a blank line. The value is one double-quoted
+ * shell word: the file-backed fragments are `$(cat <path>)` expanded by the process's own shell —
+ * never inlined into the command (size and quoting) — and the addressing text is escaped for the
+ * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
+ * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch sites
+ * cannot drift. */
 function systemPromptArguments(
   promptPath: string,
   addressingPrompt: string | undefined,
   deploymentInstructionsFile: string | undefined
 ): string {
-  const fragments = [`"$(cat ${shellPath(promptPath)})"`];
-  if (addressingPrompt !== undefined) fragments.push(shellPath(addressingPrompt));
+  const fragments = [`$(cat ${shellPath(promptPath)})`];
+  if (addressingPrompt !== undefined) fragments.push(shellDoubleQuoted(addressingPrompt));
   if (deploymentInstructionsFile !== undefined) {
-    fragments.push(`"$(cat ${shellPath(deploymentInstructionsFile)})"`);
+    fragments.push(`$(cat ${shellPath(deploymentInstructionsFile)})`);
   }
-  return fragments.map((fragment) => `--append-system-prompt ${fragment}`).join(" ");
+  return `--append-system-prompt "${fragments.join("\n\n")}"`;
 }
 
-/** The one sentence a root architect's second `--append-system-prompt` fragment carries after
- * the addressing sentence: whether this project arms the design gate (`config.gates.design`). The
- * daemon's reply to `/process/started` carries the same value, but the extension never shows it to
- * the model, so this is the only way the architect learns whether to request spec approval at all.
- * Root architects only — the root approval covers the tree and a child spec is never gated. */
+/** The one sentence a root architect's system prompt carries after the addressing sentence:
+ * whether this project arms the design gate (`config.gates.design`). The daemon's reply to
+ * `/process/started` carries the same value, but the extension never shows it to the model, so
+ * this is the only way the architect learns whether to request spec approval at all. Root
+ * architects only — the root approval covers the tree and a child spec is never gated. */
 export function designGateFragment(design: "root-issues" | "off"): string {
   return design === "off"
     ? "Design gate policy: `gates.design: off` — this project does not arm the design gate; do not request spec approval, register a gate, or wait for `design-approved`."

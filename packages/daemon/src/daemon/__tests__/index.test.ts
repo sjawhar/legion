@@ -1209,9 +1209,12 @@ describe("startDaemon", () => {
         (command) => command[0]?.endsWith("/tmux") && command[3] === "new-window"
       );
       if (!controllerLaunch) throw new Error("controller spawn did not open a tmux window");
+      // One flag, both fragments inside it (OMP's flag is last-wins): the packaged controller
+      // prompt, a blank line, then the materialized instructions.
       expect(controllerLaunch.at(-1)).toEndWith(
-        ` --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)" --append-system-prompt "$(cat ${materialized})"`
+        ` --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)\n\n$(cat ${materialized})"`
       );
+      expect(controllerLaunch.at(-1)?.split("--append-system-prompt ")).toHaveLength(2);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

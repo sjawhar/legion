@@ -130,7 +130,7 @@ export interface DaemonConfig {
   githubApps: GitHubAppsConfig;
   stateDir: string;
   /** Optional operator markdown appended to every launched pane's system prompt (root architect,
-   * sub-architects, phase workers, controller) as the last `--append-system-prompt` fragment —
+   * sub-architects, phase workers, controller) as the last part of its `--append-system-prompt` —
    * the deployment's standing rules for this repository. The `instructions` file key is resolved
    * against the config file's directory when relative; `LEGION_INSTRUCTIONS` is used as given.
    * Read once at boot (`index.ts`): a missing, unreadable, or blank file refuses startup. */

@@ -1,8 +1,9 @@
-// Real-tmux, real-shell E2E for the deployment-instructions fragment: a real `ProcessManager`
-// launches the controller pane through a real `legion worker-shim` inside a real tmux server, and
-// the wrapped "OMP" (`argv-recorder-omp.ts`) records the argv the pane's shell actually handed it
-// after `"$(cat …)"` expansion. A mocked `run` can only prove the command string; this proves the
-// process receives the materialized header + content as its last `--append-system-prompt` value.
+// Real-tmux, real-shell E2E for the system-prompt argument: a real `ProcessManager` launches the
+// controller pane through a real `legion worker-shim` inside a real tmux server, and the wrapped
+// "OMP" (`argv-recorder-omp.ts`) records the argv the pane's shell actually handed it after the
+// `$(cat …)` expansions. A mocked `run` can only prove the command string; this proves the process
+// receives exactly ONE `--append-system-prompt` (OMP's flag is last-wins) whose value is the role
+// prompt, a blank line, then the materialized deployment instructions.
 import { afterAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -107,7 +108,7 @@ afterAll(async () => {
 
 describe("real deployment instructions fragment (tmux + worker-shim, no mocks)", () => {
   it.skipIf(process.env.LEGION_E2E !== "1")(
-    "hands the launched process the materialized header + file content as its last --append-system-prompt value",
+    "hands the launched process one --append-system-prompt value: the role prompt, then the materialized header + file content",
     async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "legion-real-instructions-e2e-"));
       tempDirs.push(dir);
@@ -183,16 +184,17 @@ describe("real deployment instructions fragment (tmux + worker-shim, no mocks)",
         await waitForFile(record);
         const argv = JSON.parse(await readFile(record, "utf8")) as string[];
 
-        // The shell's `$(cat …)` strips trailing newlines from both file-backed fragments.
+        // The shell's `$(cat …)` strips trailing newlines from both file-backed fragments; the
+        // daemon joins them with a blank line inside one double-quoted word.
         const strip = (text: string) => text.replace(/\n+$/, "");
         const prompts = argv.flatMap((arg, index) =>
           arg === "--append-system-prompt" ? [argv[index + 1]] : []
         );
         expect(argv.slice(0, 2)).toEqual(["--mode", "rpc"]);
         expect(prompts).toEqual([
-          strip(await readFile(CONTROLLER_PROMPT, "utf8")),
-          `# Deployment instructions (${cfg.legionId})\n\n${strip(content)}`,
+          `${strip(await readFile(CONTROLLER_PROMPT, "utf8"))}\n\n# Deployment instructions (${cfg.legionId})\n\n${strip(content)}`,
         ]);
+        expect(argv).toHaveLength(4);
         expect(argv.at(-2)).toBe("--append-system-prompt");
       } finally {
         processes.dispose();
