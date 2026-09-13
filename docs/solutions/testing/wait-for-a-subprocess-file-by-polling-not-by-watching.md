@@ -104,3 +104,8 @@ condition — poll the observable itself.
   real wait tiny and commented.
 - [race-regression-tests-that-fail-before-the-fix](race-regression-tests-that-fail-before-the-fix.md)
   — the loop that proves a race is closed must have shown the race first.
+- [two-contenders-through-a-rename-collision-gate-both-in-wake-on-the-rename-pin-the-winner](two-contenders-through-a-rename-collision-gate-both-in-wake-on-the-rename-pin-the-winner.md)
+  § 2 — the one bounded case where `fs.watch` is acceptable: an *in-process* writer provably
+  ordered after the arm, a watched directory whose only post-arm event is the rename itself, and a
+  callback that checks the target's existence rather than the event. Outside those three bounds,
+  this document's poll applies.
