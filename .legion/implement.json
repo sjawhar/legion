@@ -3,17 +3,21 @@
     "number": 993,
     "url": "https://github.com/sjawhar/legion/pull/993",
     "branch": "legion/LEGION-33",
-    "headSha": "ec8ea35837d8cbcec64e0d15a5ddea2dede5665d",
+    "headSha": "0de8e4aaf7e7d1effc6c3be716c6fa58426bd92a",
     "base": "main",
-    "reviewedCodeHead": "c092a5acf12c9ca43fcb093ee82974fa00321e50",
-    "mergeable": "MERGEABLE (mergeStateStatus BLOCKED = awaiting checks/review, not conflicts)"
+    "reviewedCodeHead": "c092a5acf12c9ca43fcb093ee82974fa00321e50 (four code commits; unchanged through both merges and the review round)",
+    "mergeable": "MERGEABLE at 0de8e4aa (mergeStateStatus BLOCKED = awaiting checks/review, not conflicts)"
   },
   "commits": [
     "6ae0093e623e feat(envoy): forward changed_paths on push events",
     "e928d3ffe5d1 feat(daemon): PrState push-classification fields, state v25",
     "a4c7ab9900fe feat(daemon): count only real fixes as fix attempts, publish pr-blocked once per count",
     "92909f8492e3 docs: define a fix attempt and the push payload's changed_paths fields",
-    "ec8ea35837d8 merge main into legion/LEGION-33 (merge commit; parents c092a5acf12c and main abaf08175c9b)"
+    "ec8ea35837d8 merge main into legion/LEGION-33 (merge commit; parents c092a5acf12c and main abaf08175c9b)",
+    "9321a7834ccf test: record handoff (tester)",
+    "c321185825c8 review: record handoff (reviewer; committed locally by the review App, pushed by this implementer since the App has no contents permission)",
+    "9791585a3cf4 test: lock the three classifier edges the review named",
+    "0de8e4aaf7e7 merge main into legion/LEGION-33 (second merge; parents 9791585a and main 195674ab)"
   ],
   "filesChanged": [
     "packages/envoy/internal/contracts/normalize.go",
@@ -49,16 +53,16 @@
   ],
   "tests": {
     "daemon": {
-      "biome": "bunx biome check src/ -> Checked 147 files. No fixes applied (at ec8ea358).",
-      "tsc": "bunx tsc --noEmit -> exit 0 (at ec8ea358).",
-      "bunTest": "At merge head ec8ea358: bun test -> 1000 pass, 5 skip, 0 fail (1005 tests, 57 files; main added 20). Pre-merge at c092a5ac: 980 pass, 5 skip, 0 fail (three consecutive clean runs; one earlier transient process-manager flake did not reproduce).",
+      "biome": "bunx biome check src/ -> Checked 152 files. No fixes applied (at 0de8e4aa).",
+      "tsc": "bunx tsc --noEmit -> exit 0 (at 0de8e4aa).",
+      "bunTest": "At 0de8e4aa: bun test -> 1013 pass, 6 skip, 0 fail (1019 tests, 60 files). Earlier: 1000/5/0 at ec8ea358; 980/5/0 at c092a5ac.",
       "targeted": "reducers + envelope-goldens + resync + events → 159 pass, 0 fail; legion-state → 39 pass, 0 fail",
       "redBeforeGreen": "With the pre-change reducers.ts swapped in, 16 of the new reducer tests fail (all push classification cases plus both pr-blocked once-per-count cases); 83/83 pass with the change."
     },
     "envoy": {
-      "gofmt": "gofmt -l internal/contracts → nothing. gofmt -l . → internal/mcpbridge/{bridge,config,server}.go, pre-existing on main and untouched by this PR.",
+      "gofmt": "gofmt -l internal/contracts -> nothing (at 0de8e4aa).",
       "vet": "go vet ./internal/contracts/ → ok",
-      "goTest": "At merge head: go test ./internal/contracts/ -count=1 -> ok. Pre-merge full: go test ./... -> every package ok; internal/integration FAILed once while running concurrently with the daemon bun suite (embedded NATS reconnect timeouts) and passed in isolation (ok, 170.556s).",
+      "goTest": "At 0de8e4aa: go test ./internal/contracts/ -count=1 -> ok (160 subtests). Earlier full go test ./... at c092a5ac: every package ok (integration flaked once under concurrent load, ok in isolation).",
       "goldenDiff": "packages/contracts/fixtures/github-envelopes/push.json changed by exactly two added lines: changed_paths and changed_paths_truncated."
     },
     "replaySmoke": "Throwaway (not committed): Go emitted the normalized envelope for testdata/push_handoff_only.json; bun script replayed it, the regenerated push golden, and an old-listener negative control through reduceGithubEvent/settleCiVerdict on a red PR in both orders. golden → fixAttempts=1 (both orders); handoff-only → 0 (both orders); old-listener → 1 + '[legion] fix attempt: … changed_paths absent (listener predates LEGION-33)' log; six handoff-only rounds → 0 attempts, 0 pr-blocked; six real rounds with two red settlements each → pr-blocked attempts [3,4,5,6] (4 publishes over 12 red settlements). Full output is in the PR body. Re-run at merge head ec8ea358: normalized envelope and all six replay outputs byte-identical (diff empty)."
@@ -82,9 +86,47 @@
       }
     ],
     "noOtherOverlap": "main touched no other file this PR changes: no legion-state.ts version bump (v24->v25 migration stands exactly as planned, migrateV24State remains the last entry in the migrations list), no reducers.ts, no push golden. The plan's field-version note is NOT superseded.",
-    "check": "jj diff main@origin..merge == this PR's 18-file diff; jj diff c092a5ac..merge touches only AGENTS.md among this PR's files (main's four bullets)."
+    "check": "jj diff main@origin..merge == this PR's 18-file diff; jj diff c092a5ac..merge touches only AGENTS.md among this PR's files (main's four bullets).",
+    "secondMerge": {
+      "reason": "GitHub reported CONFLICTING/DIRTY again after main moved during review (#956, #994, #995, #996, releases cli v1.6.0/v1.6.1, pi-envoy v1.18.0/v1.18.1).",
+      "commit": "0de8e4aaf7e7 on top of the test commit 9791585a; reviewed code commits untouched.",
+      "conflicts": [
+        {
+          "file": "packages/daemon/src/daemon/AGENTS.md",
+          "kind": "2-sided: main reworded the 'Workspace clone' bullet (#995's runner timedOut/aborted wording); this PR's fix-attempt bullet sits directly after it.",
+          "resolution": "main's new 'Workspace clone' wording, then this PR's fix-attempt bullet unchanged (main's bullets first, ours last, as in the first merge). main's new deployment-instructions.ts row/paragraph and the SKILL.md rows merged cleanly."
+        }
+      ],
+      "noStateOrReducerChange": "main touched neither legion-state.ts nor reducers.ts: migrateV24State remains the last migration, no renumbering, no version-pinned test changed.",
+      "check": "jj diff main@origin..0de8e4aa == this PR's diff (20 files incl. the four .legion/*.json)."
+    }
   },
+  "reviewRound1": {
+    "reviewedHead": "9321a7834ccf",
+    "verdict": "0 blocking, 3 non-blocking test gaps as inline threads; thermo (deep-review + code-quality) run by the reviewer at ec8ea358",
+    "landedIn": "9791585a3cf4",
+    "rows": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/993#discussion_r3998759874",
+        "change": "reducers.test.ts mixed-push row now lists \".legion/implement.json\" FIRST then \"packages/daemon/src/daemon/reducers.ts\"; the README.md-only sibling row dropped (the push golden covers it).",
+        "breakThenFix": "classifyPush rewritten to read only split(\"\\n\")[0] -> exactly this row fails (82 pass / 1 fail); restored -> 83/83."
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/993#discussion_r3998759876",
+        "change": "reducers.test.ts unclassifiable table gains { changed_paths_truncated: \"maybe\" } -> reason \"unrecognised\", counted and logged.",
+        "breakThenFix": "the `truncated !== \"false\"` branch deleted from classifyPush -> exactly this row fails (82 pass / 1 fail); restored -> 83/83."
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/993#discussion_r3998759877",
+        "change": "normalize_test.go TestGithubPayloadFields gains \"push with exactly 100 unique paths and a repeat does not flag truncation\": commit 1 added numberedPaths(0,100), commit 2 modified numberedPaths(0,1) -> 100 lines, changed_paths_truncated \"false\".",
+        "breakThenFix": "seen check and len(paths)==maxPushChangedPaths check swapped in githubPushChangedPaths -> exactly this row fails (changed_paths_truncated = \"true\", want \"false\"); restored -> package ok."
+      }
+    ],
+    "threads": "All three replied to with the landing commit and resolved via resolveReviewThread (PRRT_kwDORFy7ds6h2g8B/C/D)."
+  },
+  "workspaceHygiene": "Abandoned the divergent local copy e5cf55e3 of change kulvkspq (differed from the pushed copy 2c808fbd only by an auto-snapshotted empty .omp/config.yml; no descendants). Removed .omp/config.yml from the working copy so no commit carries it.",
+  "legionDeletion": "NOT pushed on this head by architect instruction: the tester verifies 0de8e4aa first; the .legion/ deletion is a separate later push.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T03:26:05.957Z"
+  "completed": "2026-09-13T05:04:36.649Z"
 }
