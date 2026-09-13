@@ -348,6 +348,10 @@ export default function legionExtension(pi: PiApi): void {
     subagentSession ??= isSubagentSession(context);
     return subagentSession;
   };
+  // Whether this pane was launched for a phase worker, judged from the environment on the first
+  // tool_call (see the LEGION-45 guard there). A subagent's own instance inherits the pane's
+  // environment, so the guard binds it exactly as it binds the worker that spawned it.
+  let phaseWorkerPane: boolean | undefined;
 
   const roleDaemon = () => {
     return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
@@ -722,9 +726,29 @@ export default function legionExtension(pi: PiApi): void {
       toolCallId: toolCall.toolCallId,
       toolName: toolCall.toolName,
     });
-    // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
-    // running in the parent's own module instance, already governs the parent's `task` call
-    // that spawned it (see the architect `task` block above and isSubagentSession).
+    // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
+    // one clone), and a `task` subagent's bash runs in the same pane against it, so this guard is
+    // judged from the pane's environment ahead of the subagent exemption below -- the one gate that
+    // reaches a subagent -- and before any grant is minted. Classified once per instance, on the
+    // first call: a throw for a malformed LEGION_ROLE stays inside the handler, never at load.
+    phaseWorkerPane ??= classifySession(process.env).kind === "phase-worker";
+    if (phaseWorkerPane) {
+      const jjAttempt = jjLogRewriteAttempt(toolCall);
+      if (jjAttempt !== undefined) {
+        return {
+          block: true,
+          reason:
+            `refused \`${jjAttempt}\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo ` +
+            "rewrite the jj operation log, which every Legion issue workspace shares (each is a jj " +
+            "workspace of one clone), so they rewrite other trees' commits too. Recover forward with " +
+            "a new commit or `jj restore <paths>` of files; anything else, stop and send the owning " +
+            'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
+        };
+      }
+    }
+    // No other gate applies to a subagent's own tool calls: the parent session's gate, running
+    // in the parent's own module instance, already governs the parent's `task` call that spawned
+    // it (see the architect `task` block above and isSubagentSession).
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = capability?.sessionID === sessionID ? capability : undefined;
@@ -771,20 +795,6 @@ export default function legionExtension(pi: PiApi): void {
         MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
       ) {
         return { block: true, reason: "the merger only verifies and reports" };
-      }
-      // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
-      // one clone). Refused before it runs and before any grant is minted for it.
-      const jjAttempt = jjLogRewriteAttempt(toolCall);
-      if (jjAttempt !== undefined) {
-        return {
-          block: true,
-          reason:
-            `refused \`${jjAttempt}\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo ` +
-            "rewrite the jj operation log, which every Legion issue workspace shares (each is a jj " +
-            "workspace of one clone), so they rewrite other trees' commits too. Recover forward with " +
-            "a new commit or `jj restore <paths>` of files; anything else, stop and send the owning " +
-            'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
-        };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")

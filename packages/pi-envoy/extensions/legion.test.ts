@@ -1304,6 +1304,65 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
+  test("refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated", async () => {
+    const requests: { readonly path: string }[] = [];
+    const { childFile } = await createSubagentTranscriptPaths();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker-jj";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      return Response.json({
+        session_id: "ses_sub_worker_jj",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+    const context = sessionContext("ses_sub_worker_jj", childFile);
+    await sessionStart({}, context);
+
+    // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
+    // log, as the phase worker that spawned it -- the one gate that binds a subagent.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-sub-worker-jj-log",
+          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+        },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+    // Every other gate stays off: the call passes, and no grant or daemon route is touched.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-sub-worker-legion-state",
+          input: { command: "legion state" },
+        },
+        context
+      )
+    ).resolves.toBeUndefined();
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+  });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -2062,7 +2121,9 @@ describe("Legion OMP extension", () => {
     });
   });
   test("blocks a bash call from a worker session that has not completed its boot handshake", async () => {
+    // The pane's launch environment is complete; only the boot handshake is missing.
     process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
     process.env.LEGION_ROLE = "implementer";
     const fixture = createPi();
     legionExtension(fixture.pi);
