@@ -2,7 +2,7 @@ import { CliError } from "./errors";
 
 export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
+const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
 /** One GraphQL call against GitHub as the App whose token was redeemed. Rejects with a CliError
  * carrying GitHub's own message (HTTP status + body for a transport failure, the `errors[]`
@@ -16,7 +16,7 @@ export interface GitHubRepo {
 
 /** An unresolved review thread reduced to what the acceptance rule reads. A thread has no URL of
  * its own on GitHub; `url` is its opening comment's, the anchor the PR page scrolls to. */
-export interface UnresolvedThread {
+interface UnresolvedThread {
   id: string;
   url: string;
   openerLogin: string | null;
@@ -80,7 +80,7 @@ export function githubGraphql(fetch: Fetch, token: string): GraphqlCall {
     if (payload.errors && payload.errors.length > 0) {
       throw new CliError(payload.errors.map((error) => error.message).join("; "));
     }
-    if (payload.data === undefined) throw new CliError("GitHub GraphQL response carried no data");
+    if (payload.data == null) throw new CliError("GitHub GraphQL response carried no data");
     return payload.data;
   };
 }
@@ -88,13 +88,13 @@ export function githubGraphql(fetch: Fetch, token: string): GraphqlCall {
 /** The reviewer's acceptance reply form: the comment's first non-blank line begins `Accepted:`
  * (`Accepted: fixed in <commit> — <one line>` or `Accepted: not a defect — <reason>`). Anything
  * else — `Still open: …`, `Accepted (round 2): …`, a bare "fixed" — is not an acceptance. */
-export function isAcceptance(body: string): boolean {
+function isAcceptance(body: string): boolean {
   return body.trimStart().startsWith("Accepted:");
 }
 
 /** True when the thread's newest comment is its opener's own `Accepted:` reply: the account that
  * raised the point is the one closing it, and nobody has replied since. */
-export function acceptedByOpener(thread: UnresolvedThread): boolean {
+function acceptedByOpener(thread: UnresolvedThread): boolean {
   return (
     thread.openerLogin !== null &&
     thread.openerLogin === thread.newestLogin &&
@@ -103,7 +103,7 @@ export function acceptedByOpener(thread: UnresolvedThread): boolean {
 }
 
 /** Every unresolved review thread on the pull request, across every page of `reviewThreads`. */
-export async function listUnresolvedThreads(
+async function listUnresolvedThreads(
   graphql: GraphqlCall,
   repo: GitHubRepo,
   number: number
@@ -141,6 +141,54 @@ export async function listUnresolvedThreads(
 }
 
 /** One `resolveReviewThread` mutation; a refusal surfaces as the CliError `githubGraphql` throws. */
-export async function resolveThread(graphql: GraphqlCall, threadId: string): Promise<void> {
+async function resolveThread(graphql: GraphqlCall, threadId: string): Promise<void> {
   await graphql(RESOLVE_MUTATION, { threadId });
+}
+
+/** `--repo <owner>/<name>`, or the CliError the operator sees. */
+export function parseRepo(value: string): GitHubRepo {
+  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(value);
+  if (!match) throw new CliError(`--repo must be <owner>/<name> (got ${JSON.stringify(value)})`);
+  return { owner: match[1] as string, name: match[2] as string };
+}
+
+/** `--pr <number>`, or the CliError the operator sees. */
+export function parsePullNumber(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new CliError(`--pr must be a pull request number (got ${JSON.stringify(value)})`);
+  }
+  return Number(value);
+}
+
+/** The policy `legion threads resolve` applies, as the App whose token `graphql` carries: every
+ * unresolved review thread whose newest comment is its opener's own `Accepted:` reply is resolved
+ * (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved thread is
+ * named as left open; no unresolved thread at all prints exactly `no unresolved threads`. A thread
+ * GitHub refuses rejects with a CliError naming the thread's URL and GitHub's message, and nothing
+ * after it is attempted. */
+export async function resolveAcceptedThreads(
+  graphql: GraphqlCall,
+  repo: GitHubRepo,
+  number: number,
+  log: (line: string) => void
+): Promise<void> {
+  const threads = await listUnresolvedThreads(graphql, repo, number);
+  if (threads.length === 0) {
+    log("no unresolved threads");
+    return;
+  }
+  for (const thread of threads) {
+    if (!acceptedByOpener(thread)) {
+      const by = thread.newestLogin ?? "an unknown account";
+      log(`left open ${thread.url} — newest reply by ${by} is not an acceptance`);
+      continue;
+    }
+    try {
+      await resolveThread(graphql, thread.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new CliError(`resolveReviewThread failed for ${thread.url}: ${message}`);
+    }
+    log(`resolved ${thread.url}`);
+  }
 }
