@@ -5,7 +5,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly repo_root
 readonly smoke_dir="${SMOKE_DIR:-/tmp/legion-smoke}"
 readonly gh_config_dir="${smoke_dir}/gh-config"
-readonly nats_name="legion-smoke-nats"
 readonly nats_port="${NATS_PORT:-14222}"
 readonly listener_port="${ENVOY_PORT:-19020}"
 readonly smoke_dispatch_project="LEGSMOKE"
@@ -302,6 +301,18 @@ project_slug() {
   printf '%s\n' "$project"
 }
 
+# Both per-rig names derive from SMOKE_PROJECT so two rigs coexist on one machine: the NATS
+# container name (down.sh removes it by the record main() writes) and the listener's
+# ENVOY_MACHINE_ID, which keys its durable JetStream consumer -- two listeners sharing one id
+# collide with "consumer is already bound to a subscription".
+nats_container_name() {
+  printf 'legion-smoke-nats-%s\n' "$(project_slug)"
+}
+
+listener_machine_id() {
+  printf 'legion-smoke-%s\n' "$(project_slug)"
+}
+
 app_jwt() {
   local app_id="$1"
   local private_key_variable="$2"
@@ -424,6 +435,8 @@ ensure_root_issue() {
 }
 
 ensure_nats() {
+  local nats_name="$1"
+
   if docker container inspect "$nats_name" >/dev/null 2>&1; then
     [[ "$(docker port "$nats_name" 4222/tcp)" == *":${nats_port}"* ]] ||
       fail "NATS container ${nats_name} is not mapped to configured port ${nats_port}"
@@ -588,6 +601,7 @@ main() {
   local omp_path
   local design_gate
   local dispatch_ingress
+  local nats_name
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -603,6 +617,7 @@ main() {
 
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"
+  nats_name="$(nats_container_name)"
   webhook_mode="$(resolve_webhook_mode)"
   omp_path="$(resolve_omp_path)"
   printf 'GREEN OMP build: %s\n' "$omp_path"
@@ -614,6 +629,8 @@ main() {
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
   printf '%s\n' "$design_gate" >"${smoke_dir}/design-gate"
   printf '%s\n' "$dispatch_ingress" >"${smoke_dir}/dispatch-ingress"
+  # down.sh removes exactly the container named here, so teardown needs no SMOKE_PROJECT.
+  printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config
@@ -622,11 +639,11 @@ main() {
     go build -o out/envoy-listener ./cmd/listener
   )
 
-  ensure_nats
+  ensure_nats "$nats_name"
 
   start_process listener env \
     PORT="$listener_port" \
-    ENVOY_MACHINE_ID="legion-smoke" \
+    ENVOY_MACHINE_ID="$(listener_machine_id)" \
     NATS_URLS="$nats_url" \
     ENVOY_HOST_BRIDGE="127.0.0.1" \
     ENVOY_WEBHOOKS="github" \

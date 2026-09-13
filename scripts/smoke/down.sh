@@ -2,7 +2,10 @@
 set -euo pipefail
 
 readonly smoke_dir="${SMOKE_DIR:-/tmp/legion-smoke}"
-readonly nats_name="legion-smoke-nats"
+# up.sh records the rig's derived NATS container name (legion-smoke-nats-<slug>) here; rigs
+# started before that record existed used one fixed name for every rig.
+readonly nats_record="${smoke_dir}/nats-container"
+readonly legacy_nats_name="legion-smoke-nats"
 
 warn() {
   printf 'warning: %s\n' "$*" >&2
@@ -120,6 +123,27 @@ stop_tmux_session() {
   printf 'STOPPED tmux session %s on private socket %s\n' "$session" "$session"
 }
 
+# Removes exactly the container up.sh recorded for this rig. The record is left in place so a
+# repeat teardown against the same scratch directory still names this rig's container instead of
+# falling through to the fixed name, which may belong to an older rig still running.
+remove_nats_container() {
+  local nats_name
+
+  if [[ -e "$nats_record" ]]; then
+    nats_name="$(<"$nats_record")"
+    if [[ ! "$nats_name" =~ ^legion-smoke-nats-[a-z0-9]+$ ]]; then
+      warn "refusing to remove NATS container: ${nats_record} does not name a rig container (${nats_name})"
+      return 0
+    fi
+  else
+    nats_name="$legacy_nats_name"
+    printf 'no %s record; falling back to the old fixed name %s\n' "$nats_record" "$nats_name"
+  fi
+  docker container inspect "$nats_name" >/dev/null 2>&1 || return 0
+  docker rm -f "$nats_name" >/dev/null
+  printf 'STOPPED NATS container %s\n' "$nats_name"
+}
+
 main() {
   terminate_pid_file envoy-bridge
   terminate_process_group_file webhook-forward
@@ -130,11 +154,7 @@ main() {
   stop_tmux_session
   terminate_pid_file dispatch
   terminate_pid_file listener
-
-  if docker container inspect "$nats_name" >/dev/null 2>&1; then
-    docker rm -f "$nats_name" >/dev/null
-    printf 'STOPPED NATS container %s\n' "$nats_name"
-  fi
+  remove_nats_container
   printf 'RIG DOWN\n'
 }
 

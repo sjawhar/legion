@@ -114,6 +114,27 @@ write_daemon_config
   exit 1
 }
 
+# Acceptance 1 (LEGION-41): both per-rig names derive from SMOKE_PROJECT through project_slug, so
+# two rigs with different projects never share a NATS container or a listener identity (the
+# machine id keys the listener's durable JetStream consumer).
+[[ "$(SMOKE_PROJECT="sjawhar/16" nats_container_name)" == "legion-smoke-nats-sjawhar16" ]] || {
+  printf 'expected legion-smoke-nats-sjawhar16 for sjawhar/16, got %s\n' "$(SMOKE_PROJECT="sjawhar/16" nats_container_name)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="example-org/24" nats_container_name)" == "legion-smoke-nats-exampleorg24" ]] || {
+  printf 'expected legion-smoke-nats-exampleorg24 for example-org/24, got %s\n' "$(SMOKE_PROJECT="example-org/24" nats_container_name)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="sjawhar/16" listener_machine_id)" == "legion-smoke-sjawhar16" ]] || {
+  printf 'expected legion-smoke-sjawhar16 for sjawhar/16, got %s\n' "$(SMOKE_PROJECT="sjawhar/16" listener_machine_id)" >&2
+  exit 1
+}
+[[ "$(SMOKE_PROJECT="example-org/24" listener_machine_id)" == "legion-smoke-exampleorg24" ]] || {
+  printf 'expected legion-smoke-exampleorg24 for example-org/24, got %s\n' "$(SMOKE_PROJECT="example-org/24" listener_machine_id)" >&2
+  exit 1
+}
+printf 'PASS: derives the NATS container name and listener machine id from SMOKE_PROJECT\n'
+
 
 [[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
   printf 'expected available webhook forwarding to default to forward mode\n' >&2
@@ -601,3 +622,30 @@ jq -e '.force == true' >/dev/null "$actor_body_file" || {
 printf 'PASS: root-issue creation request forces past the Dispatch near-duplicate check\n'
 
 printf 'PASS: root-issue creation request carries a session actor for the bearer-authenticated POST\n'
+
+# Acceptance 1 (LEGION-41): main() records the derived NATS container name at
+# ${SMOKE_DIR}/nats-container -- the one file down.sh reads, so teardown needs no environment --
+# and hands the listener the per-rig ENVOY_MACHINE_ID. The last main() above ran as sjawhar/24.
+[[ "$(<"${SMOKE_DIR}/nats-container")" == "legion-smoke-nats-sjawhar24" ]] || {
+  printf 'expected main() to record legion-smoke-nats-sjawhar24 at %s; got: %s\n' "${SMOKE_DIR}/nats-container" "$(<"${SMOKE_DIR}/nats-container")" >&2
+  exit 1
+}
+grep -Fxq 'ENVOY_MACHINE_ID=legion-smoke-sjawhar24' "${SMOKE_DIR}/start_process.listener.argv" || {
+  printf 'expected the listener env block to carry ENVOY_MACHINE_ID=legion-smoke-sjawhar24; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.listener.argv")" >&2
+  exit 1
+}
+# A rig for another project derives different names from the same code path.
+rm -f "${SMOKE_DIR}"/start_process.*.argv
+if ! (SMOKE_PROJECT="example-org/7" main) >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed for example-org/7; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"${SMOKE_DIR}/nats-container")" == "legion-smoke-nats-exampleorg7" ]] || {
+  printf 'expected main() to record legion-smoke-nats-exampleorg7 for example-org/7; got: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
+  exit 1
+}
+grep -Fxq 'ENVOY_MACHINE_ID=legion-smoke-exampleorg7' "${SMOKE_DIR}/start_process.listener.argv" || {
+  printf 'expected the listener env block to carry ENVOY_MACHINE_ID=legion-smoke-exampleorg7; argv:\n%s\n' "$(<"${SMOKE_DIR}/start_process.listener.argv")" >&2
+  exit 1
+}
+printf 'PASS: records the per-project NATS container name and hands the listener a per-project ENVOY_MACHINE_ID\n'

@@ -94,13 +94,15 @@ To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OM
 
 Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects an unpinned invocation. Use the explicit `LEGION_OMP_PATH` override above.
 
-The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats` container. In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
+The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. `up.sh` refuses to start when any configured port is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time. Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats-<slug>` container (reused only when it is mapped to the configured `NATS_PORT`; otherwise `up.sh` refuses, naming the container and both ports). In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
+
+Two rigs share one machine when each has its own `SMOKE_PROJECT`, `SMOKE_DIR`, and ports: the NATS container is `legion-smoke-nats-<slug>` and the listener's `ENVOY_MACHINE_ID` is `legion-smoke-<slug>` (it keys the listener's durable JetStream consumer, so two listeners sharing one id fail with `consumer is already bound to a subscription`), where `<slug>` is the same one the tmux session name below uses. `up.sh` writes the container name to `${SMOKE_DIR}/nats-container` so `down.sh` needs no environment to find it.
 
 `SMOKE_WEBHOOK_EVENTS` overrides the supported repository-webhook event list in `forward` mode. The default includes `issues`, `issue_comment`, `sub_issues`, `pull_request`, `pull_request_review`, and `check_run`.
 
 When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, using the user-authenticated `gh` identity described above. Legion itself never reads or writes a human-approval signal: whether a human must approve before merge is the sandbox repository's own rule, and checkpoint 8 verifies that the merge queue respected it.
 
-Tear down the processes, the private tmux server (`tmux -L legion-<slug>`), and NATS container with:
+Tear down the processes, the private tmux server (`tmux -L legion-<slug>`), and this rig's NATS container `legion-smoke-nats-<slug>` (read from `${SMOKE_DIR}/nats-container`; with no record, from a rig started before the name was derived per project, `down.sh` removes the old fixed name `legion-smoke-nats` and says so) with:
 
 ```sh
 bash scripts/smoke/down.sh

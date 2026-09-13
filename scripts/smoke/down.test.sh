@@ -153,6 +153,74 @@ grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
   exit 1
 }
 
+# Acceptance 1 (LEGION-41): down.sh removes exactly the container up.sh recorded for this rig at
+# ${SMOKE_DIR}/nats-container. The fake docker logs every argv and reports two rigs' containers
+# plus the pre-LEGION-41 fixed name as existing, so anything down.sh touched is on the log.
+nats_smoke_dir="${temporary_dir}/smoke-nats"
+mkdir -p "$nats_smoke_dir"
+docker_log="${temporary_dir}/docker.log"
+cat >"${fake_bin}/docker" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${docker_log}"
+case "\$*" in
+  'container inspect legion-smoke-nats-sjawhar16' | 'container inspect legion-smoke-nats-exampleorg24' | 'container inspect legion-smoke-nats') exit 0 ;;
+  'rm -f '*) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${fake_bin}/docker"
+
+printf 'legion-smoke-nats-sjawhar16\n' >"${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >"$output_file" 2>&1
+# A repeat teardown against the same scratch directory still names this rig's container: the
+# record survives teardown, so a second down.sh never falls through to the fixed name.
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >>"$output_file" 2>&1
+grep -Fxq 'rm -f legion-smoke-nats-sjawhar16' "$docker_log" || {
+  printf 'expected down.sh to remove the recorded container legion-smoke-nats-sjawhar16; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats-sjawhar16'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+if grep -q 'exampleorg24' "$docker_log"; then
+  printf 'down.sh must never name another rig'"'"'s container; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+if grep -Eq '(inspect|rm -f) legion-smoke-nats$' "$docker_log"; then
+  printf 'down.sh must not touch the fixed name legion-smoke-nats while a record exists; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+
+# No record (a rig started before the name was derived per project): the old fixed name, and
+# down.sh says that is what it fell back to.
+rm -f "${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >"$output_file" 2>&1
+grep -Fxq 'rm -f legion-smoke-nats' "$docker_log" || {
+  printf 'expected down.sh without a record to remove legion-smoke-nats; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *"no ${nats_smoke_dir}/nats-container record; falling back to the old fixed name legion-smoke-nats"* && "$(<"$output_file")" == *'STOPPED NATS container legion-smoke-nats'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+# A record that does not name a rig container is refused, not guessed around: nothing is removed.
+printf 'not-a-rig-container\n' >"${nats_smoke_dir}/nats-container"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$nats_smoke_dir" bash "$down_script" >"$output_file" 2>&1
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove any container for a malformed record; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'refusing to remove NATS container: '*'nats-container does not name a rig container (not-a-rig-container)'* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
 printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'
 printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\n'
+printf 'PASS: removes only the NATS container recorded for this rig, falls back to legion-smoke-nats only without a record, and refuses a malformed record\n'
