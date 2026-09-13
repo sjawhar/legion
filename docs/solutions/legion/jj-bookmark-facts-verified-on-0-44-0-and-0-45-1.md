@@ -168,10 +168,12 @@ during planning and again during implementation), identical unless noted:
   Registration gone but directory present: `jj workspace update-stale` inside it says
   `Error: Nothing checked out in this workspace` (exit 1; 0.45.1 also
   `Removed Git worktree for …`) — the failure the wrong order would give every later provisioning.
-- Until LEGION-84 lands, a fetch that deletes a merged branch's bookmark also abandons the branch's
-  commits; `jj config set --repo git.abandon-unreachable-commits false -R clone` (both binaries;
-  the file is `~/.config/jj/repos/<config-id>/config.toml`) is how a test keeps them so that the
-  removal, not the fetch, is what makes them leave another workspace's log.
+- A fetch that deletes a merged branch's bookmark abandons the branch's commits unless the clone's
+  `git.abandon-unreachable-commits` is `false`; provisioning writes that setting before every
+  fetch (LEGION-84, `provisionIssueWorkspace`; both binaries accept `jj config set --repo`, and the
+  file is `~/.config/jj/repos/<config-id>/config.toml`), so a test that provisions through it
+  needs no write of its own for the removal, not the fetch, to be what makes those commits leave
+  another workspace's log. A bare scratch clone driven by hand (the recipe below) sets it itself.
 
 ## Construction recipes (for re-verifying on a new pin)
 
@@ -190,7 +192,7 @@ OP=$(jj -R clone op log --no-graph -T 'id.short() ++ "\n"' --limit 1)
 (cd w1 && jj new -m "w1 work" && jj bookmark set legion/X -r @)
 (cd w2 && jj --at-op "$OP" bookmark set legion/X -r @ --allow-backwards)   # two moves from one op;
 jj -R clone bookmark list legion/X                              # the next command reconciles → (conflicted)
-jj -R clone config set --repo git.abandon-unreachable-commits false   # LEGION-84's world
+jj -R clone config set --repo git.abandon-unreachable-commits false   # what provisioning writes before every fetch (LEGION-84)
 jj -R clone workspace add a --name a --revision main; jj -R clone workspace add b --name b --revision main
 (cd a && jj bookmark set legion/A -r @ && echo hi > f && jj new -m "a work 2")
 jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone

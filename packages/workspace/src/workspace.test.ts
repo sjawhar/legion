@@ -1623,18 +1623,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       const workspaceB = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-43");
       const bookmark = "legion/WIDGETS-42";
       process.env.LEGION_MAX_RECURSION_DEPTH = "8";
-      // LEGION-84's world: the fetch below deletes the merged branch's bookmark but must not
-      // abandon its commits itself, or "removal makes them leave B's log" would be vacuous.
-      await jj([
-        "config",
-        "set",
-        "--repo",
-        "git.abandon-unreachable-commits",
-        "false",
-        "-R",
-        repoCloneDir,
-      ]);
-
+      // Provisioning itself writes `git.abandon-unreachable-commits = false` before every fetch
+      // (LEGION-84), so the fetch below that deletes the merged branch's bookmark keeps A's
+      // commits — the removal, not the fetch, is what makes them leave B's log.
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await provisionIssueWorkspace("WIDGETS-43", deps);
       // A's work: a described commit the bookmark follows (it was created on the unsnapshotted
