@@ -4,8 +4,8 @@
     "number": 993,
     "url": "https://github.com/sjawhar/legion/pull/993",
     "branch": "legion/LEGION-33",
-    "testedHead": "2c808fbdca9052d98ad533108b05baa5e427ad62",
-    "codeHead": "ec8ea35837d8cbcec64e0d15a5ddea2dede5665d (merge commit; 2c808fbd only refreshes .legion/implement.json)"
+    "testedHead": "f7761e36c187f654dd93b13717b976c26b5ed158",
+    "codeHead": "0de8e4aaf7e7 (merge of main; reviewed code commits unchanged since c092a5ac; round-1 tested head was 2c808fbd / code ec8ea358)"
   },
   "spec": "dispatch://LEGION-33/spec version 2",
   "acceptance": {
@@ -71,7 +71,61 @@
   ],
   "e2eForPrBody": "reducer replay at head 2c808fbd (code ec8ea358): Go-normalized captured LEGION-23 handoff push + synchronize for 538bbf1a through the real event pump in both orders -> fixAttempts unchanged (6->6; six rounds from 0 -> 0, no pr-blocked); regenerated push golden -> 1 both orders; live state.json (v24, 11 PRs) loads as v25 with every record identical. Negative control: same payload without changed_paths_truncated -> counted (6->7) and '[legion] fix attempt: sjawhar/legion#966 (LEGION-23) push 538bbf1a... could not be classified as handoff-only (changed_paths absent (listener predates LEGION-33)); it counts against max_fix_attempts' written by events.ts's dispatch.",
   "throwawayArtifacts": "/tmp/legion33-tester/{replay.ts,adversarial.ts,loadcheck.ts,deep.ts,*.envelope.json,state/}; the Go dump test zz_tester_dump_test.go was deleted after use (jj status clean apart from .legion/test.json).",
+  "round2Delta": {
+    "round": 2,
+    "kind": "delta verification (not a repeat from scratch); round-1 verdict PASS 8/8 at 9321a783 stands for everything not listed here",
+    "testedHead": "f7761e36c187f654dd93b13717b976c26b5ed158",
+    "codeHead": "0de8e4aaf7e7 (merge of main 195674ab into 9791585a; f7761e36 on top refreshes .legion/implement.json only)",
+    "whatChangedSinceRound1": [
+      "9791585a 'test: lock the three classifier edges the review named': reducers.test.ts mixed-push row now lists .legion/implement.json first then packages/daemon/src/daemon/reducers.ts (README.md-only row dropped); reducers.test.ts unclassifiable table gains changed_paths_truncated 'maybe' -> reason 'unrecognised'; normalize_test.go gains 'push with exactly 100 unique paths and a repeat does not flag truncation'.",
+      "0de8e4aa merge of main (74f7b107 #995 boot-probe abort, releases cli v1.6.1 / pi-envoy v1.18.1) with one conflict in packages/daemon/src/daemon/AGENTS.md.",
+      "c3211858 review: record handoff; f7761e36 implement: record handoff after review round 1."
+    ],
+    "1-diffAudit": {
+      "result": "PASS",
+      "method": "Compared the PR's diff against main before (abaf0817..ec8ea358) and after (195674ab..0de8e4aa), per file, on +/- lines only (context drift ignored), .legion/ excluded.",
+      "evidence": "16 non-.legion files on both sides, no file added or removed. Identical +/- lines for reducers.ts, legion-state.ts, events.ts, normalize.go, push.json golden, testdata/push_handoff_only.json, scripts/fixtures/github/push.json, envelope-goldens.test.ts, legion-state.test.ts, resync.test.ts, daemon AGENTS.md, envoy AGENTS.md, architect SKILL.md, external-red-and-phase-ownership.md. Only reducers.test.ts (row rename + changed_paths reorder, README.md row removed, 'maybe' row added) and normalize_test.go (100+repeat row added) differ -- exactly the three rows and nothing else."
+    },
+    "2-breakThenFix": {
+      "result": "PASS -- every new row is load-bearing",
+      "row1_mixedPushLegionFirst": {
+        "break": "classifyPush: `.every(path => path.startsWith('.legion/'))` replaced by a first-line-only check `split('\\n')[0]?.startsWith(...)`",
+        "observed": "reducers+goldens: 85 pass, 1 fail -- exactly 'a push touching a path outside .legion/ counts one attempt even when a .legion/ path is listed first'",
+        "restored": "file byte-identical; 86 pass, 0 fail"
+      },
+      "row2_unrecognisedTruncated": {
+        "break": "classifyPush: the `if (truncated !== \"false\") return {unknown: ...unrecognised}` branch deleted so unrecognised values fall through to the path check",
+        "observed": "85 pass, 1 fail -- exactly 'an unclassifiable push (changed_paths_truncated is an unrecognised value) counts as today and logs why'",
+        "restored": "byte-identical; 86 pass, 0 fail"
+      },
+      "row3_hundredPlusRepeat": {
+        "break": "githubPushChangedPaths: the `len(paths) == maxPushChangedPaths` cap check moved before the `seen[path]` duplicate check",
+        "observed": "go test -run 'TestGithubPayloadFields|TestGithubPayloadPushChangedPathsFixture|TestGithubEnvelopeGoldens': FAIL only TestGithubPayloadFields/push_with_exactly_100_unique_paths_and_a_repeat_does_not_flag_truncation -- normalize_test.go:1890: payload[\"changed_paths_truncated\"] = \"true\", want \"false\"; the 101-path row and the fixture row still pass",
+        "restored": "byte-identical; ok; gofmt -l internal/contracts empty; go vet ok"
+      },
+      "workspaceAfter": "jj status: no changes (all breaks were in-memory edits restored before any snapshot mattered; verified byte-identical)"
+    },
+    "3-agentsMdMerge": {
+      "result": "PASS",
+      "evidence": "packages/daemon/src/daemon/AGENTS.md at 0de8e4aa == main@195674ab plus exactly this PR's two edits: the events.ts row naming the log effect, and the 'A fix attempt ...' bullet inserted directly after main's reworded 'Workspace clone' bullet (indices 10, 11 under Operational invariants). Main's 19 bullets are all present verbatim (set equality); the fix-attempt bullet is verbatim the PR-side text from 9791585a; no extra or missing bullet; file grows by exactly one line (159 -> 160)."
+    },
+    "4-suites": {
+      "daemon": "bunx biome check src/ -> Checked 152 files, no fixes; bunx tsc --noEmit -> exit 0; bun test (1019 tests, 60 files, 6 skip): run 1 -> 1009 pass / 4 fail, run 2 -> 1012 pass / 1 fail. Every failure is in src/daemon/__tests__/processes.test.ts (ProcessManager watchdog/registration-deadline timing tests: 'retires an older generation's launch as stale...', 'retires and retries a worker whose boot the watchdog...', 'resurrects directly, once, when the root registration deadline elapses...', 'retires an alive-but-unconfirmed root pane...'), a different subset each run; processes.test.ts alone: run A 214 pass / 0 fail, run B 213 pass / 1 fail. Host load average was 140 on 32 cores during these runs. processes.ts and processes.test.ts are byte-identical to main (item 1) and untouched by this PR; CI's `test` job at f7761e36 (run 34739905862) passed the same suite on an unloaded runner. All 1013 runnable tests outside those four passed in both full runs, including every reducer/golden/resync/events/legion-state test.",
+      "envoy": "gofmt -l internal/contracts -> empty; go vet ./internal/contracts/ -> ok; go test ./internal/contracts/ -count=1 -> ok",
+      "replay": "Re-emitted the normalized envelope for testdata/push_handoff_only.json with this head's normalize.go (identical to round 1 modulo issued_at) and re-ran /tmp/legion33-tester/replay.ts through this head's event pump: output byte-identical to the round-1 output recorded in integrationReplay.output below (handoff-only 6->6 both orders; six alternating rounds 0 attempts / 0 pr-blocked / 0 warns; golden -> 1 both orders; old-listener control -> 7 plus the '[legion] fix attempt: ... changed_paths absent (listener predates LEGION-33)' warn), exit 0.",
+      "stateLoad": "Fresh copy of live state.json (v24, 10 PRs, 70 issues) -> this head's loadState -> v25, .v24.bak beside the copy only, 10/10 PR records byte-identical, no keys added, every top-level collection identical under key-order canonicalization (roles differ only in JSON key order). Live path untouched. PR summary: #923 fa0, #955 fa0, #957 fa0, #961 fa1, #975 fa2, #981 fa1, #991 fa0, #992 fa1, #993 fa0, #998 fa0."
+    },
+    "5-ci": {
+      "result": "PASS",
+      "evidence": "legion gh -- pr checks 993 at f7761e36: 12/12 pass -- Tests run 34739905862 (pr-title, lint, typecheck, test) and package run 34739406960 (changes, claude-envoy-bridge, contracts, dispatch 6m26s, envoy-client, envoy-go 10m48s, envoy-plugin, pi-envoy). pr view: headRefOid f7761e36c187f654dd93b13717b976c26b5ed158, mergeable MERGEABLE, mergeStateStatus BLOCKED (reviewDecision REVIEW_REQUIRED -- awaiting review, not conflicts). No rerun needed; branch not rebased."
+    },
+    "findings": [],
+    "observations": [
+      "The implementer again left @ on its pushed handoff commit (f7761e36); this session's first snapshot amended OMP's auto-written .omp/config.yml into it, producing divergent local copy 0f5b4e39 of change msvksvmx. I moved my working copy with `jj new f7761e36`; the pushed head is untouched and my handoff is its child. 0f5b4e39 (and round 1's e5cf55e3) are left for the architect to abandon.",
+      "processes.test.ts is load-sensitive (see 4-suites); not this PR's code, but a flake source for any full-suite run on this box while it is this loaded."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T04:24:17.332Z"
+  "completed": "2026-09-13T05:25:03.798Z"
 }
