@@ -1,123 +1,118 @@
 {
-  "observations": [
-    "Follow-up filed: LEGION-142 (Dispatch browser tests write screenshots to fixed /tmp paths and fail on a shared box).",
-    "Acceptance 1 height: the 'about 140px' budget holds only for a one-line title with no external link (134px). A two-line title (38 characters in the ~530px main column at 1280 with the sidebar and margin open) gives 160px; a GitHub link gives 166px because the link takes a full row (rendered as the raw URL here since the e2e server has no GitHub App credentials; the production render is PR title + state + checks pills in an inline-flex with no truncation, so it is not narrower); link plus the approval chip and Approve / Request changes gives 206px.",
-    "Acceptance 4 at 1280: with the sidebar (320px) and the review margin open the main column is about 530px, and the Version / Name version / Copy link toolbar wraps to a right-aligned second row under the tabs (y212 vs tabs y170). They share the tab row from 1536px. The Name version button's visible text is 'Name'; its accessible name is 'Name version'.",
-    "The whose-turn pill is display:none between 1280 and 1535px (IssueHeader.tsx 'xl:hidden 2xl:inline-flex'); at the acceptance-1 width a human sees the count only in the sidebar's Needs you badge.",
-    "Devbox: http://sami-agents:8766 resolves to this host; envoy-dispatch-dispatch-1 exited 3 hours before this run and no later container was created after #1073-#1078 merged, so its autodeploy appears stopped in favour of the ECS instance. Read-only confirmation of #1051 on the deployed build was done by fetching the ECS SPA's IssuePage chunk unauthenticated and grepping the #1051 markers.",
-    "Test-suite fragility (follow-up, not a LEGION-62 defect): agents, ask-blocks, inbox and polish e2e specs write screenshots to hardcoded /tmp/<name>.png paths; on a shared box a file left by another user makes those tests fail with EACCES before their final assertions. Filed as a LEGION issue.",
-    "Workspace note: the daemon's working copy was on a197cdc0 (before #1051); the working-copy commit holding only .omp/config.yml was moved onto main@origin 7a178581 with jj rebase -r @ -d main@origin (no PR branch, no CI). All throwaway spec files (e2e/legion62-verify.e2e.ts, e2e/legion62-tmpfix-*.e2e.ts) and e2e/test-results were removed; the Postgres container, servers and web/dist E2E build are torn down / left untracked."
-  ],
-  "proof": [
-    {
-      "criterion": "1. At 1280px the header shows key and title first; status and priority pills, approval chip only after a request (no Draft), Close / Pin / Approve / Request changes as quiet actions; details on the state row or one line beneath; header about 140px.",
-      "surface": "Local build of main in Chromium 1280x900 and 1280x800 through the packages/dispatch e2e harness (real Go server, Postgres, header identity alice).",
-      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762) && env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify (throwaway spec e2e/legion62-verify.e2e.ts, removed after the run)",
-      "observed": "Row tops: key+title+pin 37; Status/Priority/Close 77-83 and Subscribers 79 on the state row; Labels+Route 149 on one line beneath (GitHub link 121 on its own line when present). Before an approval request: no Draft, no chip, no Approve; after requestApproval: 'Awaiting approval' chip plus Approve and Request changes. Height 134px (one-line title, no link), 160px (two-line title), 166px (GitHub link), 206px (link + chip + actions). Screenshots verified-header-1280, verified-header-oneline-title-1280, verified-header-approval-1280.",
-      "headSha": "7a1785815c1ea6cf04f39e6d7825e501f03e9260",
-      "negativeControl": "Before any approval request the header renders no approval chip and no Draft text (getByText(/Draft|Awaiting approval|Approved|Changes requested/) count 0, Approve button count 0)."
-    },
-    {
-      "criterion": "4. Version and Name version sit at the right end of the tab row only while the Spec tab is active, and never in the header.",
-      "surface": "Local build of main in Chromium at 1280x900, 1536x900 and 390x844.",
-      "command": "same throwaway spec, test 'acceptance 4': open /issues/CORE-1, click Conversation, Children, Artifacts, Spec at each width",
-      "observed": "Spec tab: Version select and Name version button inside data-testid=issue-tabs, none inside issue-header. 1536: Version at y133 on the tab row (tabs y130), right of the Artifacts tab (x837 > 667). 1280 with sidebar and margin open: they wrap to a right-aligned second row (y212 under tabs at y170). 390: Version + Name on one row under the tabs, Copy link on the next, all within 390px. Conversation, Children, Artifacts: zero Version / Name version controls anywhere on the page at all three widths. Screenshots verified-tabs-spec-1280, verified-tabs-spec-1536, verified-tabs-spec-390, verified-tabs-conversation-1280.",
-      "headSha": "7a1785815c1ea6cf04f39e6d7825e501f03e9260",
-      "negativeControl": "On the Conversation tab getByRole('combobox',{name:'Version'}) and getByRole('button',{name:'Name version'}) both have count 0 (the controls are absent, not merely hidden)."
-    },
-    {
-      "criterion": "5. Adding a label opens a compact popover with a search box and a check list; typing filters; Enter creates; labels save once when the popover closes.",
-      "surface": "Local build of main in Chromium at 1280x900 and 390x844, PATCH requests counted through page.on('request').",
-      "command": "same throwaway spec, test 'acceptance 5'",
-      "observed": "Edit labels opens a 256x239 popover: focused combobox 'Search or create label' and listbox 'Label options' with api, Frontend checked and backend, docs unchecked. Typing 'doc' leaves only docs plus Create \"doc\"; typing 'urgent' then Enter checks urgent. Zero PATCHes while open; closing sends exactly one PATCH {labels:[Frontend,api,urgent]} and GET /issues/CORE-1 returns those labels. At 390 the popover spans x118-374, inside the viewport. Screenshots verified-label-popover-1280, verified-label-popover-41-refused-1280, verified-label-popover-390.",
-      "headSha": "7a1785815c1ea6cf04f39e6d7825e501f03e9260",
-      "negativeControl": "A 41-character label typed then Enter: the picker shows 'Labels must be 1–40 characters.', adds no option, and closing sends no PATCH (count stays 1; labels unchanged). PATCH /api/v1/issues/CORE-1 {labels:[Frontend, <41 x>]} from the API answers 400 {code:LABELS_INPUT, error:'each label must be 1 to 40 characters'} and the labels stay [Frontend, api, urgent]."
-    },
-    {
-      "criterion": "7. A human can move the issue into any lifecycle status from the header's status select, including In progress, Testing, Needs review and Retro; confirmed on the board.",
-      "surface": "Local build of main in Chromium at 1280x900 as alice; API read back with GET /api/v1/issues/CORE-1; board at /projects/CORE (Board view).",
-      "command": "same throwaway spec, test 'acceptance 7'",
-      "observed": "Header Status select offers Triage, Icebox, Backlog, Todo, In progress, Testing, Needs review, Retro. Selecting each of In progress, Testing, Needs review, Retro: API status becomes in_progress, testing, needs_review, retro and the board region with that name holds the CORE-1 card. Screenshot verified-status-board-retro-1280.",
-      "headSha": "7a1785815c1ea6cf04f39e6d7825e501f03e9260",
-      "negativeControl": "PATCH /api/v1/issues/CORE-1 {status:'shipped'} answers 400 {code:INVALID_STATUS, error:'status is not in the Legion lifecycle'} and the status stays retro."
-    },
-    {
-      "criterion": "8. The header's existing behaviours still work: the Dispatch web app's browser test suite passes on current main.",
-      "surface": "packages/dispatch Playwright suite against the real Go server and Postgres (e2e/run-server.sh), chromium and iphone projects.",
-      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify (log /tmp/legion62-e2e-chromium.log); then --project=iphone; reruns: --project=chromium legion62-tmpfix doc.e2e.ts",
-      "observed": "chromium: 110 tests, 98 passed, 6 skipped, 6 failed; every failure passes on rerun: agents.e2e.ts:35, ask-blocks.e2e.ts:20 and :187, inbox.e2e.ts:34, polish.e2e.ts:14 failed only with EACCES writing hardcoded /tmp/<name>.png screenshot files owned by user ubuntu on this shared box (copies of those four specs with the path changed to a writable directory pass 12/12 on chromium and 12/12 on iphone); doc.e2e.ts:105 ('two users edit the same spec...') is the named two-user timing flake and passed in isolation. iphone: 122 tests, 113 passed, 4 skipped, 5 failed, all five the same EACCES. issue, labels, layout, board, inbox, approval, threads and ask-blocks are green on both projects.",
-      "headSha": "7a1785815c1ea6cf04f39e6d7825e501f03e9260",
-      "negativeControl": "The suite is not vacuous: run under the pane's inherited CI=true it refused to start with 'http://localhost:9062 is already used' (reuseExistingServer is !CI), and the same six specs fail deterministically when their screenshot path is not writable."
-    }
-  ],
-  "implementerProof": {
-    "verdict": "verified",
-    "how": "No .legion/implement.json exists for this integration check; the predecessor proofs are the five merged PR bodies. Re-ran the measurable claims on main 7a178581: #1051's 'header card 134px at 1280x800' reproduces exactly (134.0px with a one-line title, two labels, no external link, margin open); #1040's labels picker and #1041's eight-status header select and board move reproduce through the browser; the labels, board, approval and ask-blocks specs those PRs cite are green. #1012's '390 phone stack cleanly with no orphaned controls' does not hold on current main (Close, Subscribers and the GitHub link each sit alone on a row); that is recorded as the acceptance-2 failure rather than a rejection of the proof, since #1012's claim predates #1051's header changes."
+  "round": 2,
+  "passed": 8,
+  "failed": 0,
+  "build": "PR sjawhar/legion #1088, branch legion/LEGION-62, code head 79f4d50cef6744d2821d472edec124c3e43e7552 (branch tip f86d2296c66225fbb516a00f7223f93aaa1a9562 adds only .legion/implement.json); workspace @- = f86d2296 at test time",
+  "pullRequest": {
+    "number": 1088,
+    "url": "https://github.com/sjawhar/legion/pull/1088",
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BLOCKED",
+    "reviewDecision": "REVIEW_REQUIRED",
+    "headRefOid": "f86d2296c66225fbb516a00f7223f93aaa1a9562",
+    "checks": "13 of 13 SUCCESS at f86d2296 (changes, pr-title x2, lint, contracts, typecheck, envoy-plugin, test, envoy-client, pi-envoy, dispatch, claude-envoy-bridge, envoy-go); the daemon's ci-green notice for f86d2296 arrived at 09:48:32Z. Not CONFLICTING; BLOCKED only on the required review."
   },
-  "passed": 5,
-  "failed": 3,
-  "build": "main 7a1785815c1ea6cf04f39e6d7825e501f03e9260 (test(dispatch): stabilize inbox priority ordering (#1078)); contains #1051 a2051cce5f4baff5f284b4be005266183e7f6323",
   "surfaces": {
-    "devbox": "http://sami-agents:8766 is this host; its compose container envoy-dispatch-dispatch-1 (image 628e7b0b, post-#1051) exited 3 hours before this run and nothing listens on 8766, so no devbox screenshots were possible. The live Dispatch is the ECS instance https://dispatch.internal.trajectorylabs.com behind GitHub OAuth (no human login available to a worker); its deployed IssuePage chunk (index-BnuVsnFZ.js -> IssuePage-D_F8-OEA.js) contains every #1051 marker (Name version toolbar in the tab row, xl:contents header rail, issue-metadata-rail, Search or create label), so #1051 is deployed. Acceptance 1, 2 and 4 were therefore taken on the local build of main, which is what the spec's Testing section prescribes.",
-    "local": "packages/dispatch e2e harness on main: VITE_DISPATCH_E2E=1 bun run build:web; bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, Go 1.26.8, header identity alice/bob) against an isolated Postgres container legion62-dispatch-pg on 127.0.0.1:55462 (DATABASE_URL and PLAYWRIGHT_DATABASE_URL pinned there: 55432 on this box is the production dispatch-pg, and seed.ts truncates whatever it points at). Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR=/tmp/legion62-mise; nothing installed into the shared mise or the legion profile."
+    "local": "packages/dispatch e2e harness on the PR head: bun install --frozen-lockfile; go build ./cmd/dispatch (Go 1.26.8); VITE_DISPATCH_E2E=1 bun run build:web (rebuilt before every e2e run, after the Go tests, per the implementer's note that the unit suite rebuilds web/dist without the flag); bun e2e/fake-envoy.ts (FAKE_ENVOY_PORT=9062); bash e2e/run-server.sh (DISPATCH_E2E_PORT=8762, header identity alice/bob) against an isolated Postgres 16 container legion62-dispatch-pg on 127.0.0.1:55462 (55432 is the production dispatch-pg on this box; DATABASE_URL and PLAYWRIGHT_DATABASE_URL pinned to 55462). Playwright 1.63 chromium-headless-shell 153 under Node 22 from an isolated MISE_DATA_DIR=/tmp/legion62-mise. A throwaway spec e2e/legion62-verify2.e2e.ts drove lines 1-7 and was removed after the run; the four LEGION-142 specs were copied with a writable screenshot path (e2e/legion62-tmpfix-*.e2e.ts, removed) and run beside the originals.",
+    "go": "DISPATCH_TEST_DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55462/dispatch_gotest go test ./internal/dispatch/api -count=1 -> ok (149.4s); -run TestIssueDetail -v -> TestIssueDetailCarriesOpenAsks PASS, TestIssueDetailOpenAsksCarryLastReply PASS."
   },
   "acceptance": [
     {
       "line": 1,
       "verdict": "passed",
-      "note": "Layout order holds at 1280; height is 134px with a one-line title and no external link, 160px when the title wraps to two lines, 166px with a GitHub link, 206px with a GitHub link plus the approval chip and actions."
+      "note": "1280x900 and 1280x800 with a one-line title, two labels, no link, no ask: 134px (title y37-67, state row y77-83, details line y117). Spec fixture (GitHub link + open ask) at 1280: 134px, everything on three rows; approval chip + Approve/Request changes + GitHub link: 174px (was 206); two-line title + GitHub link: 160px (unchanged; the title itself is 58px). No Draft/chip/Approve before an approval request. At 1536 the state row joins the title row and the card is 94px."
     },
     {
       "line": 2,
-      "verdict": "failed",
-      "note": "Order holds and nothing is cut off, but Close, Subscribers and the GitHub link each sit alone on their own row; the header is 480px tall at 390x844."
+      "verdict": "passed",
+      "note": "390x844 with the spec fixture: 238px (bound <300; was 480). Rows: title+pin y122-188; Status | Priority | Close y197; one details line y250 holding Waiting on you (1), Labels, +, Route, Subscribers: 1, #1051 sjawhar/legion. No control other than the title alone on a row; page scrollWidth 390 = clientWidth. GitHub link reads '#1051 sjawhar/legion' (number + repository, since the e2e server has no GitHub App credentials; title once loaded), never the raw address. Note: the details line shows 316px of its 827px at rest; Route, Subscribers and the GitHub link sit in the scrolled part and appear on swiping the line (verified2-header-390-details-scrolled)."
     },
     {
       "line": 3,
-      "verdict": "failed",
-      "note": "Title line does not move and chips do not wrap, but the metadata line does not scroll sideways: chips run past the header card and the whole page becomes horizontally scrollable."
+      "verdict": "passed",
+      "note": "Eight 30-character labels via PATCH, reload. 1280: title box identical (x435.4 y37 w383.6 h58), rail overflow-x auto, 502px visible of 2037px, rail right 859 inside card right 872, chips on one row, document scrollWidth 1280 = clientWidth; scrolling the rail to its end shows the last chip at right=562. 390: title identical (x37 y122 w264 h66), rail 316 of 2125, document scrollWidth 390 = 390. 1536: 758 of 2037, document 1536 = 1536. Header height unchanged by the labels at every width (160/94/238 with those titles)."
     },
     {
       "line": 4,
       "verdict": "passed",
-      "note": "Version / Name version appear only with the Spec tab and never in the header, at 1280, 1536 and 390. At 1536 they share the tab row at its right end; at 1280 with the sidebar and margin open (main column ~530px) they wrap to a right-aligned second row under the tabs."
+      "note": "Version / Name version inside issue-tabs only while Spec is active, zero inside the header, zero anywhere on Conversation, Children, Artifacts — at 1280, 1536 and 390. Placement unchanged from round one: on the tab row at 1536 (y133 vs tabs y130), wrapped to a right-aligned row under the tabs at 1280 with the sidebar and margin open (y212 vs y170), wrapped under the tabs at 390."
     },
     {
       "line": 5,
       "verdict": "passed",
-      "note": "Compact popover (256x239) with search box and check list; typing filters; Enter creates; exactly one PATCH on close; a 41-character label is refused in the picker and by the server (400 LABELS_INPUT) and nothing is saved."
+      "note": "Popover 256x239; api and Frontend checked, backend and docs unchecked; 'doc' filters to docs + Create \"doc\"; 'urgent' + Enter creates and checks it; zero PATCHes while open, exactly one PATCH {labels:[Frontend,api,urgent]} on close. 41-character label: picker says 'Labels must be 1–40 characters.', adds nothing, closing sends no PATCH; server PATCH answers 400 LABELS_INPUT and labels are unchanged. At 390 the popover spans x118-374."
     },
     {
       "line": 6,
-      "verdict": "failed",
-      "note": "The header never flips to Waiting on agents after a human reply (1536 and 390, live and after reload); the Inbox flips for the same ask. Cause: GET /api/v1/issues/{key} open_asks rows carry no last_reply, and waitingOnYou reads last_reply.author.kind. Also hidden entirely at 1280-1535px (xl:hidden)."
+      "verdict": "passed",
+      "note": "At 390, 1280 and 1536 (a fresh issue and ask per width): 'Waiting on you (1)' on load with the badge in view (x37 on the phone, x357 on desktop); after alice's clarification it reads 'Waiting on agents (1)' live within ~190ms and still after a reload; after the agent replies it returns to 'Waiting on you (1)' live and after a reload. GET /api/v1/issues/{key} open_asks[0].last_reply: null, then {author:{kind:user,id:alice}}, then {author:{kind:session,id:e2e-session}}."
     },
     {
       "line": 7,
       "verdict": "passed",
-      "note": "In progress, Testing, Needs review and Retro each selectable from the header; API and board column agree; an unknown status is refused 400 INVALID_STATUS."
+      "note": "Header select offers Triage, Icebox, Backlog, Todo, In progress, Testing, Needs review, Retro; each of the four moves lands in the API and the matching board column; status=shipped refused 400 INVALID_STATUS."
     },
     {
       "line": 8,
       "verdict": "passed",
-      "note": "chromium: 98 passed, 6 skipped, 6 failed of which all 6 pass on rerun (5 were EACCES on /tmp/*.png screenshot files owned by another user of this shared box; 1 was the named doc.e2e.ts:135 two-user timing flake, green in isolation). iphone: 113 passed, 4 skipped, 5 failed, all five the same EACCES; the same specs with a writable screenshot path pass 12/12. issue, labels, layout, board, inbox, approval, threads and ask-blocks are green on both projects."
+      "note": "chromium 114 passed / 6 skipped / 5 failed; iphone 114 passed / 6 skipped / 5 failed. All ten failures are LEGION-142's EACCES on fixed /tmp screenshot paths owned by user ubuntu: agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14 on each project; the same four specs with a writable path pass 12/12 on chromium and 12/12 on iphone. The doc.e2e.ts two-user flake did not recur. issue, labels, layout, board, inbox, approval, threads, ask-blocks and live are green on both projects. Go internal/dispatch/api ok."
     }
   ],
-  "failures": [
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran every measurable claim in .legion/implement.json on a fresh build of 79f4d50c through the same harness (independent Postgres, ports and browser session). Line 2: header 238px at 390x844 with the fixture (claimed 238); Status, Priority and Close at y197 on one row; details line at y250 with the whose-turn badge at x37; GitHub link text '#1051 sjawhar/legion'; document scrollWidth 390 = clientWidth. Line 3: rail overflow-x auto, clientWidth 502 at 1280 and 316 at 390 (claimed 502/316), document scrollWidth 1280/390 equal to clientWidth, title box identical before and after (x435.4 y37 w383.6 h58 and x37 y122 w264 h66, both exactly as claimed). Line 6: 'Waiting on you (1)' on load at 390/1280/1536, 'Waiting on agents (1)' live within ~190ms and after reload, back to 'Waiting on you (1)' after the agent's reply; GET /issues/{key} open_asks[].last_reply null -> alice (user) -> e2e-session (session); go test -run TestIssueDetailOpenAsksCarryLastReply passes. The two round-one negative controls (main 7a178581: 480px header, page 2129/1889 wide, indicator never flipping) are my own measurements from round one, so the before/after the implementer describes is confirmed from both sides."
+  },
+  "proof": [
     {
-      "criterion": "2. At 390px wide the same order holds and no control is cut off or left on its own.",
-      "evidence": "Local build of main 7a178581, chromium 390x844, /issues/CORE-1 with two labels, P1, a GitHub link, one subscriber and one open ask. Measured tops: key 88, title 122-188, Status/Priority 197, Close 250 (alone on its row), Labels 302, Route 354, Subscribers 406 (alone), GitHub link 458 (alone), Waiting on you 516. Header 480px tall (57% of the viewport); document scrollWidth 390 = viewport, so nothing is cut off. Screenshot dispatch://LEGION-62/artifact/verified-header-390-png. Without the GitHub link the header is 394px and Close and Subscribers are still alone on their rows (verified-header-nogithub-390 measurement)."
+      "criterion": "2. At 390 the same order holds, no control is cut off, no control other than the title sits alone on a row, the GitHub link shows number and title never a raw address, and the header card is under 300px with the fixture.",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of 79f4d50c served by the real Go server (this head) and Postgres 16, Chromium 390x844 as alice through the packages/dispatch Playwright harness.",
+      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bash e2e/run-server.sh && env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'lines 1 and 2' (throwaway spec, removed)",
+      "observed": "Header 238px. Rows by vertical overlap: 122-166 title + Pin; 197-241 Status | Priority | Close issue; 250-294 Frontend | api | Edit labels | Route | Subscribers: 1 | #1051 sjawhar/legion | Waiting on you (1). Page scrollWidth 390 = clientWidth. Link text '#1051 sjawhar/legion', tooltip carries the URL; no link whose text is a URL. With an approval chip added the card is 342px (outside the fixture). Screenshots dispatch://LEGION-62/artifact/verified2-header-390-png and verified2-header-390-details-scrolled-png.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "Round one on main 7a178581 with the same fixture: 480px, Close alone at y250, Subscribers alone at y406, the raw URL alone at y458 (dispatch://LEGION-62/artifact/verified-header-390-png)."
     },
     {
-      "criterion": "3. With eight labels of thirty characters each, the title line does not move and the metadata line scrolls sideways instead of wrapping, at both widths.",
-      "evidence": "Local build of main 7a178581. Labels patched through PATCH /api/v1/issues/CORE-1 (eight 30-character labels), reload. 1280x900: title box identical before/after (x435.4 y37 h58); chips stay on one row (flex-nowrap) but the labels container is 1714px wide with overflow-x visible and no scroll container, so the chips run past the header card's right edge under the margin column and document.documentElement.scrollWidth becomes 2129 (viewport 1280): the page pans, the line does not scroll. 390x844: title identical (x37 y122 h66); labels container 1794px, metadata rail clientWidth 316 / scrollWidth 1852, document scrollWidth 1889 (viewport 390). Screenshots dispatch://LEGION-62/artifact/verified-labels-wrap-1280-png and dispatch://LEGION-62/artifact/verified-labels-wrap-390-png. Code: IssueLabels.tsx rail variant is 'relative flex shrink-0 flex-nowrap items-center gap-1' inside the header's flex-wrap rail; no overflow-x-auto anywhere in the chain."
+      "criterion": "3. With eight thirty-character labels the title line does not move and the details line scrolls sideways inside the card; page scroll width equals the window width at 1280 and 390.",
+      "surface": "Same stack; labels seeded through PATCH /api/v1/issues/{key}; Chromium 1280x900, 1536x900, 390x844.",
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'line 3'",
+      "observed": "Title box byte-identical before/after at every width; issue-metadata-rail overflow-x auto, flex-nowrap, 502/758/316px visible of 2037/2037/2125px, rail right edge inside the card; document scrollWidth 1280/1536/390 equal to clientWidth; setting rail.scrollLeft to its end brings the last chip into view without changing document scrollWidth. Screenshots dispatch://LEGION-62/artifact/verified2-labels-1280-png and verified2-labels-390-png.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "Round one on main 7a178581: labels container 1714px with overflow visible, document scrollWidth 2129 at 1280 and 1889 at 390 (dispatch://LEGION-62/artifact/verified-labels-wrap-1280-png)."
     },
     {
-      "criterion": "6. The header shows Waiting on you (N) while an open ask has an agent's reply as its newest, and Waiting on agents (N) after a human replies.",
-      "evidence": "Local build of main 7a178581. Ask created by session e2e-session on CORE-1; header at 1536x900 shows 'Waiting on you (1)'. alice posts a clarification (POST /api/v1/issues/CORE-1/comments {ask_id, body}) as a human: the header still shows 'Waiting on you (1)' after 10s live and after a reload; same at 390. The Inbox for the same ask shows the 'Waiting on agents' section, so the predicate is right and the header's input is wrong: GET /api/v1/issues/CORE-1 returns open_asks rows with keys id, issue_key, artifact_id, block_id, author, kind, question, options, multiple, urgency, anchor, state, answer, opened_event_id, created_at, edited_at and no last_reply (issue_queries.go loadOpenAsks -> []model.Ask), while GET /api/v1/inbox rows carry last_reply {author:{kind:user,id:alice}}. IssueHeader.tsx computes waitingOnYou(issue.open_asks), and BlockedOnYou.tsx filters on ask.last_reply?.author.kind !== 'user', which is always true without the field. IssuePage.test.tsx:1154 passes only because it stubs open_asks[].last_reply, a field the server never sends. Screenshots dispatch://LEGION-62/artifact/verified-whose-turn-after-human-reply-1536-png and dispatch://LEGION-62/artifact/verified-whose-turn-after-human-reply-390-png. Separately, the pill is display:none at 1280-1535px (IssueHeader.tsx: 'xl:hidden 2xl:inline-flex'), so at the acceptance-1 width the header shows no whose-turn indicator at all (measured: hidden at 1280, visible at 1536 and 390)."
+      "criterion": "6. Waiting on you (N) while an agent's reply is newest, Waiting on agents (N) after a human replies, live and after reload, visible at 390, 1280 and 1536.",
+      "surface": "Same stack; ask opened by session e2e-session through POST /issues/{key}/asks (bearer), human reply by alice through POST /issues/{key}/comments, agent reply by the session; Chromium at all three widths, one fresh issue per width.",
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 --grep 'line 6'; curl GET /api/v1/issues/{key} between steps",
+      "observed": "issue-whose-turn badge 'Waiting on you (1)' on load at x37/y237 (390), x357/y118 (1280), x357/y78 (1536), in view; 'Waiting on agents (1)' 187-198ms after the human comment without a reload, and after a reload; 'Waiting on you (1)' again live after the agent comment, and after a reload. open_asks[0].last_reply: null -> {author:{kind:user,id:alice}} -> {author:{kind:session,id:e2e-session}}. Screenshots dispatch://LEGION-62/artifact/verified2-whose-turn-you-390-png, verified2-whose-turn-agents-390-png, -1280-png, -1536-png.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "Round one on main 7a178581: the header stayed 'Waiting on you (1)' after the human reply at 1536 and 390 and was display:none at 1280 (open_asks carried no last_reply). On this head the header's own rule hides the badge rather than guessing when last_reply is absent (IssueHeader knowsWhoseTurn)."
+    },
+    {
+      "criterion": "1, 4, 5, 7. Header order and about 140px at 1280; version controls only with Spec; label popover with one save and the 41-character refusal; every lifecycle status from the header confirmed on the board.",
+      "surface": "Same stack, Chromium 1280x900 / 1280x800 / 1536x900 / 390x844 as alice; board at /projects/CORE.",
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium legion62-verify2 (tests 'lines 1 and 2', 'line 4', 'line 5', 'line 7')",
+      "observed": "1280: 134px baseline (one-line title, no link), 134px with the fixture, 160px two-line title, 174px with the approval chip; no Draft before a request. Version/Name version only inside issue-tabs while Spec is active at all widths, zero on other tabs. Popover 256x239, filter, Enter-create, one PATCH on close. Status select lists all eight lifecycle statuses; In progress, Testing, Needs review, Retro each land in the API and the matching board column. Screenshots verified2-header-1280-png, verified2-header-approval-1280-png, verified2-tabs-spec-1280-png, verified2-label-popover-1280-png, verified2-status-board-retro-1280-png.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "41-character label: picker shows 'Labels must be 1–40 characters.' and sends no PATCH; server PATCH with it -> 400 LABELS_INPUT. PATCH status=shipped -> 400 INVALID_STATUS, status stays retro."
+    },
+    {
+      "criterion": "8. The header's existing behaviours still work: the browser suite passes; the Go API tests pass.",
+      "surface": "Full Playwright suite (chromium and iphone) against the real Go server on this head; go test ./internal/dispatch/api against an isolated database.",
+      "command": "env -u CI bunx playwright test --config e2e/playwright.config.ts --project=chromium --grep-invert legion62-verify2 (log /tmp/legion62-e2e-chromium2.log); same with --project=iphone; DISPATCH_TEST_DATABASE_URL=<isolated> go test ./internal/dispatch/api -count=1",
+      "observed": "chromium 114/6/5 and iphone 114/6/5 (passed/skipped/failed); the five failures per project are agents.e2e.ts:35, ask-blocks.e2e.ts:20, ask-blocks.e2e.ts:187, inbox.e2e.ts:34, polish.e2e.ts:14, each EACCES on a /tmp/<name>.png owned by another user (LEGION-142); the same four specs with a writable path pass 12/12 on each project. Go: ok (149.4s).",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "The EACCES failures are deterministic on this box (same five files, both rounds) and vanish with a writable path, so the suite is exercising the assertions, not skipping them; the doc.e2e.ts:105 flake seen in round one did not recur here."
     }
+  ],
+  "observations": [
+    "Line 2 caveat for the architect: at 390 the details line shows 316px of its 827px content at rest — the whose-turn badge and the label chips are in view; Route, Subscribers and the GitHub link appear only after swiping the line (thin scrollbar as the affordance). This is the spec v5 design ('one horizontally scrolling line') and the measurable bounds pass; it is a phone-discoverability question, not a failure.",
+    "Priority pill: the unset option now reads 'Priority' (was 'Priority —') and the select has no native arrow; a set priority reads P0-P3 with its colour, so the pill is still recognisably a control by its colour and text.",
+    "Line 1 height table on this head at 1280 (sidebar and margin open, ~530px column): one-line title 134px; with a GitHub link and an open ask 134px; two-line title with a GitHub link 160px; approval chip + Approve/Request changes + GitHub link 174px (was 206). At 1536 the state row joins the title row: 94px.",
+    "Line 4 is unchanged by this PR: at 1280 with both rails open the Version / Name version / Copy link controls wrap to a right-aligned second row under the tabs (y212 vs tabs y170); they share the tab row from 1536. Passed in round one on the same reading.",
+    "The unchanged-diff fingerprint was not needed: no rebase happened (PR MERGEABLE, base main).",
+    "Workspace: throwaway spec files (e2e/legion62-verify2.e2e.ts, e2e/legion62-tmpfix-*.e2e.ts) and e2e/test-results removed; servers stopped; the isolated Postgres container removed; web/dist stays untracked."
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-14T06:22:11.640Z"
+  "completed": "2026-09-14T09:56:30.449Z"
 }
