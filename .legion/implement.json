@@ -1,0 +1,43 @@
+{
+  "pr": {
+    "number": 1018,
+    "url": "https://github.com/sjawhar/legion/pull/1018",
+    "branch": "legion/LEGION-52",
+    "head": "cb89747c1669",
+    "base": "main"
+  },
+  "summary": "LEGION_DAEMON_API_VERSION 1->2 and pi-envoy legion.daemonApiVersion 1->2 in one commit; bump rule widened to the pane contract in the constant doc comment, daemon AGENTS.md and pi-envoy AGENTS.md; CHANGELOG entry; stale index.ts reference fixed to boot-probes.ts; unreadable-manifest refusal test now uses the constant. Gate code (verifyLegionPluginContract) and the legion.ts tool_call hook untouched.",
+  "filesChanged": [
+    "packages/contracts/src/legion-daemon-api.ts",
+    "packages/pi-envoy/package.json",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/pi-envoy/CHANGELOG.md",
+    "packages/daemon/src/daemon/__tests__/index.test.ts"
+  ],
+  "tests": {
+    "contracts": "bun test: 103 pass; tsc clean; biome check src/ clean",
+    "daemon": "bun test: 1117 pass, 7 skip, 0 fail; tsc clean; biome check --error-on-warnings src/ clean",
+    "piEnvoy": "bun test: 166 pass; tsc clean; bun run lint clean; biome check has pre-existing formatter drift in envoy.ts/envoy.test.ts/pi-types.ts (untouched, not CI-gated)"
+  },
+  "negativeControl": {
+    "profile": "legion52-neg (cp -a of ~/.omp/profiles/legion/plugins; plugin 1.22.2, contract 1)",
+    "result": "legion start exit 1 at verifyLegionPluginContract; no state.json, no registry entry, no port bound",
+    "refusal": "[legion] pi-legion-envoy at /home/ubuntu/.omp/profiles/legion52-neg/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 1.22.2) speaks daemon API contract 1; this daemon requires 2. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile."
+  },
+  "positiveControl": {
+    "profile": "legion52-pos (same tree, plugin packed from the branch as 1.22.2-legion52.bb8f6b42, contract 2, at /tmp/legion52-smoke/pi-legion-envoy)",
+    "result": "gate passed, both OMP probes passed, `legion daemon listening on 127.0.0.1:19462`, GET /legion/v1/state answered; no pane or tmux server opened; bounded by timeout"
+  },
+  "rigNotRun": "The full scripts/smoke rig was not run from this pane: another session's live rig holds the fixed legion-smoke-nats container and ports 14222/19020/19370. The two daemon boots are the issue's stated minimum. The tester owns acceptance 4 (worker first jj git push + legion gh through the rig).",
+  "testerNotes": [
+    "Scratch tooling left for the tester: /tmp/legion52-smoke/run.sh (neg|pos), configs under /tmp/legion52-smoke/{neg,pos}/legion.yaml, profiles ~/.omp/profiles/legion52-neg and legion52-pos. Delete after the test phase; nothing else references them.",
+    "run.sh unsets this pane's LEGION_OMP_PATH (the inherited rpcfix 18.1.15 build fails its natives load under a fresh profile); the pinned 104423 build resolves through mise where and passes both probes.",
+    "dispatch_url + DISPATCH_TOKEN are required by defaultDependencies even though config.ts treats dispatch_url as optional; the scratch runs used a dummy loopback URL so production Dispatch was never touched.",
+    "Fast-follow (wording only): boot-probes.ts verifyLegionPluginContract doc comment still says HTTP API contract; gate code deliberately untouched per scope."
+  ],
+  "deployment": "Install the pi-legion-envoy release built from the merge commit into the legion profile FIRST, then restart the daemon; supersedes LEGION-54's instruction to install 1.20.1 (1.20.1..1.22.2 carry contract 1 and are refused).",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T10:04:38.641Z"
+}
