@@ -2,12 +2,12 @@
   "issue": "LEGION-20",
   "title": "Design gate consumes Dispatch document approval (artifact.approved) instead of an Approve ask",
   "tester": "legion-sjawharlegion-legion-20-tester",
-  "headSha": "62d8f44716026ee73c0c502ca4bbfb07dc4b9428",
-  "codeHeadSha": "38798dbed1bc (smoke: one case per mode in checkpoint 3…); 62d8f447 is its handoff-only child. Fix commits under test: d9824930 (seedGateFromDispatch), 368cf8a9 (migrated state saved once), 0d0b78f0, 93e9ad7a, 38798dbe",
-  "baseSha": "195674ab0592 (main)",
+  "headSha": "79153259cfe51285d65ba1aefcbf2ad4f3e9f63a",
+  "codeHeadSha": "bd6da6d034a3 (smoke: SMOKE_DISPATCH_INGRESS=rig); daemon and plugin code byte-identical to 512b9139, the head the live round ran on (processes.ts, api/routes/issues.ts, reducers.ts, legion-state.ts, dispatch-client.ts, pi-envoy/src/legion/tools.ts compared by sha256). Join fix 835bf98f (now 70b19870's parent chain after the ninth rebase).",
+  "baseSha": "419a0590692b (main)",
   "pullRequest": 975,
-  "passed": 7,
-  "failed": 1,
+  "passed": 8,
+  "failed": 0,
   "report": "dispatch://LEGION-20/artifact/tester-report-md",
   "rawEvidence": "dispatch://LEGION-20/artifact/legion20-tester-evidence-tar-gz",
   "verdicts": {
@@ -15,21 +15,15 @@
     "2 changes requested wakes with the reason, gate closed": "pass — live: approvedVersion deleted, wake {\"type\":\"design-changes-requested\",\"version\":3,\"reason\":\"LEGION-20 tester: please name the rollback path\",\"author\":\"tester-human\"}; reducers.test.ts",
     "3 new version closes, approval at the new version reopens": "pass — live: agent edit -> v3 -> {latestVersion 3, approvedVersion 2}, Dispatch stale, no wake; human approval at v3 -> open, exactly one design-approved; reducers.test.ts",
     "4 approving a non-root-spec document changes no gate": "pass — live: tester-notes.md approved by the human, artifact.approved consumed, gate unchanged, no wake; reducers.test.ts",
-    "5 state upgrade keeps gates": "pass — copy of production state.json v24 (19 gates) -> v25, 19 distinct getIssue reads, all approvedVersion==latestVersion, state.json.v24.bak byte-identical; unreachable Dispatch -> 'Cannot migrate the design gate for LEGION-6: Unable to connect' after one read, nothing written",
-    "6 gate policy in the root architect system prompt": "pass at the argv level (processes.test.ts; pane argv carries the sentence in both modes) — FAIL on the real surface when a deployment `instructions:` file is configured: OMP's --append-system-prompt is last-wins, so only the deployment instructions reach the model and a real armed-gate architect skipped the gate (round 3 run A). Fix ruled into this PR (one joined flag); see failures.",
-    "7 smoke checkpoint approves the document and the rig is green": "pass — live, SMOKE_DESIGN_GATE=root-issues, scratch Dispatch from this checkout, this head's plugin (1.17.3, contract 2) in fresh profile legion20retest, root LEGSMOKE-1 with child LEGSMOKE-2 in triage: before any approval `checkpoints.sh 1` OK, `2` OK, `3` -> 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'; human approved spec.md v3 -> gate approvedVersion 3 == latestVersion 3 in 0.06 s -> exactly one {\"type\":\"design-approved\"} to the architect -> architect released LEGSMOKE-2 (in_progress, admitted, tree active) and spawned a sub-architect; `checkpoints.sh 4` -> 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'. Negative controls: agent bearer approve -> 403 HUMAN_ONLY; `checkpoints.sh 3` after approval fails naming the missing awaiting request. Harness `bash scripts/smoke/checkpoints.test.sh` -> 17 PASS; the two new negatives assert 'CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (todo) was released while the spec document is still awaiting approval' and '...: a planner on LEGSMOKE-1 phase worker is claimed while the spec document is still awaiting approval' (checkpoints.test.sh:211, :249).",
+    "5 state upgrade keeps gates": "pass — copy of production state.json v24 (19 gates) -> v25, 19 distinct getIssue reads, all approvedVersion==latestVersion, state.json.v24.bak byte-identical; unreachable Dispatch -> 'Cannot migrate the design gate for LEGION-6: Unable to connect' after one read, nothing written | round 4: v25 -> v26 on a fresh production copy (23 gates), .v25.bak, saved once.",
+    "6 gate policy in the root architect system prompt": "pass — round 4 live with `instructions:` configured: one joined --append-system-prompt per pane; the architect's exact flag value replayed through omp -p yields the role prompt heading, the Design gate policy sentence, the role topic and the deployment instructions in order; the real armed-gate architect requested approval and registered the gate, then parked. (Round 3 had found this failing on the real surface — three flags, last-wins — fixed by 835bf98f.)",
+    "7 smoke checkpoint approves the document and the rig is green": "pass — live, SMOKE_DESIGN_GATE=root-issues, scratch Dispatch from this checkout, this head's plugin (1.17.3, contract 2) in fresh profile legion20retest, root LEGSMOKE-1 with child LEGSMOKE-2 in triage: before any approval `checkpoints.sh 1` OK, `2` OK, `3` -> 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'; human approved spec.md v3 -> gate approvedVersion 3 == latestVersion 3 in 0.06 s -> exactly one {\"type\":\"design-approved\"} to the architect -> architect released LEGSMOKE-2 (in_progress, admitted, tree active) and spawned a sub-architect; `checkpoints.sh 4` -> 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'. Negative controls: agent bearer approve -> 403 HUMAN_ONLY; `checkpoints.sh 3` after approval fails naming the missing awaiting request. Harness `bash scripts/smoke/checkpoints.test.sh` -> 17 PASS; the two new negatives assert 'CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (todo) was released while the spec document is still awaiting approval' and '...: a planner on LEGSMOKE-1 phase worker is claimed while the spec document is still awaiting approval' (checkpoints.test.sh:211, :249). | round 4: checkpoints 1-4 OK again with instructions configured (webhook-mode record set to envoy for the run, see notProven).",
     "8 no plan document committed": "pass — 45-file diff from 4d516a1f to b7d195ca has no docs/plans/ or plan markdown; .legion/plan.json is the only plan artifact"
   },
-  "failures": [
-    {
-      "criterion": "6 (real surface, with a deployment `instructions:` file configured) — the gate policy does not reach the root architect; found on the real surface at 62d8f447",
-      "evidence": "This head's scripts/smoke/up.sh writes `instructions:` into legion.yaml, so every pane receives THREE --append-system-prompt fragments (role prompt, addressing + 'Design gate policy: gates.design: root-issues …', deployment instructions). The real architect (root LEGSMOKE-1, run A) skipped the gate — no dispatch_request_approval, no register_gate, spawned an implementer directly — and its session record reasons: 'the gate policy line isn't visible at the end of my system prompt … there's no explicit Design gate policy statement before the deployment instructions … I'm also uncertain whether I'm the architect or controller here'. The pane argv carries the line (panes-argv.txt). Root cause, proven: OMP's --append-system-prompt is last-wins — the binary's handler is `\"--append-system-prompt\": (e, s) => { e.appendSystemPrompt = s; }`; a one-shot `omp -p` with three marked fragments answers only FRAGMENT_CHARLIE and with two only FRAGMENT_BRAVO, on both github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 (production panes) and 18.1.18-sami.20260912-104423 (repository pin). Consequences: the daemon's role prompt has never reached a spawned pane on these builds; with `instructions:` configured (production LEGION is) only the deployment instructions reach the model — this tester's own production-spawned system prompt has the deployment instructions and neither the '# Legion Tester' role text nor the 'Legion addressing' line. Acceptance 6's daemon test (the argv fragment) passes; the real surface does not. Architect ruling 2026-09-13 05:31Z: the daemon joins all fragments into ONE --append-system-prompt (processes.ts, in this PR); production impact escalated to the controller. Items a–f were therefore run on a rig variant whose legion.yaml omits `instructions:` (two fragments; the addressing+policy fragment is last and reaches the architect — the round 1–2 configuration). Raw: runA-instructions-fragment/ in the round-3 bundle."
-    }
-  ],
+  "failures": [],
   "notProven": [
-    "Acceptance 6 live WITH `instructions:` configured after the join fix (next round per the architect: single --append-system-prompt in the pane argv; architect session shows role prompt, addressing + policy, and deployment instructions; a real armed-gate architect requests and registers).",
-    "Stale seeding (d) live; unit-proven only.",
-    "The production daemon's own OMP binary /home/ubuntu/.local/state/legion/sjawhar-legion/omp/omp-18.1.15-sami.9bff2014-rpcfix was not probed for the flag behaviour (production panes observed running 18.1.18-sami.20260912-203541, which was)."
+    "Stale seeding (d) live; unit-proven only (round 3).",
+    "The live checkpoint run with the rig's own `SMOKE_DISPATCH_INGRESS=rig` record end to end (the record did not exist at the time of the live round; the assertions themselves were exercised with the webhook-mode record set to envoy and the harness proves the new switch)."
   ],
   "commands": {
     "suites": "for p in contracts pi-envoy envoy-client: (cd packages/$p && scrubbed.sh bun test); (cd packages/daemon && scrubbed.sh env LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test); bash scripts/smoke/checkpoints.test.sh — scrubbed.sh unsets LEGION_*/DISPATCH_*/JJ_* (in the evidence bundle)",
@@ -40,7 +34,9 @@
     "retestRig": "rig-up2.sh root-issues /tmp/legion20-tester/smoke-gate2 up|checkpoint N|down (evidence bundle): identical to the first run's recipe except OMP_PROFILE=legion20retest and throwaway copies of scripts/smoke/up.sh and down.sh differing only in repo_root (explicit) and nats_name=legion20-tester-nats — another rig (LEGION-37's) owned the hardcoded legion-smoke-nats container on host port 14370 at the time, so the copies kept the two rigs' NATS brokers apart; checkpoints.sh ran unmodified from the repo",
     "round3Rig": "rig-up3.sh (shipped up.sh copy, run A) / rig-up3b.sh (up-noinstr.sh, run B) root-issues <SMOKE_DIR> up|checkpoint N|down; OMP_PROFILE=legion20r3 with this head's plugin 1.18.1 (contract 2); human actions: POST /api/v1/artifacts/<id>/reviews {state: approved} (header) and POST /api/v1/asks/<id>/answer {selected: [Approve], expected_edited_at} (Inbox) with X-Dispatch-User: tester-human; polling at 0.3 s for approval.state and gates[root] to hit the windows",
     "appendSystemPromptProbe": "OMP_PROFILE=legion20r3 <omp> --no-extensions --append-system-prompt 'FRAGMENT_ALPHA…' --append-system-prompt 'FRAGMENT_BRAVO…' --append-system-prompt 'FRAGMENT_CHARLIE…' -p 'List every FRAGMENT_ line present in your system prompt' < /dev/null → 'FRAGMENT_CHARLIE: the codeword is CHERRY.' only; strings <omp> | grep -A1 '\"--append-system-prompt\": (e, s)'",
-    "migrationSaveOnce": "bun tester-migrate-saveonce.ts <dir-with-copied-v24-state.json> http://sami-agents:8766 <token-file>; then the same dir against http://127.0.0.1:9 (0 reads); script in the bundle"
+    "migrationSaveOnce": "bun tester-migrate-saveonce.ts <dir-with-copied-v24-state.json> http://sami-agents:8766 <token-file>; then the same dir against http://127.0.0.1:9 (0 reads); script in the bundle",
+    "round4Rig": "rig-up4.sh root-issues <SMOKE_DIR> up|checkpoint N|down: this head's scripts/smoke/up.sh and down.sh copied with only repo_root made explicit and nats_name=legion20-tester-nats; OMP_PROFILE=legion20r4; checkpoints.sh unmodified",
+    "promptReplayProbe": "take the pane's #{pane_start_command}, keep everything after `omp --mode rpc `, run `OMP_PROFILE=legion20r4 <omp> --no-extensions <that flag> -p '<ask for the heading, the Design gate policy sentence, the role topic, the instructions sentence>' < /dev/null` — scripts probe.sh and probe-planner.sh in the bundle"
   },
   "suiteCounts": {
     "contracts": "100 pass, 0 fail",
@@ -50,7 +46,9 @@
     "checkpoints.test.sh": "16 PASS",
     "daemon (retest at de55134e)": "997 pass, 1 fail of 998 (LEGION_E2E=1 LEGION_TMUX_LIVE=1, scrubbed): the one failure is the live-tmux test 'probes a real tmux pane as alive, detects its death, and resurrects it once' at bun's 5 s default under load average ~170; with --timeout 30000 it passes 3/3 in 5.2-5.9 s — load-induced timing, not a regression; CI green at this head",
     "checkpoints.test.sh (retest)": "17 PASS, 0 FAIL",
-    "round 3 at 62d8f447 (scrubbed)": "daemon 1016/0 (LEGION_E2E=1 LEGION_TMUX_LIVE=1); contracts 100/0; pi-envoy 157/0; envoy-client 198/0; checkpoints.test.sh 17 PASS"
+    "round 3 at 62d8f447 (scrubbed)": "daemon 1016/0 (LEGION_E2E=1 LEGION_TMUX_LIVE=1); contracts 100/0; pi-envoy 157/0; envoy-client 198/0; checkpoints.test.sh 17 PASS",
+    "round 4 at fe0a53c8 (scrubbed)": "daemon 1049/0 (LEGION_E2E=1 LEGION_TMUX_LIVE=1); contracts 102/0; pi-envoy 159/0; envoy-client 199/0; checkpoints.test.sh 20 PASS; up.test.sh 15 PASS; down.test.sh 3 PASS",
+    "harnesses at bd6da6d0": "checkpoints.test.sh 21 PASS; up.test.sh 16 PASS; down.test.sh 3 PASS"
   },
   "environmentScrub": "Every suite and rig command ran with this pane's LEGION_*/DISPATCH_*/JJ_* variables unset (scrubbed.sh / rig-up.sh); the worker-bin gh shim was removed from PATH for the rig.",
   "observations": [
@@ -63,16 +61,21 @@
     "scripts/smoke/up.sh hardcodes the NATS container name legion-smoke-nats, so two rigs on one box cannot coexist without editing the script (this run needed a copy); a SMOKE_NATS_NAME override or deriving the name from SMOKE_PROJECT would remove that.",
     "At load ~170 the live-tmux daemon test 'probes a real tmux pane as alive…' needs 5.2-5.9 s and misses bun's 5 s default every time; it passes with a longer timeout. Consider a per-test timeout on the LEGION_TMUX_LIVE tests.",
     "The reviewer's non-blocking threads landed as described: lowercase artifactId (api.test.ts:1251), contract-schema UUID check in the legion tool, document id in the already-approved request_approval text (observed live in run B), checkpoints.sh restructure (17 PASS), saved-once migration (f).",
-    "The implementer is editing this shared workspace concurrently (the --append-system-prompt join fix; packages/daemon/src/daemon/__tests__/index.test.ts modified in @ at 05:35Z); this handoff commit is path-scoped to .legion/test.json and leaves that edit in the working copy.",
-    "scripts/smoke/up.sh now writes `instructions:` unconditionally; until the join fix lands, an armed-gate rig exercise needs the variant without it (or the architect never learns the gate is armed)."
+    "The #957 ingress block noted in round 4 is resolved by bd6da6d0 (SMOKE_DISPATCH_INGRESS=rig, recorded at ${SMOKE_DIR}/dispatch-ingress).",
+    "This handoff commit was made on 79153259 after the implementer's ninth rebase (onto main 419a0590) landed clean; the implementer updates implement.json's CI line after it."
   ],
   "documentationFeedback": "scripts/smoke/README.md now matches the corrected ruling (checkpoint 3 = asked and waited, checkpoint 4 = opened and moved); no further change needed.",
   "retest": {
-    "of": "review round 1 fixes at 62d8f447; the b7d195ca report (acceptance 1–6, 8) and the bf1f6bd5 re-test (acceptance 7) stand; acceptance 1 and 7 were re-observed live in this round (approval → gate open → wake → checkpoint 4 on three roots)",
-    "rawEvidence": "dispatch://LEGION-20/artifact/legion20-tester-evidence-round3-tar-gz",
-    "rigVariant": "up-noinstr.sh: the repo's scripts/smoke/up.sh with `instructions: ${smoke_dir}/deployment-instructions.md` removed (plus the explicit repo_root and the private NATS name legion20-tester-nats from round 2); checkpoints.sh unmodified. Run A (the shipped up.sh with instructions) is the defect evidence."
+    "of": "join fix 835bf98f and rebase onto main 0f744bc8; rounds 1-3 stand for everything else",
+    "rawEvidence": "dispatch://LEGION-20/artifact/legion20-tester-evidence-round4-tar-gz",
+    "priorEvidence": [
+      "dispatch://LEGION-20/artifact/tester-report-md",
+      "dispatch://LEGION-20/artifact/legion20-tester-evidence-tar-gz",
+      "dispatch://LEGION-20/artifact/legion20-tester-evidence-retest-tar-gz",
+      "dispatch://LEGION-20/artifact/legion20-tester-evidence-round3-tar-gz"
+    ]
   },
-  "round": 3,
+  "round": 4,
   "roundThreeItems": {
     "a header approval before registration": "pass — live (rig variant without `instructions:`, see defect below): human POST reviews approved spec.md v2 (ask_id null) 238 s into the run, before dispatch_request_approval; the architect's request answered 'spec.md (document id 71c537c8-…) is already approved at version 2 by tester-human; no new request was opened'; register_gate 19.4 s after the approval → state {latestVersion 2, approvedVersion 2} immediately, exactly one {\"type\":\"design-approved\"} to the architect (NATS capture 05:36:07.304Z), architect spawned an implementer; checkpoint 4 OK; checkpoint 3 failed its `awaiting` precondition as expected in this ordering (approval.state approved, not awaiting) — not a defect. Root LEGSMOKE-2 on the scratch server.",
     "b inbox answer between request and registration": "pass — live: polled at 0.3 s; the approval ask (29481d96-…) was answered Approve by the human while no gate existed (ask.opened → ask.answered → artifact.approved consumed with no gate); register_gate 11.2 s later → {latestVersion 2, approvedVersion 2}, exactly one design-approved to the architect (05:41:27.183Z); architect spawned a planner; checkpoint 4 OK. Root LEGSMOKE-3.",
@@ -81,7 +84,22 @@
     "e regression": "pass — scrubbed: daemon 1016 pass / 0 fail (LEGION_E2E=1 LEGION_TMUX_LIVE=1, no load-induced timeouts this run); contracts 100/0; pi-envoy 157/0; envoy-client 198/0; checkpoints.test.sh 17 PASS. CI green at 62d8f447 before the status check: 20 checks SUCCESS, runs 34739382471, 34739382503, 34739384334, 34739879590.",
     "f migration save-once": "pass — fresh copy of production state.json (v24, 22 gates): first loadState → version 25, 22 reads (one per gate), state.json ON DISK reads version 25 with all 22 gates before any other write, state.json.v24.bak beside it; second loadState of the same directory against an unreachable Dispatch (http://127.0.0.1:9) → 0 reads, succeeds, version 25."
   },
+  "finalVerdict": "PASS — all eight acceptance lines pass at code head 512b9139; the round-3 fragment-loss defect is fixed by 835bf98f.",
+  "roundFourItems": {
+    "1 acceptance 6 live with instructions configured, gate armed": "pass — this head's unmodified scripts/smoke/up.sh (only nats_name changed for coexistence), legion.yaml has `instructions:` and gates.design root-issues, profile legion20r4 with this head's plugin 1.20.0, OMP 18.1.18-sami.20260912-203541. Pane argv: exactly one --append-system-prompt per pane (controller = controller-root.md + instructions; architect = architect-root.md + 'Legion addressing… Design gate policy: gates.design: root-issues…' + instructions; planner = planner.md + addressing + instructions). Delivery to the model proven by replaying each pane's exact flag value through a one-shot `omp -p` on the same build (the session record does not persist the system prompt): architect flag → '# Legion Root Architect' / the full Design gate policy sentence / notifications.role.legion-sjawhar920-legsmoke-1-architect / 'This deployment is the Legion smoke rig (scripts/smoke/up.sh).'; planner flag → 'Legion Planner' / notifications.role.legion-sjawhar920-legsmoke-1-planner / the same instructions sentence. Behaviour: the real architect called dispatch_request_approval and register_gate (spec.md v2) and parked; checkpoints 1, 2, 3 OK (3 printed the parked message); human header approval opened the gate in 0.07 s with exactly one design-approved; the architect spawned a planner; checkpoint 4 OK. Root LEGSMOKE-1 on the scratch server.",
+    "2 migration v25 -> v26 save-once": "pass — production state.json copy (version 25, 23 gates in the old {designAskId, designApproved} shape): first loadState → version 26, 23 distinct getIssue reads (one per gate), every gate approvedVersion == latestVersion, state.json on disk version 26 before any other write, state.json.v25.bak beside it; second load against http://127.0.0.1:9 → 0 reads.",
+    "3 regression": "pass — scrubbed: daemon 1049 pass / 0 fail (LEGION_E2E=1 LEGION_TMUX_LIVE=1, no timeouts); contracts 102/0; pi-envoy 159/0; envoy-client 199/0; scripts/smoke/checkpoints.test.sh 20 PASS, up.test.sh 15 PASS, down.test.sh 3 PASS. CI green at fe0a53c8 before the status check: 16 checks SUCCESS, runs 34742632917, 34742632934, 34742633632.",
+    "4 round-3 items a-f": "cited, not re-run — packages/daemon/src/daemon/api/routes/issues.ts, dispatch-events.ts and catchup.ts are byte-identical between 62d8f447 and 512b9139; reducers.ts differs only in main's LEGION-33 PR-head/fix-attempt code, and gateFor / reduceArtifactApproved / reduceArtifactChangesRequested / reduceArtifactVersion are byte-identical (sha256 of each function body compared).",
+    "5 SMOKE_DISPATCH_INGRESS=rig (landed after the live round)": "pass — at bd6da6d0 the harnesses give checkpoints.test.sh 21 PASS, up.test.sh 16 PASS, down.test.sh 3 PASS (the new ingress cases included); against the round-4 rig directory with SMOKE_WEBHOOK_MODE=none recorded, `SMOKE_DISPATCH_INGRESS=shared` still blocks checkpoint 3 with the Dispatch-ingress reason and `SMOKE_DISPATCH_INGRESS=rig` lifts the gate and proceeds to the real assertion (rig was already torn down, so it stopped at the Dispatch read). Not re-run live: the live round-4 checkpoints were run with the recorded webhook mode set to envoy, which exercised the same assertions."
+  },
+  "defectsFoundOnRealSurface": [
+    {
+      "round": 3,
+      "status": "fixed in 835bf98f (daemon: one --append-system-prompt per pane)",
+      "summary": "OMP's --append-system-prompt is last-wins on both github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541 and 18.1.18-sami.20260912-104423 (argv handler `(e, s) => { e.appendSystemPrompt = s; }`; a one-shot omp -p with three marked fragments answered only the third, with two only the second). With a deployment instructions file configured only that fragment reached the model: a real armed-gate architect skipped the gate and its session record said the policy line was absent. Verified fixed in round 4: one joined flag per pane; replay probes show all three parts for the architect and for a phase worker; the real architect requested and registered."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T05:47:23.962Z"
+  "completed": "2026-09-13T06:47:25.230Z"
 }
