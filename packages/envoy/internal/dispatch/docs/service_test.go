@@ -1327,7 +1327,9 @@ func waitForDocumentText(t *testing.T, service *Service, artifactID, want string
 
 func waitForDocumentVersion(t *testing.T, database *store.Store, artifactID string, number int) model.Version {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	// A ceiling, not a duration: a settlement that needs a room reload first (a test that evicted
+	// the room) takes longer than one that only writes, and a loaded CI runner stretches both.
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		version, ok, err := loadDocumentVersion(context.Background(), database, artifactID, number)
 		if err != nil {
@@ -1392,7 +1394,8 @@ func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
 	if evicted.Load() == 0 {
 		t.Fatal("settlement never reached the hook")
 	}
-	service.afterSettleWarm = nil
+	// The hook is one-shot through the CAS above; leaving it in place avoids racing the settle
+	// goroutine that reads it.
 	// The live edit was already persisted incrementally, so the reloaded text carries it; the
 	// room is not failed, so a new write still settles normally.
 	waitForNoLiveDocument(t, service, artifactID)
