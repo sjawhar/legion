@@ -1033,9 +1033,10 @@ export class ProcessManager {
    * written only for an architect `assignment` -- a `catchup` prompt is recovery plumbing and
    * leaves the phase exactly as it was, so a relaunched worker whose phase already finished never
    * becomes the active phase again. Clears the claim's `pendingAssignment`, resets
-   * `promptFailures` (a started turn confirms this worker is responsive again — any accumulated
-   * count from a prior transient failure must never carry into a future one), runs the caller's
-   * `afterPrompt`, removes the token's queue entry (a no-op when it was never queued), and
+   * `promptFailures` and deletes `promptRetires` (a started turn confirms this worker is
+   * responsive again — neither the prompt count nor the relaunch-cycle count from a prior failure
+   * may carry into a future one; this is the only place `promptRetires` is ever cleared), runs the
+   * caller's `afterPrompt`, removes the token's queue entry (a no-op when it was never queued), and
    * persists. A `persist` failure here is a durable-state persistence issue, not a prompt
    * failure: the worker is already working, mirroring `launchWorker`'s post-locator-write save
    * handling. Retries the persist once; if that also fails, logs it and returns normally — never
@@ -1056,6 +1057,7 @@ export class ProcessManager {
     if (claim && "issue" in claim) {
       delete claim.pendingAssignment;
       claim.promptFailures = 0;
+      delete claim.promptRetires;
     }
     afterPrompt?.();
     await this.workerAdmission.removeFromQueue(token);

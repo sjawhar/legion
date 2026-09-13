@@ -13300,6 +13300,49 @@ describe("ProcessManager", () => {
     expect(errorLines.filter((line) => line === retireLine(token, 2))).toHaveLength(1);
   });
 
+  it("clears promptRetires when the relaunched worker's first prompt starts a turn, so one later swallowed prompt neither retires nor escalates (LEGION-93)", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const { processes, managedState, publications, token, clock, relaunched, claim } =
+        await swallowedRelaunchFixture();
+      expect(claim().promptRetires).toBe(1);
+
+      // The relaunched worker is healthy: its ready-time prompt starts a turn.
+      relaunched.turnStartsOnPrompt = true;
+      await processes.workerReady(root, "tester", "ses_tester", 2);
+      const delivered = claim();
+      expect(delivered.pendingAssignment).toBeUndefined();
+      expect(delivered.promptFailures).toBe(0);
+      expect(delivered.promptRetires).toBeUndefined();
+      expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      // Only the relaunch published worker-started: a ready-time delivery answers the boot, it
+      // publishes nothing (the architect's spawn already answered `spawned`).
+      expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+
+      // It finishes, and the architect's next task is acknowledged without a turn: one failure,
+      // counted from zero — no retirement, no escalation.
+      relaunched.emitRunState("idle");
+      relaunched.turnStartsOnPrompt = false;
+      const spawn = processes.spawnWorker(root, root, "tester", "verify #41 again");
+      await expireTurnStartWait(clock);
+      expect(await spawn).toEqual({ status: "queued", roleToken: token });
+      const counted = claim();
+      expect(counted.locator).toBeDefined();
+      expect(counted.promptFailures).toBe(1);
+      expect(counted.promptRetires).toBeUndefined();
+      expect(counted.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41 again" });
+      expect(managedState.workerAdmission.queue).toEqual([token]);
+      expect(publications.filter((p) => p.json === workerDiedJson)).toHaveLength(0);
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+    const token = roleToken("omp", root, "tester");
+    expect(errorLines.filter((line) => line === retireLine(token, 1))).toHaveLength(1);
+    expect(errorLines.filter((line) => line === retireLine(token, 2))).toHaveLength(0);
+  });
+
   it("answers queued and queues the task when spawn_worker's direct prompt is acknowledged but starts no turn", async () => {
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
