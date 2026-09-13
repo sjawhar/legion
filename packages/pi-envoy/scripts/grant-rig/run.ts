@@ -27,13 +27,13 @@
  * Subcommands:
  *   bun run.ts prompt  [--short]
  *   bun run.ts drive   --rig <dir> --port <n> --omp <binary> [--profile l12rig] [--short]
- *                      [--label <name>] [--no-secrets]
+ *                      [--label <name>] [--no-secrets] [--prompt-file <path>]
  *   bun run.ts tui     (same options; interactive `omp` under `tmux -L l12rig`)
  *   bun run.ts analyze --rig <dir> --transcript <file> --standin-log <file> --omp-log <file>
  *                      [--label <name>]
  */
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -970,6 +970,7 @@ const { positionals, values } = parseArgs({
     transcript: { type: "string" },
     "standin-log": { type: "string" },
     "omp-log": { type: "string" },
+    "prompt-file": { type: "string" },
   },
 });
 
@@ -999,7 +1000,10 @@ switch (subcommand) {
       useSecrets: !values["no-secrets"],
     };
     const since = Date.now();
-    const prompt = buildPrompt(buildSteps(values.short));
+    const prompt =
+      values["prompt-file"] === undefined
+        ? buildPrompt(buildSteps(values.short))
+        : await readFile(values["prompt-file"], "utf8");
     const result =
       subcommand === "drive"
         ? await drive(launch, prompt, values.label)

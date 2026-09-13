@@ -1304,6 +1304,65 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
+  test("refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated", async () => {
+    const requests: { readonly path: string }[] = [];
+    const { childFile } = await createSubagentTranscriptPaths();
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker-jj";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      return Response.json({
+        session_id: "ses_sub_worker_jj",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("session_start or tool_call handler was not registered");
+    }
+    const context = sessionContext("ses_sub_worker_jj", childFile);
+    await sessionStart({}, context);
+
+    // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
+    // log, as the phase worker that spawned it -- the one gate that binds a subagent.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-sub-worker-jj-log",
+          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+        },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: expect.stringContaining("every Legion issue workspace shares"),
+    });
+    // Every other gate stays off: the call passes, and no grant or daemon route is touched.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-sub-worker-legion-state",
+          input: { command: "legion state" },
+        },
+        context
+      )
+    ).resolves.toBeUndefined();
+    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+  });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";
@@ -1774,6 +1833,256 @@ describe("Legion OMP extension", () => {
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
   });
+  test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_jj_log",
+      requests,
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-jj-log", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    const mints = (): number =>
+      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mintsBefore = mints();
+    // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,
+    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases, and (review
+    // round 1) the quoted and backslash-escaped forms bash hands to jj as the identical argv.
+    const refused = [
+      "jj undo",
+      'jj -R "$LEGION_WORKSPACE" undo',
+      "cd ws && jj undo",
+      "jj op restore 63461aba",
+      "jj op abandon",
+      "jj op revert",
+      "jj abandon",
+      "jj --repository p undo",
+      "jj operation restore 63461aba",
+      "jj op undo",
+      "jj op log -n 1 | head -1 | xargs jj op restore",
+      "jj --at-op 805478f4 op restore 805478f4",
+      "jj describe -m undo this",
+      "sh -c 'jj -R ws undo'",
+      "(cd ws && jj abandon)",
+      "cd ws\njj -R . undo",
+      "env JJ_CONFIG=/x /usr/local/bin/jj undo",
+      'jj un"do"',
+      "jj -R \"$LEGION_WORKSPACE\" describe -m 'undo",
+      'jj "undo"',
+      "jj 'undo'",
+      'jj op "restore" @-',
+      '"jj" undo',
+      "jj \\u\\n\\d\\o",
+      // A one-word message equal to a blocked word is the spec's stated tradeoff: one rephrase.
+      'jj describe -m "undo"',
+      // Redirection operators split words as bash does and never end the simple command; a
+      // backslash-newline is line continuation, not part of the next word -- outside quotes and
+      // inside double quotes alike (bash removes both characters in both places).
+      "jj undo>/dev/null",
+      "jj 2>&1 undo",
+      "jj op 2>&1 restore x",
+      "jj \\\nundo",
+      'jj "un\\\ndo"',
+    ];
+    const allowedByMistake: string[] = [];
+    for (const command of refused) {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-jj-log-${command}`, input: { command } },
+        context
+      );
+      const blocked =
+        typeof result === "object" && result !== null && "block" in result && result.block === true;
+      if (!blocked) allowedByMistake.push(command);
+    }
+    expect(allowedByMistake).toEqual([]);
+    // A refused command never mints a grant: nothing ran, so nothing ran under one.
+    expect(mints()).toBe(mintsBefore);
+    // The refusal names the command, says the log is shared by every issue workspace, and gives
+    // the recovery rule (new commit, or jj restore of files; otherwise the architect).
+    const result = await toolCall(
+      {
+        toolName: "bash",
+        toolCallId: "call-jj-log-named",
+        input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+      },
+      context
+    );
+    for (const phrase of [
+      "jj -R $LEGION_WORKSPACE undo",
+      "every Legion issue workspace shares",
+      "new commit",
+      "jj restore <paths>",
+      "architect",
+    ]) {
+      expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
+    }
+  });
+  test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_jj_ok",
+      requests,
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-jj-ok", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    const mints = (): number =>
+      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mintsBefore = mints();
+    // The spec's negatives plus the exact commands the legion-worker skill has every role run:
+    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
+    const allowed = [
+      "jj restore src/x.ts",
+      'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
+      "jj op log",
+      'jj -R "$LEGION_WORKSPACE" op log -n 5',
+      "jj op show",
+      'jj describe -m "undo this"',
+      "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
+      'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
+      'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
+      "jj -R \"$LEGION_WORKSPACE\" log -r 'description(glob:\"undo*\")'",
+      "jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
+      "jj --at-op 805478f4 restore src/x.ts",
+      "legion state",
+      // Redirections are part of the simple command they sit in, on the allowed side too.
+      "jj op log 2>&1 | head",
+      "jj restore f 2>/dev/null",
+      // Single quotes keep a backslash-newline literally in bash, so this word is not `undo`.
+      "jj 'un\\\ndo'",
+    ];
+    const refusedByMistake: string[] = [];
+    for (const command of allowed) {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-jj-ok-${command}`, input: { command } },
+        context
+      );
+      if (result !== undefined) refusedByMistake.push(`${command} -> ${JSON.stringify(result)}`);
+    }
+    expect(refusedByMistake).toEqual([]);
+    // Each allowed command went down the ordinary path: one grant minted per call.
+    expect(mints()).toBe(mintsBefore + allowed.length);
+  });
+  test("applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone", async () => {
+    // What each role actually runs per the legion-worker skill and its role prompt.
+    const sanctioned: Record<LegionRole, string> = {
+      planner: 'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
+      implementer:
+        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" new && rm -rf .legion && jj -R "$LEGION_WORKSPACE" describe -m "chore: remove .legion handoffs" && jj -R "$LEGION_WORKSPACE" bookmark set legion/REPO-43 && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/REPO-43',
+      tester: 'jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/test.json',
+      reviewer:
+        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r @- .legion && legion gh -- api --method POST repos/o/r/pulls/7/reviews --input body.json',
+      merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
+      architect: "legion handoff complete --summary x",
+    };
+    for (const role of LEGION_ROLES) {
+      const workspace = await createJjWorkspace();
+      const { toolCall, context } = await bootWorker({
+        role,
+        workspace,
+        sessionId: `ses_${role}_jj_guard`,
+        extraRoutes: (url) =>
+          url.pathname === "/legion/v1/grants"
+            ? Response.json({ grantId: `grant-${role}`, expiresAt: "2099-01-01T00:00:00.000Z" })
+            : undefined,
+      });
+      const undo = await toolCall(
+        {
+          toolName: "bash",
+          toolCallId: `call-${role}-jj-undo`,
+          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+        },
+        context
+      );
+      // A sub-architect's pane classifies as a phase worker's, so the operation-log guard (judged
+      // from the environment, ahead of every role gate so that it also binds a subagent) answers
+      // before its blanket bash gate; the root architect's pane, by contrast, never reaches it.
+      expect(undo).toEqual({
+        block: true,
+        reason: expect.stringContaining("every Legion issue workspace shares"),
+      });
+      await expect(
+        toolCall(
+          {
+            toolName: "bash",
+            toolCallId: `call-${role}-jj-sanctioned`,
+            input: { command: sanctioned[role] },
+          },
+          context
+        )
+      ).resolves.toBeUndefined();
+    }
+  });
+  test("refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "tester",
+      workspace,
+      sessionId: "ses_tester_jj_eval_hub",
+    });
+    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      {
+        toolName: "eval",
+        input: { language: "py", code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])' },
+      },
+      { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
+      // An argv literal separates the words with `", "`; the rule allows any non-word run.
+      { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "x", application: "jj", args: ["-R", "/ws", "undo"] },
+      },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "x", application: "bash", args: ["-c", "jj op restore 1"] },
+      },
+      { toolName: "hub", input: { op: "send", name: "shell", text: "jj undo" } },
+    ];
+    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      {
+        toolName: "eval",
+        input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
+      },
+      { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
+      { toolName: "hub", input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] } },
+      { toolName: "hub", input: { op: "logs", name: "web" } },
+      { toolName: "hub", input: {} },
+    ];
+    const allowedByMistake: string[] = [];
+    for (const [index, call] of refused.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-jj-text-${index}` }, context);
+      const blocked =
+        typeof result === "object" && result !== null && "block" in result && result.block === true;
+      if (!blocked) allowedByMistake.push(JSON.stringify(call));
+    }
+    expect(allowedByMistake).toEqual([]);
+    const refusedByMistake: string[] = [];
+    for (const [index, call] of allowed.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-jj-text-ok-${index}` }, context);
+      if (result !== undefined) refusedByMistake.push(JSON.stringify(call));
+    }
+    expect(refusedByMistake).toEqual([]);
+    // Same message shape as the bash refusal, naming the tool and the words it found.
+    const named = await toolCall(
+      {
+        toolName: "hub",
+        toolCallId: "call-jj-text-named",
+        input: { op: "start", name: "x", application: "jj", args: ["undo"] },
+      },
+      context
+    );
+    for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
+      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
+    }
+  });
   test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
@@ -1990,7 +2299,9 @@ describe("Legion OMP extension", () => {
     });
   });
   test("blocks a bash call from a worker session that has not completed its boot handshake", async () => {
+    // The pane's launch environment is complete; only the boot handshake is missing.
     process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
     process.env.LEGION_ROLE = "implementer";
     const fixture = createPi();
     legionExtension(fixture.pi);
@@ -2043,6 +2354,18 @@ describe("Legion OMP extension", () => {
           toolName: "bash",
           toolCallId: "call-controller-bash",
           input: { command: "legion state" },
+        },
+        context
+      )
+    ).resolves.toBeUndefined();
+    // LEGION-45: the controller does not commit and is not a phase worker; the operation-log guard
+    // never binds it.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-controller-jj",
+          input: { command: "jj -R /tmp/legion-workspace undo" },
         },
         context
       )
@@ -2857,6 +3180,17 @@ describe("Legion OMP extension", () => {
           toolCallId: "architect-bash",
           input: { command: "echo should-not-run" },
         },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "the architect delegates all code work to phase workers",
+    });
+    // LEGION-45: the root architect's blanket bash gate answers first; the phase-worker
+    // operation-log guard never reaches it (its behaviour is unchanged by that guard).
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
         context
       )
     ).resolves.toEqual({

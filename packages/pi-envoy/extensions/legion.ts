@@ -166,6 +166,146 @@ function isSingleLegionCommand(command: unknown): boolean {
   return trimmed.split(/\s+/, 1)[0] === "legion";
 }
 
+// Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
+// operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
+// every tree at once (LEGION-45: one worker's `jj undo` rewrote nine of another tree's commits).
+// The tool_call hook refuses them in every phase-worker pane. `restore`/`revert` are operation-log
+// commands only under `op`/`operation`; `jj restore <paths>` is file-level and stays allowed.
+const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
+const JJ_OP_WORDS = ["op", "operation"];
+const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
+const JJ_MENTION = /\bjj\b/;
+// Any non-word run between `op` and `restore`, so `"op", "restore"` in an argv literal counts.
+const JJ_LOG_REWRITE_MENTION = /\b(?:undo|abandon)\b|\b(?:op|operation)\b\W+(?:restore|revert)\b/;
+
+/** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`
+ * code, a `hub` process start, each word of a tokenised `bash` command (`sh -c "jj undo"`), and
+ * a `bash` command with unbalanced quoting: the blocked words `text` mentions together with `jj`
+ * (e.g. `undo`, `op restore`), or undefined. */
+function jjLogRewriteMention(text: string): string | undefined {
+  if (!JJ_MENTION.test(text)) return undefined;
+  const match = JJ_LOG_REWRITE_MENTION.exec(text);
+  return match === null ? undefined : match[0].replace(/\W+/g, " ");
+}
+
+/** Splits a shell command into simple commands (at `;`, `&`, `|`, newline, `(`, `)`, and
+ * backtick) of words, honouring single quotes, double quotes, backslash escapes, backslash-newline
+ * continuation, and redirection operators (`<`, `>`, `>&`, `<&`, `&>` end a word, never the simple
+ * command). A word is its unquoted text -- the argv bash would build -- so quoting never changes a
+ * verdict. Undefined on an unterminated quote: the caller then applies the plain-text rule to the
+ * whole command, never allows it. Not a shell parser -- no expansions, no heredoc awareness -- and
+ * every gap errs toward refusing (a heredoc body is read as commands). */
+function splitShellCommands(command: string): string[][] | undefined {
+  const commands: string[][] = [];
+  let words: string[] = [];
+  let text = "";
+  let inWord = false;
+  let quote: '"' | "'" | undefined;
+  const endWord = (): void => {
+    if (inWord) words.push(text);
+    text = "";
+    inWord = false;
+  };
+  const endCommand = (): void => {
+    endWord();
+    if (words.length > 0) commands.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command.charAt(i);
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else if (quote === '"' && char === "\\" && command.charAt(i + 1) === "\n") i += 1;
+      else if (quote === '"' && char === "\\" && i + 1 < command.length) {
+        i += 1;
+        text += command.charAt(i);
+      } else text += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      inWord = true;
+    } else if (char === "\\") {
+      // Backslash-newline is line continuation: both characters vanish, the word continues
+      // (inside double quotes too, above; single quotes keep both, as bash does).
+      if (command.charAt(i + 1) === "\n") i += 1;
+      else if (i + 1 < command.length) {
+        i += 1;
+        text += command.charAt(i);
+        inWord = true;
+      }
+    } else if (char === " " || char === "\t" || char === "<" || char === ">") {
+      // A redirection operator ends the word before it and belongs to the same simple command:
+      // `jj undo>/dev/null` is `jj undo`, and `2>&1`'s operands are harmless extra words.
+      endWord();
+    } else if (
+      char === "&" &&
+      (command.charAt(i - 1) === ">" || command.charAt(i - 1) === "<" || command.charAt(i + 1) === ">")
+    ) {
+      // The `&` of `>&`, `<&`, and `&>` is part of the redirection, not a command terminator.
+      endWord();
+    } else if (";&|\n()`".includes(char)) {
+      endCommand();
+    } else {
+      text += char;
+      inWord = true;
+    }
+  }
+  if (quote !== undefined) return undefined;
+  endCommand();
+  return commands;
+}
+
+/** The first thing in a `bash` command that would rewrite the shared jj operation log, named for
+ * the refusal, or undefined. Each simple command is judged on the whole argument list after its
+ * first `jj` (or `.../jj`) word -- never only the first word after it -- so `jj -R <path> undo`,
+ * `jj --at-op <id> op restore <id>`, and `jj operation restore` count, in any position of a
+ * pipeline or `&&` chain. A word is judged by its text whatever its quoting, since bash hands jj
+ * the same argv either way: `jj "undo"`, `"jj" undo`, and `jj \u\n\d\o` are `jj undo`, and a
+ * one-word `-m "undo"` is refused with them (the spec's tradeoff: one rephrase), while
+ * `-m "undo this"` is a different word and stays allowed. `undo`/`abandon` count anywhere;
+ * `restore`/`revert` only beside `op`/`operation`. Every word is also held to the plain-text
+ * rule (`sh -c "jj undo"`), and so is the whole command when it does not tokenise. */
+function jjLogRewriteInvocation(command: string): string | undefined {
+  const commands = splitShellCommands(command);
+  if (commands === undefined) {
+    return jjLogRewriteMention(command) === undefined ? undefined : command.trim();
+  }
+  for (const words of commands) {
+    const mentioned = words.find((word) => jjLogRewriteMention(word) !== undefined);
+    if (mentioned !== undefined) return mentioned;
+    const jj = words.findIndex((word) => word === "jj" || word.endsWith("/jj"));
+    if (jj === -1) continue;
+    const args = words.slice(jj + 1);
+    const rewritesLog =
+      args.some((arg) => JJ_LOG_REWRITE_WORDS.includes(arg)) ||
+      (args.some((arg) => JJ_OP_WORDS.includes(arg)) &&
+        args.some((arg) => JJ_OP_LOG_REWRITE_WORDS.includes(arg)));
+    if (rewritesLog) return words.slice(jj).join(" ");
+  }
+  return undefined;
+}
+
+/** What a phase worker's tool call would run against the shared operation log, or undefined. A
+ * `bash` command is tokenised; `eval` code and a `hub` call's `application`, `args`, and `text`
+ * (a process start's program and arguments, and stdin sent to a supervised process) are held to
+ * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
+function jjLogRewriteAttempt(toolCall: ToolCallEvent): string | undefined {
+  const { toolName, input } = toolCall;
+  if (toolName === "bash") {
+    return typeof input.command === "string" ? jjLogRewriteInvocation(input.command) : undefined;
+  }
+  let text: string;
+  if (toolName === "eval" && typeof input.code === "string") text = input.code;
+  else if (toolName === "hub") {
+    text = [input.application, ...(Array.isArray(input.args) ? input.args : []), input.text]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ");
+  } else return undefined;
+  const mention = jjLogRewriteMention(text);
+  return mention === undefined ? undefined : `${toolName}: jj ${mention}`;
+}
+
 // Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
 // verifyLegionPluginLoaded) to prove this extension actually loaded from an
 // ambient installed-plugin discovery -- not just that a manifest file exists,
@@ -220,6 +360,10 @@ export default function legionExtension(pi: PiApi): void {
     subagentSession ??= isSubagentSession(context);
     return subagentSession;
   };
+  // Whether this pane was launched for a phase worker, judged from the environment on the first
+  // tool_call (see the LEGION-45 guard there). A subagent's own instance inherits the pane's
+  // environment, so the guard binds it exactly as it binds the worker that spawned it.
+  let phaseWorkerPane: boolean | undefined;
 
   const roleDaemon = () => {
     return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
@@ -594,9 +738,29 @@ export default function legionExtension(pi: PiApi): void {
       toolCallId: toolCall.toolCallId,
       toolName: toolCall.toolName,
     });
-    // No gate of any kind applies to a subagent's own tool calls: the parent session's gate,
-    // running in the parent's own module instance, already governs the parent's `task` call
-    // that spawned it (see the architect `task` block above and isSubagentSession).
+    // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
+    // one clone), and a `task` subagent's bash runs in the same pane against it, so this guard is
+    // judged from the pane's environment ahead of the subagent exemption below -- the one gate that
+    // reaches a subagent -- and before any grant is minted. Classified once per instance, on the
+    // first call: a throw for a malformed LEGION_ROLE stays inside the handler, never at load.
+    phaseWorkerPane ??= classifySession(process.env).kind === "phase-worker";
+    if (phaseWorkerPane) {
+      const jjAttempt = jjLogRewriteAttempt(toolCall);
+      if (jjAttempt !== undefined) {
+        return {
+          block: true,
+          reason:
+            `refused \`${jjAttempt}\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo ` +
+            "rewrite the jj operation log, which every Legion issue workspace shares (each is a jj " +
+            "workspace of one clone), so they rewrite other trees' commits too. Recover forward with " +
+            "a new commit or `jj restore <paths>` of files; anything else, stop and send the owning " +
+            'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
+        };
+      }
+    }
+    // No other gate applies to a subagent's own tool calls: the parent session's gate, running
+    // in the parent's own module instance, already governs the parent's `task` call that spawned
+    // it (see the architect `task` block above and isSubagentSession).
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
     const active = capability?.sessionID === sessionID ? capability : undefined;
