@@ -13,7 +13,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("edits issue labels and filters project issues by every selected label", async ({
+test("edits issue labels from a searchable multi-select and filters project issues by every selected label", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -28,18 +28,48 @@ test("edits issue labels and filters project issues by every selected label", as
   try {
     const page = await context.newPage();
     await page.goto(`/issues/${edited.key}`);
-    await page.getByRole("button", { name: "Frontend" }).click();
-    const labelInput = page.getByRole("textbox", { name: "Add label" });
-    await labelInput.fill("urgent");
-    await labelInput.press("Enter");
-    if (testInfo.project.name === "iphone") {
-      await expectTouchTarget(labelInput);
-      await expectTouchTarget(page.getByRole("button", { name: "Remove api" }));
-      await expectTouchTarget(page.getByRole("button", { name: "Save labels" }));
+    const editLabels = page.getByRole("button", { name: "Edit labels" });
+    await editLabels.click();
+    const labelSearch = page.getByRole("combobox", { name: "Search or create label" });
+    await expect(page.getByRole("option", { name: "Frontend", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(page.getByRole("option", { name: "api", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(page.getByRole("option", { name: "backend", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "false"
+    );
+    await labelSearch.fill("urgent");
+    await expect(page.getByRole("option", { name: 'Create "urgent"' })).toBeVisible();
+    await labelSearch.press("Enter");
+    await expect(page.getByRole("option", { name: "urgent", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+
+    if (process.env.DISPATCH_LABEL_SCREENSHOT_DIR !== undefined) {
+      const screenshotName =
+        testInfo.project.name === "iphone" ? "labels-390.png" : "labels-1280.png";
+      await page.screenshot({
+        fullPage: true,
+        path: `${process.env.DISPATCH_LABEL_SCREENSHOT_DIR}/${screenshotName}`,
+      });
     }
-    await page.getByRole("button", { name: "Remove api" }).click();
-    await page.getByRole("button", { name: "Save labels" }).click();
-    await expect.poll(() => getIssue(edited.key)).toMatchObject({ labels: ["Frontend", "urgent"] });
+    if (testInfo.project.name === "iphone") {
+      await expectTouchTarget(editLabels);
+      await expectTouchTarget(labelSearch);
+    }
+
+    await editLabels.click();
+    await expect
+      .poll(() => getIssue(edited.key))
+      .toMatchObject({
+        labels: ["Frontend", "api", "urgent"],
+      });
 
     await page.goto("/projects/CORE?label=docs");
     await expect(page).toHaveURL(/\/projects\/CORE\?label=docs$/);

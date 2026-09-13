@@ -231,41 +231,122 @@ test("IssuePage hides the Subscribed agents header when there are no subscribers
   }
 });
 
-test("IssuePage edits label chips with project suggestions and cancels unsaved changes", async () => {
+test("IssuePage lists project labels with issue labels selected and filters them", async () => {
   const labeledIssue = { ...issue, labels: ["bug"] };
   const restore = stubIssuePage(labeledIssue);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend", "backend"], open_asks: 0 },
+    { ...issue, key: "CORE-3", labels: ["docs"], open_asks: 0 },
+  ]);
+  const view = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "Edit labels" }));
+    const input = await screen.findByRole("combobox", { name: "Search or create label" });
+    await waitFor(() => expect(listIssues).toHaveBeenCalledWith({ project: "CORE" }));
+    expect(screen.getByRole("option", { name: "bug" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("option", { name: "frontend" }).getAttribute("aria-selected")).toBe(
+      "false"
+    );
+
+    fireEvent.change(input, { target: { value: "front" } });
+
+    expect(screen.getByRole("option", { name: "frontend" })).toBeDefined();
+    expect(screen.queryByRole("option", { name: "backend" })).toBeNull();
+  } finally {
+    view.unmount();
+    listIssues.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage creates a label from the multi-select and saves the final draft once on close", async () => {
+  const labeledIssue = { ...issue, labels: ["bug"] };
+  const restore = stubIssuePage(labeledIssue);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { ...labeledIssue, open_asks: 0 },
+    { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
   const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
     ...labeledIssue,
-    labels: ["frontend", "urgent"],
+    labels: ["bug", "urgent"],
   });
   const view = renderIssuePage();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "bug" }));
-    const input = await screen.findByRole("textbox", { name: "Add label" });
-    await waitFor(() => expect(listIssues).toHaveBeenCalledWith({ project: "CORE" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Add frontend" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit labels" }));
+    const input = await screen.findByRole("combobox", { name: "Search or create label" });
     fireEvent.change(input, { target: { value: "urgent" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    fireEvent.click(screen.getByRole("button", { name: "Remove bug" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save labels" }));
+
+    expect(screen.getByRole("option", { name: "urgent" }).getAttribute("aria-selected")).toBe(
+      "true"
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["frontend", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
     );
-    fireEvent.click(await screen.findByRole("button", { name: "frontend" }));
-    const secondInput = await screen.findByRole("textbox", { name: "Add label" });
-    fireEvent.change(secondInput, { target: { value: "backend" } });
-    fireEvent.keyDown(secondInput, { key: "Enter" });
-    fireEvent.keyDown(secondInput, { key: "Escape" });
-
-    expect(screen.queryByRole("textbox", { name: "Add label" })).toBeNull();
     expect(patchIssue).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("button", { name: "backend" })).toBeNull();
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    listIssues.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage does not save after a label is toggled off and back on", async () => {
+  const labeledIssue = { ...issue, labels: ["bug", "api"] };
+  const restore = stubIssuePage(labeledIssue);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { ...labeledIssue, open_asks: 0 },
+  ]);
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const view = renderIssuePage();
+
+  try {
+    const trigger = await screen.findByRole("button", { name: "Edit labels" });
+    fireEvent.click(trigger);
+    await screen.findByRole("combobox", { name: "Search or create label" });
+    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole("option", { name: "bug" }));
+    fireEvent.click(trigger);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(patchIssue).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    listIssues.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage returns focus to the label trigger when Escape closes an unchanged draft", async () => {
+  const labeledIssue = { ...issue, labels: ["bug"] };
+  const restore = stubIssuePage(labeledIssue);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { ...labeledIssue, open_asks: 0 },
+  ]);
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const view = renderIssuePage();
+
+  try {
+    const trigger = await screen.findByRole("button", { name: "Edit labels" });
+    fireEvent.click(trigger);
+    const input = await screen.findByRole("combobox", { name: "Search or create label" });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(screen.queryByRole("listbox", { name: "Label options" })).toBeNull();
+    expect(document.activeElement === trigger).toBe(true);
+    expect(patchIssue).not.toHaveBeenCalled();
   } finally {
     view.unmount();
     patchIssue.mockRestore();
