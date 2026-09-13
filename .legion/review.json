@@ -1,0 +1,81 @@
+{
+  "summary": "Round 1 on PR #1082 at the live head 8101429bf944 is clean: one COMMENT review (https://github.com/sjawhar/legion/pull/1082#pullrequestreview-5195064380), no correctness finding, six non-blocking threads (one missing regression test, three wording, one test-hygiene, one no-action note). Verified against GitHub: checks green at the head (Tests run 34816041545 with LEGION_E2E=1, 1272 pass), rollup SUCCESS, MERGEABLE not CONFLICTING, both E2E lines present and anchored on ancestors of the head, zero threads before this review. The .legion/ deletion is the only remaining work; approval by SHA follows that push.",
+  "verdict": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 6,
+  "reviewedHead": "8101429bf944d2571194964ef62a9161a89d2798",
+  "review": {
+    "id": 5195064380,
+    "state": "COMMENTED",
+    "url": "https://github.com/sjawhar/legion/pull/1082#pullrequestreview-5195064380",
+    "submittedAt": "2026-09-14T07:38:55Z"
+  },
+  "spec": "dispatch://LEGION-93/spec (version 6) — acceptance 5 withdrawn; judged against Design, Errors, Rejected",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1082",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/worker-admission.ts:514",
+      "description": "Regression lock missing: the `verdict !== \"died\"` guard (no worker-queued for the terminal failure) and the spec's 'spawn_worker still answers queued' rule are exercised by no test — both LEGION-93 tests reach the terminal crossing through the drain. Code verified correct by reading. Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071247"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/AGENTS.md:19",
+      "description": "Wording: the /worker/ready row's 'third failure at ready ... worker-died' clause is unreachable (freshClaim starts promptFailures fresh; a ready-time prompt is always the pane's first failure). Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071254"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/AGENTS.md:70",
+      "description": "Wording: 'Both counters are cleared only by a started turn' contradicts the same bullet (promptFailures returns to zero at each retirement and restarts on the relaunched claim); only promptRetires is cleared solely by a started turn. Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071260"
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-architect/SKILL.md:302",
+      "description": "Wording: 'acknowledged every prompt' is narrower than the code — a refused prompt counts in the same promptFailures (LEGION-60), so a persistently refusing worker reaches the same verdict; same narrowing in the promptRetires doc comment (legion-state.ts:152-154). Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071263"
+    },
+    {
+      "severity": "note",
+      "file": "packages/daemon/src/daemon/processes.ts:1334",
+      "description": "No action: markWorkerDeadLocked persists before removeFromQueue and the counter writes, so a crash in that millisecond window relaunches once more before the bound — one extra cycle, never unbounded; the ordering is the spec's StopFailed choice. Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071266"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts:12539",
+      "description": "Test hygiene: toHaveLength(4) pins console.error volume; promptFailures/launchFailures toBeUndefined() pin field absence rather than behaviour; the 50-tick onceEventLoop budget is the load-sensitive race the fixture's comment rejects. Thread https://github.com/sjawhar/legion/pull/1082#discussion_r4003071269"
+    }
+  ],
+  "threads": [
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071247",
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071254",
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071260",
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071263",
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071266",
+    "https://github.com/sjawhar/legion/pull/1082#discussion_r4003071269"
+  ],
+  "fastFollow": "One LEGION issue for the architect to file on Dispatch: regression test for the terminal verdict reached through spawn_worker's own direct prompt (HTTP queued, no worker-queued, exactly one worker-died); align the /worker/ready row, the delivery bullet's 'both counters' sentence, the architect skill's worker-died row and the promptRetires doc comment ('acknowledged or refused'); drop the console.error-volume and field-absence assertions. Not a silent deferral.",
+  "ci": {
+    "head": "8101429bf944d2571194964ef62a9161a89d2798",
+    "tests": "Tests run 34816041545: lint, typecheck, test success; test job ran LEGION_E2E: 1 — 1272 pass, 0 fail, real-prompt-delivery-e2e.test.ts group present in the job log",
+    "prTitle": "success",
+    "rollup": "SUCCESS",
+    "mergeability": "MERGEABLE / BLOCKED (review required); not CONFLICTING; no rebase"
+  },
+  "e2e": "Implementer's line at 87844f7d359e (ancestor of the head; later commits touch only the e2e test and .legion/implement.json) and tester's at 8101429b, each naming the surface (daemon suite + CI under Sami's 2026-09-13 standing order), command, observation, negative control. No rig, scratch daemon, tmux server, or NATS container started by this phase.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality are not installed in this harness (task preflight: Unknown agent). Two `reviewer` subagents ran those charters once at 8101429b: deep review — no blocking finding (P3 crash-window note); code quality — the test gap and wording items. Reviewer's own gates: processes.test.ts 278 pass / 3 skip / 0 fail; biome --error-on-warnings clean; tsc clean.",
+  "diffScopedChecks": [
+    "MAX_PROMPT_RETIRES read by code only in recordPromptFailure (verdict at worker-admission.ts:474, log at 479); retirePromptFailedClaim's one caller is the retireDeadClaim wiring (processes.ts:435-436).",
+    "retirePromptFailedClaim: deriveRetryContext, markWorkerDeadLocked (stop), then on died removeFromQueue and publishWorkerDied unless isTreeGone (processes.ts:1326-1340); recordPromptFailure writes promptRetires/promptFailures only after retireDeadClaim resolved (worker-admission.ts:475-477).",
+    "delete claim.promptRetires appears once (processes.ts:1044, commitPromptDelivery, also reached via commitLateStart); launchWorker's freshClaim spreads promptRetires (processes.ts:3322) and starts promptFailures fresh.",
+    "spawnWorker on a terminal claim (no locator, pendingAssignment kept, promptRetires 2) reaches launchOrQueue (processes.ts:859): one cold launch with --resume, promptRetires 2 carried, third failure -> retires 3 >= 2 -> worker-died again.",
+    "Unchanged: api/state.ts, packages/contracts (LEGION_DAEMON_API_VERSION 2), packages/pi-envoy, state version 28, docs/plans/, scripts/smoke/ (jj diff --summary over those paths empty)."
+  ],
+  "observations": [
+    "The tester's test.json handoff commit b483baa4 is local and unpushed; this review.json commit is local too (the review App cannot push). The implementer's .legion/ deletion push carries both and removes the directory.",
+    "An empty untracked .omp/config.yml sits in the workspace working copy (jj snapshots it as A .omp/config.yml); the implementer should keep it out of the deletion commit."
+  ],
+  "nextStep": "Architect sends the implementer to push exactly the .legion/ deletion; reviewer re-reads the head, confirms it differs from 8101429b by that deletion alone (unchanged-diff fingerprint), and approves it by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T07:40:21.611Z"
+}
