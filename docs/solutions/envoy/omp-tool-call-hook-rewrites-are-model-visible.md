@@ -32,7 +32,7 @@ and five more — to the command. Pushes, `legion gh`, and `legion handoff compl
 as a session went on, and three issues' worth of workers wrote shell workarounds for it (LEGION-9, LEGION-18,
 LEGION-22). LEGION-12 measured the cause and moved the credential into the bash tool's per-command `env` argument
 (pi-envoy 1.17.1). That failed in production on the first worker: every `legion` command answered `LEGION_GRANT is
-missing`, and the profile was pinned back to 1.17.0 (LEGION-52). LEGION-54 (pi-envoy 1.17.4) moved the credential
+missing`, and the profile was pinned back to 1.17.0 (LEGION-52). LEGION-54 (pi-envoy 1.18.2) moved the credential
 out of the tool call altogether, into a file the pane already knows. This note is the part that applies to any
 extension, not just Legion's: two lessons, one about text and one about structured fields.
 
@@ -83,7 +83,7 @@ depend on which bash tool any plugin installs.
 path is on the pane's own environment — not to any field of the tool call, text or structured. Whoever owns the tool
 owns its fields; the hook owns only what it writes elsewhere.
 
-## What the fixed hook does (pi-envoy 1.17.4, LEGION-54)
+## What the fixed hook does (pi-envoy 1.18.2, LEGION-54)
 
 ```ts
 const grantFile = process.env.LEGION_GRANT_FILE;
