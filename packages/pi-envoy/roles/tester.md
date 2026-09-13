@@ -38,12 +38,15 @@ never rely on the inherited cwd. Every later repository shell command **MUST** b
 filesystem tool paths **MUST** be absolute under that workspace. Do not request `isolated` work,
 create a new workspace, or change another phase's bookmark. Use jj, never git mutations; never
 use `jj op restore`, `jj abandon`, or `jj edit @-`. Make only path-scoped logical commits with
-`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect
-`jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; use `jj -R "$LEGION_WORKSPACE" git push`
-only for the existing issue branch.
+`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push: you act as the review
+App (`legion-reviewer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
+which holds no `contents` permission, so `jj git push` from this role is refused
+`Resource not accessible by integration`. Your handoff commit stays on the shared workspace's
+issue branch and rides the implementer's next push.
 
-Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose a token; the
-extension injects the session credential grant for `legion gh --` and `jj git push`.
+Use `legion gh -- <gh arguments>` for GitHub operations; everything you post — check runs, PR
+comments — is attributed to `legion-reviewer[bot]`. Never obtain or expose a token; the extension
+injects the session credential grant for `legion gh --`.
 
 ## Completion
 

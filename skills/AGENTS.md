@@ -34,8 +34,11 @@ durable human question; replies come back to the worker's own session.
 ## Durable artifacts
 
 Phase handoffs are committed in lifecycle order: architect, plan, implement, test, and review.
+Only the implementer pushes them: it and the merger act as the code-writing GitHub App, while
+the planner, tester, reviewer, and architects act as the review App (`appRoleForLegionRole`,
+`packages/daemon/src/daemon/github-apps.ts`), which holds no `contents` permission — their
+handoff commits stay on the shared workspace's issue branch and ride the implementer's next push.
 A clean review ends with the `.legion/` deletion pushed by the implementer at the reviewer's
-direction (the review App holds no `contents` permission and cannot push), which the reviewer
-then approves; retro records its learning in
+direction, which the reviewer then approves; retro records its learning in
 `docs/solutions/` and writes no handoff. GitHub comments and reviews carry the required Legion
 footer so the daemon can attribute artifacts to their worker session.
