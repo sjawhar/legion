@@ -1,42 +1,75 @@
 {
   "pr": 998,
   "prUrl": "https://github.com/sjawhar/legion/pull/998",
-  "headSha": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
+  "round": 2,
+  "roundReason": "Reviewer round 1 REQUEST_CHANGES at code head dd22435122bdc6c3b985be6073a6b7b165fbcb0c (review 5189754771): blocking fileset bug in the fingerprint command; architect ruling on workers.ts:42 (spawn writes in_progress; completion reads the known status); eight wording items; explicit-status test nit.",
   "filesChanged": [
+    "skills/legion-worker/SKILL.md",
     "packages/daemon/src/daemon/api/routes/workers.ts",
     "packages/daemon/src/daemon/__tests__/api.test.ts",
     "packages/daemon/src/daemon/AGENTS.md",
-    "skills/legion-worker/SKILL.md",
-    "skills/legion-retro/SKILL.md",
     "skills/legion-architect/SKILL.md",
     "packages/pi-envoy/roles/tester.md",
     "packages/pi-envoy/roles/reviewer.md",
-    "packages/pi-envoy/roles/merger.md",
-    "packages/pi-envoy/roles/implementer.md"
+    "packages/pi-envoy/roles/merger.md"
+  ],
+  "round1Commits": [
+    {
+      "sha": "fff4b2a93abd416fc358fa0d688c7c9c1bb11a04",
+      "subject": "daemon: an implementer completion advances the status only from in_progress",
+      "shaBeforeRebase": "a112b2cc8f7563fb47e3f1b446552924e3cd2058"
+    },
+    {
+      "sha": "b12956ddad9eafdd5b91650513172f2c932af0fd",
+      "subject": "skills(legion-worker, legion-retro, legion-architect): retro's docs commit keeps the approval; an unchanged-diff rebase is a confirmation; no handoff file after the .legion deletion",
+      "shaBeforeRebase": "006cc8653f2d773c45c8bbfb49dc585b361b25ce"
+    },
+    {
+      "sha": "3d166c33736e217c9ca222c1a79ae6026d6187f3",
+      "subject": "roles(tester, reviewer, merger, implementer): the same rules in the role prompts",
+      "shaBeforeRebase": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c"
+    }
   ],
   "commits": [
     {
-      "sha": "a112b2cc8f7563fb47e3f1b446552924e3cd2058",
-      "subject": "daemon: an implementer completion advances the status only from in_progress"
+      "sha": "20607c949dd708e51c7c6f6546173953950043fe",
+      "subject": "skills(legion-worker): the unchanged-diff fingerprint excludes with one fileset",
+      "fixes": [
+        "thread 3998885581 (blocking fileset)",
+        "wording 1, 5, 6, 7"
+      ],
+      "shaBeforeRebase": "3b44a4d779c399f0f5a4890365061ec367af6150"
     },
     {
-      "sha": "006cc8653f2d773c45c8bbfb49dc585b361b25ce",
-      "subject": "skills(legion-worker, legion-retro, legion-architect): retro's docs commit keeps the approval; an unchanged-diff rebase is a confirmation; no handoff file after the .legion deletion"
+      "sha": "1dbbfd0857154147145b3881d7534feebf4d069d",
+      "subject": "daemon: spawn_worker writes in_progress for a child at todo and a corrective implementer; completion reads the status as the daemon knows it",
+      "fixes": [
+        "thread 3998885586 (workers.ts:42 ruling)",
+        "thread 3998885590 (explicit in_progress in the positive test)",
+        "wording 4, 8"
+      ],
+      "shaBeforeRebase": "0f52a0a95df1f72b1cf94a3c7f1b8589182d5a09"
     },
     {
-      "sha": "dd22435122bdc6c3b985be6073a6b7b165fbcb0c",
-      "subject": "roles(tester, reviewer, merger, implementer): the same rules in the role prompts"
+      "sha": "d30cb314d3ef14b67409fb4ba929ffbfb0519f1f",
+      "subject": "roles(tester, reviewer, merger): review round-1 wording",
+      "fixes": [
+        "wording 2, 3, 5"
+      ],
+      "shaBeforeRebase": "3514e21ca83187f4853d70022091e2eb126ca027"
     }
   ],
+  "whatChanged": {
+    "fingerprint": "skills/legion-worker/SKILL.md command uses the single fileset '~(.legion | docs/solutions)'; the exclusions bullet names it as one expression and says jj unions positional filesets so two negations exclude nothing. Verified here: two positional filesets give 13 --summary lines from 1cc59887 to 9b06ae6c, the single fileset 10; fingerprints at dd224351 and 9b06ae6c both f06ac0c1173259880d9c148e6e86d2a353650bb5ee00e2d5af0912a34e70fa0f with the fix (the reviewer's number).",
+    "daemon": "knownIssueStatus(state, issue) = pendingStatusWrites[issue]?.status ?? issues[issue]?.status. phaseCompleteStatus implementer -> testing only when that is in_progress. spawnStatus(state, issue, role): todo -> in_progress for any role; implementer with a state.prs entry for the issue at reviewDecision changes_requested and known status not in_progress -> in_progress; else nothing. handleSpawnWorker writes it via writeStatus after processManager.spawnWorker resolves (spawned/resumed/queued) and before returning, then ctx.save(); a refused spawn writes nothing.",
+    "docs": "AGENTS.md /worker/spawn and /phase/complete rows describe both. Architect skill step 6 item 2 and the pr-review row: the daemon writes in_progress on the first child spawn and on a corrective implementer spawn; the architect sets nothing by hand.",
+    "wording": "worker skill: rule 1 once in its bold bullet, merger bullet = two commands (with jj git fetch) + READY contents, 'no file changes above the approved head', file-list check 'prints nothing on stdout; jj warns on stderr'; architect skill: 'rewrite the reviewer-approved head', pr-review row 'proceed to retro if it has not run, otherwise to the merger'; tester.md annotation carries <old-sha> → <new-sha>; reviewer.md 'For a clean round (COMMENT), write that handoff'; merger.md both 'empty' phrasings -> 'no file changes above the approved head'."
+  },
   "verification": {
-    "tdd": "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\": before workers.ts change → 1 pass, 1 fail (retro test received [{issue: \"WIDGETS-1\", status: \"testing\"}]); after → 2 pass",
-    "unit": [
-      "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"implementer completes\" → 2 pass",
-      "cd packages/daemon && bun test src/daemon/__tests__/api.test.ts -t \"reviewer completes\" → 2 pass",
-      "cd packages/daemon && bun test → 980 pass, 5 skip, 0 fail (985 tests, 57 files)"
-    ],
-    "lint": "cd packages/daemon && bunx biome check src/ → Checked 147 files. No fixes applied.",
-    "typecheck": "cd packages/daemon && bunx tsc --noEmit → clean",
+    "tdd": "RED before the daemon change: 3 fail (child-at-todo spawn, corrective implementer spawn, completion with pending in_progress) / 5 pass (the three negative spawn cases and the two round-1 completion tests); GREEN after: 10 pass with -t \"implementer completes|architect spawns|reviewer completes\"",
+    "unit": "cd packages/daemon && bun test -> 986 pass, 5 skip, 0 fail (991 tests, 57 files)",
+    "lint": "cd packages/daemon && bunx biome check src/ -> Checked 147 files. No fixes applied.",
+    "typecheck": "cd packages/daemon && bunx tsc --noEmit -> clean",
     "greps": {
       "skills/legion-worker/SKILL.md": {
         "does not void the reviewer": 1,
@@ -44,6 +77,8 @@
         "bare gates": 2,
         "handoff complete` alone": 1,
         "^## The unchanged-diff check": 1,
+        "~(.legion | docs/solutions)": 2,
+        "no commits above": 0,
         "fences": 24
       },
       "skills/legion-retro/SKILL.md": {
@@ -58,22 +93,28 @@
         "is that confirmation": 1,
         "does not void the approval": 1,
         "quoted in READY": 1,
+        "set nothing by hand": 2,
         "fences": 12
       },
       "packages/pi-envoy/roles/tester.md": {
         "bare gates only": 1,
         "never recreate": 1,
+        "<old-sha> → <new-sha>": 1,
         "fences": 2
       },
       "packages/pi-envoy/roles/reviewer.md": {
         "a confirmation, not a round": 1,
         "does not void your approval": 1,
+        "For an approved review": 0,
+        "For a clean round": 1,
         "fences": 4
       },
       "packages/pi-envoy/roles/merger.md": {
         "approved head equals the current head": 0,
         "do not void the approval": 1,
         "--summary": 4,
+        "no commits above": 0,
+        "no file changes above": 2,
         "fences": 2
       },
       "packages/pi-envoy/roles/implementer.md": {
@@ -81,22 +122,35 @@
         "fences": 2
       },
       "packages/daemon/src/daemon/AGENTS.md": {
-        "is never followed by": 1
+        "is never followed by": 1,
+        "spawnStatus": 1,
+        "knownIssueStatus": 2
       }
     },
-    "ci": "Tests run 34738890552 and Legion Envoy and Contracts run 34738796676 at dd22435122bd; first Tests run 34738796688 passed test/lint/typecheck and failed only pr-title (non-conventional title), fixed by retitling"
+    "unchangedByThisRound": "skills/legion-retro/SKILL.md and packages/pi-envoy/roles/implementer.md"
   },
   "deviations": [
-    "skills/legion-retro/SKILL.md passage C: the plan's exact text `legion handoff complete --summary '<two sentences for the architect>'` would make the plan's own tester check `grep -c -- '--summary' → 1` return 2 (the merger's --summary on line 23 plus this line). Written as `legion handoff complete` alone (its summary: two sentences for the architect) so the grep contract holds; meaning unchanged.",
-    "PR title: the plan's title `Old Legion pull requests loop through test → review → retro (LEGION-59)` fails this repository's pr-title check (conventional subject required, .github/workflows/pr-and-main.yaml). Retitled to `fix(daemon,skills): retro's docs commit and an unchanged-diff rebase no longer restart test → review → retro (LEGION-59)`."
+    "Commit granularity is per file, not per hunk: the worker skill's fileset fix and its four wording items share one file and one commit (3b44a4d7); the architect skill's ruling text and its two wording items share the daemon commit (0f52a0a9). jj split is path-scoped and this worker has no interactive split.",
+    "workers.ts:42 ruling applied as the architect specified (option a); the tester's E2E rig must re-run at the new head because workers.ts changed."
   ],
   "trickyParts": [
-    "The daemon's grant preamble: a bash call that re-exports LEGION_GRANT with any other value makes `legion gh`/`jj git push` fail with `Unable to redeem LEGION_GRANT (403)` or an askpass error; issue only the command, never a second export block.",
-    "After every `jj split`, the bookmark sits on the undescribed working copy holding .omp/config.yml; push needs `jj bookmark set legion/LEGION-59 -r @- --allow-backwards` first.",
-    "The live daemon runs main: this tree's own .legion deletion push and retro completions still PATCH `testing` until the daemon is restarted on code containing a112b2cc; the status half of acceptance 4 is proven by the unit tests and the tester's throwaway daemon (architect ruling)."
+    "The spawn write is placed after processManager.spawnWorker resolves so a 403/409/400 spawn writes nothing, and before the response so every accepted spawn (spawned/resumed/queued) writes; ctx.save() follows only when a status was written.",
+    "knownIssueStatus is used by both the spawn and the completion decision, so a spawn whose in_progress PATCH failed (recorded pending) is still followed by testing on completion, and a second spawn on the same issue does not write in_progress twice."
   ],
   "openQuestions": [],
+  "rebase": {
+    "reason": "GitHub reported PR #998 CONFLICTING/DIRTY at 3d599ade after the round-2 push (main had moved to 0f744bc8; skills/legion-architect/SKILL.md's pr-blocked row changed in #993 next to our pr-review row edit)",
+    "command": "jj rebase -s 'roots(main@origin..@)' -d main@origin (whole chain, 12 commits)",
+    "conflicts": "skills/legion-architect/SKILL.md only: resolved at b12956dd and again at 1dbbfd08 by keeping our pr-review row and main's new pr-blocked row",
+    "tipBefore": "3d599ade4ea65bab5ec49cf2df530c233f42f57c",
+    "tipAfter": "cdc4e3c9be84eaf48fcef6cf1815e8bfc2d5e705",
+    "fingerprintBefore": "fa03a9f2d1e7d65ed8d168a62bc1639e975c3bde12c84ae6f7d19c16ade0980f",
+    "fingerprintAfter": "fa03a9f2d1e7d65ed8d168a62bc1639e975c3bde12c84ae6f7d19c16ade0980f",
+    "result": "unchanged",
+    "fileset": "'~(.legion | docs/solutions)'",
+    "verificationAfterRebase": "cd packages/daemon && bun test -> 1032 pass, 6 skip, 0 fail; biome check src/ clean; tsc --noEmit clean; every grep count identical"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T04:53:57.187Z"
+  "completed": "2026-09-13T06:14:47.540Z"
 }
