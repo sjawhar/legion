@@ -1,0 +1,60 @@
+{
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "round": 1,
+  "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
+  "reviewCommitId": "f86d2296c66225fbb516a00f7223f93aaa1a9562",
+  "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
+  "pullRequest": {
+    "number": 1088,
+    "url": "https://github.com/sjawhar/legion/pull/1088"
+  },
+  "verifiedOnGitHub": {
+    "checks": "13 of 13 SUCCESS at f86d2296; run 34828956087 dispatch job ran the Playwright suite against the real Go server and Postgres: 214 passed, 12 skipped, the three new tests green on chromium (the two viewport tests skip on iphone by design).",
+    "threads": "0 threads before this review; 3 opened by it.",
+    "e2e": "E2E (implementer) and E2E (tester) both present in the PR body at head 79f4d50c (the tester wrote its line at the reviewer's request during this round); each names surface, command, observation, head and negative control; the tester line records implementer-proof verification.",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 79f4d50c: no blocking finding from either; their should-fix items are the threads below."
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "blocking": true,
+      "file": "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
+      "line": 355,
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109",
+      "description": "`grow` on the details rail splits the row's free space with the title below xl (the title is flex-1, basis 0%, min 12rem), so at 1040-1279px with a short details line the title is squeezed and clamped where main showed it in full. Probe with the exact classes at 1024px: title block 203px and clamped with grow, 406px and fully visible without; at 1200-1279 with the real rail ~260-300px vs ~330-410px. grow is not needed for the scroll container (min-w-0 + shrink + overflow-x-auto verified at 390/1280/1536 without it). Fix: drop `grow`."
+    },
+    {
+      "severity": "should-fix",
+      "blocking": false,
+      "file": "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
+      "line": 97,
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117",
+      "description": "`failed = githubReference.isError || checks.isError` drops an already-loaded PR title and state when only the check-runs query fails, degrading to `#N owner/repo` with the raw URL as tooltip. Gate `reference` on githubReference.isError only; gate the checks pill on checks.isError. Requested in the same push; not blocking on its own."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
+      "line": 379,
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121",
+      "description": "`Route:` caption stays alone on the details line while the route form is open below; focus drops to body when the trigger unmounts. Hide the group while editing and focus the input on mount. Fast-follow acceptable."
+    }
+  ],
+  "fastFollow": "One change: shared newest-reply rule comment across inbox.go/asks.go/issue_queries.go and timestampValue(createdAt); labels.e2e.ts scroll probe instead of overflowX === 'auto'; GitHubLink non-GitHub branch truncation on an inner span (styles.css makes every <a> inline-flex below 1280 so truncate on the anchor hard-clips); vertical padding on the rail so focus rings are not clipped by the scroll container.",
+  "confirmedSound": [
+    "Go: loadAskLastReplies orders `created_at desc, id desc` per ask exactly like the inbox lateral join and /asks/open, so header and Inbox agree on whose turn it is; distinct on + any($1::uuid[]) mirrors attachApprovals; comments_ask_id partial index covers it; explicit null (no omitempty); empty asks -> [] and nil map read is safe.",
+    "Contract: doc-comment change on the existing nullable Ask.last_reply; gen:go covers the envelope only, generated Go rightly untouched.",
+    "Client: knowsWhoseTurn distinguishes absent from null; no client path builds open_asks without last_reply (mergeIssue spreads a PATCH Issue without open_asks); SSE invalidation refetches the detail for the live flip; label popover is portalled so the scroll container does not clip it.",
+    "Header at the acceptance widths: e2e in CI green for 390 shared rows (<300px card), 1280 (<=140px), 1536, eight long labels scrolling inside the card with page scrollWidth == window; approval, issue, labels, layout, live specs green.",
+    "GitHubLink without credentials reads `#N owner/repo` with the unavailable tooltip, never the raw address; href still passes safeExternalHref.",
+    "Tests: Go test pins key-present-and-null then human then agent; IssuePage unit test pins hidden-when-missing; e2e screenshots use testInfo.outputPath (no fixed /tmp paths, LEGION-142). The Math.round(top) row equality holds because styles.css gives every a/button/select min-height 44px below 1280.",
+    "AGENTS.md edits in packages/dispatch and packages/envoy describe the shipped behaviour accurately."
+  ],
+  "nextSteps": "Implementer drops `grow` (IssueHeader.tsx:355) and decouples GitHubLink `reference` from checks.isError, runs `legion threads resolve --pr 1088 --repo sjawhar/legion` after the reviewer's Accepted replies, pushes; tester re-verifies; reviewer answers each thread, then a clean round is COMMENT while .legion/ is present, and APPROVE by SHA only for the head that removes .legion/.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T10:17:12.264Z"
+}
