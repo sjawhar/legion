@@ -2428,31 +2428,26 @@ describe("Legion HTTP API", () => {
     };
   }
 
-  it("writes in_progress when the architect spawns the first worker for a child released at todo", async () => {
+  it("writes nothing when the architect spawns a worker for an issue a human moved back to todo", async () => {
+    // A released child is admitted as its own tree and gets `in_progress` from its own spawnTree,
+    // so an active issue at `todo` is only ever a human's doing; the spawn must not override it.
     const dispatch = recordingDispatchClient();
     await start({ dispatchClient: dispatch.client });
-    state.issues[child] = {
-      key: child,
-      title: "Child",
-      parent: root,
-      status: "todo",
-      children: [],
-    };
-    state.issues[root].children = [child];
+    state.issues[root].status = "todo";
     const secret = await architectSecret();
 
     const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", {
       tree: root,
-      issue: child,
+      issue: root,
       sessionId: "ses_root",
       secret,
       role: "planner",
-      task: "plan the child",
+      task: "plan #1",
     });
 
     expect(spawn.response.status).toBe(200);
     expect(spawn.body.status).toBe("spawned");
-    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+    expect(dispatch.statusWrites).toEqual([]);
   });
 
   it("writes in_progress when the architect spawns a corrective implementer while the PR's latest review is changes requested", async () => {

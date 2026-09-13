@@ -67,24 +67,24 @@ function phaseCompleteStatus(
   }
 }
 
-/** The status the daemon PATCHes when the architect spawns a phase worker — the two moments an
- * issue enters `in_progress` other than its tree's admission (`spawnTree` writes it for the root
- * only). The first worker on a child released at `todo` starts its work; a corrective implementer
- * spawned while the issue's PR carries `reviewDecision: "changes_requested"` (a Legion reviewer's
- * round or a human's review after approval) returns it from wherever the review left it. Every
- * other spawn writes nothing, so a `.legion/` deletion push or a retro under an approved review
- * never moves the status, and the implementer's completion guard above sees the status this
- * write put there. */
+/** The one status the daemon PATCHes when the architect spawns a phase worker. Every released
+ * issue, root or child, gets `in_progress` at admission (`spawnTree` writes it for the tree's
+ * root, and a child released to `todo` is admitted as its own tree), so a spawn never starts an
+ * issue — the spawn-time write exists for the corrective round alone: an implementer spawned
+ * while the issue's PR carries `reviewDecision: "changes_requested"` (a Legion reviewer's round
+ * or a human's review after approval) returns the issue to `in_progress` from wherever the review
+ * left it, unless it is already there. Every other spawn writes nothing — a `.legion/` deletion
+ * push or a retro under an approved review never moves the status, and an active issue a human
+ * moved back to `todo` is never overridden — and the implementer's completion guard above sees
+ * the status this write put there. */
 function spawnStatus(
   state: LegionState,
   issue: IssueKey,
   role: LegionRole
 ): IssueStatus | undefined {
-  const current = knownIssueStatus(state, issue);
-  if (current === "todo") return "in_progress";
   if (
     role === "implementer" &&
-    current !== "in_progress" &&
+    knownIssueStatus(state, issue) !== "in_progress" &&
     Object.values(state.prs).some(
       (pr) => pr.key === issue && pr.reviewDecision === "changes_requested"
     )

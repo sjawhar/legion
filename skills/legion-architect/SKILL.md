@@ -205,14 +205,14 @@ Preserve this order exactly:
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
    deletion (the review App holds no `contents` permission), then the reviewer approves that
-   head. The deletion must land before that approval, which is head-pinned. The daemon moves an
-   issue to `in_progress` on its own — when you `spawn_worker` the first worker for a child
-   released at `todo`, and when you `spawn_worker` a corrective implementer while the PR's
-   latest recorded review is changes requested — and an implementer completion advances the
-   status only from `in_progress` to `testing`; this push, like retro later, leaves the status
-   where it is, so you set nothing by hand — on its `phase-complete` wake, `spawn_worker` the
-   reviewer to approve that head (a finished reviewer may already be retired; `spawn_worker`
-   resumes it);
+   head. The deletion must land before that approval, which is head-pinned. Every released
+   issue, root or child, gets `in_progress` from the daemon at admission; the only spawn-time
+   status write is for the corrective round — when you `spawn_worker` an implementer while the
+   PR's latest recorded review is changes requested, the daemon returns the issue to
+   `in_progress` — and an implementer completion advances the status only from `in_progress`
+   to `testing`; this push, like retro later, leaves the status where it is, so you set nothing
+   by hand — on its `phase-complete` wake, `spawn_worker` the reviewer to approve that head (a
+   finished reviewer may already be retired; `spawn_worker` resumes it);
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
