@@ -1,74 +1,65 @@
 {
-  "verdict": "changes_requested",
-  "round": 3,
+  "verdict": "approved",
+  "round": 4,
   "githubReview": {
-    "id": 5190943102,
-    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190943102",
-    "state": "CHANGES_REQUESTED",
-    "commitId": "7fbfc22ac6f86c3407d37a8942fccb62c434d735",
-    "codeHead": "0bee94f8ecdc",
-    "why": "Round-2 item nearly closed; its fix has two defects of one root cause (tmux re-tokenises the candidate argv token), one of which unsets the wrong variable. Plus two AGENTS.md sentences misstating the daemon-internal process.env boundary after the #1017 rebase. I would deploy this head as-is (production's table triggers neither); blocking under no-deferrals."
+    "id": 5191216456,
+    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5191216456",
+    "state": "COMMENTED",
+    "commitId": "b6a4ec62b0c06f125ba23c0cc505e6d938ab6990",
+    "codeHead": "a7fc38173755",
+    "why": "COMMENT, not APPROVE, only because the head still carries .legion/. No blocking finding; I would deploy this head. APPROVE follows by SHA on the head that differs from a7fc38173755 by the .legion/ deletion alone (or, if the architect folds the non-blocking parser residual in first, on that re-reviewed head's deletion twin)."
   },
   "critical": 0,
-  "important": 1,
-  "minor": 2,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/daemon/src/daemon/tmux.ts:101-106 (environmentHas), :117 (unsetEnvironment)",
-      "description": "tmux strips a trailing ';' from an argv token (command separator; '\\;' is the literal). Candidate 'HOME;' from a continuation line 'HOME;=…' -> show-environment -g 'HOME;' runs as '… HOME' -> exit 0 -> confirmed -> set-environment -g -u 'HOME;' runs as '-u HOME' -> the real allow-listed HOME is removed from the global table; log records 'HOME;'. Reproduced through the real scrub (deep audit) and at the has/-u level (me) on scratch 3.7c servers. Siblings: 'plain;' -> 'unknown variable: plain' != expected -> throw -> boot refusal; ';' alone -> exit 0 then 'too few arguments' throw. Second shape: trailing whitespace — candidate 'key ' (from 'key = value') -> tmux echoes 'unknown variable: key \\n'; line 103 trims stderr only -> mismatch -> throw -> boot refusal whose message names a value fragment (parent entry already unset, so the supervisor's next boot succeeds). Neither reachable from a PEM or a bash function body; both need a raw multi-line value with such a continuation line; production has none. Fix (local): escape a trailing ';' as '\\;' in both argv sites (verified tmux echoes the literal back exactly) and compare stderr with only the final newline stripped (or trim both sides); tests: 'key = value' line refused/not thrown/not -u'd; 'HOME;=x' with HOME in paneEnv refused, HOME never -u'd; 'X;' as a real entry confirmed and unset under its own name. Alternative (structural): parse `show-environment -s` — entries close on an unescaped '\"; export <NAME>;' matching the opener; exact names, zero probes, no fragments in tmux's own show-messages log (deep audit finding 4), no 66x2 tmux calls."
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/tmux.ts:82-87",
+      "description": "Marker branch tests startsWith('unset ') before the '=' test and skips to the next ';\\n': (a) a set entry named 'unset X' (`unset X=\"v\"; export unset X;`) is consumed as a marker and silently kept (in neither kept nor dropped); (b) a marker line without ';' (`unset GONE\\n`) swallows the next entry. Verified through the head's real parseShellEnvironment. Not creatable by a shell (bash refuses `export 'unset X'=1`; tmux always prints `unset NAME;`) — only a crafted execve envp or a broken tmux — but the docstring's 'anything else is a parse failure' does not hold for them. Fix: compute eq/lineEnd first; marker branch only when the line has no '=' and ends with ';' before its newline; one parser test. Parser-only; no rig run needed. Architect decides whether to fold it in before the .legion/ deletion; if so I re-review gates-only."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:118-119 (thread anchored on L105)",
-      "description": "'Both secrets children run with the same stripped environment as private_key_command minus SECRETSD_SESSION_TOKEN_FILE' — inherited #1017 wording not reconciled by the rebase: private_key_command now runs on the daemon's own unstripped process.env (config.ts:553-557; L105 says so), stripDispatchEnv is gone. Say: both secrets children run under the daemon's own process.env, like private_key_command, minus exactly SECRETSD_SESSION_TOKEN_FILE (the LEGION-77 learning L59-61 already has it right)."
+      "file": "packages/daemon/src/daemon/runtime-tmux.ts:466",
+      "description": "`new Set(await environmentNames(...))` with an undefined re-list (server/session vanished between the last -u and the re-list) is an empty set: the global table refuses under the misleading message 'allow-listed name(s) now missing: HOME, PATH, …'; a vanished session is reported as a clean scrub (benign). Throw 'table vanished during the scrub' on undefined for honesty."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:200-201",
-      "description": "'read only by private_key_command, the one child that runs under the daemon's own process.env on purpose' — PR-authored; since #1017 runSecretsGet (config.ts:579-586) is a second such child. Name both."
+      "file": "packages/daemon/src/daemon/tmux.ts:148",
+      "description": "A name beginning '-' (enters a table only from a forking environ) is refused by tmux's flag parser on -u → throw → boot refusal naming the name; fail-closed, loud; `-u -- <name>` would remove it. Optional."
     }
   ],
   "threads": {
-    "resolved": [
-      "PRRT_kwDORFy7ds6h3zoI",
-      "PRRT_kwDORFy7ds6h3zo9",
-      "PRRT_kwDORFy7ds6h3zqY",
-      "PRRT_kwDORFy7ds6h3zqy",
-      "PRRT_kwDORFy7ds6h3zre",
-      "PRRT_kwDORFy7ds6h3z3R",
-      "PRRT_kwDORFy7ds6h3z4u",
-      "PRRT_kwDORFy7ds6h3z5f"
+    "resolved": 8,
+    "acceptedAwaitingResolve": [
+      "PRRT_kwDORFy7ds6h3zpW (mechanism; reply 4000044713)",
+      "PRRT_kwDORFy7ds6h5N4y (AGENTS.md L118; reply 4000044820)",
+      "PRRT_kwDORFy7ds6h5N40 (AGENTS.md L200; reply 4000044909)"
     ],
-    "stillOpen": [
-      "PRRT_kwDORFy7ds6h3zpW ENVIRONMENT_ENTRY / environmentHas (reply 3999802873)"
-    ],
-    "new": [
-      "PRRT_kwDORFy7ds6h5N4y AGENTS.md:105 (L118-119 sentence)",
-      "PRRT_kwDORFy7ds6h5N40 AGENTS.md:200"
-    ],
-    "note": "Newest comment on every open thread is mine."
+    "stillOpen": [],
+    "note": "Newest comment on all three open threads is my Accepted:; the implementer's `legion threads resolve` closes them on its next push."
   },
   "verifiedAgainstGitHub": {
-    "ci": "Tests green at 0bee94f8ecdc (34756544036/34756541750) and PR head 7fbfc22ac6f8 (34757798277/34757782046).",
-    "e2e": "Round-4 rig at 0bee94f8 (test.json): 137 removed, zero fragments, exact count; reproduction under UTF-8 and C client locales; ~12 ms x 2 tmux calls per removed name.",
-    "rebase": "Conflict-forced onto main@c8faafec (#1017). Fingerprint at ef9116b6 (100a36ba…) != rebased 63210a5a (712bf461…): the runSecretsGet cut-over squashed into the root commit. New round by the rule."
+    "ci": "Tests green at a7fc38173755 (34764249511/34764344555) and PR head b6a4ec62b0c0 (34765502222/34765475571).",
+    "rebase": "Conflict-forced onto main@d042dc77 (#1029). Fingerprint 2888e52c5d7dc36fa8db1d83e4e752d31923b2640651c34fc539be73dd024cbb at a9c393536569 and at a7fc38173755 — equal, re-computed by me; implementer's PR comment matches. Round-4 code is new vs my round-3 head → full round.",
+    "e2e": "Round-5 rig at a7fc3817 (test.json): HOME;=x / key = value PEM lines, X; variable, BASH_FUNC multi-line → 139 removed exactly, 19 allow-listed intact, show-messages names-only, both locales; injected HOME-drop → invariant refusal naming HOME; truncated dump → offset-only refusal; 147 tmux calls / 1.49 s.",
+    "prBody": "Deployment step 2 separates inheritance from revocation and defers rotation to LEGION-19 (Sami 2026-09-13 'Wait for Kubernetes'); step 3 keeps the acceptance-3 production check; Fast-follow none; rebase comment with both SHAs and equal fingerprint. Thermo line updated by me."
   },
   "thermo": {
-    "deep": "non-blocking-only by its rating; independently reproduced the trailing-';' HOME removal through the real scrub; found the show-messages residue (probe argv + 'unknown variable: <fragment>' recorded in the private server's message log, same-uid readable like its environ) and the C-locale non-ASCII-name silent-keep (pathological, pre-existing); confirmed #1017 boundary sound and no other process.env spawn site.",
-    "quality": "blocking on the two AGENTS.md sentences; found the trailing-';' shape; noted entriesOf fixture heuristics and exact probe/write order pins (taste, declined); 'vis-encodes' should read utf8_sanitize (nit)."
+    "deep": "non-blocking only; parser + \\; verified on a real 3.7c server across adversarial shapes; escape set equals tmux's cmd_show_environment_escape; wiring unchanged; found the same unset-prefix residual, the '-'-leading-name loud refusal, and the undefined re-list nit.",
+    "quality": "non-blocking only; same unset-prefix residual with a verified two-line fix; undefined re-list; `where` duplicates tableName; AGENTS.md L199 'read only by' → 'reachable only by' wording; tests defend the contract, no real-dump fixture committed (correct: such a dump would carry live keys)."
   },
   "ownReview": {
-    "item1": "environmentCandidates + environmentHas verified on the head and live: PEM case correct (three -u's, no fragment, exact count); stdout of the probe never read; throws inside the await-probes try -> boot fatal. Two defects above.",
-    "item2Locale": "UTF-8 client: literal newlines -> phantoms -> refused by the probe. C client: one line per entry, '_' per non-printable byte -> no phantoms. paneEnv carries production LANG=en_US.UTF-8. tmux.ts:34-35 comment accurate on behaviour.",
-    "item3Boundary": "runSecretsGet: process.env minus SECRETSD_SESSION_TOKEN_FILE is the right and minimal subtraction (secrets reads SECRETSD_SOCK/SECRETSD_CONFIG/XDG_CONFIG_HOME/HOME; PATH for lookup; the token would let a daemon started inside an OMP session tree land the App-key grant on that agent session; tokenless -> launcher tty scope via inherited stdin). PEM confined to generateJwt via GitHubAppRoleConfig.privateKey; no log/error carries it; --check-config resolves nothing. Sweep: only executePrivateKeyCommand and runSecretsGet spawn on process.env; every raw deps.runner use supplies an env (mise env/where, CI fetcher; API/catchup get the paneEnv runner). Learning accurate; AGENTS.md two sentences stale (threads).",
-    "item4Doc": "Scrub paragraph correct now: no server -> nothing to scrub; server without the session -> global scrubbed, session step skipped."
+    "scanner": "Real 3.7c -s dump pushed through the head's parseShellEnvironment: PEM with HOME;=x / key = value / padded lines, literal `\"; export NAME;` in a value, trailing backslash, $/backtick/quote escapes, empty value, X and X; side by side, `A B`, `Q\"N`, TAB-in-name, UNIé, bash function body, newline-in-name (throws expected NAME= — correct: indistinguishable from two lines), CRLF/truncated/trailing-garbage/no-final-newline/unknown-escape → exact names or offset-only refusal, no value text in any message. C locale: `_` per non-printable byte in values and names; a `_`-sanitised name's -u is a no-op and the 'removed name(s) still present' invariant catches it.",
+    "unsetSide": "Trailing ';' is the only aliasing re-tokenisation; \\; restores the literal (verified). Every parsed name is in exactly one of kept/dropped, so the two invariants cover any mis-landed -u; re-list once per table after all unsets, only when something was dropped (two reads per table pinned).",
+    "failurePath": "Throws inside index.ts:696-711 await-probes try → stop() → reject; names only.",
+    "docs": "Both AGENTS.md clauses fixed and accepted; scrub paragraph accurate on -s, closing rule, \\;, invariants, names-only failures, no-server vs no-session; no stale environmentHas/Candidates references."
   },
-  "declined": "Set/TmuxResult/order-pin/entriesOf fixture items from thermo (taste, no behaviour); C-locale non-ASCII name residual (pathological); show-messages residue is non-blocking — closed for free by the -s parse if taken, else one AGENTS.md clause noting the probes name candidates in the private server's message log (same-uid, like its environ).",
-  "nextForArchitect": "Implementer: escape trailing ';' + compare without trimming the name side (or the -s parse), the three tests, the two AGENTS.md sentences. Tester: rig re-run with a multi-line value carrying 'key = value' and 'HOME;=x' continuation lines; assert HOME survives in show-environment -g and the boot log count is exact. Then I re-review; APPROVE by SHA on the .legion/-less head.",
-  "handoffNote": "Committed locally on legion/LEGION-74 in the issue workspace (the review App cannot push); sha in the phase-complete summary. Round-2 handoff (611cd46939b8 after rebase) is already on origin.",
+  "cleanup": "Every scratch tmux server I forked (legion-review-*, legion-l74-phantom, in /tmp/tmux-1000 and ~/.tmux/sockets/tmux-1000) killed and its stale socket file removed; production server legion-sjawharlegion (53 windows) untouched. Throwaway scripts under /tmp/legion74-review/ only.",
+  "nextForArchitect": "Send the implementer to push the .legion/ deletion (running `legion threads resolve` first so the three Accepted threads close). If you choose to fold the parser residual in, do it before the deletion; I re-review that head gates-only. I then APPROVE the .legion/-less head by SHA.",
+  "handoffNote": "Committed locally on legion/LEGION-74 in the issue workspace (review App cannot push); sha in the phase-complete summary.",
   "reviewerSession": "01a099ec-baf9-7000-b397-e5b21462ed3b",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T13:57:51.836Z"
+  "completed": "2026-09-13T15:45:39.863Z"
 }
