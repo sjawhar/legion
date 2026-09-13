@@ -30,6 +30,7 @@ import type {
   IssueSummary,
   Message,
   MessageRead,
+  OpenAsksResponse,
   ResolveAskInput,
   SearchResponse,
   Version,
@@ -158,6 +159,13 @@ export class DispatchClient {
       ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
       input
     );
+  }
+
+  async openAsks(sessionID: string, since?: string): Promise<OpenAsksResponse> {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
+      author_session: sessionID,
+      ...(since === undefined ? {} : { since }),
+    });
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {

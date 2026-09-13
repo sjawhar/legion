@@ -26,12 +26,13 @@ the native Dispatch tool suite:
 
 ## Critical conventions
 
-- `src/dispatch-tools.ts` is the source of the thirteen native Dispatch tools:
+- `src/dispatch-tools.ts` is the source of the fourteen native Dispatch tools:
   `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
-  `dispatch_artifact`, `dispatch_read`, and `dispatch_search`. It defines their names, descriptions,
-  and field shapes; `dispatch_message.in_reply_to` is the same-issue message-reply correlation used
-  for a targeted agent's answer. Host adapters consume `dispatchToolSpecs` directly.
+  `dispatch_artifact`, `dispatch_read`, `dispatch_search`, and `dispatch_open_asks`. It defines their names,
+  descriptions, and field shapes; `dispatch_open_asks` has no model-supplied session selector and
+  `dispatch_message.in_reply_to` is the same-issue message-reply correlation used for a targeted agent's
+  answer. Host adapters consume `dispatchToolSpecs` directly.
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters) and an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest); project-document arguments accept the document's artifact id, slug, or filename.
 - `dispatch_ask` creates a question by default and accepts only `kind: "action"` for a human to-do. Action asks have server-fixed `Done` / `Can't` options; `approval` remains server-created through `dispatch_request_approval`.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the

@@ -403,6 +403,142 @@ func askTimestampPtr(value *time.Time) *string {
 	return timestampPtr(value)
 }
 
+type openAskOwner struct {
+	Issue    *inboxIssue    `json:"issue,omitempty"`
+	Document *inboxDocument `json:"document,omitempty"`
+}
+
+type openAsk struct {
+	ID           string              `json:"id"`
+	Ref          string              `json:"ref"`
+	Question     string              `json:"question"`
+	Kind         string              `json:"kind"`
+	Urgency      string              `json:"urgency"`
+	CreatedAt    time.Time           `json:"created_at"`
+	AgeSeconds   int64               `json:"age_seconds"`
+	Priority     *int                `json:"priority"`
+	Owner        openAskOwner        `json:"owner"`
+	HumanReplied bool                `json:"human_replied"`
+	LastReply    *model.AskLastReply `json:"last_reply"`
+	WaitingOn    string              `json:"waiting_on"`
+}
+
+type openAsksResponse struct {
+	SessionID      string    `json:"session_id"`
+	AsOf           string    `json:"as_of"`
+	OpenedSince    bool      `json:"opened_since"`
+	Count          int       `json:"count"`
+	WaitingOnHuman int       `json:"waiting_on_human"`
+	WaitingOnAgent int       `json:"waiting_on_agent"`
+	Asks           []openAsk `json:"asks"`
+}
+
+// listOpenAsks returns every active open ask authored by one host session, across
+// issues and unlinked project documents. A human clarification leaves an ask open
+// but makes the author responsible for the next reply.
+func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("author_session"))
+	if sessionID == "" {
+		writeError(w, "AUTHOR_SESSION_REQUIRED", http.StatusBadRequest, "author_session is required")
+		return
+	}
+	var since *time.Time
+	if values, ok := r.URL.Query()["since"]; ok {
+		if len(values) != 1 {
+			writeError(w, "INVALID_SINCE", http.StatusBadRequest, "since must be one RFC3339 timestamp")
+			return
+		}
+		value, err := time.Parse(time.RFC3339, values[0])
+		if err != nil {
+			writeError(w, "INVALID_SINCE", http.StatusBadRequest, "since must be an RFC3339 timestamp")
+			return
+		}
+		since = &value
+	}
+
+	var asOf time.Time
+	var openedSince bool
+	var rawAsks []byte
+	err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		with mine as (
+			select * from asks
+			where author->>'kind' = 'session' and author->>'id' = $1
+		), active as (
+			select
+				a.id::text,
+				case
+					when i.key is not null then '/issues/' || i.key || '?ask=' || a.id::text
+					else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?ask=' || a.id::text
+				end as ref,
+				a.question,
+				a.kind,
+				a.urgency,
+				a.created_at,
+				greatest(0, floor(extract(epoch from (statement_timestamp() - a.created_at))))::bigint as age_seconds,
+				i.priority,
+				case
+					when i.key is not null then jsonb_build_object('issue', jsonb_build_object('key', i.key, 'title', i.title))
+					else jsonb_build_object('document', jsonb_build_object('project', ar.project_key, 'slug', ar.slug, 'name', ar.name))
+				end as owner,
+				exists (
+					select 1 from comments c
+					where c.ask_id = a.id and c.author->>'kind' = 'user'
+				) as human_replied,
+				case when lr.created_at is null then null else jsonb_build_object(
+					'author', lr.author,
+					'created_at', lr.created_at
+				) end as last_reply,
+				case when lr.author->>'kind' = 'user' then 'agent' else 'human' end as waiting_on
+			from mine a
+			left join issues i on i.key = a.issue_key
+			left join artifacts ar on ar.id = a.artifact_id
+			left join lateral (
+				select c.author, c.created_at from comments c
+				where c.ask_id = a.id
+				order by c.created_at desc, c.id desc
+				limit 1
+			) lr on true
+			where a.state = 'open' and (i.key is null or i.closed_at is null)
+		)
+		select
+			statement_timestamp(),
+			exists (select 1 from mine where $2::timestamptz is not null and created_at >= $2),
+			coalesce((select jsonb_agg(to_jsonb(active) order by priority asc nulls last, created_at asc, id) from active), '[]'::jsonb)
+	`, sessionID, since).Scan(&asOf, &openedSince, &rawAsks)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
+	asks := []openAsk{}
+	if err := json.Unmarshal(rawAsks, &asks); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("decode open asks: %w", err))
+		return
+	}
+	response := openAsksResponse{
+		SessionID:   sessionID,
+		AsOf:        timestampValue(asOf),
+		OpenedSince: openedSince,
+		Asks:        asks,
+	}
+	for _, ask := range asks {
+		switch ask.WaitingOn {
+		case "human":
+			response.WaitingOnHuman++
+		case "agent":
+			response.WaitingOnAgent++
+		default:
+			s.writeHandlerError(w, fmt.Errorf("open ask %q has invalid waiting_on %q", ask.ID, ask.WaitingOn))
+			return
+		}
+	}
+	response.Count = len(response.Asks)
+	writeJSON(w, http.StatusOK, response)
+}
+
 // listIssueAsks returns every ask on an issue, filtered by state: "open" or
 // "answered" match only that state; "all" (the default) returns every ask
 // regardless of state, including resolved ones.

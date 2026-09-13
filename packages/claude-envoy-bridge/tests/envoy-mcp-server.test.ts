@@ -52,6 +52,7 @@ const dispatchToolNames = [
   "dispatch_artifact",
   "dispatch_read",
   "dispatch_search",
+  "dispatch_open_asks",
 ] as const
 
 const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number], readonly string[]>> = {
@@ -68,6 +69,7 @@ const requiredDispatchFields: Readonly<Record<(typeof dispatchToolNames)[number]
   dispatch_artifact: ["name"],
   dispatch_read: [],
   dispatch_search: ["query"],
+  dispatch_open_asks: [],
 }
 
 test("exposes every shared Dispatch tool with its required JSON Schema fields when Dispatch is enabled", async () => {

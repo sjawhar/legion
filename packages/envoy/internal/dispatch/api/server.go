@@ -171,6 +171,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /api/v1/agents", s.listAgents)
 	mux.HandleFunc("POST /api/v1/issues/{key}/asks", s.createAsk)
 	mux.HandleFunc("GET /api/v1/issues/{key}/asks", s.listIssueAsks)
+	mux.HandleFunc("GET /api/v1/asks/open", s.listOpenAsks)
 	mux.HandleFunc("GET /api/v1/asks/{id}", s.getAsk)
 	mux.HandleFunc("PATCH /api/v1/asks/{id}", s.editAsk)
 	mux.HandleFunc("POST /api/v1/asks/{id}/answer", s.answerAsk)
