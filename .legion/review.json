@@ -1,45 +1,30 @@
 {
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "verdict": "changes_requested",
-  "reviewedHead": "c493afa8a99be1da6b36fdf2b7c66a95ad85a2da",
-  "codeHead": "aedcc575914b",
-  "round": 3,
+  "important": 0,
+  "minor": 0,
+  "verdict": "approved",
+  "reviewedHead": "62bc05a1040bec59e5ab8ac68094e0d62ee7baec",
+  "codeHead": "e28c9df71fb4",
+  "round": 4,
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
   "githubReview": {
-    "id": 5189806485,
-    "event": "REQUEST_CHANGES",
-    "url": "https://github.com/sjawhar/legion/pull/991#pullrequestreview-5189806485",
-    "threads": [
+    "id": 5189973236,
+    "event": "COMMENT",
+    "url": "https://github.com/sjawhar/legion/pull/991#pullrequestreview-5189973236",
+    "approveOn": "the head that differs from 62bc05a1 by the .legion/ deletion alone, named by SHA",
+    "threadDispositions": [
       {
-        "path": "packages/daemon/src/daemon/processes.ts",
-        "line": 803,
-        "severity": "should-fix",
-        "title": "StopFailed ordering in the ready-time retire strands the role until restart"
+        "thread": "PRRT_kwDORFy7ds6h25yK",
+        "verdict": "verified fixed in def77ccc/b11a92a5 (confirm before retire; redundant cancelBootWatchdog removed)",
+        "reply": 3999053279
       },
       {
-        "path": "packages/daemon/src/daemon/legion-state.ts",
-        "line": 456,
-        "severity": "doc",
-        "title": "isBystanderRole doc contradicts resumeWorker's doc on the root architect"
+        "thread": "PRRT_kwDORFy7ds6h25yL",
+        "verdict": "verified fixed in def77ccc/b11a92a5 (isBystanderRole doc)",
+        "reply": 3999053331
       }
     ],
-    "resolvedByDisposition": [
-      {
-        "thread": "PRRT_kwDORFy7ds6h2oWU",
-        "verdict": "verified fixed in 115c55fd + aedcc575"
-      },
-      {
-        "thread": "PRRT_kwDORFy7ds6h2oWV",
-        "verdict": "verified fixed in 115c55fd"
-      },
-      {
-        "thread": "PRRT_kwDORFy7ds6h2oWX",
-        "verdict": "verified fixed in 115c55fd"
-      }
-    ],
-    "note": "the review App cannot resolve threads; the reviewer's disposition reply is on each round-two thread for the implementer to resolve"
+    "note": "the review App cannot resolve threads; both carry the reviewer's disposition for the implementer to resolve"
   },
   "rounds": [
     {
@@ -62,60 +47,72 @@
       "codeHead": "aedcc575914b",
       "verdict": "changes_requested",
       "githubReview": 5189806485
+    },
+    {
+      "round": 4,
+      "reviewedHead": "62bc05a1040bec59e5ab8ac68094e0d62ee7baec",
+      "codeHead": "e28c9df71fb4",
+      "verdict": "clean (COMMENT while .legion/ present)",
+      "githubReview": 5189973236
     }
   ],
   "holdPoints": {
-    "retireIsRetireIdleWorkers": "pass: same helper retireWorkerLocator (watchdog cancel, capability revoke, graceful shutdown with kill-pane fallback), locator-clear/carry byte-identical to retireIdleWorker's three lines; additions (delete pendingAssignment, readyConfirmedAt=now, delete launchFailures) are this branch's own semantics; stopProcess on a never-connected pane dials the shim fresh via TmuxRuntime.stop and is never cached",
-    "drainOnlyOnRetirePathOutsideLock": "pass: retiredBystander set only in the retire branch after retireWorkerLocator; promoteWorkerQueue() after mutateClaim resolves; drainWorkerQueue takes mutateClaim(queue[0]) after this token's lock is released, and this token cannot be queue[0]",
-    "promoteWorkerQueueDetached": "pass: void drainWorkerQueue().catch(...); workerReady's promise does not wait on the launch; workerReady itself is detached from the HTTP response in the route",
-    "onePredicateDefinition": "pass: isBystanderRole is the single definition; grep finds no other composed copy; three call sites keep their context-specific third clause unchanged",
-    "regressionTestFailsUnderBothMutations": "pass: retire -> bare clear fails at processes.test.ts:3505 expect(shutdownCalls); drain removed -> times out at await plannerStarted.promise; the drain is reachable only through the new trigger (retire dial not cached; queued spawn branch never drains; no reconcileWorkerAdmission)",
-    "fastFollowNone": "pass",
-    "newFinding": "StopFailed inside the new stop leaves locator-intact + unconfirmed + watchdog cancelled (retireWorkerLocator cancels all generations first) -> deliverToWorker's booting branch queues the next assignment forever; reorder the in-memory confirmation before the stop (thread), unit-only"
+    "stopFailedOrdering": "pass: confirmation (delete pendingAssignment, readyConfirmedAt=now, delete launchFailures) precedes await retireWorkerLocator; StopFailed leaves locator intact + confirmed + catch-up gone -> next spawn_worker takes deliverToWorker's probe path, never the booting branch; retiredBystander stays false; restart re-derives unconfirmed from disk and reconnectWorkers re-arms the watchdog",
+    "redundantCancelRemoved": "pass: retireWorkerLocator -> cancelBootWatchdog(token) cancels all generations (WorkerBootWatchdog.cancel with undefined generation is unconditional)",
+    "stopFailedTest": "pass: repo's existing injection (first dial refused, kill-pane exit 1 'lost server' not PANE_GONE) reaches ProcessStopFailed -> StopFailed; asserts the consequence (spawnWorker -> resumed, prompt delivered, phases=tester); mutation 9 (confirm after the stop) fails it at readyConfirmedAt",
+    "isBystanderRoleDoc": "pass: agrees with resumeWorker's doc",
+    "rebaseMainStepPreservedOnce": "pass: migrateV24State (pure bump to 25, guarded on 24) present once and verbatim at head",
+    "rebaseOursAppended": "pass: migrateV25State guarded on version !== 25 emitting 26, appended after migrateV24State in the chain",
+    "rebaseChainConstants26": "pass: LegionState.version 26, z.literal(26), newLegionState 26, loadState !== 26",
+    "rebaseBakNaming": "pass: generic .v.bak -> .v25.bak for a v25 file, .v24.bak for a v24 file; tests assert both",
+    "rebaseNoMainContentDropped": "pass: main's v25 fields intact in interface and schema; main's v24->v25 test changed only its terminal version to 26, .v24.bak and prs assertions intact",
+    "rebaseGuardedPathsUnchanged": "pass: interdiff of pre-rebase vs post-rebase branch content shows byte-identical hunks for worker-admission.ts, workers.ts, reducers.ts, api.test.ts, index.test.ts, SKILL.md; processes.ts differs only by the round-3 reorder; legion-state.ts/test/AGENTS.md only by the renumbering, composition test, and doc sentence",
+    "fastFollowNone": "pass"
   },
   "verification": {
     "tsc": "bunx tsc --noEmit exit 0",
-    "biome": "bunx biome check src/: 147 files clean",
-    "tests": "bun test legion-state api processes reducers index events catchup: 449 pass / 0 fail / 3 skip",
-    "ci": "Tests run 34741633803 success at c493afa8",
-    "thermo": "deep-review: no blocking, one should-fix (StopFailed ordering); code-quality: one doc contradiction, test-trim and comment nits judged not findings"
+    "biome": "bunx biome check src/: 154 files clean",
+    "tests": "bun test legion-state api processes reducers index events catchup: 477 pass / 0 fail / 3 skip",
+    "mutations": "9 (confirm after stop) fails the StopFailed test at readyConfirmedAt; 7 (retire -> bare clear) fails at shutdownCalls; 8 (drain removed) times out; files restored byte-identical",
+    "ci": "Tests run 34744346299 success at 62bc05a1",
+    "thermo": "deep-review: no blocking, no should-fix (one inherited-parity note on capability revoke before a failed stop); code-quality: wording/placement nits judged not findings"
   },
   "keyFindings": [
     {
       "severity": "resolved",
       "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "Round-2 blocking (never-prompted pane at runState unknown holding a cap slot): fixed in 115c55fd (retire via retireWorkerLocator inside the critical section) + aedcc575 (promoteWorkerQueue after the lock); mutations 7/8 reproduced"
+      "description": "Round-3 should-fix (StopFailed ordering in the ready-time retire): fixed in def77ccc/b11a92a5; verified by trace and mutation 9"
     },
     {
       "severity": "resolved",
       "file": "packages/daemon/src/daemon/legion-state.ts",
-      "description": "Round-2 should-fix (shared predicate): fixed in 115c55fd, isBystanderRole single definition"
+      "description": "Round-3 doc contradiction (isBystanderRole vs resumeWorker on the root architect): fixed in def77ccc/b11a92a5"
+    },
+    {
+      "severity": "resolved",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "Round-2 blocking (never-prompted pane at runState unknown): fixed in 115c55fd + aedcc575"
+    },
+    {
+      "severity": "resolved",
+      "file": "packages/daemon/src/daemon/legion-state.ts",
+      "description": "Round-2 shared predicate: fixed in 115c55fd (isBystanderRole)"
     },
     {
       "severity": "resolved",
       "file": "packages/daemon/src/daemon/worker-admission.ts",
       "description": "Round-2 doc word: fixed in 115c55fd"
-    },
-    {
-      "severity": "should-fix",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "StopFailed from retireWorkerLocator in the ready-time retire branch strands the role (locator intact, unconfirmed, watchdog cancelled, catch-up pending); move delete pendingAssignment / readyConfirmedAt=now / delete launchFailures above the await so a StopFailed leaves retireIdleWorker's recoverable shape; add a StopFailed-injection regression test asserting the next spawn_worker is not queued on the booting branch"
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/legion-state.ts",
-      "description": "isBystanderRole doc: 'never through these paths' contradicts resumeWorker's doc (root architect reaches resumeWorker via onUndeliverable and exits at the no-resumable-identity guard); one-sentence fix"
     }
   ],
   "judgedNotFindings": [
-    "fourth inline copy of the locator-clear/carry idiom (consistent with retireIdleWorker/markWorkerDeadLocked/retireUnconfirmedBoot/enqueueClaimForLaunch; extraction is a cross-cutting refactor outside a bug-fix PR)",
-    "redundant cancelBootWatchdog(token, generation) after retireWorkerLocator's all-generations cancel (mentioned in-passing in the thread)",
-    "drain comment names one of two existing trigger conventions (markWorkerDead outside vs retireUnconfirmedBoot inside)",
-    "regression test's reviewer-mirror half (redundant with the ready-delivery test near :9179 but behavioural; the compound title is the one the architect quoted)",
-    "test comments re-deriving the production rationale"
+    "migrateV25State doc's closing sentence names LEGION-33 as main's adjacent migration doc does and states the current deployment fact that makes the guard 25 (rationale, not history)",
+    "migration note embedded in the AGENTS.md /worker/ready row (first migration mention in AGENTS.md; the row is where the pendingAssignment shape is documented)",
+    "composition test overlaps the v19-chain test (adds the v24 start point and .v24.bak, the rebase-specific proof)",
+    "'main's LEGION-33 bump' wording in two fixture comments; unread commands array in the StopFailed test; ordering comment length",
+    "inherited parity: retireWorkerLocator revokes the capability before the stop, so a pane surviving a failed stop cannot mint grants when later prompted (same shape as retireIdleWorker/markWorkerDeadLocked on main; strictly better than the pre-fix queued-forever outcome)"
   ],
-  "prBody": "CI, Threads, Thermo lines updated by the reviewer at c493afa8; Fast-follow remains none",
+  "prBody": "CI, Threads, Thermo lines updated by the reviewer at 62bc05a1; Fast-follow remains none",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T06:15:57.703Z"
+  "completed": "2026-09-13T07:18:18.770Z"
 }
