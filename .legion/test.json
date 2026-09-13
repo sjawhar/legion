@@ -1,10 +1,10 @@
 {
   "verdict": "PASS",
-  "round": 3,
-  "roundReason": "Scoped round at 07a170cc after test round 2: the implementer dropped the /worker/spawn todo branch and its test (spec v6), added a test that a spawn at todo writes nothing, and reworded the workers.ts doc comment, the daemon AGENTS.md /worker/spawn row, and the architect skill step 6 item 2. No new rig run: the diff since cb255252 touches only those four files and .legion/, so the round-2 rig evidence stands for every retained behaviour.",
-  "head": "07a170ccd58738cc271e54f7effbc93eb946df9e",
-  "codeHead": "5005733ce03e",
-  "passed": 12,
+  "round": 4,
+  "roundReason": "Full round at 2f9036ab: (a) the round-4 fix after review round 2 — knownIssueStatus applies resync supersession fence (statusAtRecord), superseded-write test, architect phase-complete sentence, seven wording items (647ba2de, 3276b717); (b) a conflict-forced rebase onto 45f33bd8 whose fingerprint CHANGED (32f4d0b3 -> d89c1239) in exactly two files where #1003 sentences were merged into paragraphs this PR rewrites.",
+  "head": "2f9036abd7653d4ff3bbffa7d8de0150abf27b94",
+  "codeHead": "3276b7172d65",
+  "passed": 13,
   "failed": 0,
   "failures": [],
   "acceptance": {
@@ -47,7 +47,8 @@
     "After a rig daemon restart, reconnectWorkers probes the inert sleep panes, times out negotiate_protocol (5 s) and retires them; a later promotion of the retired implementer refused to start fresh because its recorded (never created) OMP session file is missing. Expected for placeholders; not the code under test.",
     "legion stop leaves the private tmux server and its panes alive (panes survived the mid-run restart); the server went away at final teardown only because every tree was lingered by the done PATCHes first.",
     "Tester rules for this tree, from the architect: never rebase; after a later conflict-forced rebase with an unchanged fingerprint re-run only the bare gates (CI green at the new head, bash scripts/smoke/up.test.sh) and update the E2E head SHA; once .legion/ is deleted never recreate it and report with legion handoff complete alone.",
-    "Round 3: no rig run; the PR body E2E section carries a round-3 paragraph naming the diff scope and the retained-behaviour argument above the round-2 rig record, both with their head SHAs."
+    "Round 3: no rig run; the PR body E2E section carries a round-3 paragraph naming the diff scope and the retained-behaviour argument above the round-2 rig record, both with their head SHAs.",
+    "Round 4: no rig run (reasoning under round4.rigDecision and in the PR body E2E round-4 paragraph). The rebase brought #1003 (legion threads resolve) into the worker skill and merger.md; the retro/implementer for this tree should follow the merged rules: implementer runs legion threads resolve before the .legion deletion push, merger before READY."
   ],
   "documentationFeedback": "Resolved by round 3 for the three passages and spec v6. Still open for the rig doc (docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md): scrub LEGION_* from the daemon environment, create scratch issues with force: true, and use a logging proxy in front of Dispatch as the request-level proof that no PATCH was issued; retro may pick these up.",
   "resolvedFindings": [
@@ -66,7 +67,17 @@
     "greps": "All 22 plan greps return the same counts as rounds 1 and 2 at 07a170cc. Round-2 greps unchanged except \"set nothing by hand\" in the architect skill: 2 -> 1 on one line because the reworded step 6 item 2 wraps \"nothing\" / \"by hand\" across a line break; both statements (step 6 item 2 and the pr-review row) are intact. New: \"in exactly one case\" 1, \"corrective round alone\" 1 in workers.ts, \"corrective round\" 1 in the architect skill; architect fence count 14 (even).",
     "rigEvidenceStands": "Retained behaviours whose code is byte-identical between cb255252 and 07a170cc, proven by the round-2 rig on LEGSMOKE-97/99/100: (a) implementer completion at retro -> zero Dispatch requests; (b) at in_progress -> one PATCH testing; (d1) implementer spawn at retro under changes_requested -> one PATCH in_progress; (d2) under approved -> none; implementer spawn at retro with no PR -> none. Round-2 case (c) proved a released child is admitted as its own tree and gets in_progress from admission (LEGSMOKE-98, event 3840, no spawn involved), which is what the reworded passages now state."
   },
+  "round4": {
+    "daemonDelta": "This PR own packages/daemon change since 07a170cc is commit 647ba2de alone: workers.ts (knownIssueStatus fence: pending && echoed === pending.statusAtRecord ? pending.status : echoed; changesRequested helper hoisted, used by phaseCompleteStatus and spawnStatus — pure refactor), api.test.ts (checkPr fixture; recordingDispatchClient in the pending-write test; new superseded-write test at :2825; planner-at-in_progress test dropped as wording item 7), daemon AGENTS.md (/worker/spawn and /phase/complete rows name the fence; knownIssueStatus defined once). Everything else under packages/daemon in 07a170cc..2f9036ab (cli/review-threads.ts + test, cli/index.ts, package.json) is #1003 via the rebase.",
+    "fenceLogic": "Matches retryPendingWrite in dispatch-client.ts (remote.status !== current.statusAtRecord => superseded): both readers of a pending write agree. With no pending write the function returns the echoed status exactly as before.",
+    "rigDecision": "No re-run. In the round-2 rig every daemon PATCH returned 200 through the logging proxy and pendingStatusWrites read [] at every BEFORE/AFTER snapshot, so knownIssueStatus took the no-pending branch in every driven flow; that branch is unchanged. The round-2 evidence stands at 2f9036ab for (a) retro completion -> zero requests, (b) in_progress completion -> one PATCH testing, (d1) corrective spawn under changes_requested -> one PATCH in_progress, (d2) under approved -> none, no-PR spawn -> none. The fenced branch is pinned by the unit pair api.test.ts:2781 (pending in_progress against todo, echo still todo -> testing) and :2825 (same pending write, echo icebox -> nothing).",
+    "mergedPassages": "Worker skill merger bullet (SKILL.md:343-354): #1003 legion threads resolve gate (same code-writing App, resolving changes no commit, no READY while left open or exit 1, report to architect) then this PR two-command --summary proof and READY contents; #1003 confirms the approved head still equals the current head replaced by this PR rule (still equals -> 0). merger.md opening (lines 11-20): threads resolve (step 3) then approved head plus docs/solutions confirmation and READY contents; steps 1-4 = this PR step 2 (--summary twice), #1003 threads step renumbered 3 verbatim, this PR READY step renumbered 4 (equals the current head -> 0; legion threads resolve -> 2 in merger.md, 4 in the worker skill). Compared against jj diff --from 1cc59887 (old fork point) --to main@origin for #1003 and the pre-rebase tip text for this PR: nothing dropped from either side; each passage reads as one rule.",
+    "unit": "bun test src/daemon/__tests__/api.test.ts -> 58 pass, 0 fail (293 expect calls): superseded-write :2825, pending-write :2781, corrective-implementer :2311, approved :2331, no-PR :2351, todo-writes-nothing :2289, completion-guard :2686/:2733, reviewer-completion :2592/:2639; -t architect spawns|implementer completes|reviewer completes -> 10 pass; full packages/daemon bun test -> 1035 pass, 6 skip, 0 fail (1041 tests, 62 files; +3 from #1003 review-threads.test.ts).",
+    "ci": "2f9036ab: Tests run 34744863132 (lint, test, typecheck, pr-title success), Tests run 34744897111 (same four success), Legion Envoy and Contracts run 34744863163 (changes, pi-envoy success; rest skipped) — all completed success; ci-green wake received for 2f9036abd7653d4ff3bbffa7d8de0150abf27b94; PR MERGEABLE / BLOCKED (review required).",
+    "greps": "All 22 plan greps return the stated counts at 2f9036ab; set nothing by hand back to 2 in the architect skill; ~(.legion | docs/solutions) 2; statusAtRecord 2 in workers.ts, 1 in daemon AGENTS.md; fence counts even (24/4/14/2/4/2/2).",
+    "architectRow": "phase-complete row: human -> 0 hits; parenthetical reads on the reviewer completion and again when you spawn the corrective implementer unless the daemon already knows the issue is in_progress. Step 6 item 2 back to one sentence (implementer completion in_progress -> testing only; deletion push and retro leave the status; set nothing by hand). pr-review row still names the corrective-spawn write for a human review after approval, which is spawnStatus actual behaviour."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T06:51:49.288Z"
+  "completed": "2026-09-13T07:24:59.201Z"
 }
