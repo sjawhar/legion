@@ -1,86 +1,69 @@
 {
-  "verdict": "approved",
+  "verdict": "changes_requested",
+  "round": 2,
   "githubReview": {
-    "id": 5190276420,
-    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190276420",
-    "state": "COMMENTED",
-    "commitId": "2d61ef5b817b492399d2de0f0c4ff27630d76fba",
-    "codeHead": "7154712f09ed24aed6f969bbaafdee5b37121462",
-    "why": "COMMENT, not APPROVE, only because the head still carries .legion/ (legion-worker rule). No blocking finding: I would deploy this to the LEGION daemon. APPROVE follows by SHA on the head that differs from 2d61ef5b817b by the .legion/ deletion alone."
+    "id": 5190477985,
+    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190477985",
+    "state": "CHANGES_REQUESTED",
+    "commitId": "13ffb563ed460735de1330e487f34be389fec8b2",
+    "codeHead": "ef9116b6a64c",
+    "why": "One blocking item (below); everything else accepted. I would deploy this head as-is (production has no triggering value), but the item is a documented invariant the code does not hold in a reachable configuration, and the standing rule is nothing left for later."
   },
   "critical": 0,
-  "important": 0,
-  "minor": 9,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts:273",
-      "description": "TMUX_OWN_GLOBALS[name] is a prototype-chain lookup: a table entry named constructor/toString/hasOwnProperty/valueOf/__proto__ is never unset. Object.hasOwn or a Set."
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/tmux.ts:35 (ENVIRONMENT_ENTRY) / runtime-tmux.ts:447-451 / index.ts:700-702",
+      "description": "A multi-line value's continuation line that contains '=' and does not start with space/'}'/'-' is parsed as a name (a phantom). The -u on it is a harmless exit-0 no-op and the real entry is removed by its own name, but the phantom is added to `removed` and printed in the boot log line, which promises names-never-values; the count is off by one. Reproduced through the real TmuxRuntime.scrubServerEnvironment on a scratch 3.7c -L server with a fake PEM-shaped value: the log printed the key body's padded last base64 line. bash-exported functions are not a trigger (leading-space body lines, verified via the real binary and via the bash guard-shim `which tmux` resolves to); a raw multi-line secret exported into the daemon env is (only the '='-padded last base64 line of a PEM). Production today: 3 continuation lines in the server table, all canonical function-body lines -> no phantom. Not a regression of the round-2 widening (the old charset matched alphanumeric fragments too); my round-1 note called the phantom a harmless no-op and missed the log. Fix: confirm each candidate with `show-environment <-g|-t s> <name>` (exit 0 present; exit 1 + `unknown variable: <name>` absent -> skip; other refusal throws) before -u and before recording; +1 tmux call per non-allow-listed candidate (66 on production); the probe's stdout is the value and must never be interpolated (failure() is stderr-only). Alternative: parse `show-environment -s` ('\"; export NAME;' anchors) — fiddlier escaping; I'd take the probe. Test: the reproduction (continuation line `ZmFr…=`), asserting the phantom is neither -u'd nor returned. Thread: Still open on PRRT_kwDORFy7ds6h3zpW."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/src/daemon/runtime-tmux.ts:271",
-      "description": "Session table is read before update-environment is emptied; an attach in that ms window survives until the next boot. Disable first."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/tmux.ts:58",
-      "description": "show-environment error interpolates stdout (the value dump) when stderr is empty; no observed tmux 3.7c failure mode does that, but use stderr only, as fullMiseEnvironment does."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/tmux.ts:194",
-      "description": "new-session and set-option update-environment '' are two client invocations; chain them (\\;) so AGENTS.md's 'before anything can attach' is literally true."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/tmux.ts:32",
-      "description": "ENVIRONMENT_ENTRY charset [A-Za-z0-9_%] silently skips legal names with - . / : (dashed bash functions, npm //registry:_authToken). Production table: 93/93 parsed, none skipped. Widen or document."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/environment.ts:161",
-      "description": "isSecretLikeName (second line of defence) misses *_KEY that is not _API_KEY (ENVOY_TAILSCALE_OAUTH_CLIENT_KEY is in the production daemon env), *_CREDENTIALS, *_PASSWD, *_PAT, lowercase. Allow-list keeps paneEnv clean regardless; scrubGitHubCredentials in a pane relies on it alone."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/index/hotspots.ts:19",
-      "description": "jj child now inherits full process.env, but CodebaseIndexManager has no daemon caller (dead code). Delete the module or pass a minimal env; drop the AGENTS.md:167 'with the codebase index's jj log' clause."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:257",
-      "description": "'no kill-server is needed' is true for inheritance only. The running server process keeps its fork-time environ (/proc/2023008/environ on production still carries both App key names, readable by any same-uid process), as do pre-upgrade panes. Add: only kill-server or the key rotation (acceptance 5) revokes already-handed-out material. Same sentence for the PR body's Deployment step 2."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md:104",
-      "description": "Garbled rule sentence; split in two."
+      "file": "packages/daemon/src/daemon/AGENTS.md:~259-261",
+      "description": "'a server without the daemon's session ... is not [fatal] (nothing to scrub or configure — …)' over-generalises: on such a server the global table IS scrubbed (runtime-tmux.ts:453-457, pinned by the 'server without the session' runtime test); only the session table has nothing to scrub or configure. Say 'there'. Fold into the same round; no thread of its own."
     }
   ],
-  "spec": "dispatch_doc_read LEGION-74 v6; acceptance 1, 2, 4, 6, 7, 8 judged in scope; 3 and 5 post-release; secretsd agent-tier readability, LEGION-76 new-session race, tmux.conf set-environment -g on a fresh server out of scope per the assignment.",
+  "threads": {
+    "accepted": [
+      "PRRT_kwDORFy7ds6h3zoI tmux.ts stderr-only (02b5257192e7, ef9116b6a64c)",
+      "PRRT_kwDORFy7ds6h3zo9 chained new-session (02b5257192e7)",
+      "PRRT_kwDORFy7ds6h3zqY src/index deleted (02b5257192e7)",
+      "PRRT_kwDORFy7ds6h3zqy AGENTS.md revocation paragraph (96248aad7046)",
+      "PRRT_kwDORFy7ds6h3zre config-key rule split (96248aad7046)",
+      "PRRT_kwDORFy7ds6h3z3R Object.hasOwn(TMUX_OWN_GLOBALS) (02b5257192e7)",
+      "PRRT_kwDORFy7ds6h3z4u disable-before-read (02b5257192e7)",
+      "PRRT_kwDORFy7ds6h3z5f widened isSecretLikeName (02b5257192e7)"
+    ],
+    "stillOpen": [
+      "PRRT_kwDORFy7ds6h3zpW ENVIRONMENT_ENTRY phantom names reach the boot log"
+    ],
+    "resolved": 0,
+    "note": "Newest comment on every thread is mine (verified via GraphQL after posting); the implementer's `legion threads resolve` will close the eight Accepted ones on its next push."
+  },
   "verifiedAgainstGitHub": {
-    "ci": "Tests green at 7154712f09ed (34746510981/34746510454) and at 2d61ef5b817b (34748113143/34748080059); ec196bad red run was #991's fixture vs the merge commit (pre-rebase).",
-    "threads": "0 before this review; 9 opened by it, all non-blocking, none resolved yet (the implementer resolves after Accepted: replies).",
-    "e2e": "PR body E2E and .legion/test.json agree: rig sjawhar/740 (stale hand-forked server, 133 names scrubbed), sjawhar/741 (daemon-forked, no scrub line, CHECKPOINT 13 OK), every pane/omp child grep -c -> 0; negative control production legion-37 %159 -> 2."
+    "ci": "Tests green at ef9116b6a64c (34751729788) and at PR head 13ffb563ed46 (34752389406); green at 96248aad, 61438e41, 103c12e4, db86babd.",
+    "e2e": "Round-2 rig at 96248aad (test.json: sjawhar/742 stale server 137 names removed incl. dashed / //registry/:_authToken / constructor plants; sjawhar/743 fresh server no scrub line, CHECKPOINT 13 OK) stands for ef9116b6 — I re-ran `jj diff --from 96248aad --to ef9116b6 --summary`: only tmux.ts, tmux.test.ts, the placement doc and .legion/.",
+    "rebase": "Conflict-forced onto main@52c5e03e (#981). Fingerprint at 7154712f (8c4e6105…) != at d2d0d983 (38b4e5bb…) because #981 rewrote runtime-tmux.ts/tmux.ts, so a new round by the rule: thermo re-run, one review."
   },
   "thermo": {
-    "deep": "code paths sound; rated the 'no kill-server' doc claim blocking because /proc/<old server pid>/environ still carries the keys — downgraded by me to a deployment/doc note: same-uid /proc readability is the class the spec's Rejected section and the re-filed secretsd item accept, and acceptance 5 (rotation) is the revocation; the scrub was the spec's explicit choice over kill-server.",
-    "quality": "non-blocking only: paneEnvironment naming (returns the pre-PATH intermediate), resolveOmpInvocation taking two env positionals, undefined as the global-table sentinel, two suites pinning the exact -u write order, AGENTS.md enumerating all 45 names verbatim (drift risk), garbled docs sentence."
+    "deep": "non-blocking only; independently found the phantom-name log case and rated it non-blocking (I rate it blocking). Verified clean: predicate 0 false positives on 45 allow-listed names and real mise env; scrub order and wiring after `await probes` before enableLaunches(); every tmux.ts throw stderr-only (lookupPane:340 is #981, out of scope); `;` chained argv verified live; src/index unreferenced; no hidden errors.",
+    "quality": "non-blocking only; found the same phantom case; also: Set instead of Record for TMUX_OWN_GLOBALS, a TmuxResult type, runtime-tmux.test.ts pinning exact -u order, AGENTS.md 'nothing to scrub or configure' over-generalisation (raised by me, above), allow-list enumerated in prose. I declined the Set/TmuxResult/order-pin items as taste — churn for no behaviour; recorded here, not deferred."
   },
   "ownReview": {
-    "allowList": "45 names, all identity/locale/dirs/profile/mise/proxy-CA/PATH; none credential-shaped; operator-private ones are same-uid-derivable paths. mise env --json runs under allowedDaemonEnvironment(env) so a mise template cannot read a daemon secret; merged object re-filtered, so mise output cannot reintroduce one. mise on this box emits AGENT_EVAL_VERSION CARGO_HOME GOBIN GOROOT PATH RUSTUP_HOME RUSTUP_TOOLCHAIN; regex drops none.",
-    "boundary": "Every spawn/Bun.spawn/spawnSync/runner call in packages/daemon/src audited: only config.ts:538 private_key_command gets process.env (on purpose); CI fetcher, GitHubService, catch-up use buildRoleEnv(.., paneEnv); createDaemonRunner spreads paneEnv under options.env; boot-probes pass no env; cli/* spawns are pane-side; hotspots.ts is dead.",
-    "scrub": "Every argv is tmux -L legion-<project>; socket == session; TMUX not in paneEnv and -L overrides it — cannot reach the operator's default server. set-environment -u edits the table only; running panes untouched (exec-time copy). Log is names only. Failures throw into the await-probes try -> stop() -> startDaemon rejects. Verified live on tmux 3.7c on a scratch -L server (killed after): NO_SERVER_STDERR matches both no-server shapes; 'no such session: X' matches startsWith; -u on a missing name and on BASH_FUNC_x%% exit 0; set-option -t S update-environment '' empties the session option; fresh session table = -NAME markers only; tmux writes exactly PWD/SHLVL. Ran the parser against the production server's tables (names only): 93 global names parsed, 0 skipped, 3 BASH_FUNC__aws%% continuation lines none of which looks like NAME=, -DISPATCH_TOKEN/-GH_*_PRIVATE_KEY_B64 markers skipped; session table SSH_AUTH_SOCK SSH_CONNECTION; update-environment unset (inherits default). This boot on production removes 66 global names + 2 session names and keeps AGENT_EVAL_VERSION CARGO_HOME GOBIN GOROOT HOME LANG LC_* MISE_DATA_DIR OMP_PROFILE PATH PWD RUSTUP_* SHELL SHLVL TERM TMUX_TMPDIR USER XDG_RUNTIME_DIR. Ordering: index.ts:697 after await probes, before enableLaunches (:722); nothing above the hold forks a server.",
-    "ompInvocationSplit": "LEGION_OMP_PATH read from the daemon env via configuredPath(env, 'omp'); mise where under paneEnv; environment.test.ts covers both (LEGION_OMP_PATH honoured; mise where env toEqual(paneEnv)).",
-    "tests": "Acceptance-1 test is the spec's scenario with exact toEqual on paneEnv and on the tmux new-session runner env — fails on any strip-list or wildcard. Both probes toEqual(paneEnv). Scrub tests: -u only for disallowed names, markers/function bodies skipped, no-server/no-session -> nothing, names-only log. Deleted config.test.ts strip test defended a behaviour reversed by design; nothing undefended (the private_key_command child is the operator's own key reader; a wrong env there fails boot loudly).",
-    "docs": "AGENTS.md states the allow-list rule, names all 45 variables (count matches code), covers both tables + update-environment, says a plain restart suffices; the kill-server clause needs the precision noted above. docs/solutions edits accurate bar one garbled sentence."
+    "mergedScrub": "runtime-tmux.ts:444-464 after #981: every argv still `tmux -L <socket>`; global read -> unset -> disableEnvironmentUpdates (returns false on `no such session`/no server, verified on 3.7c: `set-option -t nosuch` says `no such session: nosuch`) -> session read -> unset; wired index.ts:697-698 inside the `await probes` try, before enableLaunches() at :723; failures throw -> stop() -> startDaemon rejects. Object.hasOwn on TMUX_OWN_GLOBALS at :448.",
+    "chainedArgv": "tmux.ts:218-231: `;` as its own argv element; Bun.spawn without a shell (state/fetch.ts). Verified live: option empty immediately after creation; session table markers only.",
+    "parser": "ENVIRONMENT_ENTRY /^([^\\s=}-][^=]*)=/ correct for canonical bash function bodies (leading space / `}`) and -NAME markers; the phantom residual is the blocking item.",
+    "predicate": "Judged the pattern: _PAT anchored so _PATH never matches; 0 hits on allow-list and mise output; JAVA_HOME GOPATH PKG_CONFIG_PATH LD_LIBRARY_PATH NODE_OPTIONS VIRTUAL_ENV AWS_ACCESS_KEY_ID pass; GOOGLE_APPLICATION_CREDENTIALS CARGO_REGISTRY_TOKEN GITHUB_TOKEN dropped correctly; PGPASSWORD (no underscore) a second-line false negative, fine.",
+    "deletedIndex": "No LSP server in this workspace; repo-wide grep over packages/, scripts/, skills/, docs/, AGENTS.md, package.json, biome.json, tsconfig for src/index/, CodebaseIndexManager, buildChangeHotspots, buildDependencyGraph, codebase-index: only the placement learning (past tense). package.json's `src/cli/index.ts` and `src/daemon/index.ts` are unrelated files.",
+    "tests": "bun test tmux.test.ts runtime-tmux.test.ts environment.test.ts -> 43 pass / 0 fail at this head. Every delta test fails on the bug it names (silent stdout leak, prototype names, order, chained argv, malformed report, _PATH/_KEYBOARD negatives, allow-list loop).",
+    "docs": "AGENTS.md revocation paragraph, predicate list, config-key rule split, placement doc past tense: accurate; one over-generalised clause (minor above)."
   },
-  "deploymentNote": "Production omp_launch_prefix already supplies OMP_PROFILE=legion and the three provider keys via secrets, so panes lose nothing they need. They do lose operator-shell extras they inherited by accident (ANTHROPIC_1M_CONTEXT, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, CLAUDE_CONFIG_DIR, MNEMOPI_*_WEIGHT, OPENCODE_GITHUB_REPO, BROWSER, MISE_SHELL, __MISE_*, npm_*): the pinned OMP build reads none of ANTHROPIC_1M_CONTEXT/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS/OPENCODE_GITHUB_REPO; MNEMOPI_* and CLAUDE_CONFIG_DIR are read somewhere in the install — if wanted in panes they belong in omp_launch_prefix's env step, not the allow-list. The server process pid 2023008 and pre-upgrade panes keep the old key material until kill-server; rotation (acceptance 5) is the revocation.",
-  "prBodyEdits": "Thermo line updated by me at 09:12Z (PATCH /pulls/1007). Still needed from the implementer, no commit required: Deployment step 2 sentence on the server process environ / kill-server / rotation; Fast-follow line naming the nine nits.",
-  "nextForArchitect": "Send the implementer back to push the .legion/ deletion (and make the two PR-body edits). I then review that head and APPROVE it by SHA. Nothing in the nine threads requires a code change before approval; each is answered Accepted: not a defect — fast-follow unless the implementer prefers to fix in the fast-follow PR.",
+  "outOfScopeAgreed": "lookupPane unparseable-pid detail (#981 row, no value possible) — agree; placement doc's config.legionDir/workers.json staleness — agree, retro; LEGION-77 secretsd tier; LEGION-76 new-session race; tmux.conf set-environment -g on a fresh fork — agree with the Rejected reasoning.",
+  "nextForArchitect": "Implementer: presence probe + test + AGENTS.md clause (one code commit; the scrub's tmux call pattern changes, so a rig run is warranted — the tester should see `show-environment -g <name>` calls precede each `-u` and the log line's count equal the real names). Then I re-review (thermo again if the diff is more than the probe), and APPROVE follows by SHA on the head that differs from the re-reviewed head by the .legion/ deletion alone.",
+  "handoffNote": "The review App cannot push; this handoff is committed locally on legion/LEGION-74 in the issue workspace for the implementer to push with its next commit (sha in the phase-complete summary). Round-1 handoff commit adab7c2623cb (rebased from 7475904c) is already on origin.",
   "reviewerSession": "01a099ec-baf9-7000-b397-e5b21462ed3b",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T09:15:31.668Z"
+  "completed": "2026-09-13T11:09:08.370Z"
 }
