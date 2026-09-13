@@ -1,0 +1,67 @@
+{
+  "headSha": "b23aa9429fcefa194cd463bd4579c33f19a26dd3",
+  "codeTestHead": "167754ae9e25",
+  "pr": 1030,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1030",
+  "verdict": "changes_requested",
+  "reviewId": 5191097841,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1030#pullrequestreview-5191097841",
+  "critical": 1,
+  "important": 1,
+  "minor": 9,
+  "threads": [
+    {
+      "url": "https://github.com/sjawhar/legion/pull/1030#discussion_r3999956952",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 1044,
+      "severity": "blocking",
+      "title": "ready-time prompt whose socket closes before the turn starts is confirmed and strands the task (dead locator kept; slot leaked at cap 1, task orphaned at cap>=2; architect hears only worker-queued)"
+    },
+    {
+      "url": "https://github.com/sjawhar/legion/pull/1030#discussion_r3999956955",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 812,
+      "severity": "minor-fix-now",
+      "title": "awaitTurnStart's get_state-failed branch ignores receipt.hasStarted: a start that raced the failing get_state is counted as a prompt failure and publishes a spurious worker-queued before the late commit corrects it"
+    }
+  ],
+  "keyFindings": [
+    {
+      "severity": "blocking",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "workerReady's PromptNotStarted catch confirms the boot and queues the task for a `socket closed` observation too; onWorkerClientClosed snapshotted confirmed=false before that, so its reconnect failure routes to retireUnconfirmedBoot, which no-ops on the now-set readyConfirmedAt. Reproduced (/tmp/legion-60-repro/ready-close.test.ts, REPRO_CAP=1 and 2): dead locator kept, pendingAssignment kept, queue entry dropped as stale at cap 2 / drain stuck at stop at cap 1, only worker-queued published. Required: a closed socket on the ready path must end with the locator cleared and the task relaunched (structured not-started reason handled by the close path, and/or onWorkerClientClosed re-reading readyConfirmedAt at retireDead time), plus a regression test at cap 1 and 2."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "awaitTurnStart returns not-started from the get_state catch without checking receipt.hasStarted (line 812-816), unlike line 817. Fix in the same push."
+    },
+    {
+      "severity": "design-gap-not-required",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "A worker whose OMP keeps acking without a turn loops retire -> cold relaunch (fresh promptFailures; confirmBoot deletes launchFailures) forever with no worker-died/launch-failed; pre-existing for refusals. Also: the first turn-start after a prompt is credited to it even if an Envoy-routed message started the turn; OMP's prompt_result agentInvoked:false / late success:false are unconsumed definitive negatives. Architect to file as a LEGION issue."
+    },
+    {
+      "severity": "pr-body",
+      "file": "PR #1030 body",
+      "description": "E2E line names pre-rebase head 785d1b1d (not on the branch) — must name 52fcae68 with the tester's rebase re-check note; CI line must name run 34761733943 at the current head; 'What changed' smoke-scripts bullet still lists down.sh and SMOKE_NATS_NAME (dropped in the rebase); Thermo line to be filled."
+    },
+    {
+      "severity": "fast-follow",
+      "file": "AGENTS.md, processes.ts, worker-rpc.ts, worker-admission.ts, tests",
+      "description": "One named fast-follow 'prompt-delivery wording and fixture cleanup': AGENTS.md:68 retry-in-flight clause; publishRole doc catch-up claim; awaitTurnStart doc's 'never an idle transition' (ready path exception); retire test title vs no ompSessionFile; consistent one-line PromptNotStarted logging; PendingTurnStart one-field interface; dropFromQueue dedupe; fake getState half-mirror; log-substring pins in tests."
+    }
+  ],
+  "verified": {
+    "ciAtHead": "Tests run 34761733943 (lint, pr-title, typecheck, test success) and Legion Envoy and Contracts run 34761733882 (pi-envoy success, others skipped) at b23aa9429fce",
+    "threadsBefore": "0 reviews, 0 threads before this review",
+    "testerHead": "52fcae689ef3 is an ancestor of b23aa9429fce; fingerprint 6935415038171bd6cb9bab52858bc24bec352432b9fa4526728069f99d5d4015 at both",
+    "localRuns": "bun test worker-rpc.test.ts + processes.test.ts (filtered): 15 pass; LEGION_E2E=1 bun test real-prompt-delivery-e2e.test.ts: 3 pass",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at b23aa9429fce: BLOCKING 1 (deep), NON-BLOCKING 7 (deep) + 9 (quality)",
+    "contract": "no LegionDaemonApi shape change (packages/contracts untouched; spawn_worker statuses unchanged); publishRole cutover complete (no natsPublish/nats.publish left in packages/daemon/src)"
+  },
+  "workspaceNote": "Removed an empty .omp/config.yml my OMP session scaffolded in the workspace at 14:34Z so it cannot ride into the next commit; working copy is clean.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T15:06:16.261Z"
+}
