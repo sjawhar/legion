@@ -1191,6 +1191,17 @@ describe("legion state", () => {
         expect(warnings.filter((line) => line.includes("LEGION-4"))).toHaveLength(1);
         expect(warnings.some((line) => line.includes("LEGION-1"))).toBe(false);
         expect(await readFile(`${file}.v27.bak`, "utf8")).toBe(JSON.stringify(source));
+        // The migrated state is on disk at once: the next boot loads v28 and never asks Dispatch
+        // again, even with no ordinary save in between.
+        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(28);
+        const reloaded = await loadState(file, {
+          ...initialState,
+          resolveSpecArtifact: async (issue) => {
+            throw new Error(`the migration ran again for ${issue}`);
+          },
+        });
+        expect(reloaded.gates).toEqual(migrated.gates);
+        expect(resolved).toHaveLength(2);
       } finally {
         warnSpy.mockRestore();
       }

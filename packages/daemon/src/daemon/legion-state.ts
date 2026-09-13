@@ -1161,6 +1161,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   // Zod v3 infers validated records as partial despite every mapped value being required.
   const validatedState = parsed.data as LegionState;
+  pruneStalePrTombstones(validatedState, Date.now());
   if (
     typeof sourceVersion === "number" &&
     Number.isSafeInteger(sourceVersion) &&
@@ -1171,8 +1172,12 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     } catch (error) {
       if (!hasErrnoCode(error, "EEXIST")) throw error;
     }
+    // A migration runs exactly once: the migrated state is written now, not at the first ordinary
+    // save, so a restart before any event does not re-run the chain — migrateV27State's Dispatch
+    // read per kept gate (and its refusal to start when one fails) would otherwise recur on every
+    // boot until something else happened to save.
+    await saveState(file, validatedState);
   }
-  pruneStalePrTombstones(validatedState, Date.now());
   return validatedState;
 }
 
