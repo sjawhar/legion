@@ -205,13 +205,56 @@ expect_recorded_window() {
     fail "recorded tmux window ${recorded_window_id} is absent"
 }
 
+# A Legion issue branch: `legion/<KEY>`, the bookmark `packages/workspace` creates and the worker
+# skill pushes (`legion/LEGSMOKE-3`). Shared by the head-branch assertion and the discovery below.
+readonly legion_branch_pattern='^legion/[A-Z][A-Z0-9]*-[0-9]+$'
+
+# The pull request checkpoints 5, 7, and 8 inspect: SMOKE_PR when set, otherwise the repository's
+# one `legion/<KEY>` pull request in any state. Several candidates fail naming each one -- on a
+# shared sandbox repository another rig's pull request could otherwise be picked silently (the
+# same lesson moved the root issue to a recorded value) -- and none fails naming the remedy.
 smoke_pr() {
+  local candidates
+  local count
   if [[ -n "${SMOKE_PR:-}" ]]; then
+    [[ "$SMOKE_PR" =~ ^[0-9]+$ ]] || fail "SMOKE_PR must be a pull request number, got '${SMOKE_PR}'"
     printf '%s\n' "$SMOKE_PR"
     return
   fi
-  gh pr list -R "$SMOKE_REPO" --state all --json number,headRefName \
-    --jq '[.[] | select(.headRefName | test("^legion/issue-")) | .number] | first // empty'
+  candidates="$(gh pr list -R "$SMOKE_REPO" --state all --limit 100 --json number,headRefName |
+    jq -c --arg pattern "$legion_branch_pattern" '[.[] | select(.headRefName | test($pattern))]')"
+  count="$(jq 'length' <<<"$candidates")"
+  case "$count" in
+    0) fail "set SMOKE_PR or open a legion/<KEY> pull request" ;;
+    1) jq -r '.[0].number' <<<"$candidates" ;;
+    *)
+      fail "SMOKE_PR is unset and ${SMOKE_REPO} has ${count} legion/<KEY> pull requests: $(
+        jq -r '[.[] | "#\(.number) (\(.headRefName))"] | join(", ")' <<<"$candidates"
+      ); set SMOKE_PR to the one this exercise opened"
+      ;;
+  esac
+}
+
+# The pull request's commits, first page of 100. An empty list or a full page fails naming the
+# count: a checkpoint over zero commits proves nothing, and one over a truncated page could miss
+# the commit that breaks it.
+pr_commits() {
+  local pr="$1"
+  local commits
+  local count
+  commits="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/commits?per_page=100")"
+  count="$(jq 'length' <<<"$commits")"
+  ((count > 0)) || fail "PR #${pr} has no commits (0 listed)"
+  ((count < 100)) ||
+    fail "PR #${pr} lists ${count} commits on the first page of 100, so the list may be truncated; nothing was checked"
+  printf '%s\n' "$commits"
+}
+
+# Every review on the pull request. GitHub pages reviews 30 at a time by default, and a finished
+# Legion pull request can carry more than that (LEGION-74's carried 32, its approvals last), so
+# the pages are followed and flattened into one array.
+pr_reviews() {
+  gh api --paginate "repos/${SMOKE_REPO}/pulls/$1/reviews?per_page=100" | jq -s 'add // []'
 }
 
 checkpoint_one() {
@@ -487,15 +530,66 @@ checkpoint_four() {
   fi
 }
 
+# A commit's identity is a Legion GitHub App bot: `<slug>[bot]` as the login and GitHub's no-reply
+# address `<app id>+<slug>[bot]@users.noreply.github.com` as the email (the daemon's
+# `getGitIdentity`), for the author and the committer alike. In a shared jj workspace the author
+# is inherited from whoever created the working-copy commit; the committer is the role that made
+# the commit, so every commit's committer is one of the two Apps and at least one is the
+# code-writing App's. Every commit also carries `Omp-Session: <uuid>` — the committing pane's own
+# session id, written by the pi-envoy extension's `commit_trailers` overlay. Prints the first
+# fault naming the commit, the field, and the value found, or nothing when every commit passes.
+# ($implementer and $reviewer are jq --arg variables, not shell expansions.)
+# shellcheck disable=SC2016
+commit_faults='
+  def noreply_email($login; $email):
+    (($email // "") | capture("^(?<id>[0-9]+)\\+(?<rest>.*)$") // null) as $m
+    | $m != null and $m.rest == ($login + "@users.noreply.github.com");
+  def identity_fault($field; $login; $email):
+    if ($login | IN($implementer, $reviewer) | not) then
+      "\($field).login is \($login // "null"), not \($implementer) or \($reviewer)"
+    elif noreply_email($login; $email) | not then
+      "commit.\($field).email is \($email // "null"), not <id>+\($login)@users.noreply.github.com"
+    else empty end;
+  def trailer_fault:
+    if (.commit.message | split("\n")
+        | any(test("^Omp-Session: [0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$"))) then empty
+    else "commit.message carries no Omp-Session: <uuid> trailer line" end;
+  [ .[] | .sha as $sha
+    | ( identity_fault("author"; .author.login; .commit.author.email),
+        identity_fault("committer"; .committer.login; .commit.committer.email),
+        trailer_fault )
+    | "commit \($sha): \(.)" ]
+  | first // empty
+'
+readonly commit_faults
+
 checkpoint_five() {
   local pr
-  local view
+  local pull
+  local branch
+  local commits
+  local count
+  local fault
+  local implementer_commits
+
+  require_env SMOKE_IMPLEMENTER_LOGIN
+  require_env SMOKE_REVIEWER_LOGIN
   pr="$(smoke_pr)"
-  [[ "$pr" =~ ^[0-9]+$ ]] || fail "set SMOKE_PR or open a legion/issue-* pull request"
-  view="$(gh pr view "$pr" -R "$SMOKE_REPO" --json headRefName,commits)"
-  jq -e '(.headRefName | test("^legion/issue-")) and (tostring | test("implementer\\+ses_")) and (tostring | test("Legion-Session:"))' \
-    >/dev/null <<<"$view" || fail "PR #${pr} lacks the Legion branch, identity, or session trailer"
-  printf 'CHECKPOINT 5 OK: PR #%s carries Legion branch and commit attribution\n' "$pr"
+  pull="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}")"
+  branch="$(jq -r '.head.ref' <<<"$pull")"
+  [[ "$branch" =~ $legion_branch_pattern ]] ||
+    fail "PR #${pr} head branch is ${branch}, not a Legion issue branch legion/<KEY>"
+  commits="$(pr_commits "$pr")"
+  count="$(jq 'length' <<<"$commits")"
+  fault="$(jq -r --arg implementer "$SMOKE_IMPLEMENTER_LOGIN" --arg reviewer "$SMOKE_REVIEWER_LOGIN" \
+    "$commit_faults" <<<"$commits")"
+  [[ -z "$fault" ]] || fail "PR #${pr} ${fault}"
+  implementer_commits="$(jq --arg implementer "$SMOKE_IMPLEMENTER_LOGIN" \
+    '[.[] | select(.committer.login == $implementer)] | length' <<<"$commits")"
+  ((implementer_commits > 0)) ||
+    fail "PR #${pr} has no commit committed by ${SMOKE_IMPLEMENTER_LOGIN} (the code-writing App wrote none of its ${count} commits)"
+  printf 'CHECKPOINT 5 OK: PR #%s on %s: %s commits carry App bot identity (%s committed %s) and an Omp-Session trailer\n' \
+    "$pr" "$branch" "$count" "$SMOKE_IMPLEMENTER_LOGIN" "$implementer_commits"
 }
 
 checkpoint_six() {
@@ -515,35 +609,53 @@ checkpoint_six() {
   printf 'CHECKPOINT 6 OK: one coalesced verdict and no raw check noise\n'
 }
 
+# The `.legion/` handoff ledger leaves the branch once, at the end of a clean review, in a commit
+# the code-writing App pushes: the review App holds no `contents` permission by design (LEGION-34),
+# so a deletion commit's presence on the pull request is what proves that App pushed it (GitHub
+# records no pusher durably). The commit itself is made by either App -- usually the implementer,
+# but the reviewer may make it locally in the shared workspace and the implementer's push carries
+# it -- so its author and committer must each be one of the two App bots. The reviewer's approval
+# is then submitted after that commit, retro's commit touches `docs/solutions/`, and the final diff
+# carries no `.legion/` path. Also records main's SHA for checkpoint 8's squash check.
 checkpoint_seven() {
   local pr
   local retro
-  local files
+  local view
   local commits
   local commit
+  local committer
+  local fault
+  local deletion_sha=""
   local deletion_at=""
   local reviews
+  local files
 
   require_env SMOKE_RETRO_COMMIT
+  require_env SMOKE_IMPLEMENTER_LOGIN
   require_env SMOKE_REVIEWER_LOGIN
   pr="$(smoke_pr)"
-  [[ "$pr" =~ ^[0-9]+$ ]] || fail "set SMOKE_PR"
   retro="$(gh api "repos/${SMOKE_REPO}/commits/${SMOKE_RETRO_COMMIT}")"
   jq -e '[.files[].filename | startswith("docs/solutions/")] | any' >/dev/null <<<"$retro" ||
     fail "${SMOKE_RETRO_COMMIT} has no docs/solutions change"
-  commits="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/commits")"
+  commits="$(pr_commits "$pr")"
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
-    files="$(gh api "repos/${SMOKE_REPO}/commits/${commit}")"
-    if jq -e '[.files[] | select(.filename | startswith(".legion/")) | select(.status == "removed")] | length > 0' >/dev/null <<<"$files"; then
-      jq -e --arg reviewer "$SMOKE_REVIEWER_LOGIN" '
-        .author.login == $reviewer or .committer.login == $reviewer
-      ' >/dev/null <<<"$files" || fail "reviewer App did not author or commit the .legion deletion"
-      deletion_at="$(jq -r '.commit.committer.date' <<<"$files")"
+    view="$(gh api "repos/${SMOKE_REPO}/commits/${commit}")"
+    if jq -e '[.files[] | select((.filename | startswith(".legion/")) and .status == "removed")] | length > 0' >/dev/null <<<"$view"; then
+      fault="$(jq -r --arg implementer "$SMOKE_IMPLEMENTER_LOGIN" --arg reviewer "$SMOKE_REVIEWER_LOGIN" '
+        [ (["author", .author.login], ["committer", .committer.login])
+          | select(.[1] | IN($implementer, $reviewer) | not)
+          | "\(.[0]).login is \(.[1] // "null"), not \($implementer) or \($reviewer)" ]
+        | first // empty
+      ' <<<"$view")"
+      [[ -z "$fault" ]] || fail "the .legion deletion commit ${commit}: ${fault}"
+      committer="$(jq -r '.committer.login' <<<"$view")"
+      deletion_sha="$commit"
+      deletion_at="$(jq -r '.commit.committer.date' <<<"$view")"
     fi
   done < <(jq -r '.[].sha' <<<"$commits")
-  [[ -n "$deletion_at" ]] || fail "PR #${pr} has no reviewer .legion deletion commit"
-  reviews="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/reviews")"
+  [[ -n "$deletion_at" ]] || fail "PR #${pr} has no commit that removes a .legion/ path"
+  reviews="$(pr_reviews "$pr")"
   jq -e --arg reviewer "$SMOKE_REVIEWER_LOGIN" --arg deletion_at "$deletion_at" '
     any(.[]; .user.login == $reviewer and .state == "APPROVED" and .submitted_at > $deletion_at)
   ' >/dev/null <<<"$reviews" || fail "reviewer approval did not follow the .legion deletion"
@@ -551,7 +663,8 @@ checkpoint_seven() {
   jq -e '[.[].filename | startswith(".legion/")] | any | not' >/dev/null <<<"$files" ||
     fail "PR #${pr} final diff still contains .legion files"
   gh api "repos/${SMOKE_REPO}/git/ref/heads/main" --jq '.object.sha' >"${smoke_dir}/base-at-merge"
-  printf 'CHECKPOINT 7 OK: reviewer deleted .legion before approving and retro is durable\n'
+  printf 'CHECKPOINT 7 OK: .legion deletion %s committed by %s, %s approved after it, retro %s is durable, and the final diff has no .legion path\n' \
+    "$deletion_sha" "$committer" "$SMOKE_REVIEWER_LOGIN" "$SMOKE_RETRO_COMMIT"
 }
 
 checkpoint_eight() {
@@ -565,11 +678,10 @@ checkpoint_eight() {
   pr="$(smoke_pr)"
   [[ -r "${smoke_dir}/base-at-merge" ]] || fail "run checkpoint 7 before approving and merging the PR"
   merge_base="$(<"${smoke_dir}/base-at-merge")"
-  [[ "$pr" =~ ^[0-9]+$ ]] || fail "set SMOKE_PR"
   pull="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}")"
   jq -e '.state == "closed" and .merged == true and (.merge_commit_sha | type == "string") and .merge_commit_sha != .head.sha' >/dev/null <<<"$pull" ||
     fail "PR #${pr} is not a squash merge"
-  reviews="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/reviews")"
+  reviews="$(pr_reviews "$pr")"
   jq -e --arg human "$SMOKE_HUMAN_LOGIN" --arg head "$(jq -r '.head.sha' <<<"$pull")" '
     any(.[]; .user.login == $human and .state == "APPROVED" and .commit_id == $head)
   ' >/dev/null <<<"$reviews" || fail "current PR head lacks an approving human review"
