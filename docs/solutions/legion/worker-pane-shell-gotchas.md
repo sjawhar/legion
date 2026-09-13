@@ -398,6 +398,5 @@ call — and a `jj git push` through the credential helper fails as `could not r
 out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, every edit of the PR
 body re-runs the whole `Tests` workflow (`pull_request: types: [opened, edited, reopened, synchronize]` in
 `.github/workflows/pr-and-main.yaml`), so paste command output into the body once per round, after that round's last
-push, never per fact; and the `pr-checks-result` check the skill template names does not exist on this repository
-([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md)) — the `CI:` line cites the `Tests` run id at the
-head.
+push, never per fact; the `CI:` line cites the `Tests` run id at the head
+([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).
