@@ -1179,6 +1179,19 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
     restore();
   }
 });
+
+test("IssuePage hides whose turn when the server sent open asks without last_reply", async () => {
+  const restore = stubIssuePage({ ...issue, open_asks: [openIssueAsk] });
+  const view = renderIssuePage("/issues/CORE-1");
+
+  try {
+    await screen.findByRole("heading", { level: 1, name: issue.title });
+    expect(screen.queryByText(/^Waiting on (you|agents)/)).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
 test("IssuePage keeps state actions available while approval awaits", async () => {
   const restore = stubIssuePage({
     ...issue,

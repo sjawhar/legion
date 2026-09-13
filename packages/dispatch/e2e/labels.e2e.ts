@@ -104,3 +104,62 @@ test("edits issue labels from a searchable multi-select and filters project issu
     await context.close();
   }
 });
+
+test("eight thirty-character labels scroll inside the header's details line without widening the page", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the viewports are set explicitly in the desktop browser project"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Long labels" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const title = page.getByRole("heading", { level: 1, name: "Long labels" });
+    const rail = page.getByTestId("issue-metadata-rail");
+    for (const [width, height] of [
+      [1280, 900],
+      [390, 844],
+    ]) {
+      await page.setViewportSize({ height, width });
+      await patchIssue(issue.key, { labels: [] });
+      await page.goto(`/issues/${issue.key}`);
+      await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
+      const titleBefore = await title.boundingBox();
+
+      await patchIssue(issue.key, {
+        labels: Array.from({ length: 8 }, (_, index) => `label-${index}-`.padEnd(30, "x")),
+      });
+      await page.reload();
+      await expect(page.getByText("label-7-".padEnd(30, "x"), { exact: true })).toBeVisible();
+
+      // The title box is untouched and the details line is the scroll container: it overflows
+      // sideways inside the card while the document itself is no wider than the window.
+      expect(await title.boundingBox()).toEqual(titleBefore);
+      const metrics = await rail.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        overflowX: getComputedStyle(element).overflowX,
+        scrollWidth: element.scrollWidth,
+      }));
+      expect(metrics.overflowX).toBe("auto");
+      expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+      expect(metrics.clientWidth).toBeLessThanOrEqual(width);
+      const pageWidths = await page.evaluate(() => ({
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      }));
+      expect(pageWidths.scrollWidth).toBe(pageWidths.clientWidth);
+      expect(pageWidths.clientWidth).toBeLessThanOrEqual(width);
+      const shot = testInfo.outputPath(`labels-overflow-${width}.png`);
+      await page.screenshot({ path: shot });
+      await testInfo.attach(`eight long labels (${width}px)`, {
+        contentType: "image/png",
+        path: shot,
+      });
+    }
+  } finally {
+    await context.close();
+  }
+});

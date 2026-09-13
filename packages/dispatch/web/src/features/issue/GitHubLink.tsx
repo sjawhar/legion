@@ -21,6 +21,12 @@ interface GitHubReference {
   title: string;
 }
 
+/**
+ * One external link on the issue header's details line. A GitHub issue or pull request is
+ * shown as its number and title (the repository while the title is unknown — loading, or no
+ * GitHub App credentials for this sign-in), never as the raw address, so it fits the line on a
+ * phone; the title is truncated and carried in full by the link's tooltip.
+ */
 export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   const href = safeExternalHref(link.url);
   const match =
@@ -67,46 +73,66 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
 
   if (href === undefined) {
     return (
-      <span className={`text-sm ${textMutedOnSurface}`} title="Unsafe external link">
+      <span
+        className={`inline-block max-w-[18ch] truncate text-sm sm:max-w-[32ch] ${textMutedOnSurface}`}
+        title="Unsafe external link"
+      >
         {link.url}
       </span>
     );
   }
-  if (match === null || githubReference.isError || checks.isError) {
-    const unavailable =
-      (githubReference.error instanceof ApiError &&
-        githubReference.error.code === "GITHUB_TOKEN_UNAVAILABLE") ||
-      (checks.error instanceof ApiError && checks.error.code === "GITHUB_TOKEN_UNAVAILABLE");
+  if (match === null) {
     return (
       <a
-        className={`text-sm underline ${linkText} ${linkHoverText}`}
+        className={`inline-block max-w-[18ch] truncate text-sm underline sm:max-w-[32ch] ${linkText} ${linkHoverText}`}
         href={href}
-        title={unavailable ? "GitHub details are unavailable for this sign-in." : undefined}
+        title={link.url}
       >
         {link.url}
       </a>
     );
   }
-  if (githubReference.data === undefined) {
-    return (
-      <a className={`text-sm underline ${linkText}`} href={href}>
-        {link.url}
-      </a>
-    );
-  }
+  const repository = `${match[1]}/${match[2]}`;
+  const number = `#${match[4]}`;
+  const failed = githubReference.isError || checks.isError;
+  const unavailable =
+    (githubReference.error instanceof ApiError &&
+      githubReference.error.code === "GITHUB_TOKEN_UNAVAILABLE") ||
+    (checks.error instanceof ApiError && checks.error.code === "GITHUB_TOKEN_UNAVAILABLE");
+  const reference = failed ? undefined : githubReference.data;
   const state =
-    isPullRequest && githubReference.data.merged ? "merged" : githubReference.data.state;
+    reference === undefined
+      ? undefined
+      : isPullRequest && reference.merged
+        ? "merged"
+        : reference.state;
   return (
     <a
-      className={`inline-flex items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
+      className={`inline-flex max-w-full items-center gap-2 text-sm underline ${linkText} ${linkHoverText}`}
       href={href}
+      title={
+        unavailable
+          ? "GitHub details are unavailable for this sign-in."
+          : reference === undefined
+            ? link.url
+            : `${repository}${number}: ${reference.title}`
+      }
     >
-      <span>{githubReference.data.title}</span>
-      <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
-        {state}
+      <span className="shrink-0 font-medium">{number}</span>
+      <span className="max-w-[18ch] truncate sm:max-w-[32ch]">
+        {reference === undefined ? repository : reference.title}
       </span>
-      {isPullRequest && checks.data !== undefined ? (
-        <span className={`rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
+      {state === undefined ? null : (
+        <span
+          className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}
+        >
+          {state}
+        </span>
+      )}
+      {isPullRequest && checks.data !== undefined && !failed ? (
+        <span
+          className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}
+        >
           checks: {checks.data}
         </span>
       ) : null}

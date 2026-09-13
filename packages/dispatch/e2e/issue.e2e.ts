@@ -1,7 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { getUnsubscribeCalls, setInterests, setLiveSessions } from "./agents";
-import { createAsk, createIssue, createProject, getIssue, getIssueEvents, patchIssue } from "./api";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createProject,
+  getIssue,
+  getIssueEvents,
+  patchIssue,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -145,18 +153,7 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     external_links: [{ kind: "github_issue", url: "https://github.com/sjawhar/legion/issues/815" }],
   });
   await createAsk(issue.key, { question: "First ask" }, session);
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
-    await setInterests([
-      {
-        session_id: "e2e-session",
-        topics: [
-          `notifications.dispatch.issue.${issue.key}`,
-          `notifications.dispatch.issue.${issue.key}.>`,
-        ],
-      },
-    ]);
-  }
+  await subscribeSession(issue.key);
   await expect
     .poll(async () =>
       (await getIssueEvents(issue.key)).some((event) => event.actor.id === "e2e-session")
@@ -172,9 +169,14 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     await expect(subscribedAgents).toContainText("e2e-session-title");
     await expect(subscribedAgents.getByText("e2e-session", { exact: true })).toHaveCount(0);
     await expect(subscribedAgents.locator("[title='e2e-session']")).toHaveCount(1);
+    // Without GitHub App credentials the link still reads as the reference, never the raw address.
+    await expect(page.getByRole("link", { name: "#815 sjawhar/legion" })).toHaveAttribute(
+      "title",
+      "GitHub details are unavailable for this sign-in."
+    );
     await expect(
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
-    ).toHaveAttribute("title", "GitHub details are unavailable for this sign-in.");
+    ).toHaveCount(0);
     await page.getByRole("tab", { name: "Children" }).click();
     await expect(
       page.getByRole("tabpanel").getByRole("link", { name: `${child.key} · Child decision` })
@@ -328,5 +330,122 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     );
   } finally {
     await alice.close();
+  }
+});
+
+async function subscribeSession(issueKey: string): Promise<void> {
+  if (process.env.PLAYWRIGHT_BASE_URL) return;
+  await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
+  await setInterests([
+    {
+      session_id: "e2e-session",
+      topics: [
+        `notifications.dispatch.issue.${issueKey}`,
+        `notifications.dispatch.issue.${issueKey}.>`,
+      ],
+    },
+  ]);
+}
+
+test("issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the viewports are set explicitly in the desktop browser project"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Header on a phone" });
+  await patchIssue(issue.key, {
+    external_links: [{ kind: "github_pr", url: "https://github.com/sjawhar/legion/pull/1051" }],
+    labels: ["Frontend", "api"],
+    priority: 1,
+  });
+  await createAsk(issue.key, { question: "Which layout?" }, session);
+  await subscribeSession(issue.key);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const top = async (locator: Locator) => Math.round((await locator.boundingBox())?.y ?? -1);
+  const inView = async (locator: Locator, width: number) => {
+    const box = await locator.boundingBox();
+    return box !== null && box.x >= 0 && box.x + box.width <= width;
+  };
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/issues/${issue.key}`);
+    const header = page.getByTestId("issue-header");
+    const indicator = page.getByTestId("issue-whose-turn");
+    const subscribers = page.getByRole("button", { name: "Subscribers: 1" });
+    const link = page.getByRole("link", { name: "#1051 sjawhar/legion" });
+    await expect(indicator).toHaveText("Waiting on you (1)");
+    await expect(subscribers).toBeVisible();
+    await expect(link).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "https://github.com/sjawhar/legion/pull/1051" })
+    ).toHaveCount(0);
+
+    // Close shares the state row; Subscribers and the GitHub link share the details line with
+    // the labels and the indicator — nothing but the title sits on a row of its own.
+    const stateRow = await top(page.getByLabel("Status"));
+    expect(await top(page.getByLabel("Priority"))).toBe(stateRow);
+    expect(await top(page.getByRole("button", { name: "Close issue" }))).toBe(stateRow);
+    const rail = page.getByTestId("issue-metadata-rail");
+    const detailsRow = await top(rail);
+    expect(detailsRow).toBeGreaterThan(stateRow);
+    expect(await top(page.getByTestId("issue-labels"))).toBe(detailsRow);
+    expect(await top(subscribers)).toBe(detailsRow);
+    expect(await top(link)).toBe(detailsRow);
+    expect(await inView(indicator, 390)).toBe(true);
+    const phoneHeader = await header.boundingBox();
+    expect(phoneHeader?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(300);
+    await expect(
+      page.evaluate(
+        () => document.documentElement.scrollWidth === document.documentElement.clientWidth
+      )
+    ).resolves.toBe(true);
+    const phoneShot = testInfo.outputPath("issue-header-390.png");
+    await page.screenshot({ path: phoneShot });
+    await testInfo.attach("issue header (390px)", { contentType: "image/png", path: phoneShot });
+
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await expect(indicator).toHaveText("Waiting on you (1)");
+    expect(await inView(indicator, 1280)).toBe(true);
+    const desktopHeader = await header.boundingBox();
+    expect(desktopHeader?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(140);
+
+    await page.setViewportSize({ height: 900, width: 1536 });
+    await expect(indicator).toHaveText("Waiting on you (1)");
+    expect(await inView(indicator, 1536)).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("issue header flips between Waiting on you and Waiting on agents as the newest reply changes", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Whose turn" });
+  const ask = await createAsk(issue.key, { question: "Which layout?" }, session);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    const indicator = page.getByTestId("issue-whose-turn");
+    await expect(indicator).toHaveText("Waiting on you (1)");
+
+    // A human clarification hands the turn to the asker, live and after a reload.
+    await createComment(issue.key, { ask_id: ask.id, body: "Which widths matter?" });
+    await expect(indicator).toHaveText("Waiting on agents (1)", { timeout: 10_000 });
+    await page.reload();
+    await expect(indicator).toHaveText("Waiting on agents (1)");
+
+    // The agent's reply hands it back.
+    await createComment(issue.key, { ask_id: ask.id, body: "390, 1280 and 1536." }, session);
+    await expect(indicator).toHaveText("Waiting on you (1)", { timeout: 10_000 });
+  } finally {
+    await context.close();
   }
 });
