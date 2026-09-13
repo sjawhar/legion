@@ -2,15 +2,31 @@
   "pr": {
     "number": 1007,
     "url": "https://github.com/sjawhar/legion/pull/1007",
-    "codeHead": "96248aad7046022e0184bafd4fcd3a4603c1612c",
+    "codeHead": "ef9116b6a64cf617cc8b195023297c300bf7d69d",
     "reviewRoundFix": "02b5257192e78f9af8bbee5f3b0c8fdf8f10856e",
     "reviewRoundDocs": "96248aad7046022e0184bafd4fcd3a4603c1612c",
     "handoffHead": "the `implement: record handoff` commit pushed after CI went green at the code head",
     "base": "main@origin 52c5e03e7cb3 (post-#981; rebased a second time when GitHub reported CONFLICTING against #981's runtime-tmux.ts/tmux.ts rewrite)",
-    "ci": "run 34750181089 — lint, pr-title, typecheck, test all pass at code head 96248aad7046 (https://github.com/sjawhar/legion/actions/runs/34750181089)",
-    "tier": "T1 (live credential exposure / deploy correctness)"
+    "ci": "run 34751729788 — lint, pr-title, typecheck, test all pass at code head ef9116b6a64c (https://github.com/sjawhar/legion/actions/runs/34751729788); previous heads: 96248aad run 34750181089, 7154712f run 34746510981",
+    "tier": "T1 (live credential exposure / deploy correctness)",
+    "cleanupRound": "ef9116b6a64c"
   },
   "commits": [
+    {
+      "sha": "ef9116b6a64c",
+      "title": "chore(daemon): every tmux.ts error carries stderr only; the codebase-index learning describes the removed module in the past tense (LEGION-74)",
+      "tasks": "cleanup round: the tester's two residuals (test.json observations 2 and 3)"
+    },
+    {
+      "sha": "103c12e407db",
+      "title": "test: record handoff (round 2)",
+      "tasks": "tester's round-2 handoff (PASS)"
+    },
+    {
+      "sha": "61438e411046",
+      "title": "implement: record handoff",
+      "tasks": ""
+    },
     {
       "sha": "96248aad7046",
       "title": "docs(daemon): what a plain restart does and does not revoke; split the config-key rule; note the removed codebase index (LEGION-74)",
@@ -91,7 +107,7 @@
     "[review round 96248aad7046] daemon AGENTS.md (predicate list; codebase-index clause dropped; retention sentence; ordering/chaining/own-property notes), docs/solutions/daemon/config-env-keys-that-panes-also-carry.md (rule split), docs/solutions/daemon/codebase-index-file-placement.md (removal note)"
   ],
   "verification": {
-    "unit": "Review round, at the rebased code head 96248aad: bun test packages/daemon 1125 pass / 7 skip / 0 fail (src/index's 12 tests removed with the module; #981 added tests); bunx tsc --noEmit clean; biome check --error-on-warnings src/ clean; bash scripts/smoke/checkpoints.test.sh 15 PASS. CI run 34750181089 all green.",
+    "unit": "Cleanup round, at code head ef9116b6a64c: bun test packages/daemon 1126 pass / 7 skip / 0 fail; bunx tsc --noEmit clean; biome check --error-on-warnings src/ clean. CI run 34751729788 all green.",
     "notVerified": [
       "Acceptance 3 and 5 (post-release: production server/controller/fresh-worker environ, live grant, key rotation) - deliberately left for the wake after the operator relaunches on merged code.",
       "up.test.sh case (spec acceptance 8 mentions one): up.sh is unchanged - the daemon does the work - so no up.sh case was added; the rig pane environment is quoted instead."
@@ -218,7 +234,24 @@
     "threadReplies": "posted on all nine threads (reply ids 3999308588 … 3999309187) with the commit sha; `legion threads resolve --pr 1007 --repo sjawhar/legion` run before pushing: all nine left open (newest reply by the reviewer is not an acceptance) — expected until the reviewer's next pass",
     "secondRebase": "GitHub reported CONFLICTING after the review-round push: main had gained #981 (daemon: trust a tmux pane only as the process its locator recorded, LEGION-27), which rewrote runtime-tmux.ts (probedWindowId → verifyPaneProcess, PANE_GONE_STDERR moved into tmux.ts, TmuxRuntimeDeps.persist removed) and renamed panePid → lookupPane. Rebased once onto main@origin 52c5e03e; resolved runtime-tmux.ts (main's methods + the scrub method), tmux.test.ts (main's header/import + mine), AGENTS.md (main's PANE_GONE_STDERR wording); PANE_GONE_STDERR in tmux.ts is now built on NO_SERVER_STDERR; the runtime test fixture dropped the removed `persist` dep."
   },
+  "cleanupRound": {
+    "source": "tester handoff 103c12e407db (PASS) observations 2 and 3",
+    "items": [
+      {
+        "n": 1,
+        "residual": "docs/solutions/daemon/codebase-index-file-placement.md:49 described the deleted graph.ts in the present tense",
+        "became": "document kept (its placement rule — daemon-generated artifacts under the XDG state dir, never the tracked tree — outlives the module) and rewritten: Context states the codebase index once existed and was removed in LEGION-74 because nothing called it; the graph.ts SKIP_DIRS section is now a module-neutral 'Scanning a Tracked Tree' rule; the stale-artifact note about index.json is gone; tags/symptoms de-specialised; LEGION-74 added to related_issues. Grep of docs/, skills/, scripts/, packages/ for src/index, CodebaseIndexManager, hotspots.ts, graph.ts, 'codebase index': this file was the only remaining mention (docs/superpowers/plans/… hits are envoy-plugin's own src/index.ts, unrelated).",
+        "commit": "ef9116b6a64c"
+      },
+      {
+        "n": 2,
+        "residual": "nine tmux.ts Error constructions still interpolated stdout",
+        "became": "all ten Error sites in tmux.ts use failure() (stderr only, trimmed, omitted when empty), each still naming the command: ownership marker, new-session, bootstrap window cleanup, new-window, split-window, the 'did not report a window id' check, and parsePaneReport's three malformed-report throws — parsePaneReport now takes the whole result so it can carry stderr instead of echoing the malformed report. `grep stdout} tmux.ts` is empty. Existing pins (processes.test.ts/events.test.ts) are prefix matches on the command name and still hold; no test asserted stdout in a message, so nothing was deleted. New tmux.test.ts case: a malformed -P -F report yields 'tmux new-window did not report a window id: <stderr>' and never the report's contents.",
+        "commit": "ef9116b6a64c"
+      }
+    ]
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T09:47:57.766Z"
+  "completed": "2026-09-13T10:25:05.737Z"
 }
