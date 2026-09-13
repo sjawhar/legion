@@ -61,6 +61,15 @@ import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
 
+/** How many times `handleException` republishes one role message to a live architect before it
+ * stops: a receipt that arrives after the listener's window is reported as `delivery_failed`
+ * even though the holder has the message, and each republish is a fresh envelope the listener
+ * may fail the same way, so without a cap a loaded box turns one late receipt into the same
+ * message every few seconds for as long as the load lasts (LEGION-103: 28 copies in two
+ * minutes). Three redeliveries cover a genuinely lost message; past that the holder has it. */
+export const MAX_ROLE_REDELIVERIES = 3;
+/** Redelivery counts are kept per (role token, payload) for this long, then start over. */
+const ROLE_REDELIVERY_PERIOD_MS = 30 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
@@ -348,6 +357,9 @@ export class ProcessManager {
    * gated: the hold is about opening panes. */
   private launchesEnabled = false;
   private readonly heldResurrects = new Set<IssueKey>();
+  /** Redeliveries of one role message to one live architect within `ROLE_REDELIVERY_PERIOD_MS`,
+   * keyed by `\`${roleToken}\n${payload}\``; see `MAX_ROLE_REDELIVERIES`. */
+  private readonly roleRedeliveries = new Map<string, { count: number; firstAt: number }>();
   private heldControllerRequest = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
@@ -2530,11 +2542,12 @@ export class ProcessManager {
       if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
       if (parsed.role === "architect" && parsed.issue === root) {
         if ((await this.probe(root)) === "alive") {
-          await this.controlDirective(root, {
-            type: "reclaim-architect",
-            issue: parsed.issue,
-            redeliver: exception.original,
-          });
+          const redeliver = this.countRoleRedelivery(exception);
+          await this.controlDirective(
+            root,
+            { type: "reclaim-architect", issue: parsed.issue, redeliver: exception.original },
+            redeliver
+          );
         } else {
           await this.resurrect(root);
         }
@@ -2547,6 +2560,29 @@ export class ProcessManager {
         error
       );
     }
+  }
+
+  /** Counts one more redelivery of `exception.original` to its role and says whether it may go
+   * out: true up to `MAX_ROLE_REDELIVERIES` per (role token, payload) within
+   * `ROLE_REDELIVERY_PERIOD_MS`, false after — logged once, at the first refusal. The
+   * `reclaim-architect` directive still goes out either way (the architect re-asserts its claim);
+   * only the republish is withheld. Stale entries are pruned as the map is touched. */
+  private countRoleRedelivery(exception: ExceptionInfo): boolean {
+    const now = this.deps.now();
+    for (const [key, record] of this.roleRedeliveries) {
+      if (now - record.firstAt >= ROLE_REDELIVERY_PERIOD_MS) this.roleRedeliveries.delete(key);
+    }
+    const key = `${exception.roleToken}\n${exception.original.payload}`;
+    const record = this.roleRedeliveries.get(key) ?? { count: 0, firstAt: now };
+    record.count += 1;
+    this.roleRedeliveries.set(key, record);
+    if (record.count <= MAX_ROLE_REDELIVERIES) return true;
+    if (record.count === MAX_ROLE_REDELIVERIES + 1) {
+      console.error(
+        `[legion] not redelivering to ${exception.roleToken} again: the same message drew ${exception.reason} ${MAX_ROLE_REDELIVERIES} times in a row (a receipt later than the listener's window, not a lost message - the holder has it); further exceptions for it are ignored for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes`
+      );
+    }
+    return false;
   }
 
   /**
