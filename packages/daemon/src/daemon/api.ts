@@ -201,7 +201,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const github = new GitHubService(config.repo, deps.tokenManager, runner, deps.baseEnv);
+  const github = new GitHubService(config.repo, deps.tokenManager);
 
   const ctx: RouteContext = {
     config,

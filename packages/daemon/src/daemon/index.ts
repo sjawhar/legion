@@ -316,7 +316,12 @@ async function startDaemonLocked(
     );
   })();
   probes.catch(() => {});
+  // Both GitHub Apps are proven before anything else opens: `appRoleForLegionRole` sends the root
+  // architect (the first role to act) to the review App and the implementer to the implement App,
+  // so a `legion.yaml` missing either would otherwise start and 500 `role_not_configured` on that
+  // role's first `legion gh`. A missing App refuses startup here, naming it.
   await deps.tokenManager.getToken("implement", owner);
+  await deps.tokenManager.getToken("review", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,

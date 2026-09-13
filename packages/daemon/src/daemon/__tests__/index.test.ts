@@ -1429,9 +1429,9 @@ describe("startDaemon", () => {
           tokenManager: {
             getToken: async () => {
               tokenCalls += 1;
-              // Boot takes one implement-role lease (the startup probe); every later lease
-              // belongs to the resync CI fetch under test.
-              if (tokenCalls > 1) throw new Error("GitHub App token request failed");
+              // Boot takes two leases (the implement- and review-App startup probes); every
+              // later lease belongs to the resync CI fetch under test.
+              if (tokenCalls > 2) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
                 expiresAt: "2026-08-25T00:00:00.000Z",
@@ -3152,6 +3152,52 @@ describe("startDaemon", () => {
     } finally {
       first.server.stop();
       await first.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start when only the implement App is configured, naming the review App, before state is loaded", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    // A `legion.yaml` without `github_apps.review`: `TokenManager.getToken("review", …)` throws
+    // `role_not_configured: review` while the implement lease succeeds. Stubbed at the same
+    // `getToken` seam every other boot test in this file uses.
+    const leased: string[] = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review") => {
+        leased.push(role);
+        if (role === "review") throw new Error("role_not_configured: review");
+        return {
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+    let loadedState = false;
+    const base = daemonDeps(daemonConfig);
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...base.deps,
+            tokenManager,
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+          },
+        })
+      ).rejects.toThrow("role_not_configured: review");
+      expect(leased).toEqual(["implement", "review"]);
+      expect(loadedState).toBeFalse();
+      // The instance lock was released: a start with both Apps on the same state dir works.
+      const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
+      await daemon.stop();
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
