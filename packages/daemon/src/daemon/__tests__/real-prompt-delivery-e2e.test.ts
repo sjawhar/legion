@@ -361,7 +361,8 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
           await t.processes.reconcileWorkerAdmission();
           expect(t.state.workerAdmission.queue).toEqual([t.token]);
           expect(claimOf(t).pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
-          expect(claimOf(t).promptFailures).toBe(attempt);
+          // The third failure retires the pane and zeroes the count for the relaunch (LEGION-93).
+          expect(claimOf(t).promptFailures).toBe(attempt === 3 ? 0 : attempt);
           expect(t.state.phases[t.root]).toBeUndefined();
           expect(await promptLogLines(t.promptLog)).toHaveLength(attempt);
           logged = errorLog.mock.calls.map((call) => call.map(String).join(" "));
@@ -377,12 +378,23 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         }
 
         // The third failure retired the worker: the real pane is gone, the locator cleared with
-        // the session file carried for the relaunch, the assignment still queued.
+        // the session file carried for the relaunch, the assignment still queued, the first
+        // relaunch cycle counted on the claim and logged (LEGION-93: cycle 1 of a bound of 2 —
+        // a relaunch, not yet `worker-died`).
         expect(await waitForPaneGone(t.opened.tmuxPaneId)).toBe(true);
         expect(claimOf(t).locator).toBeUndefined();
         expect(claimOf(t).resumeSessionFile).toBe(t.sessionFile);
+        expect(claimOf(t).promptRetires).toBe(1);
         expect(t.state.workerAdmission.queue).toEqual([t.token]);
         expect(t.publications.filter((json) => json === workerStarted(t.root))).toHaveLength(0);
+        expect(t.publications.filter((json) => json.includes('"worker-died"'))).toHaveLength(0);
+        expect(
+          logged.filter(
+            (line) =>
+              line ===
+              `[legion] ${t.token}: retiring after 3 prompts with no turn started; relaunch cycle 1 (bound 2)`
+          )
+        ).toHaveLength(1);
 
         // Whichever drain reaches the queue first — the one the retired socket's own close
         // triggers (`onWorkerClientClosed` -> reconnect refused -> `markWorkerDead`), or this
