@@ -1850,7 +1850,8 @@ describe("Legion OMP extension", () => {
       requests.filter((request) => request.path === "/legion/v1/grants").length;
     const mintsBefore = mints();
     // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,
-    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases.
+    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases, and (review
+    // round 1) the quoted and backslash-escaped forms bash hands to jj as the identical argv.
     const refused = [
       "jj undo",
       'jj -R "$LEGION_WORKSPACE" undo',
@@ -1871,6 +1872,13 @@ describe("Legion OMP extension", () => {
       "env JJ_CONFIG=/x /usr/local/bin/jj undo",
       'jj un"do"',
       "jj -R \"$LEGION_WORKSPACE\" describe -m 'undo",
+      'jj "undo"',
+      "jj 'undo'",
+      'jj op "restore" @-',
+      '"jj" undo',
+      "jj \\u\\n\\d\\o",
+      // A one-word message equal to a blocked word is the spec's stated tradeoff: one rephrase.
+      'jj describe -m "undo"',
     ];
     const allowedByMistake: string[] = [];
     for (const command of refused) {

@@ -179,37 +179,30 @@ const JJ_MENTION = /\bjj\b/;
 const JJ_LOG_REWRITE_MENTION = /\b(?:undo|abandon)\b|\b(?:op|operation)\b\W+(?:restore|revert)\b/;
 
 /** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`
- * code, a `hub` process start, a quoted shell word, and a `bash` command with unbalanced quoting:
- * the blocked words `text` mentions together with `jj` (e.g. `undo`, `op restore`), or undefined. */
+ * code, a `hub` process start, each word of a tokenised `bash` command (`sh -c "jj undo"`), and
+ * a `bash` command with unbalanced quoting: the blocked words `text` mentions together with `jj`
+ * (e.g. `undo`, `op restore`), or undefined. */
 function jjLogRewriteMention(text: string): string | undefined {
   if (!JJ_MENTION.test(text)) return undefined;
   const match = JJ_LOG_REWRITE_MENTION.exec(text);
   return match === null ? undefined : match[0].replace(/\W+/g, " ");
 }
 
-interface ShellWord {
-  readonly text: string;
-  /** False when every character came from inside quotes or a backslash escape (`"undo"`), so a
-   * quoted message word is never taken for a subcommand; `un"do"` and `un\do` are still bare. */
-  readonly bare: boolean;
-}
-
 /** Splits a shell command into simple commands (at `;`, `&`, `|`, newline, `(`, `)`, and
- * backtick) of words, honouring single quotes, double quotes, and backslash escapes. A word's
- * text is its unquoted value. Undefined on an unterminated quote: the caller then applies the
- * plain-text rule to the whole command, never allows it. Not a shell parser -- no expansions, no
- * heredoc awareness -- and every gap errs toward refusing (a heredoc body is read as commands). */
-function splitShellCommands(command: string): ShellWord[][] | undefined {
-  const commands: ShellWord[][] = [];
-  let words: ShellWord[] = [];
+ * backtick) of words, honouring single quotes, double quotes, and backslash escapes. A word is
+ * its unquoted text -- the argv bash would build -- so quoting never changes a verdict.
+ * Undefined on an unterminated quote: the caller then applies the plain-text rule to the whole
+ * command, never allows it. Not a shell parser -- no expansions, no heredoc awareness -- and
+ * every gap errs toward refusing (a heredoc body is read as commands). */
+function splitShellCommands(command: string): string[][] | undefined {
+  const commands: string[][] = [];
+  let words: string[] = [];
   let text = "";
-  let unquotedChars = 0;
   let inWord = false;
   let quote: '"' | "'" | undefined;
   const endWord = (): void => {
-    if (inWord) words.push({ text, bare: unquotedChars > 0 });
+    if (inWord) words.push(text);
     text = "";
-    unquotedChars = 0;
     inWord = false;
   };
   const endCommand = (): void => {
@@ -242,7 +235,6 @@ function splitShellCommands(command: string): ShellWord[][] | undefined {
       endCommand();
     } else {
       text += char;
-      unquotedChars += 1;
       inWord = true;
     }
   }
@@ -253,33 +245,30 @@ function splitShellCommands(command: string): ShellWord[][] | undefined {
 
 /** The first thing in a `bash` command that would rewrite the shared jj operation log, named for
  * the refusal, or undefined. Each simple command is judged on the whole argument list after its
- * first bare `jj` (or `.../jj`) word -- never only the first word after it -- so `jj -R <path> undo`,
+ * first `jj` (or `.../jj`) word -- never only the first word after it -- so `jj -R <path> undo`,
  * `jj --at-op <id> op restore <id>`, and `jj operation restore` count, in any position of a
- * pipeline or `&&` chain; a bare `undo`/`abandon` counts even as an unquoted message word, and
- * `restore`/`revert` count only beside a bare `op`/`operation`. Every quoted word is held to the
- * plain-text rule too (`sh -c "jj undo"`), and so is the whole command when it does not tokenise. */
+ * pipeline or `&&` chain. A word is judged by its text whatever its quoting, since bash hands jj
+ * the same argv either way: `jj "undo"`, `"jj" undo`, and `jj \u\n\d\o` are `jj undo`, and a
+ * one-word `-m "undo"` is refused with them (the spec's tradeoff: one rephrase), while
+ * `-m "undo this"` is a different word and stays allowed. `undo`/`abandon` count anywhere;
+ * `restore`/`revert` only beside `op`/`operation`. Every word is also held to the plain-text
+ * rule (`sh -c "jj undo"`), and so is the whole command when it does not tokenise. */
 function jjLogRewriteInvocation(command: string): string | undefined {
   const commands = splitShellCommands(command);
   if (commands === undefined) {
     return jjLogRewriteMention(command) === undefined ? undefined : command.trim();
   }
   for (const words of commands) {
-    const quoted = words.find((word) => !word.bare && jjLogRewriteMention(word.text) !== undefined);
-    if (quoted !== undefined) return quoted.text;
-    const jj = words.findIndex(
-      (word) => word.bare && (word.text === "jj" || word.text.endsWith("/jj"))
-    );
+    const mentioned = words.find((word) => jjLogRewriteMention(word) !== undefined);
+    if (mentioned !== undefined) return mentioned;
+    const jj = words.findIndex((word) => word === "jj" || word.endsWith("/jj"));
     if (jj === -1) continue;
-    const args = words.slice(jj + 1).flatMap((word) => (word.bare ? [word.text] : []));
+    const args = words.slice(jj + 1);
     const rewritesLog =
       args.some((arg) => JJ_LOG_REWRITE_WORDS.includes(arg)) ||
       (args.some((arg) => JJ_OP_WORDS.includes(arg)) &&
         args.some((arg) => JJ_OP_LOG_REWRITE_WORDS.includes(arg)));
-    if (rewritesLog)
-      return words
-        .slice(jj)
-        .map((word) => word.text)
-        .join(" ");
+    if (rewritesLog) return words.slice(jj).join(" ");
   }
   return undefined;
 }
