@@ -1,0 +1,71 @@
+{
+  "pr": 1026,
+  "reviewedHead": "cfcf576b18d8bfcd00af6748a5cf0e270c091eab",
+  "implementationHead": "9b241b02e8722a61bd735e4203fe05fe943b908f",
+  "review": {
+    "id": 5191228290,
+    "event": "COMMENT",
+    "url": "https://github.com/sjawhar/legion/pull/1026#pullrequestreview-5191228290",
+    "verdict": "clean: no correctness finding stands; approve on the head that differs from a reviewed head by the .legion/ deletion alone"
+  },
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6h53ab",
+      "url": "https://github.com/sjawhar/legion/pull/1026#discussion_r4000052117",
+      "path": "scripts/smoke/issue-relay.ts",
+      "line": 277,
+      "severity": "Minor",
+      "summary": "children() silently drops a summary whose key fails ISSUE_KEY_PATTERN; make it a schema regex so a contract break errors loudly"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6h53ac",
+      "url": "https://github.com/sjawhar/legion/pull/1026#discussion_r4000052118",
+      "path": "scripts/smoke/issue-relay.ts",
+      "line": 293,
+      "severity": "Minor",
+      "summary": "2 requests per tracked key every 2 s against the shared Dispatch; one updated_since summary query per tick would do"
+    }
+  ],
+  "mergeability": {
+    "mergeable": "CONFLICTING",
+    "cause": "d042dc77 chore(smoke): harness and diagnostics hardening (LEGION-71) (#1029) on main touches up.sh, up.test.sh, checkpoints.test.sh, README.md, docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md",
+    "rebaseIs": "conflict-forced (Sami 2026-09-11 rule satisfied)",
+    "fingerprintAtReviewedHead": "3193064de16c1457abccf2775c0820c2453743bc461a0390fb6659e623e37add",
+    "rule": "equal fingerprint after rebase -> this round continues against the new head; different -> new round (thermo again, one review)"
+  },
+  "verified": {
+    "ciAtHead": "Tests success at 9b241b02 (runs 34760576651, 34760696293) and at cfcf576b (34762165668, 34762209436)",
+    "threadsBeforeReview": "0 open, 0 resolved",
+    "e2e": "tester's concurrent two-rig isolated run at 9b241b02 (ancestor of cfcf576b), surface = smoke rig, negative control quoted",
+    "localGates": "bun test issue-relay.test.ts 22/22; up.test.sh 26 PASS; checkpoints.test.sh 26 PASS; down.test.sh 7 PASS; biome clean",
+    "sourceChecks": [
+      "Dispatch listIssues honours project= and parent= (issue_queries.go); after= is seq-based (events.go)",
+      "issue-linked artifact events are issue-owned (owner.go ownerForArtifact) so the issue topic is right for every /events row",
+      "envelope is field-for-field publisher.go envelope()/payloadSummary; msgID = nats.go dedupe_key:topic; API eventSelect and outbox query share the coalesced project_key row shape",
+      "missing root -> 404 (pgx.ErrNoRows -> NOT_FOUND); /events for an unknown key is 200 [] so the root probe is load-bearing",
+      "checkpoints.sh none-mode GitHub-ingress text with %s=none is byte-identical to the previous literal; envoy-bridge.ts untouched"
+    ]
+  },
+  "thermo": {
+    "head": "9b241b02e8722a61bd735e4203fe05fe943b908f",
+    "deepReview": "no blocking defect; Minors: one-blip false red in require_isolated_relay (documented contract, not a defect) and polling load; Nits: defense-in-depth key/parent echo checks, UNHEALTHY label breadth, SIGTERM mid-tick latency",
+    "codeQuality": "no blocking finding; Minors batched into the Fast-follow line (relay_is_live shape, harness boilerplate, constant pins + orderEvents describe, two-key publish-failure gap, README dated cell)"
+  },
+  "fastFollow": "isolated-relay tidy-up: relay_is_live -> up.sh's process_start_time/pid_is_live; checkpoints.test.sh isolated block via run_checkpoint/expect_output; drop RETRY constant pins + orderEvents describe, add two-key publish-failure case; README modes-table cell as a plain noun phrase",
+  "nextSteps": [
+    "implementer: conflict-forced rebase onto main (chain incl. this handoff commit), fingerprint before/after, one rebase PR comment; may fold the Fast-follow items into the same push (architect's call)",
+    "reviewer: compare fingerprint 3193064d... with the new head; equal -> continue this round (answer both threads, then direct the .legion/ deletion); different -> new round",
+    "then: implementer pushes the .legion/ deletion at reviewer direction; reviewer APPROVEs that head by SHA"
+  ],
+  "requiredSkillsFollowed": [
+    "legion-worker",
+    "dispatch",
+    "verification-before-completion"
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T15:48:00.864Z"
+}
