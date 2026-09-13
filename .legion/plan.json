@@ -1,0 +1,242 @@
+{
+  "summary": "Make the Release Packages workflow's final step — pushing the version-bump commit to main — survive a race between two releases of the same package. Today `release-push.sh push-main` dies on the first rebase conflict because `set -e` exits on `git pull --rebase`; the fix teaches it to resolve exactly one kind of conflict (the released package's package.json alone → set .version to the released version), to abort and fail loudly naming the paths on any other conflict, and to say in the log and the job summary that the publish, tag and GitHub release already succeeded whenever it fails. A bash test against a real bare git origin locks all three behaviours and runs in CI. The pi-envoy manifest bump the spec asked for is already on main (1.24.0), so this PR touches only `.github/`.",
+  "spec": "dispatch://LEGION-75/spec (version 2 records the planning outcomes below)",
+  "skillsFollowed": [
+    "legion-worker",
+    "writing-plans",
+    "dispatch",
+    "test-driven-development (ordering of the tasks)"
+  ],
+  "decision": {
+    "shape": "(a) rebase, then resolve a conflict confined to the released package's package.json; abort and fail naming the paths on anything else.",
+    "why": [
+      "It satisfies acceptance 2 literally: a conflict outside the manifest is detected by git's own merge and fails naming the paths. Shape (b) — re-create the bump on fresh origin/main — never merges, so it cannot see such a conflict; it would silently discard any other change in the commit, which is the opposite of the spec's 'never rewrite anything but the version line automatically'.",
+      "It preserves today's behaviour for every race that already works (a different package's bump: plain rebase, no conflict) — the change is confined to the conflict branch.",
+      "Prototyped on this box (git 2.43, five scenarios): same-line race → exit 0, main at the higher version, two bump commits; conflict outside the manifest, alone or together with it → exit 1 naming the paths, rebase aborted; pre-receive hook → exactly five rejections and the summary written; identical bump already on main → git skips it as an applied cherry-pick; different-package race → clean rebase. Two facts the prototype proved that the code depends on: `git rebase --continue` under the merge backend invokes an editor (fails without a tty), so `GIT_EDITOR=true` is required; and a resolution that leaves the commit empty is dropped by `--continue` itself, so no `--skip` branch is needed."
+    ],
+    "arguments": "`push-main <package-dir> <version>`: both explicit, mirroring the `tag` subcommand (which takes the package dir) and the workflow's `${{ steps.version.outputs.version }}` that every other step already uses. Reading the version back out of HEAD's manifest would also work but hides the contract; explicit arguments make the three call sites self-documenting and let the test pass the version directly.",
+    "stepSummary": "The script writes `$GITHUB_STEP_SUMMARY` itself when the variable is set — GitHub exports it to every `run:` step — so the workflow call sites stay one-liners and the exact summary text is asserted by the test (Case 3 sets the variable to a temp file).",
+    "ciWiring": "`verify-envoy-release-workflow.sh` runs nowhere in CI (and targets a workflow file that no longer exists), so there is no pattern to follow. The test becomes a step in the existing `Tests` workflow's `test` job (pr-and-main.yaml), right after checkout: it needs only git and jq, runs in ~3 s, and inherits whatever required-check status `test` already has — no branch-protection change."
+  },
+  "dropped": [
+    {
+      "item": "Spec acceptance 4 / task item 4: bump packages/pi-envoy/package.json to 1.20.1.",
+      "why": "Already level. Evidence gathered 2026-09-13 ~13:45 UTC: `jj file show -r main@origin packages/pi-envoy/package.json | jq -r .version` → 1.24.0; newest tag `pi-legion-envoy-v1.24.0`, whose manifest reads 1.24.0; `legion gh -- release list` → pi-legion-envoy-v1.24.0 published 2026-09-13T13:30:46Z (1.23.1 at 11:58, 1.23.0 at 10:58, 1.22.2 at 08:01, 1.22.1 at 07:41); `npm view @sjawhar/pi-legion-envoy version` → 1.24.0. The releases after tonight's failure healed the lag exactly as the header comment says they do. The spec's acceptance 4 now records this (version 2)."
+    }
+  ],
+  "globalConstraints": [
+    "Bash scripts: `#!/usr/bin/env bash`, `set -euo pipefail`, GitHub `::error::` annotations for failures (release-bump.sh, release-push.sh convention).",
+    "Only the released package's version line is ever rewritten automatically; any other conflict fails loudly with the paths (spec Requirements).",
+    "A red run must never hide a successful publish (spec Requirements): every push-main failure states the release succeeded and only the push is outstanding.",
+    "No formatter or project-wide test run for this change (nothing under packages/ changes); the only verification commands are the ones named per task.",
+    "Never commit `.omp/config.yml` (an empty file the session leaves in the working copy): every commit is a path-scoped `jj split`.",
+    "Rebase the branch only if GitHub reports the PR CONFLICTING (Sami, 2026-09-11)."
+  ],
+  "interfaces": {
+    "release-push.sh push-main": {
+      "usage": "release-push.sh push-main <package-dir> <version>",
+      "exit0": "the bump commit is on origin/main (possibly rebased; possibly dropped by git when main already carried the identical bump).",
+      "exit1": "five rejected pushes; or a rebase conflict in any path set other than exactly <package-dir>/package.json (rebase aborted first); or a rebase failure with no conflicted paths (rebase aborted first).",
+      "stdout": "one `::error::` line on failure: `<reason> The release itself succeeded: the package artifacts are published, the tag and the GitHub release exist; only this version-bump push to main is outstanding. main's <package-dir>/package.json keeps the older version until the next release, which computes versions from tags and is unaffected.` Reasons: `The version-bump commit for <package-dir> v<version> lost the push race to main 5 times.` | `Rebasing the version-bump commit onto main (<sha>) conflicts in: <paths separated by spaces>. Only a conflict confined to <package-dir>/package.json is resolved automatically.` | `Rebasing the version-bump commit onto main (<sha>) failed without conflicting paths.`",
+      "GITHUB_STEP_SUMMARY": "when set and non-empty, one Markdown line is appended on failure: `**Version bump for <package-dir> v<version> did not land on main.** <the same message>`.",
+      "preconditions": "cwd is the checkout on local branch `main` with the bump commit at HEAD; git identity configured (the `tag` subcommand set it earlier in the same job); `origin` reachable."
+    },
+    "release-push.test.sh": "no arguments; prints `  PASS: …`/`  FAIL: …` per check and `Results: N passed, M failed`; exit 0 only when M = 0. Needs git ≥ 2.28 (`git init -b`) and jq; creates everything under `mktemp -d` and removes it on exit."
+  },
+  "files": [
+    {
+      "path": ".github/scripts/release-push.sh",
+      "change": "rewrite `push-main` (arguments, fetch+rebase, conflict rule, failure messages, step summary), add `fail_outstanding`, extend the header comment and the usage string. `tag` is unchanged."
+    },
+    {
+      "path": ".github/scripts/release-push.test.sh",
+      "change": "new, executable (chmod +x); the four-case bash test above."
+    },
+    {
+      "path": ".github/workflows/release.yaml",
+      "change": "three `Push version bump` steps (jobs cli, envoy_plugin, pi_envoy) pass the package dir and `${{ steps.version.outputs.version }}`."
+    },
+    {
+      "path": ".github/workflows/pr-and-main.yaml",
+      "change": "job `test`: new step `Test release scripts` right after `actions/checkout@v5`."
+    }
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Write the failing test for push-main",
+      "files": {
+        "create": ".github/scripts/release-push.test.sh"
+      },
+      "steps": [
+        {
+          "step": "Create `.github/scripts/release-push.test.sh` with exactly this content:",
+          "content": "#!/usr/bin/env bash\n# Tests for `release-push.sh push-main`: the version-bump push and its\n# same-package race resolution (LEGION-75).\n#\n# Each case builds a bare origin holding one seed commit (packages/pkg at\n# 1.0.0 plus a README) and two clones, a and b. Clone a plays the release run\n# whose bump commit already landed on main; clone b plays the next run of the\n# same package, whose checkout predates that bump — so b's push is rejected\n# and its rebase meets a's change on the same \"version\" line. A pre-receive\n# hook that always rejects forces the exhaustion case.\n#\n# Run from anywhere: .github/scripts/release-push.test.sh\n# CI runs it in the Tests workflow (pr-and-main.yaml, job test).\nset -euo pipefail\n\nscript_dir=$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\nrelease_push=\"$script_dir/release-push.sh\"\nwork=$(mktemp -d)\ntrap 'rm -rf \"$work\"' EXIT\n\nPASS=0\nFAIL=0\n\ncheck() {\n  local desc=\"$1\" result=\"$2\"\n  if [ \"$result\" = \"true\" ]; then\n    echo \"  PASS: $desc\"\n    PASS=$((PASS + 1))\n  else\n    echo \"  FAIL: $desc\"\n    FAIL=$((FAIL + 1))\n  fi\n}\n\n# is <actual> <expected>: true/false for check.\nis() { [ \"$1\" = \"$2\" ] && echo true || echo false; }\n# contains <text> <regex>: true/false for check; greps the whole text.\ncontains() { printf '%s\\n' \"$1\" | grep -q -- \"$2\" && echo true || echo false; }\n\nidentity() {\n  git -C \"$1\" config user.name \"release test\"\n  git -C \"$1\" config user.email \"release-test@example.com\"\n}\n\n# setup <dir>: bare origin at <dir>/origin.git holding the seed commit, and\n# clones <dir>/a and <dir>/b of it, both still at the seed commit.\nsetup() {\n  local dir=$1\n  mkdir -p \"$dir/seed/packages/pkg\"\n  git init -q -b main \"$dir/seed\"\n  identity \"$dir/seed\"\n  printf '{\\n  \"name\": \"pkg\",\\n  \"version\": \"1.0.0\"\\n}\\n' > \"$dir/seed/packages/pkg/package.json\"\n  printf 'seed line\\n' > \"$dir/seed/README.md\"\n  git -C \"$dir/seed\" add -A\n  git -C \"$dir/seed\" commit -q -m \"seed\"\n  git clone -q --bare \"$dir/seed\" \"$dir/origin.git\"\n  git clone -q \"$dir/origin.git\" \"$dir/a\"\n  git clone -q \"$dir/origin.git\" \"$dir/b\"\n  identity \"$dir/a\"\n  identity \"$dir/b\"\n}\n\n# bump <clone> <version>: what the workflow's \"Set release version\" step and\n# `release-push.sh tag` do together — rewrite .version with jq and commit it\n# (together with anything the case already staged).\nbump() {\n  local clone=$1 v=$2\n  jq --arg v \"$v\" '.version = $v' \"$clone/packages/pkg/package.json\" > \"$clone/tmp.json\" \\\n    && mv \"$clone/tmp.json\" \"$clone/packages/pkg/package.json\"\n  git -C \"$clone\" add packages/pkg/package.json\n  git -C \"$clone\" commit -q -m \"chore: release pkg v$v [skip ci]\"\n}\n\n# push_main <clone> <version> [summary-file]: runs the script under test from\n# <clone>; leaves its exit code in rc and its combined output in out.\npush_main() {\n  local clone=$1 v=$2 summary=${3:-}\n  set +e\n  out=$(cd \"$clone\" && GITHUB_STEP_SUMMARY=\"$summary\" \"$release_push\" push-main packages/pkg \"$v\" 2>&1)\n  rc=$?\n  set -e\n}\n\norigin_version() { git -C \"$1/origin.git\" show main:packages/pkg/package.json | jq -r .version; }\norigin_tip_subject() { git -C \"$1/origin.git\" log -1 --format=%s main; }\nrelease_commits() { git -C \"$1/origin.git\" log --format=%s main | { grep -c '^chore: release' || true; }; }\nnot_rebasing() { [ ! -d \"$1/.git/rebase-merge\" ] && [ ! -d \"$1/.git/rebase-apply\" ] && echo true || echo false; }\n\necho \"Case 1: two releases of one package race on the version line\"\nsetup \"$work/c1\"\nbump \"$work/c1/a\" 1.0.1\ngit -C \"$work/c1/a\" push -q origin main\nbump \"$work/c1/b\" 1.0.2\npush_main \"$work/c1/b\" 1.0.2\ncheck \"push-main exits 0\" \"$(is \"$rc\" 0)\"\ncheck \"origin/main holds the higher version\" \"$(is \"$(origin_version \"$work/c1\")\" 1.0.2)\"\ncheck \"origin/main has one bump commit per release\" \"$(is \"$(release_commits \"$work/c1\")\" 2)\"\ncheck \"the rebased bump commit keeps its message\" \"$(is \"$(origin_tip_subject \"$work/c1\")\" \"chore: release pkg v1.0.2 [skip ci]\")\"\ncheck \"clone is not left mid-rebase\" \"$(not_rebasing \"$work/c1/b\")\"\n\necho\necho \"Case 2: a conflict in another file fails naming it\"\nsetup \"$work/c2\"\nprintf 'from a\\n' > \"$work/c2/a/README.md\"\ngit -C \"$work/c2/a\" commit -q -am \"a: readme\"\ngit -C \"$work/c2/a\" push -q origin main\nprintf 'from b\\n' > \"$work/c2/b/README.md\"\ngit -C \"$work/c2/b\" commit -q -am \"b: readme\"\nbump \"$work/c2/b\" 1.0.1\npush_main \"$work/c2/b\" 1.0.1\ncheck \"push-main exits non-zero\" \"$([ \"$rc\" != 0 ] && echo true || echo false)\"\ncheck \"error names README.md as the conflict\" \"$(contains \"$out\" '^::error::.*conflicts in: README\\.md\\.')\"\ncheck \"origin/main manifest is untouched\" \"$(is \"$(origin_version \"$work/c2\")\" 1.0.0)\"\ncheck \"rebase was aborted\" \"$(not_rebasing \"$work/c2/b\")\"\n\necho\necho \"Case 2b: the manifest conflicting alongside another file is not resolved\"\nsetup \"$work/c2b\"\nprintf 'from a\\n' > \"$work/c2b/a/README.md\"\ngit -C \"$work/c2b/a\" add README.md\nbump \"$work/c2b/a\" 1.0.1\ngit -C \"$work/c2b/a\" push -q origin main\nprintf 'from b\\n' > \"$work/c2b/b/README.md\"\ngit -C \"$work/c2b/b\" add README.md\nbump \"$work/c2b/b\" 1.0.2\npush_main \"$work/c2b/b\" 1.0.2\ncheck \"push-main exits non-zero\" \"$([ \"$rc\" != 0 ] && echo true || echo false)\"\ncheck \"error names both conflicted paths\" \"$(contains \"$out\" '^::error::.*conflicts in: README\\.md packages/pkg/package\\.json\\.')\"\ncheck \"origin/main keeps the landed version\" \"$(is \"$(origin_version \"$work/c2b\")\" 1.0.1)\"\ncheck \"rebase was aborted\" \"$(not_rebasing \"$work/c2b/b\")\"\n\necho\necho \"Case 3: five rejections fail, saying the release succeeded and only the push is outstanding\"\nsetup \"$work/c3\"\nprintf '#!/bin/sh\\necho \"rejected by test hook\" >&2\\nexit 1\\n' > \"$work/c3/origin.git/hooks/pre-receive\"\nchmod +x \"$work/c3/origin.git/hooks/pre-receive\"\nbump \"$work/c3/b\" 1.0.1\npush_main \"$work/c3/b\" 1.0.1 \"$work/c3/summary.md\"\ncheck \"push-main exits non-zero\" \"$([ \"$rc\" != 0 ] && echo true || echo false)\"\ncheck \"push was attempted exactly five times\" \"$(is \"$(printf '%s\\n' \"$out\" | grep -c 'rejected by test hook')\" 5)\"\ncheck \"error says the release itself succeeded\" \"$(contains \"$out\" '^::error::.*The release itself succeeded')\"\ncheck \"error says only the version-bump push is outstanding\" \"$(contains \"$out\" 'only this version-bump push to main is outstanding')\"\ncheck \"job summary says the same\" \"$(contains \"$(cat \"$work/c3/summary.md\" 2>/dev/null)\" 'The release itself succeeded.*only this version-bump push to main is outstanding')\"\ncheck \"origin/main manifest is untouched\" \"$(is \"$(origin_version \"$work/c3\")\" 1.0.0)\"\n\necho\necho \"Case 4: a release of another package racing in still rebases cleanly\"\nsetup \"$work/c4\"\nmkdir -p \"$work/c4/a/packages/other\"\nprintf '{\\n  \"name\": \"other\",\\n  \"version\": \"2.0.1\"\\n}\\n' > \"$work/c4/a/packages/other/package.json\"\ngit -C \"$work/c4/a\" add -A\ngit -C \"$work/c4/a\" commit -q -m \"chore: release other v2.0.1 [skip ci]\"\ngit -C \"$work/c4/a\" push -q origin main\nbump \"$work/c4/b\" 1.0.1\npush_main \"$work/c4/b\" 1.0.1\ncheck \"push-main exits 0\" \"$(is \"$rc\" 0)\"\ncheck \"origin/main holds the bump\" \"$(is \"$(origin_version \"$work/c4\")\" 1.0.1)\"\ncheck \"origin/main has both release commits\" \"$(is \"$(release_commits \"$work/c4\")\" 2)\"\n\necho\necho \"---\"\necho \"Results: $PASS passed, $FAIL failed\"\nif [ \"$FAIL\" -gt 0 ]; then\n  exit 1\nfi\necho \"PASS: release-push.sh push-main\"\n"
+        },
+        {
+          "step": "Make it executable: `cd -- \"$LEGION_WORKSPACE\" && chmod +x .github/scripts/release-push.test.sh` (jj tracks the mode bit)."
+        },
+        {
+          "step": "Run it against the current script: `cd -- \"$LEGION_WORKSPACE\" && .github/scripts/release-push.test.sh`.",
+          "expected": "Exit 1, `Results: 10 passed, 12 failed`. Case 1 fails all five checks (the current script dies inside `git pull --rebase` under `set -e`: exit 1, origin/main still 1.0.1, the clone left mid-rebase). Case 2 and 2b fail `error names … as the conflict` (no `::error::` line; git's own conflict text only) and `rebase was aborted` (the rebase is left in progress). Case 3 fails the two message checks and `job summary says the same` (the current message is different and writes no summary). Case 4 passes, as does every `exits non-zero` and `manifest is untouched` check. The extra arguments are ignored by the current script, so nothing fails on usage."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Rewrite push-main with the conflict rule and the failure messages",
+      "files": {
+        "modify": ".github/scripts/release-push.sh"
+      },
+      "steps": [
+        {
+          "step": "Replace the whole of `.github/scripts/release-push.sh` with exactly this content (the `tag` subcommand body is unchanged; the header, the usage string, `fail_outstanding`, and `push-main` are new):",
+          "content": "#!/usr/bin/env bash\n# Release source-state publisher, shared by the release workflows.\n#\n# tag:       commit the version bump and create/push the release tag on that\n#            un-rebased commit, so the tag always describes exactly the source\n#            the artifacts were built and published from. A pre-existing tag is\n#            reused only when it carries the same package version; any other\n#            collision fails loudly.\n# push-main: push the bump commit to main, fetching main and rebasing onto it\n#            between attempts, five attempts in all. This runs last, after the\n#            tag and GitHub release exist: a lost push only delays the metadata\n#            bump on main, which the tag-anchored version computation heals on\n#            the next release. Raced-in commits stay outside the tag and are\n#            picked up by the next version calculation.\n#\n#            The race that needs help is two releases of the *same* package.\n#            A run checks out the merge commit that triggered it, and when the\n#            previous run's bump commit landed after that merge (bump commits\n#            are \"[skip ci]\" and never trigger a run of their own), both bumps\n#            rewrite the one \"version\" line of the same package.json from the\n#            same base and the rebase conflicts. One rule resolves it: when the\n#            only conflicted path is the released package's package.json, take\n#            main's copy of that file, set its .version to the version being\n#            released (each run derives its version from the newest tag, so the\n#            release in flight is always the newest for its package), continue\n#            the rebase, and push again. Any other conflicted path is a real\n#            divergence: the rebase is aborted and the step fails naming the\n#            paths. Exhausting the attempts fails the step too. Every failure\n#            here says, in the log and in the job summary, that the publish,\n#            tag and GitHub release already succeeded and only this push to\n#            main is outstanding.\nset -euo pipefail\n\ncommand=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh push-main <package-dir> <version>}\n\n# fail_outstanding <reason>: fail push-main after the release itself succeeded.\n# Writes the ::error:: annotation and, under GitHub Actions, the job summary.\nfail_outstanding() {\n  local reason=$1\n  local message=\"$reason The release itself succeeded: the package artifacts are published, the tag and the GitHub release exist; only this version-bump push to main is outstanding. main's $manifest keeps the older version until the next release, which computes versions from tags and is unaffected.\"\n  echo \"::error::$message\"\n  if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then\n    printf '**Version bump for %s v%s did not land on main.** %s\\n' \"$package_dir\" \"$version\" \"$message\" >> \"$GITHUB_STEP_SUMMARY\"\n  fi\n  exit 1\n}\n\ncase \"$command\" in\n  tag)\n    package_dir=${2:?package dir}\n    commit_message=${3:?commit message}\n    tag=${4:?tag}\n    git config user.name \"github-actions[bot]\"\n    git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\n    git add \"$package_dir/package.json\"\n    git diff --staged --quiet || git commit -m \"$commit_message\"\n    git fetch --tags origin\n    if git rev-parse -q --verify \"refs/tags/$tag\" >/dev/null; then\n      tagged_version=$(git show \"$tag:$package_dir/package.json\" | jq -r .version)\n      current_version=$(jq -r .version \"$package_dir/package.json\")\n      if [ \"$tagged_version\" != \"$current_version\" ]; then\n        echo \"::error::tag $tag already exists with version $tagged_version, not $current_version\"\n        exit 1\n      fi\n      echo \"Tag $tag already exists for version $current_version; reusing it\"\n    else\n      git tag \"$tag\"\n      git push origin \"refs/tags/$tag\"\n    fi\n    ;;\n  push-main)\n    package_dir=${2:?package dir}\n    version=${3:?released version}\n    manifest=\"$package_dir/package.json\"\n    for attempt in 1 2 3 4 5; do\n      git push origin main && exit 0\n      if [ \"$attempt\" = 5 ]; then\n        fail_outstanding \"The version-bump commit for $package_dir v$version lost the push race to main 5 times.\"\n      fi\n      git fetch origin main\n      upstream=$(git rev-parse FETCH_HEAD)\n      if git rebase \"$upstream\"; then\n        continue\n      fi\n      conflicted=$(git diff --name-only --diff-filter=U)\n      if [ \"$conflicted\" != \"$manifest\" ]; then\n        git rebase --abort || true\n        if [ -z \"$conflicted\" ]; then\n          fail_outstanding \"Rebasing the version-bump commit onto main ($upstream) failed without conflicting paths.\"\n        fi\n        fail_outstanding \"Rebasing the version-bump commit onto main ($upstream) conflicts in: $(printf '%s' \"$conflicted\" | tr '\\n' ' '). Only a conflict confined to $manifest is resolved automatically.\"\n      fi\n      echo \"Resolving the $manifest version-line conflict to v$version\"\n      # During a rebase stop HEAD is main's side (plus any commit already\n      # replayed), so this keeps every other change main made to the file.\n      # The merge backend opens an editor on --continue; give it none.\n      git show \"HEAD:$manifest\" | jq --arg v \"$version\" '.version = $v' > \"$manifest\"\n      git add \"$manifest\"\n      GIT_EDITOR=true git rebase --continue\n    done\n    ;;\n  *)\n    echo \"::error::unknown release-push command: $command\"\n    exit 1\n    ;;\nesac\n"
+        },
+        {
+          "step": "Syntax check: `cd -- \"$LEGION_WORKSPACE\" && bash -n .github/scripts/release-push.sh .github/scripts/release-push.test.sh`.",
+          "expected": "No output, exit 0."
+        },
+        {
+          "step": "Run the test: `cd -- \"$LEGION_WORKSPACE\" && .github/scripts/release-push.test.sh`.",
+          "expected": "Every line `PASS`, `Results: 22 passed, 0 failed`, `PASS: release-push.sh push-main`, exit 0. Case 1's output (visible if you drop `2>&1` capture or run the case's commands by hand) contains `CONFLICT (content): Merge conflict in packages/pkg/package.json`, then `Resolving the packages/pkg/package.json version-line conflict to v1.0.2`, then `Successfully rebased and updated refs/heads/main`."
+        },
+        {
+          "step": "Run it a second time to confirm it is deterministic and leaves nothing behind: `ls /tmp | grep -c '^tmp\\.' ` before and after should not grow (the trap removes the work dir)."
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Pass the package dir and version from the workflow; run the test in CI",
+      "files": {
+        "modify": [
+          ".github/workflows/release.yaml",
+          ".github/workflows/pr-and-main.yaml"
+        ]
+      },
+      "steps": [
+        {
+          "step": "In `.github/workflows/release.yaml`, job `cli`, step `Push version bump` (currently `run: .github/scripts/release-push.sh push-main` at line 152), change the run line to:",
+          "content": "      - name: Push version bump\n        if: steps.version.outputs.skip != 'true'\n        run: .github/scripts/release-push.sh push-main packages/daemon \"${{ steps.version.outputs.version }}\"\n"
+        },
+        {
+          "step": "Job `envoy_plugin`, step `Push version bump` (line 273):",
+          "content": "      - name: Push version bump\n        if: steps.version.outputs.skip != 'true'\n        run: .github/scripts/release-push.sh push-main packages/envoy-plugin \"${{ steps.version.outputs.version }}\"\n"
+        },
+        {
+          "step": "Job `pi_envoy`, step `Push version bump` (line 398, the last step of the file):",
+          "content": "      - name: Push version bump\n        if: steps.version.outputs.skip != 'true'\n        run: .github/scripts/release-push.sh push-main packages/pi-envoy \"${{ steps.version.outputs.version }}\"\n"
+        },
+        {
+          "step": "In `.github/workflows/pr-and-main.yaml`, job `test`, insert this step immediately after `- uses: actions/checkout@v5` and before `- name: Setup Bun`:",
+          "content": "      - name: Test release scripts\n        run: .github/scripts/release-push.test.sh\n"
+        },
+        {
+          "step": "Prove both workflow files still parse and the three call sites carry the arguments (Bun 1.3 has `Bun.YAML`; write this to a file outside the workspace, e.g. /tmp/check-release-yaml.ts, and run `cd -- \"$LEGION_WORKSPACE\" && bun run /tmp/check-release-yaml.ts`):",
+          "content": "// One-off (run from the repository root, do not commit): parse release.yaml and list every push-main call site.\nconst text = await Bun.file(\".github/workflows/release.yaml\").text();\nconst doc = Bun.YAML.parse(text) as { jobs: Record<string, { steps?: { name?: string; run?: string }[] }> };\nfor (const [job, spec] of Object.entries(doc.jobs)) {\n  for (const step of spec.steps ?? []) {\n    if (/push-main/.test(step.run ?? \"\")) console.log(`${job}: ${step.name}: ${step.run?.trim()}`);\n  }\n}\n",
+          "expected": "Three lines: `cli: Push version bump: .github/scripts/release-push.sh push-main packages/daemon \"${{ steps.version.outputs.version }}\"`, then the same for `envoy_plugin`/`packages/envoy-plugin` and `pi_envoy`/`packages/pi-envoy`. Also `bun -e 'Bun.YAML.parse(await Bun.file(\".github/workflows/pr-and-main.yaml\").text()); console.log(\"ok\")'` prints ok."
+        },
+        {
+          "step": "Confirm nothing under `packages/` changed (no release is triggered by this PR): `cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --stat`.",
+          "expected": "Exactly four paths: the two scripts and the two workflow files (plus `.omp/config.yml`, which must NOT be committed)."
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Commit, push, open the PR",
+      "steps": [
+        {
+          "step": "Single commit, path-scoped so `.omp/config.yml` stays out:",
+          "content": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m 'ci(release): resolve the same-package version-bump race in push-main (LEGION-75)' .github/scripts/release-push.sh .github/scripts/release-push.test.sh .github/workflows/release.yaml .github/workflows/pr-and-main.yaml\n"
+        },
+        {
+          "step": "Check the commit holds exactly those four paths and the test file is executable: `jj -R \"$LEGION_WORKSPACE\" diff -r @- --stat` and `jj -R \"$LEGION_WORKSPACE\" file list -r @- -T 'path ++ \" \" ++ file_type ++ \"\\n\"' .github/scripts/release-push.test.sh` (expect `file_type` executable) — or `git -C <backing repo> ls-files -s` is not available in the workspace, so use `jj diff -r @- --git .github/scripts/release-push.test.sh | head -3` and expect `new file mode 100755`."
+        },
+        {
+          "step": "Then the handoff commit per the legion-worker skill (`legion handoff write --phase implement …`, `jj split -m 'implement: record handoff' .legion/implement.json`)."
+        },
+        {
+          "step": "After a `jj split` the issue bookmark sits on the undescribed working copy; point it at the described head before every push (docs/solutions/legion/worker-pane-shell-gotchas.md §3):",
+          "content": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)' && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-75 -r @- --allow-backwards\ncd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-75\n",
+          "expected": "`jj git push` first in its own bash call (the grant lives 60 s). The push summary reads `move forward` or creates the remote bookmark; jj must not say `Won't push commit … since it has no description`."
+        },
+        {
+          "step": "Open the PR with `legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-75 --title 'ci(release): resolve the same-package version-bump race in push-main (LEGION-75)' --body-file <file>`; the body starts with `Dispatch: LEGION-75`, then the READY-format `## Verification` block from the legion-worker skill. `Thermo:` line included (this is a code PR, not docs-only). `E2E:` names `.github/scripts/release-push.test.sh` output at the head SHA (paste the `Results:` line) and the `Tests` run's `Test release scripts` step once CI runs; negative control: Case 2 (`conflicts in: README.md.` and exit 1). Subscribe with `envoy_subscribe([\"notifications.github.sjawhar.legion.pr.<n>.>\"])` and wait for the checks event instead of polling."
+        }
+      ]
+    }
+  ],
+  "acceptanceSurfaces": [
+    {
+      "acceptance": "1 — same-line race: exit 0, origin/main at the higher version, one bump commit per release",
+      "surface": "`.github/scripts/release-push.sh push-main` run against a real git remote — the same binary steps (`git push`, `git fetch`, `git rebase`) the `Push version bump` step performs; only the transport differs (file:// here, the deploy-key ssh URL in Actions), and the script sees only exit codes either way.",
+      "proof": "`release-push.test.sh` Case 1 locally (quote the `Results:` line and the head SHA) and in the PR's `Tests` run, step `Test release scripts` (link the run). The production step itself cannot be provoked without publishing a real release; the next merge-queue wave that lands two PRs touching the same package exercises it (five pi-envoy releases shipped between 07:41Z and 13:30Z today, so one is likely within a day) — the implementer's post-merge production check is that run's `Push version bump` log showing `Resolving the packages/<dir>/package.json version-line conflict to v<version>` followed by a green step, or a clean push.",
+      "skill": "legion-worker (E2E line, negative control, production verification after merge)"
+    },
+    {
+      "acceptance": "2 — conflict elsewhere: non-zero exit, message names the file",
+      "surface": "same script, Case 2 (README.md alone) and Case 2b (README.md together with the manifest — the rule is 'exactly the manifest', not 'contains the manifest').",
+      "proof": "test output; this is also the PR body's negative control. Note for the tester: the workflow can never produce this case today (the bump commit touches only the manifest); it is the safety net against a hand-run or a future change to the `tag` step, which is why the test carries it.",
+      "skill": "legion-worker"
+    },
+    {
+      "acceptance": "3 — five rejections: non-zero exit, log and job summary say publish/tag/release succeeded and only the manifest push is outstanding",
+      "surface": "same script with an always-rejecting `pre-receive` hook on the bare origin (deterministic; no stubbed git) and `GITHUB_STEP_SUMMARY` pointed at a temp file, exactly how Actions hands the variable to a `run:` step.",
+      "proof": "Case 3: exactly five `rejected by test hook` lines, the `::error::` text, and the summary file's contents. The tester additionally confirms in the PR's `Tests` run that the step summary mechanism is live by reading the `Test release scripts` step log (the test prints the checks; the summary file itself is the temp file, asserted by the test).",
+      "skill": "legion-worker"
+    },
+    {
+      "acceptance": "4 — pi-envoy manifest level with the published release",
+      "surface": "`jq -r .version packages/pi-envoy/package.json` on main vs the newest `pi-legion-envoy-v*` tag / `legion gh -- release list`.",
+      "proof": "already 1.24.0 on both (see dropped); the tester re-reads main at test time and records the two values.",
+      "skill": "legion-worker"
+    },
+    {
+      "acceptance": "5 — header comment describes the race and the rule",
+      "surface": "the diff of `.github/scripts/release-push.sh`.",
+      "proof": "reviewer reads it; the tester confirms `head -35 .github/scripts/release-push.sh` mentions the same-package race, the one-rule resolution, the abort-on-other-paths behaviour, and the summary.",
+      "skill": "legion-worker"
+    }
+  ],
+  "testCommands": [
+    "cd -- \"$LEGION_WORKSPACE\" && bash -n .github/scripts/release-push.sh .github/scripts/release-push.test.sh",
+    "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/release-push.test.sh",
+    "cd -- \"$LEGION_WORKSPACE\" && bun run /tmp/check-release-yaml.ts   # the one-off Bun.YAML call-site check from task 3",
+    "legion gh -- run list --repo sjawhar/legion --workflow Tests --branch legion/LEGION-75 --limit 1   # then `legion gh -- run view <id> --log | grep -A3 'Test release scripts'`"
+  ],
+  "taskCount": 4,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks in order (the test first, so Case 1's failure on the current script is observed before the fix). One code commit plus the handoff commit; no rebase unless GitHub says CONFLICTING. Tester: run the test locally at the PR head and read the `Tests` run; reviewer: verify the conflict rule is 'exactly the manifest' (Case 2b) and that every failure path goes through `fail_outstanding`.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — phase contract: path-scoped `jj split`, `bookmark set -r @- --allow-backwards` before each push, READY-format PR body with `Dispatch: LEGION-75`, the credential-first bash call rule, and post-merge production verification of the next release run's `Push version bump` step.",
+      "test-driven-development — write release-push.test.sh first and watch Case 1–3 fail on the current script before replacing push-main; the failing output is the evidence the test defends the contract.",
+      "verification-before-completion — the `Results: 22 passed, 0 failed` line and the Bun.YAML call-site listing are the only acceptable proof; never claim the workflow wiring works from reading YAML."
+    ],
+    "test": [
+      "legion-worker — the E2E line names `release-push.test.sh` at the head SHA plus the PR's `Tests` run step `Test release scripts`; negative control is Case 2's `conflicts in: README.md.` refusal; re-read main's pi-envoy version against the newest tag for acceptance 4.",
+      "verification-before-completion — quote command output (the `Results:` line, the run id), not the implementer's handoff; state plainly that the production step can only be observed on the next same-package merge wave."
+    ],
+    "review": [
+      "legion-worker — one review per round with every finding inline, thermonuclear-deep-review and thermonuclear-code-quality once at the head, `APPROVE` only for the `.legion`-free head named by SHA; verify CI/E2E facts on GitHub directly.",
+      "receiving-code-review — for the implementer answering the round: verify each finding against the prototype facts in this plan (GIT_EDITOR, HEAD-is-main's-side during a rebase stop, the exact-set rule) before changing anything."
+    ]
+  },
+  "concerns": [
+    "Adjacent, out of scope, architect's call: `.github/scripts/verify-envoy-release-workflow.sh` targets `.github/workflows/release-envoy-and-plugin.yaml`, which no longer exists (the workflows dir holds release.yaml, release-envoy-listener.yaml, pr-and-main.yaml, envoy-and-contracts.yaml, worker-image.yaml), and it runs nowhere in CI — it is dead. Deleting it is a one-line cleanup not caused by this change.",
+    "The conflict-outside-the-manifest path is unreachable from today's workflow (the `tag` step commits only the manifest); it exists so a future change to what the bump commit contains, or a hand-run, cannot silently lose work. The test keeps it honest.",
+    "`git rebase --continue` under the merge backend opens an editor; `GIT_EDITOR=true` is required (proved: with `GIT_EDITOR=false` the rebase stays stopped with `There was a problem with the editor`). Do not remove it as cargo cult.",
+    "`.omp/config.yml` (empty, session-created) sits in the working copy and is not on main; every commit must be a path-scoped `jj split`, and the bookmark must be re-pointed with `-r @- --allow-backwards` before each push, else jj refuses `Won't push commit … since it has no description`.",
+    "Local `jq` on this box is jaq 2.3 (a jq clone); the runner has jq 1.7. Both handle `--arg v '.version = $v'` and `-r .version`; the prototype and test ran under jaq.",
+    "Nothing under packages/ changes, so merging this PR triggers no release; the fix first runs for real on the next Release Packages run. The implementer's production verification is that run's `Push version bump` step log."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T13:54:47.690Z"
+}
