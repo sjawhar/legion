@@ -21,6 +21,57 @@ import type { WorkerRpcClient } from "./worker-rpc";
  * which increments and publishes against the same threshold for the launch path. */
 export const MAX_LAUNCH_FAILURES = 3;
 
+/** Where a queued worker sits relative to the others: lower runs first, FIFO within a tier. Work
+ * that finishes an open pull request outranks work that opens a new one — a merger turns an
+ * approved PR into a merge, a reviewer turns a tested PR into an approval, a tester turns an
+ * implementation into a verdict, and an implementer on an issue whose PR already exists (a
+ * corrective round, the retro commit) keeps that PR moving; a planner or sub-architect only
+ * prepares work; an implementer on an issue with no PR yet creates one more PR that will need
+ * every tier above it. Without this the queue drains in arrival order, so a burst of new
+ * implementers starves every tester, reviewer, and merger behind it and work in progress only
+ * grows (Sami, 2026-09-13: "If it starts implementers on new issues before it starts testers
+ * and reviewers on existing issues, it'll just build up work in progress forever"). */
+export function workerPriority(state: LegionState, token: string): number {
+  const parsed = parseRoleToken(state.project, token);
+  if (!parsed || "controller" in parsed) return 6;
+  switch (parsed.role) {
+    case "merger":
+      return 0;
+    case "reviewer":
+      return 1;
+    case "tester":
+      return 2;
+    case "implementer":
+      return Object.values(state.prs).some((pr) => pr.key === parsed.issue) ? 3 : 5;
+    case "planner":
+    case "architect":
+      return 4;
+  }
+}
+
+/** Stable in-place ordering of the running-worker queue: clean tokens by `workerPriority`, ties
+ * in arrival order (FIFO within a tier); then, behind every clean token whatever its tier, the
+ * tokens that have failed to launch and not booted since (`launchFailures > 0`, reset only by a
+ * confirmed `/worker/ready`), in the same tier-then-arrival order. That bottom shelf is where the
+ * old arrival-order queue's rotate-to-tail left a failed token too, and it is what keeps a
+ * persistently failing merger from taking the head on every pass: two drains can overlap (a
+ * promotion trigger fires while a pass is awaiting persistence), and a fresh pass's sort must not
+ * lift a token the other pass just rotated back above the workers it was rotated behind. Called
+ * under `admissionLock` at the start of every drain pass and nowhere else: a tier can change
+ * while a token waits (an implementer's PR opens) and a queue persisted by an older daemon is in
+ * arrival order, so the pass that consumes the queue orders it first; an enqueue that lands
+ * mid-pass only appends. */
+export function orderWorkerQueue(state: LegionState): void {
+  const queue = state.workerAdmission.queue;
+  const ranked = queue.map((token, index) => {
+    const claim = state.roles[token];
+    const failed = claim && "issue" in claim && (claim.launchFailures ?? 0) > 0 ? 1 : 0;
+    return { token, index, failed, tier: workerPriority(state, token) };
+  });
+  ranked.sort((a, b) => a.failed - b.failed || a.tier - b.tier || a.index - b.index);
+  for (let i = 0; i < ranked.length; i += 1) queue[i] = ranked[i].token;
+}
+
 /** The outcome of `promoteQueuedWorker`'s admission-lock critical section: `"launch"` carries
  * everything needed to run `launchWorker` outside the lock; `"prompt"` carries an already-live,
  * cached, idle client to prompt in place (the resume-at-cap path queued via
@@ -108,7 +159,8 @@ export interface WorkerAdmissionDeps {
   rootForIssue(issue: IssueKey): IssueKey | undefined;
 }
 
-/** Owns the running-worker cap: the admission decision, the FIFO queue, the reservation set that
+/** Owns the running-worker cap: the admission decision, the priority queue (`workerPriority`:
+ * finishing work first, FIFO within a tier; ordered at the start of every drain pass), the reservation set that
  * covers the gap between a decision and its effect landing, and the promotion drain that
  * consumes the queue as slots free up. `ProcessManager` keeps every tmux/workspace/token/RPC/
  * reconnect/tree mechanic and calls into this module for admission decisions and the queue drain.
@@ -239,8 +291,8 @@ export class WorkerAdmission {
    * Pure in-memory mutation (called only from inside `admissionLock`'s critical section — no
    * I/O here; the caller does `saveState`/publish after the lock releases) for a worker with no
    * live pane to reuse: records the pending prompt on the existing claim (mutated in place, never
-   * replaced, so `agentId`/`generation`/`launchFailures` survive) and appends its token to the
-   * FIFO running-worker queue. Any existing locator is cleared, moving its `ompSessionFile` to
+   * replaced, so `agentId`/`generation`/`launchFailures` survive) and appends its token to
+   * the running-worker queue (ordered by `orderWorkerQueue` when a drain pass consumes it). Any existing locator is cleared, moving its `ompSessionFile` to
    * `resumeSessionFile` so the eventual promoted launch still resumes the same agent;
    * `sessionId` is deliberately kept (never deleted) so a subsequent respawn's boot token still
    * names this session as the one it must resume — the exact path a delayed promotion depends
@@ -285,7 +337,8 @@ export class WorkerAdmission {
    * Launches a brand-new worker pane when a running-worker slot is available (fewer than
    * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
    * locator-less claim and publishes `worker-queued` to the tree's architect otherwise. Every
-   * queued task is promoted in FIFO order by `promoteWorkerQueue` once a slot frees up. Only the
+   * queued task is promoted in priority order (FIFO within a tier) by `promoteWorkerQueue` once a
+   * slot frees up. Only the
    * read-count/decide/reserve-or-enqueue step runs inside the `admissionLock` critical section
    * (pure in-memory claim/queue mutation only — no tmux, workspace, or save I/O), so a
    * concurrent decision for a different role can never observe the same free slot before this
@@ -342,7 +395,7 @@ export class WorkerAdmission {
 
   /**
    * Enqueues an already-cleared claim — its locator already gone, its `pendingAssignment`
-   * already the task to retry — into the FIFO running-worker queue, persists it, then triggers
+   * already the task to retry — onto the running-worker queue, persists it, then triggers
    * the normal cap-aware, role-locked drain to relaunch it. Never launches directly itself: a
    * boot the watchdog (or a restart-time reconnect probe) confirmed dead must go through the
    * exact same admission decision as any other launch, not bypass it (over-admission past the
@@ -358,7 +411,7 @@ export class WorkerAdmission {
     this.promoteWorkerQueue();
   }
 
-  /** Removes `token`'s FIFO queue entry, if any, under the shared admission lock — the commit
+  /** Removes `token`'s queue entry, if any, under the shared admission lock — the commit
    * half of a delivered prompt (`ProcessManager.commitPromptDelivery`), called once the worker's
    * turn is observed to start, whether in the bound or late. A no-op for a token that was never
    * queued (the direct `resumed` path and `/worker/ready`'s delivery). No persist: the caller
@@ -506,7 +559,7 @@ export class WorkerAdmission {
     });
   }
 
-  /** Removes every FIFO-queued token whose tree is `treeKey` — called by `closeTreeLocked` as
+  /** Removes every queued token whose tree is `treeKey` — called by `closeTreeLocked` as
    * part of its final cleanup, so a tree that has fully closed never leaves behind a queue entry
    * a later, unrelated drain would try to promote against a tree that no longer exists (the
    * promotion catch's `TreeClosingError` handling stops that one attempt from corrupting
@@ -530,7 +583,8 @@ export class WorkerAdmission {
     });
   }
 
-  /** Promotes queued workers in FIFO order, one at a time, while a running-worker slot is
+  /** Promotes queued workers in priority order (`workerPriority`; FIFO within a tier), one at a
+   * time, while a running-worker slot is
    * available. Each pass re-peeks the current queue head (outside any lock — staleness is
    * re-validated inside `promoteQueuedWorker`) and runs the actual admission decision through
    * the same per-role launch queue `spawnWorker` uses, keyed to that token, so a concurrent
@@ -547,6 +601,8 @@ export class WorkerAdmission {
    * periodic sweep or the next idle/dead event — one launch attempt per token per drain pass. */
   private async drainWorkerQueue(): Promise<void> {
     const attempted = new Set<string>();
+    // The one place the queue is ordered (see `orderWorkerQueue`): once, before the pass peeks.
+    await this.withAdmissionLock(async () => orderWorkerQueue(this.deps.state));
     for (;;) {
       const token = this.deps.state.workerAdmission.queue[0];
       if (token === undefined) return;
@@ -787,6 +843,8 @@ export class WorkerAdmission {
           const index = queue.indexOf(token);
           if (index !== -1) queue.splice(index, 1);
         } else if (queue[0] === token) {
+          // To the tail for the rest of this pass — and `orderWorkerQueue` keeps it behind every
+          // clean token on later passes too, until a confirmed ready resets `launchFailures`.
           queue.shift();
           queue.push(token);
         }
