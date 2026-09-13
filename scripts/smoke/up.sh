@@ -642,13 +642,15 @@ main() {
 
   ensure_nats "$nats_name"
   # Both files down.sh keys on are written here, together, only once the container is running:
-  # legion.yaml proves this directory started a rig, and the record names the container down.sh
-  # removes (so teardown needs no SMOKE_PROJECT). Nothing that can refuse the rig runs after this
-  # point. A refused start must leave neither -- legion.yaml alone is the shape of a rig from
-  # before the record existed, for which down.sh falls back to the shared legacy container name.
-  # The daemon reads legion.yaml at its start below; the listener does not.
-  write_daemon_config
+  # the record names the container down.sh removes (so teardown needs no SMOKE_PROJECT), and
+  # legion.yaml proves this directory started a rig. From here on this directory is a started rig
+  # that down.sh tears down; every refusal point precedes these writes, so a refused start leaves
+  # neither file. The record goes first: an interruption between the two writes then leaves a
+  # record without legion.yaml (which down.sh ignores) rather than legion.yaml without a record
+  # (the shape of a rig from before the record existed, for which down.sh consults the shared
+  # legacy container name). The daemon reads legion.yaml at its start below; the listener does not.
   printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
+  write_daemon_config
 
   start_process listener env \
     PORT="$listener_port" \

@@ -671,16 +671,36 @@ if [[ -n "${SMOKE_SS_BUSY_PORT:-}" && "${*: -1}" == "sport = :${SMOKE_SS_BUSY_PO
 fi
 EOF
 chmod +x "${fake_bin}/ss"
-# main() with the real port check in place of the stub above; the stub stays for every other case.
-main_with_real_port_check() {
+# main() with the real port check in place of the stub above, in a subshell so the swap never
+# leaks into later cases (which keep the stub).
+main_with_real_port_check() (
   # shellcheck disable=SC2329 # invoked by the sourced up.sh's main() (source=/dev/null above)
   assert_port_free() { real_assert_port_free "$@"; }
   main
+)
+# Acceptance 7: a refused start leaves neither file down.sh keys on. A record naming a container
+# that does not exist would hide down.sh's legacy-name fallback and could overwrite a live rig's
+# record; legion.yaml without a record is the shape of a rig from before the record existed, for
+# which down.sh consults the shared legacy container name.
+assert_no_rig_files() {
+  local refusal="$1"
+  [[ ! -e "${SMOKE_DIR}/nats-container" ]] || {
+    printf 'expected no nats-container record after %s; found: %s\n' "$refusal" "$(<"${SMOKE_DIR}/nats-container")" >&2
+    exit 1
+  }
+  [[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
+    printf 'expected no legion.yaml after %s; found:\n%s\n' "$refusal" "$(<"${SMOKE_DIR}/legion.yaml")" >&2
+    exit 1
+  }
+}
+clear_rig_files() {
+  rm -f "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
 }
 # shellcheck disable=SC2154 # daemon_port is a readonly of the sourced up.sh (source=/dev/null above)
 worker_stream_port="$((daemon_port + 1))"
 : >"$order_log"
-rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start" "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
+clear_rig_files
 neighbour_status="$(set +e; (set -e; SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check) >"$assertion_file" 2>&1; echo $?)"
 [[ "$neighbour_status" != 0 ]] || {
   printf 'expected main() to refuse when only the worker-stream port %s is occupied; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
@@ -694,25 +714,14 @@ neighbour_status="$(set +e; (set -e; SMOKE_SS_BUSY_PORT="$worker_stream_port" ma
   printf 'expected no process to start when the worker-stream port is occupied; order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1
 }
-# Acceptance 7: a refused start leaves neither file down.sh keys on. A record naming a container
-# that does not exist would hide down.sh's legacy-name fallback and could overwrite a live rig's
-# record; legion.yaml without a record is the shape of a rig from before the record existed, for
-# which down.sh falls back to the shared legacy container name -- another tester's live rig.
-[[ ! -e "${SMOKE_DIR}/nats-container" ]] || {
-  printf 'expected no nats-container record after the port check refused; found: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
-  exit 1
-}
-[[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
-  printf 'expected no legion.yaml after the port check refused; found:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
-  exit 1
-}
+assert_no_rig_files 'the port check refused'
 # The same neighbour occupied by this rig's own recorded daemon is a re-run, not a collision: the
 # daemon port check's live-PID exception must cover the worker-stream check too. This harness
 # process stands in for that daemon (its pid and /proc start time go in the daemon's records).
 printf '%s\n' "$$" >"${SMOKE_DIR}/daemon.pid"
 awk '{print $22}' "/proc/$$/stat" >"${SMOKE_DIR}/daemon.start"
 : >"$order_log"
-if ! (SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check) >"$main_output_file" 2>&1; then
+if ! SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check >"$main_output_file" 2>&1; then
   printf 'expected main() to reuse this rig'"'"'s own live daemon despite its worker-stream port being bound; output:\n%s\n' "$(<"$main_output_file")" >&2
   exit 1
 fi
@@ -726,13 +735,13 @@ printf 'PASS: refuses to start when only the daemon worker-stream port (LEGION_D
 # Acceptance 7, the other refusal point: ensure_nats itself refuses (the derived container exists
 # but is mapped to another port, or the NATS port is held by something else). Neither the record
 # nor legion.yaml may exist afterwards -- both are written only once ensure_nats has returned.
-rm -f "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
+clear_rig_files
 : >"$order_log"
 # `fail` exits the subshell itself, so no `set -e` here: the inline `cd .../packages/envoy` before
 # ensure_nats has no real repo root under this harness and must stay non-fatal, as in every other
 # main() case above.
 # shellcheck disable=SC2329,SC2154 # ensure_nats is invoked by, and nats_port defined in, the sourced up.sh (source=/dev/null above)
-nats_refusal_status="$(set +e; (ensure_nats() { fail "NATS container $1 is not mapped to configured port ${nats_port}"; }; main) >"$assertion_file" 2>&1; echo $?)"
+nats_refusal_status="$(set +e; (ensure_nats() { fail "NATS container $1 is not mapped to configured port ${nats_port}"; }; SMOKE_PROJECT="sjawhar/24" main) >"$assertion_file" 2>&1; echo $?)"
 [[ "$nats_refusal_status" != 0 ]] || {
   printf 'expected main() to stop when ensure_nats refuses; output:\n%s\n' "$(<"$assertion_file")" >&2
   exit 1
@@ -741,14 +750,7 @@ nats_refusal_status="$(set +e; (ensure_nats() { fail "NATS container $1 is not m
   printf 'expected the ensure_nats refusal to surface; output:\n%s\n' "$(<"$assertion_file")" >&2
   exit 1
 }
-[[ ! -e "${SMOKE_DIR}/nats-container" ]] || {
-  printf 'expected no nats-container record after ensure_nats refused; found: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
-  exit 1
-}
-[[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
-  printf 'expected no legion.yaml after ensure_nats refused; found:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
-  exit 1
-}
+assert_no_rig_files 'ensure_nats refused'
 [[ ! -s "$order_log" || "$(<"$order_log")" != *'start_process:'* ]] || {
   printf 'expected no process to start when ensure_nats refused; order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1

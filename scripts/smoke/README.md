@@ -102,13 +102,15 @@ Two rigs share one machine when each has its own `SMOKE_PROJECT`, `SMOKE_DIR`, a
 
 When `SMOKE_BRANCH_PROTECTION=1` is set, the rig configures `main` to require one approving review, using the user-authenticated `gh` identity described above. Legion itself never reads or writes a human-approval signal: whether a human must approve before merge is the sandbox repository's own rule, and checkpoint 8 verifies that the merge queue respected it.
 
-Tear down the processes, the private tmux server (`tmux -L legion-<slug>`), and this rig's NATS container `legion-smoke-nats-<slug>` (read from `${SMOKE_DIR}/nats-container`; with no record, from a rig started before the name was derived per project, `down.sh` removes the old fixed name `legion-smoke-nats` and says so) with:
+Tear down the processes, the private tmux server (`tmux -L legion-<slug>`), and this rig's NATS container `legion-smoke-nats-<slug>` (read from `${SMOKE_DIR}/nats-container`) with:
 
 ```sh
 bash scripts/smoke/down.sh
 ```
 
-`down.sh` acts only on a `SMOKE_DIR` that started a rig: it takes the rig's project from the `legion.yaml` `up.sh` wrote there and stops that project's private tmux server, never one named by the environment. When `SMOKE_PROJECT` is exported and disagrees with `legion.yaml`, it warns and uses `legion.yaml`. A directory with no `legion.yaml` stops no tmux server and removes no container (not even the old fixed name) — `down.sh` prints that the directory never started a rig, and only the PID-file stops run, finding nothing. `SMOKE_PROJECT` is therefore not needed for teardown; keep `SMOKE_REPO` exported in `forward` mode so `down.sh` can delete the repository webhook it recorded.
+`down.sh` acts only on a `SMOKE_DIR` that started a rig: it takes the rig's project from the `legion.yaml` `up.sh` wrote there and stops that project's private tmux server, never one named by the environment. When `SMOKE_PROJECT` is exported and disagrees with `legion.yaml`, it warns and uses `legion.yaml`. A directory with no `legion.yaml` naming a project stops no tmux server and removes no container (not even the old fixed name) — `down.sh` prints that the directory never started a rig, and only the PID-file stops run. `SMOKE_PROJECT` is therefore not needed for teardown; keep `SMOKE_REPO` exported in `forward` mode so `down.sh` can delete the repository webhook it recorded.
+
+A `SMOKE_DIR` with `legion.yaml` but no `nats-container` record is a rig started before the container name was derived per project, which used the fixed name `legion-smoke-nats` shared by every such rig. `down.sh` removes that container only when `docker port legion-smoke-nats 4222/tcp` maps to the NATS port named in this directory's `legion.yaml` (`nats_urls`) — the same ownership test `up.sh` uses to reuse a container, exact because one port is bound by one rig — and otherwise prints that the container is another rig's, naming both ports, and leaves it. A missing container is a silent no-op either way.
 
 Legion panes never appear in your own `tmux list-sessions`; attach with `tmux -L legion-<slug> attach -t legion-<slug>` where `<slug>` is `SMOKE_PROJECT` lower-cased with every non-alphanumeric character removed (`example-org/24` → `exampleorg24`).
 
