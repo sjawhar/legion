@@ -215,6 +215,7 @@ function splitShellCommands(command: string): string[][] | undefined {
     const char = command.charAt(i);
     if (quote !== undefined) {
       if (char === quote) quote = undefined;
+      else if (quote === '"' && char === "\\" && command.charAt(i + 1) === "\n") i += 1;
       else if (quote === '"' && char === "\\" && i + 1 < command.length) {
         i += 1;
         text += command.charAt(i);
@@ -225,7 +226,8 @@ function splitShellCommands(command: string): string[][] | undefined {
       quote = char;
       inWord = true;
     } else if (char === "\\") {
-      // Backslash-newline is line continuation: both characters vanish, the word continues.
+      // Backslash-newline is line continuation: both characters vanish, the word continues
+      // (inside double quotes too, above; single quotes keep both, as bash does).
       if (command.charAt(i + 1) === "\n") i += 1;
       else if (i + 1 < command.length) {
         i += 1;

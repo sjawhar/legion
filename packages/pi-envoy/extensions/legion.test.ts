@@ -1880,11 +1880,13 @@ describe("Legion OMP extension", () => {
       // A one-word message equal to a blocked word is the spec's stated tradeoff: one rephrase.
       'jj describe -m "undo"',
       // Redirection operators split words as bash does and never end the simple command; a
-      // backslash-newline is line continuation, not part of the next word.
+      // backslash-newline is line continuation, not part of the next word -- outside quotes and
+      // inside double quotes alike (bash removes both characters in both places).
       "jj undo>/dev/null",
       "jj 2>&1 undo",
       "jj op 2>&1 restore x",
       "jj \\\nundo",
+      'jj "un\\\ndo"',
     ];
     const allowedByMistake: string[] = [];
     for (const command of refused) {
@@ -1954,6 +1956,8 @@ describe("Legion OMP extension", () => {
       // Redirections are part of the simple command they sit in, on the allowed side too.
       "jj op log 2>&1 | head",
       "jj restore f 2>/dev/null",
+      // Single quotes keep a backslash-newline literally in bash, so this word is not `undo`.
+      "jj 'un\\\ndo'",
     ];
     const refusedByMistake: string[] = [];
     for (const command of allowed) {
