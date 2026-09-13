@@ -70,13 +70,13 @@ The private tmux server is forked by the daemon's own first `tmux -L legion-<pro
 and inherits the daemon's environment; a pane's `-e` pairs can add or override a variable but
 never remove one the pane would otherwise inherit from the server. So the daemon started from
 inside a Legion pane (the smoke rig, a worker's own shell) carries that pane's
-`LEGION_BOOT_TOKEN_FILE` — and would hand it to every pane that does not override it. Strip the
-whole family (`PANE_SECRET_ENV_KEYS` in `environment.ts`: `DISPATCH_TOKEN`,
-`DISPATCH_TOKEN_FILE`, `DISPATCH_URL`, `DISPATCH_MCP_URL`, `LEGION_BOOT_TOKEN`,
-`LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET`, `LEGION_CONTROLLER_SECRET_FILE`) from
-every child the daemon spawns — the tmux runner, `mise env`, `private_key_command`, GitHub App
-`gh` children — and test the strip against both the daemon's `env` and the `mise env --json`
-output, since either can carry a leak.
+`LEGION_BOOT_TOKEN_FILE` — and would hand it to every pane that does not override it. Since
+LEGION-74 the daemon builds every child's environment — the tmux runner, `mise env`, GitHub App
+`gh` children — from an allow-list (`PANE_ENV_ALLOW_LIST` in `environment.ts`) rather than by
+stripping a list of known secrets, so no `LEGION_*`/`DISPATCH_*` value is inherited at all; a
+credential-shaped name (`isSecretLikeName`) is dropped even when `mise env --json` emits it. Test
+the builder against both the daemon's `env` and the `mise env --json` output, since either can
+carry a leak.
 
 ## Private-socket consequences
 

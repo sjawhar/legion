@@ -315,11 +315,14 @@ What still works, and what to do:
 ## 10. `$OMP_SESSION_ID` in your pane is not your session
 
 The Legion PR footer (`<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->`) needs this session's live id.
-`printenv OMP_SESSION_ID` in a worker pane returns an id inherited from whatever OMP session started the daemon: the
-daemon's private tmux server is forked from the daemon's own environment, every pane inherits it, and the daemon's
-strip list (`PANE_SECRET_ENV_KEYS` in `packages/daemon/src/daemon/environment.ts`) covers secrets only. On LEGION-13
-the pane's value decoded (UUIDv7, first 48 bits are epoch millis) to 2026-09-09T01:51Z, three days before the worker
-was spawned; the implementer's two review-thread replies went out with that id in their footer and had to be edited.
+`printenv OMP_SESSION_ID` in a worker pane returned an id inherited from whatever OMP session started the daemon: the
+daemon's private tmux server is forked from the daemon's own environment and every pane inherits it. Until LEGION-74
+the daemon's strip list covered secrets only; the allow-list (`PANE_ENV_ALLOW_LIST` in
+`packages/daemon/src/daemon/environment.ts`) now excludes `OMP_SESSION_ID` and the boot-time server scrub removes it
+from an older server, but a pane opened before that first restart keeps what it inherited. On LEGION-13 the pane's
+value decoded (UUIDv7, first 48 bits are epoch millis) to
+2026-09-09T01:51Z, three days before the worker was spawned; the implementer's two review-thread replies went out with
+that id in their footer and had to be edited.
 
 Get the id from `envoy_whoami` (`session_id`) or from `legion state` → `roles["legion-<project>-<KEY>-<role>"].sessionId`;
 the two agree, and both are the id the daemon registered at `/worker/started`. Never from the environment, and — per
