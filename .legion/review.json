@@ -103,7 +103,55 @@
     "The implementer pushed 9c98c190 (implement.json only) to legion/LEGION-20 while the review was in progress; the review is pinned to bf1f6bd5 and applies to 9c98c190 unchanged."
   ],
   "nextForImplementer": "Fix the blocking thread (register reads Dispatch for an existing approval), fold or name the non-blocking items, update the PR body (Threads dispositions, Fast-follow, Thermo), push; tester re-runs acceptance 1 with the early-approval sequence (approve from the document header before dispatch_request_approval, and answer the Inbox ask before register_gate) and confirms exactly one design-approved each time; then the reviewer re-reviews the new head.",
+  "round2": {
+    "reviewedHeadSha": "50ecd30219da4ea29443c7d2f81f47d30fd55e01",
+    "codeHeadSha": "bd6da6d034a3 (smoke: SMOKE_DISPATCH_INGRESS=rig); 79153259 and 50ecd302 above it are .legion/ only",
+    "baseSha": "419a0590692b (merge base with main; main@origin 1639fb6b, MERGEABLE)",
+    "verdict": "CLEAN — COMMENT review, not yet approved (approval pinned to the .legion/-deletion head)",
+    "review": {
+      "id": 5189921812,
+      "url": "https://github.com/sjawhar/legion/pull/975#pullrequestreview-5189921812"
+    },
+    "thermo": "not re-run (ran once at bf1f6bd5); the round-2 delta — eight commits 620b9362, e2ac5c9d, eb3dd4e7, eabdab4d, 2e8bee35, b1c9960f, 70b19870, bd6da6d0 plus rebase residue — reviewed by hand",
+    "round1Threads": {
+      "status": "all eight fixes verified; resolution attempted via GraphQL resolveReviewThread on all eight thread ids and refused with FORBIDDEN (Resource not accessible by integration) — the legion-reviewer App lacks pull-request write; no REST equivalent exists. The implementer (whose App has it) resolves them, one per finding, citing the per-thread verification in the review body.",
+      "threadIds": [
+        "PRRT_kwDORFy7ds6h2TbE",
+        "PRRT_kwDORFy7ds6h2TbH",
+        "PRRT_kwDORFy7ds6h2TbJ",
+        "PRRT_kwDORFy7ds6h2TbL",
+        "PRRT_kwDORFy7ds6h2TbO",
+        "PRRT_kwDORFy7ds6h2TbR",
+        "PRRT_kwDORFy7ds6h2TbU",
+        "PRRT_kwDORFy7ds6h2TbV"
+      ],
+      "fixes": {
+        "issues.ts:131 blocking (early approval lost)": "620b9362 seedGateFromDispatch: approved-at-latest opens + one wake via publishDesignApproved; stale recorded closed; other states record nothing; latest_version always raises latestVersion; 502 before any write on a failed read; 404 naming both for a document the issue lacks; api.test.ts covers each; tester reproduced both early-approval orderings live",
+        "issues.ts:116 letter case": "620b9362 requiredString(...).toLowerCase(); test 'registers the document id lowercase however the architect typed it'",
+        "issues.ts:118 hand-rolled version check": "620b9362 requiredNumber(body, version); comment names the contract",
+        "legion-state.ts:996 save at load": "e2ac5c9d saveState after the .bak when sourceVersion < validatedState.version, after pruneStalePrTombstones; reload-with-throwing-resolver test",
+        "dispatch-execute.ts:994 already-approved text": "eb3dd4e7 names the document id; test pins it",
+        "checkpoints.sh:315 doubled case": "2e8bee35 single case per mode",
+        "checkpoints.sh:392 pasted jq / status set": "2e8bee35 root_phase_worker + released_statuses shared by tree_progress, architect_parked, checkpoint_four",
+        "tools.ts:38 second UUID definition": "eabdab4d isDispatchArtifactId uses LegionDaemonApi.GatesRegister.request.shape.artifactId.safeParse"
+      }
+    },
+    "rulingsVerified": {
+      "oneSystemPromptFlag": "b1c9960f: systemPromptArguments emits one --append-system-prompt whose value is one double-quoted word — $(cat role prompt), inline addressing (+ gate policy for the root) escaped by shellDoubleQuoted for backslash, double quote, dollar, backtick (the four POSIX double-quote metacharacters; newlines literal), $(cat instructions) — joined by blank lines; shellPath single-quoting inside $(...) is valid within double quotes; one builder for issueInnerCommand and spawnController; fragment text unchanged. Pins: root with/without instructions, resumed root, gate-off root, implementer with instructions, tester without, controller with/without. Exactly-one-flag asserted in processes.test.ts ([1,1,1] count + part order), index.test.ts (controller), and the real-tmux real-shell argv-recorder e2e (argv.length 4, joined value after $(cat) expansion, content with backticks and an apostrophe). Observation, not a finding: the real-shell e2e covers the controller only (no inline addressing part); the inline escaping is proven by the argv-string pins and the tester's live omp -p replay of the root's flag value.",
+      "migrationRenumber": "v25 -> v26 consistent: LegionState.version 26, z.literal(26), newLegionState, loadState !== 26, migrateV24State (LEGION-33 pure bump) then migrateV25State, log line v25->v26, fixtures version 25 and .v25.bak, daemon AGENTS.md, PR body 'state version 25 to 26' with #993 expanded",
+      "dispatchIngress": "bd6da6d0: up.sh resolves/records shared|rig (else refuses naming both); checkpoints.sh reads the record (fallback exported var, then shared), refuses unknown at start-up, dispatch_ingress_gate lets 1-4 and 12 through under none/forward when rig (naming the record) and blocks with the extended reason when shared; 5-7, 9-11 stay blocked under none; harness cases in checkpoints.test.sh and up.test.sh; README updated"
+    },
+    "rebaseScan": "52 files vs main 419a0590 (46 from round 1 + real-deployment-instructions-e2e.test.ts, config.ts, deployment-instructions.ts, pi-envoy/AGENTS.md, up.test.sh, .legion/review.json). Per-file +/- lines not in the round-1 diff nor in any round-2 commit: 34 total — the v25->v26 renumber applied in conflict resolution (legion-state.ts, legion-state.test.ts), the removal of main #956 three-flag pin (processes.test.ts), a two-line up.sh comment. Nothing unrelated.",
+    "ci": "RED at 50ecd302: workflow Legion Envoy and Contracts run 34743628604 job dispatch failed on Playwright packages/dispatch/e2e/doc.e2e.ts:105 (two-user collaborative cursor within 1000 ms), chromium only; iphone copy passed; this PR touches nothing under packages/dispatch/. Reran the failed job with gh run rerun --failed (rc 0). The daemon published ci-settled-red and pr-blocked (attempts 3) on this red — a flaky browser test, not a code regression; the architect should know before acting on pr-blocked. Tests runs 34743628607/34743667596 green.",
+    "prBodyEditsBeforeApproval": [
+      "CI line: write it once the rerun is green at the final head (currently pending on the ninth rebase).",
+      "Threads/Thermo/E2E cite pre-rebase ids not in the PR (d9824930, 368cf8a9, 93e9ad7a, 0d0b78f0, 38798dbe, 835bf98f, 512b9139); replace with 620b9362, e2ac5c9d, eb3dd4e7, eabdab4d, 2e8bee35, b1c9960f, 70b19870, bd6da6d0.",
+      "Threads line: 8 resolved, 0 unresolved once the implementer resolves them."
+    ],
+    "acceptedResidue": "An artifact.approved arriving during seedGateFromDispatch's own getIssue round-trip (gate not yet stored) is still dropped by the reducer — one HTTP round-trip instead of a whole model turn; store-first would risk a double wake. Recorded so it is not rediscovered as a bug.",
+    "next": "Implementer: resolve the eight threads, push the .legion/ deletion with the three body edits (no rebase). Reviewer: APPROVE that exact head by id after re-checking CI green and the body."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T04:12:57.806Z"
+  "completed": "2026-09-13T07:02:52.318Z"
 }
