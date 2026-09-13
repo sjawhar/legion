@@ -1,0 +1,83 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/instance-lock.ts",
+    "packages/daemon/src/daemon/__tests__/instance-lock.test.ts",
+    "packages/daemon/src/daemon/__tests__/fixtures/lock-holder.ts",
+    "packages/daemon/src/daemon/AGENTS.md"
+  ],
+  "pr": {
+    "number": 1004,
+    "url": "https://github.com/sjawhar/legion/pull/1004",
+    "headSha": "c4929eafb3555db361b3b028af021728ee75ab13",
+    "branch": "legion/LEGION-35"
+  },
+  "ci": {
+    "workflow": "Tests",
+    "runId": 34742504356,
+    "conclusion": "success",
+    "jobs": [
+      "pr-title",
+      "lint",
+      "typecheck",
+      "test"
+    ],
+    "note": "this repository has no pr-checks-result job; the Tests workflow run is the aggregate"
+  },
+  "probe": {
+    "dlopen": "ok",
+    "O_CLOEXEC_constant": "undefined",
+    "firstFlock": 0,
+    "secondFlockWhileHeld": {
+      "rc": -1,
+      "errno": 11,
+      "isEWOULDBLOCK": true
+    },
+    "fd1FlagsOctal": "02100002",
+    "secondFlockAfterFirstClosed": 0,
+    "flockClosedFd": {
+      "rc": -1,
+      "errno": 9,
+      "isEBADF": true
+    },
+    "bunSpawnChildInherited": false,
+    "nodeSpawnChildInherited": false,
+    "holderSaid": "locked",
+    "parentFlockWhileChildHolds": {
+      "rc": -1,
+      "errno": 11,
+      "pidText": "3351900"
+    },
+    "parentFlockAfterChildKilled": 0,
+    "inodeStable": true
+  },
+  "probeHost": "workstation, Bun 1.3.14, x86_64 Linux, nproc 32, load ~107-141 during runs",
+  "evidence": {
+    "before": "=== iteration 1 FAILED ===\nerror: expect(received).toHaveLength(expected)\nExpected length: 1\nReceived length: 2\n      at <anonymous> (/home/ubuntu/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-35/packages/daemon/src/daemon/__tests__/instance-lock.test.ts:87:25)\n(fail) acquireInstanceLock > resolves exactly one winner when contenders race a stale lock [37.39ms]\nRESULT: 49 pass, 1 fail of 50 (busy=32, load=117.68 115.90 121.67)",
+    "beforeSummary": "today's module, race test -t 'resolves exactly one winner' x50 under 32 nice'd busy loops + fsync writer: 49 pass, 1 fail (iteration 1: Expected length 1 / Received length 2 at instance-lock.test.ts:87). Two contenders reproduced; no widening to three needed.",
+    "redSet": "new suite against today's module: 6 pass, 6 fail — release leaves file in place; live-pid-text takeover; three-contender race with inode; waits for unrecorded holder pid; never-recorded holder pid; close-on-exec (exactly the plan's six)",
+    "green": "rewritten module: 12 pass, 0 fail, 242 expect() calls (1.4 s)",
+    "after": "RESULT: 50 pass, 0 fail of 50 (busy=32, load=141.63 124.77 123.74)",
+    "afterSummary": "rewritten module + whole new suite x50 under the same load: 50 pass, 0 fail (62 s)",
+    "reviewerGrep": "grep -nE 'rename|unlink|link\\(|O_EXCL|\"wx\"|O_TRUNC' packages/daemon/src/daemon/instance-lock.ts → no matches (exit 1)",
+    "typeCheck": "cd packages/daemon && bunx tsc --noEmit → exit 0",
+    "lint": "biome check on the three TypeScript files → Checked 3 files, No fixes applied, exit 0",
+    "callerTests": "index.test.ts -t 'refuses to serve an OMP invocation without pi.agents|refuses a second daemon for the same project|refuses to start when worker_stream_port is bound|refuses to start when runtime is kubernetes' → 4 pass, 0 fail (covers the stop()-then-catch double release of a failed boot probe)"
+  },
+  "deviations": [
+    "Plan Task 3 Step 3 claimed the reviewer grep would not match the module's doc-comment prose 'never renamed, linked, or unlinked'; it does (rename/unlink are substrings). Reworded that one prose line to 'its name is never moved, hard-linked, or removed' so the grep is clean. No code change.",
+    "Dropped the '// packages/daemon/...' path-label line the plan's code blocks carried as line 1 of each of the three TypeScript files: not a repository convention (api.ts, secrets.ts start with imports; cli fixtures start with a shebang), and the fixture's own usage comment remains.",
+    "PR body CI line names the `Tests` workflow run (34742504356) instead of a `pr-checks-result` run: this repository has no job by that name (pr-and-main.yaml jobs: pr-title, lint, typecheck, test)."
+  ],
+  "trickyParts": [
+    "release() is idempotent via a `released` flag: index.ts releases through stop() on a failed boot probe and again in startDaemon's catch; a bare second closeSync would throw EBADF (or close a reused descriptor number).",
+    "O_CLOEXEC is the numeric per-platform constant (Linux 0o2000000, Darwin 0x1000000): fs.constants.O_CLOEXEC is undefined under Bun 1.3.14 and Bun's openSync does not set it; the no-inherit test asserts the bit via /proc/self/fdinfo on Linux.",
+    "errno is read immediately after the failed flock, before closeSync, via __errno_location through bun:ffi; a losing contender closes its descriptor before the bounded pid re-read (20 x 25 ms).",
+    "jj: the OMP-provisioned 0-byte .omp/config.yml stays in the working copy (@) uncommitted; the bookmark was moved to the fix commit with --allow-backwards since the split left it on @."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "testerNotes": "Acceptance 7 (compiled binary) recipe is in the plan's 'For the tester' section; bun build --compile of an entry importing the module. Negative control: a second copy started while the first holds is refused with the exact 'already running (pid H, lock file X)' message.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T06:22:31.510Z"
+}
