@@ -8,6 +8,7 @@ import {
   type IssueNode,
   type IssueStatus,
   type LegionState,
+  liveAncestorTree,
   type PrState,
   type TreeState,
   type UpdateSource,
@@ -969,14 +970,27 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
   if (!issue.parent) {
     return [{ kind: "controller", payload: { type: "triage", issue: issue.key } }];
   }
-  const parent = state.issues[issue.parent];
-  if (!parent) return [];
-  if (!parent.children.includes(issue.key)) parent.children.push(issue.key);
+  return childAdopted(state, issue.parent, issue.key, dispatchEnvelope(event.eventId));
+}
+
+/** The wake for a child that has (re)entered `parent`'s tree: emitted by `issue.created` with a
+ * parent, and by the boot repair that removes a pre-LEGION-57 root tree for a child
+ * (`ProcessManager.adoptOwnerlessChildTrees`, published from `index.ts`). Records the child on the
+ * parent's `children` when it is not there yet; nothing when the parent has no node. */
+export function childAdopted(
+  state: LegionState,
+  parent: IssueKey,
+  child: IssueKey,
+  envelope: EnvelopeJson
+): Effect[] {
+  const parentNode = state.issues[parent];
+  if (!parentNode) return [];
+  if (!parentNode.children.includes(child)) parentNode.children.push(child);
   return routeActive(
     state,
-    issue.parent,
-    { type: "child-adopted", child: issue.key, remaining: openChildren(state, parent) },
-    dispatchEnvelope(event.eventId)
+    parent,
+    { type: "child-adopted", child, remaining: openChildren(state, parentNode) },
+    envelope
   );
 }
 
@@ -987,7 +1001,7 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
   const statusChanged = node.status !== issue.status;
   applyDispatchIssueFields(node, issue);
   if (!statusChanged) return [];
-  if (issue.status === "todo") return [{ kind: "admit", issue: issue.key }];
+  if (issue.status === "todo") return admitOnTodo(state, node);
   if (issue.status === "backlog" || issue.status === "icebox") {
     const tree = state.trees[issue.key];
     return tree && tree.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
@@ -995,24 +1009,46 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
   return [];
 }
 
+/** A `todo` transition admits a root. A child under a live tree is owned by that tree's architect,
+ * which runs it as a sub-architect phase worker (`spawn_worker` with `role: "architect"` -- the
+ * spawn that writes its `in_progress`), so its `todo` is inert here: the parent's own
+ * `child.status` event already wakes that architect (`reduceChildStatus`). A child with no live
+ * ancestor tree (never admitted, or lingering/closed) is an orphan and admits as a root exactly
+ * like a parentless issue, with one log line naming the parent. */
+function admitOnTodo(state: LegionState, node: IssueNode): Effect[] {
+  if (!node.parent) return [{ kind: "admit", issue: node.key }];
+  if (liveAncestorTree(state, node.key)) return [];
+  const nearest = treeFor(state, node.parent);
+  return [
+    {
+      kind: "log",
+      message: `admitting ${node.key} as a root of its own: its parent ${node.parent} has no live tree${nearest ? ` (${nearest.root} is ${nearest.status})` : ""}`,
+    },
+    { kind: "admit", issue: node.key },
+  ];
+}
+
+/** Lingers the closed issue's own active tree whether or not it has a parent -- a child admitted
+ * as a root by a pre-LEGION-57 daemon releases its admission slot on close exactly like a root --
+ * then wakes the parent's architect (`child-closed`, and `children-complete` on the last one). */
 function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
   if (!issue || !node) return [];
   const wasOpen = node.status !== "done";
   applyDispatchIssueFields(node, issue);
-  if (!node.parent) {
-    const tree = state.trees[issue.key];
-    return tree && tree.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
-  }
-  if (!wasOpen) return [];
+  const own = state.trees[issue.key];
+  const result: Effect[] = own?.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
+  if (!node.parent || !wasOpen) return result;
   const parent = state.issues[node.parent];
-  if (!parent) return [];
-  const result = routeActive(
-    state,
-    node.parent,
-    { type: "child-closed", child: issue.key, remaining: openChildren(state, parent) },
-    dispatchEnvelope(event.eventId)
+  if (!parent) return result;
+  result.push(
+    ...routeActive(
+      state,
+      node.parent,
+      { type: "child-closed", child: issue.key, remaining: openChildren(state, parent) },
+      dispatchEnvelope(event.eventId)
+    )
   );
   if (openChildren(state, parent) === 0) {
     result.push(

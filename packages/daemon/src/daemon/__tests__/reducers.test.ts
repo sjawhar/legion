@@ -486,6 +486,55 @@ describe("reduceDispatchEvent", () => {
     expect(state.issues[issue].status).toBe("todo");
   });
 
+  it("leaves a released child in its parent's tree: todo under a live root emits no admit", () => {
+    for (const status of ["active", "queued", "dead", "launch-failed"] as const) {
+      const state = rootState();
+      state.trees[root].status = status;
+      attachChild(state);
+
+      expect(
+        reduceDispatchEvent(
+          state,
+          dispatchIssueWithKey(humanTodo as unknown as DispatchFixture, child),
+          config
+        )
+      ).toEqual([]);
+      expect(state.issues[child].status).toBe("todo");
+      expect(state.trees[child]).toBeUndefined();
+    }
+  });
+
+  it("admits an orphan child as a root of its own and says why", () => {
+    const parentNeverAdmitted = newLegionState("omp", 4);
+    parentNeverAdmitted.issues[root] = issueNode(root, "Root");
+    attachChild(parentNeverAdmitted);
+    expect(
+      reduceDispatchEvent(
+        parentNeverAdmitted,
+        dispatchIssueWithKey(humanTodo as unknown as DispatchFixture, child),
+        config
+      )
+    ).toEqual([
+      { kind: "log", message: expect.stringContaining(`parent ${root} has no live tree`) },
+      { kind: "admit", issue: child },
+    ]);
+
+    for (const status of ["lingering", "closed"] as const) {
+      const state = rootState(status);
+      attachChild(state);
+      expect(
+        reduceDispatchEvent(
+          state,
+          dispatchIssueWithKey(humanTodo as unknown as DispatchFixture, child),
+          config
+        )
+      ).toEqual([
+        { kind: "log", message: expect.stringContaining(`(${root} is ${status})`) },
+        { kind: "admit", issue: child },
+      ]);
+    }
+  });
+
   for (const [status, fixture] of DAEMON_STATUS_FIXTURES) {
     it(`records the daemon-owned ${status} echo without a lifecycle effect`, () => {
       const state = newLegionState("omp", 4);
@@ -532,6 +581,30 @@ describe("reduceDispatchEvent", () => {
         config
       )
     ).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-closed", child, remaining: 0 },
+      },
+      { kind: "publish", role: architect, payload: { type: "children-complete" } },
+    ]);
+    expect(state.issues[child].status).toBe("done");
+  });
+
+  it("lingers a child's own pre-LEGION-57 root tree on close and still wakes the parent", () => {
+    const state = rootState();
+    attachChild(state);
+    state.trees[child] = { root: child, generation: 1, status: "active", launchFailures: 0 };
+    const architect = roleToken(state.project, root, "architect");
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+        config
+      )
+    ).toEqual([
+      { kind: "linger", tree: child },
       {
         kind: "publish",
         role: architect,
