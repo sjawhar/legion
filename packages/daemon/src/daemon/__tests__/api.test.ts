@@ -2744,6 +2744,100 @@ describe("Legion HTTP API", () => {
     expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
   });
 
+  it("advances the issue to testing when an implementer completes from in_progress", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([{ issue: root, status: "testing" }]);
+  });
+
+  it("writes no status when an implementer completes from retro (the .legion deletion push or retro itself)", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    state.issues[root].status = "retro";
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Pushed the .legion deletion",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([]);
+    expect(state.phases[root]).toBeUndefined();
+  });
+
   it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");

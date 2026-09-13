@@ -29,12 +29,15 @@ import {
 
 /** The status the daemon PATCHes off a phase's own completion, keyed by the role that just
  * finished. `planner`/`merger` completions never PATCH a status here: planning still reads as
- * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. A reviewer
- * completion checks the review verdict the `review` reducer already recorded on the issue's PR
- * (`state.prs[...].reviewDecision`, which records changes requested from any commit and an
- * approval only at the PR's current head): changes requested
- * returns the issue to `in_progress` for a corrective implementer instead of advancing to
- * `retro`. */
+ * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. An implementer
+ * completion advances `in_progress` → `testing` and nothing else: the same role also completes
+ * the `.legion/` deletion push, a conflict-forced rebase, and retro, none of which is a test
+ * round — from any other status (or an issue whose status this daemon has not yet observed
+ * through the Dispatch lane) it writes nothing, so `retro` is never followed by `testing`. A
+ * reviewer completion checks the review verdict the `review` reducer already recorded on the
+ * issue's PR (`state.prs[...].reviewDecision`, which records changes requested from any commit
+ * and an approval only at the PR's current head): changes requested returns the issue to
+ * `in_progress` for a corrective implementer instead of advancing to `retro`. */
 function phaseCompleteStatus(
   state: LegionState,
   issue: IssueKey,
@@ -42,7 +45,7 @@ function phaseCompleteStatus(
 ): IssueStatus | undefined {
   switch (role) {
     case "implementer":
-      return "testing";
+      return state.issues[issue]?.status === "in_progress" ? "testing" : undefined;
     case "tester":
       return "needs_review";
     case "reviewer":
