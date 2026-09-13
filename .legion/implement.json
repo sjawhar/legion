@@ -2,19 +2,28 @@
   "pr": {
     "number": 1003,
     "url": "https://github.com/sjawhar/legion/pull/1003",
-    "head": "caa02ad28b477ced440a51a0bb45fc16bf2b224b",
+    "head": "504a7a3d8e51bd9bf8d033dd87583588f8d42d6a",
     "base": "main",
     "bookmark": "legion/LEGION-34",
-    "title": "feat(cli): legion threads resolve resolves the review threads the reviewer accepted (LEGION-34)"
+    "title": "feat(cli): legion threads resolve resolves the review threads the reviewer accepted (LEGION-34)",
+    "headNote": "code head after the conflict-forced rebase onto main 0f744bc8 (PR #992 merged 06:04Z); the `implement: record handoff` commit above it is the PR head"
   },
   "commits": [
     {
-      "sha": "ff165ff8a73b",
+      "sha": "dc38ca668ee8",
       "message": "feat(cli): legion threads resolve resolves the review threads the reviewer accepted"
     },
     {
-      "sha": "caa02ad28b47",
+      "sha": "92a66d47c28c",
       "message": "docs(legion): who resolves review threads and why the review App cannot"
+    },
+    {
+      "sha": "6fbfc228929e",
+      "message": "implement: record handoff"
+    },
+    {
+      "sha": "504a7a3d8e51",
+      "message": "test: record handoff (tester's; kept in the chain)"
     }
   ],
   "filesChanged": [
@@ -132,7 +141,32 @@
   "prBodyEdits": 1,
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "preRebaseCommits": [
+    {
+      "sha": "ff165ff8a73b",
+      "message": "feat(cli): …"
+    },
+    {
+      "sha": "caa02ad28b47",
+      "message": "docs(legion): …"
+    },
+    {
+      "sha": "08700ee7fcfa",
+      "message": "implement: record handoff"
+    },
+    {
+      "sha": "3bc2afe0dd7a",
+      "message": "test: record handoff"
+    }
+  ],
+  "rebase": {
+    "reason": "GitHub reported PR #1003 CONFLICTING after PR #992 (LEGION-54, LEGION_GRANT_FILE grant delivery) merged into main at 06:04Z — the conflict .legion/plan.json step 1 predicted. Architect-directed; no other change.",
+    "command": "jj rebase -s vumzlxll (plan handoff) -d main@origin (0f744bc8811e)",
+    "conflicts": "packages/daemon/src/cli/index.ts only (cmdGh's tail); resolved in the working copy and squashed into the code commit with `jj squash --from @ --into nrqrrnxx packages/daemon/src/cli/index.ts`; the four descendants re-rebased clean. Docs, skills, AGENTS.md, CHANGELOG merged without conflict.",
+    "resolution": "`const token = await redeemGitHubToken(deps); const childEnv = buildGitHubTokenEnv(token, deps.env); if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH); const exitCode = await deps.spawnGh(args, childEnv);` — #992's `pathWithoutWorkerBin` import, `grantFrom` (LEGION_GRANT_FILE first), and `readSecretPointer` untouched, so `legion threads resolve` reads LEGION_GRANT_FILE through the same `redeemGitHubToken` → `grantFrom(deps.env)` path.",
+    "verification": "30 pass / 0 fail (`review-threads.test.ts` + `index.test.ts`, which now carries #992's grant-resolution tests); biome --error-on-warnings clean; tsc clean; zero conflict markers; live `bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion` at 504a7a3d → `no unresolved threads`, exit 0 (grant redeemed through the restarted daemon on the merged main)."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T05:49:22.118Z"
+  "completed": "2026-09-13T06:17:11.936Z"
 }
