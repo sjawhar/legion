@@ -7302,6 +7302,48 @@ describe("ProcessManager", () => {
     expect(tmuxFields(managedState.controllerLocator)?.tmuxWindowId).toBe("@2");
   });
 
+  it("does not replay a held resurrection for a tree that stopped being active during the hold", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    let windows = 0;
+    const { manager: processes, state: managedState } = manager(
+      state,
+      {
+        config: config(stateDir),
+        run: async (command) => {
+          if (command[3] === "list-windows") return { stdout: "", exitCode: 1 };
+          if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+          if (command[3] === "new-window") {
+            windows += 1;
+            return { stdout: `@${windows} %${windows} ${12345 + windows}\n`, exitCode: 0 };
+          }
+          if (command[3] === "list-panes") return { stdout: "", exitCode: 1 };
+          return { stdout: "", exitCode: 0 };
+        },
+      },
+      { skipEnableLaunches: true }
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processes.resurrect(root);
+      // The tree is parked while the probe is still retrying: nothing should bring it back.
+      await processes.beginLinger(root);
+      processes.enableLaunches();
+      await processes.replayHeldRecoveries();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(windows).toBe(0);
+    expect(managedState.trees[root]).toMatchObject({ status: "lingering", generation: 1 });
+  });
+
   it("promotes the queued worker once the running one goes idle, publishing worker-started", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
