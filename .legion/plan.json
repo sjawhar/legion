@@ -1,0 +1,216 @@
+{
+  "taskCount": 4,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks in order, test-driven: Task 1 writes the five envoy.test.ts changes and watches four of them fail on the current deliver(); Task 2 makes the one code change; Task 3 updates the docs; Task 4 runs CI's exact four pi-envoy steps, commits, pushes, opens the PR. No smoke rig, no throwaway OMP profile, no touch of ~/.omp/profiles/legion or ~/.omp/plugins (spec acceptance 5; deployment instructions).",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract — bind to $LEGION_WORKSPACE, jj split per logical change, .legion/implement.json, bookmark push, PR body in the READY format with `Dispatch: LEGION-109`.",
+      "test-driven-development: land the test changes of Task 1 first and observe the four expected failures before editing deliver(); the failing run is the evidence the tests guard the new order.",
+      "verification-before-completion: run bun run lint, typecheck, test, build in packages/pi-envoy (the exact steps of CI job pi-envoy) and paste the pass counts into implement.json before claiming done."
+    ],
+    "test": [
+      "legion-worker: the tester writes the PR body's E2E line; here it states that pre-merge smoke is withdrawn by Sami's 2026-09-13 standing order (spec acceptance 5), quotes the unit run at the PR head, and names the operator's post-deploy smoke command and release.",
+      "verification-before-completion: re-run bun run test in packages/pi-envoy at the PR head and quote the pass count; never start smoke-delivery.sh, a smoke rig, or a scratch plugin tree."
+    ],
+    "review": [
+      "legion-worker: one review per round through the reviews API with the Legion footer; verify CI, Threads, and E2E facts against GitHub, not the handoff.",
+      "verification-before-completion: check the two structural facts no unit test can — the receipt sits after renderInbound() and before the subscriptionRemovedTopics loop, and the trailing publish is gone — and that packages/pi-envoy/AGENTS.md states the new order."
+    ]
+  },
+  "spec": "dispatch://LEGION-109/spec (Design, Errors, Testing are the contract); parent dispatch://LEGION-101/spec section Design, Plugin bullet.",
+  "summary": "Move the receipt publish in deliver() (packages/pi-envoy/extensions/envoy.ts) from the end of the function to immediately after renderInbound() returns, guarded by the same condition (reply !== \"\" && subject === agentSubject(sessionID)), wrapped so a failed publish is logged and delivery continues; delete the trailing publish; nothing else in deliver() moves. Dedupe on dedupe_key is untouched (the daemon child LEGION-107 relies on it). Prove it with five unit-test changes in envoy.test.ts and update the receipt sentence in packages/pi-envoy/AGENTS.md.",
+  "baseline": {
+    "workspaceBase": "d35e8b5934c6 (#1018) — @- of the issue workspace; main@origin is e788769aff3e (#1073).",
+    "mainDrift": "main removed the ask-reminder block (armAskReminder) from deliver() in #1074 and dropped the 'arms a reminder period for a human Dispatch steer' test. Every test in this plan avoids that path on purpose, so the same tests pass on the workspace base and on the merge commit CI checks out (refs/pull/N/merge). Do NOT rebase pre-emptively (Sami 2026-09-11: rebase only when GitHub reports CONFLICTING); if GitHub does report CONFLICTING, rebase the whole chain per the legion-worker skill and post the fingerprint comment.",
+    "deliverAnchors": "workspace envoy.ts: deliver() is lines 464-547; renderInbound at 465; subscriptionRemovedTopics loop at 471; dedupe check 472-473; armAskReminder block 478-484 (absent on main); sendMessage 521-527; dedupe record 536-542; trailing receipt publish 544-546. Line numbers shift after Task 1; anchor on the text.",
+    "testsBaseline": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject|redelivery|targeted BTW|targeted Dispatch frames' → 5 pass, 0 fail (after `bun install --frozen-lockfile` at the repo root, already done in this workspace; node_modules is untracked).",
+    "workingCopyNote": "jj status shows `A .omp/config.yml` — an empty file OMP created in the working copy, not tracked on main. Never name it in a jj split. Because the working copy commit carries it and has no description, jj git push refuses `@`; set the bookmark on the described tip: `jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-109 -r @-`."
+  },
+  "release": {
+    "workflow": ".github/workflows/release.yaml job for pi-envoy: .github/scripts/release-bump.sh from the latest pi-legion-envoy-v* tag over packages/pi-envoy/, envoy-client/, contracts/, workspace/, skills/; a `fix:`/`refactor:`/`perf:` subject bumps patch, `feat:` minor.",
+    "latestTag": "pi-legion-envoy-v1.27.2 (main's packages/pi-envoy/package.json is 1.27.2; the workspace base still says 1.24.2).",
+    "expected": "1.27.3 — the patch release above 1.27.2 — if no other pi-envoy-releasing commit merges first; the spec's '1.24.3' was computed when 1.24.2 was the latest tag and is stale (reported to the architect). The PR body names it as 'the patch release the merge cuts (1.27.3 if nothing else releases first; read the pi-legion-envoy-v* tag the release workflow pushes for the merge commit)'. After the merge, the implementer replaces that phrase with the actual tag.",
+    "install": "The operator alone installs the release into the live legion profile and the default plugin tree; the daemon restart is the operator's step (deployment instructions: 'Only the operator session edits ~/.omp/profiles/legion/plugins')."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Tests first: record the call order in envoy.test.ts (four of five fail on the current code)",
+      "files": [
+        "packages/pi-envoy/extensions/envoy.test.ts"
+      ],
+      "steps": [
+        {
+          "step": "1a. Fixture: make the NATS mock report publishes in order and able to fail once.",
+          "where": "natsState (line 104-113) and the mock.module('nats') publish (line 138); afterEach (line 256-263).",
+          "code": "// natsState gains two fields:\n  published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],\n  onPublish: undefined as ((subject: string) => void) | undefined,\n  failPublishes: 0,\n\n// mock publish becomes:\n      publish: (subject: string, data?: Uint8Array) => {\n        if (natsState.failPublishes > 0) {\n          natsState.failPublishes -= 1;\n          throw new Error(\"PUBLISH_FAILED\");\n        }\n        natsState.published.push({ subject, data });\n        natsState.onPublish?.(subject);\n      },\n\n// afterEach adds:\n  natsState.onPublish = undefined;\n  natsState.failPublishes = 0;"
+        },
+        {
+          "step": "1b. Acceptance 1 — rewrite the existing test 'acknowledges an agent-subject request after steering injection' (line 3913-3938) into the recorded-sequence proof. Keep the ?agent-receipt import query.",
+          "code": "  test(\"acknowledges an agent-subject request before any Dispatch call or the injection\", async () => {\n    // The listener waits two seconds for this receipt and reports a miss as a failed\n    // delivery, which the daemon answers by re-sending the message (LEGION-101). The\n    // receipt therefore precedes every other step of deliver(); the recorded call\n    // sequence is the proof — a fetch recorded here would be a Dispatch call made\n    // before the acknowledgement.\n    const calls: string[] = [];\n    let recording = false;\n    globalThis.fetch = async (input, init) => {\n      if (recording) calls.push(`fetch ${new URL(input.toString()).pathname}`);\n      return responseWithRegistration(input, init, []);\n    };\n    const { default: envoyExtension } = await import(\"./envoy.ts?agent-receipt\");\n    const fixture = createPi();\n    const injected = Promise.withResolvers<void>();\n    envoyExtension({\n      ...fixture.pi,\n      sendMessage: (message, options) => {\n        calls.push(\"sendMessage\");\n        fixture.pi.sendMessage(message, options);\n        injected.resolve();\n      },\n    });\n    await fixture.handlers.get(\"session_start\")?.({}, sessionContext(\"ses_receipt\"));\n    const controls = natsState.controls.get(\"notifications.agent.ses_receipt\");\n    if (controls === undefined) throw new Error(\"agent subject was not subscribed\");\n    natsState.onPublish = (subject) => calls.push(`publish ${subject}`);\n    recording = true;\n\n    controls.push(\n      forwardedRoleEnvelope(\"legion-controller\", \"receipt event\", \"agent-receipt\"),\n      \"_INBOX.receipt\"\n    );\n    await injected.promise;\n\n    expect(calls).toEqual([\"publish _INBOX.receipt\", \"sendMessage\"]);\n    expect(fixture.messages[0]).toContain(\"receipt event\");\n  });",
+          "expectedBeforeFix": "FAIL — calls is [\"sendMessage\"] at the time injected resolves (the receipt is published afterwards)."
+        },
+        {
+          "step": "1c. Acceptance 2 — extend the existing test 'deduplicates a redelivery after successful injection' (line 3856-3893): give the three pushes reply subjects and assert every copy, the duplicate included, is acknowledged while only two inject. Dedupe itself is unchanged; this test pins the contract the daemon child LEGION-107 relies on.",
+          "code": "    controls.push(envelope, \"_INBOX.first\");\n    controls.push(envelope, \"_INBOX.duplicate\");\n    controls.push(\n      forwardedRoleEnvelope(\n        \"legion-controller\",\n        \"the next unique delivery proves the duplicate was skipped\",\n        \"after-dedupe\"\n      ),\n      \"_INBOX.next\"\n    );\n    await deliveryAfterDuplicate.promise;\n\n    expect(fixture.messages).toHaveLength(2);\n    expect(fixture.messages[0]).toContain(\"only the first delivery injects\");\n    // The duplicate is acknowledged — the listener must not report it undelivered —\n    // without a second injection.\n    expect(natsState.published.map((message) => message.subject)).toEqual([\n      \"_INBOX.first\",\n      \"_INBOX.duplicate\",\n      \"_INBOX.next\",\n    ]);",
+          "expectedBeforeFix": "PASS or flaky-PASS (the old code also acknowledges duplicates, one microtask later). It is a regression lock, not a red test."
+        },
+        {
+          "step": "1d. Acceptance 3 — extend the existing test 'answers a targeted BTW delivery ephemerally and registers the capability' (line 2855-2916): record the sequence receipt → askEphemeral → reply POST. The targeted envelope's topic is notifications.agent.ses_target, so the agent-subject guard holds.",
+          "code": "    const calls: string[] = [];\n    // inside the existing globalThis.fetch, in the reply branch, before replies.push:\n      if (path === \"/api/v1/messages/message-1/reply\") {\n        calls.push(`fetch ${path}`);\n        replies.push(JSON.parse(init?.body?.toString() ?? \"{}\"));\n        replyPosted.resolve();\n      }\n    // askEphemeral records itself:\n      askEphemeral: async ({ prompt }) => {\n        calls.push(\"askEphemeral\");\n        asked.push(prompt);\n        return { replyText: \"Yes, ship it.\" };\n      },\n    // after session_start and the agent lookup, before the push:\n    natsState.onPublish = (subject) => calls.push(`publish ${subject}`);\n    agent.push(JSON.stringify({ /* unchanged BTW envelope */ }), \"_INBOX.btw\");\n    await replyPosted.promise;\n\n    // existing asked / deliveries / replies / registrations assertions stay, plus:\n    expect(calls).toEqual([\n      \"publish _INBOX.btw\",\n      \"askEphemeral\",\n      \"fetch /api/v1/messages/message-1/reply\",\n    ]);",
+          "expectedBeforeFix": "FAIL — calls is [\"askEphemeral\", \"fetch /api/v1/messages/message-1/reply\"] when replyPosted resolves; the receipt comes last."
+        },
+        {
+          "step": "1e. Acceptance 4 — adjust the existing test 'permits redelivery after a failed injection and warns with the envelope id' (line 3796-3854) to the new order: the failed attempt is acknowledged before sendMessage throws, the warning still names the event id, the dedupe key is not recorded so the re-send injects.",
+          "code": "      controls?.push(envelope, \"_INBOX.failed\");\n      await failedInjection.promise;\n      controls?.push(envelope, \"_INBOX.retried\");\n      controls?.push(\n        forwardedRoleEnvelope(\n          \"legion-controller\",\n          \"the following message proves the pump continued\",\n          \"after-retry\"\n        ),\n        \"_INBOX.after\"\n      );\n      await followingDelivery.promise;\n\n      expect(delivered).toHaveLength(2);\n      expect(delivered[0]).toContain(\"the redelivery repairs the failed injection\");\n      expect(warning).toHaveBeenCalledTimes(1);\n      expect(warning).toHaveBeenCalledWith(\n        expect.stringContaining(\"evt-retry-after-failure\"),\n        expect.any(Error)\n      );\n      // The failed attempt was acknowledged before its injection threw: the receipt does\n      // not depend on injection, and the unrecorded dedupe key lets the re-send inject.\n      expect(natsState.published.map((message) => message.subject)).toEqual([\n        \"_INBOX.failed\",\n        \"_INBOX.retried\",\n        \"_INBOX.after\",\n      ]);",
+          "expectedBeforeFix": "FAIL — published is [\"_INBOX.retried\", \"_INBOX.after\"]: the old code throws before its trailing publish."
+        },
+        {
+          "step": "1f. Spec Errors row 'Publishing the receipt itself fails → logged; the rest of deliver still runs' — new test after 1b's test.",
+          "code": "  test(\"a failed receipt publish is logged with the event id and the message is still injected\", async () => {\n    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);\n    const { default: envoyExtension } = await import(\"./envoy.ts?receipt-publish-failure\");\n    const fixture = createPi();\n    const secondDelivery = Promise.withResolvers<void>();\n    const warning = spyOn(console, \"warn\").mockImplementation(() => {});\n    envoyExtension({\n      ...fixture.pi,\n      sendMessage: (message, options) => {\n        fixture.pi.sendMessage(message, options);\n        if (fixture.messages.length === 2) secondDelivery.resolve();\n      },\n    });\n    try {\n      await fixture.handlers.get(\"session_start\")?.({}, sessionContext(\"ses_receipt_fail\"));\n      const controls = natsState.controls.get(\"notifications.agent.ses_receipt_fail\");\n      if (controls === undefined) throw new Error(\"agent subject was not subscribed\");\n\n      natsState.failPublishes = 1;\n      controls.push(\n        forwardedRoleEnvelope(\"legion-controller\", \"receipt lost\", \"receipt-lost\"),\n        \"_INBOX.lost\"\n      );\n      controls.push(\n        forwardedRoleEnvelope(\"legion-controller\", \"receipt kept\", \"receipt-kept\"),\n        \"_INBOX.kept\"\n      );\n      await secondDelivery.promise;\n\n      // The message whose receipt could not be published is still injected — the\n      // acknowledgement is best-effort, the local delivery is not — and the pump\n      // acknowledges the next one normally.\n      expect(fixture.messages[0]).toContain(\"receipt lost\");\n      expect(fixture.messages[1]).toContain(\"receipt kept\");\n      expect(natsState.published.map((message) => message.subject)).toEqual([\"_INBOX.kept\"]);\n      expect(warning).toHaveBeenCalledTimes(1);\n      expect(warning).toHaveBeenCalledWith(\n        expect.stringContaining(\"evt-receipt-lost\"),\n        expect.any(Error)\n      );\n    } finally {\n      warning.mockRestore();\n    }\n  });",
+          "expectedBeforeFix": "FAIL — the old trailing publish throws out of deliver() after injection: no 'acknowledge' warning (warning count 0), and the pump's catch swallows it."
+        },
+        {
+          "step": "1g. Run and record the red.",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject|redelivery|targeted BTW|failed receipt publish'",
+          "expected": "5 tests selected: 4 fail (1b, 1d, 1e, 1f), 1 pass (1c). Any other outcome means a test is not observing the order — fix the test before touching deliver()."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "The change: publish the receipt right after renderInbound(), log-and-continue on failure, delete the trailing publish",
+      "files": [
+        "packages/pi-envoy/extensions/envoy.ts"
+      ],
+      "steps": [
+        {
+          "step": "2a. Insert the receipt block between `const rendered = renderInbound(raw, sessionID, subject);` and the `// A human unsubscribed one of our topics` comment. Same guard as the old trailing publish; nothing below it moves.",
+          "code": "  const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {\n    const rendered = renderInbound(raw, sessionID, subject);\n    // Acknowledge first. The listener's role lane waits two seconds for this\n    // receipt and reports a miss as a failed delivery, which the daemon answers\n    // by re-sending the message (LEGION-101); everything below — the inbox\n    // update, a Dispatch round trip, the injection — can outlast that window\n    // under load. A frame renderInbound throws on never reaches this line, so\n    // an undecodable frame is still not acknowledged. A receipt that cannot be\n    // published is logged and delivery goes on: the message must not be lost\n    // locally because the acknowledgement was.\n    if (reply !== \"\" && subject === agentSubject(sessionID)) {\n      try {\n        (await ensureConnection()).publish(reply);\n      } catch (error) {\n        console.warn(\n          `[envoy] failed to acknowledge envelope ${rendered.envelope?.event_id ?? \"unknown\"}`,\n          error\n        );\n      }\n    }\n    // A human unsubscribed one of our topics: drop it locally too, the same\n    // ... (existing body, unchanged, through the dedupeKeys record) ...\n  };"
+        },
+        {
+          "step": "2b. Delete the trailing block at the end of deliver():",
+          "code": "    if (reply !== \"\" && subject === agentSubject(sessionID)) {\n      (await ensureConnection()).publish(reply);\n    }"
+        },
+        {
+          "step": "2c. Green.",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject|redelivery|targeted BTW|failed receipt publish' && bun run test",
+          "expected": "The 5 selected tests pass; then the whole pi-envoy suite passes (no other test names a receipt; 'a subscription.removed notice…' and the targeted-frame tests push without a reply subject and are unaffected)."
+        },
+        {
+          "step": "2d. Invariants the reviewer will check by reading: (1) the receipt block is after renderInbound() and before the subscriptionRemovedTopics loop, so a frame renderInbound throws on is still not acknowledged (spec Errors row 1) and the receipt precedes the dedupe check, the inbox update, armAskReminder (workspace base only), postDispatchReply, askEphemeral, and sendMessage; (2) exactly one `.publish(reply)` remains in envoy.ts; (3) the dedupe block (`dedupeKeys.add` after a successful injection, nothing on a throw) is byte-identical; (4) no new import (agentSubject and ensureConnection already exist)."
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Docs: the receipt sentence",
+      "files": [
+        "packages/pi-envoy/AGENTS.md",
+        "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+      ],
+      "steps": [
+        {
+          "step": "3a. packages/pi-envoy/AGENTS.md Overview (lines 12-16; the same text is at line 14 on main). Replace the sentence 'The agent pump replies after it accepts the envelope, so the listener can turn a claimed-but-deaf holder into a `delivery_failed` exception after two seconds.' with:",
+          "text": "The agent pump replies the moment the envelope is decoded — before the inbox update, any Dispatch call, or the session injection — so the listener's two-second receipt window measures decoding, not the host's turn: a claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one no longer does (LEGION-101). A frame that cannot be decoded is still never acknowledged, and a receipt that fails to publish is logged while delivery continues.",
+          "why": "Spec acceptance 6."
+        },
+        {
+          "step": "3b. docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md lines 96-105 quote the old code verbatim ('// inside deliver(), after pi.sendMessage accepts the envelope'). Replace the sentence and snippet so the learning does not contradict the code:",
+          "text": "The agent pump replies as soon as the forwarded envelope is decoded, before injecting it or calling any service; the receipt says \"a live receiver has this frame\", not \"the host has finished with it\" (LEGION-101):\n\n```ts\nawait deliver(message.subject, codec.decode(message.data), message.reply ?? \"\");\n\n// inside deliver(), immediately after renderInbound() returns and before the\n// inbox update, any Dispatch call, or pi.sendMessage\nif (reply !== \"\" && subject === agentSubject(sessionID)) {\n  (await ensureConnection()).publish(reply);\n}\n```",
+          "why": "Docs-only and the one file beyond the spec's named list; flagged to the architect, who may strike it. packages/pi-envoy/README.md lines 10-12 ('The agent pump replies after accepting the envelope') and packages/envoy/AGENTS.md line 90 ('returns an empty receipt after accepting the envelope') already describe the new order and stay as they are."
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Verify like CI, commit, push, open the PR",
+      "files": [
+        ".legion/implement.json"
+      ],
+      "steps": [
+        {
+          "step": "4a. CI's exact pi-envoy steps (workflow 'Legion Envoy and Contracts', job pi-envoy, .github/workflows/envoy-and-contracts.yaml lines 156-170), from the workspace root after `bun install --frozen-lockfile`:",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/contracts\" && bun run build && cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun run lint && bun run typecheck && bun run test && bun run build",
+          "expected": "lint clean (biome), tsc clean, full suite green with the new test count, dist/envoy.js and dist/legion.js built. Paste the test summary line into implement.json."
+        },
+        {
+          "step": "4b. One implementation commit, then the handoff commit. Never list .omp/config.yml.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"fix(pi-envoy): acknowledge a role message as soon as it is decoded, before injection or any Dispatch call (LEGION-109)\" packages/pi-envoy/extensions/envoy.ts packages/pi-envoy/extensions/envoy.test.ts packages/pi-envoy/AGENTS.md docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md && legion handoff write --phase implement --data '<implement JSON>' && test -f \"$LEGION_WORKSPACE/.legion/implement.json\" && jj -R \"$LEGION_WORKSPACE\" split -m \"implement: record handoff\" .legion/implement.json",
+          "note": "The subject starts with `fix(` — the release bump reads it (patch). Ancestry check before pushing: jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)' must show only plan: record handoff, the fix, implement: record handoff above d35e8b59."
+        },
+        {
+          "step": "4c. Push the described tip and open the PR.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-109 -r @- && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-109 && legion gh -- pr create --repo sjawhar/legion --base main --head legion/LEGION-109 --title \"fix(pi-envoy): acknowledge a role message as soon as it is decoded, before injection or any Dispatch call (LEGION-109)\" --body-file /tmp/legion-109-pr-body.md",
+          "prBody": "First line `Dispatch: LEGION-109`. Then one plain paragraph for a phone reader: when a message for a Legion role reaches a busy session, the plugin now tells the message bus 'received' as soon as it has read the message, instead of after it has finished its own work; under load the old order missed the bus's two-second window and the same message was sent again and again (the incident is LEGION-101). Then a 'Release' paragraph: this merge cuts the patch release above the latest pi-legion-envoy tag — 1.27.3 if nothing else releases first — and the operator installs it into the live profile; after that install, `packages/pi-envoy/scripts/smoke-delivery.sh` against the installed plugin is the live proof at the operator's timing, and the parent issue's production hour is the end-to-end proof. Then the READY-format `## Verification` block from the legion-worker skill: CI (workflow 'Legion Envoy and Contracts' job pi-envoy plus 'Tests' pr-title/lint/typecheck/test at the head sha), Threads (0 at open), Thermo (left for the reviewer), E2E (left for the tester; see acceptanceProof[4]), Fast-follow: none, Chain: not stacked."
+        },
+        {
+          "step": "4d. After the merge queue merges: watch the release workflow run for the merge commit, read the pi-legion-envoy-v* tag it pushes, and edit the PR body's Release paragraph to the actual version (`legion gh -- pr edit <n> --body-file …`). The install into the live profile is the operator's; the implementer does not touch ~/.omp/profiles/legion or ~/.omp/plugins."
+        }
+      ]
+    }
+  ],
+  "acceptanceProof": [
+    {
+      "criterion": "1 — receipt before pi.sendMessage and before any fetch, from a recorded call sequence",
+      "surface": "bun run test in packages/pi-envoy (CI job pi-envoy, workflow 'Legion Envoy and Contracts')",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'acknowledges an agent-subject request before'",
+      "skill": "legion-worker (completion gate), test-driven-development"
+    },
+    {
+      "criterion": "2 — a duplicate (same dedupe_key) is acknowledged and not injected twice",
+      "surface": "same suite",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'deduplicates a redelivery after successful injection'",
+      "skill": "legion-worker"
+    },
+    {
+      "criterion": "3 — a BTW frame's receipt precedes pi.askEphemeral resolving (and the reply POST)",
+      "surface": "same suite",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'answers a targeted BTW delivery ephemerally'",
+      "skill": "legion-worker"
+    },
+    {
+      "criterion": "4 — sendMessage throws after the receipt: logged with the event id, dedupe key not recorded",
+      "surface": "same suite",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/pi-envoy\" && bun test extensions/envoy.test.ts -t 'permits redelivery after a failed injection'",
+      "skill": "legion-worker"
+    },
+    {
+      "criterion": "5 — pre-merge smoke withdrawn; the PR names the release; post-deploy smoke by the operator",
+      "surface": "Pre-merge: none — Sami's standing order of 2026-09-13 (spec acceptance 5 and Testing row; deployment instructions: only the operator touches the live profile and the default plugin tree). No smoke-delivery.sh run, no smoke rig, no throwaway OMP profile, no scratch plugin tree by any worker. Post-deploy, operator-run: `packages/pi-envoy/scripts/smoke-delivery.sh` (default ENVOY_URL http://127.0.0.1:9020) from a checkout at or after the merge, against the plugin installed at ~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy; its first output line `plugin version: <v>` must name the release the merge cut (expected 1.27.3) and it must end `PASS:`. End to end: the parent's production hour, LEGION-101 acceptance 4 — envoy_inbox on three busy architects shows no payload twice.",
+      "testerE2ELine": "**E2E:** pre-merge smoke withdrawn by Sami's standing order of 2026-09-13 (LEGION-109 acceptance 5); unit proof `bun run test` in packages/pi-envoy at <head sha>: <N> pass, 0 fail, including 'acknowledges an agent-subject request before any Dispatch call or the injection'. Post-deploy: operator runs packages/pi-envoy/scripts/smoke-delivery.sh against installed pi-legion-envoy <release>; production hour per LEGION-101 acceptance 4. Negative control: the test 'permits redelivery after a failed injection…' — pi.sendMessage throws after the receipt; observed one warning naming evt-retry-after-failure, receipt _INBOX.failed published, dedupe key unrecorded so the re-send injected.",
+      "skill": "legion-worker (tester section), envoy (envoy_inbox for the production hour)"
+    },
+    {
+      "criterion": "6 — packages/pi-envoy/AGENTS.md states the new order",
+      "surface": "the reviewer reads the AGENTS.md hunk (and the learning-doc hunk) in the PR diff",
+      "command": "legion gh -- pr diff <n> --repo sjawhar/legion -- packages/pi-envoy/AGENTS.md",
+      "skill": "legion-worker (reviewer section)"
+    }
+  ],
+  "errorsCoverage": {
+    "renderInbound throws → no receipt": "structural: the receipt block sits after renderInbound() (Task 2a); reviewer check 2d(1). No unit test — renderInbound is tolerant (non-JSON and schema failures render as `unrecognised`, they do not throw), so a throw is not reachable from a test frame without mocking @legion/envoy-client.",
+    "injection or Dispatch call fails after the receipt": "test 1e: receipt published, warning names the event id, dedupe key unrecorded, re-send injects.",
+    "receipt publish fails": "test 1f: warning names the event id, message still injected, pump continues."
+  },
+  "concerns": [
+    "Spec acceptance 5 names release 1.24.3; the latest tag is pi-legion-envoy-v1.27.2, so a fix: merge cuts 1.27.3 (if nothing else releases first). Architect asked to correct the spec.",
+    "The assignment prompt described acceptance 5 as two smoke-delivery.sh runs (installed default profile + throwaway OMP profile). The spec's current version withdraws pre-merge smoke and forbids throwaway profiles under Sami's 2026-09-13 standing order; this plan follows the spec. Architect asked to confirm.",
+    "Workspace base d35e8b59 is 55 commits behind main@origin e788769a; main removed armAskReminder from deliver() (#1074). The tests here avoid that path, so they pass on both. No pre-emptive rebase (standing order); rebase only on a GitHub CONFLICTING report.",
+    "Task 3b touches docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md (its snippet quotes the old order verbatim). Docs-only; the architect may strike it to keep the diff to the spec's named files.",
+    "The working copy holds an untracked empty .omp/config.yml; jj refuses to push a commit with no description, so the bookmark must be set with -r @-."
+  ],
+  "outOfScope": [
+    "Any change to dedupe on dedupe_key (LEGION-107 relies on it).",
+    "Aside/steer/BTW delivery modes, subscription-removed handling, the ask reminder (already removed on main), the pump's resubscribe path.",
+    "Listener (LEGION-108/receipt_timeout) and daemon (LEGION-107) changes — sibling children of LEGION-101.",
+    "Installing the release or restarting the daemon — the operator's steps."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-14T05:53:27.215Z"
+}
