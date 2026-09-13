@@ -170,6 +170,44 @@ not.
 version back out of `HEAD`'s manifest would also work but hides the contract; explicit arguments
 make the three call sites self-documenting and let the test pass the version directly.
 
+## 6. A `pull_request` run tests the PR's cached potential merge commit, and only a head push refreshes it
+
+A `pull_request`-triggered run does not check out the PR head. `actions/checkout` fetches
+`github.sha` **by sha**, and for `pull_request` events that is the PR's *potential merge commit*
+— GitHub's test merge of the head into the base, cached on the PR (`merge_commit_sha` in REST,
+`potentialMergeCommit` in GraphQL). The run's log says so:
+`HEAD is now at 5bc2afa Merge ac002051… into 0611be6b…`. When `main` was red at the moment that
+merge was computed, the PR's checks are red for a failure the branch does not contain, and two
+remedies that look right do nothing:
+
+- `gh run rerun <run-id> --failed` re-runs the **same run**, whose event payload still names the
+  same merge sha; the rerun fetches `5bc2afa` again and fails identically.
+- A new `pull_request` event that does not move the head (`edited`: a title or body change) fires
+  a **new run**, but its payload copies the PR's cached `merge_commit_sha` — GitHub had not
+  recomputed it, so the new run checked out the same `5bc2afa`.
+
+GitHub recomputes the potential merge commit lazily. On sjawhar/legion#1035 it stayed pinned to a
+base three `main` pushes old for more than ten minutes of REST and GraphQL polling (`mergeable:
+true`, `MERGEABLE` — cached, with no recompute pending). The one event that certainly refreshes
+it is a push to the PR head (`synchronize`): GitHub recomputes the merge for the new head, and the
+run that fires tests it against the `main` of that moment.
+
+Today's evidence. Retro head `ac002051` (approved `7097b62b` plus `docs/solutions/` only) got
+`Tests` run 34769469580, red on `typecheck` alone:
+`real-prompt-delivery-e2e.test.ts(293,5): Property 'baseEnv' is missing … WorkerCatchupDeps` — a
+file the branch never touches. Its merge base `0611be6b` (`chore: release cli v1.9.4`) had
+`catchup.ts` requiring `baseEnv` and the test file lacking it; `main` was red there and #1045
+(`8af58deb`) fixed it eight minutes later, green in run 34769578687. The rerun (attempt 2) and the
+`edited`-triggered run 34769828557 both checked out `5bc2afa` and failed on the same line. What
+finally produced a run against current `main` was this section's own commit — the one docs-only
+push the retro rule allows above an approved head, which carries a real learning and refreshes
+the merge commit as a side effect.
+
+So, when a PR is red on a required check in a file the branch does not touch: read the run's
+`HEAD is now at <merge> Merge <head> into <base>` line, check whether `main` was red at `<base>`
+(`gh run list --branch main` around that time), and if so do not rerun and do not poke the body —
+push the next real commit, or, on a branch that must not move, ask for one.
+
 ## Related
 
 - [bash-test-against-a-real-bare-git-origin](../testing/bash-test-against-a-real-bare-git-origin.md) —
