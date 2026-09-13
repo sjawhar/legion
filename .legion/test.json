@@ -1,0 +1,119 @@
+{
+  "verdict": "PASS",
+  "testedHead": "e97e5b720e06745c048529e373f05df810a67bf5",
+  "behaviourCommit": "43de0f67dfaf1f9ac52a2a41165143e65c88464c",
+  "pr": 1016,
+  "specVersion": 3,
+  "surface": "the real `legion start` entry: `bun run packages/daemon/src/cli/index.ts start <team> --config <file> [--check-config]` in the issue workspace at the PR head, `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u LEGION_DAEMON_URL` (a Legion pane exports DISPATCH_URL/DISPATCH_TOKEN_FILE without DISPATCH_TOKEN, which alone makes resolveDaemonConfig refuse; LEGION_DAEMON_URL is the outer pane's and is refused under runtime tmux). Minimal temp yaml per case: project acme/46, dispatch_project ACME, one repo, one nats url, no github_apps (no secret command runs). Driver: /tmp/legion46-sweep.sh (disposable).",
+  "acceptance": [
+    {
+      "item": 1,
+      "title": "every bounded key refused from file and LEGION_* with `<key> must be at most <bound>`; product bounded naming both keys; at-bound accepted",
+      "result": "PASS",
+      "evidence": [
+        "32/32 per-key cases through --check-config: for each of worker_stop_timeout_seconds, tree_stop_timeout_seconds, worker_boot_timeout_seconds, worker_rpc_timeout_seconds, resync_interval_seconds, worker_idle_retire_seconds, slow_command_timeout_seconds (bound 2147483) and linger_hours (bound 596): file value bound+1 -> exit 1 `error: <key> must be at most <bound>`; file value == bound -> `Config OK: project=acme46` exit 0; LEGION_<KEY>=bound+1 -> exit 1 `error: LEGION_<KEY> must be at most <bound>`; LEGION_<KEY>=bound -> Config OK exit 0. (worker_boot_timeout_seconds at-bound paired with worker_boot_registration_deadline_intervals: 1 / LEGION_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS=1, since the default 3 overflows the product by design.)",
+        "worker_idle_retire_seconds refusal keeps its hint: `worker_idle_retire_seconds must be at most 2147483; use 0 to disable idle retirement` (file) and the LEGION_ variant (env).",
+        "Product: file worker_boot_timeout_seconds: 2147483 with default intervals -> exit 1 `error: worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483`; file 1000000 x 3 -> same; env 715828 x 3 (=2147484) -> same; mixed file boot 2147483 x env intervals 2 -> same; env 715827 x 3 (=2147481) -> Config OK exit 0.",
+        "Counts stay unbounded: admission_cap/worker_cap/max_fix_attempts/max_recursion_depth: 99999999999 -> Config OK exit 0.",
+        "Plain `legion start acme/46 --config <bad>` (no --check-config), state_dir pointed at a fresh mktemp dir and port 47146: exit 1, `error: worker_boot_timeout_seconds must be at most 2147483` thrown at loadConfigFromFile <- loadStartConfig <- cmdStart (before startDaemon); afterwards the state_dir has 0 entries (no daemon.lock), no private tmux socket `legion-acme46` exists, port 47146 is not listening."
+      ]
+    },
+    {
+      "item": 2,
+      "title": "boundary pair: bound accepted, bound+1 refused; a normal value still loads",
+      "result": "PASS",
+      "evidence": [
+        "resync_interval_seconds: file 2147483 -> Config OK; file 2147484 -> `resync_interval_seconds must be at most 2147483`; LEGION_RESYNC_INTERVAL_SECONDS=2147483 -> Config OK; =2147484 -> `LEGION_RESYNC_INTERVAL_SECONDS must be at most 2147483`.",
+        "resync_interval_seconds: 3600 (file) -> Config OK exit 0; LEGION_RESYNC_INTERVAL_SECONDS=3600 -> Config OK exit 0 (the post-resolve check judges 3_600_000 ms against 2_147_483_000).",
+        "Unit test `accepts resync_interval_seconds exactly at 2147483 from either source and refuses 2147484` asserts config.resyncIntervalMs === 2_147_483_000 for both sources and `resyncIntervalMs must be at most 2147483000` for a cliOverride of 2_147_483_001; mutation M3 (seconds bound on the ms field) turned exactly that case red."
+      ]
+    },
+    {
+      "item": 3,
+      "title": "--check-config reports the same refusal as start-up",
+      "result": "PASS",
+      "evidence": [
+        "Same bad file through `start` and `start --check-config`: both exit 1 with the identical line `error: worker_boot_timeout_seconds must be at most 2147483`; `cmp` of the two full outputs differs only at the stack frame naming cmdStart vs cmdCheckConfig (both via loadStartConfig -> loadConfigFromFile -> checkAtMost config.ts:316).",
+        "The stack-trace-with-source-excerpt shape is pre-existing runCli behaviour for every non-CliError (identical for `port must be at most 65535` on the same head); not introduced by this PR."
+      ]
+    },
+    {
+      "item": 4,
+      "title": "existing valid deployment loads unchanged",
+      "result": "PASS",
+      "evidence": [
+        "`env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u LEGION_DAEMON_URL bun run packages/daemon/src/cli/index.ts start sjawhar/legion --config /home/ubuntu/.config/legion/sjawhar-legion/legion.yaml --check-config` at e97e5b72 -> `Config OK: project=sjawharlegion`, exit 0. The live yaml sets no *_seconds/_hours/_intervals key (grep: none), so every bounded setting is at its default."
+      ]
+    },
+    {
+      "item": 5,
+      "title": "daemon AGENTS.md lifecycle-defaults bullet names the bound",
+      "result": "PASS",
+      "evidence": [
+        "packages/daemon/src/daemon/AGENTS.md line 55 names `MAX_TIMER_SECONDS = 2147483`, `MAX_TIMER_HOURS = 596`, all eight keys (worker_stop_timeout_seconds, tree_stop_timeout_seconds, worker_boot_timeout_seconds, worker_rpc_timeout_seconds, resync_interval_seconds, worker_idle_retire_seconds, slow_command_timeout_seconds, linger_hours), the `<key> must be at most <bound>` refusal with `--check-config` reporting the same, the product rule with its exact message, and linger_hours as a deadline timestamp under the same bound.",
+        "The idle-retire parenthetical now reads `at most \\`MAX_TIMER_SECONDS\\`, below` — no own bound wording. The implementer's placement (after `... and \\`bind\\` (\\`127.0.0.1\\` unless \\`runtime: kubernetes\\`).` and before `A command the runner killed at its budget ...`) reads coherently: the runtime-selection list closes before the new sentences begin, nothing dangles. Line 65 (idle-retire bullet) still carries its own 2147483 explanation, unchanged and still true."
+      ]
+    }
+  ],
+  "completenessSweep": {
+    "result": "PASS — no gap",
+    "method": "Enumerated all 15 numeric DaemonConfig fields; grepped packages/daemon/src for every timer sink (setTimeout/setInterval/boundedWait/cancelableSleep/createCancellableSleep/Bun.sleep/sleep) and every `Seconds *`/`Hours *`/`* 1000`/HOUR_MS derivation; traced each config-derived delay to its sink.",
+    "bounded": {
+      "resyncIntervalMs": "index.ts:709 deps.setTimeout(..., config.resyncIntervalMs); resync.ts:341 comparison only",
+      "workerStopTimeoutSeconds / treeStopTimeoutSeconds": "processes.ts:3101/3105 *1000 -> stopProcess -> runtime.stop -> awaitShutdown -> boundedWait (runtime.ts:165)",
+      "workerBootTimeoutSeconds": "worker-boot-watchdog.ts:224 intervalMs -> cancelableSleep(remaining) setTimeout (:160)",
+      "workerBootTimeoutSeconds * workerBootRegistrationDeadlineIntervals": "processes.ts:1575-1579 (controller) and 1607-1611 (root) deadlineMs -> boundedWait",
+      "workerIdleRetireSeconds": "processes.ts:1652 retireMs -> boundedWait",
+      "workerRpcTimeoutSeconds": "index.ts:374/526, processes.ts:3114 *1000 -> worker-rpc.ts:347 per-request setTimeout; worker-stream-listener.ts:114 hello timeout",
+      "slowCommandTimeoutSeconds": "index.ts:295 (boot probes) and processes.ts:2431 (provisioning) *1000 -> state/fetch.ts:103 setTimeout(kill('budget'), limitMs)",
+      "lingerHours": "processes.ts:2106/2552 lingerUntil = now + hours*HOUR_MS (Date), swept by index.ts:722 setInterval(LINGER_SWEEP_INTERVAL_MS constant) — not a timer delay; bounded at 596 anyway per spec"
+    },
+    "legitimatelyExcluded": {
+      "workerBootRegistrationDeadlineIntervals alone": "an interval counter in the watchdog; covered through the product check",
+      "admissionCap, workerCap, maxRecursionDepth, maxFixAttempts": "counts, never a delay",
+      "port, workerStreamPort": "TCP ports, bounded at 65535 through the same checkAtMost"
+    },
+    "constantOnlySinks": "boot-probes.ts retry backoff (DAEMON_PROBE_RETRY), events.ts controller-notice drain backoff, instance-lock.ts HOLDER_PID_REREAD_MS, legions-registry.ts lock backoff, nats-transport.ts restart backoff/pull interval, worker-boot-watchdog.ts BOOT_WATCHDOG_POLL_INTERVAL_MS, cli/worker-shim.ts redial backoff, state/fetch.ts graphql backoff, index.ts LINGER_SWEEP_INTERVAL_MS, cli/index.ts probe-image IMAGE_PROBE_TIMEOUT_MS (= DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS*1000, a constant not the configured value)"
+  },
+  "gates": {
+    "tests": "bun test packages/daemon/src/daemon/__tests__/config.test.ts packages/daemon/src/cli/__tests__/index.test.ts -> 88 pass, 0 fail, 230 expect() calls",
+    "typecheck": "cd packages/daemon && node_modules/.bin/tsc --noEmit (5.9.3) -> exit 0",
+    "lint": "packages/daemon/node_modules/.bin/biome check (2.4.11) on config.ts, config.test.ts, cli/__tests__/index.test.ts -> Checked 3 files, No fixes applied, exit 0",
+    "ci": "legion gh -- pr view 1016 --json statusCheckRollup at head e97e5b72: pr-title, lint, typecheck, test all COMPLETED/SUCCESS; mergeable MERGEABLE. `Tests` workflow runs 34750580740 and 34750622237 both success."
+  },
+  "mutationCheck": {
+    "result": "9/9 caught; config.ts restored byte-identical (sha256 bc207ec9051b5377...) and baseline re-run 88/0",
+    "driver": "/tmp/legion46-mutate.py (disposable) — one exact-string mutation at a time in the workspace's config.ts, the two touched test files run, file restored in finally",
+    "mutations": [
+      "M1 worker_rpc_timeout_seconds file row loses MAX_TIMER_SECONDS -> 87/1: `refuses every timer setting above its bound from the file`",
+      "M2 LEGION_SLOW_COMMAND_TIMEOUT_SECONDS env parser loses bound -> 87/1: `... from its LEGION_* variable`",
+      "M3 post-resolve resyncIntervalMs max MAX_TIMER_SECONDS (seconds on the ms field) -> 87/1: `accepts resync_interval_seconds exactly at 2147483 ...`",
+      "M4 product check removed -> 87/1: `bounds the root registration deadline ...`",
+      "M5 MAX_TIMER_SECONDS = 2_147_484 -> 81/7: CLI check-config test, idle-retire, file table, env table, resync boundary, cliOverride, product",
+      "M6 cliOverride workerStopTimeoutSeconds loses max -> 87/1: `refuses a cliOverride above the bound post-resolve`",
+      "M7 worker_boot_timeout_seconds file row loses bound -> 86/2: CLI `refuses a timer setting above the 32-bit bound with the same message start-up gives` + file table",
+      "M8 linger_hours file row loses MAX_TIMER_HOURS -> 87/1: file table",
+      "M9 idle-retire hint dropped -> 87/1: idle-retire test"
+    ]
+  },
+  "testsAssessment": "Meets the bar. Every assertion is on an observable — a thrown message through the public loadConfigFromFile/resolveDaemonConfig/cmdCheckConfig entries or a resolved config value; no test imports the constant, asserts source text, or pins wiring. One row per key is not padding: M1/M7/M8 show each row alone catches its own dropped bound. The two updated idle-retire full-message assertions pin the operator-visible refusal text, which is the spec's stated contract (`<key> must be at most <bound>`), not implementation. The boundary case covers the real unit hazard (M3) and the product case the real timer that multiplies (M4).",
+  "observations": [
+    "Non-CliError config refusals print Bun's stack trace with a source excerpt before `error: <message>`; pre-existing runCli behaviour (runCli rethrows anything that is not a CliError), identical for `port must be at most 65535` on this head. Not a defect of this PR.",
+    "The PR body template's `pr-checks-result` run does not exist in this repository (already noted by the LEGION-13 tester); the gate is the `Tests` workflow.",
+    "The workspace carries an untracked harness-created `.omp/config.yml` in the working copy (implementer deviation 3); left out of the handoff commit by path-scoped `jj split`."
+  ],
+  "scratchArtifacts": [
+    "/tmp/legion46-sweep.sh",
+    "/tmp/legion46-mutate.py",
+    "/tmp/legion46-base.yaml",
+    "/tmp/legion46-case.yaml",
+    "/tmp/legion46-bad.yaml",
+    "/tmp/legion46-port.yaml",
+    "/tmp/legion46-start.out",
+    "/tmp/legion46-check.out",
+    "/tmp/legion46-state.*"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T10:07:00.611Z"
+}
