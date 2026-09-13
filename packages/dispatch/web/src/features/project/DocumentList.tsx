@@ -4,6 +4,8 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { EmptyState } from "../../components/EmptyState";
+import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
@@ -113,7 +115,7 @@ export function DocumentList({ project }: { project: string }): ReactNode {
   };
 
   if (documents.isPending) {
-    return <p className={textMutedOnCanvas}>Loading documents…</p>;
+    return <LoadingSkeleton label="Loading project documents" />;
   }
   if (documents.isError) {
     return <p className={dangerText}>Could not load documents.</p>;
@@ -170,7 +172,7 @@ export function DocumentList({ project }: { project: string }): ReactNode {
       ) : null}
       <Upload owner={{ project }} />
       {(documents.data ?? []).length === 0 ? (
-        <p className={textMutedOnCanvas}>No documents yet.</p>
+        <EmptyState label="Project documents empty state" message="No documents yet." />
       ) : (
         <ul>
           {(documents.data ?? []).map((document) => (

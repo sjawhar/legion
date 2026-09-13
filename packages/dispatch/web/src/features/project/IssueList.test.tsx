@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueSummary, UserState } from "../../api/types";
+import { userPreferenceStorageKey } from "../shell/userPreference";
 import { IssueList } from "./IssueList";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
@@ -27,10 +28,18 @@ function LocationSearch() {
   return <output data-testid="location-search">{useLocation().search}</output>;
 }
 
+async function openFilters(): Promise<void> {
+  const disclosure = await screen.findByRole("button", { name: /Filters · \d+ active/ });
+  if (disclosure.getAttribute("aria-expanded") === "false") {
+    fireEvent.click(disclosure);
+  }
+}
+
 function renderList(
   issues: IssueSummary[],
   state: UserState = {},
-  initialEntry = "/projects/CORE"
+  initialEntry = "/projects/CORE",
+  login = "alice"
 ) {
   const listIssues = spyOn(api, "listIssues").mockImplementation(async (options = {}) => {
     const labels = options.labels ?? [];
@@ -43,7 +52,7 @@ function renderList(
   const view = render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
-        <IssueList project="CORE" />
+        <IssueList login={login} project="CORE" />
         <LocationSearch />
       </QueryClientProvider>
     </MemoryRouter>
@@ -85,6 +94,7 @@ test("Needs you keeps only issues with open asks", async () => {
 
   try {
     await screen.findByText("Answer me");
+    await openFilters();
     fireEvent.click(screen.getByRole("button", { name: "Needs you" }));
     expect(screen.getByText("Answer me")).toBeTruthy();
     expect(screen.queryByText("Quiet")).toBeNull();
@@ -109,6 +119,7 @@ test("Unread keeps only issues with events past last_read_seq", async () => {
 
   try {
     await screen.findByRole("link", { name: /CORE-1.*Unread/ });
+    await openFilters();
     fireEvent.click(screen.getByRole("button", { name: "Unread" }));
     expect(screen.getByRole("link", { name: /CORE-1.*Unread/ })).toBeTruthy();
     expect(screen.queryByText("Read")).toBeNull();
@@ -128,6 +139,7 @@ test("label chips send every selection to the API and retain only AND matches", 
 
   try {
     await screen.findByText("Navigation");
+    await openFilters();
     fireEvent.click(screen.getByRole("button", { name: "frontend" }));
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["frontend"], project: "CORE" })
@@ -158,6 +170,7 @@ test("restores labels from the URL and writes filter changes back to it", async 
 
   try {
     await screen.findByText("Guidance");
+    await openFilters();
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["docs"], project: "CORE" })
     );
@@ -193,5 +206,59 @@ test("a child row shows its parent chip", async () => {
     view.unmount();
     getMyState.mockRestore();
     listIssues.mockRestore();
+  }
+});
+
+test("collapses filter controls by default and retains the disclosure preference per login", async () => {
+  window.localStorage.clear();
+  const { getMyState, listIssues, view } = renderList([issue()]);
+
+  try {
+    await screen.findByText("Core work");
+    const disclosure = screen.getByRole("button", { name: "Filters · 0 active" });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
+
+    fireEvent.click(disclosure);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Status" }), {
+      target: { value: "done" },
+    });
+    expect(
+      screen.getByRole("button", { name: "Filters · 1 active" }).getAttribute("aria-expanded")
+    ).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Filters · 1 active" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove Status: done filter" }));
+    expect(screen.getByRole("button", { name: "Filters · 0 active" })).toBeTruthy();
+    expect(
+      window.localStorage.getItem(userPreferenceStorageKey("alice", "project.issue-filters"))
+    ).toBe("collapsed");
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    window.localStorage.clear();
+  }
+});
+
+test("collapses a saved filter disclosure when no filters are active", async () => {
+  window.localStorage.setItem(
+    userPreferenceStorageKey("alice", "project.issue-filters"),
+    "expanded"
+  );
+  const { getMyState, listIssues, view } = renderList([issue()]);
+
+  try {
+    await screen.findByText("Core work");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Filters · 0 active" }).getAttribute("aria-expanded")
+      ).toBe("false")
+    );
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    window.localStorage.clear();
   }
 });

@@ -3,6 +3,9 @@ import { type ReactNode, useMemo, useState } from "react";
 
 import { api } from "../../api/client";
 import type { Agent } from "../../api/types";
+import { EmptyState } from "../../components/EmptyState";
+import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { LabelPill } from "../../components/Pill";
 import {
   borderDefault,
   card,
@@ -14,8 +17,6 @@ import {
   primaryButtonBg,
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
-  surfaceMutedBg,
-  surfaceMutedStrongBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
@@ -132,7 +133,7 @@ function AgentRow({ agent, needsYou }: { agent: Agent; needsYou: number }): Reac
         <div className="flex min-w-0 items-start gap-2">
           <FreshnessDot agent={agent} />
           <div className="min-w-0">
-            <h2 className={`truncate font-semibold ${textPrimaryOnCanvas}`} title={label}>
+            <h2 className={`truncate text-base font-semibold ${textPrimaryOnCanvas}`} title={label}>
               {label}
             </h2>
             <p className={`truncate text-sm ${textMutedOnCanvas}`} title={machineAndDir}>
@@ -141,28 +142,13 @@ function AgentRow({ agent, needsYou }: { agent: Agent; needsYou: number }): Reac
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {needsYou === 0 ? null : (
-            <span
-              className={`rounded-full px-2 py-1 text-xs font-semibold ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
-            >
-              Needs you {needsYou}
-            </span>
-          )}
-          <span
-            className={`rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
-          >
-            Open asks {agent.open_asks}
-          </span>
+          {needsYou === 0 ? null : <LabelPill selected>Needs you {needsYou}</LabelPill>}
+          <LabelPill>Open asks {agent.open_asks}</LabelPill>
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
         {agent.roles.map((role) => (
-          <span
-            className={`rounded-full px-2 py-1 font-medium ${surfaceMutedStrongBg} ${textSecondaryOnCanvas}`}
-            key={role}
-          >
-            {role}
-          </span>
+          <LabelPill key={role}>{role}</LabelPill>
         ))}
         {agent.capabilities.map((capability) => (
           <span className={textMutedOnCanvas} key={capability}>
@@ -227,19 +213,21 @@ export function AgentsPage(): ReactNode {
     [agents]
   );
 
-  if (isPending) return <p className={textMutedOnCanvas}>Loading agents…</p>;
+  if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
 
   return (
     <section aria-label="Agents">
       <header className={`mb-5 border-b pb-4 ${borderDefault}`}>
-        <h1 className="text-2xl font-semibold">Agents</h1>
+        <h1 className={`text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}>
+          Agents
+        </h1>
         <p className={`mt-1 text-sm ${textMutedOnCanvas}`}>
           Live Envoy sessions and their Dispatch activity.
         </p>
       </header>
       {orderedAgents.length === 0 ? (
-        <p className={textMutedOnCanvas}>No agents are connected to Envoy right now.</p>
+        <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <div className="space-y-3">
           {orderedAgents.map((agent) => (

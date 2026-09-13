@@ -46,3 +46,26 @@ test("board renders every lifecycle column without daemon-only status controls",
     listIssues.mockRestore();
   }
 });
+
+test("board shows a shared empty state when the project has no issues", async () => {
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <IssueBoard project="CORE" />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    expect(
+      within(board).getByRole("region", { name: "Empty project board" }).textContent
+    ).toContain("No issues in this project.");
+  } finally {
+    view.unmount();
+    listIssues.mockRestore();
+  }
+});

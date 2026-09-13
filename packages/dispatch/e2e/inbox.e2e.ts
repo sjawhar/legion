@@ -143,10 +143,10 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   }
   const needsYou = alicePage.getByRole("region", { name: "Needs you" });
   const newestAskCard = needsYou.getByTestId(`ask-${newestAsk.id}`);
-  const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
+  const shipOption = newestAskCard.getByRole("button", { name: "Ship" });
   await shipOption.click();
-  await expect(shipOption).toBeChecked();
-  await newestAskCard.getByRole("button", { name: "Answer" }).click();
+  await expect(shipOption).toHaveAttribute("aria-pressed", "true");
+  await newestAskCard.getByRole("button", { exact: true, name: "Answer" }).click();
   await expect(newestAskCard).toHaveCount(0);
   await expect
     .poll(() => getAsk(newestAsk.id))

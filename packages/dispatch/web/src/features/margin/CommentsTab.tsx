@@ -1,15 +1,10 @@
 import type { ReactNode } from "react";
 
 import type { Ask } from "../../api/types";
+import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
-import {
-  borderDefault,
-  highlightRing,
-  textMutedOnSurface,
-  textPrimaryOnSurface,
-} from "../../theme/classes";
+import { borderDefault, highlightRing, textPrimaryOnSurface } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
-import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { ThreadList } from "./ThreadList";
@@ -73,11 +68,8 @@ function AskCardItem({
       className={selected ? `rounded-xl ${highlightRing}` : undefined}
       data-margin-item={ask.id}
     >
-      <AskCard ask={ask} artifactSlug={artifactSlug} />
+      <AskCard ask={ask} artifactSlug={artifactSlug} variant="compact" />
       {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
-      <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
-        <Timestamp at={ask.created_at} />
-      </p>
     </div>
   );
 }
@@ -200,9 +192,10 @@ export function CommentsTab({
             !asksPending &&
             !commentsPending &&
             !answeredAsksPending ? (
-              <p className={`text-sm ${textMutedOnSurface}`}>
-                No comments, asks, or suggestions on this document.
-              </p>
+              <EmptyState
+                label="Margin review empty state"
+                message="No comments, asks, or suggestions on this document."
+              />
             ) : null}
           </>
         )}

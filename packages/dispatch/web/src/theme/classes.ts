@@ -368,12 +368,24 @@ export const badgePrimary = {
   text: "text-sky-800 dark:text-sky-300",
 };
 
+/** Priority is the only badge that uses a geometric tag rather than a pill. P2 and P3 stay
+ * neutral so only genuinely urgent work competes with an ask's urgency accent. */
+export const priorityBadge = [badgeBlocking, badgeHigh, badgeLow, badgeLow] as const;
+
 /** Ask cards use a left border for urgency, keeping the distinction visible without spending
  * space in the card's content flow. */
 export const askUrgencyBlockingBorder = "border-l-rose-500 dark:border-l-rose-400";
 export const askUrgencyHighBorder = "border-l-amber-500 dark:border-l-amber-400";
 export const askUrgencyMedBorder = "border-l-sky-500 dark:border-l-sky-400";
 export const askUrgencyLowBorder = "border-l-slate-400 dark:border-l-slate-600";
+/** Reusable urgency accents for cards that need priority without adding another chip to the
+ * content flow. */
+export const askUrgencyAccent = {
+  blocking: askUrgencyBlockingBorder,
+  high: askUrgencyHighBorder,
+  low: askUrgencyLowBorder,
+  med: askUrgencyMedBorder,
+} as const;
 /** The issue-status select is a neutral control: its solid dot carries the state signal while
  * its label remains readable without requiring users to distinguish hues. */
 export const STATUS_PILL_BG = pair(P.SLATE_100, P.SLATE_800);
@@ -386,6 +398,20 @@ export const statusPill = {
 export const statusPillDot = "bg-slate-500 dark:bg-slate-400";
 
 registerText("issue-status pill", STATUS_PILL_TEXT, STATUS_PILL_BG);
+
+/** Outlined approval states remain distinct from filled status and label pills. */
+export const approvalPill = {
+  approved: "border-emerald-700 dark:border-emerald-400 text-emerald-700 dark:text-emerald-400",
+  awaiting: "border-amber-700 dark:border-amber-400 text-amber-800 dark:text-amber-300",
+  changes_requested: "border-rose-700 dark:border-rose-400 text-rose-700 dark:text-rose-400",
+  draft: "border-dashed border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300",
+  stale: "border-amber-700 dark:border-amber-400 text-amber-800 dark:text-amber-300",
+} as const;
+
+registerText("approved approval pill", SUCCESS_TEXT, SURFACE);
+registerText("awaiting approval pill", BADGE_HIGH_TEXT, SURFACE);
+registerText("changes-requested approval pill", DANGER_TEXT, SURFACE);
+registerText("stale approval pill", BADGE_HIGH_TEXT, SURFACE);
 
 registerText("urgency:blocking badge", BADGE_BLOCKING_TEXT, BADGE_BLOCKING_BG);
 registerText("urgency:high badge", BADGE_HIGH_TEXT, BADGE_HIGH_BG);
@@ -499,6 +525,9 @@ export const railFocusOverlayText = "focus:text-slate-100";
 export const railDangerText = "text-rose-300";
 export const railBadgeBg = "bg-sky-500";
 export const railBadgeText = "text-slate-950";
+/** The Inbox count uses amber because it means the viewer, not merely any agent, must act. */
+export const railNeedsYouBadgeBg = "bg-amber-500";
+export const railNeedsYouBadgeText = "text-slate-950";
 
 registerText("rail primary text", railFixed(P.SLATE_100), railFixed(RAIL_BG_SWATCH));
 registerText("rail secondary text", railFixed(P.SLATE_300), railFixed(RAIL_BG_SWATCH));
@@ -506,6 +535,7 @@ registerText("rail muted text", railFixed(P.SLATE_400), railFixed(RAIL_BG_SWATCH
 registerText("rail link text", railFixed(P.SKY_300), railFixed(RAIL_BG_SWATCH));
 registerText("rail error text", railFixed(P.ROSE_300), railFixed(RAIL_BG_SWATCH));
 registerText("rail unread-count badge text", railFixed(P.SLATE_950), railFixed(P.SKY_500));
+registerText("rail needs-you badge text", railFixed(P.SLATE_950), railFixed(P.AMBER_500));
 /** `railActiveBg` (a nav item's selected/hover state) is a lighter shade than the base rail —
  * secondary/accent rail text sitting on it needs its own check, since it's a different
  * background from `RAIL_BG_SWATCH` above. */

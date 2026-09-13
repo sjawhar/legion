@@ -71,6 +71,27 @@ function renderSidebar(pathname = "/") {
       last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-10T01:00:00Z" },
       urgency: "med",
     },
+    {
+      anchor: null,
+      answer: null,
+      author: { id: "agent-2", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-3",
+      issue_key: "OPS-2",
+      priority: null,
+      kind: "question",
+      multiple: false,
+      opened_event_id: 3,
+      options: [],
+      question: "Confirm?",
+      state: "open",
+      last_reply: {
+        author: { id: "agent-3", kind: "session" },
+        created_at: "2026-09-10T01:00:00Z",
+      },
+      urgency: "med",
+    },
   ]);
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
@@ -100,7 +121,7 @@ test("sidebar lists Inbox, Pinned, Projects, and Settings with a truthful Needs-
 
   try {
     await screen.findByRole("link", { name: /CORE.*Core/ });
-    expect(screen.getByRole("link", { name: /Inbox.*Needs you 1/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Inbox.*Needs you 2/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Pinned" })).toBeTruthy();
     expect(screen.getByRole("link", { name: /CORE-1.*Pinned work/ }).textContent).toContain("1");
     expect(screen.getByRole("heading", { name: "Projects" })).toBeTruthy();

@@ -4,28 +4,18 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
-import {
-  badgeLow,
-  borderStrong,
-  dangerText,
-  linkHoverText,
-  linkText,
-  textMutedOnCanvas,
-} from "../../theme/classes";
-import { PriorityBadge } from "../issue/PriorityBadge";
+import { PriorityBadge } from "../../components/Badge";
+import { EmptyState } from "../../components/EmptyState";
+import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { LabelPill } from "../../components/Pill";
+import { dangerText, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
-  return (
-    <span
-      className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${badgeLow.bg} ${badgeLow.text}`}
-    >
-      {children}
-    </span>
-  );
+  return <LabelPill>{children}</LabelPill>;
 }
 
 /** A human spoke last on this ask (last_reply.author.kind === "user") — the ask's own author
@@ -88,17 +78,13 @@ export function Inbox(): ReactNode {
   });
 
   if (inbox.isPending) {
-    return <p className={textMutedOnCanvas}>Loading your inbox…</p>;
+    return <LoadingSkeleton label="Loading your inbox" />;
   }
   if (inbox.isError) {
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
   if (inbox.data.length === 0) {
-    return (
-      <p className={`rounded-xl border border-dashed p-8 ${borderStrong} ${textMutedOnCanvas}`}>
-        Nothing needs you
-      </p>
-    );
+    return <EmptyState label="Inbox empty state" message="Nothing needs you" />;
   }
 
   const waiting = waitingOnYou(inbox.data);
@@ -112,7 +98,7 @@ export function Inbox(): ReactNode {
       <BlockedOnYou asks={inbox.data} />
       {waiting.length === 0 ? null : (
         <section>
-          <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on you</h2>
+          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Waiting on you</h2>
           <ul className="space-y-3">
             {waiting.map((ask) => (
               <InboxItem ask={ask} key={ask.id} />
@@ -122,7 +108,7 @@ export function Inbox(): ReactNode {
       )}
       {needsYou.length === 0 ? null : (
         <section>
-          <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Needs you</h2>
+          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Needs you</h2>
           <ul className="space-y-3">
             {needsYou.map((ask) => (
               <InboxItem ask={ask} key={ask.id} />
@@ -132,7 +118,7 @@ export function Inbox(): ReactNode {
       )}
       {waitingOnAgents.length === 0 ? null : (
         <section>
-          <h2 className={`mb-3 text-sm font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
+          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
           <ul className="space-y-3">
             {waitingOnAgents.map((ask) => (
               <InboxItem ask={ask} key={ask.id} />

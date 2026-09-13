@@ -52,10 +52,10 @@ const inbox: InboxRow[] = [1, 2].map((number) => ({
   urgency: "med",
 }));
 
-function renderAgents() {
+function renderAgents(listedAgents: Agent[] = agents) {
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inbox);
-  const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue(listedAgents);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
   const view = render(
@@ -92,6 +92,22 @@ test("Agents lists live session activity and capability-aware actions", async ()
     expect(
       within(pageRegion).getByRole("button", { name: "BTW Reviewer" }).getAttribute("title")
     ).toBe("Reviewer does not advertise BTW");
+  } finally {
+    page.getInbox.mockRestore();
+    page.listAgents.mockRestore();
+    page.listIssues.mockRestore();
+    page.listProjects.mockRestore();
+    page.unmount();
+    page.whoAmI.mockRestore();
+  }
+});
+
+test("Agents shows the shared empty state when Envoy has no live sessions", async () => {
+  const page = renderAgents([]);
+
+  try {
+    const emptyState = await screen.findByRole("region", { name: "Agents empty state" });
+    expect(within(emptyState).getByText("No agents are connected.")).toBeTruthy();
   } finally {
     page.getInbox.mockRestore();
     page.listAgents.mockRestore();

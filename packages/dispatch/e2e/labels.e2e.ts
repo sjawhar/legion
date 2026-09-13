@@ -73,25 +73,26 @@ test("edits issue labels from a searchable multi-select and filters project issu
 
     await page.goto("/projects/CORE?label=docs");
     await expect(page).toHaveURL(/\/projects\/CORE\?label=docs$/);
-    await expect(page.getByRole("button", { name: "docs" })).toHaveAttribute(
+    await expect(page.getByRole("button", { exact: true, name: "docs" })).toHaveAttribute(
       "aria-pressed",
       "true"
     );
     await expect(page.getByText("Frontend documentation", { exact: true })).toBeVisible();
     await expect(page.getByText("Backend documentation", { exact: true })).toBeVisible();
     await expect(page.getByText("Editable labels", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "docs" }).click();
+    await page.getByRole("button", { exact: true, name: "docs" }).click();
     await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await page.getByRole("button", { name: "Frontend" }).click();
     await expect(page.getByText("Editable labels", { exact: true })).toBeVisible();
     await expect(page.getByText("Frontend documentation", { exact: true })).toBeVisible();
     await expect(page.getByText("Backend documentation", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "docs" }).click();
+    await page.getByRole("button", { exact: true, name: "docs" }).click();
     await expect(page.getByText("Frontend documentation", { exact: true })).toBeVisible();
     await expect(page.getByText("Editable labels", { exact: true })).toHaveCount(0);
 
     if (testInfo.project.name === "iphone") {
-      await expectTouchTarget(page.getByRole("button", { name: "docs" }));
+      await expectTouchTarget(page.getByRole("button", { exact: true, name: "docs" }));
       await expectTouchTarget(page.getByRole("button", { name: "Clear labels" }));
       await expect(
         page.evaluate(
