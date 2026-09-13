@@ -387,6 +387,13 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	s.settleWG.Add(1)
 	state.settle = time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
+		if current, _ := s.rooms.Load(room); current != state {
+			// The room was evicted between arming and firing: its state was replaced (or is
+			// gone), but the write that armed this timer is persisted and still owed a
+			// settlement. Arm it again on the room's current state instead of dropping it.
+			s.scheduleSettle(room)
+			return
+		}
 		s.settleRoom(room, generation)
 	})
 }
@@ -935,6 +942,10 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 }
 
 func (s *Service) evictRoom(room string, state *roomState) error {
+	// Close first, then remove the state: the close's flush-before-evict consults the state's
+	// persistence-suppression slot, so a state removed before the close would let a failed
+	// settlement's discarded identity update reach the store. A settlement armed on this
+	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
 	err := s.srv.CloseRoom(room, true)
 	if state != nil {
 		s.rooms.CompareAndDelete(room, state)
