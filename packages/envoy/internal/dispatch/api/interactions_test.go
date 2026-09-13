@@ -2068,13 +2068,21 @@ func (d *postApplyFailureDocs) waitBeforeApply() {
 	<-d.releaseBeforeApply
 }
 
+// loadMarkProjection waits for the mark to reach the persisted document: the API answers once
+// the live document carries the mark, and persistence follows on its own schedule.
 func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) map[string]any {
 	t.Helper()
-	projection, found := findMarkProjection(t, database, artifactID, markID)
-	if !found {
-		t.Fatalf("mark projection %q is missing", markID)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		projection, found := findMarkProjection(t, database, artifactID, markID)
+		if found {
+			return projection
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mark projection %q is missing", markID)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return projection
 }
 
 func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
