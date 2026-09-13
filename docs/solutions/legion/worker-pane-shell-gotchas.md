@@ -24,6 +24,7 @@ related_issues:
   - "sjawhar/legion#974"
   - "LEGION-52"
   - "LEGION-54"
+  - "sjawhar/legion#992"
   - "LEGION-16"
   - "LEGION-14"
   - "sjawhar/legion#952"
