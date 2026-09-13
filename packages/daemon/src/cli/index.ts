@@ -164,6 +164,98 @@ function isPrMergeInvocation(args: string[]): boolean {
   return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
 }
 
+/** The `gh issue` verbs that write to a GitHub issue. Reads (`view`, `list`, `status`) are not
+ * listed: a read is not a public action. */
+const GITHUB_ISSUE_WRITE_VERBS: Record<string, true> = {
+  comment: true,
+  create: true,
+  edit: true,
+  close: true,
+  reopen: true,
+  delete: true,
+  pin: true,
+  unpin: true,
+  transfer: true,
+  lock: true,
+  unlock: true,
+  develop: true,
+};
+
+/** A REST path token that names an issues endpoint: `repos/o/r/issues` (create), `…/issues/5`
+ * (edit, close, lock), `…/issues/5/comments`, `…/issues/comments/123`, `…/issues/5/labels`, and
+ * the full `https://api.github.com/…` forms of each. `…/pulls/5/reviews` and `graphql` do not
+ * match. */
+const GITHUB_ISSUES_PATH = /\/issues(?:[/?]|$)/;
+
+/** The HTTP method a `gh api` argv sends, by gh's own documented rule: the explicit `-X`/`--method`
+ * value when one is given (`-X POST`, `-XPOST`, `--method POST`, `--method=POST`), otherwise
+ * `POST` when any body flag is present (`-f`/`--raw-field`, `-F`/`--field`, `--input`, exact or
+ * attached), otherwise `GET`. So `--method GET … -f state=open` is a GET with query parameters. */
+function ghApiMethod(args: string[]): string {
+  let explicit: string | undefined;
+  let body = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "-X" || arg === "--method") {
+      explicit = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith("-X")) {
+      explicit = arg.slice("-X".length);
+    } else if (arg.startsWith("--method=")) {
+      explicit = arg.slice("--method=".length);
+    } else if (
+      arg.startsWith("-f") ||
+      arg.startsWith("-F") ||
+      arg === "--raw-field" ||
+      arg.startsWith("--raw-field=") ||
+      arg === "--field" ||
+      arg.startsWith("--field=") ||
+      arg === "--input" ||
+      arg.startsWith("--input=")
+    ) {
+      body = true;
+    }
+  }
+  return explicit ?? (body ? "POST" : "GET");
+}
+
+/** True when the forwarded `gh` argv would write to a GitHub issue. Legion issues live on
+ * Dispatch, and Legion never reads or writes a GitHub issue — yet on 2026-09-13 the LEGION-27
+ * retro followed a stale skill template and posted its retro comment on the unrelated public
+ * issue sjawhar/legion#27 (LEGION-78). A stale instruction anywhere must not be able to do that
+ * again, so the shim refuses the write itself, exactly as it refuses `pr merge`.
+ *
+ * Refused: an `issue` subcommand invocation whose later non-flag tokens include one of
+ * `GITHUB_ISSUE_WRITE_VERBS` (the positional filter from `isPrMergeInvocation`, so
+ * `issue --repo <value> comment 5` is caught), and a raw `gh api` call with a positional token on
+ * an `/issues` path whose effective method (`ghApiMethod`) is not GET.
+ *
+ * Not refused: `pr comment`, `pr review`, `api …/pulls/…`, `api graphql`, `issue view`/`list`, and
+ * any GET on an `/issues` path (`api repos/o/r/issues/5/comments --jq length`,
+ * `api --method GET repos/o/r/issues -f state=open`).
+ *
+ * Two accepted over-refusals, both by design: editing or deleting a pull-request *conversation*
+ * comment by raw API (`repos/o/r/issues/comments/<id>` — GitHub serves those from the issues
+ * endpoint; use `gh pr comment --edit-last`), and a non-GET call whose flag *value* happens to
+ * contain `/issues/` — the same imprecision `isPrMergeInvocation` accepts for `/merge`. A flag
+ * value equal to a verb (`issue list --search close`) is likewise refused: a GitHub-issue read
+ * Legion never performs. */
+function isGitHubIssueWriteInvocation(args: string[]): boolean {
+  const positional = args.filter((arg) => !arg.startsWith("-"));
+  const issueIndex = positional.indexOf("issue");
+  if (
+    issueIndex !== -1 &&
+    positional.slice(issueIndex + 1).some((token) => Object.hasOwn(GITHUB_ISSUE_WRITE_VERBS, token))
+  ) {
+    return true;
+  }
+  return (
+    positional.includes("api") &&
+    positional.some((token) => GITHUB_ISSUES_PATH.test(token)) &&
+    ghApiMethod(args).toUpperCase() !== "GET"
+  );
+}
+
 /** Redeems the pane's grant for a GitHub App token: the App of the role running the command
  * (`appRoleForLegionRole` in the daemon — the review App for the reviewer, the implement App for
  * every other role). */
@@ -186,6 +278,11 @@ async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
   if (isPrMergeInvocation(args)) {
     throw new CliError("Legion workers never merge; publish READY to the merge queue");
+  }
+  if (isGitHubIssueWriteInvocation(args)) {
+    throw new CliError(
+      `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || "the Dispatch issue"}`
+    );
   }
   const token = await redeemGitHubToken(deps);
   const childEnv = buildGitHubTokenEnv(token, deps.env);
