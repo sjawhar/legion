@@ -1,0 +1,77 @@
+{
+  "pr": 1021,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1021",
+  "branch": "legion/LEGION-42",
+  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
+  "commits": [
+    "ab14cffd686f daemon: one role→GitHub App mapping; the tester acts as the review App (LEGION-42)",
+    "4108e121b83f skills: only the implementer and merger push the issue branch (LEGION-42)"
+  ],
+  "filesChanged": [
+    "packages/daemon/src/daemon/github-apps.ts",
+    "packages/daemon/src/daemon/api/github.ts",
+    "packages/daemon/src/daemon/api/routes/credentials.ts",
+    "packages/daemon/src/daemon/api/routes/workers.ts",
+    "packages/daemon/src/daemon/catchup.ts",
+    "packages/daemon/src/daemon/__tests__/github-apps.test.ts",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/cli/index.ts",
+    "skills/legion-worker/SKILL.md",
+    "skills/AGENTS.md",
+    "packages/pi-envoy/roles/planner.md",
+    "packages/pi-envoy/roles/tester.md"
+  ],
+  "trickyParts": [
+    "The mapping is an exhaustive Record<LegionRole, GitHubAppRole> (architect/planner/tester/reviewer → review; implementer/merger → implement) so a new LegionRole fails to compile until placed; there is no runtime 'Unknown worker mode' path any more because every caller passes a validated LegionRole.",
+    "api.test.ts 'reissues a daemon-registered worker session capability…' is a tester and now pins the review identity on /worker/started, /gh-token (tokenRoles === ['review','review']) and /git-credential; the 'registers a worker session…' case pins gitName legion-review[bot]. Nothing else in the suite depended on the old mapping (1115 pass).",
+    "A pane's global git config routes https://github.com through `!gh auth git-credential`, and `gh` on a pane PATH is the Legion shim: any git push from a pane silently redeems THAT pane's grant, whatever token the test meant to use. The proof driver isolates git with GIT_CONFIG_GLOBAL=/dev/null; run 1 of the proof was contaminated that way (its branch legion42-proof/2026-09-13T10-17-43-805Z was deleted).",
+    "Non-pushing roles: the review App answers `git push` with `remote: Repository not found` (not the REST 403 text) — the negative control checks the remote head is unchanged rather than matching the message."
+  ],
+  "deviations": [
+    "The production-like proof ran the workspace build's real Legion API (`startLegionApi` + real TokenManager, real GitHub) driven over HTTP as the extension does, with in-memory state and no NATS/Dispatch/tmux/OMP panes — those are not on the changed path. The tester may repeat it through a full rig; the driver was a throwaway under /tmp and is not committed.",
+    "Spec v2 acceptance 3 asked for a tester commit status; the review App has no `statuses` permission (GET /app) so that POST 403s. The architect changed acceptance 3 in spec v3 to check run + PR comment and recorded 'add statuses to the review App' under Rejected; neither App's permissions were touched.",
+    "packages/pi-envoy/extensions/envoy.test.ts fails `bunx biome check` formatting on main already (untouched here); named as the PR's Fast-follow rather than widening the diff."
+  ],
+  "verification": {
+    "lint": "packages/daemon: bunx biome check src/ — Checked 159 files, no errors",
+    "typecheck": "packages/daemon: bunx tsc --noEmit — clean",
+    "tests": "packages/daemon: bun test — 1115 pass, 7 skip, 0 fail (63 files)"
+  },
+  "productionLikeProof": {
+    "surface": "scratch Legion API daemon from this branch (startLegionApi + real TokenManager) on 127.0.0.1, real api.github.com, sandbox sjawhar/legion-smoke; secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --; no token printed",
+    "sandboxPr": "https://github.com/sjawhar/legion-smoke/pull/36 (closed; branch legion42-proof/2026-09-13T10-19-19-674Z kept for inspection)",
+    "tester": {
+      "workerStartedLease": "gitName=legion-reviewer[bot] gitEmail=271566912+legion-reviewer[bot]@users.noreply.github.com",
+      "ghToken": "appLogin=legion-reviewer[bot]",
+      "gitCredential": "200, same token as /gh-token",
+      "checkRun": "POST /repos/sjawhar/legion-smoke/check-runs → 201, app.slug=legion-reviewer, app.id=3202653, https://github.com/sjawhar/legion-smoke/runs/103708837443",
+      "prComment": "201, user.login=legion-reviewer[bot], https://github.com/sjawhar/legion-smoke/pull/36#issuecomment-5652671849",
+      "commitStatus": "POST /repos/sjawhar/legion-smoke/statuses/66553606a1f398929113539b490231d82ebce9a3 → 403 {\"message\":\"Resource not accessible by integration\",\"documentation_url\":\"https://docs.github.com/rest/commits/statuses#create-a-commit-status\",\"status\":\"403\"} — the review App has no statuses permission; by architect ruling (spec v3) not an acceptance item"
+    },
+    "implementer": {
+      "workerStartedLease": "gitName=legion-implementer[bot] gitEmail=271566630+legion-implementer[bot]@users.noreply.github.com",
+      "ghToken": "appLogin=legion-implementer[bot]",
+      "push": "git push origin legion42-proof/2026-09-13T10-19-19-674Z exit 0; commit 66553606a1f398929113539b490231d82ebce9a3 author.login=committer.login=legion-implementer[bot]",
+      "prCreate": "201, #36, user.login=legion-implementer[bot]",
+      "prComment": "201, user.login=legion-implementer[bot], https://github.com/sjawhar/legion-smoke/pull/36#issuecomment-5652671771"
+    },
+    "negativeControls": {
+      "testerGitPush": "exit 128, remote: Repository not found; remote head unchanged (66553606…)",
+      "testerCreateRef": "POST /git/refs → 403 Resource not accessible by integration",
+      "implementerCheckRun": "POST /check-runs → 403 Resource not accessible by integration (the pre-fix failure LEGION-21/22's testers hit)"
+    },
+    "appPermissionsFromGitHub": {
+      "legion-implementer (3202636)": "actions:write, checks:read, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, statuses:write, workflows:write",
+      "legion-reviewer (3202653)": "actions:write, checks:write, issues:write, metadata:read, packages:read, pull_requests:write"
+    }
+  },
+  "notesForTester": [
+    "Acceptance 3 (spec v3): a tester grant's check run and PR comment on the sandbox PR are legion-reviewer[bot]; do not post a commit status (the review App has no statuses permission by design).",
+    "Acceptance 6: your handoff commit stays local — do not push; the implementer's next push carries it. A `jj git push` from your role is refused (`Repository not found` / `Resource not accessible by integration`) and that is expected.",
+    "Any git push from a pane goes through the pane's own grant via the gh shim credential helper; to test another identity's push, isolate git from the global config (GIT_CONFIG_GLOBAL=/dev/null) and supply the token via GIT_ASKPASS."
+  ],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T10:24:16.828Z"
+}
