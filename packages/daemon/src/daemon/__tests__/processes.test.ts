@@ -5271,8 +5271,6 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, child, "tester", "test it");
     // Let both watchdogs' connect-retry loops genuinely spin for a while first.
     await connects.reached(10);
-    const attemptsBeforeDispose = connects.count;
-    expect(attemptsBeforeDispose).toBeGreaterThan(0);
 
     processes.dispose();
     const attemptsAtDispose = connects.count;
@@ -5762,7 +5760,6 @@ describe("ProcessManager", () => {
     // re-check that follows it is synchronous.
     await runs("list-panes").completed.reached(2);
 
-    expect(listPanesCalls).toBeGreaterThanOrEqual(2);
     expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
     expect(commands.some((command) => command[3] === "new-window")).toBe(false);
     expect(managedState.controllerLocator).toEqual(locator);
@@ -6509,10 +6506,14 @@ describe("ProcessManager", () => {
 
     // Daemon shutdown begins while the retry's own pre-resurrect persist is still in flight.
     processes.dispose();
+    // The released save is the next completion; the treeStillUnconfirmed() re-check that
+    // declines (disposed) is its microtask-only continuation. `drainSpawns()` then awaits any
+    // resurrection a regressed check would have started -- its real fs I/O precedes `new-window`,
+    // so `windowCount` alone cannot see it one macrotask later; free when nothing was started.
+    const released = saves.completed.next();
     saveGate.resolve();
-    // The released save completes; the treeStillUnconfirmed() re-check that declines (disposed)
-    // is its synchronous continuation.
-    await saves.completed.reached(2);
+    await released;
+    await processes.drainSpawns();
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -6585,10 +6586,13 @@ describe("ProcessManager", () => {
     // earlier was wrong (or already stale), and this confirmation must still win over the
     // decision already in flight.
     processes.confirmRootReady(root, 1);
+    // The released save is the next completion; the treeStillUnconfirmed() re-check that
+    // declines (readyConfirmedAt set) is its microtask-only continuation. `drainSpawns()` then
+    // awaits any resurrection a regressed check would have started (see the dispose test above).
+    const released = saves.completed.next();
     saveGate.resolve();
-    // The released save completes; the treeStillUnconfirmed() re-check that declines
-    // (readyConfirmedAt set) is its synchronous continuation.
-    await saves.completed.reached(2);
+    await released;
+    await processes.drainSpawns();
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -6662,10 +6666,15 @@ describe("ProcessManager", () => {
     await processes.closeTree(root);
     expect(managedState.trees[root]?.status).toBe("closed");
 
+    // `closeTree` persisted three more times on its own, so the gated save is the NEXT completion
+    // (the 5th: spawnRoot's, closeTree's three, then this one) -- `next()`, never a fixed count.
+    // The treeStillUnconfirmed() re-check that declines (status closed) is its microtask-only
+    // continuation; `drainSpawns()` then awaits any resurrection a regressed check would have
+    // started (see the dispose test above).
+    const released = saves.completed.next();
     saveGate.resolve();
-    // The released save completes; the treeStillUnconfirmed() re-check that declines (status
-    // closed) is its synchronous continuation.
-    await saves.completed.reached(2);
+    await released;
+    await processes.drainSpawns();
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]?.status).toBe("closed");
