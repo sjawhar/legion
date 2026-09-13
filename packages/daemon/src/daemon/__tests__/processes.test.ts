@@ -24,6 +24,7 @@ import {
 import { parseProcStatStartTicks } from "../proc-stat";
 import {
   addressingFragment,
+  type ChildAdoption,
   type ControlDirective,
   designGateFragment,
   locatorsForIssue,
@@ -8560,6 +8561,193 @@ describe("ProcessManager", () => {
     await expect(processes.spawnWorker(root, child, "architect", "plan sub-tree")).rejects.toThrow(
       /recursion/
     );
+  });
+
+  it("spawns a released child's sub-architect as a phase worker of the parent tree", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(workspace, { recursive: true });
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: [child],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    tree(state);
+    state.admission.active = [root];
+    const admissionBefore = structuredClone(state.admission);
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@7 %71 4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const result = await processes.spawnWorker(root, child, "architect", "own this child");
+
+    expect(result).toEqual({ status: "spawned", roleToken: roleToken("omp", child, "architect") });
+    const windowCommand = commands.find(
+      (command) => command[0] === "tmux" && command[3] === "new-window" && command.includes("-n")
+    );
+    if (!windowCommand) throw new Error("sub-architect spawn did not open a tmux window");
+    expect(tmuxWindowEnvironment(windowCommand)).toMatchObject({
+      LEGION_TREE: root,
+      LEGION_ISSUE: child,
+      LEGION_ROLE: "architect",
+    });
+    expect(windowCommand.at(-1)).toContain(path.join("roles", "architect.md"));
+    // A worker claim with a locator: what `runningWorkerCount` counts against `worker_cap`.
+    const claim = managedState.roles[roleToken("omp", child, "architect")];
+    if (!claim || !("issue" in claim)) throw new Error("sub-architect claim was not recorded");
+    expect(claim.issue).toBe(child);
+    expect(claim.locator).toMatchObject({ tmuxWindowId: "@7", tmuxPaneId: "%71" });
+    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "own this child" });
+    // The child is a member of the parent's tree, never a tree or admission entry of its own.
+    expect(managedState.trees[child]).toBeUndefined();
+    expect(managedState.admission).toEqual(admissionBefore);
+  });
+
+  it("adoptOwnerlessChildTrees removes exactly the no-process child trees with a live ancestor, deletes and revokes each one's stale root-architect claim, and names surviving worker panes", () => {
+    const issue = (key: string, parent?: string, children: string[] = []) => ({
+      key,
+      title: key,
+      status: "todo" as const,
+      children,
+      ...(parent === undefined ? {} : { parent }),
+    });
+    const legacyTree = (
+      key: string,
+      status: LegionState["trees"][string]["status"],
+      locator?: LegionState["trees"][string]["locator"]
+    ) => ({
+      root: key,
+      generation: 1,
+      status,
+      launchFailures: 0,
+      ...(locator === undefined ? {} : { locator }),
+    });
+    const state = newLegionState("omp", 4);
+    // One active root owning five children of different shapes, a `queued` child carrying a
+    // `queued` grandchild tree of its own, a lingering legacy child tree over a queued grandchild,
+    // and a parentless queued root that must be left alone.
+    state.issues["OMP-1"] = issue("OMP-1", undefined, [
+      "OMP-2",
+      "OMP-3",
+      "OMP-4",
+      "OMP-5",
+      "OMP-6",
+      "OMP-8",
+    ]);
+    tree(state, "OMP-1");
+    state.issues["OMP-2"] = issue("OMP-2", "OMP-1", ["OMP-7"]);
+    state.trees["OMP-2"] = legacyTree("OMP-2", "queued");
+    state.issues["OMP-7"] = issue("OMP-7", "OMP-2");
+    state.trees["OMP-7"] = legacyTree("OMP-7", "queued");
+    state.issues["OMP-3"] = issue("OMP-3", "OMP-1");
+    state.trees["OMP-3"] = legacyTree("OMP-3", "launch-failed");
+    state.roles[roleToken("omp", "OMP-3", "architect")] = {
+      issue: "OMP-3",
+      role: "architect",
+      sessionId: "ses_omp3_failed_root",
+    };
+    // A worker an earlier confirmed generation of OMP-3 spawned: locator kept, LEGION_TREE=OMP-3.
+    state.roles[roleToken("omp", "OMP-3", "planner")] = {
+      issue: "OMP-3",
+      role: "planner",
+      sessionId: "ses_omp3_planner",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@30",
+        tmuxPaneId: "%30",
+        socketPath: "/state/workers/omp3-planner.sock",
+      },
+    };
+    state.issues["OMP-4"] = issue("OMP-4", "OMP-1");
+    state.trees["OMP-4"] = legacyTree("OMP-4", "active");
+    state.issues["OMP-5"] = issue("OMP-5", "OMP-1");
+    state.trees["OMP-5"] = legacyTree("OMP-5", "dead");
+    state.issues["OMP-6"] = issue("OMP-6", "OMP-1");
+    state.trees["OMP-6"] = legacyTree("OMP-6", "active", {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@6",
+      tmuxPaneId: "%6",
+      socketPath: "/state/workers/omp6-architect.sock",
+    });
+    state.issues["OMP-8"] = issue("OMP-8", "OMP-1", ["OMP-9"]);
+    state.trees["OMP-8"] = legacyTree("OMP-8", "lingering");
+    state.issues["OMP-9"] = issue("OMP-9", "OMP-8");
+    state.trees["OMP-9"] = legacyTree("OMP-9", "queued");
+    state.issues["OMP-10"] = issue("OMP-10");
+    state.trees["OMP-10"] = legacyTree("OMP-10", "queued");
+    state.admission.active = ["OMP-1", "OMP-4", "OMP-6"];
+    state.admission.queue = ["OMP-2", "OMP-7", "OMP-9", "OMP-10"];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const {
+      manager: processes,
+      state: managed,
+      revokedSessions,
+    } = manager(state, {
+      config: config("/state"),
+    });
+
+    let adoptions: ChildAdoption[];
+    let logged: string;
+    try {
+      adoptions = processes.adoptOwnerlessChildTrees();
+      logged = errorLog.mock.calls.flat().map(String).join("\n");
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    // Removed: queued (OMP-2), its queued grandchild (OMP-7, owned through OMP-2's parent chain
+    // once the nearest tree is a live one -- OMP-2's own tree is `queued`, which owns),
+    // launch-failed (OMP-3), active without a locator (OMP-4).
+    expect(adoptions).toEqual([
+      { child: "OMP-2", parent: "OMP-1" },
+      { child: "OMP-7", parent: "OMP-2" },
+      { child: "OMP-3", parent: "OMP-1" },
+      { child: "OMP-4", parent: "OMP-1" },
+    ]);
+    // Kept: dead (OMP-5), active with a locator (OMP-6), the lingering legacy tree (OMP-8) and the
+    // queued grandchild under it (OMP-9: its nearest ancestor tree is lingering, so it is an
+    // orphan), and the parentless root (OMP-10).
+    expect(Object.keys(managed.trees).sort()).toEqual([
+      "OMP-1",
+      "OMP-10",
+      "OMP-5",
+      "OMP-6",
+      "OMP-8",
+      "OMP-9",
+    ]);
+    expect(managed.admission.active).toEqual(["OMP-1", "OMP-6"]);
+    expect(managed.admission.queue).toEqual(["OMP-9", "OMP-10"]);
+    // The stale root-architect claim is gone and its capability revoked; the surviving worker's
+    // claim stays (nothing here stops a process) and is named in the log.
+    expect(managed.roles[roleToken("omp", "OMP-3", "architect")]).toBeUndefined();
+    expect(revokedSessions).toEqual(["ses_omp3_failed_root"]);
+    expect(managed.roles[roleToken("omp", "OMP-3", "planner")]).toBeDefined();
+    expect(logged).toContain(
+      `OMP-3's removed root tree still has worker claims with recorded panes (${roleToken("omp", "OMP-3", "planner")})`
+    );
+    expect(logged.match(/\(LEGION-57\)/g)).toHaveLength(4);
+
+    // Idempotent.
+    expect(processes.adoptOwnerlessChildTrees()).toEqual([]);
   });
 
   it("queues a second spawnWorker call at the running-worker cap and publishes worker-queued to the architect", async () => {

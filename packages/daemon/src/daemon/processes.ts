@@ -24,6 +24,7 @@ import {
   isBystanderCatchup,
   isBystanderRole,
   type LegionState,
+  liveAncestorTree,
   type PendingAssignment,
   type TreeState,
   type WorkerRoleClaim,
@@ -82,6 +83,13 @@ type Redelivery = { topic: string; payload: string; eventId: string };
 export type ControlDirective =
   | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
   | { type: "shutdown" };
+
+/** A child whose stray root tree the boot repair removed, and the parent whose architect now owns
+ * it -- what `index.ts` wakes with `child-adopted` once boot admission has settled. */
+export interface ChildAdoption {
+  child: IssueKey;
+  parent: IssueKey;
+}
 
 export interface ProcessManagerDeps {
   state: LegionState;
@@ -512,6 +520,88 @@ export class ProcessManager {
     void this.persist();
     void this.startRoot(issue);
     return "spawned";
+  }
+
+  /** LEGION-57 boot repair, idempotent: a pre-LEGION-57 daemon admitted every child released to
+   * `todo` as a root tree of its own. Removes each child tree that holds no process -- one of
+   * three shapes: `queued`; `launch-failed`; or `active` with no recorded locator (a promotion
+   * persisted before `spawnRoot` ever recorded a locator, so the spawn never completed before the
+   * daemon stopped) -- whose issue has a live ancestor tree (`liveAncestorTree`, the reducer's own
+   * ownership predicate) from `trees`, `admission.queue`, and `admission.active`, and with it the
+   * child's stale root-architect claim (`roles[roleToken(child, "architect")]`, revoked through
+   * `revokeRoleClaim` exactly as `closeTree` does): a `launch-failed` or active-without-locator
+   * tree has had `/process/started` write that claim with a `sessionId` and nothing but
+   * `closeTree` ever deletes it, so left in place its `sessionId` would become the
+   * `expectedSessionId` of the parent's first sub-architect spawn, whose fresh session would 409
+   * at `/worker/started` and burn a boot-timeout cycle before the retry launched clean -- and the
+   * architect skill's "no architect claim" gate would see it and skip the spawn. The claim holds
+   * no locator (a root architect's never does), so there is nothing to stop. Never the child's
+   * Dispatch status, whatever it is; one log line each. Returns the (child, parent) pairs so
+   * `index.ts` can wake each parent's architect with the reducer's own `child-adopted` payload once
+   * boot admission has settled. Left alone: a `dead` child tree (a root mid-resurrection) and an
+   * `active` one with a locator (a live root architect holding capabilities and workers); each
+   * lingers and releases its slot when its issue closes (`reduceIssueClosed`). Runs before
+   * `enableLaunches()` with the launch hold on, and so before `reconcileAdmission` -- which would
+   * otherwise promote a queued child, or demote an active-no-locator one to queued and relaunch it
+   * as a root in the same boot -- and a `launch-failed` child left in place would refuse the
+   * parent's `spawn_worker` (`rootForIssue` resolves to the child itself) forever now that the
+   * controller's `todo` no longer re-admits it.
+   *
+   * One exposure, logged rather than repaired: a `launch-failed` tree is reached from `dead` after
+   * `MAX_LAUNCH_FAILURES` resurrections, and neither that path nor `recordRootExit` stops the phase
+   * workers a previously *confirmed* generation of that root spawned. Such a worker keeps its
+   * locator and `LEGION_TREE=<child>`; once the tree is gone here, its tree-scoped credential
+   * routes (`/grants`, `/git-credential`, `/gh-token`) answer 404 `Unknown tree`, and the new
+   * sub-architect's `spawn_worker` for that role finds the live claim and resumes it rather than
+   * replacing it. The removal still happens (the spec's Errors row asks for it, and the parent's
+   * `spawn_worker` is otherwise refused forever); the surviving claims are named in one log line
+   * so the operator can retire them by hand. Synchronous, no persist of its own:
+   * `reconcileAdmission`'s closing `persist()` saves the result. */
+  adoptOwnerlessChildTrees(): ChildAdoption[] {
+    const state = this.deps.state;
+    const adoptions: ChildAdoption[] = [];
+    for (const [key, tree] of Object.entries(state.trees)) {
+      const holdsNoProcess =
+        tree.status === "queued" ||
+        tree.status === "launch-failed" ||
+        (tree.status === "active" && tree.locator === undefined);
+      if (!holdsNoProcess) continue;
+      const parent = state.issues[key]?.parent;
+      if (!parent) continue;
+      const owner = liveAncestorTree(state, key);
+      if (!owner) continue;
+      // Resolved while the tree still exists: `rootForIssue` reaches `key` for the child and its
+      // descendants only through this tree.
+      const survivingWorkers = Object.entries(state.roles)
+        .filter(
+          ([, claim]) =>
+            "issue" in claim &&
+            claim.locator !== undefined &&
+            this.rootForIssue(claim.issue) === key
+        )
+        .map(([token]) => token);
+      delete state.trees[key];
+      const queuedIndex = state.admission.queue.indexOf(key);
+      if (queuedIndex !== -1) state.admission.queue.splice(queuedIndex, 1);
+      const activeIndex = state.admission.active.indexOf(key);
+      if (activeIndex !== -1) state.admission.active.splice(activeIndex, 1);
+      const architectToken = roleToken(state.project, key, "architect");
+      const architectClaim = state.roles[architectToken];
+      if (architectClaim && "issue" in architectClaim) {
+        this.revokeRoleClaim(architectClaim);
+        delete state.roles[architectToken];
+      }
+      console.error(
+        `[legion] removed the ${tree.status} root tree for ${key} at boot: it is a child of ${parent} (${owner.root} is ${owner.status}) and is owned by that tree's architect, never admitted as a root (LEGION-57); its Dispatch status is left as is`
+      );
+      if (survivingWorkers.length > 0) {
+        console.error(
+          `[legion] ${key}'s removed root tree still has worker claims with recorded panes (${survivingWorkers.join(", ")}): spawned by an earlier confirmed generation of that root, they carry LEGION_TREE=${key}, so their tree-scoped credential routes answer 404 until they are retired; ${parent}'s sub-architect for ${key} would resume, not replace, them`
+        );
+      }
+      adoptions.push({ child: key, parent });
+    }
+    return adoptions;
   }
 
   /**

@@ -74,24 +74,35 @@ function phaseCompleteStatus(
   }
 }
 
-/** The one status the daemon PATCHes when the architect spawns a phase worker. Every released
- * issue, root or child, gets `in_progress` at admission (`spawnTree` writes it for the tree's
- * root, and a child released to `todo` is admitted as its own tree), so a spawn never starts an
- * issue — the spawn-time write exists for the corrective round alone: an implementer spawned
- * while the issue's PR carries `reviewDecision: "changes_requested"` (a Legion reviewer's round
- * or a human's review after approval) returns the issue to `in_progress` from wherever the review
- * left it, unless it is already there. Every other spawn writes nothing — a `.legion/` deletion
- * push or a retro under an approved review never moves the status, and an active issue a human
- * moved back to `todo` is never overridden — and the implementer's completion guard above sees
- * the status this write put there. */
+/** The status the daemon PATCHes when the architect spawns a worker: two cases, nothing else.
+ *
+ * (a) A `role: architect` spawn — a child's sub-architect; the root's own architect is refused 400
+ * by `handleSpawnWorker` — while the known status is `todo` → `in_progress`. A child is never
+ * admitted as a tree of its own (`reduceIssueUpdated` emits no `admit` for a `todo` under a live
+ * ancestor tree), so this spawn is the child's admission and writes what `spawnTree` writes for a
+ * root. A child a human moved back to `todo` gets `in_progress` again on its next sub-architect
+ * spawn: for a child, that spawn *is* its admission. A second spawn for the same live
+ * sub-architect writes nothing once Dispatch's echo lands (or, after a failed PATCH, at once,
+ * through `knownIssueStatus`'s pending-write fence); one that lands between a successful PATCH
+ * and its echo PATCHes `in_progress` again — an idempotent duplicate, the same window a root's
+ * `spawnTree` write has.
+ *
+ * (b) An implementer spawned while the issue's PR carries `reviewDecision: "changes_requested"` (a
+ * Legion reviewer's round or a human's review after approval) returns the issue to `in_progress`
+ * from wherever the review left it, unless it is already there.
+ *
+ * No spawn starts a root. Every other spawn writes nothing — a `.legion/` deletion push or a retro
+ * under an approved review never moves the status, and a phase worker spawned on an active issue a
+ * human moved back to `todo` never overrides it — and the implementer's completion guard above
+ * sees the status these writes put there. */
 function spawnStatus(
   state: LegionState,
   issue: IssueKey,
   role: LegionRole
 ): IssueStatus | undefined {
-  return role === "implementer" &&
-    knownIssueStatus(state, issue) !== "in_progress" &&
-    changesRequested(state, issue)
+  const known = knownIssueStatus(state, issue);
+  if (role === "architect") return known === "todo" ? "in_progress" : undefined;
+  return role === "implementer" && known !== "in_progress" && changesRequested(state, issue)
     ? "in_progress"
     : undefined;
 }

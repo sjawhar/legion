@@ -163,6 +163,12 @@ in flight. On each child closure, re-scope open work, close obsolete work with a
 release the next wave only when it now makes sense. There is no inter-child dependency
 mechanism to encode.
 
+Release admits nothing. A child never takes an admission slot or becomes a root tree of its
+own: the daemon ignores a child's `todo` while your tree is live, and this `spawn_worker` is
+what starts the child — the daemon writes its Dispatch status `in_progress` on the first
+sub-architect spawn while the child is at `todo`. A released child with no sub-architect stays
+at `todo` until you spawn one.
+
 ## 3. Children complete
 
 Treat `children-complete` as the edge into the end-game, not as a reason to close the
@@ -276,6 +282,8 @@ corresponding lifecycle procedure.
 
 | Wake | Procedure |
 | --- | --- |
+| `child-adopted` | Payload `{type:"child-adopted", child, remaining}`. A child is now in your tree — one created under this issue (by you or a human), or one a daemon upgrade moved back into your tree from a root tree of its own (LEGION-57). If Dispatch shows it released **and open** — `todo` through `retro`, never `done`; `remaining` counts exactly those — and `legion state` shows no `roles` entry with `issue` = the child and `role: "architect"`, `spawn_worker` its architect now. An unreleased child waits for its wave; a `done` child is finished and gets nothing, whatever stray tree of its own `legion state` may still show. |
+| `child-status` | Payload `{type:"child-status", child, from, to}`. Your child's Dispatch status changed. `to: "todo"` with no architect claim for the child (`legion state`) means it is released and unowned — your own `release_wave` echo, or a human's move — so `spawn_worker` its architect. `to: "backlog"` or `"icebox"` means the child was de-prioritised (a human's move, or your own `set_status`): a child has no tree of its own, so the daemon stops nothing on that move — tell its sub-architect (`envoy_publish` to its role topic) to finish the step in flight and park, or re-scope it; its finished workers idle-retire, and it resumes from its session on your next `spawn_worker` once the child is released again. Any other transition is information for re-scoping. |
 | `child-closed` | Read the child completion and remaining open children. Re-scope or close obsolete open work; release an appropriate next wave, or await `children-complete`. |
 | `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
@@ -290,7 +298,7 @@ corresponding lifecycle procedure.
 | `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. This is your cue for step 7: post the sign-off comment naming that merge commit and set the issue `done`. Nothing else follows a merge. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
-| `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. `gates[LEGION_TREE].open` is the design gate's current state: `true` means the root spec is approved at its current version and you may spawn; `false` (or no `open` key, meaning no gate is registered) means the sequence in section 1 still applies. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. |
+| `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. `gates[LEGION_TREE].open` is the design gate's current state: `true` means the root spec is approved at its current version and you may spawn; `false` (or no `open` key, meaning no gate is registered) means the sequence in section 1 still applies. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. Then compare `childCounts[LEGION_ISSUE].open` (the children not `done`) with `legion state` and Dispatch: any **open** released child — `todo` through `retro` — with no architect role claim gets `spawn_worker` for its architect, a `child-adopted` or `child-status` wake you missed while not live; a `done` child gets nothing, whether or not a lingering legacy tree of its own still shows in `legion state`. |
 | `worker-died` | Payload `{type:"worker-died", issue, role}`. The daemon probed and retried this role's worker through `MAX_LAUNCH_FAILURES` attempts and could not confirm a boot — never a raw-event replay or a silent revive. Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |
 

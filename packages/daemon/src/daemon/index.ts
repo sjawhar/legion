@@ -18,7 +18,7 @@ import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
 import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
-import { publishDesignApproved } from "./api/routes/issues";
+import { publishDesignApproved, publishWakeEffects } from "./api/routes/issues";
 import {
   DAEMON_PROBE_RETRY,
   verifyLegionPluginContract,
@@ -52,6 +52,7 @@ import {
   ProcessManager,
   type ProcessManagerDeps,
 } from "./processes";
+import { childAdopted } from "./reducers";
 import { runResync } from "./resync";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
@@ -681,16 +682,21 @@ async function startDaemonLocked(
     throw error;
   }
 
-  // The probes passed: release the hold. The promotion cascades below call back into
-  // `processManager`'s `mintBootToken`/`mintControllerCapability` closures, which read `api` by
-  // reference — assigned long since. `Bun.serve` has been accepting requests throughout; the
-  // running-worker and tree-admission counts these calls converge are correct before that
-  // (computed fresh from `state.roles`/`state.admission`, not accumulated), so an early request
-  // was never over-admitted — it queued, and is promoted here in FIFO order. `enableLaunches()`
-  // releases the hold every pane-opening path (`admit`, `spawnWorker`, `resurrect`,
-  // `ensureController`, and every `onIdle`/`markWorkerDead`/`closeTree` promotion trigger from
-  // this point on) waited behind — see `ProcessManager.launchesEnabled` and
-  // `WorkerAdmission.workerPromotionEnabled`.
+  // The probes passed. First the LEGION-57 boot repair, while the hold is still on: every child
+  // tree that holds no process (`queued`, `launch-failed`, `active` without a locator) and whose
+  // issue has a live ancestor tree leaves `trees`/`admission` here, before `reconcileAdmission`
+  // below could promote it, or demote and relaunch it, as a root. The parents' architects are
+  // woken once boot admission has settled (after `replayHeldRecoveries()`).
+  const adoptions = processManager.adoptOwnerlessChildTrees();
+  // Then release the hold. The promotion cascades below call back into `processManager`'s
+  // `mintBootToken`/`mintControllerCapability` closures, which read `api` by reference -- assigned
+  // long since. `Bun.serve` has been accepting requests throughout; the running-worker and
+  // tree-admission counts these calls converge are correct before that (computed fresh from
+  // `state.roles`/`state.admission`, not accumulated), so an early request was never
+  // over-admitted -- it queued, and is promoted here in FIFO order. `enableLaunches()` releases
+  // the hold every pane-opening path (`admit`, `spawnWorker`, `resurrect`, `ensureController`,
+  // and every `onIdle`/`markWorkerDead`/`closeTree` promotion trigger from this point on) waited
+  // behind -- see `ProcessManager.launchesEnabled` and `WorkerAdmission.workerPromotionEnabled`.
   processManager.enableLaunches();
   // Before `reconcileAdmission`'s own promotion cascade, which can take a while (spawning
   // multiple queued roots): a restored active-with-a-locator-but-never-confirmed tree must have
@@ -703,6 +709,20 @@ async function startDaemonLocked(
   // `ensureController` above, an exception routed to a dead root, an API call from a live
   // architect) runs now.
   await processManager.replayHeldRecoveries();
+  // Each child the boot repair moved back into its parent's tree: wake the parent's architect
+  // exactly as `issue.created` would (`childAdopted`, the reducer's own payload), so it spawns the
+  // sub-architect. Best-effort like the gate-off wake above, and a 404 no-holder is recovered the
+  // ordinary way: the parent root's locator survived boot (or `reconnectRoots`/the resync probe
+  // resurrects it), and the resurrected architect's catch-up procedure spawns a sub-architect for
+  // any released child without an architect claim.
+  for (const { child, parent } of adoptions) {
+    await publishWakeEffects(
+      childAdopted(state, parent, child),
+      deps.envoyPublish,
+      (message) =>
+        `[legion] the child-adopted wake for ${child} (moved back into ${parent}'s tree at boot) failed to publish; the parent's architect reconciles released children at its next catch-up: ${message}`
+    );
+  }
   const ready = nats.ready();
 
   const scheduleResync = (): void => {

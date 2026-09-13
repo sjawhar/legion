@@ -6,7 +6,7 @@ import {
   type IssueStatus,
   type LegionState,
 } from "../../legion-state";
-import { type EnvelopeJson, routeActive } from "../../reducers";
+import { type Effect, routeActive } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {
   EnvoyPublishError,
@@ -17,10 +17,6 @@ import {
   requiredString,
   validateContractResponse,
 } from "../http";
-
-/** `routeActive` takes the triggering envelope only to keep one signature with the reducers; the
- * gate-off wake has no Dispatch event behind it. */
-const GATE_OFF_ENVELOPE: EnvelopeJson = { event_id: "gate-off", issued_at: 0 };
 
 /**
  * Sets an issue's Dispatch status. Two mutually exclusive credentials, distinguished by which is
@@ -66,30 +62,47 @@ export async function handleIssueStatus(
   return Response.json(validateContractResponse(LegionDaemonApi.IssueStatus.response, {}));
 }
 
-/** Publishes the `design-approved` wake for a gate the daemon opened without an `artifact.approved`
- * event of its own to reduce — the `gates.design: off` self-approval, and a registration that
- * found the document already approved on Dispatch (`seedGateFromDispatch`) — to exactly the role
- * the reducer's `artifact.approved` path would have chosen (`routeActive`: the issue's active
- * phase worker if any, else its tree's architect). Best-effort: the state already carries the
- * approval, so a resumed architect's catch-up shows it; a 404 no-holder is silent, anything else
- * is logged. Shared by the register route and the boot fixup. */
-export async function publishDesignApproved(
-  state: LegionState,
-  issue: IssueKey,
-  envoyPublish: (topic: string, payloadJson: string) => Promise<void>
+/** Publishes the `publish` effects of a wake the daemon itself originated (no Dispatch event
+ * behind it: the design gate's self-approval, the boot repair's `child-adopted`) to exactly the
+ * roles the reducers would have chosen. Best-effort: the state already carries what the wake
+ * announces, so a resumed architect's catch-up shows it. A 404 no-holder is silent; anything else
+ * is logged with the line `describeFailure` builds from the error's message. Any other effect kind
+ * is ignored -- `routeActive` yields a `controller` wake only for a closed tree, which no caller
+ * targets. */
+export async function publishWakeEffects(
+  effects: Effect[],
+  envoyPublish: (topic: string, payloadJson: string) => Promise<void>,
+  describeFailure: (message: string) => string
 ): Promise<void> {
-  for (const effect of routeActive(state, issue, { type: "design-approved" }, GATE_OFF_ENVELOPE)) {
+  for (const effect of effects) {
     if (effect.kind !== "publish") continue;
     try {
       await envoyPublish(roleTopic(effect.role), JSON.stringify(effect.payload));
     } catch (error) {
       if (!(error instanceof EnvoyPublishError) || error.status !== 404) {
-        console.error(
-          `[legion] the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${error instanceof Error ? error.message : String(error)}`
-        );
+        console.error(describeFailure(error instanceof Error ? error.message : String(error)));
       }
     }
   }
+}
+
+/** Publishes the `design-approved` wake for a gate the daemon opened without an `artifact.approved`
+ * event of its own to reduce — the `gates.design: off` self-approval, and a registration that
+ * found the document already approved on Dispatch (`seedGateFromDispatch`) — to exactly the role
+ * the reducer's `artifact.approved` path would have chosen (`routeActive`: the issue's active
+ * phase worker if any, else its tree's architect). Shared by the register route and the boot
+ * fixup; `publishWakeEffects` carries the best-effort/404-silent rule. */
+export async function publishDesignApproved(
+  state: LegionState,
+  issue: IssueKey,
+  envoyPublish: (topic: string, payloadJson: string) => Promise<void>
+): Promise<void> {
+  await publishWakeEffects(
+    routeActive(state, issue, { type: "design-approved" }),
+    envoyPublish,
+    (message) =>
+      `[legion] the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${message}`
+  );
 }
 
 /** A registration that would leave the gate closed asks Dispatch whether a human already approved
@@ -208,9 +221,12 @@ export async function handleWaveRelease(
   if (!ctx.deps.state.trees[tree]) {
     throw new HttpError(404, "Unknown tree");
   }
-  // The PATCH itself is all this route does: the resulting `issue.updated` event (Dispatch echoes
-  // every status write back through the daemon's own durable consumer) is what actually admits
-  // each child, exactly like a human moving a child to `todo` in the dashboard would.
+  // The PATCH itself is all this route does. The resulting `issue.updated` event (Dispatch echoes
+  // every status write back through the daemon's own durable consumer) admits nothing for a child
+  // under this live tree (`reduceIssueUpdated` -> `admitOnTodo`): it wakes this architect through
+  // the parent's own `child.status` event, and the architect's `spawn_worker` for the child's
+  // sub-architect is what starts the child (writing its `in_progress`, `spawnStatus`). Exactly
+  // like a human moving a child to `todo` in the dashboard would.
   for (const issue of issues) {
     await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, "todo");
   }

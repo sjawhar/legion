@@ -540,6 +540,26 @@ export function isBystanderCatchup(
   return pending?.kind === "catchup" && isBystanderRole(state, issue, role);
 }
 
+/** The tree that owns `issue` through its parent chain, if any: the nearest ancestor (never `issue`
+ * itself) recorded in `state.trees`, unless that tree is `lingering` or `closed` -- a tree whose
+ * architect is gone for good. `queued`, `active`, `dead`, and `launch-failed` all own: each is a
+ * root tree that resumes (promotion, resurrection, the controller's re-admission). A child with no
+ * owner is an orphan and admits as a root of its own. Shared by `reduceIssueUpdated` and the boot
+ * repair `adoptOwnerlessChildTrees` so the two cannot disagree. Cycle-safe like `rootForIssue`. */
+export function liveAncestorTree(state: LegionState, issue: IssueKey): TreeState | undefined {
+  const seen = new Set<IssueKey>([issue]);
+  let current = state.issues[issue]?.parent;
+  while (current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    const tree = state.trees[current];
+    if (tree) {
+      return tree.status === "lingering" || tree.status === "closed" ? undefined : tree;
+    }
+    current = state.issues[current]?.parent;
+  }
+  return undefined;
+}
+
 function migrateV5State(state: unknown): unknown {
   if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
   if (!("version" in state) || state.version !== 5) return state;

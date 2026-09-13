@@ -393,13 +393,32 @@ checkpoint_three() {
 
 # Under `root-issues`, between checkpoints 3 and 4 a human approves the root spec document (the
 # document header's Approve, or the approval ask with Approve); this checkpoint proves the approval
-# opened the gate (`approvedVersion == latestVersion`) and the tree then moved — a child released
-# into admission or an active tree, or a phase-worker role claim on the root itself (a
-# single-issue tree). Under `off` there is no gate to check; only the move itself is observed.
+# opened the gate (`approvedVersion == latestVersion`) and the tree then moved. Under `off` there
+# is no gate to check; only the move itself is observed.
+#
+# LEGION-57: a released child is owned by a sub-architect running as a phase worker inside its
+# parent's tree -- never a tree or admission entry of its own (the reducer ignores a child's `todo`
+# while an ancestor tree is live; the first `spawn_worker` of the child's architect is what starts
+# it and writes its `in_progress`). So the move is either a child Dispatch reports at `in_progress`
+# or later holding an architect role claim whose locator is a worker pane, or -- only while no
+# child of the root is released (`todo` or later on Dispatch), a single-issue tree -- a phase-worker
+# role claim on the root itself (`root_phase_worker`). A released child without that claim fails
+# whatever runs on the root: a phase worker on the root does not own a child, and the window after
+# `release_wave` and before `spawn_worker` is not yet the fixed state. Either way, no child of the
+# root may be a tree or admission entry. Dispatch is the surface for the child's status; the
+# daemon's persisted state is the surface for admission and role claims. A worker claim's locator
+# is a worker pane by construction (only `launchWorker` writes a locator onto a role claim; the
+# root architect's own claim never carries one), and the tree-absence assertion rules out the
+# child holding a root pane of its own.
 checkpoint_four() {
   local root
   local design_gate
   local daemon_state
+  local children
+  local offender
+  local owned
+  local unowned
+  local pending
   local released
 
   root="$(dispatch_root_key)"
@@ -411,22 +430,54 @@ checkpoint_four() {
     ' >/dev/null <<<"$daemon_state" ||
       fail "daemon has not recorded the spec approval for ${root} (gates[${root}].approvedVersion must equal latestVersion)"
   fi
-  jq -e --arg root "$root" --argjson released "$released_statuses" '
-    [
-      .issues[$root].children[]? as $child |
-      .issues[$child].status as $status |
-      .trees[$child].status as $tree_status |
+  children="$(dispatch_children "$root")"
+  offender="$(jq -r --arg root "$root" --argjson children "$children" '
+    . as $state |
+    [ $children[] | select(.parent == $root) | .key as $child |
       select(
-        ($status | IN($released[])) and
-          ((.admission.active | index($child)) != null or $tree_status == "queued" or
-            $tree_status == "active")
-      )
-    ] | length > 0
-  ' >/dev/null <<<"$daemon_state" && released="a released child is tracked by admission or tree state"
-  if [[ -z "${released:-}" ]]; then
+        $state.trees[$child] != null or
+          (($state.admission.queue // []) | index($child)) != null or
+          (($state.admission.active // []) | index($child)) != null
+      ) | $child ] | first // empty
+  ' <<<"$daemon_state")"
+  [[ -z "$offender" ]] || fail "child ${offender} is admitted as a tree of its own (LEGION-57)"
+  # `in_progress` is what the first sub-architect spawn writes, and every later status passes
+  # through it; `todo` is released but not yet spawned -- not yet the fixed state.
+  owned="$(jq -r --arg root "$root" --argjson children "$children" '
+    . as $state |
+    [ $children[] | select(.parent == $root) | . as $child |
+      select(
+        ($child.status == "in_progress" or $child.status == "testing" or
+          $child.status == "needs_review" or $child.status == "retro" or $child.status == "done") and
+          any($state.roles[]?;
+            has("issue") and .issue == $child.key and .role == "architect" and
+              (.locator.tmuxPaneId | type == "string" and length > 0))
+      ) | "\(.key) \(.status)" ] | first // empty
+  ' <<<"$daemon_state")"
+  if [[ -n "$owned" ]]; then
+    released="released child ${owned%% *} has no tree or admission entry of its own; its architect runs as a worker pane of ${root} and Dispatch reports it ${owned##* }"
+  else
+    # A released child the sub-architect claim already covers, still `todo` on Dispatch: the
+    # `in_progress` PATCH in flight during `spawn_worker`, or a failed one parked in the daemon's
+    # `pendingStatusWrites` for resync. Named as such -- the claim is not missing.
+    pending="$(jq -r --arg root "$root" --argjson children "$children" '
+      . as $state |
+      [ $children[] | select(.parent == $root and .status == "todo") | .key as $child |
+        select(any($state.roles[]?;
+          has("issue") and .issue == $child and .role == "architect" and
+            (.locator.tmuxPaneId | type == "string" and length > 0))) | $child ] | first // empty
+    ' <<<"$daemon_state")"
+    [[ -z "$pending" ]] ||
+      fail "released child ${pending} has a sub-architect worker pane on ${root} but Dispatch still reports it todo (the in_progress PATCH is in flight, or failed and is parked in the daemon's pendingStatusWrites for resync)"
+    unowned="$(jq -r --arg root "$root" --argjson released "$released_statuses" '
+      [ .[] | select(.parent == $root and (.status | IN($released[]))) | "\(.key) (\(.status))" ]
+      | first // empty
+    ' <<<"$children")"
+    [[ -z "$unowned" ]] ||
+      fail "released child ${unowned} holds no sub-architect role claim with a worker pane on ${root} (LEGION-57: the parent architect's spawn_worker for its architect is what starts a child; a phase worker on the root does not own it)"
     released="$(root_phase_worker "$root" "$daemon_state")"
     [[ -n "$released" ]] ||
-      fail "neither a child is released into admission or an active tree nor a phase worker is claimed on ${root}"
+      fail "neither a released child holds a sub-architect role claim with a worker pane nor a phase worker is claimed on ${root}"
     released="a ${released} phase worker claimed on the root (single-issue tree)"
   fi
   if [[ "$design_gate" == root-issues ]]; then

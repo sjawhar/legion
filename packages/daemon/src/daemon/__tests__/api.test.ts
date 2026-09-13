@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +16,7 @@ import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
-import { type EnvelopeJson, routeActive } from "../reducers";
+import { routeActive } from "../reducers";
 import { checkPr, fakeDispatchClient } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
@@ -1995,8 +1995,7 @@ describe("Legion HTTP API", () => {
     // The green-CI wake for the retro commit still reaches the implementer, not the relaunched
     // reviewer.
     const payload = { type: "ci-green" as const, sha: "retro-head" };
-    const envelope: EnvelopeJson = { event_id: "delivery-1", issued_at: now, payload: {} };
-    expect(routeActive(state, root, payload, envelope)).toEqual([
+    expect(routeActive(state, root, payload)).toEqual([
       { kind: "publish", role: implementerToken, payload },
     ]);
   });
@@ -2698,8 +2697,9 @@ describe("Legion HTTP API", () => {
   }
 
   it("writes nothing when the architect spawns a worker for an issue a human moved back to todo", async () => {
-    // A released child is admitted as its own tree and gets `in_progress` from its own spawnTree,
-    // so an active issue at `todo` is only ever a human's doing; the spawn must not override it.
+    // A root gets `in_progress` from `spawnTree` and a child from its first sub-architect spawn, so
+    // a phase worker spawned on an issue at `todo` is answering a human's move; the spawn must not
+    // override it.
     const dispatch = recordingDispatchClient();
     await start({ dispatchClient: dispatch.client });
     state.issues[root].status = "todo";
@@ -2717,6 +2717,53 @@ describe("Legion HTTP API", () => {
     expect(spawn.response.status).toBe(200);
     expect(spawn.body.status).toBe("spawned");
     expect(dispatch.statusWrites).toEqual([]);
+  });
+
+  it("writes in_progress once when the architect spawns a released child's sub-architect", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    const secret = await architectSecret();
+
+    const spawn = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "own this child",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(spawn.body).toEqual({
+      status: "spawned",
+      roleToken: roleToken(state.project, child, "architect"),
+    });
+    expect(spawnedWorkers).toEqual([
+      { tree: root, issue: child, role: "architect", task: "own this child" },
+    ]);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
+
+    // Dispatch echoes the write back through the durable lane; the next spawn for the same live
+    // sub-architect (a new task for it) writes nothing.
+    state.issues[child].status = "in_progress";
+    const again = await json<{ status: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: child,
+      sessionId: "ses_root",
+      secret,
+      role: "architect",
+      task: "re-scope the child",
+    });
+    expect(again.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
   });
 
   it("writes in_progress when the architect spawns a corrective implementer while the PR's latest review is changes requested", async () => {
@@ -3139,6 +3186,91 @@ describe("Legion HTTP API", () => {
 
     expect(complete.response.status).toBe(200);
     expect(statusWrites).toEqual([{ issue: root, status: "testing" }]);
+  });
+
+  it("advances a child to testing on its implementer's completion when the sub-architect spawn's in_progress PATCH failed and no echo ever arrived", async () => {
+    // `AGENTS.md`'s `/phase/complete` row promises this for a child: the `in_progress` write at
+    // admission (the first sub-architect spawn) fails, resync has not retried it yet, Dispatch
+    // still echoes `todo` -- and the implementer's completion still writes `testing`, because
+    // `knownIssueStatus` reads the daemon's own pending write through the `statusAtRecord` fence.
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    let failNext = true;
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          if (failNext) {
+            failNext = false;
+            throw new Error("Dispatch unavailable: 503");
+          }
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    const secret = await architectSecret();
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const spawn = await json("/legion/v1/worker/spawn", {
+        tree: root,
+        issue: child,
+        sessionId: "ses_root",
+        secret,
+        role: "architect",
+        task: "own this child",
+      });
+      expect(spawn.response.status).toBe(200);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // The spawn succeeded; the failed PATCH is parked for resync against the status it saw.
+    expect(statusWrites).toEqual([]);
+    expect(state.pendingStatusWrites[child]).toEqual({
+      status: "in_progress",
+      statusAtRecord: "todo",
+    });
+    expect(state.issues[child].status).toBe("todo");
+
+    state.roles[roleToken(state.project, child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/child-implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, child, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: child,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_child_implementer",
+      agentId: "agt_child_implementer",
+      ompSessionFile: "/tmp/child-implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[child] = { phase: "implementer", sessionId: "ses_child_implementer" };
+    const grantId = await mintGrant(child, "ses_child_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the child",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([{ issue: child, status: "testing" }]);
   });
 
   it("writes no status when an implementer completes from retro (the .legion deletion push or retro itself)", async () => {
