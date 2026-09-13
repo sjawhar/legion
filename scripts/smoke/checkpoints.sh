@@ -610,13 +610,22 @@ checkpoint_twelve() {
     fail "closed tree is still active or queued issue was not promoted"
 }
 
-# Spec LEGION-6 acceptance 2 and 4: no recorded Legion process — the private tmux server itself,
-# the controller pane, every tree root pane, every worker pane — carries a bearer or boot secret on
-# its argv or in its environment; the private server's global environment has none; and the default
-# tmux server hosts no legion-<slug> session.
+# Spec LEGION-6 acceptance 2 and 4, and LEGION-74: no recorded Legion process — the private tmux
+# server itself, the controller pane, every tree root pane, every worker pane — carries a bearer, a
+# boot secret, or either GitHub App private key (the daemon's own, for token minting; a pane must
+# never see them) on its argv or in its environment; the private server's global environment has
+# none; and the default tmux server hosts no legion-<slug> session. SMOKE_CANARY_ENV is a
+# space-separated list of further names the operator planted in the daemon's environment
+# (e.g. FOO_SECRET=canary) to prove the allow-list drops what it does not name.
 checkpoint_thirteen() {
-  local slug socket server_pid pane pid entry name
+  local slug socket server_pid pane pid entry name pattern joined
   local -a pids=()
+  local -a names=(DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64)
+  local -a canaries=()
+  read -r -a canaries <<<"${SMOKE_CANARY_ENV:-}"
+  names+=("${canaries[@]}")
+  pattern="$(IFS='|'; printf '%s' "${names[*]}")"
+  joined="$(IFS=' '; printf '%s' "${names[*]}")"
   slug="$(project_slug)"
   socket="legion-${slug}"
   server_pid="$(legion_tmux display-message -p '#{pid}')" || fail "private tmux server ${socket} is not running"
@@ -633,23 +642,23 @@ checkpoint_thirteen() {
   ((${#pids[@]} > 1)) || fail "daemon state records no pane to inspect"
   for pid in "${pids[@]}"; do
     [[ -r "/proc/${pid}/environ" && -r "/proc/${pid}/cmdline" ]] || fail "cannot read /proc/${pid}"
-    for name in DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET; do
+    for name in "${names[@]}"; do
       if entry="$(tr '\0' '\n' <"/proc/${pid}/environ" | grep -m1 "^${name}=")"; then
-        fail "pid ${pid} environ carries ${entry%%=*}=… (expected only ${name}_FILE)"
+        fail "pid ${pid} environ carries ${entry%%=*}=… (no Legion pane may carry it)"
       fi
       if entry="$(tr '\0' '\n' <"/proc/${pid}/cmdline" | grep -m1 "^${name}=")"; then
         fail "pid ${pid} cmdline carries ${entry%%=*}=…"
       fi
     done
   done
-  if entry="$(legion_tmux show-environment -g | grep -m1 -E '^(DISPATCH_TOKEN|LEGION_BOOT_TOKEN|LEGION_CONTROLLER_SECRET)=')"; then
+  if entry="$(legion_tmux show-environment -g | grep -m1 -E "^(${pattern})=")"; then
     fail "private tmux server global environment carries ${entry%%=*}"
   fi
   if tmux has-session -t "$socket" 2>/dev/null; then
     fail "default tmux server still hosts a ${socket} session"
   fi
-  printf 'CHECKPOINT 13 OK: %d processes on %s carry no bearer or boot secret; default server hosts no %s\n' \
-    "${#pids[@]}" "$socket" "$socket"
+  printf 'CHECKPOINT 13 OK: %d processes on %s carry none of %s; default server hosts no %s\n' \
+    "${#pids[@]}" "$socket" "$joined" "$socket"
 }
 
 if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
