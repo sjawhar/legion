@@ -10,6 +10,10 @@ export interface RunResult {
   /** Set by the runner when it killed the command at `limitMs`; `elapsedMs` is the wall time the
    * command actually ran. See `CommandResult` in the daemon's command runner. */
   readonly timedOut?: { readonly limitMs: number; readonly elapsedMs: number };
+  /** Set by the runner when it killed the command because the caller's `signal` aborted: the
+   * caller gave the command up, and nothing about the command itself is being reported. At most
+   * one of `timedOut` and `aborted` is present. */
+  readonly aborted?: true;
 }
 
 export interface WorkspaceSpec {
@@ -23,7 +27,7 @@ export interface WorkspaceCommandOptions {
   readonly env?: Readonly<Record<string, string>>;
   /** Budget after which the runner kills the command. */
   readonly timeoutMs?: number;
-  /** Kills the command when aborted, like the budget does. */
+  /** Kills the command when aborted, as the budget does; the result carries `aborted`. */
   readonly signal?: AbortSignal;
 }
 
@@ -42,7 +46,14 @@ export interface ProvisionIssueWorkspaceDeps {
   readonly commandTimeoutMs: number;
 }
 
+/** Neither kill is an ordinary `Command failed (exit N)`: the runner's own report is what the
+ * operator needs — the budget and wall time for a timeout, the fact of the abort for a command
+ * the caller gave up on. */
 function commandFailure(result: RunResult, cmd: string[]): Error {
+  if (result.aborted) {
+    const message = `Command aborted: ${cmd.join(" ")}`;
+    return new Error(result.stderr ? `${message}\n${result.stderr}` : message);
+  }
   if (result.timedOut) {
     const { limitMs, elapsedMs } = result.timedOut;
     const message = `Command timed out after ${limitMs / 1000} s (ran ${(elapsedMs / 1000).toFixed(1)} s): ${cmd.join(" ")}`;

@@ -49,10 +49,10 @@ export interface CommandRunnerOptions {
    */
   readonly timeoutMs?: number;
   /**
-   * Kills the command when aborted, exactly as the budget does: the caller is giving up on it
-   * (a daemon whose boot failed while a probe was still running) and must not leave the child
-   * behind — the kill timer alone dies with the caller's process. The result carries `aborted`,
-   * never `timedOut` and never a clean exit.
+   * Kills the command when aborted, as the budget does: the caller is giving up on it (a daemon
+   * whose boot failed while a probe was still running) and must not leave the child behind — the
+   * kill timer alone dies with the caller's process. The report differs on purpose: the result
+   * carries `aborted`, never `timedOut` and never a clean exit.
    */
   readonly signal?: AbortSignal;
 }

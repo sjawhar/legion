@@ -82,6 +82,7 @@ export interface ProcessManagerDeps {
     stderr?: string;
     exitCode: number;
     timedOut?: CommandResult["timedOut"];
+    aborted?: CommandResult["aborted"];
   }>;
   natsPublish(subject: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
