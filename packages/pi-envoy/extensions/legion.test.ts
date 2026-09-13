@@ -74,7 +74,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
-const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
+const {
+  default: legionExtension,
+  resetLegionBootstrappedSessionForTests,
+  setLegionBootstrapExitForTests,
+} = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -149,6 +153,7 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
   natsConnections.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
+  resetLegionBootstrappedSessionForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
@@ -1423,6 +1428,83 @@ describe("Legion OMP extension", () => {
       toolCall(
         { toolName: "bash", toolCallId: "call-sub-worker-bash", input: { command: "ls" } },
         context
+      )
+    ).resolves.toBeUndefined();
+  });
+  test("recognises a subagent by the session this process already bootstrapped when no transcript is on disk", async () => {
+    // With the transcript in a SQL row there is no parent `.jsonl` beside the subagent's path, so
+    // the on-disk layout says nothing; the guard must still fall back on what this process booted.
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    const tree = "REPO-42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-root-sql";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      return Response.json({
+        session_id: "ses_root_sql",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    // Neither transcript exists on disk: the row keys below name files nothing ever wrote.
+    const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-sql-subagent-"));
+    temporaryPaths.push(baseDirectory);
+    const rootFile = path.join(baseDirectory, "sessions", "-repo", "2026_root.jsonl");
+    const subagentFile = path.join(baseDirectory, "sessions", "-repo", "2026_root", "2026_task.jsonl");
+
+    const root = createPi();
+    legionExtension(root.pi);
+    const rootStart = root.handlers.get("session_start");
+    if (rootStart === undefined) throw new Error("root session_start handler was not registered");
+    await rootStart({}, sessionContext("ses_root_sql", rootFile));
+    expect(root.tools.find((tool) => tool.name === "legion")).toBeDefined();
+    const requestsAfterRoot = requests.length;
+
+    // The root runs a `task`: a fresh extension instance binds in the same process and its
+    // subagent session starts with a different transcript path and the inherited environment.
+    const subagent = createPi();
+    legionExtension(subagent.pi);
+    const subagentStart = subagent.handlers.get("session_start");
+    const subagentToolCall = subagent.handlers.get("tool_call");
+    if (subagentStart === undefined || subagentToolCall === undefined) {
+      throw new Error("subagent handlers were not registered");
+    }
+    const subagentContext = sessionContext("ses_root_sql_task", subagentFile);
+    await subagentStart({}, subagentContext);
+
+    // Only Envoy's own direct-subject registration for the new session may follow: no Legion
+    // daemon route and no role claim.
+    const afterRoot = requests.slice(requestsAfterRoot).map((request) => request.path);
+    expect(afterRoot.filter((requestPath) => requestPath !== "/v1/interests/subscribe")).toEqual(
+      []
+    );
+    expect(exits).toEqual([]);
+    expect(subagent.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    await expect(
+      subagentToolCall(
+        { toolName: "bash", toolCallId: "call-sql-subagent-bash", input: { command: "ls" } },
+        subagentContext
       )
     ).resolves.toBeUndefined();
   });

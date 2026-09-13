@@ -1,6 +1,6 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image and the in-cluster daemon.
+This runbook covers the worker image, the session store, and the in-cluster daemon.
 
 ## Worker image
 
@@ -114,3 +114,67 @@ default command. The real entrypoint (how provider keys reach the OMP child from
 the shim dials the daemon) is the Kubernetes runtime's (LEGION-24), which sets the pod's `command`. To run
 anything else in the image, override it: `docker run --rm --entrypoint sh <image> -c '…'`,
 `docker run --rm --entrypoint legion <image> probe-image`.
+
+## Session store
+
+A Legion agent's conversation — its OMP session — is by default a JSONL file under `HOME`, so a pod that
+loses its disk loses the conversation. The OMP fork the daemon pins (`OMP_FORK_PIN`) can store the session
+in a SQL database instead, selected by two environment variables the pod (or a tmux pane) carries; the
+daemon-side setting that delivers them, `session_store: postgres`, is LEGION-31's second child and is not in
+this section.
+
+### The two variables
+
+| Variable                   | Settings equivalent (`config.yml`) | Value                                                                        |
+| -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------- |
+| `OMP_SESSION_STORAGE`      | `session.storage`                  | `sql`; unset (or `file`) is today's JSONL tree                               |
+| `OMP_SESSION_SQL_DSN_FILE` | `session.sql.dsnFile`              | absolute path of a `0600` file whose trimmed contents are one `postgres://…` URL |
+
+The environment wins over the setting, the same way `OMP_AUTH_BROKER_URL` wins over `auth.broker.url`. The
+connection string is delivered as a file, never as an environment value or an argument — the same rule as
+`DISPATCH_TOKEN_FILE` and every other `*_FILE` variable the daemon writes. The dialect follows the URL
+scheme; Legion delivers Postgres.
+
+### What Oh My Pi creates
+
+On the first start with `sql`, Oh My Pi's own `SqlSessionStorage` runs `CREATE TABLE IF NOT EXISTS
+omp_session_files` (columns `path TEXT PRIMARY KEY`, `content TEXT NOT NULL`, `mtime_ms BIGINT NOT NULL`,
+`title TEXT`, `title_source TEXT`, `title_updated_at TEXT`) and warms its index from every row. Legion
+manages no schema and no migration: the table is Oh My Pi's. One row is one session; `path` is the same
+string the session would have had as a file, `content` is the JSONL transcript.
+
+### Resume
+
+`omp --resume=<row path>` — the value is exactly the session path the extension reports to the daemon at
+`/worker/started` as `ompSessionFile` (the field the second child's `ompSessionRef` carries unchanged), and
+in Postgres it is the row's `path` key: `<sessions root>/<encoded cwd>/<timestamp>_<session id>.jsonl`. The
+key embeds the home-relative sessions root, so the resuming pod must carry the same two `OMP_SESSION_*`
+variables and the same `HOME` (and `OMP_PROFILE`) as the pod that wrote it. Nothing else changes: the
+daemon already relaunches a dead worker with `--resume=<recorded session file>`.
+
+### Refusals
+
+Every refusal is exit 1 with the message on stderr, and none falls back to file storage:
+
+| condition                                                         | behaviour                                                                                                                                                                              |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| both variables unset, settings at their defaults                  | JSONL files exactly as before; nothing is logged                                                                                                                                       |
+| `OMP_SESSION_STORAGE=sql`, no file named by the variable or the setting | refuses, naming both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`                                                                                                        |
+| the named file is missing or unreadable                           | `OMP_SESSION_SQL_DSN_FILE names <path>, which could not be read: <reason>` (or `session.sql.dsnFile names …` when the setting supplied it)                                            |
+| the named file is blank after trimming                            | `… names <path>, which is empty`                                                                                                                                                       |
+| the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)` — the driver's error, never the connection string                     |
+| any other `OMP_SESSION_STORAGE` value                             | `OMP_SESSION_STORAGE is "<value>"; expected "file" or "sql"`                                                                                                                           |
+| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files; the second child refuses to enable `session_store: postgres` on a pin older than the release carrying the setting          |
+
+### What stays on the pod's disk
+
+Only the transcript moves. Tool artifacts and image blobs stay under the agent directory on local disk
+(`~/.omp/profiles/legion/agent/…`), as do OMP's logs and `models.db`; `.legion/` handoffs live in the
+repository. A pod that dies loses those local files as it does today — the conversation it does not.
+
+### The extension under SQL storage
+
+`@sjawhar/pi-legion-envoy` recognises a `task` subagent inside a Legion worker without looking for the
+parent's transcript on disk: the extension records which session it bootstrapped in the process, and a later
+session start in the same process with a different transcript path is a subagent (`packages/pi-envoy/AGENTS.md`).
+Nothing in the extension reads the two variables; the pin bump is the only Legion-side change this needs.
