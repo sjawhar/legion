@@ -1,11 +1,11 @@
 {
-  "passed": 13,
+  "passed": 14,
   "failed": 0,
   "failures": [],
-  "head": "def77cccdb7098e0ab27a19ec25d91a227b56172",
+  "head": "e28c9df71fb48dcfa713737279d7ed11fb802815",
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
-  "proof": "dispatch://LEGION-37/artifact/tester-proof-round5-md",
-  "evidence": "see rounds[].evidence",
+  "proof": "dispatch://LEGION-37/artifact/tester-proof-round6-md",
+  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round6-tar-gz",
   "rounds": [
     {
       "passed": 9,
@@ -285,6 +285,59 @@
       "observations": [
         "The kernel-driven bash lacks the pi-envoy grant hook (LEGION_GRANT_FILE is missing); every legion gh / jj git push / legion handoff call in rounds 3-5 went through the tool bash where the extension injects it."
       ]
+    },
+    {
+      "round": 6,
+      "head": "e28c9df71fb48dcfa713737279d7ed11fb802815",
+      "baseHead": "def77cccdb7098e0ab27a19ec25d91a227b56172",
+      "mainBase": "419a0590692b",
+      "scope": "rebase onto main@origin 419a0590 (#1001's pure v24 -> v25 bump) with the payload-classifying pendingAssignment migration renumbered to v25 -> v26 (migrateV25State, .v25.bak, z.literal(26), newLegionState/loadState 26, tests, AGENTS.md /worker/ready row). Resolves round 5's blocking finding.",
+      "specVersion": 6,
+      "passed": 1,
+      "failed": 0,
+      "failures": [],
+      "proof": "dispatch://LEGION-37/artifact/tester-proof-round6-md",
+      "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round6-tar-gz",
+      "acceptance": [
+        {
+          "criterion": "round-5 blocking finding: the branch's migration must sit after main's v24 -> v25 bump as v25 -> v26 so a v25 production state with bare-string pendingAssignments migrates instead of failing the strict schema",
+          "verdict": "pass",
+          "evidence": "Rig: the current main checkout's daemon (0f744bc8: z.literal(25), pendingAssignment z.string()) wrote a v25 state.json with a bare-string planner pendingAssignment; e28c9df7 booted on it -> state.json.v25.bak cmp-identical to the main-written file, state.json version 26 with {kind: assignment, task}, the migrated assignment delivered at /worker/ready wrote phases[LEGSMOKE-91] = planner (06:47:03Z). Round 1's kept main-written v24 sample booted -> .v24.bak identical + version 26 objects. Negative: a v26 file with no .bak present booted with no .bak written. Unit: legion-state.test.ts 'composes the LEGION-33 v24 -> v25 bump with the v25 -> v26 classification ...' and 'migrates v25 state to v26 ...' fail (with 23 others) when migrateV25State is removed from the chain (mutation 10)."
+        }
+      ],
+      "rebaseIntegrity": "diff abaf0817..def77ccc vs diff 419a0590..e28c9df7, +/- lines only: processes.ts (193), reducers.ts, skills/legion-architect/SKILL.md, __tests__/index.test.ts, __tests__/processes.test.ts (700) identical; api/routes/workers.ts, worker-admission.ts, __tests__/api.test.ts whole-file identical to def77ccc; legion-state.ts differs only by the 25->26 renumbering (version literals, migrateV24State -> migrateV25State guarding 25 and returning 26, chain gains migrateV25State after main's migrateV24State, a two-sentence doc addition); main's pure-bump migrateV24State present exactly once; every line main added between the bases present verbatim except the four 25 literals bumped to 26; legion-state.test.ts the same renumbering + .v25.bak + the composition test; daemon AGENTS.md /worker/ready row gains the v25 -> v26 clause.",
+      "unit": {
+        "tsc": "bunx tsc --noEmit exit 0",
+        "biome": "bunx biome check src/: 154 files, no fixes, exit 0",
+        "tests": "bun test legion-state api processes reducers index: 436 pass / 0 fail / 3 skip (439 tests, 5 files)",
+        "mutations": [
+          "1 -> 4 api.test.ts cases",
+          "2 -> 2 sub-architect cases",
+          "3 -> skips the catch-up for a finished phase worker",
+          "4 -> drops a catch-up inside the role lock",
+          "5 -> both promotion tests",
+          "6 -> retires a relaunched worker at worker/ready ... + confirms the boot before the ready-time bystander retire ...",
+          "7 -> the same two",
+          "8 -> retires a relaunched worker ... (timeout) + one root-spawn flake green in isolation",
+          "9 -> confirms the boot before the ready-time bystander retire ...",
+          "10 migrateV25State removed from the chain -> 25 legion-state tests incl. the composition test"
+        ]
+      },
+      "rig": {
+        "surface": "same isolation (SMOKE_PROJECT sjawhar/370, /tmp/legion37-tester-rig6, NATS 14370 as legion37-tester6-nats via up-manual.sh/down-manual.sh, listener 19170, daemon 19470/19471, LEGSMOKE-90/91, production OMP invocation, real omp --mode rpc workers); main daemon from /home/ubuntu/legion-ws-RunDaemon (0f744bc8) for the v25 write; production untouched (state.json still v25)",
+        "scenarios": {
+          "d-v25": "main-written v25 bare string -> .v25.bak identical, v26 {kind, task}, delivered at ready, phase written by that delivery",
+          "d-v24": "round-1 main-written v24 sample -> .v24.bak identical, v26 objects",
+          "negative-v26": "v26 file, no .bak present -> boots, no .bak written",
+          "a": "finished planner + active implementer + exception for the planner -> one 'no catch-up for ...' line, no pane, {phases, roles} identical",
+          "not-rerun": "b, c, e, f, g, h and the round-3/4 retire/drain reproductions: byte-identical code across the rebase"
+        }
+      },
+      "observations": [
+        "The daemon-swap orphan was recovered at boot by reconnectWorkers this time (negotiate_protocol timeout -> retire -> --resume relaunch, ~20 s) rather than by the 3x120 s boot watchdog as in round 1; both paths deliver the migrated assignment.",
+        "Rig slip, not an evidence problem: an architect secret reused across a daemon swap without /worker-session recovery 403s every spawn_worker; and a state file planted from another rig carries that rig's root boot token, so its architect cannot be recovered -- the (a) result is from a clean fresh-seed rebuild.",
+        "main@origin moved to 1639fb6b (#1000, dispatch web) after the rebase; e28c9df7's base is 419a0590; GitHub reports the PR BLOCKED (awaiting review), no longer DIRTY."
+      ]
     }
   ],
   "observations": [
@@ -299,7 +352,10 @@
     "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
     "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction.",
     "The ~1-1.6 s in the cold case is launchWorker itself (workspace provisioning through the runner, secret write, tmux split-window, persist), not the trigger; the idle-live case shows the trigger latency is below the 50 ms poll.",
-    "The kernel-driven bash lacks the pi-envoy grant hook (LEGION_GRANT_FILE is missing); every legion gh / jj git push / legion handoff call in rounds 3-5 went through the tool bash where the extension injects it."
+    "The kernel-driven bash lacks the pi-envoy grant hook (LEGION_GRANT_FILE is missing); every legion gh / jj git push / legion handoff call in rounds 3-5 went through the tool bash where the extension injects it.",
+    "The daemon-swap orphan was recovered at boot by reconnectWorkers this time (negotiate_protocol timeout -> retire -> --resume relaunch, ~20 s) rather than by the 3x120 s boot watchdog as in round 1; both paths deliver the migrated assignment.",
+    "Rig slip, not an evidence problem: an architect secret reused across a daemon swap without /worker-session recovery 403s every spawn_worker; and a state file planted from another rig carries that rig's root boot token, so its architect cannot be recovered -- the (a) result is from a clean fresh-seed rebuild.",
+    "main@origin moved to 1639fb6b (#1000, dispatch web) after the rebase; e28c9df7's base is 419a0590; GitHub reports the PR BLOCKED (awaiting review), no longer DIRTY."
   ],
   "findings": [
     {
@@ -311,15 +367,17 @@
     {
       "severity": "blocking",
       "file": "packages/daemon/src/daemon/legion-state.ts",
-      "description": "PR #991 is CONFLICTING with main (gh: mergeable false, mergeStateStatus DIRTY). A read-only `git merge-tree --write-tree main(d1eea37c, #1001) def77ccc` conflicts in legion-state.ts and __tests__/legion-state.test.ts: #1001 already bumped the state schema to v25 (its migrateV24State is a pure version bump) and this branch also declares z.literal(25)/version 25 with its own payload-classifying migrateV24State. Production's state.json is already version 25 under main's meaning (the production checkout runs main). This branch's migration therefore has to become v25 -> v26 (schema literal, newLegionState, loadState check, the migrations array, tests, AGENTS.md 'v24 -> v25'), and round 1's (d) rig proof (a main-written v24 file -> .v24.bak + v25 {kind, task}) must be re-run against a main-written v25 file once rebased -- otherwise a bare-string pendingAssignment in a v25 production state would fail this branch's strict PendingAssignmentSchema at boot with no migration to classify it. Per Sami's 2026-09-11 ruling this is the one case a rebase is required. Not fixed by the tester."
+      "description": "PR #991 is CONFLICTING with main (gh: mergeable false, mergeStateStatus DIRTY). A read-only `git merge-tree --write-tree main(d1eea37c, #1001) def77ccc` conflicts in legion-state.ts and __tests__/legion-state.test.ts: #1001 already bumped the state schema to v25 (its migrateV24State is a pure version bump) and this branch also declares z.literal(25)/version 25 with its own payload-classifying migrateV24State. Production's state.json is already version 25 under main's meaning (the production checkout runs main). This branch's migration therefore has to become v25 -> v26 (schema literal, newLegionState, loadState check, the migrations array, tests, AGENTS.md 'v24 -> v25'), and round 1's (d) rig proof (a main-written v24 file -> .v24.bak + v25 {kind, task}) must be re-run against a main-written v25 file once rebased -- otherwise a bare-string pendingAssignment in a v25 production state would fail this branch's strict PendingAssignmentSchema at boot with no migration to classify it. Per Sami's 2026-09-11 ruling this is the one case a rebase is required. Not fixed by the tester.",
+      "resolved": "closed by e28c9df7 (round 6): migration renumbered v25 -> v26 on top of #1001; CI green at e28c9df7"
     },
     {
       "severity": "info",
       "file": ".github",
-      "description": "No CI run exists at def77ccc (actions/runs?head_sha -> 0, no check-runs, 15+ minutes after the 06:20Z push): GitHub creates no merge ref for a CONFLICTING pull request, so pull_request-triggered workflows do not start. The CI line cannot be filled until the conflict above is resolved; CI at c493afa8/aedcc575/115c55fd/143dd0d1/5d895442/910c527f remains green."
+      "description": "No CI run exists at def77ccc (actions/runs?head_sha -> 0, no check-runs, 15+ minutes after the 06:20Z push): GitHub creates no merge ref for a CONFLICTING pull request, so pull_request-triggered workflows do not start. The CI line cannot be filled until the conflict above is resolved; CI at c493afa8/aedcc575/115c55fd/143dd0d1/5d895442/910c527f remains green.",
+      "resolved": "closed by e28c9df7 (round 6): migration renumbered v25 -> v26 on top of #1001; CI green at e28c9df7"
     }
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T06:28:51.872Z"
+  "completed": "2026-09-13T07:04:24.969Z"
 }
