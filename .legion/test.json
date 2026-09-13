@@ -1,0 +1,39 @@
+{
+  "passed": 4,
+  "failed": 0,
+  "failures": [],
+  "head": "a826d2bace546537bd1f68f39369a53cd6bdcf8b",
+  "pullRequest": {
+    "number": 1055,
+    "url": "https://github.com/sjawhar/legion/pull/1055",
+    "ciRuns": [
+      34772516713,
+      34772751495
+    ]
+  },
+  "surface": "GitHub read through the daemon's worker-bin/gh shim (legion gh --), PATH prefixed with <state_dir>/worker-bin because this pane predates it",
+  "acceptance": {
+    "1": "grep -rnF -e 'implementer+ses_' -e 'Legion-Session' -e 'legion/issue-' scripts/smoke prints nothing (grep exit 1)",
+    "2": "bash scripts/smoke/checkpoints.test.sh exit 0, 43 PASS, 0 other lines; three fixture mutations caught (trailer stripped from passing c2: abort after 27 PASS; deletion committer octocat in passing checkpoint-7 fixture: abort after 35 PASS; bot login with foreign email in the human-committer case: expect_output prints the checkpoint's own differing FAILED text after 28 PASS); file restored byte-identical",
+    "3": "checkpoint 5 and 7 against #1035 with SMOKE_RETRO_COMMIT=ac002051: CHECKPOINT 5 OK (12 commits, legion-implementer[bot] committed 9) and CHECKPOINT 7 OK (deletion 7097b62b by legion-implementer[bot], approval 16:36:52Z after deletion 16:34:44Z, 0 .legion paths in final diff); gh api re-read independently agrees",
+    "4": "README rows 5 and 7 restated; both list SMOKE_IMPLEMENTER_LOGIN and SMOKE_REVIEWER_LOGIN; the smoke_pr paragraph and the 'Required checkpoint sequence' sentence updated"
+  },
+  "negativeControls": [
+    "checkpoint 5 on #1011 -> CHECKPOINT 5 FAILED: PR #1011 commit cbab905dca9b9c3273441058cebf9555ec3196f9: commit.message carries no Omp-Session: <uuid> trailer line (exit 1)",
+    "checkpoint 7 on #1018 (retro 300ae3f8), #1023 (05639e6e), #1029 (cec9d892): CHECKPOINT 7 OK naming the reviewer-committed deletion each time (761fc312, eda885fd, f2430c96)",
+    "checkpoint 7 on #1007 (32 reviews, default page has 0 approvals) with SMOKE_RETRO_COMMIT=3a61e17b: CHECKPOINT 7 OK, deletion 38c7ffb4 by legion-implementer[bot] 16:26:05Z, approval 16:34:24Z on page 2; #1007 has no separate retro commit, its docs/solutions changes ride implementation commits",
+    "SMOKE_PR unset -> CHECKPOINT 5 FAILED: SMOKE_PR is unset and sjawhar/legion has 54 legion/<KEY> pull requests: #1059 (legion/LEGION-90), ...; set SMOKE_PR to the one this exercise opened",
+    "SMOKE_PR=abc -> CHECKPOINT 7 FAILED: SMOKE_PR must be a pull request number, got 'abc'"
+  ],
+  "checkpointEight": "diff is exactly the pr_reviews call for its reviews read and the removed dead 'set SMOKE_PR' guard (smoke_pr validates the number); no other behaviour change",
+  "observations": [
+    "A broken passing fixture aborts the harness silently under set -e at run_github_checkpoint (27 or 35 PASS lines, then exit 1, no output); only the failing-fixture cases echo the checkpoint's own text through expect_output. This is the harness's pre-existing convention for every checkpoint, not new to this PR.",
+    "smoke_pr lists at most 100 pull requests (gh pr list --limit 100); sjawhar/legion already has 54 legion/<KEY> candidates among more than 100 PRs, so a lone legion/<KEY> PR older than the 100 most recent would be reported as none rather than found. Irrelevant on the sandbox repository the rig targets.",
+    "The daemon was unreachable 18:20-18:25Z mid-run (checkpoint 7 on #1029 failed with ConnectionRefused at 127.0.0.1:13370 from legion gh); the run was repeated once it returned and passed.",
+    "shellcheck -x clean on checkpoints.sh and checkpoints.test.sh at a826d2ba."
+  ],
+  "documentationFeedback": "README rows 5 and 7 match the assertions and name both login inputs; nothing missing.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T18:28:17.301Z"
+}
