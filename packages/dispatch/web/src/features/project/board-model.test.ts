@@ -53,8 +53,9 @@ test("derives before and after keys from the final insertion position", () => {
   expect(rankInputForInsertion(issues, 3)).toEqual({ after: "CORE-3" });
 });
 
-test("identifies lifecycle columns a human cannot set", () => {
+test("identifies lifecycle columns a human can set", () => {
   expect(isHumanSettableStatus("todo")).toBe(true);
+  expect(isHumanSettableStatus("done")).toBe(true);
   expect(isHumanSettableStatus("in_progress")).toBe(false);
-  expect(isHumanSettableStatus("done")).toBe(false);
+  expect(isHumanSettableStatus("testing")).toBe(false);
 });

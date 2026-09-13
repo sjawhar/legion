@@ -15,7 +15,13 @@ export const issueStatuses = [
 export type IssueStatus = (typeof issueStatuses)[number];
 
 export function isHumanSettableStatus(status: IssueStatus): boolean {
-  return status === "triage" || status === "icebox" || status === "backlog" || status === "todo";
+  return (
+    status === "triage" ||
+    status === "icebox" ||
+    status === "backlog" ||
+    status === "todo" ||
+    status === "done"
+  );
 }
 
 export interface BoardColumn {

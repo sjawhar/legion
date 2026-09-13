@@ -91,12 +91,14 @@ function isConversationComment(event: Event): event is CommentEvent {
   );
 }
 
-export function activityDescription(event: Event): string {
+export function activityDescription(event: Event, previousStatus?: string): string {
   switch (event.type) {
     case "issue.created":
       return "created the issue";
     case "issue.updated":
-      return "updated the issue";
+      return previousStatus === "done" && event.payload.status !== "done"
+        ? `reopened the issue into ${event.payload.status}`
+        : "updated the issue";
     case "issue.closed":
       return "closed the issue";
     case "artifact.created":
@@ -157,6 +159,7 @@ export function buildConversationItems({
   const askItems = new Map<string, AskItem>();
   const targetedMessages = new Map<string, TargetedMessageItem>();
   const turns: Exclude<ConversationItem, { kind: "day-divider" | "unread-divider" }>[] = [];
+  let previousIssueStatus: string | undefined;
 
   for (const event of ordered) {
     if (isAskEvent(event)) {
@@ -244,8 +247,15 @@ export function buildConversationItems({
         kind: "activity",
         id: `activity:${event.id}`,
         event,
-        description: activityDescription(event),
+        description: activityDescription(event, previousIssueStatus),
       });
+    }
+    if (
+      event.type === "issue.created" ||
+      event.type === "issue.updated" ||
+      event.type === "issue.closed"
+    ) {
+      previousIssueStatus = event.payload.status;
     }
   }
 

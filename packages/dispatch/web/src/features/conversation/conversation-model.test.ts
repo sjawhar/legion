@@ -409,6 +409,27 @@ test("anchored comments, replies and system events are activity lines described 
   );
 });
 
+test("describes a status change out of Done as reopening the issue", () => {
+  const closed = {
+    ...message(1, "2026-09-10T10:00:00Z"),
+    payload: { status: "done" },
+    type: "issue.closed",
+  } as Event;
+  const reopened = {
+    ...message(2, "2026-09-10T10:01:00Z"),
+    payload: { status: "backlog" },
+    type: "issue.updated",
+  } as Event;
+  const activity = build([closed, reopened]).find(
+    (item) => item.kind === "activity" && item.event.id === 2
+  );
+
+  if (activity === undefined || activity.kind !== "activity") {
+    throw new Error("reopened issue activity was not built");
+  }
+  expect(activity.description).toBe("reopened the issue into backlog");
+});
+
 test("hiding activity drops the lines and any day that would be left empty", () => {
   const items = build([
     { ...message(1, "2026-09-09T10:00:00Z"), type: "issue.created", payload: {} } as Event,

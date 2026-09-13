@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
@@ -1076,6 +1076,68 @@ test("IssuePage names the human blocking an ask open for more than an hour", asy
     expect(await screen.findByText("Waiting on sami")).toBeTruthy();
   } finally {
     view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage closes an issue and reopens it into Backlog", async () => {
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "The mounted specification",
+    version: 1,
+  });
+  const closeSave = Promise.withResolvers<IssueDetails>();
+  const reopenSave = Promise.withResolvers<IssueDetails>();
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+    if (input.status === "done") return closeSave.promise;
+    if (input.status === "backlog") return reopenSave.promise;
+    throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
+  });
+  const view = renderIssuePage();
+
+  try {
+    const openStatus = (await screen.findByLabelText("Status")) as HTMLSelectElement;
+    expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    // While the write is in flight the control is disabled: no second close can be queued.
+    expect(
+      (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await act(async () => {
+      closeSave.resolve({ ...issue, closed_at: "2026-09-12T10:00:00Z", status: "done" });
+      await closeSave.promise;
+    });
+
+    expect(await screen.findByText("This issue is closed.")).toBeTruthy();
+    const closedStatus = screen.getByLabelText("Status") as HTMLSelectElement;
+    expect(closedStatus.disabled).toBe(true);
+    expect(closedStatus.value).toBe("done");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+    );
+    expect(
+      (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await act(async () => {
+      reopenSave.resolve({ ...issue, status: "backlog" });
+      await reopenSave.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByText("This issue is closed.")).toBeNull());
+    expect(((await screen.findByLabelText("Status")) as HTMLSelectElement).value).toBe("backlog");
+  } finally {
+    view.unmount();
+    patchIssue.mockRestore();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
     restore();
   }
 });
