@@ -2,6 +2,9 @@ package contracts
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -1688,6 +1691,83 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 		},
 		{
+			name:  "push lists unique changed paths across commits in first-seen order",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": []any{"a.ts"}, "removed": []any{}, "modified": []any{"b.ts"}},
+					map[string]any{"id": "2", "added": []any{}, "removed": []any{"c.ts"}, "modified": []any{"a.ts"}},
+				},
+			},
+			want: map[string]string{"changed_paths": "a.ts\nb.ts\nc.ts", "changed_paths_truncated": "false"},
+		},
+		{
+			name:  "push caps changed paths at 100 and flags truncation",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": numberedPaths(0, 60), "removed": []any{}, "modified": []any{}},
+					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(60, 101)},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
+				"changed_paths_truncated": "true",
+			},
+		},
+		{
+			name:  "push with exactly 100 unique paths and a repeat does not flag truncation",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": numberedPaths(0, 100), "removed": []any{}, "modified": []any{}},
+					map[string]any{"id": "2", "added": []any{}, "removed": []any{}, "modified": numberedPaths(0, 1)},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           strings.Join(numberedPathStrings(0, 100), "\n"),
+				"changed_paths_truncated": "false",
+			},
+		},
+		{
+			name:  "push with no commits omits changed_paths",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/legion/X",
+				"commits":     []any{},
+				"head_commit": nil,
+			},
+			want:    map[string]string{"changed_paths_truncated": "false", "commit_count": "0"},
+			omitted: []string{"changed_paths"},
+		},
+		{
+			name:  "push removing the .legion handoffs lists the removed paths",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{
+						"id":       "9b6fe2c5154f",
+						"added":    []any{},
+						"removed":  []any{".legion/implement.json", ".legion/plan.json", ".legion/review.json", ".legion/test.json"},
+						"modified": []any{},
+					},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           ".legion/implement.json\n.legion/plan.json\n.legion/review.json\n.legion/test.json",
+				"changed_paths_truncated": "false",
+			},
+		},
+		{
 			name:  "merged pull request carries merge and ref facts",
 			event: "pull_request",
 			body: map[string]any{
@@ -1819,6 +1899,56 @@ func TestGithubPayloadFields(t *testing.T) {
 				t.Fatalf("body has %d runes, want %d", len([]rune(payload["body"])), tt.wantBodyLen)
 			}
 		})
+	}
+}
+
+// numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
+func numberedPathStrings(from, to int) []string {
+	paths := make([]string, 0, to-from)
+	for n := from; n < to; n++ {
+		paths = append(paths, fmt.Sprintf("src/f%d.ts", n))
+	}
+	return paths
+}
+
+func numberedPaths(from, to int) []any {
+	paths := make([]any, 0, to-from)
+	for _, path := range numberedPathStrings(from, to) {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// TestGithubPayloadPushChangedPathsFixture normalizes a captured-shape GitHub push body carrying
+// the real LEGION-23 handoff push (PR #966, commit 538bbf1a: `.legion/implement.json` added,
+// nothing else) and asserts the daemon sees exactly that one path, unflagged.
+func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "push_handoff_only.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	body := map[string]any{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	envelope := GithubEnvelope(GithubEnvelopeInput{
+		Event: "push", Delivery: "delivery", EventID: "event", TraceID: "trace", Body: body,
+	})
+	if want := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-23"; envelope.Topic != want {
+		t.Fatalf("topic = %q, want %q", envelope.Topic, want)
+	}
+	payload := decodePayload(t, envelope.Payload)
+	want := map[string]string{
+		"changed_paths":           ".legion/implement.json",
+		"changed_paths_truncated": "false",
+		"commit_count":            "1",
+		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+		"ref":                     "refs/heads/legion/LEGION-23",
+	}
+	for key, value := range want {
+		if got := payload[key]; got != value {
+			t.Fatalf("payload[%q] = %q, want %q", key, got, value)
+		}
 	}
 }
 

@@ -627,6 +627,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
       else if (effect.kind === "admit") deps.onAdmit(effect.issue);
+      else if (effect.kind === "log") console.warn(`[legion] ${effect.message}`);
       else {
         const unhandled: never = effect;
         throw new Error(

@@ -712,16 +712,19 @@ func githubPayload(event string, body map[string]any) string {
 		}
 		addCappedBody(data, issueBody)
 	case "push":
+		changedPaths, truncated := githubPushChangedPaths(body)
 		data = map[string]string{
-			"kind":         "push",
-			"repo":         repo,
-			"ref":          stringValue(body["ref"]),
-			"after":        stringValue(body["after"]),
-			"before":       stringValue(body["before"]),
-			"pusher":       nestedString(body, "pusher", "name"),
-			"head_subject": firstNonEmptyLine(nestedString(body, "head_commit", "message")),
-			"commit_count": strconv.Itoa(len(sliceValue(body["commits"]))),
-			"compare_url":  stringValue(body["compare"]),
+			"kind":                    "push",
+			"repo":                    repo,
+			"ref":                     stringValue(body["ref"]),
+			"after":                   stringValue(body["after"]),
+			"before":                  stringValue(body["before"]),
+			"pusher":                  nestedString(body, "pusher", "name"),
+			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
+			"compare_url":             stringValue(body["compare"]),
+			"changed_paths":           strings.Join(changedPaths, "\n"),
+			"changed_paths_truncated": strconv.FormatBool(truncated),
 		}
 	case "workflow_run":
 		headBranch := nestedString(body, "workflow_run", "head_branch")
@@ -990,6 +993,38 @@ func slackFilesSuffix(files []any) string {
 		label = stringValue(file["filetype"])
 	}
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
+}
+
+// maxPushChangedPaths caps the unique paths a push payload lists. A push touching more sets
+// changed_paths_truncated so a consumer never mistakes a capped list for the whole change.
+const maxPushChangedPaths = 100
+
+// githubPushChangedPaths collects the unique paths across every pushed commit's added, removed,
+// and modified lists, in first-seen order, capped at maxPushChangedPaths. truncated reports that
+// a further unique path was seen past the cap; repeats of an already-listed path never count.
+// Only commits[] is read — head_commit is one of them.
+func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool) {
+	seen := map[string]struct{}{}
+	for _, item := range sliceValue(body["commits"]) {
+		commit := mapValue(item)
+		for _, key := range [...]string{"added", "removed", "modified"} {
+			for _, value := range sliceValue(commit[key]) {
+				path := stringValue(value)
+				if path == "" {
+					continue
+				}
+				if _, dup := seen[path]; dup {
+					continue
+				}
+				if len(paths) == maxPushChangedPaths {
+					return paths, true
+				}
+				seen[path] = struct{}{}
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths, false
 }
 
 func payloadJSON(data map[string]string) string {

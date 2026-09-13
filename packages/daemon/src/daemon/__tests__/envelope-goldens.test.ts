@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { roleToken } from "@legion/contracts";
 import opened from "../../../../contracts/fixtures/github-envelopes/pull-request-opened.json";
+import push from "../../../../contracts/fixtures/github-envelopes/push.json";
 import { type LegionState, newLegionState } from "../legion-state";
 import { type ReducerConfig, reduceGithubEvent } from "../reducers";
 
@@ -92,5 +93,75 @@ describe("Envoy GitHub envelope goldens", () => {
       },
     });
     expect(state.prs["example-org/example-repo#42"]?.reviewDecision).toBe("approved");
+  });
+
+  // The push golden is regenerated from normalize.go, so this proves the TypeScript classifier
+  // reads exactly the field shapes the listener emits (`changed_paths` newline-joined,
+  // `changed_paths_truncated` as the string "false").
+  it("counts the Go-normalized push golden as a real fix attempt", () => {
+    const state: LegionState = newLegionState("omp", 4);
+    const issue = "WIDGETS-1";
+    const architect = roleToken(state.project, issue, "architect");
+    state.issues[issue] = { key: issue, title: "Issue one", status: "in_progress", children: [] };
+    state.trees[issue] = { root: issue, generation: 1, status: "active", launchFailures: 0 };
+    state.roles[architect] = { issue, role: "architect" };
+    const prKey = "example-org/example-repo#42";
+    state.prs[prKey] = {
+      key: issue,
+      repo: "example-org/example-repo",
+      number: 42,
+      headSha: push.payload.before,
+      verdict: "red",
+      failing: ["unit"],
+      failingStatuses: [],
+      ciSettledAt: 1,
+      ciCheckRuns: null,
+      ciSettlementGeneration: null,
+      ciSnapshot: null,
+      ciReconciled: false,
+      fixAttempts: 0,
+    };
+    state.prByBranch["example-org/example-repo@main"] = prKey;
+
+    expect(
+      reduceGithubEvent(
+        state,
+        push.topic,
+        {
+          event_id: "golden-push",
+          issued_at: 0,
+          payload_summary: push.payload_summary,
+          payload: push.payload,
+        },
+        config
+      )
+    ).toEqual([]);
+    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: push.payload.after, handoffOnly: false });
+
+    expect(
+      reduceGithubEvent(
+        state,
+        "notifications.github.example-org.example-repo.pr.42",
+        {
+          event_id: "golden-push-synchronize",
+          issued_at: 0,
+          payload: {
+            kind: "pr",
+            action: "synchronize",
+            repo: "example-org/example-repo",
+            number: "42",
+            head_ref: "main",
+            head_sha: push.payload.after,
+          },
+        },
+        config
+      )
+    ).toEqual([]);
+    expect(state.prs[prKey]).toMatchObject({
+      headSha: push.payload.after,
+      fixAttempts: 1,
+      headCounted: true,
+    });
+    expect(state.prs[prKey]?.pendingPush).toBeUndefined();
   });
 });

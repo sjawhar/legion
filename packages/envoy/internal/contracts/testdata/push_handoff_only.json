@@ -1,0 +1,83 @@
+{
+  "ref": "refs/heads/legion/LEGION-23",
+  "before": "da6d40f735b36fdda8f6980cd7550b872d5ceeba",
+  "after": "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+  "repository": {
+    "id": 1146927990,
+    "node_id": "R_kgDORFy7dg",
+    "name": "legion",
+    "full_name": "sjawhar/legion",
+    "private": false,
+    "owner": {
+      "name": "sjawhar",
+      "email": "sjawhar@users.noreply.github.com",
+      "login": "sjawhar",
+      "type": "User",
+      "site_admin": false
+    },
+    "html_url": "https://github.com/sjawhar/legion",
+    "description": null,
+    "fork": false,
+    "url": "https://github.com/sjawhar/legion",
+    "default_branch": "main",
+    "visibility": "public"
+  },
+  "pusher": {
+    "name": "legion-implementer[bot]",
+    "email": "271566630+legion-implementer[bot]@users.noreply.github.com"
+  },
+  "sender": {
+    "login": "legion-implementer[bot]",
+    "type": "Bot",
+    "site_admin": false
+  },
+  "installation": {
+    "id": 1,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uMQ=="
+  },
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "base_ref": null,
+  "compare": "https://github.com/sjawhar/legion/compare/da6d40f735b3...538bbf1ab6b9",
+  "commits": [
+    {
+      "id": "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+      "tree_id": "864c10cdd471a5397230d553acce72f4189be063",
+      "distinct": true,
+      "message": "implement: record handoff\n\nOmp-Session: 01a094fd-16d5-7000-943a-df0be0b628ad",
+      "timestamp": "2026-09-12T10:01:19Z",
+      "url": "https://github.com/sjawhar/legion/commit/538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+      "author": {
+        "name": "legion-implementer[bot]",
+        "email": "271566630+legion-implementer[bot]@users.noreply.github.com"
+      },
+      "committer": {
+        "name": "legion-implementer[bot]",
+        "email": "271566630+legion-implementer[bot]@users.noreply.github.com"
+      },
+      "added": [".legion/implement.json"],
+      "removed": [],
+      "modified": []
+    }
+  ],
+  "head_commit": {
+    "id": "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+    "tree_id": "864c10cdd471a5397230d553acce72f4189be063",
+    "distinct": true,
+    "message": "implement: record handoff\n\nOmp-Session: 01a094fd-16d5-7000-943a-df0be0b628ad",
+    "timestamp": "2026-09-12T10:01:19Z",
+    "url": "https://github.com/sjawhar/legion/commit/538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
+    "author": {
+      "name": "legion-implementer[bot]",
+      "email": "271566630+legion-implementer[bot]@users.noreply.github.com"
+    },
+    "committer": {
+      "name": "legion-implementer[bot]",
+      "email": "271566630+legion-implementer[bot]@users.noreply.github.com"
+    },
+    "added": [".legion/implement.json"],
+    "removed": [],
+    "modified": []
+  }
+}
