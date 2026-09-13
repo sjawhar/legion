@@ -10,6 +10,7 @@ import { EnvoyPublishError } from "../api/http";
 import { DispatchHttpError } from "../dispatch-client";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
+import { type EnvelopeJson, routeActive } from "../reducers";
 import { fakeDispatchClient } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
@@ -1624,7 +1625,7 @@ describe("Legion HTTP API", () => {
       ).response.status
     ).toBe(200);
   });
-  it("registers a worker session and phase from a valid worker boot token", async () => {
+  it("registers a worker session from a valid worker boot token without touching the issue's active phase", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -1665,7 +1666,148 @@ describe("Legion HTTP API", () => {
       agentId: "agt_tester",
       locator: { ompSessionFile: "/tmp/tester.json" },
     });
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(state.phases[root]).toBeUndefined();
+  });
+
+  it("keeps the implementer as the active phase when a finished reviewer's relaunch registers, and keeps routing to the implementer", async () => {
+    await start();
+    const implementerToken = roleToken(state.project, root, "implementer");
+    const reviewerToken = roleToken(state.project, root, "reviewer");
+    // The reviewer finished at 14:29 and was retired; the implementer is doing the retro. The
+    // daemon relaunched the reviewer (a lost connection, a restart) as generation 2 of the same
+    // agent -- exactly LEGION-14's shape when the implementer's completion was refused.
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    state.roles[implementerToken] = {
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      generation: 1,
+      readyConfirmedAt: now,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    state.roles[reviewerToken] = {
+      issue: root,
+      role: "reviewer",
+      generation: 2,
+      expectedSessionId: "ses_reviewer",
+      resumeSessionFile: "/tmp/reviewer.json",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/reviewer.sock",
+        ompSessionFile: "/tmp/reviewer.json",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 2, "ses_reviewer");
+    if (!bootToken) throw new Error("worker boot token was not minted");
+
+    const started = await json<{ roleToken: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      bootToken,
+      sessionId: "ses_reviewer",
+      agentId: "agt_reviewer",
+      ompSessionFile: "/tmp/reviewer.json",
+    });
+
+    expect(started.response.status).toBe(200);
+    expect(started.body.roleToken).toBe(reviewerToken);
+    expect(state.roles[reviewerToken]).toMatchObject({ sessionId: "ses_reviewer", generation: 2 });
+    expect(state.phases[root]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
+    // The green-CI wake for the retro commit still reaches the implementer, not the relaunched
+    // reviewer.
+    const payload = { type: "ci-green" as const, sha: "retro-head" };
+    const envelope: EnvelopeJson = { event_id: "delivery-1", issued_at: now, payload: {} };
+    expect(routeActive(state, root, payload, envelope)).toEqual([
+      { kind: "publish", role: implementerToken, payload },
+    ]);
+  });
+
+  it("accepts the implementer's completion after a finished reviewer relaunched", async () => {
+    await start();
+    const implementerToken = roleToken(state.project, root, "implementer");
+    const reviewerToken = roleToken(state.project, root, "reviewer");
+    state.roles[implementerToken] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const implementerBoot = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!implementerBoot) throw new Error("worker boot token was not minted");
+    const implementerStarted = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken: implementerBoot,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(implementerStarted.response.status).toBe(200);
+    // The architect's assignment reached the implementer (the one write of the phase).
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+
+    state.roles[reviewerToken] = {
+      issue: root,
+      role: "reviewer",
+      generation: 2,
+      expectedSessionId: "ses_reviewer",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/reviewer.sock",
+        ompSessionFile: "/tmp/reviewer.json",
+      },
+    };
+    const reviewerBoot = await api?.mintWorkerBootToken(root, root, "reviewer", 2, "ses_reviewer");
+    if (!reviewerBoot) throw new Error("worker boot token was not minted");
+    const reviewerStarted = await json("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "reviewer",
+      bootToken: reviewerBoot,
+      sessionId: "ses_reviewer",
+      agentId: "agt_reviewer",
+      ompSessionFile: "/tmp/reviewer.json",
+    });
+    expect(reviewerStarted.response.status).toBe(200);
+    expect(state.phases[root]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
+
+    const grantId = await mintGrant(root, "ses_implementer", implementerStarted.body.secret);
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Retro recorded",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
+    expect(publications).toContainEqual({
+      topic: roleTopic(roleToken(state.project, root, "architect")),
+      payload: JSON.stringify({
+        type: "phase-complete",
+        issue: root,
+        role: "implementer",
+        summary: "Retro recorded",
+      }),
+    });
   });
 
   it("rejects worker/started with a fresh 409 when the claim's generation changes while its GitHub lease is in flight", async () => {
@@ -1912,7 +2054,7 @@ describe("Legion HTTP API", () => {
     expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
   });
 
-  it("rolls back the claim and phase mutations when the state save fails, leaving a clean retry", async () => {
+  it("rolls back the claim mutation when the state save fails, leaving a clean retry", async () => {
     let saveCalls = 0;
     await start({
       mintController: false,
@@ -1968,7 +2110,7 @@ describe("Legion HTTP API", () => {
     );
     expect(retry.response.status).toBe(200);
     expect(state.roles[token]).toMatchObject({ sessionId: "ses_tester", agentId: "agt_tester" });
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(state.phases[root]).toBeUndefined();
   });
 
   it("rejects a worker/started sessionId that differs from the boot token's expected respawn session", async () => {
@@ -2091,7 +2233,7 @@ describe("Legion HTTP API", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: "verify #41",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -2144,7 +2286,7 @@ describe("Legion HTTP API", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: "verify #41",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",

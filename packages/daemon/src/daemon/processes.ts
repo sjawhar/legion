@@ -18,7 +18,13 @@ import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
-import type { LegionState, TreeState, WorkerRoleClaim } from "./legion-state";
+import {
+  isActivePhase,
+  type LegionState,
+  type PendingAssignment,
+  type TreeState,
+  type WorkerRoleClaim,
+} from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
 import {
   awaitShutdown,
@@ -356,10 +362,10 @@ export class ProcessManager {
       // fixed point as a direct spawnWorker launch is -- see launchWorker's own entry check for
       // the other half of this fence (closingTrees, re-checked before this call ever spawns a
       // process).
-      launchWorker: (treeKey, issue, role, claim, task) =>
-        this.trackLaunch(treeKey, () => this.launchWorker(treeKey, issue, role, claim, task)),
-      promptExistingWorker: (client, token, issue, role, sessionId, task) =>
-        this.promptExistingWorker(client, token, issue, role, sessionId, task),
+      launchWorker: (treeKey, issue, role, claim, pending) =>
+        this.trackLaunch(treeKey, () => this.launchWorker(treeKey, issue, role, claim, pending)),
+      promptExistingWorker: (client, token, issue, role, sessionId, pending) =>
+        this.promptExistingWorker(client, token, issue, role, sessionId, pending),
       retireDeadClaim: (token, locator) => this.markWorkerDeadLocked(token, locator),
       onAdmissionEvent: deps.onAdmissionEvent,
       rootForIssue: (issue) => this.rootForIssue(issue),
@@ -535,11 +541,30 @@ export class ProcessManager {
     await this.beginPromotionSweep();
   }
 
+  /** Delivers an architect's `spawn_worker` task to `role` on `issue`. The architect's task is
+   * the only source of an `assignment` -- the one kind of pending prompt whose delivery makes
+   * its role the issue's active phase (`state.phases[issue]`, written by `promptExistingWorker`);
+   * the daemon's own recovery prompt goes through `deliverToWorker` as a `catchup` instead. */
   async spawnWorker(
     treeKey: IssueKey,
     issue: IssueKey,
     role: LegionRole,
     task: string
+  ): Promise<SpawnWorkerResponse> {
+    return this.deliverToWorker(treeKey, issue, role, { kind: "assignment", task });
+  }
+
+  /** Resumes, prompts, launches, or queues the worker for `role` so that `pending` reaches it:
+   * prompted straight into a live idle worker, queued on a booting or at-cap claim for
+   * `/worker/ready` or queue promotion to deliver, or launched fresh (`--resume` when the role
+   * has a recorded session). A `catchup` never displaces a queued `assignment`: the check runs
+   * inside the role's lock because `resumeWorker` computes its catch-up outside it (a GitHub
+   * fetch), and an architect's `spawn_worker` can land in that window. */
+  private async deliverToWorker(
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    pending: PendingAssignment
   ): Promise<SpawnWorkerResponse> {
     if (this.rootForIssue(issue) !== treeKey) {
       throw new Error(`Issue ${issue} does not belong to Legion tree ${treeKey}`);
@@ -576,6 +601,12 @@ export class ProcessManager {
         }
         const existing = this.deps.state.roles[token];
         const claim = existing && "issue" in existing ? existing : undefined;
+        if (pending.kind === "catchup" && claim?.pendingAssignment?.kind === "assignment") {
+          console.info(
+            `[legion] dropping catch-up for ${token}: the architect's assignment is queued and reaches the worker first`
+          );
+          return { status: "resumed", roleToken: token };
+        }
 
         if (claim?.locator) {
           if (!claim.sessionId || claim.readyConfirmedAt === undefined) {
@@ -583,9 +614,9 @@ export class ProcessManager {
             // /worker/started has not yet registered this generation's session, or it has and
             // /worker/ready has not yet durably confirmed the boot. Never launch a second
             // process or probe/prompt the socket while a boot's readiness is still unconfirmed —
-            // queue the task and let /worker/ready deliver it once the worker's boot is
-            // confirmed.
-            claim.pendingAssignment = task;
+            // queue the pending prompt and let /worker/ready deliver it once the worker's boot
+            // is confirmed.
+            claim.pendingAssignment = pending;
             await this.persist();
             return { status: "resumed", roleToken: token };
           }
@@ -622,7 +653,7 @@ export class ProcessManager {
               role,
               claim,
               claim.sessionId,
-              task,
+              pending,
               probe.client
             );
             if (decision.kind === "queued") {
@@ -636,10 +667,10 @@ export class ProcessManager {
           if (this.closingTrees.has(treeKey)) {
             throw new TreeClosingError(treeKey);
           }
-          return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, task);
+          return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, pending);
         }
 
-        return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, task);
+        return this.workerAdmission.launchOrQueue(token, treeKey, issue, role, claim, pending);
       })
     );
   }
@@ -664,7 +695,7 @@ export class ProcessManager {
     return running;
   }
 
-  /** Prompts an already-connected, already-live worker client with `task` — the shared
+  /** Prompts an already-connected, already-live worker client with `pending.task` — the shared
    * implementation behind every "resume an existing worker" path (`WorkerAdmission`'s
    * `resumeOrQueueExisting` admitted branch, its `"prompt"` queue-promotion decision, and
    * `/worker/ready`), as opposed to `launchWorker`, which spawns a fresh process. Does not touch the
@@ -673,27 +704,32 @@ export class ProcessManager {
    * the caller knows whether this prompt represents a new admission (`resumeOrQueueExisting`'s
    * below-cap idle-resume, or a queue promotion) or none at all (`/worker/ready` resuming a
    * worker whose slot was already counted via its locator from the moment `launchWorker` wrote
-   * it, so nothing here needs releasing or re-checking). Registers the current phase
-   * (`state.phases[issue]`) so `phase/complete` can find it, and clears the claim's
-   * `pendingAssignment` if it was still set. Throws (without touching
-   * phases/`pendingAssignment`/persisting) only if `prompt()` itself rejects — the caller
-   * decides what "the prompt failed" means for its own bookkeeping. A `persist` failure
-   * *after* `prompt()` already succeeded is a durable-state persistence issue, not a prompt
-   * failure: the worker is already working, mirroring `launchWorker`'s post-locator-write
-   * save handling. Retries the persist once; if that also fails, logs it and returns
-   * normally — never rethrown, since the caller (and, transitively, the architect) would
-   * otherwise see a failure for a worker that is actually already running the task. */
+   * it, so nothing here needs releasing or re-checking). This is the ONE writer of the issue's
+   * active phase (`state.phases[issue]`, which `phase/complete` and `routeActive` read), and it
+   * writes it only for an architect `assignment` -- a `catchup` prompt is recovery plumbing and
+   * leaves the phase exactly as it was, so a relaunched worker whose phase already finished
+   * never becomes the active phase again. Clears the claim's `pendingAssignment` if it was
+   * still set. Throws (without touching phases/`pendingAssignment`/persisting) only if
+   * `prompt()` itself rejects — the caller decides what "the prompt failed" means for its own
+   * bookkeeping. A `persist` failure *after* `prompt()` already succeeded is a durable-state
+   * persistence issue, not a prompt failure: the worker is already working, mirroring
+   * `launchWorker`'s post-locator-write save handling. Retries the persist once; if that also
+   * fails, logs it and returns normally — never rethrown, since the caller (and, transitively,
+   * the architect) would otherwise see a failure for a worker that is actually already running
+   * the task. */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
     issue: IssueKey,
     role: LegionRole,
     sessionId: string,
-    task: string,
+    pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
-    await client.prompt(task);
-    this.deps.state.phases[issue] = { phase: role, sessionId };
+    await client.prompt(pending.task);
+    if (pending.kind === "assignment") {
+      this.deps.state.phases[issue] = { phase: role, sessionId };
+    }
     const claim = this.deps.state.roles[token];
     if (claim && "issue" in claim) {
       delete claim.pendingAssignment;
@@ -774,10 +810,10 @@ export class ProcessManager {
         this.cancelBootWatchdog(token, generation);
         return;
       }
-      const task = claim.pendingAssignment;
+      const pending = claim.pendingAssignment;
       const client = await this.clientFor(token, claim.locator);
-      if (task) {
-        await this.promptExistingWorker(client, token, issue, role, sessionId, task, () => {
+      if (pending) {
+        await this.promptExistingWorker(client, token, issue, role, sessionId, pending, () => {
           claim.readyConfirmedAt = this.deps.now();
           // A durably confirmed boot is the one moment this counter resets -- never a mere
           // `/worker/started` registration, which a worker that keeps registering but never
@@ -1605,8 +1641,8 @@ export class ProcessManager {
    *
    * A decline on exactly the last two conditions -- the role is the issue's active phase, or a
    * `pendingAssignment` is queued -- re-arms the clock. Both change without this worker ever
-   * transitioning to idle again (`/worker/started` or `promptExistingWorker` re-writing
-   * `phases[issue]` for another role; a promotion draining the queued task), and an already-idle
+   * transitioning to idle again (`promptExistingWorker` delivering an architect assignment to
+   * another role re-writes `phases[issue]`; a promotion drains the queued task), and an already-idle
    * worker's `onIdle` never fires again, so without the re-arm a worker that finished its turn while
    * still the recorded phase would stay resident for the life of the tree once the phase moves on.
    * Re-armed inside this same critical section, so it cannot interleave with a prompt; the
@@ -1626,10 +1662,9 @@ export class ProcessManager {
       if (claim.role === "architect") return;
       const treeKey = this.rootForIssue(claim.issue);
       if (treeKey === undefined || this.isTreeGone(treeKey, claim.issue)) return;
-      const phase = this.deps.state.phases[claim.issue];
       if (
         claim.pendingAssignment !== undefined ||
-        (phase && !phase.completed && phase.phase === claim.role)
+        isActivePhase(this.deps.state, claim.issue, claim.role)
       ) {
         this.armIdleRetire(token, client);
         return;
@@ -1971,7 +2006,7 @@ export class ProcessManager {
 
   /**
    * Recovers a role's missed wake by probing its own worker locator (never the root's) and, if
-   * dead, resuming the same agent through the existing `spawnWorker` resume path (`--resume`,
+   * dead, resuming the same agent through the existing `deliverToWorker` resume path (`--resume`,
    * never fresh) with a state-derived catch-up as its prompt instead of the raw missed event —
    * shared by a role-lane delivery exception, the durable lane's `onUndeliverable` 404, and a
    * dead-launch retry. A role with no claim, or a claim with neither a locator nor a resumable
@@ -1980,10 +2015,22 @@ export class ProcessManager {
    * first spawn's own catch-up recovers anything missed meanwhile). Critically, a claim whose
    * *locator* was already cleared but whose `resumeSessionFile` survives — exactly the shape
    * `markWorkerDeadLocked` leaves behind for a confirmed-dead worker — is NOT that case: this is
-   * the one scenario this method exists to recover, and `spawnWorker`'s own resume-session
+   * the one scenario this method exists to recover, and `deliverToWorker`'s own resume-session
    * lookup (`claim.locator?.ompSessionFile ?? claim.resumeSessionFile`) already handles it once
    * reached. Publishes `worker-died` to the tree architect only once the resume attempt itself
    * fails at the launch-failure threshold.
+   *
+   * The catch-up is a `catchup` pending prompt, never an `assignment`: it does not write
+   * `phases[issue]`, and it is not sent at all to a phase-worker role that is neither the issue's
+   * active phase nor holding a pending prompt -- a finished worker whose wake was misrouted is a
+   * bystander until the architect's next `spawn_worker`, so resuming it would only relaunch a
+   * process with nothing to do. A sub-architect (`role === "architect"`; the root architect never
+   * reaches this method) is exempt, exactly as in `retireIdleWorker`: an architect has no phase
+   * of its own -- it is never `phases[issue].phase` once it has spawned a planner -- and it parks
+   * by design between wakes for the life of its subtree, so this is its only recovery path. A
+   * catch-up never replaces a queued architect assignment either: checked here to skip the fetch,
+   * and again inside the role's lock in `deliverToWorker` for a `spawn_worker` that lands while
+   * the catch-up is being computed.
    */
   async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
@@ -1994,9 +2041,28 @@ export class ProcessManager {
       );
       return;
     }
+    if (claim.pendingAssignment?.kind === "assignment") {
+      console.info(
+        `[legion] dropping catch-up for ${token}: the architect's assignment is queued and reaches the worker first`
+      );
+      return;
+    }
+    if (
+      role !== "architect" &&
+      !isActivePhase(this.deps.state, issue, role) &&
+      claim.pendingAssignment === undefined
+    ) {
+      console.info(
+        `[legion] no catch-up for ${token}: ${issue}'s active phase is ${this.deps.state.phases[issue]?.phase ?? "none"} and nothing is queued for this role; only spawn_worker resumes a finished worker`
+      );
+      return;
+    }
     const catchup = await workerCatchup(this.deps.state, issue, role, this.deps.workerCatchup);
     try {
-      await this.spawnWorker(root, issue, role, JSON.stringify(catchup));
+      await this.deliverToWorker(root, issue, role, {
+        kind: "catchup",
+        task: JSON.stringify(catchup),
+      });
     } catch (error) {
       console.error(`[legion] failed to resume worker ${issue}/${role}:`, error);
       const failedClaim = this.deps.state.roles[token];
@@ -2503,7 +2569,7 @@ export class ProcessManager {
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
-    task: string
+    pending: PendingAssignment
   ): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
     const generation = (claim?.generation ?? 0) + 1;
@@ -2600,7 +2666,7 @@ export class ProcessManager {
         // recovery signal for launch accounting, not merely respawning.
         launchFailures: claim?.launchFailures ?? 0,
         generation,
-        pendingAssignment: task,
+        pendingAssignment: pending,
         bootTokenHash: secretHash(bootToken).toString("hex"),
         ...(claim?.sessionId ? { expectedSessionId: claim.sessionId } : {}),
         locator: freshLocator,
