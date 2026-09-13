@@ -3,9 +3,10 @@
   "pr": {
     "number": 1079,
     "url": "https://github.com/sjawhar/legion/pull/1079",
-    "headSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+    "headSha": "35d2483e3c5b06ad64f6c6371e9c26f02b7aecf0",
     "branch": "legion/LEGION-108",
-    "mergeable": "MERGEABLE at open; no rebase needed"
+    "mergeable": "MERGEABLE at open and at the docs corrective push (mergeStateStatus BLOCKED = awaiting review/checks, not a conflict); no rebase performed",
+    "codeHeadSha": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72"
   },
   "filesChanged": [
     "packages/envoy/cmd/listener/delivery.go",
@@ -24,7 +25,10 @@
     "eaaf9a1edaa7 listener test: a forward publish error stays delivery_failed",
     "d3b4d4067443 listener api: publish accepts an explicit dedupe_key, exclusive with idempotency_key (LEGION-108)",
     "ba6086055e44 listener test: same dedupe_key is forwarded again after receipt_timeout and skipped after delivery",
-    "fc7c2ab3ae2f docs(envoy): role-lane reasons no_holder/delivery_failed/receipt_timeout and publish dedupe_key"
+    "fc7c2ab3ae2f docs(envoy): role-lane reasons no_holder/delivery_failed/receipt_timeout and publish dedupe_key",
+    "b7ddac82a6ab implement: record handoff",
+    "9b656be337ec test: record handoff (tester, carried by this push: the review App cannot push)",
+    "35d2483e3c5b docs(solutions): receipt_timeout branch in the receipt-backed delivery snippet; a deaf holder may be dead"
   ],
   "proof": [
     {
@@ -95,7 +99,22 @@
   ],
   "toolchain": "Go 1.26.8 via mise x go@1.26 (installed into mise's tool store; no mise config, legion profile, or legion.yaml touched). Docker 29.7.2; the listener tests pulled nats:2.10 through testcontainers-go without a credential-helper issue.",
   "subPlanningNeeded": false,
+  "correctiveRounds": [
+    {
+      "round": 1,
+      "kind": "docs only, before review (tester finding on acceptance line 6)",
+      "file": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+      "commit": "35d2483e3c5b06ad64f6c6371e9c26f02b7aecf0",
+      "changes": [
+        "(a) The Correct: require the selected receiver to reply snippet now has the errors.Is(err, nats.ErrTimeout) -> receipt_timeout branch, matching roleTopicDelivery; every other RequestCoreTo error stays delivery_failed.",
+        "(b) The Guidance paragraph no longer claims a receipt_timeout holder has the envelope: the forward was published to a registered, live-looking holder and no receipt arrived in two seconds -- usually a busy holder, but a process that died inside the registry stale window times out the same way and never had it; the daemon probes to tell slow from dead (LEGION-101 contract) and treats a live process as having the message.",
+        "The closing sentence under the snippet was tightened for the same reason: a stopped holder is delivery_failed only once its registration has gone stale; a fresh-but-deaf one (slow or dead inside the window) is receipt_timeout."
+      ],
+      "verification": "docs-only change; no Go tests run per the architect (standing order: run nothing but jj and legion gh). The code the snippet now mirrors is unchanged at fc7c2ab3 and was proven there.",
+      "rebase": "none; PR #1079 reported MERGEABLE"
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T06:14:02.661Z"
+  "completed": "2026-09-14T06:46:53.267Z"
 }
