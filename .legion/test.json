@@ -2,7 +2,7 @@
   "pr": 1011,
   "prUrl": "https://github.com/sjawhar/legion/pull/1011",
   "branch": "legion/LEGION-40",
-  "headSha": "b26707972d01a37ce742b9112118a9414cdaca46",
+  "headSha": "cdd957a17934133bfd4938d02a57ab5d72b64970",
   "verdict": "PASS",
   "passed": 3,
   "failed": 0,
@@ -13,19 +13,19 @@
     "3": "legion gh -- pr view 1011 --json files: .legion/implement.json, .legion/plan.json, docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md, scripts/smoke/{README.md,checkpoints.sh,checkpoints.test.sh,dispatch-config.sh,up.sh,up.test.sh}. No legion.yaml, no ~/.config/legion, no packages/daemon. shellcheck -x 0.11.0 on the five shell files: only pre-existing up.sh SC2155 (line 22) and SC2086 (line 304; line 301 on main)."
   },
   "environmentScrub": "env -u LEGION_DAEMON_URL -u LEGION_STATE_DIR -u LEGION_TREE -u LEGION_ISSUE -u LEGION_ROLE -u LEGION_GENERATION -u LEGION_WORKSPACE -u LEGION_ROOT_WORKSPACE -u LEGION_PROJECT -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u LEGION_OMP_PATH -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE (the docs/solutions/daemon/config-env-keys-that-panes-also-carry.md 'Working from a pane' list plus the four the assignment named). Pane carried DISPATCH_URL and DISPATCH_TOKEN_FILE; XDG_CONFIG_HOME unset; envoy.json at /home/ubuntu/.config/opencode/envoy.json with .dispatch.serverUrl and a 64-char .dispatch.token; `secrets get DISPATCH_TOKEN --no-request` -> secret 'DISPATCH_TOKEN' not found (the premise of the issue holds).",
-  "ci": "Tests run 34748617991 success at b2670797 (lint, pr-title, test, typecheck). Duplicate run 34748612355 had lint fail on oven-sh/setup-bun 502 (infrastructure, never reached biome); re-run with `legion gh -- run rerun 34748612355 --failed` -> all four jobs success. Daemon saw ci-green 08:53, ci-settled-red (lint) 08:56, ci-green 09:03.",
-  "testerStatus": "commit status legion/tester=success at b2670797, id 54067445288, creator legion-implementer[bot]. A `tester` check-run (POST /check-runs) is refused 403 'Resource not accessible by integration' to the implement App the tester role runs as; the envoy listener would in any case only trust a tester check from the reviewer App (ENVOY_REVIEWER_APP_ID).",
+  "ci": "Round 2: Tests run 34749174194 success (lint, pr-title, test, typecheck) at cdd957a17934, settled before the check — no re-run needed; daemon ci-green 09:15:53Z. Round 1 at b2670797: run 34748617991 success; duplicate run 34748612355 had lint fail on oven-sh/setup-bun 502 (infrastructure, never reached biome), re-run with `legion gh -- run rerun 34748612355 --failed` -> success.",
+  "testerStatus": "commit status legion/tester=success at cdd957a17934, id 54067606906, creator legion-implementer[bot] (round 1: id 54067445288 at b2670797). A `tester` check-run (POST /check-runs) is refused 403 'Resource not accessible by integration' to the implement App the tester role runs as; the envoy listener would in any case only trust a tester check from the reviewer App (ENVOY_REVIEWER_APP_ID).",
   "sandboxIssuesCreated": [
     "LEGSMOKE-110 (set to done)"
   ],
   "rigPreconditions": "Default ports and legion-smoke-nats free; two other agents' rigs (sjawhar/41 and sjawhar/42 on /tmp/legion-smoke-41 and -42 with NATS ports 14231/14232) live throughout and bridging every LEGSMOKE Dispatch event, so they saw LEGSMOKE-110 too. Implementer's leftover /tmp/legion-smoke (recording done LEGSMOKE-107) moved to /tmp/legion-smoke.legion40-implementer-run2 before the run so the block created a root rather than REUSED one; teardown left a fresh /tmp/legion-smoke in place.",
   "observations": [
-    "up.test.sh inherits SMOKE_WEBHOOK_MODE from the caller's shell: with the README's `export SMOKE_WEBHOOK_MODE=envoy` still exported it fails `expected available webhook forwarding to default to forward mode` (the two resolve_webhook_mode default cases at up.test.sh:121/125 never clear the variable; same shape at main's line 118). `unset SMOKE_WEBHOOK_MODE` and it passes. Pre-existing, not an acceptance line; remedy is one `unset SMOKE_WEBHOOK_MODE` (or `SMOKE_WEBHOOK_MODE=` on those two cases) at the top of up.test.sh.",
+    "FIXED in ffd71d97b6fc: up.test.sh inherited SMOKE_WEBHOOK_MODE from the caller's shell and failed its default-mode case under the README's export; the two cases now unset it in their own subshell. Verified both ways at cdd957a17934.",
     "The README block passes XDG_CONFIG_HOME through to `secrets` as well as up.sh: `secrets` reads $XDG_CONFIG_HOME/secretsd/config.toml, so an operator who sets XDG_CONFIG_HOME to relocate envoy.json also relocates secretsd's config and gets `secrets: no secretsd config at …` before up.sh runs. Only affects a deliberately relocated XDG_CONFIG_HOME; the failure variants were driven with `secrets … -- env XDG_CONFIG_HOME=… bash -c …` for that reason.",
     "The rig daemon's process environment carries DISPATCH_TOKEN (deliberate: up.sh's env block at line 620-621); checkpoint 13 scans panes and the private tmux server, not the daemon process, and passed."
   ],
   "documentationFeedback": "README rows and both command blocks are accurate at this head; every quoted error string matched byte-for-byte. The README does not say that `up.sh`'s reuse of `${SMOKE_DIR}/root-issue` means a second operator on the same box sees `REUSED root issue` rather than `CREATED` unless SMOKE_DIR is fresh — the Prerequisites paragraph does say 'or reuses one already recorded under SMOKE_DIR', which covers it.",
-  "logs": "/tmp/legion40-tester.MBPIUq",
+  "logs": "/tmp/legion40-tester.MBPIUq (round 1) and /tmp/legion40-tester.MBPIUq/round2 (round 2)",
   "learningsInjected": [
     "docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md",
     "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md"
@@ -33,7 +33,28 @@
   "learningsHelpful": [
     "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md"
   ],
+  "round": 2,
+  "previousHeadSha": "b26707972d01a37ce742b9112118a9414cdaca46",
+  "changedSincePreviousHead": {
+    "commits": [
+      "ffd71d97b6fc fix(smoke): up.test.sh does not inherit SMOKE_WEBHOOK_MODE from the caller (LEGION-40)",
+      "cdd957a17934 implement: record handoff"
+    ],
+    "diffSummary": "jj diff --from b26707972d01 --to cdd957a17934 --summary: M .legion/implement.json; A .legion/test.json; M scripts/smoke/up.test.sh",
+    "prFiles": ".legion/{implement,plan,test}.json, docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md, scripts/smoke/{README.md,checkpoints.sh,checkpoints.test.sh,dispatch-config.sh,up.sh,up.test.sh} — no legion.yaml, ~/.config/legion, or packages/daemon",
+    "whatChanged": "up.test.sh lines 121 and 125 only: the two resolve_webhook_mode default-mode cases now run `unset SMOKE_WEBHOOK_MODE;` inside their own $(...) subshell, plus a three-line comment. No file the rig executes (up.sh, checkpoints.sh, down.sh, dispatch-config.sh, README) changed."
+  },
+  "rigEvidenceCarriedForward": "Acceptance 1's rig run (LEGSMOKE-110: CREATED root issue, RIG READY, CHECKPOINT 13 OK, CHECKPOINT 1 OK, negative control, RIG DOWN — recorded under acceptance.1 below, performed at b26707972d01 on 2026-09-13 08:56-09:00Z) is still valid for cdd957a17934: the only non-.legion change is to the up.test.sh harness, which the README blocks never invoke and which does not change up.sh, checkpoints.sh, down.sh, dispatch-config.sh, or the README text the blocks were copied from. Not re-run this round by the architect's scoping.",
+  "bareGatesRound2": {
+    "upTestEnvoyExported": "SMOKE_WEBHOOK_MODE=envoy bash scripts/smoke/up.test.sh -> exit 0, 18 PASS (incl. 'DISPATCH_URL and DISPATCH_TOKEN fall back to .dispatch.serverUrl/.dispatch.token in envoy.json', 'an exported DISPATCH_URL/DISPATCH_TOKEN wins over envoy.json', 'with neither source present, resolution stops naming the variable, the envoy.json path, and the key')",
+    "upTestUnset": "env -u SMOKE_WEBHOOK_MODE bash scripts/smoke/up.test.sh -> exit 0, 18 PASS; PASS lines byte-identical to the exported run",
+    "regressionControl": "the pre-fix up.test.sh from b26707972d01, placed in a repo-shaped scratch tree (packages/ and node_modules/ symlinked), with SMOKE_WEBHOOK_MODE=envoy -> 'expected available webhook forwarding to default to forward mode', exit 1; unset -> 18 PASS, exit 0. The fix is what changed the outcome.",
+    "checkpointsTest": "bash scripts/smoke/checkpoints.test.sh -> exit 0, 14 PASS (incl. 'checkpoints read DISPATCH_URL and DISPATCH_TOKEN from envoy.json when the variables are unset', 'missing-token error names the variable, the envoy.json path, and the key')",
+    "downTest": "bash scripts/smoke/down.test.sh -> exit 0, 3 PASS",
+    "shellcheck": "shellcheck -x 0.11.0 on up.sh up.test.sh checkpoints.sh checkpoints.test.sh dispatch-config.sh: only pre-existing up.sh SC2155 (line 22) and SC2086 (line 304)",
+    "scrub": "all harness runs under the same pane scrub as round 1 (env -u LEGION_* … -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u LEGION_OMP_PATH -u TMUX -u GH_*), so envoy.json is what the fallback cases read"
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T09:08:53.408Z"
+  "completed": "2026-09-13T09:19:45.144Z"
 }
