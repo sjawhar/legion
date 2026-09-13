@@ -480,6 +480,47 @@ for (const fixture of [
   });
 }
 
+test("IssuePage keeps a pull request's title and state when only its check-runs lookup fails", async () => {
+  const restore = stubIssuePage(
+    issueWithExternalLink("https://github.com/owner/repository/pull/7")
+  );
+  const githubRest = spyOn(api, "githubRest").mockImplementation(async (path) => {
+    if (path === "repos/owner/repository/pulls/7") {
+      return new Response(
+        JSON.stringify({
+          head: { sha: "abcdef" },
+          merged: false,
+          state: "open",
+          title: "Keep the title when checks vanish",
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    throw new Error("check-runs unavailable");
+  });
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText("Keep the title when checks vanish");
+    await waitFor(() =>
+      expect(githubRest).toHaveBeenCalledWith("repos/owner/repository/commits/abcdef/check-runs")
+    );
+    // The failed check-runs read drops only the checks pill; the loaded title and state stay.
+    await waitFor(() => expect(screen.queryByText(/^checks:/)).toBeNull());
+    expect(screen.getByText("Keep the title when checks vanish")).toBeDefined();
+    expect(screen.getByText("open")).toBeDefined();
+    expect(
+      screen
+        .getByRole("link", { name: /#7 Keep the title when checks vanish/ })
+        .getAttribute("title")
+    ).toBe("owner/repository#7: Keep the title when checks vanish");
+  } finally {
+    view.unmount();
+    githubRest.mockRestore();
+    restore();
+  }
+});
+
 test("IssuePage continues to unfurl GitHub issues through the issues endpoint", async () => {
   const restore = stubIssuePage(
     issueWithExternalLink("https://github.com/owner/repository/issues/9")

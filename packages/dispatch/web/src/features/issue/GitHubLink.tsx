@@ -94,12 +94,13 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   }
   const repository = `${match[1]}/${match[2]}`;
   const number = `#${match[4]}`;
-  const failed = githubReference.isError || checks.isError;
+  // The reference (title, state) and the check-runs are separate lookups: a failed check-runs
+  // read only drops the checks pill and never the title and state already loaded.
+  const reference = githubReference.isError ? undefined : githubReference.data;
   const unavailable =
-    (githubReference.error instanceof ApiError &&
-      githubReference.error.code === "GITHUB_TOKEN_UNAVAILABLE") ||
-    (checks.error instanceof ApiError && checks.error.code === "GITHUB_TOKEN_UNAVAILABLE");
-  const reference = failed ? undefined : githubReference.data;
+    reference === undefined &&
+    githubReference.error instanceof ApiError &&
+    githubReference.error.code === "GITHUB_TOKEN_UNAVAILABLE";
   const state =
     reference === undefined
       ? undefined
@@ -129,7 +130,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
           {state}
         </span>
       )}
-      {isPullRequest && checks.data !== undefined && !failed ? (
+      {isPullRequest && !checks.isError && checks.data !== undefined ? (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}
         >

@@ -1,5 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, type ReactNode, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -68,6 +75,14 @@ export function IssueHeader({
   const queryClient = useQueryClient();
   const [editingTitle, setEditingTitle] = useState(false);
   const [routeEditing, setRouteEditing] = useState(false);
+  const routeInputRef = useRef<HTMLInputElement>(null);
+  // Focus the route input once when editing opens: the trigger button unmounts, so without this
+  // focus would drop to the body and a keyboard user would have to find the form again.
+  useEffect(() => {
+    if (routeEditing) {
+      routeInputRef.current?.focus();
+    }
+  }, [routeEditing]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const subscribers = useQuery({
     queryKey: ["subscribers", issue.key],
@@ -352,7 +367,7 @@ export function IssueHeader({
           )}
         </div>
         <div
-          className="flex min-w-0 grow flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0"
+          className="flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0"
           data-testid="issue-metadata-rail"
         >
           {whoseTurn === null ? null : (
@@ -375,9 +390,9 @@ export function IssueHeader({
               variant="rail"
             />
           </div>
-          <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-            <span className="font-medium">Route:</span>
-            {routeEditing ? null : (
+          {routeEditing ? null : (
+            <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
+              <span className="font-medium">Route:</span>
               <button
                 aria-label={routeLabel}
                 className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
@@ -388,8 +403,8 @@ export function IssueHeader({
               >
                 {drafts.route === "" ? "No route" : drafts.route}
               </button>
-            )}
-          </div>
+            </div>
+          )}
           <button
             aria-expanded={subscribersOpen}
             className={`flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium ${textSecondaryHoverToPrimary}`}
@@ -419,6 +434,9 @@ export function IssueHeader({
           <label className="sr-only" htmlFor="issue-route">
             Route
           </label>
+          <span aria-hidden="true" className={`text-sm font-medium ${textSecondaryOnSurface}`}>
+            Route:
+          </span>
           <input
             aria-describedby="issue-route-help"
             className={`w-full rounded px-2 py-1 text-sm outline-none md:w-64 ${inputClasses(true)}`}
@@ -432,6 +450,7 @@ export function IssueHeader({
               }
             }}
             placeholder="role:legion-controller-core"
+            ref={routeInputRef}
             value={drafts.route}
           />
           <button

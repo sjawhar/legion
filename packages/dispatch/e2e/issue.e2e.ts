@@ -449,3 +449,45 @@ test("issue header flips between Waiting on you and Waiting on agents as the new
     await context.close();
   }
 });
+
+test("issue header gives the title the row's free space beside a short details line", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the viewports are set explicitly in the desktop browser project"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Header keeps its title readable" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    // Below 1280 the details line shares the row with the title once it fits beside the state
+    // controls; the title must still take the rest of the row rather than split it with the line.
+    for (const width of [1024, 1200, 1279]) {
+      await page.setViewportSize({ height: 800, width });
+      await page.goto(`/issues/${issue.key}`);
+      const title = page.getByRole("heading", {
+        level: 1,
+        name: "Header keeps its title readable",
+      });
+      await expect(title).toBeVisible();
+      const clipped = await title.evaluate(
+        (element) =>
+          element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth
+      );
+      expect(clipped, `title clipped at ${width}px`).toBe(false);
+      if (width === 1024) {
+        const shot = testInfo.outputPath("issue-header-title-1024.png");
+        await page.screenshot({ path: shot });
+        await testInfo.attach("issue header title (1024px)", {
+          contentType: "image/png",
+          path: shot,
+        });
+      }
+    }
+  } finally {
+    await context.close();
+  }
+});

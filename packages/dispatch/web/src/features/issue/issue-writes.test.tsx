@@ -718,8 +718,10 @@ test("IssuePage retries a failed drained title before sending the queued route",
       expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
     );
 
-    const title = await openTitleEditor();
+    // The route input takes focus when it opens, which would blur (and submit) an open title
+    // editor exactly as a click does in a browser; open it first so both drafts can be staged.
     const route = await openRouteEditor();
+    const title = await openTitleEditor();
     const routeForm = screen.getByRole("button", { name: "Save route" }).closest("form");
     if (routeForm === null) {
       throw new Error("Save route must be inside a form.");
