@@ -367,6 +367,13 @@ export const badgePrimary = {
   bg: "bg-sky-100 dark:bg-sky-950",
   text: "text-sky-800 dark:text-sky-300",
 };
+
+/** Ask cards use a left border for urgency, keeping the distinction visible without spending
+ * space in the card's content flow. */
+export const askUrgencyBlockingBorder = "border-l-rose-500 dark:border-l-rose-400";
+export const askUrgencyHighBorder = "border-l-amber-500 dark:border-l-amber-400";
+export const askUrgencyMedBorder = "border-l-sky-500 dark:border-l-sky-400";
+export const askUrgencyLowBorder = "border-l-slate-400 dark:border-l-slate-600";
 /** The issue-status select is a neutral control: its solid dot carries the state signal while
  * its label remains readable without requiring users to distinguish hues. */
 export const STATUS_PILL_BG = pair(P.SLATE_100, P.SLATE_800);

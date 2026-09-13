@@ -15,6 +15,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import { copyText } from "../../lib/clipboard";
 import {
   badgeMed,
   secondaryButtonBorder,
@@ -426,14 +427,12 @@ export function ProofDocument({
       ask.block_artifact?.id === artifact.id
   );
 
-  const copyBlockLink = useCallback(async () => {
+  const copyBlockLink = useCallback(async (): Promise<boolean> => {
     const blockId = editorRef.current?.blockIdAtSelection();
     if (blockId === null || blockId === undefined) {
-      return;
+      return false;
     }
-    await navigator.clipboard.writeText(
-      `${window.location.origin}${window.location.pathname}#b-${blockId}`
-    );
+    return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
   }, []);
 
   useEffect(() => {

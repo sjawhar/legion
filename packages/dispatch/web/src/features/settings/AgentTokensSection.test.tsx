@@ -76,3 +76,44 @@ test("Settings exposes a new personal token once, copies it, and revokes an exis
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
   }
 });
+
+test("Settings copies a new token through the legacy clipboard fallback", async () => {
+  const plaintext = "dsp_abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFG";
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const createAgentToken = spyOn(api, "createAgentToken").mockResolvedValue({
+    ...token,
+    id: "22222222-2222-2222-2222-222222222222",
+    name: "reviewer",
+    token: plaintext,
+  });
+  const originalClipboard = navigator.clipboard;
+  const originalExecCommand = document.execCommand;
+  const execCommand = spyOn({ execCommand: (_command: string) => true }, "execCommand");
+  Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTokensSection />
+      </QueryClientProvider>
+    );
+    fireEvent.change(screen.getByLabelText("Token label"), { target: { value: "reviewer" } });
+    fireEvent.click(screen.getByRole("button", { name: "New token" }));
+    await screen.findByText(plaintext);
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy token" }));
+    expect(await screen.findByText("Copied", { exact: true })).toBeDefined();
+  } finally {
+    cleanup();
+    queryClient.clear();
+    listAgentTokens.mockRestore();
+    createAgentToken.mockRestore();
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: originalExecCommand,
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+  }
+});

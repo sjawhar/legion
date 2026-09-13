@@ -9,6 +9,7 @@ import {
   createProject,
   createProjectDocument,
   getAsk,
+  getIssue,
   getIssueEvents,
   patchIssue,
 } from "./api";
@@ -27,6 +28,54 @@ test.beforeEach(async () => {
   await resetDatabase();
   if (!process.env.PLAYWRIGHT_BASE_URL) {
     await setLiveSessions([]);
+  }
+});
+
+test("ask cards show urgency accents and copy tmux targets", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Urgency accents" });
+  const tmuxSession = {
+    ...session,
+    actor: { ...session.actor, origin: { session_title: "e2e-session-title", tmux: "dev:4.7" } },
+  };
+  const blocking = await createAsk(
+    issue.key,
+    { question: "Blocking decision", urgency: "blocking" },
+    tmuxSession
+  );
+  await createAsk(issue.key, { question: "High decision", urgency: "high" }, tmuxSession);
+  await createAsk(issue.key, { question: "Medium decision", urgency: "med" }, tmuxSession);
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/");
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+
+    const inboxCards = page.locator("[data-testid^=ask-]");
+    await expect(inboxCards).toHaveCount(3);
+    await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toContainText(
+      "BLOCKING"
+    );
+    await expect(page.getByRole("article", { name: "Urgency: High" })).toContainText("HIGH");
+    await expect(page.getByRole("article", { name: "Urgency: Medium" })).toBeVisible();
+    await expect(page.getByText("Medium", { exact: true })).toHaveCount(0);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Close navigation" }).click();
+    }
+
+    const blockingCard = page.getByTestId(`ask-${blocking.id}`);
+    await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
+    await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();
+    if (testInfo.project.name === "iphone") {
+      await page.locator("main").screenshot({ path: "/tmp/askcard-390.png" });
+    } else {
+      await page.screenshot({ fullPage: true, path: "/tmp/askcard-1280.png" });
+    }
+  } finally {
+    await alice.close();
   }
 });
 
@@ -248,6 +297,7 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
     const priority = page.getByLabel("Priority");
     await priority.selectOption("0");
     await expect(priority).toHaveValue("0");
+    await expect.poll(() => getIssue(p0Issue.key)).toMatchObject({ priority: 0 });
     await page.goto("/");
     for (const ask of [p2Ask, p0Ask]) {
       const card = page.getByTestId(`ask-${ask.id}`);
