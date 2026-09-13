@@ -1,139 +1,275 @@
 {
-  "headSha": "bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad",
-  "round": 2,
+  "headSha": "9f7a4e858eb678a2bfbb94e7076b03c21dfce7de",
+  "round": 3,
   "pullRequest": 1010,
   "pullRequestUrl": "https://github.com/sjawhar/legion/pull/1010",
-  "passed": 5,
-  "failed": 0,
-  "failures": [],
+  "passed": 6,
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "Acceptance 6 / requirement 'Teardown never removes another rig's container': down.sh acts only on a SMOKE_DIR that actually started a rig",
+      "evidence": "A start refused inside ensure_nats leaves ${SMOKE_DIR}/legion.yaml (write_daemon_config at up.sh:584 runs before go build and ensure_nats at up.sh:590) and, per acceptance 7, no nats-container record. That is the exact 'pre-record rig' shape down.sh's legacy fallback keys on. Live at 09:57Z: NATS_PORT 14251 occupied by a scratch listener; `up.sh` -> `error: NATS port 14251 is already in use` (exit 1); /tmp/legion-smoke-41 then held `legion.yaml` (`project: sjawhar/41`) and no `nats-container`. Probe at 09:58Z on that directory with a logging fake `docker` first on PATH (real docker never invoked): `SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh` printed `no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats` / `STOPPED NATS container legion-smoke-nats` / `RIG DOWN` (exit 0); fake argv log: `docker container inspect legion-smoke-nats`, `docker rm -f legion-smoke-nats`. At that moment `legion-smoke-nats` (port 14222) was another tester's live pre-PR rig on this machine — the real command would have removed it. Suggested fix in this PR: move `write_daemon_config` after `ensure_nats` beside the record write (nothing between them reads legion.yaml) so a refused start leaves neither marker; extend up.test.sh's refusal cases to assert legion.yaml is absent too."
+    }
+  ],
   "verdictPerAcceptance": {
-    "1": "PASS (bare gates re-run at bf338059): `bash scripts/smoke/up.test.sh` 18 PASS / exit 0; `bash scripts/smoke/down.test.sh` 4 PASS / exit 0. Container-name code (down.sh whole, up.sh minus d027061c's four-line worker-stream hunk) is byte-identical to the round-1 head (sha256 3f676306… at both 431a0d7a and bf338059).",
-    "2": "PASS (round-1 live run stands, not repeated): the only product change since 431a0d7a is d027061c — `jj diff --from 431a0d7a --to bf338059 --summary` = scripts/smoke/{README.md,up.sh,up.test.sh} + .legion/; down.sh untouched; the up.sh diff is exactly the 3 comment lines + `assert_port_free 'Legion daemon worker stream' \"$((daemon_port + 1))\" \"${smoke_dir}/daemon.pid\"`. Whole-branch fingerprint (skill formula) 55487a83… → 481c976a…, i.e. changed by that fix alone. Round-1 evidence (two rigs, three docker ps snapshots, negative control) kept in `round1` below and in the PR body.",
-    "3": "PASS: README at head names `legion-smoke-nats-<slug>` in the coexistence paragraph and the teardown paragraph (unchanged from round 1) and now also says in the ports sentence that the daemon 'binds the port one above `LEGION_DAEMON_PORT` for its worker stream … so that port must be free too' with 'the daemon's record covers both of its ports', and in the two-rigs paragraph that the `LEGION_DAEMON_PORT` values 'are not adjacent'.",
-    "4": "PASS (unchanged): PR body Base section names LEGION-10 (#957) merge commit 4b934e60; 4b934e60 is an ancestor of bf338059 (branch not rebased).",
-    "5": "PASS (live): with rig A on daemon port 19401 (ss showed 19401 and 19402 LISTEN), a second rig on LEGION_DAEMON_PORT=19400 — whose worker-stream port 19401 is rig A's daemon port — was refused right after `GREEN OMP build` with `error: Legion daemon worker stream port 19401 is already in use` (exit 1), before go build / docker run / listener / daemon: 14242, 19042, 19400 stayed free, `docker ps -a` still listed only legion-smoke-nats-sjawhar41, /tmp/legion-smoke-42 held only the nats-container/webhook-mode records and empty dirs (no *.pid, *.log, legion.yaml). Rig A's own up.sh re-run with its live daemon.pid was not refused by either check and printed REUSED NATS container / REUSED listener (pid 1401799) / REUSED daemon (pid 1402459) / REUSED root issue LEGSMOKE-111 / RIG READY. The architect's literal scenario (second rig on daemon port A+1 = 19402) was also run: it is refused by the pre-existing daemon-port check (`error: Legion daemon port 19402 is already in use`) because B's daemon port *is* A's worker-stream port, so the new check is never reached in that ordering — still nothing launched. Both refusals recorded verbatim below."
+    "1": "PASS (bare gates at 9f7a4e85: up.test.sh 19 PASS / exit 0, down.test.sh 5 PASS / exit 0). Name derivation, ensure_nats reuse rule and assert_port_free are byte-identical to the round-2 head: sha256 of the project_slug/nats_container_name/listener_machine_id/ensure_nats/assert_port_free function bodies = 991306d6… at both bf338059 and 9f7a4e85.",
+    "2": "PASS (round-1 live run at 431a0d7a stands; not repeated). Product changes since: d027061c (round 2, worker-stream check) and 1b6a5da6 (round 3: down.sh identity from legion.yaml + refusal, up.sh record write after ensure_nats, comment reword). checkpoints.sh / envoy-bridge.ts / checkpoints.test.sh unchanged since bf338059 (8aa385d3… / 87876bc2… / 5b0786de…). Whole-branch fingerprint (skill formula) 481c976a… at bf338059 -> 5b4082b2… at 9f7a4e85, changed by 1b6a5da6 alone. Round-3 step 3 also re-exercised the container-removal path live: own down.sh removed exactly legion-smoke-nats-sjawhar41.",
+    "3": "PASS: README teardown paragraph names `legion-smoke-nats-<slug>`, takes the project from legion.yaml, says SMOKE_PROJECT 'is therefore not needed for teardown; keep SMOKE_REPO exported in forward mode so down.sh can delete the repository webhook it recorded', and that a directory without legion.yaml stops no tmux server and removes no container; the ports sentence quotes ensure_nats verbatim: `NATS container legion-smoke-nats-<slug> is not mapped to configured port <NATS_PORT>` (up.sh: `fail \"NATS container ${nats_name} is not mapped to configured port ${nats_port}\"`). The old 'Keep SMOKE_REPO and SMOKE_PROJECT exported for teardown' sentence is removed.",
+    "4": "PASS (unchanged): PR body Base section names LEGION-10 (#957) merge commit 4b934e60, an ancestor of the head; branch not rebased.",
+    "5": "PASS (round-2 live run at bf338059 stands; assert_port_free and the main() port asserts unchanged since — only the comment above the worker-stream assert was reworded).",
+    "6": "PASS on both spec checks, live: (b) throwaway SMOKE_DIR with no legion.yaml + SMOKE_PROJECT=sjawhar/41 while the sjawhar/41 rig and its private tmux server were up -> `/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container`, RIG DOWN, exit 0; has-session legion-sjawhar41 still OK (@1 controller), docker ps unchanged, daemon/listener alive. (c) own SMOKE_DIR + SMOKE_PROJECT=sjawhar/9999 -> `warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41`, STOPPED tmux session legion-sjawhar41, STOPPED NATS container legion-smoke-nats-sjawhar41, RIG DOWN; afterwards no legion-sjawhar41 server, no legion-smoke-nats* container, ports free. FAIL on the intent ('only a directory that actually started a rig') for a directory left by a start refused at ensure_nats — see failures[0].",
+    "7": "PASS as worded, live: refused start (NATS port occupied) left no nats-container record; real start then wrote `legion-smoke-nats-sjawhar41`. But the same refused start leaves legion.yaml, which is what feeds failures[0]."
   },
-  "acceptance5LiveRun": {
-    "preflight": "docker ps -a: no legion-smoke-nats* container; ss -Hltn: 14241 19041 19401 19402 14242 19042 free (also 19400, 19403)",
-    "rigA": {
+  "liveRun": {
+    "rig": {
       "SMOKE_PROJECT": "sjawhar/41",
       "SMOKE_DIR": "/tmp/legion-smoke-41",
-      "NATS_PORT": 14241,
-      "ENVOY_PORT": 19041,
-      "LEGION_DAEMON_PORT": 19401,
-      "listenerPid": 1401799,
-      "daemonPid": 1402459,
-      "rootIssue": "LEGSMOKE-111",
-      "upOutput": [
+      "NATS_PORT": 14251,
+      "ENVOY_PORT": 19051,
+      "LEGION_DAEMON_PORT": 19411,
+      "workerStreamPort": 19412,
+      "container": "legion-smoke-nats-sjawhar41",
+      "rootIssue": "LEGSMOKE-116",
+      "listenerPid": 2726911,
+      "daemonPid": 2727720,
+      "controller": "window @1 pane %1 on tmux -L legion-sjawhar41, alive at 10:09:23Z (first resync, ~10 min after boot)"
+    },
+    "preflight": "docker ps -a: only another tester's legacy-named `legion-smoke-nats` (Up 4 minutes, 0.0.0.0:14222->4222) — left alone; ports 14251 19051 19411 19412 free; no /tmp/legion-smoke-41; no legion-sjawhar41 tmux server",
+    "step7a_refused": {
+      "at": "2026-09-13T09:57:24Z",
+      "setup": "python3 socket bound to 127.0.0.1:14251 (hub-supervised, ss showed LISTEN 127.0.0.1:14251)",
+      "output": [
         "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
+        "error: NATS port 14251 is already in use"
+      ],
+      "exit": 1,
+      "after": "ls /tmp/legion-smoke-41/nats-container -> No such file or directory; SMOKE_DIR contents: daemon/ deployment-instructions.md gh-config/ legion.yaml webhook-mode xdg-data/ xdg-state/; no *.pid/*.log; docker ps -a unchanged; 19051 19411 19412 free"
+    },
+    "step7a_probeDownShOnRefusedDir": {
+      "at": "2026-09-13T09:58:12Z",
+      "how": "fake docker on PATH logging argv and exiting 0; real docker untouched (verified: legion-smoke-nats still Up afterwards)",
+      "output": [
+        "no /tmp/legion-smoke-41/nats-container record; falling back to the old fixed name legion-smoke-nats",
+        "STOPPED NATS container legion-smoke-nats",
+        "RIG DOWN"
+      ],
+      "fakeDockerArgv": [
+        "docker container inspect legion-smoke-nats",
+        "docker rm -f legion-smoke-nats"
+      ],
+      "meaning": "see failures[0]"
+    },
+    "step7a_realStart": {
+      "at": "2026-09-13T09:58:50Z",
+      "output": [
         "STARTED NATS container legion-smoke-nats-sjawhar41",
-        "STARTED listener (pid 1401799)",
+        "STARTED listener (pid 2726911)",
         "GREEN Envoy listener: {...\"status\":\"healthy\"}",
         "GREEN webhook round-trip: listener accepted signed ping",
         "SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: ...",
-        "STARTED daemon (pid 1402459)",
-        "GREEN Legion daemon: {\"project\":\"sjawhar41\",\"version\":26,...}",
-        "CREATED root issue LEGSMOKE-111",
-        "SKIPPED-BLOCKED branch protection: ...",
-        "RIG READY"
-      ],
-      "ssAfter": "14241 LISTEN 0.0.0.0/[::]; 19041 LISTEN 127.0.0.1; 19401 LISTEN 127.0.0.1; 19402 LISTEN 127.0.0.1 (daemon API + worker stream); 14242 19042 19400 19403 free",
-      "at": "2026-09-13T09:19:38Z"
-    },
-    "attemptB1_daemonPortAPlusOne": {
-      "SMOKE_PROJECT": "sjawhar/42",
-      "SMOKE_DIR": "/tmp/legion-smoke-42",
-      "NATS_PORT": 14242,
-      "ENVOY_PORT": 19042,
-      "LEGION_DAEMON_PORT": 19402,
-      "at": "2026-09-13T09:19:51Z",
-      "output": [
-        "WARNING: GITHUB_WEBHOOK_SECRET stored secret contains whitespace; trimmed leading/trailing whitespace",
-        "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
-        "error: Legion daemon port 19402 is already in use"
-      ],
-      "exit": 1,
-      "whichCheck": "pre-existing daemon-port check (B's daemon port 19402 is A's worker-stream port); the new worker-stream check on 19403 is not reached",
-      "nothingLaunched": "ss: 14242 19042 19403 free, 19402 LISTEN (rig A); docker ps -a: only legion-smoke-nats-sjawhar41 (Up 26 seconds); /tmp/legion-smoke-42: daemon/ gh-config/ nats-container webhook-mode xdg-data/ xdg-state/ — no *.pid, *.log, legion.yaml"
-    },
-    "attemptB2_daemonPortAMinusOne": {
-      "SMOKE_PROJECT": "sjawhar/42",
-      "SMOKE_DIR": "/tmp/legion-smoke-42",
-      "NATS_PORT": 14242,
-      "ENVOY_PORT": 19042,
-      "LEGION_DAEMON_PORT": 19400,
-      "at": "2026-09-13T09:20:06Z",
-      "output": [
-        "WARNING: GITHUB_WEBHOOK_SECRET stored secret contains whitespace; trimmed leading/trailing whitespace",
-        "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
-        "error: Legion daemon worker stream port 19401 is already in use"
-      ],
-      "exit": 1,
-      "whichCheck": "NEW worker-stream check (acceptance 5): B's worker-stream port 19400+1 = 19401 is rig A's daemon API port",
-      "nothingLaunched": "ss: 14242 19042 19400 free, 19401/19402 LISTEN (rig A); docker ps -a: only legion-smoke-nats-sjawhar41 (Up 41 seconds); /tmp/legion-smoke-42: records + empty dirs only, no *.pid/*.log/legion.yaml; rig A /legion/v1/state answered {project: sjawhar41, version: 26}, daemon 1402459 and listener 1401799 alive"
-    },
-    "rigA_rerunReuse": {
-      "at": "2026-09-13T09:20:17Z",
-      "exit": 0,
-      "output": [
-        "GREEN OMP build: ...",
-        "REUSED NATS container legion-smoke-nats-sjawhar41",
-        "REUSED listener (pid 1401799)",
-        "GREEN Envoy listener: {...\"status\":\"healthy\"}",
-        "GREEN webhook round-trip: listener accepted signed ping",
-        "SKIPPED-BLOCKED webhook ingress: ...",
-        "REUSED daemon (pid 1402459)",
+        "STARTED daemon (pid 2727720)",
         "GREEN Legion daemon: {\"project\":\"sjawhar41\",...}",
-        "REUSED root issue LEGSMOKE-111",
+        "CREATED root issue LEGSMOKE-116",
         "SKIPPED-BLOCKED branch protection: ...",
         "RIG READY"
       ],
-      "note": "neither `Legion daemon port 19401` nor `Legion daemon worker stream port 19402` was refused: both asserts take the live daemon.pid exception; pids unchanged after the re-run"
+      "record": "legion-smoke-nats-sjawhar41",
+      "legionYamlProject": "sjawhar/41",
+      "dockerPs": [
+        "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14251->4222/tcp, [::]:14251->4222/tcp",
+        "legion-smoke-nats 6222/tcp, 8222/tcp, 0.0.0.0:14222->4222/tcp, [::]:14222->4222/tcp (another tester's; gone from docker ps by 10:09Z, not by any action of mine)"
+      ]
     },
-    "teardown": {
-      "at": "2026-09-13T09:20:28Z",
-      "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+    "step6b_throwaway": {
+      "at": "2026-09-13T10:09:42Z",
+      "command": "SMOKE_DIR=/tmp/legion-smoke-throwaway SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+      "dirContents": "(empty; no legion.yaml)",
+      "before": "has-session legion-sjawhar41 OK; list-windows: @1 controller; state controllerLocator {@1,%1}; docker ps: legion-smoke-nats-sjawhar41 …14251->4222",
       "output": [
+        "/tmp/legion-smoke-throwaway has no legion.yaml: this directory never started a rig; stopping no tmux server and removing no container",
+        "RIG DOWN"
+      ],
+      "exit": 0,
+      "after": "has-session legion-sjawhar41 OK (still up); @1 controller; docker ps unchanged; listener 2726911 alive, daemon 2727720 alive"
+    },
+    "step6c_disagreement": {
+      "at": "2026-09-13T10:09:57Z",
+      "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/9999 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+      "before": "has-session legion-sjawhar41 OK; tmux -L legion-sjawhar9999 has-session -> error connecting … (No such file or directory); docker ps -a: legion-smoke-nats-sjawhar41 Up 11 minutes; legion.yaml project: sjawhar/41; record legion-smoke-nats-sjawhar41",
+      "output": [
+        "warning: SMOKE_PROJECT=sjawhar/9999 disagrees with /tmp/legion-smoke-41/legion.yaml (project: sjawhar/41); tearing down sjawhar/41",
+        "STOPPED tmux session legion-sjawhar41 on private socket legion-sjawhar41",
         "STOPPED NATS container legion-smoke-nats-sjawhar41",
         "RIG DOWN"
       ],
-      "after": "docker ps -a: no legion-smoke-nats*; daemon 1402459 and listener 1401799 dead; 14241 19041 19401 19402 14242 19042 19400 all free; no legion-sjawhar41 tmux server (the controller had not spawned yet in this ~1-minute run, so down.sh had no session to stop); /tmp/legion-smoke-41, /tmp/legion-smoke-42 and the scratch launcher removed"
-    }
+      "exit": 0,
+      "after": "has-session legion-sjawhar41 -> no server running; docker ps -a: no legion-smoke-nats*; daemon and listener dead; 14251 19051 19411 19412 free; record kept (by design)"
+    },
+    "cleanup": "/tmp/legion-smoke-41, /tmp/legion-smoke-throwaway, scratch launcher/watcher/fake-docker dir removed; no legion-smoke-nats* container; no legion-sjawhar41 tmux socket. One disposable root issue LEGSMOKE-116 created in LEGSMOKE (rig design)."
   },
   "commands": [
-    "cd $LEGION_WORKSPACE && jj git fetch  # head bf338059 = implement: record handoff on d027061c",
-    "bun install; bash scripts/smoke/up.test.sh  # 18 PASS, exit 0; bash scripts/smoke/down.test.sh  # 4 PASS, exit 0",
-    "legion gh -- api repos/sjawhar/legion/commits/bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad/check-runs  # lint/test/pr-title/typecheck success in runs 34749228858 and 34749177029",
-    "jj diff --from 431a0d7a --to bf338059 --summary; jj diff --from 431a0d7a --to bf338059 --git --context 0 scripts/smoke/up.sh scripts/smoke/down.sh",
-    "fingerprint: jj diff --from \"fork_point(main@origin | <h>)\" --to <h> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum  # 431a0d7a 55487a83…, bf338059 481c976a…",
-    "container-name surface: { jj file show -r <h> scripts/smoke/down.sh; jj file show -r <h> scripts/smoke/up.sh | sed <drop the 4 worker-stream hunk lines>; } | sha256sum  # 3f676306… at both heads",
-    "scratch launcher (deleted): env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=<p> SMOKE_DIR=<d> NATS_PORT=<n> ENVOY_PORT=<e> LEGION_DAEMON_PORT=<l> SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
-    "launcher sjawhar/41 /tmp/legion-smoke-41 14241 19041 19401  # RIG READY",
-    "launcher sjawhar/42 /tmp/legion-smoke-42 14242 19042 19402  # refused: Legion daemon port 19402 is already in use",
-    "launcher sjawhar/42 /tmp/legion-smoke-42 14242 19042 19400  # refused: Legion daemon worker stream port 19401 is already in use",
-    "launcher sjawhar/41 /tmp/legion-smoke-41 14241 19041 19401  # re-run: REUSED ... RIG READY",
-    "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh"
+    "cd $LEGION_WORKSPACE && jj git fetch  # head 9f7a4e85 = implement: record handoff (round 3) on 1b6a5da6 on reviewer's 7b05bea1",
+    "bun install; bash scripts/smoke/up.test.sh  # 19 PASS, exit 0; bash scripts/smoke/down.test.sh  # 5 PASS, exit 0",
+    "legion gh -- api repos/sjawhar/legion/commits/9f7a4e858eb678a2bfbb94e7076b03c21dfce7de/check-runs  # lint/pr-title/typecheck/test success, runs 34750449758 and 34750503515",
+    "jj diff --from bf338059 --to 9f7a4e85 --summary  # .legion/*, README.md, down.sh, down.test.sh, up.sh, up.test.sh",
+    "fingerprint (skill formula) at bf338059 -> 481c976a…, at 9f7a4e85 -> 5b4082b2…; function-body hash of project_slug/nats_container_name/listener_machine_id/ensure_nats/assert_port_free = 991306d6… at both",
+    "scratch launcher (deleted): env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/41 SMOKE_DIR=/tmp/legion-smoke-41 NATS_PORT=14251 ENVOY_PORT=19051 LEGION_DAEMON_PORT=19411 SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
+    "port squat: python3 -c 'socket bind 127.0.0.1:14251; listen; sleep' (hub start), then launcher -> refused; hub stop; launcher -> RIG READY",
+    "probe (fake docker on PATH, logging): SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # on the refused dir, before the real start",
+    "controller wait: poll GET http://127.0.0.1:19411/legion/v1/state controllerLocator + tmux -L legion-sjawhar41 list-windows every 10 s -> alive 10:09:23Z",
+    "SMOKE_DIR=/tmp/legion-smoke-throwaway SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # 6b",
+    "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/9999 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # 6c"
   ],
   "unitTests": {
     "up.test.sh": {
-      "pass": 18,
+      "pass": 19,
       "exit": 0,
-      "newCase": "refuses to start when only the daemon worker-stream port (LEGION_DAEMON_PORT + 1) is occupied, unless by this rig's own recorded daemon"
+      "newCase": "a start refused by the port check or by ensure_nats leaves no nats-container record"
     },
     "down.test.sh": {
-      "pass": 4,
-      "exit": 0
+      "pass": 5,
+      "exit": 0,
+      "newCase": "tears down only the rig the directory's legion.yaml names -- a directory without one stops no tmux server and removes no container, and a disagreeing SMOKE_PROJECT is warned about and ignored"
     }
   },
-  "ci": "Tests at bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad: runs 34749177029 and 34749228858, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists on this workflow.",
+  "ci": "Tests at 9f7a4e858eb678a2bfbb94e7076b03c21dfce7de: runs 34750449758 and 34750503515, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists.",
   "observations": [
-    "Acceptance 5's Errors row says the refusal names 'that port and that the daemon's worker stream needs it': observed message is `error: Legion daemon worker stream port 19401 is already in use` — names the port and the worker stream, as required.",
-    "Ordering note for the architect: 'second rig on LEGION_DAEMON_PORT = first + 1' is refused by the *daemon-port* check (`Legion daemon port <A+1> is already in use`), because that port is the first rig's worker stream; the new worker-stream check is what refuses the mirror case (second rig on first − 1, or any rig whose daemon port + 1 is occupied by anything). Both were run; both refuse before anything launches. Not a defect — the two checks together cover both adjacent orderings, and either message names the offending port.",
-    "up.sh still creates SMOKE_DIR and writes the nats-container and webhook-mode records (plus empty daemon/gh-config/xdg-* dirs) before the port asserts, so a refused rig leaves those records behind; no process, container, or legion.yaml is created. Pre-existing ordering (webhook-mode was already written before the asserts at main@origin); harmless, since down.sh against such a dir removes only a container that exists.",
-    "GitHub GraphQL returned `Something went wrong while executing your query` twice for `gh pr edit --body-file` at 09:21–09:22Z; the same body landed via REST `gh api --method PATCH repos/sjawhar/legion/pulls/1010 -F body=@file` (HTTP 200, body length 15884 verified by GET). `legion gh -- api --input <file>` and `--input -` both report `unexpected end of JSON input` (stdin/file input does not reach gh through the shim's spawn); `-F body=@file` works.",
-    "Cleanup: rig torn down; no legion-smoke-nats* container; all rig ports free; /tmp/legion-smoke-41, /tmp/legion-smoke-42, /tmp/legion41-rig.sh removed. One disposable root issue LEGSMOKE-111 created in LEGSMOKE this round (rig design)."
+    "The one failure (failures[0]) is a narrow ordering gap in 1b6a5da6's design, not a regression of anything tested in rounds 1-2: before round 3 the record was written first and a refused-at-ensure_nats directory made down.sh inspect only the (nonexistent) derived name — removing nothing; now the same directory makes it fall back to the legacy name. Both port-assert refusals (listener/daemon/worker-stream, which precede write_daemon_config) leave neither marker and are inert.",
+    "Environment scrub as in earlier rounds: LEGION_* and DISPATCH_TOKEN_FILE removed from the child env; secrets only via the `secrets` wrapper and envoy.json's dispatch.token, never printed.",
+    "Another tester's legacy-named `legion-smoke-nats` (14222) was live during 7a and disappeared from docker ps between 09:58Z and 10:09Z; none of my commands touched it (6b touched nothing; the fake-docker probe never reached the real docker — re-verified with `command -v docker` -> /usr/bin/docker and `docker ps -a` afterwards).",
+    "Tooling: `legion gh -- api --method PATCH … -F body=@file` is the reliable PR-body update path; `--input <file>`/`--input -` fail through the shim (`unexpected end of JSON input`), and `gh pr edit --body-file` hit GraphQL 5xx twice in round 2."
   ],
-  "documentationFeedback": "README now says what round 1 asked for (neighbour port in the ports sentence, non-adjacent daemon ports in the two-rigs paragraph). Nothing further.",
+  "documentationFeedback": "README reads correctly for what was observed. If the ordering fix lands, the coexistence paragraph's 'a refused start writes no record' can say 'writes neither legion.yaml nor the record'.",
+  "round2": {
+    "headSha": "bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad",
+    "verdictPerAcceptance": {
+      "1": "PASS (bare gates re-run at bf338059): `bash scripts/smoke/up.test.sh` 18 PASS / exit 0; `bash scripts/smoke/down.test.sh` 4 PASS / exit 0. Container-name code (down.sh whole, up.sh minus d027061c's four-line worker-stream hunk) is byte-identical to the round-1 head (sha256 3f676306… at both 431a0d7a and bf338059).",
+      "2": "PASS (round-1 live run stands, not repeated): the only product change since 431a0d7a is d027061c — `jj diff --from 431a0d7a --to bf338059 --summary` = scripts/smoke/{README.md,up.sh,up.test.sh} + .legion/; down.sh untouched; the up.sh diff is exactly the 3 comment lines + `assert_port_free 'Legion daemon worker stream' \"$((daemon_port + 1))\" \"${smoke_dir}/daemon.pid\"`. Whole-branch fingerprint (skill formula) 55487a83… → 481c976a…, i.e. changed by that fix alone. Round-1 evidence (two rigs, three docker ps snapshots, negative control) kept in `round1` below and in the PR body.",
+      "3": "PASS: README at head names `legion-smoke-nats-<slug>` in the coexistence paragraph and the teardown paragraph (unchanged from round 1) and now also says in the ports sentence that the daemon 'binds the port one above `LEGION_DAEMON_PORT` for its worker stream … so that port must be free too' with 'the daemon's record covers both of its ports', and in the two-rigs paragraph that the `LEGION_DAEMON_PORT` values 'are not adjacent'.",
+      "4": "PASS (unchanged): PR body Base section names LEGION-10 (#957) merge commit 4b934e60; 4b934e60 is an ancestor of bf338059 (branch not rebased).",
+      "5": "PASS (live): with rig A on daemon port 19401 (ss showed 19401 and 19402 LISTEN), a second rig on LEGION_DAEMON_PORT=19400 — whose worker-stream port 19401 is rig A's daemon port — was refused right after `GREEN OMP build` with `error: Legion daemon worker stream port 19401 is already in use` (exit 1), before go build / docker run / listener / daemon: 14242, 19042, 19400 stayed free, `docker ps -a` still listed only legion-smoke-nats-sjawhar41, /tmp/legion-smoke-42 held only the nats-container/webhook-mode records and empty dirs (no *.pid, *.log, legion.yaml). Rig A's own up.sh re-run with its live daemon.pid was not refused by either check and printed REUSED NATS container / REUSED listener (pid 1401799) / REUSED daemon (pid 1402459) / REUSED root issue LEGSMOKE-111 / RIG READY. The architect's literal scenario (second rig on daemon port A+1 = 19402) was also run: it is refused by the pre-existing daemon-port check (`error: Legion daemon port 19402 is already in use`) because B's daemon port *is* A's worker-stream port, so the new check is never reached in that ordering — still nothing launched. Both refusals recorded verbatim below."
+    },
+    "acceptance5LiveRun": {
+      "preflight": "docker ps -a: no legion-smoke-nats* container; ss -Hltn: 14241 19041 19401 19402 14242 19042 free (also 19400, 19403)",
+      "rigA": {
+        "SMOKE_PROJECT": "sjawhar/41",
+        "SMOKE_DIR": "/tmp/legion-smoke-41",
+        "NATS_PORT": 14241,
+        "ENVOY_PORT": 19041,
+        "LEGION_DAEMON_PORT": 19401,
+        "listenerPid": 1401799,
+        "daemonPid": 1402459,
+        "rootIssue": "LEGSMOKE-111",
+        "upOutput": [
+          "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
+          "STARTED NATS container legion-smoke-nats-sjawhar41",
+          "STARTED listener (pid 1401799)",
+          "GREEN Envoy listener: {...\"status\":\"healthy\"}",
+          "GREEN webhook round-trip: listener accepted signed ping",
+          "SKIPPED-BLOCKED webhook ingress: SMOKE_WEBHOOK_MODE=none: ...",
+          "STARTED daemon (pid 1402459)",
+          "GREEN Legion daemon: {\"project\":\"sjawhar41\",\"version\":26,...}",
+          "CREATED root issue LEGSMOKE-111",
+          "SKIPPED-BLOCKED branch protection: ...",
+          "RIG READY"
+        ],
+        "ssAfter": "14241 LISTEN 0.0.0.0/[::]; 19041 LISTEN 127.0.0.1; 19401 LISTEN 127.0.0.1; 19402 LISTEN 127.0.0.1 (daemon API + worker stream); 14242 19042 19400 19403 free",
+        "at": "2026-09-13T09:19:38Z"
+      },
+      "attemptB1_daemonPortAPlusOne": {
+        "SMOKE_PROJECT": "sjawhar/42",
+        "SMOKE_DIR": "/tmp/legion-smoke-42",
+        "NATS_PORT": 14242,
+        "ENVOY_PORT": 19042,
+        "LEGION_DAEMON_PORT": 19402,
+        "at": "2026-09-13T09:19:51Z",
+        "output": [
+          "WARNING: GITHUB_WEBHOOK_SECRET stored secret contains whitespace; trimmed leading/trailing whitespace",
+          "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
+          "error: Legion daemon port 19402 is already in use"
+        ],
+        "exit": 1,
+        "whichCheck": "pre-existing daemon-port check (B's daemon port 19402 is A's worker-stream port); the new worker-stream check on 19403 is not reached",
+        "nothingLaunched": "ss: 14242 19042 19403 free, 19402 LISTEN (rig A); docker ps -a: only legion-smoke-nats-sjawhar41 (Up 26 seconds); /tmp/legion-smoke-42: daemon/ gh-config/ nats-container webhook-mode xdg-data/ xdg-state/ — no *.pid, *.log, legion.yaml"
+      },
+      "attemptB2_daemonPortAMinusOne": {
+        "SMOKE_PROJECT": "sjawhar/42",
+        "SMOKE_DIR": "/tmp/legion-smoke-42",
+        "NATS_PORT": 14242,
+        "ENVOY_PORT": 19042,
+        "LEGION_DAEMON_PORT": 19400,
+        "at": "2026-09-13T09:20:06Z",
+        "output": [
+          "WARNING: GITHUB_WEBHOOK_SECRET stored secret contains whitespace; trimmed leading/trailing whitespace",
+          "GREEN OMP build: /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp",
+          "error: Legion daemon worker stream port 19401 is already in use"
+        ],
+        "exit": 1,
+        "whichCheck": "NEW worker-stream check (acceptance 5): B's worker-stream port 19400+1 = 19401 is rig A's daemon API port",
+        "nothingLaunched": "ss: 14242 19042 19400 free, 19401/19402 LISTEN (rig A); docker ps -a: only legion-smoke-nats-sjawhar41 (Up 41 seconds); /tmp/legion-smoke-42: records + empty dirs only, no *.pid/*.log/legion.yaml; rig A /legion/v1/state answered {project: sjawhar41, version: 26}, daemon 1402459 and listener 1401799 alive"
+      },
+      "rigA_rerunReuse": {
+        "at": "2026-09-13T09:20:17Z",
+        "exit": 0,
+        "output": [
+          "GREEN OMP build: ...",
+          "REUSED NATS container legion-smoke-nats-sjawhar41",
+          "REUSED listener (pid 1401799)",
+          "GREEN Envoy listener: {...\"status\":\"healthy\"}",
+          "GREEN webhook round-trip: listener accepted signed ping",
+          "SKIPPED-BLOCKED webhook ingress: ...",
+          "REUSED daemon (pid 1402459)",
+          "GREEN Legion daemon: {\"project\":\"sjawhar41\",...}",
+          "REUSED root issue LEGSMOKE-111",
+          "SKIPPED-BLOCKED branch protection: ...",
+          "RIG READY"
+        ],
+        "note": "neither `Legion daemon port 19401` nor `Legion daemon worker stream port 19402` was refused: both asserts take the live daemon.pid exception; pids unchanged after the re-run"
+      },
+      "teardown": {
+        "at": "2026-09-13T09:20:28Z",
+        "command": "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+        "output": [
+          "STOPPED NATS container legion-smoke-nats-sjawhar41",
+          "RIG DOWN"
+        ],
+        "after": "docker ps -a: no legion-smoke-nats*; daemon 1402459 and listener 1401799 dead; 14241 19041 19401 19402 14242 19042 19400 all free; no legion-sjawhar41 tmux server (the controller had not spawned yet in this ~1-minute run, so down.sh had no session to stop); /tmp/legion-smoke-41, /tmp/legion-smoke-42 and the scratch launcher removed"
+      }
+    },
+    "commands": [
+      "cd $LEGION_WORKSPACE && jj git fetch  # head bf338059 = implement: record handoff on d027061c",
+      "bun install; bash scripts/smoke/up.test.sh  # 18 PASS, exit 0; bash scripts/smoke/down.test.sh  # 4 PASS, exit 0",
+      "legion gh -- api repos/sjawhar/legion/commits/bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad/check-runs  # lint/test/pr-title/typecheck success in runs 34749228858 and 34749177029",
+      "jj diff --from 431a0d7a --to bf338059 --summary; jj diff --from 431a0d7a --to bf338059 --git --context 0 scripts/smoke/up.sh scripts/smoke/down.sh",
+      "fingerprint: jj diff --from \"fork_point(main@origin | <h>)\" --to <h> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum  # 431a0d7a 55487a83…, bf338059 481c976a…",
+      "container-name surface: { jj file show -r <h> scripts/smoke/down.sh; jj file show -r <h> scripts/smoke/up.sh | sed <drop the 4 worker-stream hunk lines>; } | sha256sum  # 3f676306… at both heads",
+      "scratch launcher (deleted): env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=<p> SMOKE_DIR=<d> NATS_PORT=<n> ENVOY_PORT=<e> LEGION_DAEMON_PORT=<l> SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
+      "launcher sjawhar/41 /tmp/legion-smoke-41 14241 19041 19401  # RIG READY",
+      "launcher sjawhar/42 /tmp/legion-smoke-42 14242 19042 19402  # refused: Legion daemon port 19402 is already in use",
+      "launcher sjawhar/42 /tmp/legion-smoke-42 14242 19042 19400  # refused: Legion daemon worker stream port 19401 is already in use",
+      "launcher sjawhar/41 /tmp/legion-smoke-41 14241 19041 19401  # re-run: REUSED ... RIG READY",
+      "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh"
+    ],
+    "unitTests": {
+      "up.test.sh": {
+        "pass": 18,
+        "exit": 0,
+        "newCase": "refuses to start when only the daemon worker-stream port (LEGION_DAEMON_PORT + 1) is occupied, unless by this rig's own recorded daemon"
+      },
+      "down.test.sh": {
+        "pass": 4,
+        "exit": 0
+      }
+    },
+    "ci": "Tests at bf338059cb3e2dbd9ac9c50cfc44b7e1673fb2ad: runs 34749177029 and 34749228858, jobs lint, pr-title, typecheck, test all success (check-runs API). No pr-checks-result job exists on this workflow.",
+    "observations": [
+      "Acceptance 5's Errors row says the refusal names 'that port and that the daemon's worker stream needs it': observed message is `error: Legion daemon worker stream port 19401 is already in use` — names the port and the worker stream, as required.",
+      "Ordering note for the architect: 'second rig on LEGION_DAEMON_PORT = first + 1' is refused by the *daemon-port* check (`Legion daemon port <A+1> is already in use`), because that port is the first rig's worker stream; the new worker-stream check is what refuses the mirror case (second rig on first − 1, or any rig whose daemon port + 1 is occupied by anything). Both were run; both refuse before anything launches. Not a defect — the two checks together cover both adjacent orderings, and either message names the offending port.",
+      "up.sh still creates SMOKE_DIR and writes the nats-container and webhook-mode records (plus empty daemon/gh-config/xdg-* dirs) before the port asserts, so a refused rig leaves those records behind; no process, container, or legion.yaml is created. Pre-existing ordering (webhook-mode was already written before the asserts at main@origin); harmless, since down.sh against such a dir removes only a container that exists.",
+      "GitHub GraphQL returned `Something went wrong while executing your query` twice for `gh pr edit --body-file` at 09:21–09:22Z; the same body landed via REST `gh api --method PATCH repos/sjawhar/legion/pulls/1010 -F body=@file` (HTTP 200, body length 15884 verified by GET). `legion gh -- api --input <file>` and `--input -` both report `unexpected end of JSON input` (stdin/file input does not reach gh through the shim's spawn); `-F body=@file` works.",
+      "Cleanup: rig torn down; no legion-smoke-nats* container; all rig ports free; /tmp/legion-smoke-41, /tmp/legion-smoke-42, /tmp/legion41-rig.sh removed. One disposable root issue LEGSMOKE-111 created in LEGSMOKE this round (rig design)."
+    ]
+  },
   "round1": {
     "headSha": "431a0d7a82922dcbda249634263e1619c7fca892",
     "verdictPerAcceptance": {
@@ -246,5 +382,5 @@
   },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T09:24:24.198Z"
+  "completed": "2026-09-13T10:12:26.574Z"
 }
