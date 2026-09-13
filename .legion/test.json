@@ -1,0 +1,103 @@
+{
+  "head": "a875b0033e7015cf4141aa065a0771168bac4f6d",
+  "headNote": "a875b003 = code tree d61f711a + .legion/implement.json. Rig built from the workspace @ (004f249e), whose tree is a875b003 plus the daemon-provisioned empty .omp/config.yml (processes.ts:2724 writes it at workspace provisioning; not gitignored, so jj snapshots it into every phase's working copy) - the built dist/*.js is byte-identical to what packages/pi-envoy produces at this head (md5 4fd5fd364d963031aa752f38cb8132cd for dist/legion.js, copied over the installed plugin's dist/).",
+  "verdict": "PASS",
+  "acceptance": {
+    "1": {
+      "verdict": "PASS",
+      "evidence": [
+        "Headless leg /tmp/l54rig/runs/tester-fixed-rpc-2026-09-13T03-16-05-703Z: 34 bash calls (5 bash, task, 9 bash, task, 12 bash, task, 8 bash - 3 task spawns, record-grant calls 7-14, 18-29, 33 run after spawns), 34 mints, 4 extension instances (parent + 3 task spawns); every row H=1/1 G=1 T=0; 27/27 record-grant rows file=own-mint mode 600; verdicts A-G all PASS (table.txt verdict block). Zero LEGION_GRANT= occurrences in events.jsonl; no env argument on any call (A second clause PASS).",
+        "Interactive leg /tmp/l54rig/runs/tester-fixed-tui-2026-09-13T03-19-58-168Z (run.ts tui --short, private tmux -L l12rig): 9 bash calls, 9 mints, 2 instances (parent + 1 task spawn), 6/6 record-grant rows file=own-mint mode 600, A-G all PASS.",
+        "Rig mode: RIG_PLUGINS=production (copy of ~/.omp/profiles/legion/plugins: @sjawhar/pi-legion-envoy 1.17.0 manifest with this branch's dist/envoy.js+dist/legion.js swapped in, secretsd github:sjawhar/forward#v3.0.2, superpowers v6.3.0, @bopstack/pi-codegraph, @sjawhar/opencode-knives), RIG_LEGION_BUILD=branch, OMP /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-203541/bin/omp (the live daemon's legion.yaml omp_invocation), stand-in daemon-standin.ts on 127.0.0.1:13399 under hub start (l54-standin), drives under hub start (l54-drive-rpc exit 0, l54-drive-tui exit 0).",
+        "Stand-in logs copied to /tmp/l54rig/standin.tester-fixed-rpc.log (34 /grants mints) and /tmp/l54rig/standin.tester-fixed-tui.log (9 mints); seen-grants copies /tmp/l54rig/seen-grants.tester-fixed-{rpc,tui}.log (27 and 6 lines, every mode field 600)."
+      ]
+    },
+    "2": {
+      "verdict": "PASS",
+      "evidence": [
+        "Headless leg probe results (table.txt 'tool results'): call 30 [legion credential get] username=x-access-token password=rig-token exit=0; call 31 [legion gh -- --version] gh version 2.98.0 exit=0; call 32 [legion credential get] exit=0; call 34 [legion handoff complete] '[handoff] Reported phase completion' exit=0. Stand-in 200 lines: 03:17:26.837Z /gh-token 200 e0048762 (the `gh --version` shim probe, call 16); 03:18:06.574Z /git-credential 200 61aa3eb5; 03:18:09.623Z /gh-token 200 496d705c; 03:18:12.870Z /git-credential 200 b95a8b60; 03:18:18.199Z /phase/complete 200 cdf76c29 - every redemption a minted id, all 200 (verdict B, D PASS). Interactive leg: call 8 legion credential get exit=0 (/git-credential 200 d8452a52), call 9 legion handoff complete exit=0 (/phase/complete 200 d365231e).",
+        "Negative control (branch CLI /tmp/l54rig/state/bin/legion against the stand-in, run from this pane whose own hook-set LEGION_GRANT was present in the environment and ignored): printf '00000000-0000-4000-8000-000000000000' > /tmp/l54rig/fake-grant; chmod 600; LEGION_GRANT_FILE=/tmp/l54rig/fake-grant legion credential get -> 'Unable to redeem LEGION_GRANT (403)' exit=1 (stand-in: 03:22:24.658Z /git-credential 403 grantId 00000000-...); legion gh -- --version -> same 403 exit=1 (03:22:25.261Z /gh-token 403). Blank 0600 file -> 'LEGION_GRANT_FILE names /tmp/l54rig/blank-grant, which is empty' exit=1; missing path -> 'LEGION_GRANT_FILE names /tmp/l54rig/does-not-exist, which could not be read: ENOENT: no such file or directory' exit=1 (no fallback to the LEGION_GRANT in the environment)."
+      ]
+    },
+    "3": {
+      "verdict": "PASS",
+      "evidence": [
+        "Accepted the implementer's two before runs; both directories still exist and their table.txt shows the documented FAIL shapes. /tmp/l54rig/runs/before-1.17.1-2026-09-13T01-54-44-216Z (report.json rigMode legionBuild 1.17.1, checkout /tmp/l54rig/main = main 4d516a1f CLI, same OMP): 34 bash calls, 34 mints, 'redemptions (stand-in log): (none)', every legion probe 'LEGION_GRANT is missing: the Legion worker extension injects it before credential commands run' (calls 16, 29, 30, 31, 33, 34), every record-grant 'file held - mode -', env=[LEGION_GRANT,...] on every call; verdicts: A env clause FAIL, B redemptions FAIL, C FAIL, D FAIL, F FAIL (34/34 ids in transcript via arguments.env).",
+        "/tmp/l54rig/runs/before-1.17.0-2026-09-13T02-14-29-023Z (legionBuild 1.17.0): 39 bash calls, T=1,1,2,1,2,2,2,3,1,1,2,... with X=[hook,unminted,...], 403s on never-minted ids (9a7b2ab7, eb2cc0d1, 7ab3d0a6, 7c1e7d05, 6f0b0d1e, bafc57d2, 9ff37ea1, 70a1da1c, b7f0f0b7), printenv PATH with worker-bin x3; verdicts A, B(redemptions), C, D, E, F, G FAIL. Not re-run: the released builds are unchanged and the directories are intact."
+      ]
+    },
+    "4": {
+      "verdict": "PASS",
+      "evidence": [
+        "Rig verdict G PASS on both legs: headless call 17 / interactive call 3 printenv probe -> GH_CONFIG_DIR=/tmp/l54rig/state/gh, 'GH_TOKEN= GITHUB_TOKEN= GH_HOST=', PATH=/tmp/l54rig/state/worker-bin:/tmp/l54rig/state/bin:... with worker-bin exactly once; the record-grant calls before and after that probe ran under the same pane environment (no per-command scope).",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts on the branch: 214 pass, 0 fail, 3 skip (the LEGION_TMUX_LIVE-gated tests); 'launches controller and root windows with disjoint exact environments' (l.760) and 'puts the static credential environment on every pane, worker-bin first on PATH exactly once' (l.829, controller + root + tester) pass (bun test -t filter: 4 pass)."
+      ]
+    },
+    "5": {
+      "verdict": "PASS",
+      "evidence": [
+        "Manual grep (both legs) printed nothing: for id in $(jq -r 'select(.path==\"/legion/v1/grants\") | .mintedGrantId' /tmp/l54rig/standin.tester-fixed-rpc.log); do grep -rl -- \"$id\" /tmp/l54rig/runs/tester-fixed-rpc-2026-09-13T03-16-05-703Z/events.jsonl ~/.omp/profiles/l12rig/agent/sessions ~/.omp/profiles/l12rig/logs; done -> empty for all 34 ids (transcript /home/ubuntu/.omp/profiles/l12rig/agent/sessions/-tmp-l54rig-ws/2026-09-13T03-16-16-576Z_01a098c3-fe40-7000-9542-cae511963182.jsonl, OMP log omp.2026-09-13.85103.log, plus the 3 subagent session files); same over /tmp/l54rig/runs/tester-fixed-tui-2026-09-13T03-19-58-168Z/pane.txt + all sessions + all logs for the 9 tui ids (transcript 2026-09-13T03-20-07-144Z_01a098c7-82e8-7000-81c2-5f43a34ec8b4.jsonl, log omp.2026-09-13.267548.log). Verdict F PASS on both legs.",
+        "ls -l /tmp/l54rig/state/secrets/ after each leg: -rw------- 1 ubuntu ubuntu 36 legion-l12rig-rig-1-implementer-grant (0600; I deleted it before each leg so the extension's write is what created it), -rw------- boot.",
+        "secrets prune tests pass on the branch: secrets.test.ts 4/4; processes.test.ts 'prunes a pane's secret file once no locator references it, keeping the others' (l.981) and 'reaps a secret file inherited from a previous daemon process once its locator clears' (l.1035) pass."
+      ]
+    },
+    "6": {
+      "verdict": "PASS",
+      "branch": {
+        "packages/pi-envoy extensions/legion.test.ts": "54 pass, 0 fail",
+        "packages/daemon src/cli/__tests__/index.test.ts": "26 pass, 0 fail ('grant resolution' -t filter: 4 pass)",
+        "packages/daemon processes.test.ts": "214 pass, 0 fail, 3 skip (LEGION_TMUX_LIVE)",
+        "packages/daemon secrets/environment/config/worker-bin/index tests": "4/12/53/2/31 pass, 0 fail"
+      },
+      "onMain": {
+        "method": "read-only export of main@origin abaf08175c9b90b3888cb10b24852e55b0bbdfee via git archive into /tmp/l54main-abaf (bun install --frozen-lockfile), the branch's eight test files copied over (cmp-identical), run there; logs /tmp/l54-main-{legion,cli,daemon-small,processes}-test.log",
+        "extensions/legion.test.ts": "47 pass, 7 fail: 'recovers a live worker's capability after the daemon loses its secret' expect(received).toBeUndefined() at legion.test.ts:1383 (main returns a revised input); 'writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched' toBeUndefined at :1797; 'ignores whatever env or text the model supplied and never rewrites command or env' toBeUndefined at :1849; 'overwrites the file with a fresh mint on every call, leaving no temp file behind' ENOENT in grantFileContents (:308 via :1884) - main never writes the file; 'blocks the command naming the path when the grant file cannot be written' at :1913 expected {block:true, reason: containing 'LEGION_GRANT_FILE ... could not be written'} received {input:{command:'jj git push', env:{LEGION_GRANT:'grant-1', GH_CONFIG_DIR, GH_HOST:'', GH_TOKEN:'', GITHUB_TOKEN:'', PATH:'.../worker-bin:...'}}}; 'blocks when the pane carries no LEGION_GRANT_FILE, without minting' at :1931 expected reason 'LEGION_GRANT_FILE is not set on this pane: ...' received a zod error (main minted anyway); 'blocks a bash call from a worker session that has not completed its boot handshake' at :1983 reason 'cannot mint its grant' vs main's 'cannot mint LEGION_GRANT'.",
+        "cli/__tests__/index.test.ts": "15 pass, 11 fail. grant resolution: 'reads LEGION_GRANT_FILE (trimmed) ahead of LEGION_GRANT' index.test.ts:48 expected grantId 'file-grant' received 'env-grant'; 'errors naming LEGION_GRANT_FILE and the path when the file is missing or blank, without falling back' :60 (no error thrown - main fell back to LEGION_GRANT); 'names both variables when neither is set' :92 expected message containing 'LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset)' received CliError 'LEGION_GRANT is missing: the Legion worker extension injects it before credential commands run'. Also failing on main: legion gh 'redeems the worker-extension grant only into the gh child environment' :122, 'spawns the real gh, never the pane's worker-bin shim' :157, 'fails loudly when the pane carries no grant file and no grant' :181, 'allows a pr subcommand that merely mentions merge' :270; legion handoff complete 'posts the phase-complete request built from the grant in LEGION_GRANT_FILE' :380, 'fails loudly when the pane carries no grant file and no grant' :401, 'fails loudly when the daemon rejects the request', 'warns instead of reporting plain success ... 202' (fixtures now supply the grant through LEGION_GRANT_FILE, which main ignores).",
+        "processes.test.ts": "207 pass, 7 fail, 3 skip: 'launches controller and root windows with disjoint exact environments' :785 expected GH_CONFIG_DIR/GH_HOST/GH_TOKEN/GITHUB_TOKEN/LEGION_GRANT_FILE=<stateDir>/secrets/legion-omp-controller-grant and PATH '<stateDir>/worker-bin:/full/bin:/usr/bin', received only PATH '/full/bin:/usr/bin'; 'puts the static credential environment on every pane...' :865 same five keys missing; 'prunes a pane's secret file...' :1024 expect(...).toBeUndefined() (grant file not reaped); 'reaps a secret file inherited...' :1086 readdir expected [] received 1 leftover; plus 'provisions the root issue workspace...' :619, 'passes the packaged role prompt path...' :1709, 'spawns a worker's first pane as a new window with the full worker env...' :5928 (same env keys missing).",
+        "secrets/environment/config/worker-bin/index tests": "93 pass, 5 fail: environment.test.ts 'strips the Dispatch keys and the Legion pane-secret family from paneEnv' expect(received).not.toHaveProperty (LEGION_GRANT/LEGION_GRANT_FILE not stripped); config.test.ts 'strips every pane-secret key ... from a private_key_command child's environment' not.toContain; worker-bin.test.ts: Cannot find module '../worker-bin' (2 tests unrunnable); secrets.test.ts: SyntaxError Export named 'grantSecretName' not found in module secrets.ts (file unrunnable); index.test.ts 'does not resolve until boot-time admission reconciliation...' :427 ENOENT statx <stateDir>/worker-bin/gh."
+      }
+    },
+    "7": {
+      "verdict": "OUT_OF_SCOPE",
+      "evidence": [
+        "Post-merge sign-off item (first fresh worker after the operator installs the release); not testable pre-merge."
+      ]
+    },
+    "8": {
+      "verdict": "PASS",
+      "evidence": [
+        "docs/solutions/envoy/omp-tool-call-hook-rewrites-are-model-visible.md: Lesson 2 (l.55-80) records the env failure and its reason ('secretsd ... replaces the bash tool at session start with Oh My Pi's legacy legacy-pi-coding-agent-shim, whose schema is {command, timeout} and which discards the tool call's env', l.59-61); 'The rule' (l.82-84) forbids any tool-call field, text or structured - no env recommendation remains; version stated 'pi-envoy 1.17.4' (l.35, l.86); per-command-scope caveat replaced by 'That was 1.17.1's behaviour, not a property of the pane's shell; file delivery removes per-command injection entirely' (l.74-76).",
+        "docs/solutions/legion/worker-pane-shell-gotchas.md: title (l.2) and symptom (l.40) name the 1.17.1-1.17.2 'LEGION_GRANT is missing' regression; 'The fix (pi-envoy 1.17.4; LEGION-54 ...)' (l.108-120) names the file mechanism, the reason ('legacy {command, timeout} shim, which drops env', l.114-115), and 'on file delivery the persistent shell behaves as a shell does' (l.119-120) in place of the old per-command caveat; no 'put it in the call's own env' advice remains (grep for 'env argument' / 'call's own env' in the doc: none).",
+        "packages/pi-envoy/CHANGELOG.md [Unreleased] Fixed l.11: the LEGION-54 entry naming LEGION_GRANT_FILE, the dropped env argument and secretsd, and the daemon-side static environment; the LEGION-12 line (l.12) kept as history.",
+        "Release version: .github/scripts/release-bump.sh classifies the squash message; the PR title 'fix(pi-envoy): ...' is a patch bump; latest tag pi-legion-envoy-v1.17.3 (packages/pi-envoy/package.json 1.17.3) -> 1.17.4, matching both docs and the PR body. .legion/implement.json 'deployment' still says @1.17.3 - that field is stale; 1.17.4 is right. Caveat for the merger: release-bump.sh also classifies body lines after stripping a leading '* '/'- ', so a squash body that carried this branch's 'feat(daemon): ...' commit subject as a bullet would bump to 1.18.0; none of the last 60 main squash bodies carries a conventional bullet (the merge queue writes the READY packet as the body), so the risk is only if the squash body format changes."
+      ]
+    }
+  },
+  "ci": {
+    "head": "a875b0033e7015cf4141aa065a0771168bac4f6d",
+    "runs": {
+      "Tests": [
+        "34734772102",
+        "34734785851"
+      ],
+      "Legion Envoy and Contracts": "34734772116"
+    },
+    "checks": "pr-title, lint, typecheck, test x2 SUCCESS; pi-envoy SUCCESS; changes SUCCESS; contracts/envoy-plugin/envoy-client/dispatch/claude-envoy-bridge/envoy-go SKIPPED (path-filtered); mergeable MERGEABLE, mergeStateStatus BLOCKED (awaiting review). The daemon published ci-green for a875b003 at 03:10:25Z. processes.test.ts flake from #980 not observed in any of my runs (branch 214/0 once, -t filtered 4/0, main 207/7 with only the expected pane-env failures)."
+  },
+  "environment": {
+    "rig": "/tmp/l54rig",
+    "profile": "~/.omp/profiles/l12rig (production plugin tree copy)",
+    "standin": "hub start l54-standin, bun daemon-standin.ts 13399 /tmp/l54rig/standin.log /tmp/l54rig/state/secrets/boot; stopped after the negative controls",
+    "mainExport": "/tmp/l54main-abaf (main@origin abaf08175c9b)",
+    "scrub": "run.ts workerEnvironment drops every LEGION_*/DISPATCH_* value and inherited worker-bin PATH entries from this pane before launching the rig worker; ENVOY_URL http://127.0.0.1:9020 inherited (rig role legion-l12rig-rig-1-implementer)"
+  },
+  "observations": [
+    "LEGION-12 imitation reproduced in this tester's own (1.17.0) pane: two of my early bash calls carried a second export LEGION_GRANT= block copied from the hook's write-back and 403'd (legion gh -- pr view); every legion invocation after that went through eval's tool.bash (command string built in code, the LEGION-29 workaround in worker-pane-shell-gotchas.md section 8). Exactly the failure mode this PR removes for fresh sessions.",
+    "Daemon workspace provisioning writes an empty .omp/config.yml into the issue workspace (processes.ts:2724); it is not gitignored, so jj snapshots it into each phase's working-copy commit and the auto-advanced local bookmark pointed at that commit. I set the bookmark to the handoff commit explicitly (-r @-) so the stray file is not pushed. Not this issue's scope; the architect may want it gitignored or written outside the tracked tree.",
+    ".legion/plan.json is not on this branch (commit 2389be42 'plan: record handoff' sits on 4d516a1f and was not carried through the implementer's rebase); read it from that commit."
+  ],
+  "prBody": "E2E + CI lines refreshed at a875b003 with the tester's two run directories and verdict blocks; the implementer's before-run tables kept.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T03:27:47.948Z"
+}
