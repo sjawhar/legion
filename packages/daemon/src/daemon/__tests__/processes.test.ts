@@ -2255,6 +2255,59 @@ describe("ProcessManager", () => {
     expect(state.trees[root]?.locator).toBeUndefined();
   });
 
+  it("dequeue removes a waiting root's queue entry and its queued tree record, and persists once", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Finished", status: "done", children: [] };
+    state.trees[root] = { root, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(root);
+    let saves = 0;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        saves += 1;
+      },
+    });
+
+    await processes.dequeue(root);
+
+    expect(state.admission).toEqual({ cap: 1, active: [], queue: [] });
+    expect(state.trees[root]).toBeUndefined();
+    expect(saves).toBe(1);
+  });
+
+  it("dequeue drops only the queue entry of a launch-failed root, and is a silent no-op for an issue that is not waiting", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Parked", status: "backlog", children: [] };
+    // A launch-failed root legitimately sits in the queue (see the reconcile cases below); its
+    // record belongs to the launch-failure and re-admission paths, never to dequeue.
+    state.trees[root] = { root, generation: 2, status: "launch-failed", launchFailures: 3 };
+    state.admission.queue.push(root);
+    let saves = 0;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        saves += 1;
+      },
+    });
+
+    try {
+      await processes.dequeue(root);
+      expect(state.admission.queue).toEqual([]);
+      expect(state.trees[root]).toMatchObject({ status: "launch-failed", launchFailures: 3 });
+      expect(saves).toBe(1);
+
+      // Nothing recorded for `child` at all: no mutation, no save, no log line.
+      await processes.dequeue(child);
+      expect(saves).toBe(1);
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it("leaves launch-failed trees queued when reconciling admission capacity", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

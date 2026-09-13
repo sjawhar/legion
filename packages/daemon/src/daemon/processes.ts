@@ -650,6 +650,31 @@ export class ProcessManager {
     await this.persist();
   }
 
+  /** Removes `issue`'s `admission.queue` entry and, when its tree record is `queued`, that record
+   * -- the whole footprint of a root waiting for a slot, so a later `todo` admits it again exactly
+   * like a never-seen issue. Any other tree status (active, lingering, dead, launch-failed,
+   * closed) is left in place: the linger, close, and launch-failure paths own those records.
+   * Returns whether anything changed. Mutation only; the caller persists. */
+  private removeQueued(issue: IssueKey): boolean {
+    const state = this.deps.state;
+    const queuedIndex = state.admission.queue.indexOf(issue);
+    if (queuedIndex !== -1) state.admission.queue.splice(queuedIndex, 1);
+    const queuedTree = state.trees[issue]?.status === "queued";
+    if (queuedTree) delete state.trees[issue];
+    return queuedIndex !== -1 || queuedTree;
+  }
+
+  /** The `dequeue` effect's executor (`events.ts`'s `onDequeue`): a waiting issue that Dispatch
+   * moved to `done`, `backlog`, `icebox`, or `triage` leaves the queue and loses its `queued` tree
+   * record, persisted inside the durable lane's dispatch-before-save transaction -- so the queue
+   * change lands in the same durable step as the status change, and a persist failure propagates
+   * and goes fatal like every other effect's. A silent no-op when the issue holds neither (a
+   * redelivered event finds nothing to do). */
+  async dequeue(issue: IssueKey): Promise<void> {
+    if (!this.removeQueued(issue)) return;
+    await this.persist();
+  }
+
   async releaseSlot(issue: IssueKey): Promise<void> {
     const admission = this.deps.state.admission;
     const activeIndex = admission.active.indexOf(issue);
