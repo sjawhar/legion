@@ -1,0 +1,42 @@
+{
+  "pr": 1021,
+  "prUrl": "https://github.com/sjawhar/legion/pull/1021",
+  "headTested": "02dc6def3159520055e5d957ad16c62de4b39f5a",
+  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
+  "specVersion": 3,
+  "passed": 6,
+  "failed": 0,
+  "failures": [],
+  "acceptance": {
+    "1": "PASS. github-apps.ts: one exhaustive Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (architect/planner/tester/reviewer → review; implementer/merger → implement). MODE_TO_ROLE, modeToRole, catchup's WORKER_MODE absent repo-wide (only mentioned in .legion/implement.json). github-apps.test.ts: 'maps every Legion role to exactly one App' (iterates LEGION_ROLES) and 'runs the tester as the review App, never the code-writing one'.",
+    "2": "PASS. api/routes/credentials.ts (handleGitCredential, handleGhToken) and api/routes/workers.ts (/worker/started lease) import appRoleForLegionRole from ../../github-apps; catchup.ts too. api.test.ts 'reissues a daemon-registered worker session capability and keeps grants short-lived' pins gitName legion-review[bot], appLogin legion-review[bot], tokenRoles ['review','review'] and git-credential 200 for a tester; 'registers a worker session from a valid worker boot token without touching the issue's active phase' pins gitName legion-review[bot]. api/github.ts's gh() keeps a default appRole of 'implement' for the daemon's own reads — a default argument, not a role mapping.",
+    "3": "PASS (live, independent of the implementer's run). Tester grant through this branch's startLegionApi + real TokenManager: /worker/started 200 gitName=legion-reviewer[bot]; /gh-token 200 appLogin=legion-reviewer[bot]; /git-credential 200 with the same token. POST /repos/sjawhar/legion-smoke/check-runs → 201 app.slug=legion-reviewer app.id=3202653 https://github.com/sjawhar/legion-smoke/runs/103711307756; POST /issues/37/comments → 201 user.login=legion-reviewer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769689. Read back via legion gh: app_slug=legion-reviewer, conclusion=success.",
+    "4": "PASS (live). Implementer grant: /worker/started gitName=legion-implementer[bot]; /gh-token appLogin=legion-implementer[bot]; git push origin legion42-tester-proof/2026-09-13T10-41-26-374Z exit 0; commit bb06684217d42c849a1c4ba97b4296c47034cb70 author.login=committer.login=legion-implementer[bot]; POST /pulls 201 #37 user.login=legion-implementer[bot]; POST /issues/37/comments 201 user.login=legion-implementer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769634.",
+    "5": "PASS. packages/daemon/src/daemon/AGENTS.md GitHub Apps section states the mapping once and names appRoleForLegionRole (github-apps.ts). packages/daemon/src/cli/index.ts redeemGitHubToken comment now reads 'chosen by appRoleForLegionRole (daemon/github-apps.ts) — the command never picks one' with no restated mapping.",
+    "6": "PASS. skills/legion-worker/SKILL.md completion gate: only the implementer and merger can push; planner/tester/reviewer/architects commit locally and do not push, the commit rides the implementer's next push; a refused push is expected. skills/AGENTS.md, packages/pi-envoy/roles/planner.md and roles/tester.md say the same. Live: this tester committed 'test: record handoff' locally with jj split and attempted NO push."
+  },
+  "negativeControls": {
+    "testerGitPush": "exit 128 'remote: Repository not found.'; remote head after = bb06684217d42c849a1c4ba97b4296c47034cb70 (unchanged)",
+    "testerCreateRef": "POST /git/refs → 403 Resource not accessible by integration",
+    "implementerCheckRun": "POST /check-runs → 403 Resource not accessible by integration (the pre-fix failure LEGION-21/22's testers hit)"
+  },
+  "surface": "scratch Legion API from this workspace's build (startLegionApi + real TokenManager, real api.github.com, App ids 3202636/3202653), driven over HTTP as the extension does; sandbox sjawhar/legion-smoke PR #37 (closed by the driver; branch legion42-tester-proof/2026-09-13T10-41-26-374Z kept so the check run stays inspectable). Run under `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bun /tmp/legion42-tester-proof/driver.ts`; git isolated with GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM=1, GIT_ASKPASS reading an env var; no token printed. The live daemon on this box runs the pre-fix code and was not used as evidence.",
+  "staticChecks": {
+    "tests": "packages/daemon: bun test — 1115 pass, 7 skip, 0 fail (63 files)",
+    "lint": "packages/daemon: bunx biome check src/ — Checked 159 files, no errors",
+    "typecheck": "packages/daemon: bunx tsc --noEmit — clean"
+  },
+  "prState": "pr view 1021 --json mergeable,mergeStateStatus at 02dc6def: MERGEABLE / BLOCKED (branch protection; no conflict with main@origin); not rebased",
+  "appPermissionsFromGitHub": {
+    "legion-implementer (3202636)": "actions:write, checks:read, contents:write, issues:write, metadata:read, organization_projects:write, packages:read, pull_requests:write, repository_projects:write, statuses:write, workflows:write",
+    "legion-reviewer (3202653)": "actions:write, checks:write, issues:write, metadata:read, packages:read, pull_requests:write"
+  },
+  "observations": [
+    "roles/planner.md and roles/tester.md quote the refusal as `Resource not accessible by integration`; a git push from the review App actually fails with `remote: Repository not found.` (the REST text appears only on /git/refs). Wording only — the skill's completion gate already says the push is refused and not to retry. Fast-follow candidate, no behavior change."
+  ],
+  "pushAttempted": false,
+  "prBodyE2E": "filled: tester's independent run block added before Fast-follow, with tester Legion footer",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T10:43:31.874Z"
+}
