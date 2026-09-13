@@ -3,13 +3,10 @@ import { type ReactNode, useId, useRef, useState } from "react";
 
 import { api, type CreateArtifactReviewInput } from "../../api/client";
 import type { Artifact, ArtifactApproval } from "../../api/types";
+import { approvalPillClassName } from "../../components/Pill";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   backdrop40,
-  badgeBlocking,
-  badgeHigh,
-  badgeLow,
-  badgeMed,
   card,
   dangerText,
   inputClasses,
@@ -27,14 +24,6 @@ import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { useDialog } from "../shell/useDialog";
-
-const STATE_BADGE: Record<ArtifactApproval["state"], { bg: string; text: string }> = {
-  approved: badgeLow,
-  awaiting: badgeMed,
-  changes_requested: badgeBlocking,
-  draft: badgeLow,
-  stale: badgeHigh,
-};
 
 function approvalLabel(approval: ArtifactApproval): string {
   switch (approval.state) {
@@ -242,7 +231,6 @@ export function ApprovalChip({
     return null;
   }
 
-  const badge = STATE_BADGE[approval.state];
   const approveLabel =
     approval.state === "stale" ? `Approve v${approval.latest_version}` : "Approve";
 
@@ -252,7 +240,7 @@ export function ApprovalChip({
     >
       <button
         aria-haspopup="dialog"
-        className={`rounded-full px-2.5 py-1 text-xs font-medium ${badge.bg} ${badge.text}`}
+        className={approvalPillClassName(approval.state)}
         onClick={() => setReviewsOpen(true)}
         title={
           approval.state === "stale"
