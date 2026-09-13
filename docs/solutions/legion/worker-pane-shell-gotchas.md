@@ -331,3 +331,35 @@ name the 409 in it so the architect knows the daemon holds no record of the comp
 message directly; a `phase-complete` event will not arrive. Contrast section 7's 202 (`no architect was live`), where
 the daemon does keep the record and a repeat of the same command later delivers it: after a 409 a repeat only 409s
 again.
+
+## 12. Three facts a multi-round tree meets that are not defects of the branch (from LEGION-54)
+
+**The "exact released version" a doc states is a moving target while the tree is open.** LEGION-54's docs named the
+pi-envoy release it would ship as; `main` released 1.17.3, 1.18.0, and 1.18.1 during its five rounds, and the number
+was edited three times (1.17.3 → 1.17.4 → 1.18.2), one of them a tester FAIL. The workable rule: compute the number at
+commit time from the latest tag with the release workflow's own script —
+`.github/scripts/release-bump.sh <prev> pi-legion-envoy-v<prev>..<head> -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/`
+(paths from `.github/workflows/release.yaml`) — the merger recomputes it at READY, and a drift that appears after
+approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
+branch's commit subjects, so only the PR title's conventional-commit type classifies the bump.
+
+**"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
+that it "reverted" LEGION-11's `reconnectWorkers`-after-`api` fix and "deleted" its regression test. It had diffed the
+branch head against `main@origin`, which by then carried LEGION-11 on top of the branch's base; the branch's own delta
+on those files was seven lines. The PR's diff is against the merge base — `jj diff --from <the commit the branch was
+rebased onto> --to <head>`, or `gh pr view --json files` — and a per-commit `jj diff -r <c> --stat <paths>` over
+`main@origin..<branch>` settles what the branch touched. [rebasing-a-branch-across-a-refactor-of-its-own-call-sites](rebasing-a-branch-across-a-refactor-of-its-own-call-sites.md)
+has the same rule for the symmetric case; check `jj log -r '::main@origin ~ ::<branch>'` before reading any
+"main has X, the branch does not" finding as a revert.
+
+**Already recorded, so read these rather than re-deriving:** the 409 after a daemon restart and the architect's
+re-derived status write are §11 above and
+[external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); the review App's
+inability to push or resolve threads, and the implementer resolving them with the `resolveReviewThread` GraphQL
+mutation under `legion gh` — there is no `legion threads` command; a worker on LEGION-54 was told to run one and it
+does not exist on any branch — is §3 of that same note (LEGION-34); the tester completion's status write is
+verdict-blind (`phaseCompleteStatus` in `api/routes/workers.ts` returns `needs_review` for a tester whatever it
+found), so a FAIL is carried by the tester's comment and the architect's own `set_status in_progress` seconds later —
+a sibling architect reading Dispatch status alone will see `needs_review` flash by; the daemon-provisioned untracked
+`.omp/config.yml` that every path-scoped commit must leave out is [text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md) §1
+and is filed as LEGION-58.

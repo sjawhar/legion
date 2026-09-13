@@ -27,7 +27,9 @@ calls with `task` spawns — without the real daemon, real GitHub, or the live r
 analyzer, and a README with the layout). The rig itself is documented there; this note is the set of things that cost
 time on the way and will cost the next rig author the same time unless written down. The smoke rig's own notes are in
 [smoke-rig-fakes-and-live-run-notes](smoke-rig-fakes-and-live-run-notes.md); this rig is smaller and fakes the daemon,
-not tmux.
+not tmux. What LEGION-54 added — the production-plugin-tree mode, the tainted-PATH launch, the before runs against
+`main`'s CLI, and the profile guard — is in [proof-rig-loads-the-production-plugin-tree](proof-rig-loads-the-production-plugin-tree.md);
+§3 below (the shim's double redemption) is the symptom that mode later traced to the same `PATH` inheritance.
 
 ## 1. Encode the role token exactly as the daemon does, or the worker exits at boot
 
