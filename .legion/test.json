@@ -104,7 +104,84 @@
     "commitStatus": "legion/tester success on 4f806288, id 54062111203, target_url = the comment",
     "checkRun": "POST repos/sjawhar/legion/check-runs as the tester role's App token -> 403 'Resource not accessible by integration': the tester App lacks checks:write, so the bare `tester` check-run that docs/solutions/github/branch-protection-required-checks.md expects from the reviewer App cannot be published from this role; the commit status above is the substitute."
   },
+  "round2": {
+    "head": "7c2dcb27b68f354488df9d5d7605a030493e0b19",
+    "headNote": "7c2dcb27 = fix commit fa521041 (code tree) + reviewer's 4319ece9 (.legion/review.json) + .legion/implement.json round-2 section. Rig built from the workspace @ 39701cb8 = 7c2dcb27's tree + the daemon-provisioned empty .omp/config.yml; dist/legion.js md5 2b279593769ae39dd4a1638e3283f05b copied over the installed plugin.",
+    "verdict": "PASS on both blocking fixes, all eight non-blocking changes, regression, acceptance 5; FAIL on one acceptance-8 sub-item: the stated release version (1.17.4) is stale — main released pi-envoy v1.18.0 at 04:16:54Z, so this PR now releases as 1.18.1. Also: the PR is CONFLICTING against main (rebase required by the rule) and GitHub therefore created no workflow run for 7c2dcb27; CI is green at fa521041.",
+    "items": {
+      "1_blocking1_daemonPathHygiene": {
+        "verdict": "PASS",
+        "evidence": [
+          "(a) New tests on the branch: environment.test.ts 'strips every inherited worker-bin entry from the pane base PATH, so the daemon's own gh is never the shim' and processes.test.ts 'a daemon started from inside a Legion pane still launches panes with worker-bin exactly once' — 2 pass (-t filter); environment.test.ts 13/13, processes.test.ts 215 pass in the full run.",
+          "(a) Same two test files copied onto read-only git-archive exports of BOTH main@origin abaf0817 (/tmp/l54main-abaf, the merge base) and current main@origin 94146572 (/tmp/l54main-9414): 0 pass / 2 fail on each. environment.test.ts:270 `expect(environment.paneEnv.PATH).toBe(cleanSearchPath)` — Expected '<stateDir>/bin:/full/bin:/usr/bin', Received '<stateDir>/bin:<stateDir>/worker-bin:/full/bin:/other/state/worker-bin:/usr/bin' (both inherited entries kept, head and mid-list). processes.test.ts:940 `expect(entries[0]).toBe(inheritedWorkerBin)` — Expected '<stateDir>/worker-bin', Received '<stateDir>/bin'.",
+          "(b) Headless leg /tmp/l54rig/runs/tester-r2-fixed-rpc-2026-09-13T04-30-27-277Z launched (hub start l54-drive-rpc-r2) with PATH carrying /tmp/l54rig/state/worker-bin at position 1 AND position 6 plus this pane's own /home/ubuntu/.local/state/legion/sjawhar-legion/worker-bin (3 worker-bin entries; launcher log line '[tester] rig worker-bin entries in launch PATH: 2'): 34 bash calls (5·task·9·task·12·task·8), 34 mints, 4 instances, 27/27 record-grant file=own-mint mode 600, every row H=1/1 G=1 T=0; probe call 17 PATH begins /tmp/l54rig/state/worker-bin:/tmp/l54rig/state/bin:… with worker-bin exactly once (events.jsonl PATH line: 1 worker-bin entry); `which gh` -> /tmp/l54rig/state/worker-bin/gh, `gh --version` and `legion gh -- --version` (call 31) -> gh version 2.98.0 exit=0 via /gh-token 200 (be1de869, ff0fa9f3); `legion credential get` (30, 32) exit=0, `legion handoff complete` (34) exit=0; zero 'LEGION_GRANT_FILE is missing' and zero 'LEGION_GRANT=' in events.jsonl; A–G ALL PASS.",
+          "(b) Interactive leg /tmp/l54rig/runs/tester-r2-fixed-tui-2026-09-13T04-33-30-511Z (run.ts tui --short, same doubled PATH): 9 calls, 9 mints, 2 instances, 6/6 own-mint 600, probe PATH worker-bin once, legion credential get (8) + legion handoff complete (9) exit=0 with 200s (7d50caab, 87e04f95); A–G ALL PASS.",
+          "(b) Direct from-pane proof of the daemon fix (this pane's PATH begins with the live daemon's worker-bin; two rig entries added): `resolveDaemonEnvironment(DEFAULT_OMP_INVOCATION, {run: defaultRunner, stateDir: tmp})` at the branch -> paneEnv.PATH worker-bin entries: 0; commands.gh = /home/ubuntu/.dotfiles/shims/gh (not the shim). Same probe against main@origin 94146572's environment.ts -> paneEnv.PATH worker-bin entries: 2 ['/tmp/l54rig/state/worker-bin', '/home/ubuntu/.local/state/legion/sjawhar-legion/worker-bin'] and commands.gh = /tmp/l54rig/state/worker-bin/gh (the shim) — the exact failure the reviewer described, reproduced on main and absent on the branch."
+        ]
+      },
+      "2_blocking2_setupProfileGuard": {
+        "verdict": "PASS",
+        "evidence": [
+          "Guard present at setup.sh:30 (`realpath -m` of both dirs compared) before any filesystem action. Fingerprint of ~/.omp/profiles/legion/plugins BEFORE: sha256 over (find -maxdepth 3 listing with modes/sizes/mtimes, 108 entries) + sha256 of all 164 node_modules/*/package.json + plugins/package.json (0e2fab64…) + bun.lock (30e2ad84…) = aa68e07c8846b012e858bc60d245ff501b2d38b5f1b1eb4cb3daba96ccd467e5; size 183839247 bytes; plugins/ mtime 2026-09-13 00:52:55.",
+          "Case A `RIG_PLUGINS=production RIG_PROFILE=legion sh setup.sh $WS /tmp/l54-guard-A` -> stderr 'refusing: rig profile equals source profile (/home/ubuntu/.omp/profiles/legion is /home/ubuntu/.omp/profiles/legion); set RIG_PROFILE to a scratch profile name', exit=2. Case B `RIG_SOURCE_PROFILE=l12rig` (rig default l12rig) -> 'refusing: … (/home/ubuntu/.omp/profiles/l12rig is /home/ubuntu/.omp/profiles/l12rig) …', exit=2; l12rig/plugins/node_modules untouched (mtime 00:52). Case C symlink alias ~/.omp/profiles/l54-alias -> legion with RIG_PROFILE=l54-alias -> 'refusing: … (/home/ubuntu/.omp/profiles/l54-alias is /home/ubuntu/.omp/profiles/legion) …', exit=2 (alias removed afterwards). None of /tmp/l54-guard-{A,B,C} was created.",
+          "Fingerprint AFTER the three refusals: aa68e07c8846b012e858bc60d245ff501b2d38b5f1b1eb4cb3daba96ccd467e5 — identical; package.json/bun.lock hashes and size identical; plugins/ mtime unchanged. (The profile root's own 04:10 mtime is OMP runtime state — autoqa.db, logs/, agent/*.db-wal written by live panes — not plugins/.)",
+          "Dropped `mkdir -p $RIG/state/worker-bin` verified: `RIG_LEGION_BUILD=1.17.1 RIG_PROFILE=l54rigb sh setup.sh /tmp/l54rig/main /tmp/l54rig-b` (main checkout without worker-bin.ts) leaves state/ with bin, gh, secrets only — no worker-bin dir (previously an empty 0755 dir first on PATH); scratch profile l54rigb and /tmp/l54rig-b removed afterwards. On the branch checkout setup.sh -> state/worker-bin drwx------ with gh -rwx------ and no gh.* temp residue (the rename path)."
+        ]
+      },
+      "3_nonBlockingThreads": {
+        "verdict": "PASS",
+        "note": "All ten root threads (2 blocking + 8 non-blocking) carry an implementer reply naming fa521041e866; none resolved by me. Each claimed change verified present at 7c2dcb27:",
+        "threads": [
+          "r3998653532 processes.ts:2915 (blocking 1) -> reply r3998698080 'Fixed in fa521041e866'; environment.ts:260 `PATH: legionBinDir + pathWithoutWorkerBin(miseEnv.PATH)` present.",
+          "r3998653534 setup.sh:61 (blocking 2) -> reply r3998698145; guard at setup.sh:30-34, mkdir line trimmed.",
+          "r3998653537 legion.ts:686 pane-ambient grant -> reply r3998698263; skills/legion-worker/SKILL.md:151-155 sentence present ('succeeds only within 60 seconds of that call and 403s afterwards — a timing artifact').",
+          "r3998653539 cli/index.ts:97 ENOENT remedy -> reply r3998698384; cli/index.ts:119 appends ': the pi-envoy extension in this pane did not write it — the installed plugin predates LEGION-54; install the released plugin in the profile and relaunch the pane'; live check against the stand-in printed exactly that; cli test :64 asserts it.",
+          "r3998653540 worker-bin.ts:13 three strips -> reply r3998698454; docstring rewritten naming both callers and the shim's differing `${PATH#…}`; run.ts:41 imports pathWithoutWorkerBin, its endsWith variant gone (0 matches); WORKER_BIN_DIRNAME unexported (worker-bin.ts:6).",
+          "r3998653543 worker-bin.ts:38 shim rewrite -> reply r3998698540; installWorkerGhShim writes gh.<pid>.<uuid> (worker-bin.ts:46) and rename(temp, shim) (:58), rm on failure; worker-bin.test.ts 2/2; rig worker-bin/ has no temp residue.",
+          "r3998653545 grant-file.ts:20 blank/relative -> reply r3998698613; legion.ts:667 `grantFile === undefined || grantFile.trim() === \"\"` blocks before minting; grant-file.ts:17 `!path.isAbsolute(file)` throws '…could not be written: the path is not absolute'; legion.test.ts 'blocks when the pane carries no LEGION_GRANT_FILE, or a blank one, without minting' and the relative-path write-failure case pass on branch, fail on main 94146572 (:1913 received {input:{command, env:{LEGION_GRANT:'grant-1',…}}}; :1950 received a zod error — main minted anyway).",
+          "r3998653548 processes.ts:2997 prune cleanup -> reply r3998698702; secrets.ts:56 `pruneSecretFiles(...): Promise<void>`, secrets.ts:33 `processSecretNames`; processes.ts:2940 and :2980 use it; secrets.test.ts 4/4 asserting via directory listing.",
+          "r3998653551 index.ts:258 comment accuracy -> reply r3998698772; 'lazily' gone from index.ts (0 matches); holdProcessSecret docstring (processes.ts:2943) names processSecretNames.",
+          "r3998653554 CHANGELOG.md:11 fold -> reply r3998700118; one [Unreleased] Fixed entry now says the file replaces 'both the prepended command text the model imitated … (LEGION-12 …) and the 1.17.1 `env` delivery'; the separate LEGION-12 line is gone (0 matches for 'per-command environment instead of prepended command text')."
+        ]
+      },
+      "4_regression": {
+        "verdict": "PASS",
+        "evidence": [
+          "Branch, plan steps 1-3 named files: environment.test.ts 13/13, processes.test.ts 215 pass (3 skip: LEGION_TMUX_LIVE) in the full run, secrets.test.ts 4/4, worker-bin.test.ts 2/2, config.test.ts 53/53, index.test.ts 31/31, cli/__tests__/index.test.ts 26/26 (grant resolution 4/4), pi-envoy extensions/legion.test.ts 54/54.",
+          "Full suites: packages/daemon `bun test` 988 pass / 5 skip / 0 fail across 58 files (41.4 s; log /tmp/l54-r2-daemon-full.log) — the #980 processes.test.ts timing flake did NOT appear this run; the 5 skips are the LEGION_TMUX_LIVE-gated tests. packages/pi-envoy `bun run test` 159 pass / 0 fail across 7 files.",
+          "Fail-on-main re-check for the extended tests (main@origin 94146572 export): legion.test.ts blank-pointer + relative-path cases 0/2; cli 'grant resolution' 1 pass / 3 fail (:48 env-grant≠file-grant, :60 no error, :92 old message) — unchanged from round 1."
+        ]
+      },
+      "5_acceptance5and8": {
+        "verdict": "acceptance 5 PASS; acceptance 8 PATH-guarantee wording PASS; acceptance 8 release version FAIL (stale)",
+        "evidence": [
+          "Acceptance 5: manual grep of all 34 (rpc) and 9 (tui) minted ids over /tmp/l54rig/runs/tester-r2-fixed-rpc-2026-09-13T04-30-27-277Z/events.jsonl, /tmp/l54rig/runs/tester-r2-fixed-tui-2026-09-13T04-33-30-511Z/pane.txt, every ~/.omp/profiles/l12rig/agent/sessions transcript and every ~/.omp/profiles/l12rig/logs/omp.*.log: printed nothing (transcripts 2026-09-13T04-30-33-399Z_01a09907-….jsonl / 2026-09-13T04-33-37-782Z_01a0990a-….jsonl, logs omp.2026-09-13.3028976.log / omp.2026-09-13.3151795.log); verdict F PASS both legs; grant file -rw------- 36 bytes legion-l12rig-rig-1-implementer-grant under /tmp/l54rig/state/secrets/ (deleted before each leg; the extension's write created it). Negative controls at this head: fabricated 0600 id -> 'Unable to redeem LEGION_GRANT (403)' (stand-in 04:35:09.100Z /git-credential 403); blank -> 'LEGION_GRANT_FILE names /tmp/l54rig/blank-grant, which is empty'; missing -> ENOENT + the new remedy text; no temp residue in /tmp/l54rig/ws.",
+          "Acceptance 8, PATH guarantee stated as enforced: packages/daemon/src/daemon/AGENTS.md:113-118 ('resolveDaemonEnvironment strips every inherited worker-bin entry from the mise PATH before it resolves the daemon's tools or hands that PATH to ProcessManager as processPath'); environment.ts:236-241 docstring; docs/solutions/daemon/config-env-keys-that-panes-also-carry.md:86-90 ('PATH needs no scrub … resolveDaemonEnvironment therefore strips every inherited worker-bin entry at the daemon boundary (pathWithoutWorkerBin)') — the round-1 'reset PATH by hand' advice is gone. Both solution docs still record the secretsd reason and recommend no env argument; CHANGELOG entry present (folded).",
+          "Acceptance 8, release version — FAIL: the head names 1.17.4 at docs/solutions/envoy/omp-tool-call-hook-rewrites-are-model-visible.md:35 and :86, docs/solutions/legion/worker-pane-shell-gotchas.md:63 and :108, docs/solutions/legion/grant-delivery-plugin-omp-contract.md:29, .legion/implement.json deployment (now says 1.17.4 as the architect asked), and PR body Deployment step 1. But main released pi-envoy v1.18.0 (tag pi-legion-envoy-v1.18.0, commit 94146572, packages/pi-envoy/package.json 1.18.0) at 04:16:54Z from #956 `feat(daemon): legion.yaml instructions appended to every pane's system prompt` (a feat touching skills/, one of the pi-envoy release paths -> minor bump). .github/scripts/release-bump.sh over prev 1.18.0 with this PR's `fix(pi-envoy):` title computes 1.18.1 (reproduced by hand with the script's own regexes). Every '1.17.4' at this head is therefore a version that will never exist. Remedy: change the six sites to 1.18.1 in the conflict-forced rebase pass (docs-only edit), and have the merger re-verify `git tag -l 'pi-legion-envoy-v*' | sort -V | tail -1` at READY time, since any further pi-envoy-path release before merge moves it again."
+        ]
+      },
+      "ci": {
+        "verdict": "green at fa521041; no run possible at 7c2dcb27",
+        "evidence": [
+          "check-runs API at fa521041: Tests run 34737467249 (pr-title, lint, typecheck, test all success; test completed 04:16:27Z) and Legion Envoy and Contracts run 34737467244 (changes, pi-envoy success; contracts/envoy-plugin/envoy-client/dispatch/claude-envoy-bridge/envoy-go skipped, path-filtered).",
+          "check-runs and actions/runs?head_sha= for 7c2dcb27b68f354488df9d5d7605a030493e0b19: none. Cause: #956 merged to main at 04:16:54Z (27 s after fa521041's checks finished), turning the PR CONFLICTING/DIRTY (files touched on both sides: AGENTS.md, docs/solutions/legion/worker-pane-shell-gotchas.md, packages/daemon/src/cli/index.ts, packages/daemon/src/daemon/AGENTS.md, packages/daemon/src/daemon/index.ts, packages/daemon/src/daemon/processes.ts, packages/pi-envoy/AGENTS.md, skills/legion-worker/SKILL.md); 7c2dcb27 was pushed 04:21:12Z, and GitHub does not create pull_request workflow runs for a PR with a merge conflict. `pr view`: mergeable CONFLICTING, mergeStateStatus DIRTY. The rule permits exactly this rebase (GitHub reports CONFLICTING); after it, CI runs at the new head."
+        ]
+      }
+    },
+    "environment": {
+      "rig": "/tmp/l54rig (production mode, l12rig profile copy with secretsd v3.0.2; dist swapped from the head)",
+      "omp": "/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-203541/bin/omp",
+      "standin": "hub start l54-standin on 13399, stopped after the negative controls",
+      "standinLogs": "/tmp/l54rig/standin.tester-r2-fixed-rpc.log (34 mints), /tmp/l54rig/standin.tester-r2-fixed-tui.log (9 mints)",
+      "launchPath": "/tmp/l54-drive-path.txt (74 entries; rig worker-bin at 1 and 6, pane worker-bin at 2)",
+      "mainExports": "/tmp/l54main-abaf (abaf0817), /tmp/l54main-9414 (94146572; node_modules symlinked from the abaf export — identical bun.lock)"
+    },
+    "observations": [
+      "This tester pane (1.17.0 plugin) again imitated the hook's write-back on several bash calls; the `legion gh` calls were routed through eval's tool.bash as in round 1.",
+      "run.ts's own pathWithoutWorkerBin strip means the rig's verdict G proves the pane-level invariant; the daemon-level fix is proven by the two new unit tests and the from-pane resolveDaemonEnvironment probe above, which is why all three are recorded."
+    ]
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T03:31:39.571Z"
+  "completed": "2026-09-13T04:39:53.447Z"
 }
