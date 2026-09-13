@@ -1,76 +1,120 @@
 # claude-envoy-bridge
 
-Claude Code plugin for Legion's Envoy subsystem. It uses Claude Code's Tier 1 Monitor tool
-integration to deliver Envoy traffic into a live session, including idle sessions.
+Claude Code channel plugin for Legion's Envoy subsystem. One MCP stdio server consumes Envoy NATS
+events and sends them to the current Claude Code session as supported
+`notifications/claude/channel` notifications.
 
 ## Architecture
 
-- `.claude-plugin/plugin.json` declares the plugin and its always-on monitor.
-- `bin/envoy-monitor.ts` subscribes directly to `notifications.agent.<session-id>` over NATS,
-  registers that self-subscribed route with Envoy, and refreshes the registration every heartbeat.
-  Monitor stdout is rendered by Claude Code as a Monitor event, waking the session for inbound
-  Envoy traffic.
-- `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
-- `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the shared
-  Envoy messaging contract plus the fourteen native Dispatch tools: `dispatch_issue`,
-  `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`, `dispatch_suggest`,
-  `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_artifact`,
-  `dispatch_request_approval`, `dispatch_read`, `dispatch_search`, and `dispatch_open_asks`. The tools are offered only when `dispatch.enabled`
-  resolves a server URL and bearer token in envoy.json or when `DISPATCH_URL` and
-  `DISPATCH_TOKEN` provide them; with `dispatch.enabled: true` and no `dispatch.serverUrl`, the
-  URL is `http://localhost:8766`. Each issue-scoped call fills the target repo from the session's
-  working directory, stamps it with the Claude session id, and subscribes each successful
-  mutation's `details.topic` so its Dispatch events arrive back through Envoy.
+- `.mcp.json` launches `bin/envoy-channel.ts`. It declares the experimental `claude/channel`
+  capability, so Claude Code accepts its event notifications; it also exposes Envoy messaging and
+  native Dispatch tools through that same MCP server.
+- The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
+  followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
+  the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- Direct NATS request-reply delivery receives its empty receipt immediately after the server
+  accepts the event into its ordered MCP notification queue. That confirms adapter acceptance, not
+  that Claude Code or the model processed the event: the channel protocol has no processing ack.
+- The server registers the session as self-subscribed with `capabilities: ["aside"]`. It does not
+  advertise `btw`.
+- `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/envoy-role.json`. A new server
+  process soft-reclaims it with the saved `previous_session_id`; every healthy registration
+  heartbeat checks and reasserts the role if the listener lost it. Shutdown drains NATS before
+  deregistering the session.
+- `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
+  body, ordered newest first.
+- `bin/envoy-send.ts` sends direct messages through Envoy's local listener HTTP API.
 
-- The MCP server is also the session's topic consumer. Envoy pushes nothing to a session that
-  consumes NATS itself, and the monitor listens only on `notifications.agent.<session-id>`, so
-  for every topic the session follows — a Dispatch mutation or anything passed to
-  `envoy_subscribe` — the server subscribes NATS (`ENVOY_NATS_URL`, the monitor's broker) and
-  republishes each envelope on the session's agent subject, where the monitor renders it.
-  `envoy_unsubscribe` stops the forwarding; closing the session drains the connection. A manual
-  `envoy_subscribe` rejects before recording an interest if its NATS forwarder is unavailable;
-  Dispatch auto-subscription remains best-effort and reports the gap on stderr.
-- `skills/` symlinks the repository's shared skills tree, so a Claude session gets the
-  `dispatch` skill (when to raise a question) alongside the tools.
+## Channel metadata
 
-`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
-An architect can post a specification directly with
-`{ issue, name: "spec.md", content: "# Design" }`.
+Each notification has rendered Envoy content and only identifier-safe, string-valued metadata.
+Claude Code drops invalid meta keys, so the server filters them before writing to stdio.
 
-## Inbound rendering
+| Key | Meaning |
+| --- | --- |
+| `source` | Envoy producer, or `unknown` for a malformed envelope. |
+| `topic` | NATS subject that delivered the event. |
+| `event_id` | Envoy event identity; used for channel-side deduplication. |
+| `dedupe_key` | Legacy/logical identity when supplied by Envoy. |
+| `urgency` | Optional Envoy priority. |
+| `from_session` | Optional source session identifier. |
+| `expects_reply` | Optional Envoy reply expectation. |
+| `in_reply_to` | Optional correlated inbound event id. |
 
-The monitor uses the same tolerant `@legion/envoy-client/delivery` renderer as other Envoy hosts.
-It emits one TOON block containing recognized delivery fields (`to`, `from`, `at`, `id`, expiry,
-reply metadata, and `summary`) and a structured payload only once as `message`. Unknown sources
-and malformed frames become safe `unrecognised` fields; raw frame bytes are never emitted.
+## Dispatch and Envoy tools
 
-The shared MCP tool list intentionally omits `envoy_inbox`, which is Pi-specific local recovery
-state. It includes `envoy_role_get` for the listener's current role holder.
+The server exposes the shared Envoy messaging contract, including `envoy_inbox` and
+`envoy_role_get`. When Dispatch is configured, it additionally exposes the fourteen native tools:
+`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+`dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
+`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
+`dispatch_search`, and `dispatch_open_asks`.
 
-## Enable
+Dispatch configuration follows `@legion/envoy-client/dispatch-config`: set `dispatch.enabled`,
+`dispatch.serverUrl`, and `dispatch.token` in envoy.json, or provide `DISPATCH_URL` and
+`DISPATCH_TOKEN`. The resolved configuration is re-read on every Dispatch tool call. A successful
+mutation follows its event topic; reads do not add a subscription.
 
-From the Legion repository root, install workspace dependencies and load the package directly:
+Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
+human approval surface.
 
-```bash
-bun install
-claude --plugin-dir packages/claude-envoy-bridge
-```
+## Enable the channel
 
-The monitor and the `envoy` MCP tools identify the session by Claude Code's
-`CLAUDE_CODE_SESSION_ID`, so messages, `envoy_whoami`, and native Dispatch operations all name one session.
-`ENVOY_SESSION_ID` is an explicit override for controlled QA. If neither is available, the
-monitor exits with an actionable error rather than subscribing to a made-up address. No Claude
-configuration-file changes are required.
-
-## Send from a Claude session
+Install the plugin from its marketplace, then opt it into a local development session during the
+research preview:
 
 ```bash
-bun packages/claude-envoy-bridge/bin/envoy-send.ts <target-session-id> "message"
+claude --dangerously-load-development-channels plugin:claude-envoy-bridge@<marketplace>
 ```
 
-Set `ENVOY_URL` to use an Envoy listener other than `http://127.0.0.1:9020`. Set
-`ENVOY_NATS_URL` to use a NATS server other than `nats://example-host:4222`; `ENVOY_TOPICS` adds
-comma-separated NATS subscriptions.
+For a Team or Enterprise deployment, an organization owner must enable channels and allow the
+internal marketplace plugin in managed settings. The user still opts the plugin into each session
+with `--channels`:
+
+```json
+{
+  "channelsEnabled": true,
+  "allowedChannelPlugins": [
+    { "marketplace": "<marketplace>", "plugin": "claude-envoy-bridge" }
+  ]
+}
+```
+
+The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which defaults to
+`http://127.0.0.1:9020`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and
+`CLAUDE_PLUGIN_DATA`; set `ENVOY_SESSION_ID` only to use a controlled identity for QA.
+
+`claude -p` can run a channel session, but it disables features that need terminal input, including
+multiple-choice questions and plan approval. Production Legion workers must have MCP and channel
+consent preconfigured and must not depend on local dialogs.
+
+## Intentionally omitted
+
+- **Targeted BTW:** the channel registers only `aside`. A channel notification has no model or
+  Claude Code acknowledgement, so advertising BTW would promise an automatic correlated Dispatch
+  reply that does not exist. Add it only with a server-owned pending-delivery state and explicit
+  reply tool design.
+- **Permission relay:** the server does not declare `claude/channel/permission`. It has no
+  sender-authenticated reply path or reply-ack design for remote permission decisions; declaring
+  one would let unauthenticated Envoy payloads approve tool use. Dispatch asks stay on Dispatch.
+
+## Manual smoke
+
+`scripts/smoke-channel.sh` is a real manual smoke, never a CI step. It starts an isolated,
+interactive Claude Code session with the development-channel flag, waits for its Envoy
+registration, sends an actual direct Envoy event, and asserts the model writes the unique payload
+before checking teardown. It requires a live Envoy listener, NATS, Claude authentication, a
+configured model, an organization that enables channels, and an installed plugin entry:
+
+```bash
+ENVOY_NATS_URL=nats://envoy-nats:4222 \
+  CLAUDE_CHANNEL_ENTRY=plugin:claude-envoy-bridge@<marketplace> \
+  packages/claude-envoy-bridge/scripts/smoke-channel.sh
+```
+
+Use `CLAUDE_BIN` or `ENVOY_URL` to select a different Claude binary or listener. For source-tree
+diagnostics, pass a temporary bare-server config through `CLAUDE_MCP_CONFIG` and use
+`CLAUDE_CHANNEL_ENTRY=server:envoy`; the marketplace command above is the plugin packaging check.
 
 ## Local checks
 
@@ -79,9 +123,3 @@ bun run --cwd packages/claude-envoy-bridge lint
 bun run --cwd packages/claude-envoy-bridge typecheck
 bun run --cwd packages/claude-envoy-bridge test
 ```
-
-## Caveats
-
-Claude Code owns Monitor stdout semantics, including any truncation of unusually long event lines.
-The monitor needs a real session identity, supplied by Claude Code or explicitly through
-`ENVOY_SESSION_ID` for controlled QA.

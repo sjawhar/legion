@@ -1,13 +1,13 @@
 {
   "name": "@sjawhar/claude-envoy-bridge",
-  "version": "0.1.0",
-  "description": "Claude Code plugin for Legion's Envoy Monitor bus",
+  "version": "0.2.0",
+  "description": "Claude Code channel plugin for Legion's Envoy bus",
   "type": "module",
   "files": [
     ".claude-plugin/**",
     ".mcp.json",
     "bin/**",
-    "monitors/**",
+    "scripts/**",
     "src/**",
     "README.md",
     "AGENTS.md"
@@ -17,6 +17,7 @@
     "url": "https://github.com/sjawhar/legion"
   },
   "scripts": {
+    "channel": "bun bin/envoy-channel.ts",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
