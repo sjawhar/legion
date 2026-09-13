@@ -1,51 +1,89 @@
 {
-  "summary": "Pull request https://github.com/sjawhar/legion/pull/1035 at head d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866 makes `release-push.sh push-main` survive a same-package version-bump race: it now takes `<package-dir> <version>`, fetches main and rebases onto it between its five push attempts, resolves a conflict confined to the released package's package.json by setting .version to the released version and continuing the rebase, aborts and fails naming the paths on any other conflict, and states on every failure (log and job summary) that the publish, tag and GitHub release already succeeded and only the push to main is outstanding. Implemented test-first exactly per .legion/plan.json: the new .github/scripts/release-push.test.sh gave `Results: 10 passed, 12 failed` (exit 1) against the old script and `Results: 22 passed, 0 failed` (exit 0) against the new one, locally twice and on the GitHub runner in Tests run 34762283378 (all four jobs green; step `Test release scripts` in job test).",
+  "summary": "Round 2 (corrective) for pull request https://github.com/sjawhar/legion/pull/1035 after review 5191040117 requested changes. Code commit 98c5ebf21c8e2886da1928e2189bb3f95ea7ba7d, on top of the reviewer's locally committed handoff 5a9e1de31b76 (carried by this push, untouched), routes every `push-main` failure through `fail_outstanding`: a failing `git fetch origin main` now fails with the release-succeeded message and summary; the resolvable conflict shape is exactly the manifest AND the file still present on main (`git cat-file -e HEAD:<manifest>`), so a modify/delete conflict aborts and fails naming the path; the jq rewrite lands via a temp file and the whole resolution is one guarded list that aborts the rebase on any failure. The four minors are applied (header enumerates the promise; both `rebase --abort` calls and the cat-file probe silenced; hermetic git config in the test; Case 1 asserts main's other manifest edit survives). Test: `Results: 33 passed, 0 failed` (was 22; the extended test against the round-1 script gave `27 passed, 6 failed`, exactly the reviewer's two reproductions). Tests run 34765902884 at 98c5ebf2.",
+  "round": 2,
   "pr": {
     "number": 1035,
     "url": "https://github.com/sjawhar/legion/pull/1035",
-    "headSha": "d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866",
+    "headSha": "98c5ebf21c8e2886da1928e2189bb3f95ea7ba7d",
+    "round1CodeCommit": "d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866",
+    "reviewAnswered": "https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117",
     "branch": "legion/LEGION-75",
-    "ciRun": "https://github.com/sjawhar/legion/actions/runs/34762283378",
-    "ciJobTest": "https://github.com/sjawhar/legion/actions/runs/34762283378/job/103737095880"
+    "ciRun": "https://github.com/sjawhar/legion/actions/runs/34765902884",
+    "mergeState": "MERGEABLE / BLOCKED (awaiting review) at push time; no rebase"
   },
   "filesChanged": [
     ".github/scripts/release-push.sh",
-    ".github/scripts/release-push.test.sh",
-    ".github/scripts/verify-envoy-release-workflow.sh",
-    ".github/workflows/release.yaml",
-    ".github/workflows/pr-and-main.yaml"
+    ".github/scripts/release-push.test.sh"
   ],
+  "threads": [
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903164",
+      "severity": "blocking",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "`git fetch origin main || fail_outstanding \"Fetching main from origin failed on attempt $attempt.\"`; new Case 5 (origin re-pointed at a nonexistent path, summary file set): non-zero exit, `^::error::Fetching main from origin failed on attempt 1.`, release-succeeded sentence in log and summary, no rebase left.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017025"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903166",
+      "severity": "blocking",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "Gate `[ \"$conflicted\" != \"$manifest\" ] || ! git cat-file -e \"HEAD:$manifest\" 2>/dev/null`; abort message adds 'with the file still present on main'; jq output via `$manifest.tmp` + mv; show|jq, mv, git add, GIT_EDITOR=true rebase --continue in one guarded `if ! { … }` that rm -f's the temp, aborts the rebase, and calls fail_outstanding. New Case 6 (main deleted packages/pkg): non-zero exit, `::error::…conflicts in: packages/pkg/package.json.`, rebase aborted, manifest intact at 1.0.1, origin/main untouched.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017073"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903168",
+      "severity": "minor",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "Header names the deleted-on-main case as a real divergence and enumerates the failure kinds the promise covers; nothing narrowed because every path is now routed.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017137"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903171",
+      "severity": "minor",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "Both `git rebase --abort` calls are `2>/dev/null || true`; the cat-file probe is silenced too (it prints `fatal: path … exists on disk, but not in 'HEAD'` on the modify/delete path). By hand: 0 `fatal:` lines before the ::error::.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017213"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903173",
+      "severity": "minor",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "`export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` after `set -euo pipefail`, with a comment naming the keys fenced off.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017325"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1035#discussion_r3999903175",
+      "severity": "minor",
+      "disposition": "Accepted: fixed in 98c5ebf2",
+      "change": "Case 1: clone a's bump also sets `.description = \"set on main by a\"`, asserted on origin/main after push-main; a REBASE_HEAD: regression fails it.",
+      "reply": "https://github.com/sjawhar/legion/pull/1035#discussion_r4000017379"
+    }
+  ],
+  "threadsResolveOutput": "legion threads resolve --pr 1035 --repo sjawhar/legion at 98c5ebf2: exit 0; six `left open … newest reply by legion-implementer is not an acceptance` (expected — the newest comment on each is my disposition; the reviewer's own `Accepted:` is what the command resolves). No thread refused.",
   "evidence": {
-    "testBeforeFix": "Results: 10 passed, 12 failed (exit 1): Case 1 failed all five checks — the old script died inside `git pull --rebase` under `set -e`, origin/main stayed at 1.0.1, clone left mid-rebase; Cases 2/2b failed the `::error::` naming and `rebase was aborted` checks; Case 3 failed the two message checks and the job-summary check; Case 4 and every exit-code/manifest-untouched check passed. Matches the plan's task 1 expectation exactly.",
-    "testAfterFix": "Results: 22 passed, 0 failed / PASS: release-push.sh push-main (exit 0), run twice locally (deterministic; /tmp entry count 31137 before and after both runs) and on the runner (Tests run 34762283378, step `Test release scripts`, ~1 s).",
-    "case1ByHand": "CONFLICT (content): Merge conflict in packages/pkg/package.json → `Resolving the packages/pkg/package.json version-line conflict to v1.0.2` → `Successfully rebased and updated refs/heads/main.` → push accepted; origin/main log: `chore: release pkg v1.0.2 [skip ci]` over `chore: release pkg v1.0.1 [skip ci]` over `seed`; manifest .version 1.0.2.",
-    "negativeControl": "Case 2 (README.md conflicting): exit 1, `::error::Rebasing the version-bump commit onto main (<sha>) conflicts in: README.md. Only a conflict confined to packages/pkg/package.json is resolved automatically. The release itself succeeded: …`, rebase aborted, origin/main manifest untouched at 1.0.0.",
-    "workflowWiring": "Bun.YAML.parse of release.yaml lists exactly three push-main call sites: cli → packages/daemon, envoy_plugin → packages/envoy-plugin, pi_envoy → packages/pi-envoy, each with \"${{ steps.version.outputs.version }}\" (package dirs cross-checked against each job's `release-push.sh tag` call). pr-and-main.yaml parses; job test's steps begin actions/checkout@v5, Test release scripts, Setup Bun.",
-    "syntax": "bash -n on both scripts: clean.",
-    "commitScope": "`jj diff -r @- --stat` on the code commit: exactly the five paths above; release-push.test.sh is `new file mode 100755`; verify-envoy-release-workflow.sh is `deleted file mode 100755`; .omp/config.yml never committed."
+    "invariantsChecked": "Per the plan's prototype facts before changing anything: `GIT_EDITOR=true git rebase --continue` kept (line 106); the rewrite is still `git show HEAD:$manifest | jq '.version = $v'` — main's copy with only the version set — and new Case 1 proves main's `.description` survives; the exact-set rule `[ \"$conflicted\" != \"$manifest\" ]` is intact, only OR'd with the cat-file presence check.",
+    "red": "Extended test against the round-1 script (d5fd3ed8): `Results: 27 passed, 6 failed` — Case 5 failed `error names the fetch`, `error says the release itself succeeded`, `job summary says the same`; Case 6 failed `error names the manifest as the conflict`, `rebase was aborted`, `clone's manifest is intact, not truncated`.",
+    "green": "`Results: 33 passed, 0 failed` / `PASS: release-push.sh push-main`, exit 0, twice in the workspace at 98c5ebf2; `bash -n` clean on both scripts.",
+    "byHandBlocking1": "Unreachable origin (`git remote set-url origin <nonexistent path>`), GITHUB_STEP_SUMMARY set: EXIT=1; `::error::Fetching main from origin failed on attempt 1. The release itself succeeded: the package artifacts are published, the tag and the GitHub release exist; only this version-bump push to main is outstanding. main's packages/pkg/package.json keeps the older version until the next release, which computes versions from tags and is unaffected.`; summary file: `**Version bump for packages/pkg v1.0.1 did not land on main.** Fetching main from origin failed on attempt 1. …`; no .git/rebase-*.",
+    "byHandBlocking2": "Main deleted packages/pkg (clone a `git rm -r` + push), clone b bumps 1.0.1: EXIT=1; git prints `CONFLICT (modify/delete): packages/pkg/package.json deleted in HEAD and modified in …`; `::error::Rebasing the version-bump commit onto main (<sha>) conflicts in: packages/pkg/package.json. Only a conflict confined to packages/pkg/package.json, with the file still present on main, is resolved automatically. The release itself succeeded: …`; 0 `fatal:` lines; summary written; no .git/rebase-merge; manifest 42 bytes at 1.0.1; origin/main tip still `a: remove pkg`.",
+    "byHandGuardedResolution": "Failing `jq` shim on PATH during a real Case 1 conflict: `Resolving the packages/pkg/package.json version-line conflict to v1.0.2` → `jq: simulated failure` → `::error::Resolving the packages/pkg/package.json version-line conflict onto main (<sha>) failed; the rebase was aborted. The release itself succeeded: …`; no rebase dir, no package.json.tmp, manifest restored to the bump commit's 1.0.2.",
+    "byHandCase1": "With main's bump also setting `.description`: `CONFLICT (content)` → `Resolving … to v1.0.2` → `Successfully rebased and updated refs/heads/main.` → push accepted; origin/main manifest `{name: pkg, version: 1.0.2, description: \"set on main by a\"}`."
   },
   "trickyParts": [
-    "`git rebase --continue` under the merge backend opens an editor and fails without a tty; `GIT_EDITOR=true` on that line is load-bearing, not cargo cult (plan concern; do not remove).",
-    "During a rebase stop, HEAD is main's side, so `git show HEAD:$manifest | jq '.version = $v'` keeps every other change main made to the manifest and rewrites only the version line — the one automatic rewrite the spec allows.",
-    "A resolution that leaves the commit empty (main already carries the identical bump) is dropped by `git rebase --continue` itself; no `--skip` branch is needed.",
-    "The conflict rule compares `git diff --name-only --diff-filter=U` to exactly `<package-dir>/package.json`; a manifest conflict alongside any other path (Case 2b) is aborted, not resolved.",
-    "After the path-scoped `jj split`, `jj git push` first answered `The working copy is stale` (another workspace's operation raced the shared op log; `Concurrent modification detected, resolving automatically` had appeared during the split). Repaired per docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md Hazard 2: copied .omp/config.yml aside, `jj workspace update-stale`, restored the file; the chain, the code commit's five paths, and the bookmark were untouched. No undo/op restore/abandon was run."
+    "`git cat-file -e HEAD:<path>` prints `fatal: path … exists on disk, but not in 'HEAD'` on stderr when the path is absent from HEAD but present in the working tree (the modify/delete shape); it needs `2>/dev/null` or the spurious fatal precedes the ::error:: line — the same class as the reviewer's `rebase --abort` minor.",
+    "Inside the guarded `if ! { …; }` list under `set -e`, a failing pipeline member does not exit the script (the list is a condition); the rm -f / rebase --abort / fail_outstanding branch runs. Verified with the jq shim.",
+    "The opposite modify/delete shape — the bump commit deleting the manifest while main modified it — is not guarded (HEAD:manifest exists, so the resolver would recreate the file with main's content and the released version). It is unreachable: `release-push.sh tag` stages the manifest the version step just wrote, so the bump commit is always a modification. Named here rather than coded; a `git cat-file -e REBASE_HEAD:$manifest` check would be the one-line guard if that ever changes."
   ],
   "deviations": [
-    "Architect-directed addition beyond the plan: deleted .github/scripts/verify-envoy-release-workflow.sh in the same code commit. It targeted .github/workflows/release-envoy-and-plugin.yaml, which no longer exists, exited 1 unconditionally (`FAIL: .github/workflows/release-envoy-and-plugin.yaml not found`), and ran nowhere in CI or live docs; its only reference is docs/superpowers/plans/2026-04-12-fix-ci-docker-build-gating.md, a historical design record left unchanged. Named in the PR body as adjacent dead-script cleanup.",
-    "Waited for the PR checks through the Envoy subscription (notifications.github.sjawhar.legion.pr.1035.>) plus one `legion gh -- run watch`, which found the run already complete; no polling loop."
+    "All six threads taken; none left `Still open`. The `Fast-follow` line carries the reviewer's five cosmetics unchanged (trailing EOF blank line, `${conflicted//$'\\n'/ }`, the `set +e` toggle, the inline exit-code copies, the Case 2/2b regex pinning)."
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
-  "productionVerification": "Nothing under packages/ changes, so merging triggers no release. The fix first runs for real on the next Release Packages run; the implementer's post-merge production check is that run's `Push version bump` step log (and, for a same-package race, the `Resolving the <manifest> version-line conflict to v<version>` line followed by a successful push).",
   "learningsInjected": [
-    "docs/solutions/legion/worker-pane-shell-gotchas.md",
     "docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md"
   ],
-  "learningsHelpful": [
-    "docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md"
-  ],
+  "learningsHelpful": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T14:20:51.640Z"
+  "completed": "2026-09-13T15:34:21.586Z"
 }
