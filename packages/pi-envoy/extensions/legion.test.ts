@@ -557,6 +557,113 @@ describe("Legion OMP extension", () => {
       },
     ]);
   });
+  test("two legion tool calls issued at once both succeed after the daemon forgot the session's secret, with one recovery", async () => {
+    const requests: {
+      readonly path: string;
+      readonly body: Record<string, unknown> | undefined;
+    }[] = [];
+    const tree = "REPO-42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "root-recovery";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    // The daemon's capability map: `root-secret` until the test "restarts" the daemon, then
+    // whatever the newest /worker-session minted (stored at mint time; only the response is held).
+    let current: string | undefined = "root-secret";
+    let minted = 0;
+    const held: (() => void)[] = [];
+    const firstRecoverySeen = Promise.withResolvers<void>();
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      const body =
+        init?.body == null
+          ? undefined
+          : (JSON.parse(init.body.toString()) as Record<string, unknown>);
+      requests.push({ path: url.pathname, body });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/worker-session") {
+        minted += 1;
+        const secret = `recovered-root-${minted}`;
+        current = secret;
+        const gate = Promise.withResolvers<void>();
+        held.push(gate.resolve);
+        firstRecoverySeen.resolve();
+        await gate.promise;
+        return Response.json({ tree, issue: tree, role: "architect", secret });
+      }
+      if (url.pathname.startsWith("/legion/v1/")) {
+        if (current === undefined || body?.secret !== current) {
+          return Response.json({ error: "Invalid session secret" }, { status: 403 });
+        }
+        if (url.pathname === "/legion/v1/waves/release") {
+          return Response.json({ released: ["REPO-43"] });
+        }
+        return Response.json({});
+      }
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined)
+      throw new Error("Legion session_start handler was not registered");
+    const context = sessionContext("ses_root", "/tmp/root-transcript.jsonl");
+    await sessionStart({}, context);
+    const legionTool = fixture.tools.find((tool) => tool.name === "legion");
+    if (legionTool === undefined) throw new Error("Legion root tool was not registered");
+    current = undefined; // the daemon restarted: its in-memory capability map is gone
+
+    const releaseWave = legionTool.execute(
+      "call-release",
+      { op: "release_wave", issues: ["REPO-43"] },
+      undefined,
+      undefined,
+      context
+    );
+    const escalate = legionTool.execute(
+      "call-escalate",
+      { op: "escalate", kind: "capacity", context: { reason: "No slots" } },
+      undefined,
+      undefined,
+      context
+    );
+    await firstRecoverySeen.promise;
+    // One macrotask tick, never a wall-clock wait: every microtask the two refusals queued has run,
+    // so a second recovery request (the defect) would already be visible before the gates open.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (const resume of held) resume();
+    const results = await Promise.all([releaseWave, escalate]);
+
+    expect(results.map((result) => result.isError)).toEqual([undefined, undefined]);
+    expect(requests.filter((request) => request.path === "/legion/v1/worker-session")).toEqual([
+      {
+        path: "/legion/v1/worker-session",
+        body: { sessionId: "ses_root", recoveryToken: "root-recovery" },
+      },
+    ]);
+    expect(
+      requests
+        .filter((request) => request.body?.secret === "recovered-root-1")
+        .map((request) => request.path)
+        .sort()
+    ).toEqual(["/legion/v1/escalate", "/legion/v1/waves/release"]);
+  });
   test("registers the root process before claiming its role and agent delivery subject", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const tree = "REPO-42";
