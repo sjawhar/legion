@@ -1905,6 +1905,51 @@ describe("Legion OMP extension", () => {
       expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
+  test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_jj_ok",
+      requests,
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-jj-ok", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    const mints = (): number =>
+      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mintsBefore = mints();
+    // The spec's negatives plus the exact commands the legion-worker skill has every role run:
+    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
+    const allowed = [
+      "jj restore src/x.ts",
+      'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
+      "jj op log",
+      'jj -R "$LEGION_WORKSPACE" op log -n 5',
+      "jj op show",
+      'jj describe -m "undo this"',
+      "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
+      'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
+      'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
+      "jj -R \"$LEGION_WORKSPACE\" log -r 'description(glob:\"undo*\")'",
+      "jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
+      "jj --at-op 805478f4 restore src/x.ts",
+      "legion state",
+    ];
+    const refusedByMistake: string[] = [];
+    for (const command of allowed) {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-jj-ok-${command}`, input: { command } },
+        context
+      );
+      if (result !== undefined) refusedByMistake.push(`${command} -> ${JSON.stringify(result)}`);
+    }
+    expect(refusedByMistake).toEqual([]);
+    // Each allowed command went down the ordinary path: one grant minted per call.
+    expect(mints()).toBe(mintsBefore + allowed.length);
+  });
   test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
