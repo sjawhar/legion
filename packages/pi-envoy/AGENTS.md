@@ -29,8 +29,10 @@ opening NATS, or serving its API — unless the field equals its `LEGION_DAEMON_
 naming the manifest path, the package version, and both numbers. A change to either surface bumps
 the field and the constant in the same commit (`src/legion/daemon-api-version.test.ts` pins them
 equal), and the deployment installs the release built from that commit before restarting the
-daemon. Contract 1 was the `runtime` locator discriminant (LEGION-21); 2 is the credential file
-(LEGION-54, bumped by LEGION-52).
+daemon. Contract 1 was the `runtime` locator discriminant (LEGION-21). Contract 2 was introduced
+by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from LEGION-52, also
+covers the pane contract including the credential file (`LEGION_GRANT_FILE`, LEGION-54); release
+1.23.0 is the first to declare 2.
 
 ## Native Dispatch tools
 

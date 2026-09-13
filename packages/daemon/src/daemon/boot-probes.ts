@@ -233,8 +233,9 @@ function legionPluginManifestPath(): string {
  * Refuses startup unless the installed plugin was built against this daemon's contract: its
  * manifest's `legion.daemonApiVersion` must equal `LEGION_DAEMON_API_VERSION`
  * (`@legion/contracts`). The number covers two surfaces — the `LegionDaemonApi` HTTP request and
- * response shapes, and the pane contract (the environment variables the daemon sets on a pane
- * that the plugin reads or writes: `LEGION_GRANT_FILE` and its siblings); the full rule and the
+ * response shapes (2 was introduced by LEGION-20 for `stateGate`/`GatesRegister`), and the pane
+ * contract (the environment variables the daemon sets on a pane that the plugin reads or writes:
+ * `LEGION_GRANT_FILE` and its siblings, covered by 2 from LEGION-52); the full bump rule and the
  * contract history live in the constant's doc comment. A plugin from before an HTTP shape change
  * (or after a later one) validates every daemon response against the strict schemas it bundles
  * and fails the controller/architect boot handshake — `daemon.state()` rejects on the first

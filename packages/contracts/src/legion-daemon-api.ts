@@ -18,8 +18,11 @@ import { LEGION_ROLES } from "./legion-roles";
  * `LegionDaemonApi` request or response shape, OR to the pane contract, bumps this constant AND
  * the plugin manifest's `legion.daemonApiVersion` in the same commit.
  *
- * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21);
- * 2 — the credential file `LEGION_GRANT_FILE` (LEGION-54, bumped by LEGION-52).
+ * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21). 2 —
+ * introduced by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from
+ * LEGION-52, also covering the pane contract including the credential file (`LEGION_GRANT_FILE`,
+ * LEGION-54); plugin release 1.23.0 is the first to declare 2 (every release through 1.22.2
+ * declares 1, or nothing before LEGION-21, and is refused).
  */
 export const LEGION_DAEMON_API_VERSION = 2;
 
