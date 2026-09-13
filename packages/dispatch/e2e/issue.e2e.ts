@@ -462,22 +462,30 @@ test("issue header gives the title the row's free space beside a short details l
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
+  const title = page.getByRole("heading", { level: 1 });
+  const measureTitle = () =>
+    page.evaluate(() => {
+      const heading = document.querySelector("[data-testid=issue-header] h1") as HTMLElement;
+      const header = document.querySelector("[data-testid=issue-header]") as HTMLElement;
+      const style = getComputedStyle(header);
+      return {
+        clipped:
+          heading.scrollHeight > heading.clientHeight || heading.scrollWidth > heading.clientWidth,
+        contentWidth:
+          header.clientWidth -
+          Number.parseFloat(style.paddingLeft) -
+          Number.parseFloat(style.paddingRight),
+        width: heading.getBoundingClientRect().width,
+      };
+    });
   try {
     // Below 1280 the details line shares the row with the title once it fits beside the state
     // controls; the title must still take the rest of the row rather than split it with the line.
     for (const width of [1024, 1200, 1279]) {
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
-      const title = page.getByRole("heading", {
-        level: 1,
-        name: "Header keeps its title readable",
-      });
-      await expect(title).toBeVisible();
-      const clipped = await title.evaluate(
-        (element) =>
-          element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth
-      );
-      expect(clipped, `title clipped at ${width}px`).toBe(false);
+      await expect(title).toHaveText("Header keeps its title readable");
+      expect((await measureTitle()).clipped, `title clipped at ${width}px`).toBe(false);
       if (width === 1024) {
         const shot = testInfo.outputPath("issue-header-title-1024.png");
         await page.screenshot({ path: shot });
@@ -485,6 +493,38 @@ test("issue header gives the title the row's free space beside a short details l
           contentType: "image/png",
           path: shot,
         });
+      }
+    }
+
+    // A busy details line (whose-turn badge, one label, Route, Subscribers) that fits beside a
+    // 12rem title but not beside the whole title: just below 1280 the title must keep at least
+    // half the card rather than share the row and drop to its minimum. The line without the
+    // GitHub link is the one that used to squeeze (with the link it was too wide to share).
+    await patchIssue(issue.key, {
+      labels: ["api"],
+      title: "Migrate the issue header to a single row",
+    });
+    await createAsk(issue.key, { question: "Which layout?" }, session);
+    await subscribeSession(issue.key);
+    for (const withLink of [false, true]) {
+      await patchIssue(issue.key, {
+        external_links: withLink
+          ? [{ kind: "github_pr", url: "https://github.com/sjawhar/legion/pull/1051" }]
+          : [],
+      });
+      for (const width of [1265, 1279]) {
+        await page.setViewportSize({ height: 800, width });
+        await page.goto(`/issues/${issue.key}`);
+        await expect(title).toHaveText("Migrate the issue header to a single row");
+        await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+        await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
+        const measured = await measureTitle();
+        const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
+        expect(measured.clipped, `title clipped at ${label}`).toBe(false);
+        expect(
+          measured.width,
+          `title ${measured.width}px of a ${measured.contentWidth}px card at ${label}`
+        ).toBeGreaterThanOrEqual(measured.contentWidth / 2);
       }
     }
   } finally {

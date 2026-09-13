@@ -196,6 +196,13 @@ export function IssueHeader({
     }
   };
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
+  // The title block's flex-basis is its full text width (flex-auto), so the state controls and
+  // the details line share its row only when they fit beside the whole title; otherwise they
+  // wrap beneath it and the title is never squeezed. Below md the state row is full-width, and
+  // from xl the title always has its own row; while editing, the input takes the whole row too.
+  const titleBlockBasis = editingTitle
+    ? "basis-full 2xl:basis-auto"
+    : "xl:basis-full 2xl:basis-auto";
 
   return (
     <header className={`mb-3 min-w-0 rounded-xl border p-3 ${card}`} data-testid="issue-header">
@@ -217,7 +224,9 @@ export function IssueHeader({
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex min-w-[12rem] flex-1 flex-col gap-2 sm:flex-row sm:items-start xl:basis-full 2xl:basis-auto">
+        <div
+          className={`flex min-w-0 flex-auto flex-col gap-2 sm:flex-row sm:items-start ${titleBlockBasis}`}
+        >
           <p
             className={`self-start shrink-0 rounded-md px-2.5 py-1.5 font-mono text-sm font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
           >
