@@ -1,0 +1,63 @@
+{
+  "verdict": "comment",
+  "event": "COMMENT",
+  "head": "614eefeef587322eb605ff65583f951c0734f3a3",
+  "review": {
+    "id": 5190174804,
+    "url": "https://github.com/sjawhar/legion/pull/1008#pullrequestreview-5190174804",
+    "state": "COMMENTED",
+    "author": "legion-reviewer[bot]"
+  },
+  "pr": {
+    "number": 1008,
+    "url": "https://github.com/sjawhar/legion/pull/1008",
+    "branch": "legion/LEGION-38",
+    "mergeable": "MERGEABLE"
+  },
+  "thermo": "skipped: docs-only PR (template omits the Thermo line)",
+  "threadsOpened": [],
+  "checks": [
+    {
+      "n": 1,
+      "name": "CI line names exactly the Tests workflow's jobs and is fillable verbatim",
+      "result": "pass",
+      "evidence": ".github/workflows/pr-and-main.yaml name: Tests, jobs pr-title/lint/typecheck/test, no rollup; SKILL.md:223 = **CI:** `Tests` run <run-id> — jobs lint, pr-title, typecheck, test all success at <head-sha>."
+    },
+    {
+      "n": 2,
+      "name": "implementer.md paragraph one sentence, meaning unchanged, within file width",
+      "result": "pass",
+      "evidence": "Substituting the old clause back reproduces main's paragraph byte-for-byte; paragraph lines 62-96 cols (main had a 97-col line); file's other >96 lines pre-exist unchanged."
+    },
+    {
+      "n": 3,
+      "name": "grep -rn pr-checks-result skills/ packages/pi-envoy/roles/ prints nothing",
+      "result": "pass",
+      "evidence": "empty output, exit 1"
+    },
+    {
+      "n": 4,
+      "name": "diff from merge base touches only the two markdown files plus .legion/*.json",
+      "result": "pass",
+      "evidence": "merge base a0d0f33f5952; stat: .legion/implement.json, .legion/test.json, packages/pi-envoy/roles/implementer.md (+7/-7), skills/legion-worker/SKILL.md (+1/-1)"
+    },
+    {
+      "n": 5,
+      "name": "PR body READY format, facts verified on GitHub, Dispatch line, LEGION-18 named",
+      "result": "pass",
+      "evidence": "Dispatch: LEGION-38 present; CI/Threads/E2E/Fast-follow/Chain present, Thermo omitted; run 34746259514 Tests success at 96758d47, 4 jobs success; head 614eefee green too (run 34746670620); reviewThreads.totalCount 0; E2E head 96758d47 is the parent of 614eefee; LEGION-18 #953 merge commit d07086e1ee952fb7b93fd86396b73f05e068a64b named and is an ancestor."
+    },
+    {
+      "n": 6,
+      "name": "PR title is a conventional-commit subject",
+      "result": "pass",
+      "evidence": "matches ^[a-z]+(\\([^)]+\\))?!?: .+; pr-title job success at 614eefee"
+    }
+  ],
+  "notesForCleanupPush": "Body CI line cites 96758d47; refresh it to the cleaned head's Tests run when the .legion/ deletion lands.",
+  "fastFollow": "docs/solutions/legion/text-only-skill-pr-mechanics.md:111-113 and docs/solutions/legion/worker-pane-shell-gotchas.md:401 still describe the workaround for the old template line; wording only, retro's docs/solutions commit can update them.",
+  "nextStep": "architect sends the implementer to push the .legion/ deletion; reviewer re-reviews that head and approves it by SHA",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T08:08:29.210Z"
+}
