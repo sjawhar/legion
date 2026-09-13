@@ -83,6 +83,23 @@ implementer, tester, merger — runs as the **implement** App (`github_apps.impl
 git identity lease minted at `/worker/started` — goes through that mapping, so the App a command
 acts as is the App of the role that runs it, never a choice the command makes.
 
+A phase worker's commit identity is its pane environment, never a config write. `launchWorker`
+(`processes.ts`) resolves the role's App identity from the token lease
+(`appRoleForLegionRole` → `TokenManager.getToken(...).gitIdentity`) before the pane opens and
+sets `JJ_USER`/`JJ_EMAIL` — which jj reads over every config scope — and
+`GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` for plain git
+(`gitIdentityEnv` in `github-app-env.ts`, the same mapping `buildRoleEnv` uses for the daemon's
+own commands) on every pane the worker spawn path opens, sub-architects included; the root
+architect and controller panes, which never commit, carry none. A token-manager failure fails
+the launch (counted in `launchFailures`): no pane opens without an identity. Every issue
+workspace is a `jj workspace` of the one shared clone, and jj's repository-scoped config is a
+single file for all of them (`~/.config/jj/repos/<hash>/config.toml`), so an identity written
+there — as the extension did at every worker boot before LEGION-44 — set the author and
+committer for every tree's commits at once. Provisioning (`packages/workspace`,
+`provisionIssueWorkspace`) probes that scope on every launch and removes a leftover `user.name`
+or `user.email` once, with a `[legion] removing repository-scoped jj …` log line; nothing writes
+them again.
+
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it
 holds `pull_requests: write` and no `contents` permission — so it can post reviews and reply on

@@ -149,9 +149,11 @@ Commit attribution is automatic: the extension exports a `JJ_CONFIG` overlay whe
 session starts, so every jj commit you make carries an `Omp-Session: <this-session-id>`
 trailer with no action from you. Do not add attribution trailers by hand.
 
-The jj configuration already supplies your phase's plus-addressed author and committer
-identity. Do not override Git identity configuration. Your session receives the credential
-capability it needs; invoke GitHub through the credential helper:
+Your pane's environment already supplies your phase's author and committer identity
+(`JJ_USER`/`JJ_EMAIL` and the Git author/committer variables, set by the daemon when it opened
+the pane). Do not set or override identity in jj or Git configuration: the repository-scoped jj
+config is one file shared by every issue workspace of the clone. Your session receives the
+credential capability it needs; invoke GitHub through the credential helper:
 
 ```bash
 legion gh -- <gh args…>
