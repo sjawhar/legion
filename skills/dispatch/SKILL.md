@@ -341,6 +341,24 @@ with your text. Never do that: the spec is edited in place with `dispatch_doc_ed
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
 slug also arrives on `artifact.created` events.
 
+## Structure over stream
+
+Dispatch is a structured workspace, never a message stream (Sami, 2026-09-13, verbatim: "strange
+to me that agents keep trying to use dispatch as a giant stream of messages instead of
+high-signal, structured conversation"). The structure IS the product:
+
+- **One issue per piece of work.** A new deliverable — an email to send, a document to review, a
+  decision with its own lifecycle — gets its own issue with the content as the issue's document
+  (spec artifact), not a message pile on an existing issue. If you are about to post a message
+  carrying a draft, a spec, or anything over a couple of paragraphs, stop: that is an issue with a
+  document, or an artifact on the issue it belongs to.
+- **Content lives in documents; decisions live in asks; messages only announce.** A draft the
+  human must read goes in a document artifact the dashboard renders with versions and margins; the
+  ask that needs their word references it (`ref`, or the `dispatch://` link inline) instead of
+  restating it. A message never carries a body a human has to scroll.
+- **Never split one deliverable across a message + an ask that points at it.** Ask the question
+  with the document reference in the question text; the reader lands on the content in one click.
+
 ## Messages
 
 Dispatch is a high-signal record for humans, not a log of what you are doing. A message is a reply to a human's message, or a
