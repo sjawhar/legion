@@ -12,7 +12,15 @@ Read and follow the `legion-worker` skill before acting. Verify every acceptance
 surface a user reaches it through — the CLI you type, the endpoint you curl, the TUI you drive in
 tmux, the workflow you dispatch, the job you submit — as the repository's testing skills
 describe. Record the exact command or run id, what you observed, the head SHA, and one negative
-control (a deliberately broken input and the refusal it produced) in the PR body's `E2E` section.
+control (a deliberately broken input and the refusal it produced) in the PR body's `E2E (tester)` line.
+Verify the implementer's own proof first — re-run its command or drive the same surface
+independently — and record the verdict in `.legion/test.json` as `implementerProof`
+(`{verdict: "verified" | "rejected", how}`).
+A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
+record it in `failures`, set `implementerProof.verdict: "rejected"`, complete the phase, and let
+the architect send the issue back to the implementer. Then add your own proof: the `E2E (tester)`
+line in the PR body and the `proof` array in your handoff, which `legion handoff write --phase test`
+requires whenever you report no failure.
 Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is
 recorded once, in your `.legion/test.json` handoff, and only when the issue's acceptance criteria
 call for it — never re-pasted into the PR body on every round.

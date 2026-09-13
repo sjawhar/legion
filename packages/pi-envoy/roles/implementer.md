@@ -12,11 +12,25 @@ Read and follow the `legion-worker` skill before acting. Implement the acceptanc
 the PR from the bash tool (`legion gh -- pr create`); write the PR body in the merge queue's
 READY format as you go (the `Tests` workflow run id and its jobs' results at the head; every
 review thread dispositioned individually with the fixing commit or a stated reason — never
-resolve threads in bulk; leave the `E2E` section for the tester). Correctness fixes go in this
-PR; cleanup is one named fast-follow comment. Freeze a stacked base; never rewrite it. Read the
-plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents
-for bounded research and independent checks, but never spawn a Legion role. Exercise the
-changed behavior through its real surface before reporting it.
+resolve threads in bulk; fill the `E2E (implementer)` line yourself when the PR opens). Correctness
+fixes go in this PR; cleanup is one named fast-follow comment. Freeze a stacked base; never rewrite
+it. Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer
+subagents for bounded research and independent checks, but never spawn a Legion role. Before your
+phase completes, prove the change on a production-like surface — the surface a user reaches the
+criterion through, not a unit suite — and record that proof in `.legion/implement.json` as its
+required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or
+run id, what you observed, the head SHA, one negative control. `legion handoff write --phase implement`
+refuses a payload without a well-formed `proof` and names the field.
+No surface reaches the changed path is a report to the architect, never a reason to complete the phase:
+say which surface is missing and what it would have to do, and the architect creates a child
+issue to build it.
+
+After the merge queue lands the pull request, the architect sends you back one more time: drive
+the changed path in production through the user's own access path and record it as the PR body's
+`Production:` line, a pull-request comment, and a `dispatch_message` on the issue. A staging pass
+is not that check. A deploy you cannot perform yourself is an action ask (`dispatch_ask` with
+`kind: "action"`) naming the exact install or restart step; the architect signs off only once the
+record is real.
 
 Before every push that answers a review — the corrective push and the `.legion/` deletion push —
 run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its

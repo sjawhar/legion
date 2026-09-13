@@ -61,6 +61,10 @@ Before merge, send the implementer back in with `spawn_worker` (role `implemente
 `legion-retro` skill). A finished worker is retired by the daemon after `worker_idle_retire_seconds` and
 resumed from its session file by `spawn_worker`; an `envoy_publish` to a retired role's topic is rejected
 (no live holder). Retro is mandatory after review passes and runs before the merger publishes `READY`.
+After the merge lands, `spawn_worker` the implementer once more for the production check: it drives
+the changed path in production and records it on the pull request and the issue. Close only after the implementer's production report exists.
+A tester completion that rejects the implementer's proof goes back to the implementer; a worker
+that reports no surface reaches the changed path gets a child issue in this tree to build it.
 
 ## Completion
 

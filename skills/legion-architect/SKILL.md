@@ -222,7 +222,9 @@ file or rewrite the reviewer-approved head after cleanup.
 
 Sign off only when scope is fully met, integration evidence is current, corrective work
 is complete, review is clean, retro completed, and no necessary work was silently
-deferred. Make the sign-off comment explicit about that evidence.
+deferred. Make the sign-off comment explicit about that evidence. Sign-off also requires the
+implementer's production report: a `Production:` line that names what was driven, how, what was
+observed, and the merge commit — never a `pending` one, and never a staging pass.
 
 Preserve this order exactly:
 
@@ -242,6 +244,11 @@ Preserve this order exactly:
    merges. The merge queue merges under its own authority and the repository's own rules
    (branch protection, CODEOWNERS); whether a human must approve first is that repository's
    setting, not Legion's, and you never ask for or wait on such an approval.
+5. the merge queue merges; you then `spawn_worker` the **implementer** once more with the
+   production-check task. It drives the changed path in production through the user's own access
+   path and records what it saw on the pull request and on this issue. Close only after the implementer's production report exists.
+   A defect it finds is a corrective child issue of this tree, not a note on a closed one; a deploy
+   the implementer cannot perform is its action ask, and the issue waits for it.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a rebase whose fingerprint (the `legion-worker`
@@ -264,11 +271,11 @@ and the implementer's and merger's runs of the command close every accepted one.
 
 ## 7. Close
 
-After the merge result and sign-off are recorded, post the sign-off and close this issue
-through the Legion write surface:
+After the merge result, the implementer's production report, and sign-off are recorded, post the
+sign-off and close this issue through the Legion write surface:
 
 ```text
-dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, and merge>" })
+dispatch_comment({ issue: "LEGION-40", body: "<sign-off: scope, integration evidence, review, retro, merge, and the implementer's production report>" })
 legion({ op: "set_status", issue: "LEGION-40", status: "done" })
 ```
 
@@ -289,13 +296,13 @@ corresponding lifecycle procedure.
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
 | `design-approved` | Payload `{type:"design-approved"}`. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
 | `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec, call `dispatch_request_approval` again, and stay parked; the gate is closed. |
-| `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. |
+| `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. An `implementer` completion that follows the merge is its production report: read the record on the pull request and the issue, then run step 7 — the issue is already at `retro`, the daemon writes no status for this completion, and you set `done` yourself. A `tester` completion whose handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof, goes back to the **implementer** with that finding — never forward to the reviewer, and never by supplying the proof from another role. A worker that reports no surface reaches the changed path gets a child issue in this tree (infrastructure, tooling, or a skill) and a resume once it lands; that report is never a reason to advance the phase. |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. This role's task is queued for promotion — either the deployment's worker cap is full, or the live worker acknowledged the task without starting a turn and the daemon is retrying it (counted; the worker is replaced after three such failures, still with the same task). Do not respawn or retry — wait for `worker-started`. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
 | `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-complete`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; that `spawn_worker` returns the issue to `in_progress` on its own (the daemon writes it for a corrective implementer whenever the PR's latest recorded review is changes requested, a human's after approval included), so you set nothing by hand; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. `state: "approved"` on a rebased head whose body names an unchanged fingerprint is that confirmation: proceed to retro if it has not run, otherwise to the merger — never to a second retro or test round. |
 | `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count; a push the daemon cannot classify (a listener without `changed_paths`, a list capped at 100, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
-| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. This is your cue for step 7: post the sign-off comment naming that merge commit and set the issue `done`. Nothing else follows a merge. |
+| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. `gates[LEGION_TREE].open` is the design gate's current state: `true` means the root spec is approved at its current version and you may spawn; `false` (or no `open` key, meaning no gate is registered) means the sequence in section 1 still applies. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. Then compare `childCounts[LEGION_ISSUE].open` (the children not `done`) with `legion state` and Dispatch: any **open** released child — `todo` through `retro` — with no architect role claim gets `spawn_worker` for its architect, a `child-adopted` or `child-status` wake you missed while not live; a `done` child gets nothing, whether or not a lingering legacy tree of its own still shows in `legion state`. |

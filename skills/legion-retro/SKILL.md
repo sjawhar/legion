@@ -28,6 +28,10 @@ retrospective's durable output.
    the change in production and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
    "the agent that developed it should be responsible for testing in production"). The
    architect's sign-off waits for that record.
+   The record is the pull request's `Production:` line, one pull-request comment, and a
+   `dispatch_message` on the issue, each naming what was driven, how, what was observed, and the
+   merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
+   owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
 Retro's commit sits above the reviewer's approved head and the approval stands: a commit that
 changes only `docs/solutions/` does not void it, and the tree goes from retro to the merger —
@@ -40,10 +44,12 @@ before step 3. The design gate is not a substitute for review and retro.
 ## Two perspectives
 
 1. Re-read the issue, its acceptance criteria, the PR, test evidence, and review evidence.
-   Confirm the PR's `E2E` line links a pre-merge proof on a production-like surface (a devN
-   stack, staging, or a local stack with real migrations). If it links only a unit suite or
-   nothing, the retro's first durable learning is that gap, and the issue goes back to the
-   tester before `READY`.
+   Confirm the PR carries both proofs: the implementer's own `E2E (implementer)` line and the tester's `E2E (tester)` line,
+   each naming a production-like surface (a scratch daemon, a smoke rig, a sandbox repository, a devN
+   stack, staging, or a local stack with real migrations), a command or run id, an observation, a head
+   SHA, and a negative control. If either is missing, or links only a unit suite, the retro's first
+   durable learning is that gap and the issue goes back — to the implementer for its own proof, to the
+   tester for the tester's — before `READY`.
    Do not rebase or create a new branch; work on the existing issue branch.
 2. Spawn one fresh-eyes subagent. Give it the issue and PR, ask it to inspect the diff and
    return concrete reusable learnings, and require it to return analysis rather than edit files.
@@ -75,8 +81,9 @@ related_issues:
 Commit the documentation on the existing issue branch, advance its existing bookmark, and push
 that branch. Do not create a replacement branch or bookmark. Then post one Dispatch message on
 the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
-issue, and the `gh` shim refuses every GitHub-issue write — naming the documents and the
-one-to-three most useful takeaways. The message must carry this revived implementer's structured
+issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
+one-to-three most useful takeaways, the two proofs you read, and the production check that
+follows the merge. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
 
 ```ts
@@ -89,6 +96,10 @@ dispatch_message({
 
 **Key takeaways:**
 - <reusable lesson>
+
+**Proofs read:** implementer <surface/command>, tester <surface/command>.
+
+**Production check:** <what the implementer will drive after the merge, or the action ask it opened>
 
 <!-- legion: {"session":"<session-id>","phase":"retro"} -->`,
 })
@@ -105,7 +116,8 @@ Before returning, verify all of the following:
 
 - The reviewer cleanup commit remains below the retro documentation commit, and the reviewer's
   approval of that cleanup head stands: the merger accepts the approved head plus this commit.
-- The learning documents and the Dispatch message both exist.
+- The learning documents and the Dispatch message both exist (never a GitHub issue comment).
+- Both proofs were read, and any gap in either is recorded as a learning.
 - No `.legion` file was created or modified by retro.
 - The fresh-eyes analysis was considered alongside the implementer's context.
 - The merger remains a subsequent step, not work performed by retro.

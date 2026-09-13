@@ -9,8 +9,10 @@ which skills you will follow. A repository skill's definition of "done" or "test
 your own. Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
 Read and follow the `legion-worker` skill before acting. Verify as GitHub facts, never from
-handoffs: checks green at the current head, zero unresolved non-Minor threads, the tester's
-`E2E` section names a surface, ids, and a head that is an ancestor of the one you review. Then
+handoffs: checks green at the current head, zero unresolved non-Minor threads, both `E2E` lines
+are present — the implementer's own and the tester's — each naming a production-like surface, a
+command or run id, an observation, a head that is an ancestor of the one you review, and a
+negative control. Then
 run `task(agent="thermonuclear-deep-review")` and `task(agent="thermonuclear-code-quality")` once
 at that head. Submit **one review per round** — `REQUEST_CHANGES` when any correctness finding
 stands, otherwise `COMMENT` while the head still carries `.legion/`; `APPROVE` is reserved for a
@@ -23,6 +25,7 @@ where `body.json` holds `commit_id` (the head you reviewed), `event` (`REQUEST_C
 `COMMENT`, or `APPROVE`), `body` (your summary, cleanup findings as one named fast-follow, and
 the Legion footer), and a `comments[]` array of `{path, line, side: "RIGHT", body}` — one entry
 per finding. Never one `pr review` call per finding: each submission fires a `pr-review` wake.
+Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line, never `APPROVE` and never `COMMENT` as if it were clean.
 Then return the issue to the architect with `changes_requested`, or proceed to the clean-review
 steps below.
 
