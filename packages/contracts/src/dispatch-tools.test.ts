@@ -115,6 +115,17 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
+  test("explains that an ask ref is appended as a rendered link", () => {
+    const tool = dispatchToolSpecs.find((candidate) => candidate.name === "dispatch_ask");
+    if (tool === undefined) throw new Error("dispatch_ask spec is missing");
+    const argumentsSchema = tool.arguments(schemaApi) as unknown as {
+      ref: z.ZodOptional<z.ZodString>;
+    };
+    expect(argumentsSchema.ref.unwrap().description).toBe(
+      "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
+    );
+  });
+
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
     const schema = schemaFor("dispatch_search");
 

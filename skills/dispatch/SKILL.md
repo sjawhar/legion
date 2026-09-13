@@ -111,6 +111,7 @@ dispatch_ask({
   issue?,
   project?,
   artifact?,
+  ref?,
   question,
   options?: { label, description? }[],
   multiple?,
@@ -119,6 +120,8 @@ dispatch_ask({
 })
 ```
 It returns `details` `{ issue, topic, ask }` for an issue or `{ project, artifact, document, topic, ask }` for a project document.
+
+References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
 An ask is read on a phone by someone who has not read the code. Open with one or two plain
 sentences: what needs deciding and why it matters now. Each option is a button with a label and

@@ -234,6 +234,17 @@ function askKind(args: ToolArguments): CreateAskInput["kind"] {
   throw new Error("kind must be action");
 }
 
+function askQuestionWithRef(args: ToolArguments): string {
+  const question = stringArg(args, "question");
+  const ref = optionalString(args, "ref");
+  if (ref === undefined || question.includes(ref)) return question;
+  const withRef = `${question}\n\nRef: ${ref}`;
+  if (withRef.length > 800) {
+    throw new Error("question plus ref must be at most 800 characters");
+  }
+  return withRef;
+}
+
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   const projectDocument = ref.match(
     /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/
@@ -324,6 +335,13 @@ async function resolveOwnerArguments(
 ): Promise<{ args: ToolArguments; ref: ParsedDispatchRef | null; owner: Owner | null }> {
   if (issueFreeTools[tool] === true) return { args, ref: null, owner: null };
   const refArgument = args.ref;
+  if (
+    tool === "dispatch_ask" &&
+    typeof refArgument === "string" &&
+    !refArgument.startsWith("dispatch://")
+  ) {
+    throw new Error("ref must be a dispatch:// reference");
+  }
   const ref =
     typeof refArgument === "string"
       ? (parseDispatchRef(refArgument) ??
@@ -856,7 +874,7 @@ export async function executeDispatchTool(
       const kind = askKind(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const askInput = {
-        question: stringArg(args, "question"),
+        question: askQuestionWithRef(args),
         ...(kind === undefined ? {} : { kind }),
         ...(Array.isArray(options)
           ? { options: options as NonNullable<CreateAskInput["options"]> }

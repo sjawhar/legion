@@ -97,6 +97,16 @@ test("message routes round-trip through the dispatch:// reference and the browse
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/messages/message-1"));
 });
 
+test("ask routes round-trip through the dispatch:// reference and the browser path", () => {
+  const route = { id: "ask-1", key: "CORE-1", kind: "ask" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/ask/ask-1")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/ask/ask-1");
+  expect(parseIssuePath("/issues/CORE-1/asks/ask-1")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/asks/ask-1"));
+  expect(issueTabForRoute(route, undefined)).toBe("conversation");
+});
+
 test("the conversation owns the /conversation path and still answers the retired /log path", () => {
   expect(parseIssuePath("/issues/CORE-1/conversation")).toEqual({
     key: "CORE-1",
