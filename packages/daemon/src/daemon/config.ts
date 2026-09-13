@@ -5,7 +5,8 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 
-export type GitHubAppRole = "implement" | "review";
+export const GITHUB_APP_ROLES = ["implement", "review"] as const;
+export type GitHubAppRole = (typeof GITHUB_APP_ROLES)[number];
 
 export interface GitHubAppRoleConfig {
   appId: string;
@@ -646,15 +647,25 @@ function resolvePrivateKeySecret(name: string, field: string): string {
   return decoded;
 }
 
+/** Both Apps are required: `appRoleForLegionRole` (`github-apps.ts`) sends the root architect to
+ * the review App and the implementer to the implement App, so a deployment can do nothing with
+ * only one. Presence is checked for both roles before any role's private key is resolved, so a
+ * missing App is refused before a `private_key_command` or `secrets` call could run — and
+ * `--check-config` (`resolveSecrets: false`) reports it without executing anything. */
 function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConfig | undefined {
   if (value === undefined || value === null) return undefined;
   const parsedApps = UnknownRecordSchema.safeParse(value);
   if (!parsedApps.success) throw new Error("github_apps must be a mapping");
+  for (const role of GITHUB_APP_ROLES) {
+    const roleValue = parsedApps.data[role];
+    if (roleValue === undefined || roleValue === null) {
+      throw new Error(`github_apps.${role} is required`);
+    }
+  }
 
   const apps: GitHubAppsConfig = {};
-  for (const role of ["implement", "review"] as const) {
+  for (const role of GITHUB_APP_ROLES) {
     const roleValue = parsedApps.data[role];
-    if (roleValue === undefined || roleValue === null) continue;
     const parsedRole = UnknownRecordSchema.safeParse(roleValue);
     if (!parsedRole.success) throw new Error(`github_apps.${role} must be a mapping`);
 
@@ -1231,8 +1242,13 @@ export function resolveDaemonConfig(
     opts.cliOverrides?.githubApps,
     fileGitHubApps(fields),
     undefined,
-    {}
+    undefined
   );
+  if (githubApps.value === undefined) throw new Error("github_apps is required");
+  // The file loader already refused a section missing a role; a CLI override is checked here.
+  for (const role of GITHUB_APP_ROLES) {
+    if (githubApps.value[role] === undefined) throw new Error(`github_apps.${role} is required`);
+  }
   const stateDir = resolveValue(
     opts.cliOverrides?.stateDir,
     fileString(fields, "stateDir"),

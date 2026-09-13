@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
-import type { DaemonConfig } from "../config";
+import type { DaemonConfig, GitHubAppRole } from "../config";
 import type { DaemonEnvironment } from "../environment";
 import * as daemonIndex from "../index";
 import { type LegionState, newLegionState } from "../legion-state";
@@ -266,7 +266,10 @@ function config(stateDir: string): DaemonConfig {
     slowCommandTimeoutSeconds: 300,
     workerStreamPort: 0,
     gates: { design: "root-issues" },
-    githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+    githubApps: {
+      implement: { appId: "1", privateKey: "test", installations: {} },
+      review: { appId: "2", privateKey: "test", installations: {} },
+    },
     dispatchUrl: "http://127.0.0.1:18766",
     dispatchToken: "test-dispatch-token",
     stateDir,
@@ -1405,7 +1408,9 @@ describe("startDaemon", () => {
     let resync: (() => void) | undefined;
     let resyncComplete: Promise<void> | undefined;
     let daemon: daemonIndex.DaemonHandle | undefined;
-    let tokenCalls = 0;
+    // Boot's own App-token leases (the startup probes) succeed; every lease after `startDaemon`
+    // resolves belongs to the resync CI fetch under test and fails.
+    let booted = false;
     console.log = (...values: unknown[]) => logs.push(values.join(" "));
 
     try {
@@ -1428,10 +1433,7 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => {
-              tokenCalls += 1;
-              // Boot takes two leases (the implement- and review-App startup probes); every
-              // later lease belongs to the resync CI fetch under test.
-              if (tokenCalls > 2) throw new Error("GitHub App token request failed");
+              if (booted) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
                 expiresAt: "2026-08-25T00:00:00.000Z",
@@ -1456,6 +1458,7 @@ describe("startDaemon", () => {
           now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         },
       });
+      booted = true;
 
       if (!resync) throw new Error("Daemon did not schedule resync");
       resync();
@@ -3159,13 +3162,11 @@ describe("startDaemon", () => {
   it("refuses to start when only the implement App is configured, naming the review App, before state is loaded", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
-    // A `legion.yaml` without `github_apps.review`: `TokenManager.getToken("review", …)` throws
-    // `role_not_configured: review` while the implement lease succeeds. Stubbed at the same
-    // `getToken` seam every other boot test in this file uses.
-    const leased: string[] = [];
+    // A `legion.yaml` whose review App key cannot mint a token (the config loader already refuses
+    // a missing section): `TokenManager.getToken("review", …)` throws while the implement lease
+    // succeeds. Stubbed at the same `getToken` seam every other boot test in this file uses.
     const tokenManager = {
-      getToken: async (role: "implement" | "review") => {
-        leased.push(role);
+      getToken: async (role: GitHubAppRole) => {
         if (role === "review") throw new Error("role_not_configured: review");
         return {
           token: "test-token",
@@ -3192,7 +3193,6 @@ describe("startDaemon", () => {
           },
         })
       ).rejects.toThrow("role_not_configured: review");
-      expect(leased).toEqual(["implement", "review"]);
       expect(loadedState).toBeFalse();
       // The instance lock was released: a start with both Apps on the same state dir works.
       const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));

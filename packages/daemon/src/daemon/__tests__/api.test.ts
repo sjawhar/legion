@@ -10,7 +10,6 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
-import type { CommandRunner } from "../../state/fetch";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { EnvoyPublishError } from "../api/http";
@@ -91,7 +90,6 @@ interface WorkerSessionResponse {
 describe("Legion HTTP API", () => {
   let api: LegionApi | undefined;
   let state: LegionState;
-  let commands: string[][];
   let publications: Array<{ topic: string; payload: string }>;
   let tokenRoles: string[];
   let releaseSlots: IssueKey[];
@@ -112,7 +110,6 @@ describe("Legion HTTP API", () => {
   let controllerSecret: string;
 
   beforeEach(() => {
-    commands = [];
     publications = [];
     tokenRoles = [];
     releaseSlots = [];
@@ -163,7 +160,6 @@ describe("Legion HTTP API", () => {
   afterEach(() => api?.stop());
 
   async function start(options?: {
-    runner?: CommandRunner;
     gates?: { design: "root-issues" | "off" };
     state?: LegionState;
     saveState?: () => Promise<void>;
@@ -181,17 +177,8 @@ describe("Legion HTTP API", () => {
     workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
-    const runner =
-      options?.runner ??
-      ((async (command) => {
-        commands.push(command);
-        return { stdout: "", stderr: "", exitCode: 0 };
-      }) satisfies CommandRunner);
-
     const deps: LegionApiDeps = {
       state: options?.state ?? state,
-      runner,
-      baseEnv: {},
       dispatchClient: options?.dispatchClient ?? fakeDispatchClient(),
       tokenManager: {
         getToken:

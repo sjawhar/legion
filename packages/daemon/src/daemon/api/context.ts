@@ -1,5 +1,4 @@
 import type { IssueKey } from "@legion/contracts";
-import type { CommandRunner } from "../../state/fetch";
 import type { LegionApiConfig, LegionApiDeps } from "../api";
 import type { LegionState } from "../legion-state";
 import type { CapabilityService } from "./auth";
@@ -65,7 +64,6 @@ export interface RouteContext {
   deps: LegionApiDeps;
   now: () => number;
   save: () => Promise<void>;
-  runner: CommandRunner;
   grantTtlMs: number;
   auth: CapabilityService;
   github: GitHubService;
