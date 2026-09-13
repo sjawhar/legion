@@ -1,80 +1,134 @@
 {
   "pr": "https://github.com/sjawhar/legion/pull/1087",
-  "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
-  "prHeadSha": "725226e70c96ca145e068208b6516c555e8e1509",
-  "review": "https://github.com/sjawhar/legion/pull/1087#pullrequestreview-5196476433",
-  "reviewEvent": "REQUEST_CHANGES",
-  "verdict": "changes_requested",
-  "critical": 1,
+  "headSha": "7de8ef078bb996859435888f9e3a92ea4ae1c756",
+  "prHeadSha": "4f93a4fe5baa9fcfeb7b5d416d3f73779950359c",
+  "round": 2,
+  "review": "https://github.com/sjawhar/legion/pull/1087#pullrequestreview-5196747584",
+  "reviewEvent": "COMMENT",
+  "verdict": "approved",
+  "verdictNote": "Clean at 7de8ef07; COMMENT, not APPROVE, because the head still carries .legion/. The approval goes on the head that differs from 4f93a4fe by the .legion/ deletion alone, named by SHA, after every thread shows isResolved true.",
+  "critical": 0,
   "important": 0,
-  "minor": 3,
-  "keyFindings": [
-    {
-      "severity": "critical",
-      "file": "packages/daemon/src/daemon/processes.ts:1911",
-      "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189654",
-      "description": "spawnRoot's new awaitClosingTrees can await the close that is running it: closeTreeLocked(T) -> releaseSlot(T) (:1821) -> beginPromotionSweep -> advancePromotionSweep -> await startRoot(next) (:2909) -> spawnRoot(next) -> awaitClosingTrees(next) -> await closingTrees.get(T), the same close's promise (closeTree deletes it only in .finally). Reachable when next is a child of T holding its own queued tree record (moved to todo while T lingered; first launch failed so spawnRoot's catch left it queued with a free slot) and T is re-admitted mid-close (the fifth new test's case). Reproduced on a scratch copy: closeTree never settles (timeout 5 s; record closed, child active, wait line logged, 0 provisioning commands); identical test with only the awaitClosingTrees line removed settles in 0.4 s with 12 provisioning commands. Effects: close never settles, isTreeGone(T) true for the daemon's lifetime, both spawns hang, promotionSweep.inFlight never returns to 0, drainSpawns()/stop() hang. Fix: never run the promotion cascade from inside a frame closingTrees still names (closeTreeLocked splices admission.active itself and closeTree kicks beginPromotionSweep after closingTrees.delete in .finally; or advancePromotionSweep skips a candidate whose parent chain names a closing tree and closeTree's .finally re-sweeps), plus the fake-runtime regression for this shape."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts:4243",
-      "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189663",
-      "description": "The `// Negative wait:` marker is the first of three comment lines, not the line directly above flushEventLoop(50) — the audit-miss shape docs/solutions/testing/await-the-event-not-a-tick-budget.md flags. The drain itself is a correct negative wait."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md:64",
-      "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189668",
-      "description": "The bullet quotes the `kept every workspace ...` line without the code's trailing ` (re-admitted while closing)` (processes.ts:3071). Quote the suffix or drop the parenthetical from the code (smaller; also removes a guess, since a `dead` record from a racing resurrection gets the same text)."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md:171",
-      "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189672",
-      "description": "`Until LEGION-84 lands` is stale: LEGION-84 is on main and provisionIssueWorkspace writes git.abandon-unreachable-commits=false before every fetch (workspace.ts:386-405); the new tests' own `jj config set` (workspace.test.ts:1628) is therefore redundant (harmless)."
-    }
-  ],
+  "minor": 0,
+  "keyFindings": [],
   "threads": {
-    "deadlock": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189654",
-    "marker": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189663",
-    "agents": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189668",
-    "docs": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189672"
+    "deadlock": {
+      "url": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189654",
+      "myReply": "Accepted: fixed in 21a77dc48a03",
+      "replyId": 4004416192
+    },
+    "marker": {
+      "url": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189663",
+      "myReply": "Accepted: fixed in 21a77dc48a03",
+      "replyId": 4004416404
+    },
+    "agents": {
+      "url": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189668",
+      "myReply": "Accepted: fixed in 21a77dc48a03",
+      "replyId": 4004416556
+    },
+    "docs": {
+      "url": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189672",
+      "myReply": "Accepted: fixed in 7de8ef078bb9",
+      "replyId": 4004416759
+    },
+    "resolved": "none yet; the implementer's `legion threads resolve --pr 1087 --repo sjawhar/legion` before the deletion push resolves each (newest comment is my Accepted:); I verify isResolved over GraphQL before approving"
   },
   "gateFacts": {
-    "ci": "PR head 725226e7: statusCheckRollup lint/typecheck/test (Tests) and pr-title (PR Title) all SUCCESS via `legion gh -- pr view 1087 --json statusCheckRollup`; tester names Tests run 34829005074, PR title run 34829004995",
-    "mergeable": "MERGEABLE / BLOCKED (review required) — no CONFLICTING, no rebase",
-    "threadsBefore": "0 review threads before this review",
-    "e2eImplementer": "present: real-jj driver on both binaries, commands quoted, head 0658feec, negative control = main@origin's workspace.ts (TypeError: removeIssueWorkspace is not a function)",
-    "e2eTester": "present: real-jj closeTree through the daemon's own runner on both binaries + driver re-run, head 0658feec (PR head 725226e7 named), negative control = the call site neutralised (`jj workspace list` still names the removed workspaces)",
-    "ancestry": "0658feec is the parent of 725226e7 (jj log ancestors(@,6))"
+    "ci": "PR head 4f93a4fe: statusCheckRollup lint/typecheck/test (Tests) and pr-title all SUCCESS; tester names Tests run 34834231712 / PR title 34834231663",
+    "mergeable": "MERGEABLE / BLOCKED (review required); no CONFLICTING, no rebase",
+    "e2e": "both lines present on the PR body; tester's names 7de8ef07 with the real-jj closeTree e2e re-run on both binaries",
+    "ancestry": "7de8ef07 is the parent of 4f93a4fe; 34d3a3bb (tester) is on the branch unpushed"
   },
-  "judged": {
-    "1_removeIssueWorkspace_order": "matches spec design and error table: list only when <clone>/.jj exists; jj log only when registered; rm before abandon/forget; abandon skipped on an empty set; forget only when registered; prune when the clone exists; second call runs only the list and returns removed:false. createWorkspace's `already (registered|exists)` branch repairs the directory-first crash shape (workspace.ts:255-268).",
-    "2_removeTreeWorkspaces": "at processes.ts:1813 after the StopFailed throw (:1801-1809) and before tree.status = closed (:1815); root removed unless backlog/icebox, descendants only at done; kept lines one each; failed removal logged once (error as second console.error arg, the file's convention) and the close proceeds; nothing removed when the record is not lingering (:3069) or rootForIssue moved (:3083-3087).",
-    "3_inFlightLaunches": "no cycle through inFlightLaunches: only trackLaunch (worker launches: deliverToWorker and the promotion dep) populates it; spawnRoot is tracked in `spawns`, awaited only by drainSpawns. The reading holds — but the promotion sweep cycle above is a different path to the same deadlock and is the blocking finding.",
-    "4_revset": "::<name>@ ~ ::(working_copies() ~ <name>@) ~ ::(bookmarks() | remote_bookmarks() | tags()) never lists a commit another working copy (default included), any bookmark target (all targets of a conflicted bookmark), a remote bookmark, or a tag reaches; ::main subtracted via main/main@origin/main@git; descendants of the set are rebased by the abandon step, never dropped.",
-    "5_legion143": "nothing pins it: the fifth test asserts the wait line, no forget/abandon, the intact directory, the kept-every line, and provisioning after the close — no final tree status, no status write, no retirement.",
-    "6_agents_md": "accurate to the code except the one quote (thread agents); the trailing parenthetical mismatch is a wording item, not a defect.",
-    "7_e2e_lines": "both present with surface, command, observation, head, negative control (gateFacts).",
-    "8_tests": "observable behaviour asserted (workspace list, worktree list, directory, other workspace's log, kept bookmark, log lines, tree status, removal-after-stop ordering); argv pins follow the package's fake-runner convention; console.error spies restored in finally in all three spying tests; the fifth test's positive waits are gates the fake resolves (stopArmed/stopGate) and its one drain is a genuine negative wait (marker shape is the minor)."
+  "fixVerified": {
+    "shape": "closeTreeLocked returns Promise<boolean>: splices treeKey out of admission.active after the closed mark with no sweep (:1840-1843); closeTree awaits closeTreeLocked(...).finally(closingTrees.delete) and only then beginPromotionSweep() when true (:1688-1700); second concurrent callers await the in-flight promise and return without sweeping",
+    "oncePerSlot": "exactly one sweep per close that released a slot: only the first-caller frame reads the boolean; releaseSlot is no longer called from the close",
+    "stopFailed": "the StopFailed throw (:1824) precedes the splice, so a failed close releases no slot and its rejected await never reaches the sweep; the new retry test pins admission.active still [root] after the rejection",
+    "otherCallers": "releaseSlot :747 unchanged; its callers recordRootExit :1521, launch-failed escalation :2328, beginLinger :2630, human-parked rollback :3261 are outside the diff",
+    "apiShape": "ProcessManager.closeTree still returns Promise<void>; LegionDaemonApi.closeTree in api.ts:84 unchanged",
+    "foldInGuard": "removeTreeWorkspaces keeps every workspace when status !== lingering or admission.active.includes(treeKey). A normal close never holds a slot: beginLinger releases at linger start, recordRootExit before reportRootExit's close; boot's demote loop (reconcileAdmission :700-710) touches only active records, so a lingering record holding a slot after a StopFailed retry keeps it across a restart — the guard reads durable state. The first removal test (done root/child, lingering, no slot) still removes.",
+    "ownRuns": "scratch /tmp/legion-104-reviewer/r2head (7de8ef07 processes.ts sha256 e61f2561… = workspace) → the seven LEGION-104 daemon tests 7 pass; /tmp/legion-104-reviewer/r2red (7de8ef07 tests over 725226e7's processes.ts, sha256 b376a431…) → the two new regressions 0 pass 2 fail: the promotion test on the 5 s timeout, the retry test on expect(forget).toBeFalse() Received: true"
   },
-  "thermo": {
-    "deepReview": "1 blocking (the promotion-sweep cycle), 4 minors: the lingering guard's blind spot after a StopFailed retry (:1802 rewrites lingering over a mid-close admit's active; the sweep's retry close would remove the re-admitted root's fresh workspace and also kills that root — LEGION-143's subject; suggested admission.active.includes(treeKey) beside the status), the list-then-abandon two-step window (spec design; abandoning by the revset would close it), commits above @ outside ::<name>@ (spec-conformant), the stale LEGION-84 sentence.",
-    "codeQuality": "no blocking findings; minors: the Negative-wait marker shape, the AGENTS.md quote, log-before-early-return forcing a `let` in removeIssueWorkspace, the repeated log subject phrase, the single-caller removeWorkspace wrapper, Pick-derived dep types."
+  "minorsLanded": {
+    "marker": "processes.test.ts: `// Negative wait:` directly above flushEventLoop(50), rationale above it",
+    "agentsQuote": "processes.ts:3095-3104 drops the parenthetical; AGENTS.md:64 quotes both kept-every reasons verbatim",
+    "docs": "docs/solutions bullet :171 states provisioning writes the setting before every fetch (LEGION-84); the removal test's own `jj config set` removed with a comment naming why the fetch keeps A's commits"
   },
+  "legion143": "Nothing pins it: the new tests assert the child's `jj workspace add`, its active record and locator, the wait lines, the StopFailed bookkeeping (lingering, active [root]), and the kept-every line — no final status of the reopened root, no status write, no retirement.",
+  "thermo": "No new pass in round 2; round 1's pass at 725226e7 stands (the corrective diff is the fix, its two regressions, and the three wording items).",
+  "fastFollow": "none",
+  "nextStep": "Implementer: `legion threads resolve --pr 1087 --repo sjawhar/legion` (four threads, newest comment is my Accepted:), then push exactly the .legion/ deletion; paste the resolve output into the PR body's Threads section. I approve that head by SHA once it differs from 4f93a4fe by the deletion alone and GraphQL shows every thread isResolved true. No handoff write after this one.",
   "observationsForArchitect": [
     "Recommend folding into LEGION-143: the StopFailed-retry blind spot of the `lingering` guard (a `state.admission.active.includes(treeKey)` check beside the status would cover it).",
     "Follow-up decision, not this PR: abandoning by the revset (`-r <ownCommitsRevset>`) instead of the listed ids would close the list/abandon window a concurrent provisioning fetch could hit, at the cost of the log line's count coming from the abandon output."
   ],
-  "fastFollow": "one named cleanup, may ride the corrective push: fold the Negative-wait marker (processes.test.ts:4243), make AGENTS.md:64 quote the kept-every line verbatim or drop the code's parenthetical (processes.ts:3071), reword the docs/solutions bullet at :171 and drop/annotate the tests' redundant `jj config set`.",
-  "repro": {
-    "scratch": "/tmp/legion-104-reviewer/{branch,nowait}/packages/daemon (copies of the tester's daemon-real; branch processes.ts sha256 b376a431… equals the workspace's); repro test text /tmp/legion-104-reviewer/repro-test.ts spliced before the `requests control directives` test",
-    "branch": "LEGION_E2E=1 bun test src/daemon/__tests__/processes.test.ts -t 'REVIEWER REPRO' → close outcome `timeout after 5s`, tree=closed child=active active=[LEGION-43], wait lines for LEGION-42 and LEGION-43 naming the close of LEGION-42, 0 jj commands; 0 pass 1 fail",
-    "nowait": "same with `await this.awaitClosingTrees(issue);` removed → close outcome `settled`, 12 jj commands, 1 pass"
+  "round1": {
+    "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+    "prHeadSha": "725226e70c96ca145e068208b6516c555e8e1509",
+    "review": "https://github.com/sjawhar/legion/pull/1087#pullrequestreview-5196476433",
+    "reviewEvent": "REQUEST_CHANGES",
+    "verdict": "changes_requested",
+    "critical": 1,
+    "important": 0,
+    "minor": 3,
+    "keyFindings": [
+      {
+        "severity": "critical",
+        "file": "packages/daemon/src/daemon/processes.ts:1911",
+        "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189654",
+        "description": "spawnRoot's new awaitClosingTrees can await the close that is running it: closeTreeLocked(T) -> releaseSlot(T) (:1821) -> beginPromotionSweep -> advancePromotionSweep -> await startRoot(next) (:2909) -> spawnRoot(next) -> awaitClosingTrees(next) -> await closingTrees.get(T), the same close's promise (closeTree deletes it only in .finally). Reachable when next is a child of T holding its own queued tree record (moved to todo while T lingered; first launch failed so spawnRoot's catch left it queued with a free slot) and T is re-admitted mid-close (the fifth new test's case). Reproduced on a scratch copy: closeTree never settles (timeout 5 s; record closed, child active, wait line logged, 0 provisioning commands); identical test with only the awaitClosingTrees line removed settles in 0.4 s with 12 provisioning commands. Effects: close never settles, isTreeGone(T) true for the daemon's lifetime, both spawns hang, promotionSweep.inFlight never returns to 0, drainSpawns()/stop() hang. Fix: never run the promotion cascade from inside a frame closingTrees still names (closeTreeLocked splices admission.active itself and closeTree kicks beginPromotionSweep after closingTrees.delete in .finally; or advancePromotionSweep skips a candidate whose parent chain names a closing tree and closeTree's .finally re-sweeps), plus the fake-runtime regression for this shape."
+      },
+      {
+        "severity": "minor",
+        "file": "packages/daemon/src/daemon/__tests__/processes.test.ts:4243",
+        "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189663",
+        "description": "The `// Negative wait:` marker is the first of three comment lines, not the line directly above flushEventLoop(50) — the audit-miss shape docs/solutions/testing/await-the-event-not-a-tick-budget.md flags. The drain itself is a correct negative wait."
+      },
+      {
+        "severity": "minor",
+        "file": "packages/daemon/src/daemon/AGENTS.md:64",
+        "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189668",
+        "description": "The bullet quotes the `kept every workspace ...` line without the code's trailing ` (re-admitted while closing)` (processes.ts:3071). Quote the suffix or drop the parenthetical from the code (smaller; also removes a guess, since a `dead` record from a racing resurrection gets the same text)."
+      },
+      {
+        "severity": "minor",
+        "file": "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md:171",
+        "thread": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189672",
+        "description": "`Until LEGION-84 lands` is stale: LEGION-84 is on main and provisionIssueWorkspace writes git.abandon-unreachable-commits=false before every fetch (workspace.ts:386-405); the new tests' own `jj config set` (workspace.test.ts:1628) is therefore redundant (harmless)."
+      }
+    ],
+    "threads": {
+      "deadlock": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189654",
+      "marker": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189663",
+      "agents": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189668",
+      "docs": "https://github.com/sjawhar/legion/pull/1087#discussion_r4004189672"
+    },
+    "judged": {
+      "1_removeIssueWorkspace_order": "matches spec design and error table: list only when <clone>/.jj exists; jj log only when registered; rm before abandon/forget; abandon skipped on an empty set; forget only when registered; prune when the clone exists; second call runs only the list and returns removed:false. createWorkspace's `already (registered|exists)` branch repairs the directory-first crash shape (workspace.ts:255-268).",
+      "2_removeTreeWorkspaces": "at processes.ts:1813 after the StopFailed throw (:1801-1809) and before tree.status = closed (:1815); root removed unless backlog/icebox, descendants only at done; kept lines one each; failed removal logged once (error as second console.error arg, the file's convention) and the close proceeds; nothing removed when the record is not lingering (:3069) or rootForIssue moved (:3083-3087).",
+      "3_inFlightLaunches": "no cycle through inFlightLaunches: only trackLaunch (worker launches: deliverToWorker and the promotion dep) populates it; spawnRoot is tracked in `spawns`, awaited only by drainSpawns. The reading holds — but the promotion sweep cycle above is a different path to the same deadlock and is the blocking finding.",
+      "4_revset": "::<name>@ ~ ::(working_copies() ~ <name>@) ~ ::(bookmarks() | remote_bookmarks() | tags()) never lists a commit another working copy (default included), any bookmark target (all targets of a conflicted bookmark), a remote bookmark, or a tag reaches; ::main subtracted via main/main@origin/main@git; descendants of the set are rebased by the abandon step, never dropped.",
+      "5_legion143": "nothing pins it: the fifth test asserts the wait line, no forget/abandon, the intact directory, the kept-every line, and provisioning after the close — no final tree status, no status write, no retirement.",
+      "6_agents_md": "accurate to the code except the one quote (thread agents); the trailing parenthetical mismatch is a wording item, not a defect.",
+      "7_e2e_lines": "both present with surface, command, observation, head, negative control (gateFacts).",
+      "8_tests": "observable behaviour asserted (workspace list, worktree list, directory, other workspace's log, kept bookmark, log lines, tree status, removal-after-stop ordering); argv pins follow the package's fake-runner convention; console.error spies restored in finally in all three spying tests; the fifth test's positive waits are gates the fake resolves (stopArmed/stopGate) and its one drain is a genuine negative wait (marker shape is the minor)."
+    },
+    "thermo": {
+      "deepReview": "1 blocking (the promotion-sweep cycle), 4 minors: the lingering guard's blind spot after a StopFailed retry (:1802 rewrites lingering over a mid-close admit's active; the sweep's retry close would remove the re-admitted root's fresh workspace and also kills that root — LEGION-143's subject; suggested admission.active.includes(treeKey) beside the status), the list-then-abandon two-step window (spec design; abandoning by the revset would close it), commits above @ outside ::<name>@ (spec-conformant), the stale LEGION-84 sentence.",
+      "codeQuality": "no blocking findings; minors: the Negative-wait marker shape, the AGENTS.md quote, log-before-early-return forcing a `let` in removeIssueWorkspace, the repeated log subject phrase, the single-caller removeWorkspace wrapper, Pick-derived dep types."
+    },
+    "observationsForArchitect": [
+      "Recommend folding into LEGION-143: the StopFailed-retry blind spot of the `lingering` guard (a `state.admission.active.includes(treeKey)` check beside the status would cover it).",
+      "Follow-up decision, not this PR: abandoning by the revset (`-r <ownCommitsRevset>`) instead of the listed ids would close the list/abandon window a concurrent provisioning fetch could hit, at the cost of the log line's count coming from the abandon output."
+    ],
+    "repro": {
+      "scratch": "/tmp/legion-104-reviewer/{branch,nowait}/packages/daemon (copies of the tester's daemon-real; branch processes.ts sha256 b376a431… equals the workspace's); repro test text /tmp/legion-104-reviewer/repro-test.ts spliced before the `requests control directives` test",
+      "branch": "LEGION_E2E=1 bun test src/daemon/__tests__/processes.test.ts -t 'REVIEWER REPRO' → close outcome `timeout after 5s`, tree=closed child=active active=[LEGION-43], wait lines for LEGION-42 and LEGION-43 naming the close of LEGION-42, 0 jj commands; 0 pass 1 fail",
+      "nowait": "same with `await this.awaitClosingTrees(issue);` removed → close outcome `settled`, 12 jj commands, 1 pass"
+    }
   },
-  "nextStep": "Implementer: fix the cycle at processes.ts:1911/closeTreeLocked, add the regression, optionally fold the three wording items, run `legion threads resolve` after my Accepted replies, push. I re-review the corrective head, answer each thread, and only then move to COMMENT/.legion deletion.",
-  "workspace": "nothing edited in $LEGION_WORKSPACE besides this handoff; scratch work under /tmp/legion-104-reviewer",
+  "workspace": "nothing edited in $LEGION_WORKSPACE besides .legion/review.json; scratch work under /tmp/legion-104-reviewer",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-14T10:19:28.549Z"
+  "completed": "2026-09-14T10:52:27.001Z"
 }
