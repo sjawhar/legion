@@ -32,7 +32,27 @@
   ],
   "confirmed": "spec Errors table paths; mint-then-write order; 0600 chmod before rename; hook returns undefined with command/env untouched; LEGION-12 debug lines byte-identical to main; checkSubagentSession bail; credentialProcessEnvironment on all three spawn sites; trackProcessSecrets/liveSecretFiles/boot-prune seeding; stripDispatchEnv covers LEGION_GRANT(_FILE); installWorkerGhShim failure refuses startup; readSecretPointer 1:1 extraction; grantFrom throws before fetch; cmdGh strips worker-bin and scrubs the pointer so the 1.17.x double-redeem recursion is impossible; contracts diff empty, API version 1 both sides (acceptable without bump); rig production mode reads the legion profile only, analyzer per-command file scoring, verdict F over transcript+OMP log; docs acceptance 8 met, 1.17.4 stated; tests assert observable behaviour",
   "nextRound": "Re-review the head that fixes the two blocking threads (CI green), then the .legion/ deletion head by SHA",
+  "round2": {
+    "verdict": "APPROVED",
+    "reviewedHead": "58d15b603e6a016873ca4cfabb549a7953a49157",
+    "codeTree": "d507e6402cbf3f56edc758a2ba50906bb7a48353",
+    "rebasedOnto": "main@origin 195674ab0592 (chore: release pi-envoy v1.18.1)",
+    "review": "https://github.com/sjawhar/legion/pull/992#pullrequestreview-5189635270",
+    "reviewId": 5189635270,
+    "scope": "Pre-cleanup head, per the architect's instruction; the .legion/ deletion head gets a second approval by SHA.",
+    "ci": "58d15b60: Tests 34739930992 + Legion Envoy and Contracts 34739930998 SUCCESS (path-filtered jobs SKIPPED), legion/tester SUCCESS, MERGEABLE/BLOCKED (review); f8a8ff0b: 34739420569 / 34739420598 per the tester's round-3 comment",
+    "blockingFixed": [
+      "processPath/worker-bin: resolveDaemonEnvironment builds paneEnv.PATH = legionBinDir + pathWithoutWorkerBin(miseEnv.PATH); environment.test.ts and processes.test.ts assert clean PATH, commands.gh not the shim, worker-bin exactly once on all three launches; docstring/AGENTS.md/config-env-keys now state the guarantee. Spot-check: pathWithoutWorkerBin('/s/worker-bin:/s/bin:/opt/x/worker-bin:/usr/bin') -> '/s/bin:/usr/bin'",
+      "setup.sh same-profile guard: realpath -m compare as first action, exit 2 naming both paths before any fs action; redundant mkdir of $RIG/state/worker-bin dropped; README documents it. Spot-check with two equal scratch profile names: exit 2, rig dir and profile uncreated (the real profile never named)"
+    ],
+    "nonBlockingAddressed": "All eight in fa521041, confirmed in the diff (SKILL.md subagent timing sentence; grantFrom ENOENT remedy + test; pathWithoutWorkerBin docstring + run.ts import + WORKER_BIN_DIRNAME unexported; installWorkerGhShim temp+rename; blank LEGION_GRANT_FILE blocks pre-mint and writeGrantFile refuses non-absolute paths + tests; pruneSecretFiles void + processSecretNames; index.ts/holdProcessSecret comments; CHANGELOG LEGION-12 folded)",
+    "rebaseResolutions": "worker-pane-shell-gotchas.md intro: main's LEGION-17 sentence verbatim + branch's LEGION-54 sentence; daemon AGENTS.md boot-probe paragraph identical to main apart from the inserted installWorkerGhShim clause (diffed with the clause removed); processes.ts diff vs main carries only this PR's changes (systemPromptArguments/deploymentInstructionsFile are main's)",
+    "releaseVersion": "1.18.2 at every site (two docs x2, grant-delivery note, implement.json deployment, PR body); no 1.17.4 / stale 1.18.1; from tag pi-legion-envoy-v1.18.1 + fix(pi-envoy) title; merger recomputes at READY if main releases again",
+    "threads": "10 dispositioned individually in the review body; 0 unresolved findings. Could not resolve on GitHub: resolveReviewThread -> 'Resource not accessible by integration' for the review App (batched and single attempts) — LEGION-34, in progress; the implementer App's `legion threads resolve --pr 992` resolves threads whose latest reply is the reviewer's",
+    "thermo": "Not re-run: round-1 pass at 2ec1de35 stands; the delta is the fix for its two findings plus a conflict-free rebase checked by hand",
+    "next": "Approve the .legion/ deletion head by SHA when resumed"
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T03:52:31.028Z"
+  "completed": "2026-09-13T05:24:24.632Z"
 }
