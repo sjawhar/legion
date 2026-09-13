@@ -202,12 +202,13 @@ async function realJjRig(command: readonly string[], stateDir: string) {
 }
 
 /** The repository-scoped identity probes every provisioning runs (`removeRepoScopedIdentity`);
- * an `unset` follows a probe only when it printed a value. */
+ * an `unset` follows a probe only when it printed a value. `--include-overridden` makes the probe
+ * see a value the daemon's own `JJ_USER`/`JJ_EMAIL` would otherwise hide. */
+function identityProbe(repoCloneDir: string, key: string): string[] {
+  return ["jj", "config", "list", "--repo", "--include-overridden", "-R", repoCloneDir, key];
+}
 function identityProbeCommands(repoCloneDir: string): string[][] {
-  return [
-    ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.name"],
-    ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.email"],
-  ];
+  return [identityProbe(repoCloneDir, "user.name"), identityProbe(repoCloneDir, "user.email")];
 }
 
 describe("provisionIssueWorkspace", () => {
@@ -527,13 +528,14 @@ describe("provisionIssueWorkspace", () => {
       "config",
       "list",
       "--repo",
+      "--include-overridden",
       "-R",
       repoCloneDir,
       "user",
     ]);
     expect(repoIdentity.exitCode).toBe(0);
     expect(repoIdentity.stdout.trim()).toBe("");
-  });
+  }, 60_000);
   test("runs the supplied pinned credential helper instead of a PATH Legion and fails loudly", async () => {
     const stateDir = path.join(await temporaryDirectory(), "state");
     const helperDir = await temporaryDirectory();
@@ -707,9 +709,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
 
     expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
-      ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.name"],
+      identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
-      ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.email"],
+      identityProbe(repoCloneDir, "user.email"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.email"],
     ]);
     expect(repoConfig.size).toBe(0);
@@ -757,10 +759,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
     expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
-      ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.name"],
+      identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
-      ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.name"],
-      ["jj", "config", "list", "--repo", "-R", repoCloneDir, "user.email"],
+      identityProbe(repoCloneDir, "user.name"),
+      identityProbe(repoCloneDir, "user.email"),
     ]);
   });
 

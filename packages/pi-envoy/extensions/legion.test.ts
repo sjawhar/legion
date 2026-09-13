@@ -292,19 +292,21 @@ async function createJjWorkspace(): Promise<string> {
 
 /** `key` at repository scope for the repo `directory` belongs to, as `jj config list` prints it
  * (`user.name = "…"`), or `""` when the repository scope does not set it. `--repo` is the scope;
- * `-R` names the repo. */
+ * `-R` names the repo. `--include-overridden` (its `# ` marker stripped) keeps the answer the same
+ * when the process running the tests — a Legion pane — carries `JJ_USER`/`JJ_EMAIL`, which would
+ * otherwise hide the repository value. */
 async function jjRepoConfig(directory: string, key: string): Promise<string> {
-  const child = Bun.spawn(["jj", "config", "list", "--repo", "-R", directory, key], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const child = Bun.spawn(
+    ["jj", "config", "list", "--repo", "--include-overridden", "-R", directory, key],
+    { stdout: "pipe", stderr: "pipe" }
+  );
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout as ReadableStream<Uint8Array>).text(),
     new Response(child.stderr as ReadableStream<Uint8Array>).text(),
   ]);
   if (exitCode !== 0) throw new Error(`jj config list failed: ${stderr}`);
-  return stdout.trim();
+  return stdout.trim().replace(/^# /, "");
 }
 
 async function setJjRepoConfig(directory: string, key: string, value: string): Promise<void> {

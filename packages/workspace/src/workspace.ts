@@ -288,15 +288,28 @@ async function writeOmpConfig(workspaceDir: string): Promise<void> {
  * commits from the clone; it is removed here, once, logged, and nothing writes it again. Runs on
  * every provisioning so a pane still on the pre-upgrade plugin during a rollout is healed at the
  * next launch. A key is probed first (`jj config list --repo` exits 0 with empty stdout when
- * unset) because `jj config unset` exits 1 on a key that does not exist; a failed unset is
- * re-probed once, since two issues provisioning at the same time can both see the key and only
- * one of them removes it. */
+ * unset) because `jj config unset` exits 1 on a key that does not exist. The probe carries
+ * `--include-overridden`: without it jj hides a repository value that a higher layer overrides,
+ * and the daemon's own environment can carry `JJ_USER`/`JJ_EMAIL` (a daemon started from inside a
+ * Legion pane inherits the pane's identity), which would make the probe print nothing for a value
+ * the repo file does hold and the unset silently never run. A failed unset is re-probed once,
+ * since two issues provisioning at the same time can both see the key and only one of them
+ * removes it. */
 async function removeRepoScopedIdentity(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string
 ): Promise<void> {
   for (const key of ["user.name", "user.email"]) {
-    const probe = ["jj", "config", "list", "--repo", "-R", repoCloneDir, key];
+    const probe = [
+      "jj",
+      "config",
+      "list",
+      "--repo",
+      "--include-overridden",
+      "-R",
+      repoCloneDir,
+      key,
+    ];
     const present = await run(deps, probe);
     if (present.exitCode !== 0) throw commandFailure(present, probe);
     if (present.stdout.trim() === "") continue;
@@ -312,6 +325,17 @@ async function removeRepoScopedIdentity(
   }
 }
 
+/** Where `issue`'s jj workspace lives under `stateDir` — the one path `provisionIssueWorkspace`
+ * creates and every later daemon command against that working copy must target. */
+export function issueWorkspaceDir(
+  stateDir: string,
+  repo: `${string}/${string}`,
+  issue: IssueKey
+): string {
+  const [owner, name] = repo.split("/") as [string, string];
+  return path.join(stateDir, "workspaces", owner, name, issue.toLowerCase());
+}
+
 export async function provisionIssueWorkspace(
   issue: IssueKey,
   deps: ProvisionIssueWorkspaceDeps
@@ -319,7 +343,7 @@ export async function provisionIssueWorkspace(
   const [owner, repo] = deps.repo.split("/") as [string, string];
   const workspaceName = issue.toLowerCase();
   const repoCloneDir = path.join(deps.stateDir, "repos", "github.com", owner, repo);
-  const workspaceDir = path.join(deps.stateDir, "workspaces", owner, repo, workspaceName);
+  const workspaceDir = issueWorkspaceDir(deps.stateDir, deps.repo, issue);
   const gitDir = path.join(repoCloneDir, ".git");
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
   // matches exactly this pattern for a Dispatch key). `createWorkspace` alone touches it: it
