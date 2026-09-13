@@ -7,16 +7,16 @@
   ],
   "pr": 1021,
   "prUrl": "https://github.com/sjawhar/legion/pull/1021",
-  "headTested": "9562b3a4cca61ac3650f2aad2a7d4b758664f94b",
+  "headTested": "a49929e18c15267fdf7f27da3af581550919b094",
   "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
-  "specVersion": 3,
+  "specVersion": 4,
   "acceptance": {
-    "1": "PASS. github-apps.ts: one exhaustive Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (architect/planner/tester/reviewer → review; implementer/merger → implement). MODE_TO_ROLE, modeToRole, catchup's WORKER_MODE absent repo-wide (only mentioned in .legion/implement.json). github-apps.test.ts: 'maps every Legion role to exactly one App' (iterates LEGION_ROLES) and 'runs the tester as the review App, never the code-writing one'.",
-    "2": "PASS. api/routes/credentials.ts (handleGitCredential, handleGhToken) and api/routes/workers.ts (/worker/started lease) import appRoleForLegionRole from ../../github-apps; catchup.ts too. api.test.ts 'reissues a daemon-registered worker session capability and keeps grants short-lived' pins gitName legion-review[bot], appLogin legion-review[bot], tokenRoles ['review','review'] and git-credential 200 for a tester; 'registers a worker session from a valid worker boot token without touching the issue's active phase' pins gitName legion-review[bot]. api/github.ts's gh() keeps a default appRole of 'implement' for the daemon's own reads — a default argument, not a role mapping.",
+    "1": "PASS. github-apps.ts: one exhaustive Record<LegionRole, GitHubAppRole> behind appRoleForLegionRole (architect/planner/tester/reviewer → review; implementer/merger → implement). MODE_TO_ROLE, modeToRole, catchup's WORKER_MODE absent repo-wide (only mentioned in .legion/implement.json). github-apps.test.ts: 'maps every Legion role to exactly one App' (iterates LEGION_ROLES) and 'runs the tester as the review App, never the code-writing one'. (round 3: github-apps.ts unchanged, still holds)",
+    "2": "PASS. api/routes/credentials.ts (handleGitCredential, handleGhToken) and api/routes/workers.ts (/worker/started lease) import appRoleForLegionRole from ../../github-apps; catchup.ts too. api.test.ts 'reissues a daemon-registered worker session capability and keeps grants short-lived' pins gitName legion-review[bot], appLogin legion-review[bot], tokenRoles ['review','review'] and git-credential 200 for a tester; 'registers a worker session from a valid worker boot token without touching the issue's active phase' pins gitName legion-review[bot]. api/github.ts's gh() keeps a default appRole of 'implement' for the daemon's own reads — a default argument, not a role mapping. (round 3: routes unchanged, still holds)",
     "3": "PASS (live, independent of the implementer's run). Tester grant through this branch's startLegionApi + real TokenManager: /worker/started 200 gitName=legion-reviewer[bot]; /gh-token 200 appLogin=legion-reviewer[bot]; /git-credential 200 with the same token. POST /repos/sjawhar/legion-smoke/check-runs → 201 app.slug=legion-reviewer app.id=3202653 https://github.com/sjawhar/legion-smoke/runs/103711307756; POST /issues/37/comments → 201 user.login=legion-reviewer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769689. Read back via legion gh: app_slug=legion-reviewer, conclusion=success.",
     "4": "PASS (live). Implementer grant: /worker/started gitName=legion-implementer[bot]; /gh-token appLogin=legion-implementer[bot]; git push origin legion42-tester-proof/2026-09-13T10-41-26-374Z exit 0; commit bb06684217d42c849a1c4ba97b4296c47034cb70 author.login=committer.login=legion-implementer[bot]; POST /pulls 201 #37 user.login=legion-implementer[bot]; POST /issues/37/comments 201 user.login=legion-implementer[bot] https://github.com/sjawhar/legion-smoke/pull/37#issuecomment-5652769634.",
-    "5": "PASS. packages/daemon/src/daemon/AGENTS.md GitHub Apps section states the mapping once and names appRoleForLegionRole (github-apps.ts). packages/daemon/src/cli/index.ts redeemGitHubToken comment now reads 'chosen by appRoleForLegionRole (daemon/github-apps.ts) — the command never picks one' with no restated mapping.",
-    "6": "PASS. skills/legion-worker/SKILL.md completion gate: only the implementer and merger can push; planner/tester/reviewer/architects commit locally and do not push, the commit rides the implementer's next push; a refused push is expected. skills/AGENTS.md, packages/pi-envoy/roles/planner.md and roles/tester.md say the same. Live: this tester committed 'test: record handoff' locally with jj split and attempted NO push."
+    "5": "PASS. packages/daemon/src/daemon/AGENTS.md GitHub Apps section states the mapping once and names appRoleForLegionRole (github-apps.ts). packages/daemon/src/cli/index.ts redeemGitHubToken comment now reads 'chosen by appRoleForLegionRole (daemon/github-apps.ts) — the command never picks one' with no restated mapping. (round 3: AGENTS.md boot bullet + GitHub Apps section updated for both-App leases and the provisioning exception; cli comment unchanged)",
+    "6": "PASS. skills/legion-worker/SKILL.md completion gate: only the implementer and merger can push; planner/tester/reviewer/architects commit locally and do not push, the commit rides the implementer's next push; a refused push is expected. skills/AGENTS.md, packages/pi-envoy/roles/planner.md and roles/tester.md say the same. Live: this tester committed 'test: record handoff' locally with jj split and attempted NO push. (round 3: SKILL.md gate names the implementer as the one pusher exactly once; this round's handoff again committed locally with no push)"
   },
   "negativeControls": {
     "testerGitPush": "exit 128 'remote: Repository not found.'; remote head after = bb06684217d42c849a1c4ba97b4296c47034cb70 (unchanged)",
@@ -35,8 +35,11 @@
     "legion-reviewer (3202653)": "actions:write, checks:write, issues:write, metadata:read, packages:read, pull_requests:write"
   },
   "pushAttempted": false,
-  "prBodyE2E": "round 1 block kept; round 2 added `E2E re-check 02dc6def → 9562b3a4: docs-only, code head 4108e121 unchanged, bare gates only` with the tester Legion footer",
-  "headTestedPrevious": "02dc6def3159520055e5d957ad16c62de4b39f5a",
+  "prBodyE2E": "round 1 block, round 2 re-check line, and round 3 block (boot-probe refusal + negative control, dead code, rebase check, bare gates) — all before Fast-follow, tester Legion footer",
+  "headTestedPrevious": [
+    "02dc6def3159520055e5d957ad16c62de4b39f5a",
+    "9562b3a4cca61ac3650f2aad2a7d4b758664f94b"
+  ],
   "recheck": {
     "kind": "docs-only re-check 02dc6def → 9562b3a4; code head 4108e121b83f425a2131e5392bc649a0b4f1bb8f unchanged; bare gates only; live sandbox proof (acceptance 3/4) not repeated",
     "commitsAbove02dc6def": [
@@ -57,7 +60,40 @@
     "result": "PASS; observation from round 1 resolved by 9562b3a4",
     "pushAttempted": false
   },
+  "round3": {
+    "kind": "full round for the corrective commits 1a39a623 (prove both Apps at boot; drop GitHubService.gh) and 6bc614cf (completion gate names the implementer once), above the conflict-forced rebase onto main c8faafec; spec v4",
+    "result": "PASS on every item",
+    "bootProbe": {
+      "surface": "this branch's startDaemon on a scratch legion.yaml via the real loadStartConfig, real TokenManager built by startDaemon's default deps (real App JWTs, installation discovery and token exchange on api.github.com); mise env, plugin manifest and OMP-probe runner stubbed; loadState a throwing sentinel so a passing probe stops before state/NATS/API/tmux; run under secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --; driver /tmp/legion42-boot-proof/boot-driver.ts (throwaway); live daemon untouched; no token printed",
+      "implementOnly": "github_apps: implement → implement lease succeeded on GitHub (JWT iss=3202636 → installations 200 → access_tokens 119465532 → 201 → /app 200 → /users/legion-implementer[bot] 200), then startDaemon rejected `role_not_configured: review`; loadState never reached",
+      "bothApps": "github_apps: implement, review → implement lease then review lease (JWT iss=3202653 → access_tokens 119465559 → 201 → /users/legion-reviewer[bot] 200), then the state-load sentinel: both leases passed (negative control)",
+      "unitLock": "index.test.ts :: refuses to start when only the implement App is configured, naming the review App, before state is loaded — 1 pass",
+      "configLoaderAlsoObserved": "loadStartConfig refused `port: 0` (must be a positive integer) and refused the pane's inherited LEGION_DAEMON_URL under runtime tmux, both as documented; the driver scrubs LEGION_*/DISPATCH_*/ENVOY_* like an operator shell"
+    },
+    "deadCode": "GitHubService.gh(), its runner ctor arg, CommandRunner/buildRoleEnv imports gone from api/github.ts; only construction api.ts:202 new GitHubService(config.repo, deps.tokenManager); no .gh( caller in packages/. Remaining \"implement\" literals in daemon source are daemon-owned uses: index.ts:124 createCiStatusFetcher (daemon CI reads), index.ts:319 boot probe, index.ts:403 provisioningToken (workspace clone/fetch), credentials.ts:13 /provisioning-credential (architect capability clones the shared repo; AGENTS.md names it the non-role-keyed exception); plus the type/loader config.ts:9,644 and the mapping table github-apps.ts:16,19.",
+    "rebase": {
+      "fileSet": "compare/main...a49929e1 = spec v4 Design table files + their consequences (api.ts, catchup.ts, github-apps.test.ts, index.test.ts, planner.md, tester.md, skills/AGENTS.md) + .legion/{implement,review,test}.json; nothing else",
+      "mainOverlap": "main gained 10 commits since old base 52c5e03e; PR files also touched by main: cli/index.ts (#1015 29b471f8), daemon AGENTS.md (#1017 c5be7944, #975 b2971198), api.test.ts/index.test.ts/catchup.ts/index.ts (#975), SKILL.md (#1015)",
+      "mechanicalCheck": "552 lines those main commits added to those files: all present at a49929e1, 0 missing; main-removed lines: none reappear (14 set-membership false positives were generic syntax lines inside the new refusal test, resolved by reading the main→head diff, which is LEGION-42 content only per file)",
+      "prCommits": [
+        "d06522dcf1ce",
+        "db3e8bbcdf10",
+        "bc8739e13ac5",
+        "3de67ac49918",
+        "7a3ff4973166",
+        "93d0919e602b (my test handoff, rebased)",
+        "65bfbd5c1d39 (review handoff, rebased)",
+        "1a39a62367b6",
+        "6bc614cf385e",
+        "a49929e18c15"
+      ]
+    },
+    "mappingUnchanged": "github-apps.ts blob sha256 172fb8fddcb24bd51074f5358a56599d2dbd3352e72e1bbe541c93b95d03be97 at both 4108e121 and a49929e1 (0-line diff) — round-1 sandbox proof (check run 103711307756, PR 37) stands for acceptance 3/4",
+    "bareGates": "CI at a49929e1: Tests run 34756189868 success (re-run 34756277610 success), Legion Envoy and Contracts run 34756189921 success (pi-envoy; siblings skipped); local packages/daemon bun test 1174 pass / 7 skip / 0 fail, biome 160 files clean, tsc clean; PR MERGEABLE / BLOCKED (not CONFLICTING); not rebased by me",
+    "docs": "SKILL.md L88-92 '(and, for the implementer, pushed)'; completion gate L432-455 states once that only the implementer pushes, merger pushes nothing, no orphaned wrap; daemon AGENTS.md boot bullet names both leases and the GitHub Apps section names the provisioning-credential and CI-read exceptions",
+    "pushAttempted": false
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T10:48:27.859Z"
+  "completed": "2026-09-13T12:18:44.822Z"
 }
