@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
+import { appRoleForLegionRole } from "../../github-apps";
 import type { RouteContext } from "../context";
-import { appRoleForLegionRole } from "../github";
 import { requiredString, validateContractResponse } from "../http";
 
 export async function handleProvisioningCredential(

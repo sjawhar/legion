@@ -1,20 +1,12 @@
 import { type IssueKey, isLegionRole, type LegionRole } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
-import { buildRoleEnv, modeToRole, type TokenManager } from "./github-apps";
+import { appRoleForLegionRole, buildRoleEnv, type TokenManager } from "./github-apps";
 import { type DesignGate, designGateOpen, type LegionState, type PrState } from "./legion-state";
 import type { LegionEventPayload } from "./reducers";
 
 type JsonRecord = Record<string, unknown>;
 
 type CiVerdict = "green" | "red" | "pending";
-const WORKER_MODE: Record<LegionRole, string> = {
-  architect: "architect",
-  planner: "plan",
-  implementer: "implement",
-  tester: "test",
-  reviewer: "review",
-  merger: "merge",
-};
 
 export interface CatchupOverseerPayload extends LegionEventPayload {
   type: "catchup-overseer";
@@ -314,7 +306,7 @@ export async function workerCatchup(
   deps: WorkerCatchupDeps
 ): Promise<LegionEventPayload> {
   const [owner] = deps.repo.split("/") as [string, string];
-  const credential = await deps.tokenManager.getToken(modeToRole(WORKER_MODE[role]), owner);
+  const credential = await deps.tokenManager.getToken(appRoleForLegionRole(role), owner);
   const options: CommandRunnerOptions = {
     env: buildRoleEnv(credential.token, credential.gitIdentity, deps.baseEnv),
   };

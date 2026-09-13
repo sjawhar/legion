@@ -1,16 +1,22 @@
+import type { LegionRole } from "@legion/contracts";
 import type { GitHubAppRole, GitHubAppRoleConfig, GitHubAppsConfig } from "./config";
 import { generateJwt } from "./github-app-crypto";
 
 export { generateJwt } from "./github-app-crypto";
 export { buildRoleEnv } from "./github-app-env";
 
-const MODE_TO_ROLE: Record<string, GitHubAppRole> = {
-  implement: "implement",
-  merge: "implement",
-  review: "review",
-  test: "review",
+/** The one place a Legion role is mapped to the GitHub App it acts as. The implementer and
+ * merger write code: they act as the implement App, the only one with `contents` permission, so
+ * they alone can push the issue branch. Every other role — planner, tester, reviewer, root and
+ * sub-architects — posts verdicts and reviews as the review App. Exhaustive over `LegionRole`:
+ * a new role fails to compile until it is placed here. */
+const APP_ROLE_FOR_LEGION_ROLE: Record<LegionRole, GitHubAppRole> = {
   architect: "review",
-  plan: "review",
+  planner: "review",
+  implementer: "implement",
+  tester: "review",
+  reviewer: "review",
+  merger: "implement",
 };
 
 /** Token refresh window — regenerate when within 5 minutes of expiry */
@@ -24,12 +30,8 @@ const GITHUB_USERS_URL = "https://api.github.com/users";
 
 export type GitHubFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-export function modeToRole(mode: string): GitHubAppRole {
-  const role = MODE_TO_ROLE[mode];
-  if (!role) {
-    throw new Error(`Unknown worker mode: ${mode}`);
-  }
-  return role;
+export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
+  return APP_ROLE_FOR_LEGION_ROLE[role];
 }
 
 export function getGitIdentity(appId: string, appName: string): { name: string; email: string } {

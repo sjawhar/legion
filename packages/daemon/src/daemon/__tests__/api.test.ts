@@ -1595,8 +1595,8 @@ describe("Legion HTTP API", () => {
     expect(phase.body).toEqual({
       roleToken: testerToken,
       secret: expect.any(String),
-      gitName: "legion-implement[bot]",
-      gitEmail: "42+legion-implement[bot]@users.noreply.github.com",
+      gitName: "legion-review[bot]",
+      gitEmail: "42+legion-review[bot]@users.noreply.github.com",
     });
 
     const recovered = await curlJson<WorkerSessionResponse>("/legion/v1/worker-session", {
@@ -1645,16 +1645,16 @@ describe("Legion HTTP API", () => {
       grantId: grant.body.grantId,
     });
     expect(token.body).toEqual({
-      token: "minted-implement-acme",
-      appLogin: "legion-implement[bot]",
+      token: "minted-review-acme",
+      appLogin: "legion-review[bot]",
     });
-    expect(tokenRoles).toEqual(["implement", "implement"]);
+    expect(tokenRoles).toEqual(["review", "review"]);
 
     const credential = await curl("/legion/v1/git-credential", {
       grantId: grant.body.grantId,
     });
     expect(credential.status).toBe(200);
-    expect(credential.body).toBe("username=x-access-token\npassword=minted-implement-acme");
+    expect(credential.body).toBe("username=x-access-token\npassword=minted-review-acme");
 
     now += 60_001;
     const expired = await json("/legion/v1/gh-token", {
@@ -1930,7 +1930,7 @@ describe("Legion HTTP API", () => {
 
     expect(started.response.status).toBe(200);
     expect(started.body.roleToken).toBe(token);
-    expect(started.body.gitName).toBe("legion-implement[bot]");
+    expect(started.body.gitName).toBe("legion-review[bot]");
     expect(state.roles[token]).toMatchObject({
       sessionId: "ses_tester",
       agentId: "agt_tester",

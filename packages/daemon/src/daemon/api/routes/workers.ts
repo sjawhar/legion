@@ -7,6 +7,7 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
+import { appRoleForLegionRole } from "../../github-apps";
 import {
   activePhaseLabel,
   type IssueStatus,
@@ -17,7 +18,6 @@ import {
 import { sameProcess } from "../../runtime";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
-import { appRoleForLegionRole } from "../github";
 import {
   EnvoyPublishError,
   HttpError,

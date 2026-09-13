@@ -1,4 +1,3 @@
-import type { LegionRole } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import type { GitHubAppRole } from "../config";
 import { buildRoleEnv } from "../github-apps";
@@ -11,10 +10,6 @@ export interface TokenLease {
 
 export interface GitHubTokenSource {
   getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
-}
-
-export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
-  return role === "reviewer" ? "review" : "implement";
 }
 
 /** Fetches GitHub App tokens for Legion's single configured repo and runs `gh` under that

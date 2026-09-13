@@ -76,13 +76,18 @@ The localhost-only Legion API lives in `api.ts`.
 ## GitHub Apps
 
 Legion acts on GitHub through two GitHub Apps, chosen per Legion role by `appRoleForLegionRole`
-(`api/github.ts`): the `reviewer` role runs as the **review** App (`github_apps.review` in
-`legion.yaml`; `legion-reviewer[bot]`), and every other role — root and sub-architects, planner,
-implementer, tester, merger — runs as the **implement** App (`github_apps.implement`;
+(`github-apps.ts`, the one role-keyed table — exhaustive over `LegionRole`, so a new role does not
+compile until it is placed): the `planner`, `tester`, `reviewer`, and root and sub-`architect`
+roles run as the **review** App (`github_apps.review` in `legion.yaml`; `legion-reviewer[bot]`),
+and the `implementer` and `merger` run as the **implement** App (`github_apps.implement`;
 `legion-implementer[bot]`). Every credential a pane redeems — `/legion/v1/gh-token` behind
-`legion gh` and `legion threads resolve`, `/legion/v1/git-credential` behind `jj git push`, and the
-git identity lease minted at `/worker/started` — goes through that mapping, so the App a command
-acts as is the App of the role that runs it, never a choice the command makes.
+`legion gh` and `legion threads resolve`, `/legion/v1/git-credential` behind `jj git push`, the
+git identity lease minted at `/worker/started`, and the worker catch-up's own GitHub reads
+(`workerCatchup`) — goes through that one function, so the App a command acts as is the App of
+the role that runs it, never a choice the command makes. Consequently only the implementer and
+merger can push the issue branch: the review App holds no `contents` permission, so a planner's,
+tester's, reviewer's, or architect's handoff commit stays in the shared workspace and reaches
+GitHub on the implementer's next push.
 
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it

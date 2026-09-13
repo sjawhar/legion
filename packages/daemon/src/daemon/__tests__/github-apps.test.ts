@@ -1,11 +1,12 @@
 import { describe, expect, it, mock } from "bun:test";
-import type { GitHubAppsConfig } from "../config";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
+import type { GitHubAppRole, GitHubAppsConfig } from "../config";
 import {
+  appRoleForLegionRole,
   buildRoleEnv,
   exchangeToken,
   generateJwt,
   getGitIdentity,
-  modeToRole,
   TokenManager,
 } from "../github-apps";
 
@@ -39,24 +40,25 @@ async function generateTestKeyPair() {
   };
 }
 
-describe("modeToRole", () => {
-  it("maps implement and merge to implement", () => {
-    expect(modeToRole("implement")).toBe("implement");
-    expect(modeToRole("merge")).toBe("implement");
+describe("appRoleForLegionRole", () => {
+  const expected: Record<LegionRole, GitHubAppRole> = {
+    architect: "review",
+    planner: "review",
+    implementer: "implement",
+    tester: "review",
+    reviewer: "review",
+    merger: "implement",
+  };
+
+  it("maps every Legion role to exactly one App", () => {
+    const actual = Object.fromEntries(
+      LEGION_ROLES.map((role) => [role, appRoleForLegionRole(role)])
+    );
+    expect(actual).toEqual(expected);
   });
 
-  it("maps review to review", () => {
-    expect(modeToRole("review")).toBe("review");
-  });
-
-  it("maps test, architect, plan to review", () => {
-    expect(modeToRole("test")).toBe("review");
-    expect(modeToRole("architect")).toBe("review");
-    expect(modeToRole("plan")).toBe("review");
-  });
-
-  it("throws for unknown mode", () => {
-    expect(() => modeToRole("unknown")).toThrow("Unknown worker mode: unknown");
+  it("runs the tester as the review App, never the code-writing one", () => {
+    expect(appRoleForLegionRole("tester")).toBe("review");
   });
 });
 
