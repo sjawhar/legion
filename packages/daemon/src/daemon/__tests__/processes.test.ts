@@ -13116,7 +13116,9 @@ describe("ProcessManager", () => {
         const run = processes.reconcileWorkerAdmission();
         await expireTurnStartWait(sleeps, clock);
         await run;
-        expect(testerClaim(managedState, token).promptFailures).toBe(attempt === 2 ? 0 : attempt + 1);
+        expect(testerClaim(managedState, token).promptFailures).toBe(
+          attempt === 2 ? 0 : attempt + 1
+        );
       }
     } finally {
       errorLines = errorLog.mock.calls.map((call) => String(call[0]));
@@ -13172,6 +13174,15 @@ describe("ProcessManager", () => {
     void relaunched.closed.then(() => closedSockets.add(relaunched));
     const tmuxFake = relaunchingTmux();
     const publications: Array<{ subject: string; json: string }> = [];
+    // The relaunch does real filesystem work (the session-file `stat`, the boot-token secret
+    // file, the workspace config, the socket dir) before and after its tmux call, so a
+    // `setImmediate` budget racing it is load-sensitive. `worker-started` is published only once
+    // `launchWorker` has written the fresh claim, dequeued the token, and persisted — the last
+    // step of the chain — so a waiter resolved from inside the fake publish is the observable end
+    // itself. A wait that never resolves fails on bun's own timeout with the assertions
+    // unreached, never a false green.
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const relaunchPublished = Promise.withResolvers<void>();
     const fixture = await queuedIdleWorkerFixture(
       1,
       {
@@ -13183,6 +13194,7 @@ describe("ProcessManager", () => {
         run: tmuxFake.run,
         publishRole: (subject, json) => {
           publications.push({ subject, json });
+          if (subject === architectTopic && json === workerStartedJson) relaunchPublished.resolve();
         },
       },
       first
@@ -13200,7 +13212,7 @@ describe("ProcessManager", () => {
       await expireTurnStartWait(clock);
       await run;
     }
-    await flushEventLoopUntil(() => tmuxFields(claim().locator)?.tmuxPaneId === "%301");
+    await relaunchPublished.promise;
     // `/worker/started` for generation 2: the session registered, the session file recorded.
     const booted = claim();
     booted.sessionId = "ses_tester";
@@ -13213,8 +13225,9 @@ describe("ProcessManager", () => {
       sessionFile,
       claim,
       splitWindows: () =>
-        tmuxFake.commands.filter((command) => command[0] === "tmux" && command[3] === "split-window")
-          .length,
+        tmuxFake.commands.filter(
+          (command) => command[0] === "tmux" && command[3] === "split-window"
+        ).length,
     };
   }
 
@@ -13262,7 +13275,6 @@ describe("ProcessManager", () => {
         await expireTurnStartWait(clock);
         await run;
       }
-      await flushEventLoopUntil(() => publications.some((p) => p.json === workerDiedJson));
       // Give any wrongful relaunch every chance to show up before asserting it did not.
       for (let tick = 0; tick < 50; tick += 1) await onceEventLoop();
 

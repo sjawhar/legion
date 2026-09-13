@@ -63,11 +63,7 @@ import {
   pruneSecretFiles,
   secretFilePath,
 } from "./secrets";
-import {
-  MAX_LAUNCH_FAILURES,
-  type PromptRetireVerdict,
-  WorkerAdmission,
-} from "./worker-admission";
+import { MAX_LAUNCH_FAILURES, type PromptRetireVerdict, WorkerAdmission } from "./worker-admission";
 import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
@@ -1345,7 +1341,8 @@ export class ProcessManager {
     verdict: PromptRetireVerdict
   ): Promise<void> {
     const claim = this.deps.state.roles[token];
-    const retry = claim && "issue" in claim ? this.deriveRetryContext(token, claim.issue) : undefined;
+    const retry =
+      claim && "issue" in claim ? this.deriveRetryContext(token, claim.issue) : undefined;
     await this.markWorkerDeadLocked(token, locator);
     if (verdict !== "died") return;
     await this.workerAdmission.removeFromQueue(token);
