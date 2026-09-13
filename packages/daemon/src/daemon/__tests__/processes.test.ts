@@ -13199,7 +13199,7 @@ describe("ProcessManager", () => {
       },
       first
     );
-    const { processes, managedState, token, clock } = fixture;
+    const { processes, managedState, token, clock, sleeps } = fixture;
     const claim = (): WorkerRoleClaim => testerClaim(managedState, token);
     const seeded = claim().locator;
     if (!seeded) throw new Error("seeded locator missing");
@@ -13209,7 +13209,7 @@ describe("ProcessManager", () => {
     // (relaunch cycle 1, bound 2) and the close handler's drain relaunches the task cold.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const run = processes.reconcileWorkerAdmission();
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await run;
     }
     await relaunchPublished.promise;
@@ -13241,6 +13241,7 @@ describe("ProcessManager", () => {
         publications,
         token,
         clock,
+        sleeps,
         first,
         relaunched,
         claim,
@@ -13263,7 +13264,7 @@ describe("ProcessManager", () => {
 
       // /worker/ready delivers the queued task to the relaunched pane: acknowledged, no turn.
       const ready = processes.workerReady(root, "tester", "ses_tester", 2);
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await ready;
       expect(claim().promptFailures).toBe(1);
       expect(claim().readyConfirmedAt).toBeDefined();
@@ -13272,11 +13273,15 @@ describe("ProcessManager", () => {
       // Two more drains; the third failure on this pane is relaunch cycle 2 (bound 2): terminal.
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const run = processes.reconcileWorkerAdmission();
-        await expireTurnStartWait(clock);
+        await expireTurnStartWait(sleeps, clock);
         await run;
       }
-      // Give any wrongful relaunch every chance to show up before asserting it did not.
-      for (let tick = 0; tick < 50; tick += 1) await onceEventLoop();
+      // `worker-died` was published inside the drain `run` awaited (`retirePromptFailedClaim`,
+      // under the role lock), so it is already in `publications`.
+      // Negative wait: the retired socket's close reaches `onWorkerClientClosed` -> one refused
+      // reconnect dial -> `markWorkerDead`, a no-op on the already-cleared locator, whose
+      // `promoteWorkerQueue` finds the queue empty -- no file write, no injected `run`.
+      await flushEventLoop(50);
 
       const died = publications.filter((p) => p.json === workerDiedJson);
       expect(died).toHaveLength(1);
@@ -13316,7 +13321,7 @@ describe("ProcessManager", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     let errorLines: string[] = [];
     try {
-      const { processes, managedState, publications, token, clock, relaunched, claim } =
+      const { processes, managedState, publications, token, clock, sleeps, relaunched, claim } =
         await swallowedRelaunchFixture();
       expect(claim().promptRetires).toBe(1);
 
@@ -13337,7 +13342,7 @@ describe("ProcessManager", () => {
       relaunched.emitRunState("idle");
       relaunched.turnStartsOnPrompt = false;
       const spawn = processes.spawnWorker(root, root, "tester", "verify #41 again");
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       expect(await spawn).toEqual({ status: "queued", roleToken: token });
       const counted = claim();
       expect(counted.locator).toBeDefined();
