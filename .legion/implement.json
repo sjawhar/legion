@@ -1,7 +1,7 @@
 {
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
-  "headSha": "236c08a1a3f1",
+  "headSha": "167754ae9e25 (rebased code+test tip; the pushed tip is the implement handoff commit on top of it, differing only in .legion/implement.json)",
   "commits": [
     "9d48d41d0185 daemon: deliver a worker prompt only when its turn is observed to start (LEGION-60) (was 372310dc3b21 before the conflict-forced rebase)",
     "48ad9b49c27f daemon: send worker-queued/worker-started and the other ProcessManager notices through the Envoy listener (was 208d87937e58)",
@@ -56,20 +56,49 @@
   ],
   "openQuestions": [],
   "subPlanningNeeded": false,
-  "rebase": {
-    "reason": "GitHub reported the PR CONFLICTING against main c8faafecc6a7 (one 2-sided conflict in index.test.ts: main renamed the test after my inserted case)",
-    "from": "fe5e6563f52d",
-    "to": "236c08a1a3f1",
-    "fingerprintBefore": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
-    "fingerprintAfter": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
-    "verdict": "unchanged",
-    "suiteOnRebasedTip": "1199 pass, 0 fail (LEGION_E2E=1); tsc and biome clean",
-    "rigHeads": {
-      "positive": "372310dc3b21 (now 9d48d41d0185)",
-      "negativeControl": "208d87937e58 (now 48ad9b49c27f)"
+  "rebases": [
+    {
+      "reason": "GitHub reported the PR CONFLICTING against main c8faafecc6a7 (one 2-sided conflict in index.test.ts: main renamed the test after my inserted case)",
+      "from": "fe5e6563f52d",
+      "to": "236c08a1a3f1",
+      "fingerprintBefore": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
+      "fingerprintAfter": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
+      "verdict": "unchanged"
+    },
+    {
+      "reason": "GitHub reported the PR CONFLICTING against main a7c01347fd69 (9a3bb41b #1010 rewrote scripts/smoke/up.sh and down.sh: the NATS container name is now derived per rig from SMOKE_PROJECT as legion-smoke-nats-<slug> and recorded in ${SMOKE_DIR}/nats-container, which is what SMOKE_NATS_NAME did for two rigs on one box). Resolution: took main's mechanism and dropped SMOKE_NATS_NAME from up.sh, down.sh, and README.md (clean cutover); kept SMOKE_WORKER_CAP. packages/daemon/src/daemon/AGENTS.md merged without conflict with both sides' content (main's #1016 bullets and this branch's five delivery-definition edits).",
+      "from": "367bee2962ae382d6c5bd5a8b709a7babba621f7",
+      "to": "167754ae9e25",
+      "fingerprintBefore": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
+      "fingerprintAfter": "6935415038171bd6cb9bab52858bc24bec352432b9fa4526728069f99d5d4015",
+      "verdict": "changed",
+      "changedPaths": [
+        "scripts/smoke/README.md (SMOKE_NATS_NAME row removed)",
+        "scripts/smoke/down.sh (no longer touched by this branch at all)",
+        "scripts/smoke/up.sh (SMOKE_NATS_NAME line removed; SMOKE_WORKER_CAP kept)"
+      ],
+      "packagesDaemonSrcDiffers": false,
+      "identicalPaths": 21,
+      "verificationOnRebasedTip": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: run 1 had 4 failures in real-shutdown-e2e.test.ts and real-deployment-instructions-e2e.test.ts (fixed tmux socket names shared by every workspace on this box; the same 5 tests pass in isolation), run 2 1205 pass / 0 fail; bunx tsc --noEmit clean; bunx biome check src/ clean; bash scripts/smoke/up.test.sh 24 PASS exit 0; bash scripts/smoke/down.test.sh 6 PASS exit 0."
     }
+  ],
+  "rebase": {
+    "reason": "GitHub reported the PR CONFLICTING against main a7c01347fd69 (9a3bb41b #1010 rewrote scripts/smoke/up.sh and down.sh: the NATS container name is now derived per rig from SMOKE_PROJECT as legion-smoke-nats-<slug> and recorded in ${SMOKE_DIR}/nats-container, which is what SMOKE_NATS_NAME did for two rigs on one box). Resolution: took main's mechanism and dropped SMOKE_NATS_NAME from up.sh, down.sh, and README.md (clean cutover); kept SMOKE_WORKER_CAP. packages/daemon/src/daemon/AGENTS.md merged without conflict with both sides' content (main's #1016 bullets and this branch's five delivery-definition edits).",
+    "from": "367bee2962ae382d6c5bd5a8b709a7babba621f7",
+    "to": "167754ae9e25",
+    "fingerprintBefore": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
+    "fingerprintAfter": "6935415038171bd6cb9bab52858bc24bec352432b9fa4526728069f99d5d4015",
+    "verdict": "changed",
+    "changedPaths": [
+      "scripts/smoke/README.md (SMOKE_NATS_NAME row removed)",
+      "scripts/smoke/down.sh (no longer touched by this branch at all)",
+      "scripts/smoke/up.sh (SMOKE_NATS_NAME line removed; SMOKE_WORKER_CAP kept)"
+    ],
+    "packagesDaemonSrcDiffers": false,
+    "identicalPaths": 21,
+    "verificationOnRebasedTip": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: run 1 had 4 failures in real-shutdown-e2e.test.ts and real-deployment-instructions-e2e.test.ts (fixed tmux socket names shared by every workspace on this box; the same 5 tests pass in isolation), run 2 1205 pass / 0 fail; bunx tsc --noEmit clean; bunx biome check src/ clean; bash scripts/smoke/up.test.sh 24 PASS exit 0; bash scripts/smoke/down.test.sh 6 PASS exit 0."
   },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T12:35:49.081Z"
+  "completed": "2026-09-13T14:02:07.946Z"
 }
