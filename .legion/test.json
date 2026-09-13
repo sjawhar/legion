@@ -243,9 +243,15 @@
       "rig": "/tmp/l54rig",
       "mainExports": "/tmp/l54main-abaf (abaf0817), /tmp/l54main-9414 (94146572) - kept from rounds 1-2; not needed this round (no new fail-on-main claims)",
       "launchPath": "/tmp/l54-drive-path.txt"
+    },
+    "prArtifacts": {
+      "handoffCommit": "a06686f30992f0cdb1cfc3a840d9f303b848bd38 (test: record round-3 handoff; only .legion/test.json)",
+      "comment": "https://github.com/sjawhar/legion/pull/992#issuecomment-5651341340",
+      "prBody": "CI line rewritten for f8a8ff0b (34739420569/34739420598) + d507e640; 'E2E (tester, round 3 ...)' section inserted ahead of round 2's; Deployment step 1 already says 1.18.2 (implementer)",
+      "commitStatus": "legion/tester = success on f8a8ff0b (id 54063794015) and a06686f3 (id 54063794498)"
     }
   },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T05:15:36.740Z"
+  "completed": "2026-09-13T05:17:17.782Z"
 }
