@@ -78,15 +78,32 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
 
 ## Working from a pane
 
-- Start rigs and scratch daemons with the inherited family scrubbed. The pattern that worked:
-  `env -u LEGION_DAEMON_URL -u LEGION_STATE_DIR -u LEGION_TREE -u LEGION_ISSUE -u LEGION_ROLE
-  -u LEGION_GENERATION -u LEGION_WORKSPACE -u LEGION_ROOT_WORKSPACE -u LEGION_PROJECT
-  -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
-  -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u LEGION_OMP_PATH
-  -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN
-  -u GITHUB_TOKEN -u GH_HOST …`. The checkpoints script must run under the same scrub
-  (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
-- `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
+- The Legion identity family needs no scrub before `scripts/smoke/up.sh` or a scratch daemon.
+  Since LEGION-74 the daemon builds every pane's environment from `PANE_ENV_ALLOW_LIST`
+  (`environment.ts`), which names no `LEGION_*` variable, and scrubs the private tmux server's
+  own tables at boot, so an inherited `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE`,
+  `LEGION_GENERATION`, `LEGION_WORKSPACE`, `LEGION_ROOT_WORKSPACE`, `LEGION_PROJECT`, or
+  `LEGION_CONTROLLER` — and the credential family (`LEGION_GRANT`, `LEGION_GRANT_FILE`,
+  `LEGION_BOOT_TOKEN_FILE`, `LEGION_CREDENTIAL_HELPER`, `LEGION_CONTROL_SUBJECT`) — never reaches
+  a pane. `up.sh` writes `daemon_url` into its `legion.yaml` and passes `LEGION_STATE_DIR`
+  explicitly, so the two config keys above are covered too. Checkpoint 14
+  (`scripts/smoke/checkpoints.sh 14`, every webhook mode) fails the rig if the controller never
+  claimed its role or if any recorded pane's process tree carries an identity the daemon did not
+  set for it — proven from a worker pane with nothing unset by LEGION-88, whose canary rig
+  (`SMOKE_OMP_LAUNCH_PREFIX='env LEGION_TREE=CANARY-1 …'`) also shows the two silences it made
+  speak: the pane's own one-sentence refusal (`packages/pi-envoy/extensions/legion.ts`,
+  `CONFLICTING_LAUNCH_MARKERS_NOTICE`) and the daemon's `[legion] retiring the controller: alive in
+  pane … but it never claimed its role within its <N>s registration deadline` line (the root
+  architect has the same line, `retiring <KEY>'s root architect`; see the registration-deadline
+  bullet in `packages/daemon/src/daemon/AGENTS.md`). The LEGION-72 proof's scrub
+  (`env -u LEGION_TREE -u LEGION_ISSUE …`) was needed only because those daemons predated LEGION-74:
+  the symptom it cured — a controller pane carrying both `LEGION_CONTROLLER` and `LEGION_TREE`, two
+  silent six-minute registration cycles — is what checkpoint 14 now fails on and the two lines now
+  name. `checkpoints.sh` reads `${SMOKE_DIR}/daemon/state.json` and addresses the private tmux
+  server by `SMOKE_PROJECT`'s slug; no `LEGION_*` variable steers it, so it needs no scrub either.
+  What a pane may still need to unset is `LEGION_OMP_PATH` (the next two bullets) and the Dispatch
+  pair (the bullet after them).
+- `LEGION_OMP_PATH` still needs unsetting (`env -u LEGION_OMP_PATH …`) since LEGION-77: the dogfood daemon's private tmux server still
   carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see
   `omp-pin-bump-behavioral-proof.md`, "One operator observation"), every pane inherits it, and a
   scratch daemon started from a pane honours it as its OMP override. That binary cannot load its
@@ -146,3 +163,10 @@ row now does.
   (`env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE bun test`, stacked grants) a worker needs first.
 - `docs/solutions/testing/fresh-state-dir-boot-beside-a-busy-rig.md`: the scratch-daemon recipe
   that applies this scrub end to end.
+- `scripts/smoke/README.md`, checkpoint 14 (the table row and "Checkpoint 14's negative"): the
+  rig's identity check — the controller claim, every pane's daemon-set identity, the server's
+  global table — and the canary rig that proves its failure.
+- `packages/daemon/src/daemon/AGENTS.md`, the registration-deadline bullet: the two retirement
+  lines the daemon logs for a live-but-unregistered controller or root, `describeProcessLocation`
+  of its pane, and the `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`
+  deadline they name (LEGION-88).
