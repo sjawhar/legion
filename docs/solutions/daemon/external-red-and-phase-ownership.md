@@ -76,10 +76,11 @@ than the active phase's must never overwrite it. Alternatively key `phases` by r
 ## 3. The review App can neither push nor resolve threads; the implementer App does both
 
 The `legion-reviewer` GitHub App holds `pull_requests: write` and no `contents` permission, and
-GitHub lets only the pull request's author, the comment's author, or an account with push access
-resolve a review thread: `resolveReviewThread` from the review App returns
-`Resource not accessible by integration`, and so does its push. Widening the App does not change
-that. So in every round:
+GitHub lets only the pull request's author or an account with write (push) access to the repository
+resolve a review thread or push to its branch. The review App is neither by design, so
+`resolveReviewThread` from it returns `Resource not accessible by integration`, and so does its
+push. Widening the review App is rejected by design, not because it would not work. So in every
+round:
 
 - the reviewer's `.legion/review.json` commit exists only in the shared workspace until the
   implementer's next push carries it (check `jj log` that it is an ancestor before building on it);

@@ -81,22 +81,23 @@ implementer, tester, merger — runs as the **implement** App (`github_apps.impl
 git identity lease minted at `/worker/started` — goes through that mapping, so the App a command
 acts as is the App of the role that runs it, never a choice the command makes.
 
-The review App holds `pull_requests: write` and no `contents` permission, and GitHub lets only a
-pull request's author, a comment's author, or an account with push access resolve a review thread
-or push to its branch; the review App is none of those by design, so it can post reviews and reply
-on threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened —
-both answer `Resource not accessible by integration`, and widening the App does not change that
-(LEGION-34). The implementer therefore pushes the `.legion/` deletion at the reviewer's direction,
-and the implementer — before every push that answers a review — and the merger — once more before
-READY — resolve every thread the reviewer has accepted with
+GitHub lets only the pull request's author or an account with write (push) access to the
+repository resolve a review thread or push to its branch; the review App is neither by design — it
+holds `pull_requests: write` and no `contents` permission — so it can post reviews and reply on
+threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened, and
+both answer `Resource not accessible by integration`. Widening the review App is rejected by design
+(LEGION-34), not because it would not work. The implementer therefore pushes the `.legion/`
+deletion at the reviewer's direction, and the implementer — before every push that answers a
+review — and the merger — once more before READY — resolve every thread the reviewer has accepted with
 `legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
 `cmdThreadsResolve` in `cli/index.ts`). The command redeems the caller's grant through the same
 `/gh-token` path `legion gh` uses, reads every review thread over GitHub GraphQL with an injected
 `fetch`, resolves each unresolved thread whose newest comment was written by the account that
 opened it and begins `Accepted:` (one `resolveReviewThread` per thread), prints `resolved <url>` /
 `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the first
-thread GitHub refuses; a `Still open:` reply, or any reply by another account, leaves the thread
-open with exit 0.
+thread GitHub refuses; any newest comment that is not the opener's own `Accepted:` — a
+`Still open:` reply, a reply by another account, or the opener's own later follow-up — leaves the
+thread open with exit 0.
 
 ## OMP invocation and daemon tools
 

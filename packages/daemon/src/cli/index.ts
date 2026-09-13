@@ -214,11 +214,12 @@ function parsePullNumber(value: string): number {
 
 /** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it,
  * resolves every unresolved review thread whose newest comment is its opener's own `Accepted:`
- * reply and names every other unresolved thread as left open. GitHub lets only a pull request's
- * author, a comment's author, or an account with push access resolve a thread, so the review App
- * that opens threads cannot close them (nor push); the implementer runs this before every push
- * that answers a review and the merger once more before READY. A thread GitHub refuses ends the
- * run with exit 1 naming the thread's URL and GitHub's message; nothing after it is attempted. */
+ * reply and names every other unresolved thread as left open. GitHub lets only the pull request's
+ * author or an account with write (push) access to the repository resolve a thread or push to its
+ * branch; the review App is neither by design (`pull_requests: write`, no `contents`), so the
+ * threads it opens are resolved here by the implementer — before every push that answers a
+ * review — and by the merger once more before READY. A thread GitHub refuses ends the run with
+ * exit 1 naming the thread's URL and GitHub's message; nothing after it is attempted. */
 export async function cmdThreadsResolve(
   options: { repo: string; pr: string },
   deps: ThreadsResolveCommandDeps

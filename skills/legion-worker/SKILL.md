@@ -244,10 +244,12 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   thread gets its own line naming the fixing commit or the reason it isn't a defect. The
   reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
-  acceptance, and nobody replies after an `Accepted:` (a later reply by anyone else puts the
-  thread back to left open). The review App can reply on a thread but can neither resolve it
-  nor push — GitHub grants both only to the pull request's author, the comment's author, or an
-  account with push access (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
+  acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
+  `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
+  reads only the newest comment). The review App can reply on a thread but can neither resolve it
+  nor push — GitHub grants both only to the pull request's author or an account with write (push)
+  access to the repository, and the review App is neither by design
+  (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
   **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
   push that answers a review (the corrective push and the final `.legion/` deletion push) and
   pastes its output into the `Threads` section. The command resolves each unresolved thread
