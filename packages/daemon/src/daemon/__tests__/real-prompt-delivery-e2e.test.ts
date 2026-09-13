@@ -292,6 +292,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     provisioningToken: async () => "installation-token",
     workerCatchup: {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+      baseEnv: {},
       tokenManager: {
         getToken: async () => ({
           token: "worker-token",
