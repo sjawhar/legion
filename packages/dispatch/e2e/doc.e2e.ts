@@ -18,7 +18,7 @@ const session = {
   as: "agent" as const,
 };
 const longToken = `sjawhar/legion#838-${"unbreakable".repeat(12)}`;
-const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n`;
+const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n\nEnd of spec.\n`;
 
 test.beforeEach(async () => {
   await resetDatabase();
