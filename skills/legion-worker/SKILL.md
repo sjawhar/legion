@@ -173,8 +173,8 @@ credentialed commands from your own bash calls.
 Append this exact structured footer to **every** pull-request comment and review that this
 phase posts on GitHub. It preserves session provenance on the artifact itself so work stays
 attributable to the session that produced it. Dispatch comments carry session provenance
-natively through their own `actor`/`origin` fields; this footer is only for GitHub PR
-artifacts:
+natively through their own `actor`/`origin` fields; this footer is for GitHub PR artifacts and
+for the retro's Dispatch message (`skills/legion-retro`):
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->
