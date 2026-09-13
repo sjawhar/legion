@@ -187,7 +187,65 @@
       "commitStatus": "legion/tester = failure on 7c2dcb27 (id 54063243185) and 363270f3 (id 54063243702): 'both blocking fixes PASS (rig A-G x2); FAIL: docs name 1.17.4 but main released 1.18.0 -> 1.18.1; PR CONFLICTING, rebase' (an earlier success status on each SHA, ids 54063237551/54063238045, is superseded by the later failure)."
     }
   },
+  "round3": {
+    "head": "f8a8ff0be3460c719095f8edf24c283ec06aefa0",
+    "headNote": "f8a8ff0b = code+docs head d507e640 + .legion/implement.json round-3 section. Rig built from workspace @ d1a976ef (= f8a8ff0b's tree + the daemon-provisioned empty .omp/config.yml); dist/legion.js md5 2b279593769ae39dd4a1638e3283f05b (unchanged since round 2 - the rebase touched no extension source).",
+    "verdict": "PASS on all five items. Current expected release version: 1.18.2 (latest tag pi-legion-envoy-v1.18.1 both at the implementer's commit and now).",
+    "items": {
+      "1_rebaseIntegrity": {
+        "verdict": "PASS",
+        "evidence": [
+          "`jj diff --from main@origin(195674ab) --to d507e640 --summary` lists 32 paths; `jj diff --from abaf0817 --to 7c2dcb27 --summary` (pre-rebase) lists the same 32 - set difference empty both ways (3 .legion/*.json, A worker-bin.ts + test, A grant-file.ts, D gh-shim.ts, 25 M). No file outside this PR's intended set, so nothing from #956/#994/#995/#996 is reverted.",
+          "Per-file, the rebased diff-against-base is byte-identical (md5 of the unified diff minus index/@@ lines) to the pre-rebase diff for 28 of 32 paths - including processes.ts, daemon/index.ts, cli/index.ts, SKILL.md, root AGENTS.md, pi-envoy/AGENTS.md, which main also changed. The 4 that differ: omp-tool-call-hook-rewrites-are-model-visible.md and grant-delivery-plugin-omp-contract.md (only the 1.17.4->1.18.2 lines: :35, :86; :29), and the two conflict files below.",
+          "Conflict 1 docs/solutions/legion/worker-pane-shell-gotchas.md: main's #956/LEGION-17 additions all present at d507e640 (related_issues LEGION-17/#956/LEGION-52; the intro sentence 'the slow-push paragraph in section 1 is from LEGION-17 (sjawhar/legion#956), whose implementer ... filed the section-1 harness fix as LEGION-52'; the section-1 'The push *itself* can outlive the grant ... load average was 889 ...' paragraph) - 3/3 grep hits; the branch's sentences 'delivery fixed for good by LEGION-54 (pi-envoy 1.18.2)' (:68) and '**The fix (pi-envoy 1.18.2; LEGION-54 ...' (:119) present; 'None was part of' appears once; 0 conflict markers.",
+          "Conflict 2 packages/daemon/src/daemon/AGENTS.md boot-probe paragraph: word-diff of main's paragraph vs d507e640's yields exactly one insertion - '- itself preceded by `resolveDaemonEnvironment` and `installWorkerGhShim` (`worker-bin.ts`), so the `gh` shim every pane's PATH puts first exists before any probe or pane runs, and an fs failure writing it refuses startup -' - and main's #995 'An attempt the daemon itself abandoned ...' tail is present; #956's `deployment-instructions.ts` Files row and 'Set `instructions` in `legion.yaml`' section present (3 hits); 0 conflict markers.",
+          "Chain over main@origin: 18 commits - eaf657cf feat(daemon), 1742611d fix(cli), abb8b8fe fix(pi-envoy), 338e6892 test(pi-envoy) rig, 921c6bf0/fe26092d/6cca9ecb docs, 58d18fce implement handoff, f5fbc2e4 implement handoff (r1 rebase), 89fa21da 'test: record handoff' + f2f6d295 'test: record PR artifacts in handoff' (round 1), 8b927bbe 'review: record handoff' (the reviewer's 4319ece9, rebased), a0a97879 fix(daemon) round-2, 8ea236f2 implement r2, 50868dbc 'test: record round-2 handoff' + 416ac4b9 'test: record round-2 PR artifacts', d507e640 docs version, f8a8ff0b implement r3. The implementer's swept .omp/config.yml commit is absent (correct)."
+        ]
+      },
+      "2_behavioralProof": {
+        "verdict": "PASS",
+        "evidence": [
+          "Rig: RIG_PLUGINS=production RIG_LEGION_BUILD=branch (l12rig profile copy with secretsd v3.0.2; state/worker-bin removed and reinstalled by setup.sh via worker-bin.ts: gh -rwx------), OMP /home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-203541/bin/omp, stand-in on 13399 (hub start l54-standin), both drives under hub start with the round-2 launch PATH (/tmp/l54-drive-path.txt: /tmp/l54rig/state/worker-bin at positions 1 and 6, this pane's own .../sjawhar-legion/worker-bin at 2; 75 entries).",
+          "Headless /tmp/l54rig/runs/tester-r3-fixed-rpc-2026-09-13T05-09-05-963Z (hub l54-drive-rpc-r3, exit 0): 34 bash calls (5/task/9/task/12/task/8), 34 mints, 4 instances, every row H=1/1 G=1 T=0, 27/27 record-grant file=own-mint mode 600; probe call 17 PATH begins /tmp/l54rig/state/worker-bin:/tmp/l54rig/state/bin:... with worker-bin exactly once; `which gh` -> the shim, `gh --version` and `legion gh -- --version` (31) -> gh version 2.98.0 exit=0 via /gh-token 200 (299de1d3, 5b98ba3f); `legion credential get` (30, 32) exit=0 (/git-credential 200 953d6caf, df64fae6); `legion handoff complete` (34) exit=0 (/phase/complete 200 dcc46ef8); 0 'LEGION_GRANT_FILE is missing' and 0 'LEGION_GRANT=' in events.jsonl; A-G ALL PASS.",
+          "Interactive /tmp/l54rig/runs/tester-r3-fixed-tui-2026-09-13T05-12-00-308Z (run.ts tui --short under tmux -L l12rig, exit 0): 9 calls, 9 mints, 2 instances, 6/6 own-mint 600, probe PATH worker-bin once, `legion credential get` (8) exit=0 (/git-credential 200 f8dd18cc), `legion handoff complete` (9) exit=0 (/phase/complete 200 b00fef92); A-G ALL PASS.",
+          "Negative control: fabricated id in a 0600 file -> 'Unable to redeem LEGION_GRANT (403)' exit=1; stand-in 05:13:25.947Z /legion/v1/git-credential 403 grantId 00000000-0000-4000-8000-000000000000.",
+          "Acceptance 5 grep: all 34 + 9 minted ids over /tmp/l54rig/runs/tester-r3-fixed-rpc-2026-09-13T05-09-05-963Z/events.jsonl, /tmp/l54rig/runs/tester-r3-fixed-tui-2026-09-13T05-12-00-308Z/pane.txt, every ~/.omp/profiles/l12rig/agent/sessions transcript and every ~/.omp/profiles/l12rig/logs/omp.*.log - printed nothing (transcripts 2026-09-13T05-09-10-820Z_01a0992b-... / 2026-09-13T05-12-07-255Z_01a0992e-...; logs omp.2026-09-13.399608.log / omp.2026-09-13.526667.log). Grant file -rw------- 36 bytes legion-l12rig-rig-1-implementer-grant (deleted before each leg). Stand-in logs kept: /tmp/l54rig/standin.tester-r3-fixed-{rpc,tui}.log."
+        ]
+      },
+      "3_regression": {
+        "verdict": "PASS",
+        "evidence": [
+          "Named files at f8a8ff0b: environment.test.ts 13/13, processes.test.ts 216 pass / 3 skip (LEGION_TMUX_LIVE), cli/__tests__/index.test.ts 27/27, secrets.test.ts 4/4, worker-bin.test.ts 2/2, config.test.ts 55/55, index.test.ts 33/33 (config/index/cli counts grew with main's #956/#995 tests); round-2 additions + 'grant resolution' via -t: 6/6; pi-envoy extensions/legion.test.ts 54/54.",
+          "Full suites: packages/daemon `bun test` 1001 pass / 6 skip / 0 fail across 61 files (47.4 s; /tmp/l54-r3-daemon-full.log) - the #980 timing family did not fail this run; skips are the LEGION_TMUX_LIVE tests. packages/pi-envoy `bun run test` 159 pass / 0 fail across 7 files."
+        ]
+      },
+      "4_releaseVersion": {
+        "verdict": "PASS",
+        "expectedNow": "1.18.2",
+        "evidence": [
+          "Tags (commit dates): pi-legion-envoy-v1.18.0 -> 41721b7a 2026-09-13T04:18:08Z; pi-legion-envoy-v1.18.1 -> e560b0ee 2026-09-13T04:41:14Z; no later pi-legion-envoy tag after `git fetch origin --tags` at 05:08Z; main@origin 195674ab is v1.18.1's release commit.",
+          "Implementer's round-3 commits: d507e640 authored 04:53:55Z / committed 04:57:57Z; f8a8ff0b 05:04:47Z / 05:04:54Z - both after v1.18.1 (04:41Z), so the latest tag at edit time was v1.18.1.",
+          "`.github/scripts/release-bump.sh 1.18.1 pi-legion-envoy-v1.18.1..d507e640 -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/` -> 1.18.2 (classifiable subjects in that range on those paths: fix(pi-envoy) and fix(daemon) only - the branch's feat(daemon) commit touches packages/daemon alone and is path-filtered out). Squash-title-only model with the script's regexes over prev 1.18.1 -> 1.18.2. As of now (05:08Z): 1.18.2.",
+          "Six sites at f8a8ff0b all say 1.18.2: omp-tool-call-hook-rewrites-are-model-visible.md:35 and :86; worker-pane-shell-gotchas.md:68 and :119; grant-delivery-plugin-omp-contract.md:29; .legion/implement.json deployment '@sjawhar/pi-legion-envoy@1.18.2'; PR body Deployment step 1. Tree grep for '1.17.4|1.18.1' over *.md/*.ts/*.sh/*.json/*.yaml excluding node_modules and .legion/: the only hit is packages/pi-envoy/package.json version 1.18.1, byte-identical to main's (the release workflow's own bump; `jj diff --from main@origin --to f8a8ff0b packages/pi-envoy/package.json` -> 0 files changed) - not a branch claim. .legion/*.json carry the old numbers only as round history.",
+          "Merger note: expected release version at READY time is 1.18.2 unless main releases pi-envoy again first (any merge touching packages/pi-envoy, envoy-client, contracts, workspace, or skills/ with a feat/fix/refactor/perf subject); recompute with `git tag -l 'pi-legion-envoy-v*' | sort -V | tail -1` and the script, and make the one-line correction if drifted. The squash body must not carry the branch's 'feat(daemon): ...' subject as a `* ` bullet (the classifier reads body lines; a feat bullet would publish 1.19.0)."
+        ]
+      },
+      "5_ci": {
+        "verdict": "PASS",
+        "evidence": [
+          "check-runs at f8a8ff0be3460c719095f8edf24c283ec06aefa0: Tests run 34739420569 - pr-title, lint, typecheck, test all success; Legion Envoy and Contracts run 34739420598 - changes, pi-envoy success; contracts/envoy-plugin/envoy-client/dispatch/claude-envoy-bridge/envoy-go skipped (path-filtered). The daemon published ci-green for f8a8ff0b at 05:06:31Z.",
+          "check-runs at d507e640: Tests 34739130921 (and a second Tests run 34739386168, both success) and Legion Envoy and Contracts 34739130922 success - matches the implementer's report.",
+          "PR: mergeable MERGEABLE, mergeStateStatus BLOCKED (review required); combined commit status at f8a8ff0b was 'pending' (no statuses) before my legion/tester status."
+        ]
+      }
+    },
+    "environment": {
+      "rig": "/tmp/l54rig",
+      "mainExports": "/tmp/l54main-abaf (abaf0817), /tmp/l54main-9414 (94146572) - kept from rounds 1-2; not needed this round (no new fail-on-main claims)",
+      "launchPath": "/tmp/l54-drive-path.txt"
+    }
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T04:42:59.927Z"
+  "completed": "2026-09-13T05:15:36.740Z"
 }
