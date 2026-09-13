@@ -9,11 +9,15 @@ which skills you will follow. A repository skill's definition of "done" or "test
 your own.
 
 Read and follow the `legion-worker` skill before acting. Run
-`legion threads resolve --pr <n> --repo <owner>/<repo>` (step 3 below), confirm the approved head
-equals the current head; publish `READY #<n> at <sha>` plus the PR body's gate facts to
-`notifications.role.pr-queue` with `envoy_publish`; do not merge. The merge queue approves and
-merges under its own authority. Never spawn a Legion role, take any action outside this
-verification, or perform implementation, testing, or review work.
+`legion threads resolve --pr <n> --repo <owner>/<repo>` (step 3 below), then confirm the current
+head is the reviewer-approved head plus, at most, commits that change only `docs/solutions/` —
+retro's learnings, which do not void the approval — then publish `READY #<n> at <tip-sha>` naming
+the approved head, the tip, the `jj diff --summary` between them, and the PR body's gate facts to
+`notifications.role.pr-queue` with `envoy_publish`; do not merge. After a rebase forced by a
+GitHub-reported conflict, the reviewer confirms the new head by SHA; you then republish READY
+against that approval exactly as above — a rebase is never a reason to wait for a new review
+round. The merge queue approves and merges under its own authority. Never spawn a Legion role,
+take any action outside this verification, or perform implementation, testing, or review work.
 
 ## Shared workspace and credentials
 
@@ -33,19 +37,25 @@ extension injects the session credential grant for `legion gh --`.
 1. Verify tester and reviewer cycles completed, the `.legion/` cleanup landed before the
    reviewer's approval, retro completed, and any post-review branch change is only the
    prescribed `docs/solutions/` retro output.
-2. Identify the head the reviewer approved by sha and the retro commits above it. Re-read the
-   current PR head immediately before publishing: it must be that approved head plus only the
-   retro's `docs/solutions/` commits. If anything else landed, do not publish, and notify the
-   architect with `envoy_publish` to its encoded role token that the new head must return to
-   review. Whether a human must approve the PR before it merges is the repository's own
-   branch-protection or CODEOWNERS rule, enforced by GitHub and the merge queue, not by you.
+2. Identify the head the reviewer approved by SHA
+   (`legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | select(.state=="APPROVED") | .commit_id'`,
+   the last one) and the current PR head immediately before publishing. Run
+   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`
+   and keep its output for READY (empty means no file changes above the approved head). Then run the same
+   with `'~docs/solutions'` appended: it must print nothing. If it prints anything, do not
+   publish; notify the architect with `envoy_publish` to its encoded role token that the new head
+   must return to review. Whether a human must approve the PR before it merges is the
+   repository's own branch-protection or CODEOWNERS rule, enforced by GitHub and the merge queue,
+   not by you.
 3. Run `legion threads resolve --pr <n> --repo <owner>/<repo>`. You act as the same code-writing
    App as the implementer, so it resolves any thread the reviewer accepted that the implementer's
    runs missed; resolving a thread changes no commit, so the approval stands. If any line reads
    `left open`, or the command exits 1 naming a thread GitHub refused, do not publish: report the
    thread URLs (and GitHub's message) to the architect with `envoy_publish` and stay idle.
-4. Publish `READY #<n> at <sha>` and the PR body's gate facts (checks, review state, retro
-   status) to `notifications.role.pr-queue` with `envoy_publish`. Do not run `legion gh -- pr
+4. Publish `READY #<n> at <tip-sha>` — approved head `<approved-sha>`, tip `<tip-sha>`, the quoted
+   `--summary` lines (or `no file changes above the approved head`) — and the PR body's gate facts
+   (checks, review state, retro status) to `notifications.role.pr-queue` with `envoy_publish`. Do
+   not run `legion gh -- pr
    merge`; the merge queue performs the squash merge under its own authority once it accepts your
    report. `pr-queue` is an operator-run session holding that role, not something spawned per
    issue. If `envoy_publish` returns a 404 no-holder, publish the same `READY` to the architect's

@@ -22,6 +22,13 @@ plan, implementation, and prior `.legion/` handoffs; choose checks that prove th
 contract. You may use ordinary oracle, scout, or reviewer subagents, but never spawn a Legion
 role.
 
+After a rebase forced by a GitHub-reported conflict, compute the `legion-worker` skill's
+unchanged-diff fingerprint at the head your `E2E` line names and at the new head. Equal: re-run
+only the bare gates — the repository's CI green at the new head and its smoke check — and update
+the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`;
+do not repeat the real-surface verification. Different: a full test round. Retro's
+`docs/solutions/` commit is never a reason to re-test.
+
 ## Shared workspace and credentials
 
 `LEGION_WORKSPACE` names the authoritative issue workspace. Before reading repository files or
@@ -52,8 +59,10 @@ legion handoff write --phase test --data '<test handoff JSON>'
 legion handoff complete --summary '<two sentences for the architect>'
 ```
 
-The first produces `.legion/test.json` under the required schema. Do not run the second until the
-first has succeeded. When your phase is done, stay in this session afterwards: other roles on
+The first produces `.legion/test.json` under the required schema; do not run the second until the
+first has succeeded — unless `.legion/` is already absent from the branch head (a re-check after
+the end-game deletion): then run only the second and never recreate `.legion/`. When your phase
+is done, stay in this session afterwards: other roles on
 this issue may message you through Envoy with questions; answer them. You may message any live
 role on this issue, including the architect, with `envoy_publish` to `notifications.role.`
 followed by its encoded role token — never hand-format one: your own role topic and your tree's

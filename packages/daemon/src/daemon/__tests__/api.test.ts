@@ -11,7 +11,7 @@ import { DispatchHttpError } from "../dispatch-client";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { type EnvelopeJson, routeActive } from "../reducers";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
 const child = "WIDGETS-2" as IssueKey;
@@ -2398,6 +2398,117 @@ describe("Legion HTTP API", () => {
     expect(spawnedWorkers).toEqual([{ tree: root, issue: root, role: "planner", task: "plan #1" }]);
   });
 
+  async function architectSecret(): Promise<string> {
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("root boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(started.response.status).toBe(200);
+    return started.body.secret;
+  }
+
+  function recordingDispatchClient(): {
+    client: LegionApiDeps["dispatchClient"];
+    statusWrites: Array<{ issue: IssueKey; status: string }>;
+  } {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    return {
+      statusWrites,
+      client: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    };
+  }
+
+  it("writes nothing when the architect spawns a worker for an issue a human moved back to todo", async () => {
+    // A released child is admitted as its own tree and gets `in_progress` from its own spawnTree,
+    // so an active issue at `todo` is only ever a human's doing; the spawn must not override it.
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].status = "todo";
+    const secret = await architectSecret();
+
+    const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret,
+      role: "planner",
+      task: "plan #1",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(spawn.body.status).toBe("spawned");
+    expect(dispatch.statusWrites).toEqual([]);
+  });
+
+  it("writes in_progress when the architect spawns a corrective implementer while the PR's latest review is changes requested", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].status = "retro";
+    state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "changes_requested" });
+    const secret = await architectSecret();
+
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret,
+      role: "implementer",
+      task: "address the human's review",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+  });
+
+  it("writes nothing when the architect spawns the implementer at retro under an approved review", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].status = "retro";
+    state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "approved" });
+    const secret = await architectSecret();
+
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret,
+      role: "implementer",
+      task: "run retro",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([]);
+  });
+
+  it("writes nothing when the architect spawns the implementer at retro with no pull request recorded", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    state.issues[root].status = "retro";
+    const secret = await architectSecret();
+
+    const spawn = await json("/legion/v1/worker/spawn", {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      secret,
+      role: "implementer",
+      task: "run retro",
+    });
+
+    expect(spawn.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([]);
+  });
+
   it("refuses spawn_worker for a non-architect session capability", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
@@ -2642,22 +2753,7 @@ describe("Legion HTTP API", () => {
         socketPath: "/state/workers/reviewer.sock",
       },
     };
-    state.prs["acme/widgets#9"] = {
-      key: root,
-      repo: "acme/widgets",
-      number: 9,
-      headSha: "head-sha",
-      verdict: "green",
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: 0,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-      reviewDecision: "changes_requested",
-    };
+    state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "changes_requested" });
     const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
     if (!bootToken) throw new Error("worker boot token was not minted");
     const started = await json<{ secret: string }>("/legion/v1/worker/started", {
@@ -2704,22 +2800,7 @@ describe("Legion HTTP API", () => {
         socketPath: "/state/workers/reviewer.sock",
       },
     };
-    state.prs["acme/widgets#9"] = {
-      key: root,
-      repo: "acme/widgets",
-      number: 9,
-      headSha: "head-sha",
-      verdict: "green",
-      failing: [],
-      failingStatuses: [],
-      ciSettledAt: 0,
-      ciCheckRuns: null,
-      ciSettlementGeneration: null,
-      ciSnapshot: null,
-      ciReconciled: false,
-      fixAttempts: 0,
-      reviewDecision: "approved",
-    };
+    state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "approved" });
     const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
     if (!bootToken) throw new Error("worker boot token was not minted");
     const started = await json<{ secret: string }>("/legion/v1/worker/started", {
@@ -2742,6 +2823,190 @@ describe("Legion HTTP API", () => {
 
     expect(complete.response.status).toBe(200);
     expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
+  });
+
+  it("advances the issue to testing when an implementer completes from in_progress", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    state.issues[root].status = "in_progress";
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([{ issue: root, status: "testing" }]);
+  });
+
+  it("writes no status when an implementer completes from retro (the .legion deletion push or retro itself)", async () => {
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    await start({
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+    state.issues[root].status = "retro";
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Pushed the .legion deletion",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(statusWrites).toEqual([]);
+    expect(state.phases[root]).toBeUndefined();
+  });
+
+  it("advances the issue to testing when an implementer completes while the daemon's own in_progress write is still pending", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    // Dispatch has echoed nothing past `todo`, but admission's `in_progress` PATCH is recorded as
+    // pending against that `todo`: the daemon's own view of the issue is `in_progress`.
+    state.issues[root].status = "todo";
+    state.pendingStatusWrites[root] = { status: "in_progress", statusAtRecord: "todo" };
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([{ issue: root, status: "testing" }]);
+  });
+
+  it("writes no status when an implementer completes after a human's move superseded the daemon's pending in_progress write", async () => {
+    const dispatch = recordingDispatchClient();
+    await start({ dispatchClient: dispatch.client });
+    // Admission's `in_progress` PATCH failed and was recorded against `todo`; before resync could
+    // retry it, Dispatch echoed a human's move to `icebox`. That echo supersedes the pending write
+    // (resync's own fence), so the daemon's view of the issue is the human's `icebox`.
+    state.issues[root].status = "icebox";
+    state.pendingStatusWrites[root] = { status: "in_progress", statusAtRecord: "todo" };
+    const token = roleToken(state.project, root, "implementer");
+    state.roles[token] = {
+      issue: root,
+      role: "implementer",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/implementer.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "implementer", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "implementer",
+      bootToken,
+      sessionId: "ses_implementer",
+      agentId: "agt_implementer",
+      ompSessionFile: "/tmp/implementer.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+    const grantId = await mintGrant(root, "ses_implementer", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(dispatch.statusWrites).toEqual([]);
   });
 
   it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase", async () => {

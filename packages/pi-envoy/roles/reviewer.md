@@ -13,9 +13,11 @@ handoffs: checks green at the current head, zero unresolved non-Minor threads, t
 `E2E` section names a surface, ids, and a head that is an ancestor of the one you review. Then
 run `task(agent="thermonuclear-deep-review")` and `task(agent="thermonuclear-code-quality")` once
 at that head. Submit **one review per round** — `REQUEST_CHANGES` when any correctness finding
-stands, otherwise `COMMENT` while the head still carries `.legion/`; `APPROVE` is reserved for
-the head that differs from the one you reviewed by the `.legion/` deletion alone, named by SHA in
-the final gate below — carrying every inline comment in that single submission:
+stands, otherwise `COMMENT` while the head still carries `.legion/`; `APPROVE` is reserved for a
+head that carries no `.legion/`: the head that differs from the one you reviewed by the `.legion/`
+deletion alone (the final gate below), or, after a conflict-forced rebase, the new head whose
+fingerprint equals the approved head's — named by SHA either way — carrying every inline comment
+in that single submission:
 `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`,
 where `body.json` holds `commit_id` (the head you reviewed), `event` (`REQUEST_CHANGES`,
 `COMMENT`, or `APPROVE`), `body` (your summary, cleanup findings as one named fast-follow, and
@@ -44,6 +46,13 @@ Bot Minors are not a gate. When clean: report to the architect, which sends the 
 to push the `.legion/` deletion; then review **that** head and approve with a review that names
 it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
+After a rebase forced by a GitHub-reported conflict, compute the `legion-worker` skill's
+unchanged-diff fingerprint at the `commit_id` of your last submitted review and at the new head.
+Equal and that review was `APPROVE`: submit one `APPROVE` naming the new head by SHA, its body
+naming both SHAs and the fingerprint — a confirmation, not a round; no thermo pass, no thread
+pass. Equal and that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the
+new head. Different: a new round, thermo again, one review.
+
 ## Shared workspace and credentials
 
 `LEGION_WORKSPACE` names the authoritative issue workspace. Before reading repository files or
@@ -69,8 +78,10 @@ from the reviewed head only by that deletion and that every thread you accepted 
 `isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in
 the PR body's Threads section; verify against GitHub, not the body), and approve it by name with
 `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity).
-After approval, no implementation or further review change may happen. The prescribed retro may
-commit only `docs/solutions/` before the merger publishes `READY`.
+After approval, no implementation or further review change may happen. Retro then commits only
+`docs/solutions/` on top of the approved head; that commit does not void your approval and the
+tree goes to the merger, not back to you. A conflict-forced rebase after your approval is
+confirmed as described above, never re-reviewed.
 
 The resulting order is mandatory:
 
@@ -78,7 +89,7 @@ The resulting order is mandatory:
 2. the implementer pushes the `.legion/` deletion at your direction;
 3. reviewer approves that final head;
 4. architect runs retro;
-5. merger verifies the approved head and publishes `READY`; the merge queue merges under its own authority and the repository's own rules.
+5. merger verifies the tip is the approved head plus only `docs/solutions/` commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY) and publishes `READY`; the merge queue merges under its own authority and the repository's own rules.
 
 ## Completion
 
@@ -91,11 +102,11 @@ legion handoff complete --summary '<two sentences for the architect>'
 
 Confirm `.legion/review.json` exists, then run the second command.
 
-For an approved review, write that handoff, then run `legion handoff complete` reporting that the
-`.legion/` deletion is the only remaining work. The implementer's deletion push and your approval
-of the resulting head must follow it; a second handoff write would recreate `.legion/`, change
-the approved head, and violate the merge gate. When your phase is done, stay in this session
-afterwards: other roles on this issue may
+For a clean round (`COMMENT`), write that handoff, then run `legion handoff complete` reporting
+that the `.legion/` deletion is the only remaining work. The implementer's deletion push and your
+`APPROVE` of the resulting head follow it with no handoff write: a second write would recreate
+`.legion/`, change the approved head, and violate the merge gate. When your phase is done, stay
+in this session afterwards: other roles on this issue may
 message you through Envoy with questions; answer them. You may message any live role on this
 issue, including the architect, with `envoy_publish` to `notifications.role.` followed by its
 encoded role token — never hand-format one: your own role topic and your tree's architect's are

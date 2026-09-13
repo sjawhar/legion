@@ -26,6 +26,12 @@ threads or push — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and nam
 unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's
 message: report it to the architect with `envoy_publish`; never skip it.
 
+Rebase only when GitHub reports the PR `CONFLICTING`. Before and after, record the
+`legion-worker` skill's unchanged-diff fingerprint at the tip and post both SHAs and both
+fingerprints in one PR comment; rebase the whole chain
+(`jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`) so other roles'
+commits move with yours.
+
 ## Shared workspace and credentials
 
 `LEGION_WORKSPACE` names the authoritative issue workspace. Before reading repository files or
@@ -56,8 +62,10 @@ legion handoff write --phase implement --data '<implement handoff JSON>'
 legion handoff complete --summary '<two sentences for the architect>'
 ```
 
-The first writes `.legion/implement.json` with the required schema fields. Do not run the second
-until the first has succeeded. When your phase is done, stay in this session afterwards: other
+The first writes `.legion/implement.json` with the required schema fields; do not run the second
+until the first has succeeded — unless `.legion/` is already absent from the branch head (the
+`.legion/` deletion push itself, a later rebase, or retro): then run only the second and
+never recreate `.legion/`. When your phase is done, stay in this session afterwards: other
 roles on this issue may message you through Envoy with questions; answer them. You may message
 any live role on this issue, including the architect, with `envoy_publish` to `notifications.role.`
 followed by its encoded role token — never hand-format one: your own role topic and your tree's

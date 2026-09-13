@@ -27,14 +27,36 @@ import {
   validateContractResponse,
 } from "../http";
 
+/** An issue's status as this daemon knows it. A lifecycle write of its own that has not landed on
+ * Dispatch yet (`pendingStatusWrites`, recorded when the PATCH failed and retried by resync) wins
+ * over the last status Dispatch echoed back through the durable lane — but only while that echoed
+ * status is still the one the write was recorded against (`statusAtRecord`), resync's own
+ * supersession fence (`retryPendingWrite` in `dispatch-client.ts`). So a Dispatch outage between
+ * two daemon-owned transitions never makes the second one read a stale status, and a human's move
+ * echoed after the failed write is never outranked by it. */
+function knownIssueStatus(state: LegionState, issue: IssueKey): IssueStatus | undefined {
+  const pending = state.pendingStatusWrites[issue];
+  const echoed = state.issues[issue]?.status;
+  return pending && echoed === pending.statusAtRecord ? pending.status : echoed;
+}
+
+/** Whether the `review` reducer has recorded changes requested on the issue's PR — from any
+ * commit, while an approval is recorded only at the PR's current head. */
+function changesRequested(state: LegionState, issue: IssueKey): boolean {
+  return Object.values(state.prs).some(
+    (pr) => pr.key === issue && pr.reviewDecision === "changes_requested"
+  );
+}
+
 /** The status the daemon PATCHes off a phase's own completion, keyed by the role that just
  * finished. `planner`/`merger` completions never PATCH a status here: planning still reads as
- * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. A reviewer
- * completion checks the review verdict the `review` reducer already recorded on the issue's PR
- * (`state.prs[...].reviewDecision`, which records changes requested from any commit and an
- * approval only at the PR's current head): changes requested
- * returns the issue to `in_progress` for a corrective implementer instead of advancing to
- * `retro`. */
+ * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. An implementer
+ * completion advances `in_progress` → `testing` and nothing else: the same role also completes
+ * the `.legion/` deletion push, a conflict-forced rebase, and retro, none of which is a test
+ * round — from any other known status (or an issue whose status this daemon has not yet
+ * observed) it writes nothing, so `retro` is never followed by `testing`. A reviewer completion
+ * checks the review verdict already recorded on the issue's PR: changes requested returns the
+ * issue to `in_progress` for a corrective implementer instead of advancing to `retro`. */
 function phaseCompleteStatus(
   state: LegionState,
   issue: IssueKey,
@@ -42,18 +64,36 @@ function phaseCompleteStatus(
 ): IssueStatus | undefined {
   switch (role) {
     case "implementer":
-      return "testing";
+      return knownIssueStatus(state, issue) === "in_progress" ? "testing" : undefined;
     case "tester":
       return "needs_review";
     case "reviewer":
-      return Object.values(state.prs).some(
-        (pr) => pr.key === issue && pr.reviewDecision === "changes_requested"
-      )
-        ? "in_progress"
-        : "retro";
+      return changesRequested(state, issue) ? "in_progress" : "retro";
     default:
       return undefined;
   }
+}
+
+/** The one status the daemon PATCHes when the architect spawns a phase worker. Every released
+ * issue, root or child, gets `in_progress` at admission (`spawnTree` writes it for the tree's
+ * root, and a child released to `todo` is admitted as its own tree), so a spawn never starts an
+ * issue — the spawn-time write exists for the corrective round alone: an implementer spawned
+ * while the issue's PR carries `reviewDecision: "changes_requested"` (a Legion reviewer's round
+ * or a human's review after approval) returns the issue to `in_progress` from wherever the review
+ * left it, unless it is already there. Every other spawn writes nothing — a `.legion/` deletion
+ * push or a retro under an approved review never moves the status, and an active issue a human
+ * moved back to `todo` is never overridden — and the implementer's completion guard above sees
+ * the status this write put there. */
+function spawnStatus(
+  state: LegionState,
+  issue: IssueKey,
+  role: LegionRole
+): IssueStatus | undefined {
+  return role === "implementer" &&
+    knownIssueStatus(state, issue) !== "in_progress" &&
+    changesRequested(state, issue)
+    ? "in_progress"
+    : undefined;
 }
 
 export async function handleWorkerSession(
@@ -420,5 +460,13 @@ export async function handleSpawnWorker(
   }
   const task = requiredString(body, "task");
   const result = await ctx.deps.processManager.spawnWorker(tree, issue, role, task);
+  // Written after the process manager accepted the spawn (a refused one moves nothing) and before
+  // the result is returned, whether it was spawned, resumed, or queued: the worker's phase has
+  // started from the architect's point of view either way.
+  const nextStatus = spawnStatus(ctx.deps.state, issue, role);
+  if (nextStatus) {
+    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, nextStatus);
+    await ctx.save();
+  }
   return Response.json(validateContractResponse(LegionDaemonApi.SpawnWorker.response, result));
 }

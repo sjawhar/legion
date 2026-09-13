@@ -268,7 +268,13 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   The implementer rebases the issue branch only when GitHub reports it `CONFLICTING` or the
   controller asks because of a conflict — never to pick up `main` or to refresh CI. A single
   failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
-  pushing a new commit.
+  pushing a new commit. A conflict-forced rebase that leaves the branch's diff unchanged is a
+  confirmation, not a new round (see *The unchanged-diff check* below). Before rebasing, record
+  the fingerprint at the current tip; after pushing the rebased branch, record it at the new
+  tip; post one PR comment (Legion footer):
+  `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+  Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
+  so the tester's and reviewer's commits move with yours.
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -294,21 +300,33 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   whole staging gate never ran. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
-  re-pasted into the PR body each round.
+  re-pasted into the PR body each round. After a conflict-forced rebase, compute the
+  fingerprint at the head your `E2E` line names and at the new head. Equal: re-run only the
+  bare gates — the repository's CI green at the new head and its smoke check — and change the
+  `E2E` line's head to the new SHA with
+  `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
+  real-surface verification is not repeated. Different: a full test round.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
-  still carries `.legion/`; `APPROVE` only for the head that differs from the reviewed one by
-  the `.legion/` deletion alone, named by SHA — carrying every inline comment in that single
+  still carries `.legion/`; `APPROVE` only for a head that carries no `.legion/` — the head
+  that differs from the reviewed one by the `.legion/` deletion alone, or, after a
+  conflict-forced rebase, the new head whose fingerprint equals the approved head's — always
+  named by SHA — carrying every inline comment in that single
   call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
   with `commit_id`, `event` (`REQUEST_CHANGES`, `COMMENT`, or `APPROVE`), `body` (with the
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   Then return the issue to the architect; when clean, have the architect send the implementer
   back to push the `.legion/` deletion (the review App cannot push), then review **that** head
-  and approve it by name.
+  and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
+  `commit_id` of your last submitted review and at the new head. Equal and that review was
+  `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
+  and the fingerprint — a confirmation, not a round; no thermo pass, no thread pass. Equal and
+  that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
+  nothing restarts. Different: a new round — thermo again, one review.
   When you re-review after a corrective push, answer every thread you opened in one of the
   three forms above — `Accepted:` is the only reply the implementer's `legion threads resolve`
   acts on — and approve only once every thread you opened carries your `Accepted:` reply and the
@@ -316,13 +334,24 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   the PR body).
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
+- **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
+  cleaned head, retro commits its learnings under `docs/solutions/` on top of it; that commit
+  stays, the approval stands, and the tree goes to the merger — never back to the tester or
+  reviewer. Anything else above the approved head does void it, and the merger tells the
+  architect the head must return to review instead of publishing. A conflict-forced rebase
+  after retro moves those documents with the branch; retro never re-runs.
 - The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
   code-writing App as the implementer; resolving a thread changes no commit, so this run never
   invalidates the approval), does not publish while any `left open` line remains or the command
-  exits 1 (report the thread to the architect instead), confirms the approved head still equals
-  the current head, then publishes `READY #<n> at <sha>` plus the PR body's gate facts to the
-  merge queue's role (`notifications.role.pr-queue`) with `envoy_publish`. The merger never
-  merges; the queue merges under its own authority.
+  exits 1 (report the thread to the architect instead), then
+  proves that rule with two commands and publishes. First
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`,
+  whose output is quoted in READY (an empty output is quoted as
+  `no file changes above the approved head`); then the same with `'~docs/solutions'` appended,
+  which must print nothing. Then it publishes `READY #<n> at <tip-sha>` naming the approved
+  head, the tip, and that summary, plus the PR body's gate facts, to the merge queue's role
+  (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
+  merges under its own authority.
 - **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the
@@ -332,6 +361,44 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
   failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
   implementer owns the fix and the next slot.
+
+## The unchanged-diff check
+
+The fingerprint every role compares after a conflict-forced rebase (every flag and the fileset
+verified on jj 0.45.1):
+
+```bash
+cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
+  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
+    --git --context 0 '~(.legion | docs/solutions)' \
+  | sed -e '/^@@/d' -e '/^index /d' | sha256sum
+```
+
+- `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
+- `fork_point(main@origin | <head-sha>)` is the base the branch was cut from *at that head*:
+  the old base for the pre-rebase head, the new base for the rebased one, so one command
+  serves both sides. On a stacked PR substitute its base branch for `main`
+  (`legion gh -- pr view <n> --json baseRefName`).
+- A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
+  workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
+  changed diff — never as unchanged.
+- `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
+  on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
+  is left is exactly the added and removed lines per file.
+- The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
+  learnings: process artifacts the rules above already exempt from re-review, which change
+  between one role's verified head and the next without changing the product. This is what lets
+  each role compare against *its own* last verified head instead of trusting another role's
+  numbers. It must be one expression: jj unions positional filesets, so two separate
+  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Once
+  `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
+  unaffected.
+
+Where each role gets its two heads: the implementer — the tip before and after its own rebase;
+the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
+its last submitted review (`legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login}'`)
+and the new head; the merger never computes a fingerprint — it uses the `--summary` check
+above.
 
 ## Completion gate: handoff write, verification, and persistence
 
@@ -368,7 +435,13 @@ cd -- "$LEGION_WORKSPACE" && \
 Do not report phase completion until the write, existence check, and handoff commit
 succeed; when an issue branch exists, its push is also required. This is the committed
 copy the next phase reads after revival. It is removed once, at the end of a clean review: the
-implementer pushes that deletion at the reviewer's direction. No other phase removes it.
+implementer pushes that deletion at the reviewer's direction. No other phase removes it — and
+once it is gone (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout;
+jj warns on stderr), this
+gate no longer applies: a later rebase, bare-gate re-check, confirmation, or retro writes no
+`.legion/<phase>.json`, commits no handoff, and reports with `legion handoff complete` alone
+(below). Recreating `.legion/` after its deletion changes the approved head and restarts the
+review loop this rule exists to end.
 
 ## Completion: report to the architect, then stay
 
