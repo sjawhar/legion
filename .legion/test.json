@@ -1,0 +1,212 @@
+{
+  "summary": "All four acceptance criteria pass at pull request #1037 code head fb9b26175cfe6667bcae501ad912a4324a151919 (PR head 6d0fa3a92a2ee8d1e029c90b2364f1b4f10d7d3c is the implementer's handoff commit on top). Bare gates green from packages/daemon. Acceptance 1-3 are each defended by tests that assert the observable contract (effects, admission/trees state, the exact log line, the pane opened), not plumbing. Acceptance 4 re-run on the tester's own smoke rig at this head: the seeded done issue at the head of the queue was dropped at boot with exactly one verbatim log line and the todo entry behind it was promoted; a genuinely waiting issue closed in Dispatch left legion state on that one issue.closed event with no log line; closing a known non-waiting issue left .admission byte-identical.",
+  "prUrl": "https://github.com/sjawhar/legion/pull/1037",
+  "prNumber": 1037,
+  "headSha": "fb9b26175cfe6667bcae501ad912a4324a151919",
+  "prHeadSha": "6d0fa3a92a2ee8d1e029c90b2364f1b4f10d7d3c",
+  "passed": 4,
+  "failed": 0,
+  "failures": [],
+  "gates": {
+    "from": "packages/daemon at working copy = code head fb9b26175cfe (only .omp/config.yml uncommitted, a workspace artifact)",
+    "biome": "`bunx biome check --error-on-warnings src/` -> Checked 160 files in 749ms. No fixes applied. exit 0",
+    "tsc": "`bunx tsc --noEmit` -> no output, exit 0",
+    "bunTest": "`bun test` -> 1198 pass, 7 skip, 0 fail, 5262 expect() calls, 1205 tests across 63 files, 36.95s, exit 0"
+  },
+  "acceptance": {
+    "1": {
+      "verdict": "pass",
+      "criterion": "A waiting issue moved to done/backlog/icebox/triage leaves the queue and loses its queued tree record in the same durable step; legion state shows neither; a later todo admits it again as a fresh root.",
+      "defendingTests": [
+        "reducers.test.ts `dequeues a waiting root that Dispatch moves to <backlog|icebox|triage|done>, never lingers it, and admits it afresh on a later todo` (x4): asserts the reducer's effects are exactly [{kind:dequeue}] (so no linger), the status is recorded, and a seq-99 `todo` on the post-dequeue state yields exactly [{kind:admit}].",
+        "reducers.test.ts `records <backlog|icebox> without a tree and lingers an active tree` (x2) and `lingers an active root when Dispatch closes it`: the active-tree path still yields [linger] for backlog/icebox/done; `leaves an active root alone when Dispatch moves it back to triage`: [] for triage on an active tree.",
+        "reducers.test.ts `leaves a waiting root queued when Dispatch echoes the daemon-owned <in_progress|testing|needs_review|retro>` (x4): [] on a queued root, so a daemon-owned echo never dequeues.",
+        "reducers.test.ts `dequeues a waiting child on close and still routes child-closed and children-complete to the parent`: [dequeue, child-closed publish, children-complete publish] in that order.",
+        "reducers.test.ts REPLAY_ONCE_CASES `issue.closed root waiting in the admission queue`: the at-most-once fence holds for the queued shape.",
+        "processes.test.ts `dequeue removes a waiting root's queue entry and its queued tree record, and persists once`: state.admission == {cap:1, active:[], queue:[]}, trees[root] undefined, exactly one save.",
+        "processes.test.ts `dequeue drops only the queue entry of a launch-failed root, and is a silent no-op for an issue that is not waiting`: launch-failed record untouched, no second save, no log line for a non-waiting issue.",
+        "events.test.ts `dequeues a waiting root in the same durable step as its close: onDequeue runs, then the save, then the ack`: order [dequeue, save] then ack=1 for a real issue.closed envelope on the durable lane.",
+        "api.test.ts `projects redacted durable state for GET /legion/v1/state ...` (pre-existing): pins that the API view is state.admission/state.trees verbatim, so the state-level assertions above are what `legion state` shows."
+      ],
+      "assessment": "Every test asserts what a consumer observes (reducer effects, the persisted admission/trees, the API projection, the durable-lane order), not internal wiring. No acceptance line is without a defending test."
+    },
+    "2": {
+      "verdict": "pass",
+      "criterion": "Every resync removes any remaining waiting entry whose status is done/backlog/icebox/triage, logs one line per entry naming issue and status, and leaves todo and daemon-owned entries alone.",
+      "defendingTests": [
+        "resync.test.ts `drops a queued entry whose issue is already done, logs it once, and leaves todo and daemon-owned entries alone`: queue [done LEGION-56, todo LEGION-57, in_progress LEGION-58] with Dispatch agreeing on every status (so the drift heal replays nothing) -> applyEffects called exactly once with [{kind:dequeue, issue:LEGION-56}, {kind:log, message:`dropped LEGION-56 from the admission queue at resync: Dispatch status \"done\"`}] under event_id `resync:LEGION-56:dequeue`; queue afterwards [LEGION-57, LEGION-58] with both trees still queued.",
+        "events.ts:635 prints a log effect as `[legion] ${message}` (read, not tested here), giving the full line `[legion] dropped <KEY> from the admission queue at resync: Dispatch status \"<status>\"`."
+      ],
+      "assessment": "Asserts the observable effects and the resulting state, not the helper. The predicate is shared with the reducer path, where all four stale statuses and all five non-stale ones are exercised. Observation, not a failure: the spec's Errors row `queue entry whose issue record is missing, found by the start-up or periodic sweep` is tested for the start-up sweep only (processes.test.ts `drops a queue entry with no issue record at boot, naming it unknown`); the periodic sweep's `unknown issue` reason goes through the same `staleQueueEntryReason` helper but has no resync-level case. Not exercised on the rig: after this change the reducer (live) and the boot sweep remove every reachable stale entry first, so a resync-time drop needs a state the daemon can no longer reach on its own; the unit test is the spec's named check."
+    },
+    "3": {
+      "verdict": "pass",
+      "criterion": "At start-up, before anything is promoted, every stale entry is removed and logged; a stale head is never promoted and the valid entry behind it is.",
+      "defendingTests": [
+        "processes.test.ts `drops a finished issue from the head of the queue at boot, logs it, and promotes the todo entry behind it`: queue [done root, todo child] under cap 1 -> admission == {cap:1, active:[child], queue:[]}, trees[root] undefined, trees[child].status active, console.error called with exactly `[legion] dropped <root> from the admission queue at boot: Dispatch status \"done\"`, exactly one tmux new-window and its LEGION_TREE is the child.",
+        "processes.test.ts `drops a queue entry with no issue record at boot, naming it unknown`: admission == {cap:2, active:[], queue:[]}, no tree, exact `... at boot: unknown issue` line.",
+        "processes.test.ts `never promotes stale queue entries whose trees are not queued` (pre-existing, re-seeded with todo nodes): active/lingering/dead/closed trees in the queue are left exactly as they were."
+      ],
+      "assessment": "Asserts the promoted pane, the final admission/trees, and the exact line — the observable boot outcome. Also proven on the rig (acceptance 4, part one, with a todo entry behind the done head)."
+    },
+    "4": {
+      "verdict": "pass",
+      "criterion": "On the smoke rig, a state file seeded with a finished issue in the queue starts clean and prints the log line, and closing a waiting issue in Dispatch removes it from legion state on that one event.",
+      "evidence": "see smoke below; the production check on LEGION-56 (no new status events across two controller reorder cycles after the operator restarts the production daemon on this change) is the operator's next relaunch and is named in the PR body, not testable here."
+    }
+  },
+  "smoke": {
+    "rig": "main's scripts/smoke/up.sh + down.sh as an uncommitted working-copy overlay (this branch's up.sh hardcodes the shared NATS container name; overlay identical to main@origin 708d9ad405c5, `jj restore`d afterwards — `jj status` shows only .omp/config.yml), run under `env -u LEGION_OMP_PATH secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'` with SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/790 SMOKE_WEBHOOK_MODE=envoy SMOKE_DIR=/tmp/legion-smoke-79t NATS_PORT=14280 ENVOY_PORT=19080 LEGION_DAEMON_PORT=19380. Real NATS container legion-smoke-nats-sjawhar790, real Envoy listener, production-Envoy bridge for Dispatch issue events, private tmux server legion-sjawhar790, OMP pin 18.1.18-sami.20260912-104423 (`GREEN OMP build ... mise where`), legion profile plugins via that pin, daemon = this workspace at code head fb9b26175cfe6667bcae501ad912a4324a151919. `RIG READY` at 15:22Z; root LEGSMOKE-163 created by up.sh, admitted and active; controller spawned.",
+    "dispatchWrites": "POST /api/v1/issues and PATCH /api/v1/issues/<key> with actor {kind:\"session\", id:\"legion-79-tester\", origin:{session_title:\"LEGION-79 tester smoke\"}}; DISPATCH_URL/DISPATCH_TOKEN from ~/.config/opencode/envoy.json.",
+    "setup": "Created LEGSMOKE-164 (left in triage, no tree) and LEGSMOKE-165 (PATCHed to backlog; daemon view: status backlog, no tree). Stopped the rig daemon (TERM, API gone), backed up state.json, seeded: LEGSMOKE-1 (done in Dispatch: `T20 fixture capture — root`) as issues node {status done} + trees {status queued} at the head of admission.queue; LEGSMOKE-164 issues.status -> todo + trees {status queued} behind it; admission_cap 4 -> 2 in legion.yaml so one slot was free next to the active LEGSMOKE-163. Restarted with up.sh's exact daemon env block and command under `env -u LEGION_OMP_PATH secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- env ENVOY_NATS_URL=nats://127.0.0.1:14280 ENVOY_URL=http://127.0.0.1:19080 LEGION_DAEMON_PORT=19380 DISPATCH_URL=... DISPATCH_TOKEN=... LEGION_STATE_DIR=/tmp/legion-smoke-79t/daemon XDG_DATA_HOME=... XDG_STATE_HOME=... bun run packages/daemon/src/cli/index.ts start sjawhar/790 --config /tmp/legion-smoke-79t/legion.yaml`, daemon.pid/daemon.start recorded as start_process does. API up 15:24:26Z.",
+    "bootSweep": {
+      "stateBefore": {
+        "admission": {
+          "cap": 4,
+          "active": [
+            "LEGSMOKE-163"
+          ],
+          "queue": [
+            "LEGSMOKE-1",
+            "LEGSMOKE-164"
+          ]
+        },
+        "doneTree": {
+          "root": "LEGSMOKE-1",
+          "generation": 0,
+          "status": "queued",
+          "launchFailures": 0
+        },
+        "doneIssue": {
+          "key": "LEGSMOKE-1",
+          "title": "seeded finished issue",
+          "status": "done",
+          "children": []
+        },
+        "todoTree": {
+          "root": "LEGSMOKE-164",
+          "generation": 0,
+          "status": "queued",
+          "launchFailures": 0
+        },
+        "todoIssue": {
+          "key": "LEGSMOKE-164",
+          "status": "todo",
+          "title": "LEGION-79 tester: todo entry behind the done head"
+        },
+        "otherTrees": {
+          "LEGSMOKE-163": "active"
+        },
+        "legionYaml": "admission_cap: 2",
+        "dispatchStatusOfTodoEntryAtRestart": "triage"
+      },
+      "bootLogLine": "[legion] dropped LEGSMOKE-1 from the admission queue at boot: Dispatch status \"done\"",
+      "bootLogLineCount": 1,
+      "bootLogLineCountWholeLog": 1,
+      "stateAfter": {
+        "admission": {
+          "cap": 2,
+          "active": [
+            "LEGSMOKE-163",
+            "LEGSMOKE-164"
+          ],
+          "queue": []
+        },
+        "doneTree": null,
+        "doneIssueStatus": "done",
+        "todoTree": {
+          "status": "active",
+          "generation": 1,
+          "readyConfirmedAt": 1789313087884
+        },
+        "todoIssueStatus": "in_progress",
+        "todoIssueInDispatch": "in_progress",
+        "tmuxWindows": [
+          "@1 controller",
+          "@2 legsmoke-163",
+          "@3 legsmoke-164"
+        ]
+      },
+      "reading": "The done head was dropped exactly once with the exact line, its tree record deleted and its issue status left done; the todo entry behind it was promoted at boot (active, generation 1, ready-confirmed, window @3, admission's in_progress written to Dispatch at 15:24:40Z by legion-daemon:LEGSMOKE)."
+    },
+    "liveClose": {
+      "issue": "LEGSMOKE-166",
+      "release": "POST (triage) then PATCH status=todo at 2026-09-13T15:25:59Z; daemon consumed dispatch-5346 issue.created and dispatch-5347 issue.updated",
+      "stateBefore": {
+        "admission": {
+          "cap": 2,
+          "active": [
+            "LEGSMOKE-163",
+            "LEGSMOKE-164"
+          ],
+          "queue": [
+            "LEGSMOKE-166"
+          ]
+        },
+        "tree": {
+          "status": "queued",
+          "generation": 0,
+          "launchFailures": 0
+        },
+        "issueStatus": "todo"
+      },
+      "close": "PATCH status=done at 2026-09-13T15:26:31Z; the only LEGSMOKE-166 event the daemon consumed afterwards: dispatch-5349 notifications.dispatch.issue.LEGSMOKE-166.issue.closed",
+      "stateAfter": {
+        "admission": {
+          "cap": 2,
+          "active": [
+            "LEGSMOKE-163",
+            "LEGSMOKE-164"
+          ],
+          "queue": []
+        },
+        "tree": null,
+        "issueStatus": "done"
+      },
+      "droppedLineCount": 0,
+      "admissionQueueLinesInWholeLog": 1,
+      "reading": "Gone from legion state on that one issue.closed event; no `dropped` line, as the live path is the reducer effect and only the sweeps log."
+    },
+    "negativeControl": {
+      "issue": "LEGSMOKE-165 (known to the daemon, status backlog, no tree, never queued)",
+      "admissionBefore": {
+        "cap": 2,
+        "active": [
+          "LEGSMOKE-163"
+        ],
+        "queue": []
+      },
+      "close": "PATCH status=done at 2026-09-13T15:27:01Z; daemon consumed dispatch-5354 issue.closed",
+      "admissionAfter": {
+        "cap": 2,
+        "active": [
+          "LEGSMOKE-163"
+        ],
+        "queue": []
+      },
+      "diff": "empty; `cmp` byte-identical",
+      "issueAfter": {
+        "tree": null,
+        "status": "done"
+      },
+      "droppedLineCount": 0
+    },
+    "noise": [
+      "LEGSMOKE-164 left `active` between the live-close snapshot (15:26:46Z) and the negative control (15:27:00Z): its own promoted architect wrote a spec artifact version and a comment and closed the issue done at 15:26:49Z (Dispatch events seq 5, actor legion-daemon:LEGSMOKE); the daemon consumed dispatch-5353 issue.closed and took the existing active-tree linger path (tree lingering, removed from active). An architect's decision on a placeholder issue, not this change; both negative-control snapshots were taken after it.",
+      "`[legion] failed to connect architect shim socket on ready for LEGSMOKE-163/164: Worker RPC \"negotiate_protocol\" timed out after 5000ms` on both root readies: the known post-ready connect shape (LEGION-39, needs_review; LEGION-27 called it benign). Unrelated to admission.",
+      "One live sibling rig daemon (sjawhar7273 on port 19473) consumes the same LEGSMOKE events through its own bridge; it did not touch this rig's queue. No controller reorder pass happened in the ~5 minute window."
+    ],
+    "teardown": "legion.yaml admission_cap restored to 4; `bash scripts/smoke/down.sh` -> STOPPED tmux session legion-sjawhar790, STOPPED NATS container legion-smoke-nats-sjawhar790, RIG DOWN, rc 0; no rig processes, container, or tmux server left. Evidence copies (daemon.log, seeded/backup state, negative-control snapshots) at /tmp/legion-79t-evidence/. LEGSMOKE-164/165/166 are closed rig-project issues, left as they are."
+  },
+  "notFlagged": [
+    "A controller reorder pass (backlog then todo on a queued issue) now makes that issue leave and rejoin the queue at the back — expected after this change; none occurred during the run.",
+    "Sibling rig controllers triaging fresh LEGSMOKE issues — none did during the run."
+  ],
+  "testerNotes": [
+    "Follow implement.json's testerNotes exactly: main's up.sh/down.sh overlay, `env -u LEGION_OMP_PATH`, actor on every Dispatch write, `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --` for the manual restart. `$!` is unreliable in the pane's tool shell for a `secrets ... -- env ... bun run ... &` chain; record daemon.pid from `pgrep -f 'cli/index.ts start <project>'` and its /proc start ticks so down.sh owns the restarted daemon.",
+    "To prove `the todo entry behind it promoted`, seed a second entry (issues.status todo + queued tree) behind the done head and set admission_cap so exactly one slot is free; use a fresh issue of your own left in triage in Dispatch so no sibling rig admits it before your boot (admission's in_progress write then lands in Dispatch from your rig)."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T15:30:50.933Z"
+}
