@@ -15,6 +15,7 @@ import {
   settledChecks,
   stateForIssue,
 } from "./ci-fixtures";
+import dispatchIssueClosed from "./fixtures/dispatch/issue-closed.json";
 import dispatchIssueCreatedChild from "./fixtures/dispatch/issue-created-child.json";
 import dispatchIssueCreatedRoot from "./fixtures/dispatch/issue-created-root.json";
 
@@ -41,10 +42,11 @@ function deps(
   nats: FakeNats,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>,
   onException: EventPumpDeps["onException"] = async () => {},
-  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onAdmit"> = {
+  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onAdmit" | "onDequeue"> = {
     onLinger: async () => {},
     onProbe: async () => {},
     onAdmit: () => {},
+    onDequeue: async () => {},
   }
 ): EventPumpDeps {
   return {
@@ -117,6 +119,57 @@ describe("Dispatch durable intake", () => {
 
       expect(foreignCalls).toEqual({ acks: 1, naks: [], terms: [] });
       expect(state.issues["OPS-3"]).toBeUndefined();
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("dequeues a waiting root in the same durable step as its close: onDequeue runs, then the save, then the ack", async () => {
+    const state = newLegionState("omp", 4);
+    state.issues["LEGSMOKE-1"] = { key: "LEGSMOKE-1", title: "Root", status: "todo", children: [] };
+    state.trees["LEGSMOKE-1"] = {
+      root: "LEGSMOKE-1",
+      generation: 0,
+      status: "queued",
+      launchFailures: 0,
+    };
+    state.admission.queue.push("LEGSMOKE-1");
+    const nats = new FakeNats();
+    const order: string[] = [];
+    const pump = startEventPump({
+      ...deps(
+        state,
+        nats,
+        async () => {},
+        async () => {},
+        {
+          onLinger: async () => {},
+          onProbe: async () => {},
+          onAdmit: () => {},
+          onDequeue: async (issue) => {
+            order.push(`dequeue:${issue}`);
+          },
+        }
+      ),
+      saveState: async () => {
+        order.push("save");
+      },
+      config: { ...config(), dispatchProject: "LEGSMOKE" },
+    });
+
+    try {
+      const calls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      nats.emit(
+        "notifications.dispatch.issue.LEGSMOKE-1.issue.closed",
+        dispatchEnvelope(dispatchIssueClosed, "dispatch-queued-close"),
+        { streamSequence: 20, deliverySequence: 1 },
+        calls
+      );
+      await flush();
+
+      expect(order).toEqual(["dequeue:LEGSMOKE-1", "save"]);
+      expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
+      expect(state.issues["LEGSMOKE-1"]?.status).toBe("done");
     } finally {
       pump.stop();
     }
@@ -500,6 +553,7 @@ describe("core-NATS event pump", () => {
           onLinger: async () => {},
           onProbe: async () => {},
           onAdmit: () => {},
+          onDequeue: async () => {},
         }
       ),
       saveState,

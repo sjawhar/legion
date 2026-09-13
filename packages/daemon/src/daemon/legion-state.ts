@@ -199,6 +199,52 @@ export function designGateOpen(gate: DesignGate): boolean {
   return gate.approvedVersion !== undefined && gate.approvedVersion === gate.latestVersion;
 }
 
+/** Whether an issue with this Dispatch status has left the waiting line: a human-owned status
+ * other than `todo` (`triage`, `icebox`, `backlog`) or `done`. A `queued` tree or an
+ * `admission.queue` entry for such an issue is stale -- the reducer drops it on the status event
+ * (the `dequeue` effect), and the boot and resync sweeps (`staleQueueEntryReason`) drop one that
+ * is already there. `todo` is the waiting line itself; a daemon-owned status (`in_progress`,
+ * `testing`, `needs_review`, `retro`) on a queued entry is the legitimate shape of a tree boot
+ * demoted back to the queue after admission wrote `in_progress` but before its pane was recorded,
+ * never stale. Exhaustive over `IssueStatus`: a new status is a compile error here, not a silent
+ * default. */
+export function isStaleQueuedStatus(status: IssueStatus): boolean {
+  switch (status) {
+    case "triage":
+    case "icebox":
+    case "backlog":
+    case "done":
+      return true;
+    case "todo":
+    case "in_progress":
+    case "testing":
+    case "needs_review":
+    case "retro":
+      return false;
+    default: {
+      const unhandled: never = status;
+      throw new Error(`unknown issue status: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/** Why an `admission.queue` entry must go, or `undefined` when it may stay: `unknown issue` when
+ * no `issues` node exists for it (nothing could ever run it correctly, and it would hold a queue
+ * position forever), else `Dispatch status "<status>"` when the node's status
+ * `isStaleQueuedStatus`. A node with no status yet (never described by the Dispatch lane) stays:
+ * the predicate has nothing to judge, and the resync drift heal assigns its status. Shared by
+ * `ProcessManager.reconcileAdmission`'s boot sweep and `resync.ts`'s periodic sweep so the two
+ * cannot disagree; the text is the tail of their `dropped <KEY> from the admission queue at
+ * <boot|resync>: <reason>` line. */
+export function staleQueueEntryReason(state: LegionState, issue: IssueKey): string | undefined {
+  const node = state.issues[issue];
+  if (!node) return "unknown issue";
+  if (node.status !== undefined && isStaleQueuedStatus(node.status)) {
+    return `Dispatch status "${node.status}"`;
+  }
+  return undefined;
+}
+
 export interface LegionState {
   version: 28;
   project: string;

@@ -89,11 +89,17 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
 - `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
   carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see
   `omp-pin-bump-behavioral-proof.md`, "One operator observation"), every pane inherits it, and a
-  scratch daemon started from a pane honours it as its OMP override. That hand-built binary's
-  `pi_natives` addon no longer matches its loader (`does not expose the … version sentinel`), so the
-  `pi.agents` probe fails **definitively** at the launch hold — after config loaded and the App keys
-  resolved, before the listening lines — and `legion start` exits 1 with `Configured OMP invocation
-  does not expose pi.agents`. Scrubbed, the daemon resolves the pinned mise release and boots.
+  scratch daemon started from a pane honours it as its OMP override. That binary cannot load its
+  `pi_natives` addon (`does not expose the … version sentinel`) — not because the build is broken
+  but because OMP keys the natives cache by version string alone (`~/.omp/natives/18.1.15/`) and
+  three different builds that all call themselves 18.1.15 share that directory; whichever
+  extracted last wins (LEGION-92, the corrected premise: production panes run 18.1.18 with their
+  own directory and were never affected). So the `pi.agents` probe fails **definitively** at the
+  launch hold — after config loaded and the App keys resolved, before the listening lines — and
+  `legion start` exits 1 with `Configured OMP invocation does not expose pi.agents`. Scrubbed, the
+  daemon resolves the pinned mise release and boots. Put the scrub on the launching command
+  (`env -u LEGION_OMP_PATH …`), never a shell-level `unset` beforehand; see
+  `../testing/smoke-rig-from-a-worker-pane-mains-scripts-env-u-app-keys-and-a-session-actor.md` §2.
 - The smoke rig honours the same inherited `LEGION_OMP_PATH` (LEGION-40): `scripts/smoke/up.sh`
   treats it as the operator's explicit override of the pinned OMP, so inherited it silently changes
   which OMP the rig runs. The first LEGION-40 run printed

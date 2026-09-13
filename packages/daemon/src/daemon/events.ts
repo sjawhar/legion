@@ -78,7 +78,7 @@ class DurableReducerFailure extends Error {
 
 /**
  * Wraps a failure from a reducer-derived event's effect dispatch (a
- * non-404 publish/controller rejection, or an `onLinger`/`onProbe`
+ * non-404 publish/controller rejection, or an `onLinger`/`onProbe`/`onDequeue`
  * handler throwing) or its `saveState` — anything `applyDurableEvent`
  * hits after the reducer has already mutated live state. Distinguishes
  * this from `DurableReducerFailure` (poison, no mutation risk) and from
@@ -114,6 +114,10 @@ export interface EventPumpDeps {
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
   onAdmit(issue: IssueKey): void;
+  /** Executes a `dequeue` effect (`ProcessManager.dequeue`): a waiting issue that left the line
+   * loses its queue entry and `queued` tree record. Awaited, so a persist failure inside the
+   * durable lane is fatal exactly like `onLinger`'s. */
+  onDequeue(issue: IssueKey): Promise<void>;
 
   /**
    * Called when a durable effect's role has no live holder (Envoy 404).
@@ -627,6 +631,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
       else if (effect.kind === "admit") deps.onAdmit(effect.issue);
+      else if (effect.kind === "dequeue") await deps.onDequeue(effect.issue);
       else if (effect.kind === "log") console.warn(`[legion] ${effect.message}`);
       else {
         const unhandled: never = effect;
@@ -647,7 +652,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
    * (mutating it in place, same as always), dispatches every derived
    * effect, then durably saves. This is the whole transaction, and its
    * order is deliberate: dispatching before saving means every effect
-   * (publish/controller/linger/probe) has already run by
+   * (publish/controller/linger/probe/dequeue) has already run by
    * the time state is marked durable, so a crash or failure anywhere in
    * this function can never leave a "saved but not yet woken" or "acked
    * but not yet dispatched" gap. State is the source of truth once this

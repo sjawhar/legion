@@ -26,6 +26,7 @@ import {
   type LegionState,
   liveAncestorTree,
   type PendingAssignment,
+  staleQueueEntryReason,
   type TreeState,
   type WorkerRoleClaim,
 } from "./legion-state";
@@ -636,6 +637,18 @@ export class ProcessManager {
 
     const admission = this.deps.state.admission;
     admission.cap = this.deps.config.admissionCap;
+    // Drop every waiting entry whose issue has already left the line -- a `done` issue queued by
+    // a daemon that predates the `dequeue` effect (LEGION-56), or one whose status event this
+    // daemon missed -- before anything below is promoted: a stale head of the queue must never
+    // spawn a root for an issue with nothing to do, and the valid entry behind it must be the one
+    // promoted. The same rule as the resync sweep (`staleQueueEntryReason`, legion-state.ts);
+    // `reconcileAdmission`'s closing persist saves the result.
+    for (const issue of [...admission.queue]) {
+      const reason = staleQueueEntryReason(this.deps.state, issue);
+      if (reason === undefined) continue;
+      this.removeQueued(issue);
+      console.error(`[legion] dropped ${issue} from the admission queue at boot: ${reason}`);
+    }
     // An "active" tree with no recorded locator never finished spawning
     // before the daemon last stopped: advancePromotionSweep persists the
     // promotion before startRoot/spawnRoot ever records a locator, so a
@@ -661,6 +674,31 @@ export class ProcessManager {
       if (admission.queue.length === queued) break;
       queued = admission.queue.length;
     }
+    await this.persist();
+  }
+
+  /** Removes `issue`'s `admission.queue` entry and, when its tree record is `queued`, that record
+   * -- the whole footprint of a root waiting for a slot, so a later `todo` admits it again exactly
+   * like a never-seen issue. Any other tree status (active, lingering, dead, launch-failed,
+   * closed) is left in place: the linger, close, and launch-failure paths own those records.
+   * Returns whether anything changed. Mutation only; the caller persists. */
+  private removeQueued(issue: IssueKey): boolean {
+    const state = this.deps.state;
+    const queuedIndex = state.admission.queue.indexOf(issue);
+    if (queuedIndex !== -1) state.admission.queue.splice(queuedIndex, 1);
+    const queuedTree = state.trees[issue]?.status === "queued";
+    if (queuedTree) delete state.trees[issue];
+    return queuedIndex !== -1 || queuedTree;
+  }
+
+  /** The `dequeue` effect's executor (`events.ts`'s `onDequeue`): a waiting issue that Dispatch
+   * moved to `done`, `backlog`, `icebox`, or `triage` leaves the queue and loses its `queued` tree
+   * record, persisted inside the durable lane's dispatch-before-save transaction -- so the queue
+   * change lands in the same durable step as the status change, and a persist failure propagates
+   * and goes fatal like every other effect's. A silent no-op when the issue holds neither (a
+   * redelivered event finds nothing to do). */
+  async dequeue(issue: IssueKey): Promise<void> {
+    if (!this.removeQueued(issue)) return;
     await this.persist();
   }
 

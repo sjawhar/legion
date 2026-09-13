@@ -1860,6 +1860,9 @@ describe("startDaemon", () => {
     const first = "WIDGETS-42";
     const second = "WIDGETS-43";
     state.admission.queue.push(first, second);
+    for (const issue of [first, second]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+    }
     await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
       recursive: true,
     });

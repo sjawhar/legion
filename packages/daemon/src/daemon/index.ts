@@ -456,6 +456,7 @@ async function startDaemonLocked(
     onAdmit: (issue) => {
       processManager.admit(issue);
     },
+    onDequeue: (issue) => processManager.dequeue(issue),
     onUndeliverable,
     config,
   };

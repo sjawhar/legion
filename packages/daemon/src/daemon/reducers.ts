@@ -7,6 +7,7 @@ import {
   ISSUE_STATUSES,
   type IssueNode,
   type IssueStatus,
+  isStaleQueuedStatus,
   type LegionState,
   liveAncestorTree,
   type PrState,
@@ -21,13 +22,14 @@ export interface LegionEventPayload {
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). A `log` effect only writes one line to the daemon's log and cannot fail. */
+/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). `dequeue` removes a waiting issue's admission-queue entry and `queued` tree record (`ProcessManager.dequeue`) inside the same transaction. A `log` effect only writes one line to the daemon's log and cannot fail. */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
   | { kind: "linger"; tree: IssueKey }
   | { kind: "admit"; issue: IssueKey }
+  | { kind: "dequeue"; issue: IssueKey }
   | { kind: "log"; message: string };
 
 export interface EnvelopeJson {
@@ -952,6 +954,17 @@ export function childAdopted(state: LegionState, parent: IssueKey, child: IssueK
   });
 }
 
+/** The `dequeue` effect for an issue whose new `status` has taken it out of the waiting line
+ * (`isStaleQueuedStatus`) while it still holds an `admission.queue` entry or a `queued` tree
+ * record -- `ProcessManager.dequeue` removes both in the same durable step as the status change.
+ * Nothing for any other status, and nothing for an issue that is not waiting: a redelivery finds
+ * nothing to do, and an active or lingering tree belongs to the linger and close paths. */
+function dequeueIfWaiting(state: LegionState, issue: IssueKey, status: IssueStatus): Effect[] {
+  if (!isStaleQueuedStatus(status)) return [];
+  const waiting = state.admission.queue.includes(issue) || state.trees[issue]?.status === "queued";
+  return waiting ? [{ kind: "dequeue", issue }] : [];
+}
+
 function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
@@ -962,9 +975,9 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
   if (issue.status === "todo") return admitOnTodo(state, node);
   if (issue.status === "backlog" || issue.status === "icebox") {
     const tree = state.trees[issue.key];
-    return tree && tree.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
+    if (tree && tree.status === "active") return [{ kind: "linger", tree: issue.key }];
   }
-  return [];
+  return dequeueIfWaiting(state, issue.key, issue.status);
 }
 
 /** A `todo` transition admits a root. A child under a live tree is owned by that tree's architect,
@@ -988,7 +1001,8 @@ function admitOnTodo(state: LegionState, node: IssueNode): Effect[] {
 
 /** Lingers the closed issue's own active tree whether or not it has a parent -- a child admitted
  * as a root by a pre-LEGION-57 daemon releases its admission slot on close exactly like a root --
- * then wakes the parent's architect (`child-closed`, and `children-complete` on the last one). */
+ * or, when that tree is still waiting for a slot instead, dequeues it (`dequeueIfWaiting`); then
+ * wakes the parent's architect (`child-closed`, and `children-complete` on the last one). */
 function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
@@ -996,7 +1010,10 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
   const wasOpen = node.status !== "done";
   applyDispatchIssueFields(node, issue);
   const own = state.trees[issue.key];
-  const result: Effect[] = own?.status === "active" ? [{ kind: "linger", tree: issue.key }] : [];
+  const result: Effect[] =
+    own?.status === "active"
+      ? [{ kind: "linger", tree: issue.key }]
+      : dequeueIfWaiting(state, issue.key, issue.status);
   if (!node.parent || !wasOpen) return result;
   const parent = state.issues[node.parent];
   if (!parent) return result;
