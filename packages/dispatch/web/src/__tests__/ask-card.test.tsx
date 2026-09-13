@@ -102,6 +102,100 @@ test("AskCard links a non-primary block ask to its owning artifact", async () =>
   }
 });
 
+test("AskCard exposes medium urgency to screen readers without an inline label", () => {
+  const input = ask({ urgency: "med" });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    expect(view.getByRole("article", { name: "Urgency: Medium" })).toBeTruthy();
+    expect(view.queryByText("Medium", { exact: true })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard renders a blocking urgency notch", () => {
+  const input = ask({ urgency: "blocking" });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    const card = view.getByRole("article", { name: "Urgency: Blocking" });
+    expect(within(card).getByText("BLOCKING", { exact: true })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard copies its tmux target and confirms success", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async () => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const input = ask({
+    author: { id: "session-1", kind: "session", origin: { tmux: "dev:4.7" } },
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dev:4.7"));
+    expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
+test("AskCard confirms tmux target copy through the legacy clipboard fallback", async () => {
+  const originalClipboard = navigator.clipboard;
+  const originalExecCommand = document.execCommand;
+  const execCommand = spyOn({ execCommand: (_command: string) => true }, "execCommand");
+  Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  expect(navigator.clipboard).toBeUndefined();
+  const input = ask({
+    author: { id: "session-1", kind: "session", origin: { tmux: "dev:4.7" } },
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
+    expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
+  } finally {
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: originalExecCommand,
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
+test("AskCard shows an inline failure when neither clipboard path can copy", async () => {
+  const originalClipboard = navigator.clipboard;
+  const originalExecCommand = document.execCommand;
+  const execCommand = spyOn({ execCommand: (_command: string) => false }, "execCommand");
+  Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  expect(navigator.clipboard).toBeUndefined();
+  const input = ask({
+    author: { id: "session-1", kind: "session", origin: { tmux: "dev:4.7" } },
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
+    expect(await view.findByText("Copy failed - select the text", { exact: true })).toBeTruthy();
+    expect(view.getByText("dev:4.7", { exact: true })).toBeTruthy();
+  } finally {
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: originalExecCommand,
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.

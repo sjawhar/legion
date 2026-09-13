@@ -1,9 +1,14 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { copyText } from "../../lib/clipboard";
 import {
+  askUrgencyBlockingBorder,
+  askUrgencyHighBorder,
+  askUrgencyLowBorder,
+  askUrgencyMedBorder,
   badgeBlocking,
   badgeHigh,
   badgeLow,
@@ -11,6 +16,7 @@ import {
   borderDefault,
   card,
   cardHoverBorder,
+  dangerText,
   inlineWarningText,
   inputClasses,
   linkHoverText,
@@ -20,6 +26,8 @@ import {
   primaryButtonEnabledHoverBg,
   quoteAccentBorder,
   quoteBodyText,
+  successText,
+  surfaceBg,
   textMutedOnSurface,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
@@ -49,11 +57,11 @@ export interface AskCardProps {
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 }
 
-const URGENCY_STYLES: Record<Ask["urgency"], { bg: string; text: string }> = {
-  blocking: badgeBlocking,
-  high: badgeHigh,
-  low: badgeLow,
-  med: badgeMed,
+const URGENCY_STYLES: Record<Ask["urgency"], { border: string; text: string }> = {
+  blocking: { border: askUrgencyBlockingBorder, text: badgeBlocking.text },
+  high: { border: askUrgencyHighBorder, text: badgeHigh.text },
+  low: { border: askUrgencyLowBorder, text: badgeLow.text },
+  med: { border: askUrgencyMedBorder, text: badgeMed.text },
 };
 
 const URGENCY_LABELS: Record<Ask["urgency"], string> = {
@@ -103,8 +111,24 @@ export function AskCard({
     createReply: reply,
     getAskThread: getThread,
   });
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const tmuxTarget =
     displayedAsk.author.kind === "session" ? displayedAsk.author.origin?.tmux : undefined;
+  const hasUrgencyNotch = displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high";
+  useEffect(() => {
+    if (copyStatus !== "copied") {
+      return;
+    }
+    const timeout = window.setTimeout(() => setCopyStatus("idle"), 1500);
+    return () => window.clearTimeout(timeout);
+  }, [copyStatus]);
+
+  const handleTmuxCopy = async () => {
+    if (tmuxTarget === undefined) {
+      return;
+    }
+    setCopyStatus((await copyText(tmuxTarget)) ? "copied" : "failed");
+  };
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
@@ -137,7 +161,19 @@ export function AskCard({
   }
 
   return (
-    <article className={`rounded-xl p-4 shadow-sm ${card}`} data-testid={`ask-${displayedAsk.id}`}>
+    <article
+      aria-label={`Urgency: ${URGENCY_LABELS[displayedAsk.urgency]}`}
+      className={`relative rounded-xl border-l-4 px-4 pt-5 pb-4 shadow-sm ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${URGENCY_STYLES[displayedAsk.urgency].border}`}
+      data-testid={`ask-${displayedAsk.id}`}
+    >
+      {hasUrgencyNotch ? (
+        <span
+          aria-hidden="true"
+          className={`absolute -top-2 left-3 rounded px-1.5 text-[10px] leading-4 font-semibold tracking-wide uppercase ${surfaceBg} ${URGENCY_STYLES[displayedAsk.urgency].text}`}
+        >
+          {URGENCY_LABELS[displayedAsk.urgency].toUpperCase()}
+        </span>
+      ) : null}
       {displayedAsk.anchor === null ? null : (
         <blockquote
           className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
@@ -153,50 +189,68 @@ export function AskCard({
           <AskBlockLink ask={displayedAsk} />
         </p>
       )}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          {isApproval ? (
-            <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
-              Approval requested
-            </p>
-          ) : isAction ? (
-            <span
-              className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
-            >
-              Action
-            </span>
-          ) : null}
-          <div className={`font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
-          </div>
-          <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
-            {actorLabel(displayedAsk.author)} ·{" "}
-            {isAction ? (
-              <time dateTime={displayedAsk.created_at}>
-                {formatAskAge(displayedAsk.created_at)}
-              </time>
-            ) : (
-              <Timestamp at={displayedAsk.created_at} />
-            )}
+      <div>
+        {isApproval ? (
+          <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
+            Approval requested
           </p>
-          <AskEditHistory ask={displayedAsk} edits={edits} />
-          {tmuxTarget === undefined ? null : (
-            <button
-              className={`mt-3 text-sm font-medium ${linkText} ${linkHoverText}`}
-              onClick={() => {
-                void navigator.clipboard?.writeText(tmuxTarget);
-              }}
-              type="button"
-            >
-              Copy tmux target
-            </button>
-          )}
+        ) : isAction ? (
+          <span
+            className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
+          >
+            Action
+          </span>
+        ) : null}
+        <div className={`font-medium ${textPrimaryOnSurface}`}>
+          <MarkdownBody markdown={displayedAsk.question} />
         </div>
-        <span
-          className={`rounded-full px-2.5 py-1 text-xs font-medium ${URGENCY_STYLES[displayedAsk.urgency].bg} ${URGENCY_STYLES[displayedAsk.urgency].text}`}
-        >
-          {URGENCY_LABELS[displayedAsk.urgency]}
-        </span>
+        <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
+          {actorLabel(displayedAsk.author)} ·{" "}
+          {isAction ? (
+            <time dateTime={displayedAsk.created_at}>{formatAskAge(displayedAsk.created_at)}</time>
+          ) : (
+            <Timestamp at={displayedAsk.created_at} />
+          )}
+          {tmuxTarget === undefined ? null : (
+            <>
+              {" · "}
+              <button
+                aria-label={`Copy tmux target ${tmuxTarget}`}
+                className={`inline-flex max-w-full items-center gap-1 align-baseline font-mono text-xs font-medium select-text ${linkText} ${linkHoverText}`}
+                onClick={() => void handleTmuxCopy()}
+                title={`Copy tmux target ${tmuxTarget}`}
+                type="button"
+              >
+                <span>{tmuxTarget}</span>
+                <svg aria-hidden="true" className="size-3 shrink-0" fill="none" viewBox="0 0 20 20">
+                  <rect
+                    height="10"
+                    rx="1"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    width="8"
+                    x="7"
+                    y="7"
+                  />
+                  <path
+                    d="M5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v1"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                </svg>
+              </button>
+            </>
+          )}
+          {copyStatus === "idle" ? null : (
+            <span
+              aria-live="polite"
+              className={`ml-1 text-xs font-medium ${copyStatus === "copied" ? successText : dangerText}`}
+            >
+              {copyStatus === "copied" ? "Copied" : "Copy failed - select the text"}
+            </span>
+          )}
+        </p>
+        <AskEditHistory ask={displayedAsk} edits={edits} />
       </div>
       {askChanged ? (
         <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>

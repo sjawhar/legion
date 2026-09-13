@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AgentToken, CreatedAgentToken } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { copyText } from "../../lib/clipboard";
 import {
   borderDefault,
   card,
@@ -12,6 +13,7 @@ import {
   inputClasses,
   primaryButtonBg,
   primaryButtonHoverBg,
+  successText,
   surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
@@ -28,7 +30,7 @@ export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
-  const [copyError, setCopyError] = useState<string>();
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
   const createToken = useMutation({
     mutationFn: (input: { name: string }) => api.createAgentToken(input),
@@ -39,7 +41,7 @@ export function AgentTokensSection(): ReactNode {
         ...current,
       ]);
       setShownToken(created);
-      setCopyError(undefined);
+      setCopyStatus("idle");
       setName("");
     },
   });
@@ -54,6 +56,14 @@ export function AgentTokensSection(): ReactNode {
     },
   });
 
+  useEffect(() => {
+    if (copyStatus !== "copied") {
+      return;
+    }
+    const timeout = window.setTimeout(() => setCopyStatus("idle"), 1500);
+    return () => window.clearTimeout(timeout);
+  }, [copyStatus]);
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     createToken.mutate({ name });
@@ -62,10 +72,7 @@ export function AgentTokensSection(): ReactNode {
     if (shownToken === undefined) {
       return;
     }
-    void navigator.clipboard.writeText(shownToken.token).then(
-      () => setCopyError(undefined),
-      () => setCopyError("Couldn't copy the token. Copy it from the field above.")
-    );
+    void copyText(shownToken.token).then((copied) => setCopyStatus(copied ? "copied" : "failed"));
   };
   const revoke = (token: AgentToken) => {
     if (
@@ -211,7 +218,7 @@ export function AgentTokensSection(): ReactNode {
           </p>
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <code
-              className={`break-all rounded-md px-3 py-2 ${surfaceMutedBg} ${textPrimaryOnSurface}`}
+              className={`break-all rounded-md px-3 py-2 select-text ${surfaceMutedBg} ${textPrimaryOnSurface}`}
             >
               {shownToken.token}
             </code>
@@ -223,8 +230,13 @@ export function AgentTokensSection(): ReactNode {
               Copy token
             </button>
           </div>
-          {copyError === undefined ? null : (
-            <p className={`mt-2 text-sm ${dangerText}`}>{copyError}</p>
+          {copyStatus === "idle" ? null : (
+            <p
+              aria-live="polite"
+              className={`mt-2 text-sm ${copyStatus === "copied" ? successText : dangerText}`}
+            >
+              {copyStatus === "copied" ? "Copied" : "Copy failed - select the text"}
+            </p>
           )}
           <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
             Put this in <code>~/.config/opencode/envoy.json</code>:
