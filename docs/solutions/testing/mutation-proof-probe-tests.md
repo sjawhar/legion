@@ -106,3 +106,10 @@ jj -R "$LEGION_WORKSPACE" diff --stat              # the mutated file must be ab
 the root-relative `packages/daemon/src/daemon/tmux.ts` prints `No matching entries for paths` and reverts nothing.
 Confirm the revert with `diff --stat` before committing. Record the mutation's exact failure
 (`Expected: 4141285 Received: 3715931`) in the handoff: "fails" alone does not show the test observes the right thing.
+
+## Related
+
+- `docs/solutions/testing/bash-harness-cases-that-pass-for-the-wrong-reason.md`: the same method
+  applied to the smoke rig's bash harnesses (sjawhar/legion#957), with three further
+  corollaries — one guard per negative case, assert the success-only side effect is absent when
+  probing `set -e`, and give a group-kill fixture a second process.

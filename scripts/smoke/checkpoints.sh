@@ -57,18 +57,33 @@ dispatch_children() {
   local project="${root%%-*}"
   dispatch_request "issues?project=${project}&parent=${root}"
 }
+# The mode up.sh recorded for this rig, or an explicit export for a scratch directory up.sh never
+# populated. Never a guess: forward now gates checkpoints 1-4 and 12, so a guessed mode would block
+# them on a fact nobody recorded and send the operator after a setting that does not exist.
 stored_webhook_mode() {
   local mode_file="${smoke_dir}/webhook-mode"
   if [[ -r "$mode_file" ]]; then
     printf '%s\n' "$(<"$mode_file")"
+  elif [[ -n "${SMOKE_WEBHOOK_MODE:-}" ]]; then
+    printf '%s\n' "$SMOKE_WEBHOOK_MODE"
   else
-    printf '%s\n' "${SMOKE_WEBHOOK_MODE:-forward}"
+    fail "no recorded webhook mode at ${mode_file}; run up.sh, or export SMOKE_WEBHOOK_MODE=envoy|forward|none"
   fi
 }
 
 webhook_ingress_block_reason() {
   printf '%s\n' \
     'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
+}
+
+# Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has
+# ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and
+# reportRootAnomalies skip keys it never saw). Only up.sh's envoy-mode bridge relays those events
+# into the rig NATS: none mode has no feed at all, and forward mode (`gh webhook forward`) carries
+# GitHub events only -- up.sh creates the root issue over HTTP and the daemon never admits it -- so
+# under either recorded mode these are blocked, never reported as a false FAILED.
+dispatch_ingress_block_reason() {
+  printf 'SMOKE_WEBHOOK_MODE=%s: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy\n' "$1"
 }
 
 
@@ -518,15 +533,27 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
-case "$(stored_webhook_mode)" in
+webhook_mode="$(stored_webhook_mode)"
+readonly webhook_mode
+case "$webhook_mode" in
   none)
     case "$checkpoint" in
+      1 | 2 | 3 | 4 | 12)
+        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        ;;
       5 | 6 | 7 | 9 | 10 | 11)
         blocked "$(webhook_ingress_block_reason)"
         ;;
     esac
     ;;
-  forward | envoy)
+  forward)
+    case "$checkpoint" in
+      1 | 2 | 3 | 4 | 12)
+        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        ;;
+    esac
+    ;;
+  envoy)
     ;;
   *)
     fail "recorded SMOKE_WEBHOOK_MODE must be forward, envoy, or none"
