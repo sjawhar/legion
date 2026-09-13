@@ -205,14 +205,11 @@ Preserve this order exactly:
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
    deletion (the review App holds no `contents` permission), then the reviewer approves that
-   head. The deletion must land before that approval, which is head-pinned. Every released
-   issue, root or child, gets `in_progress` from the daemon at admission; the only spawn-time
-   status write is for the corrective round — when you `spawn_worker` an implementer while the
-   PR's latest recorded review is changes requested, the daemon returns the issue to
-   `in_progress` — and an implementer completion advances the status only from `in_progress`
-   to `testing`; this push, like retro later, leaves the status where it is, so you set nothing
-   by hand — on its `phase-complete` wake, `spawn_worker` the reviewer to approve that head (a
-   finished reviewer may already be retired; `spawn_worker` resumes it);
+   head. The deletion must land before that approval, which is head-pinned. An implementer
+   completion advances the status only from `in_progress` to `testing`; this push, like retro
+   later, leaves the status where it is, so you set nothing by hand — on its `phase-complete`
+   wake, `spawn_worker` the reviewer to approve that head (a finished reviewer may already be
+   retired; `spawn_worker` resumes it);
 3. retro commits its learnings under `docs/solutions/` on top of the approved head; that
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
@@ -264,7 +261,7 @@ corresponding lifecycle procedure.
 | `child-closed` | Read the child completion and remaining open children. Re-scope or close obsolete open work; release an appropriate next wave, or await `children-complete`. |
 | `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
-| `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer if a human's review moved it since) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. |
+| `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. The deployment's worker cap is full; this role's spawn is queued. Do not respawn or retry — wait for `worker-started`. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
