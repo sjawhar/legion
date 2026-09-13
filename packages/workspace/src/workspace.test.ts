@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,23 @@ type RunCall = {
 const commandTimeoutMs = 300_000;
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** Resolves once `target` exists, woken by `watchedDir`'s own filesystem events — never a timer.
+ * The re-check after arming covers a change that landed between the first check and the watch. */
+function whenPathExists(watchedDir: string, target: string): Promise<void> {
+  if (existsSync(target)) return Promise.resolve();
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const watcher = watch(watchedDir, () => {
+    if (!existsSync(target)) return;
+    watcher.close();
+    resolve();
+  });
+  watcher.on("error", reject);
+  if (existsSync(target)) {
+    watcher.close();
+    resolve();
+  }
+  return promise;
 }
 function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
   const env = call.opts?.env;
@@ -195,6 +212,78 @@ describe("provisionIssueWorkspace", () => {
     ).toEqual([]);
     expect(await readFile(path.join(workspaceDir, ".omp", "config.yml"), "utf8")).toBe("");
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
+  });
+
+  test("two issues cloning the same repository for the first time at once both provision; the clone that lands second yields to the one already in place", async () => {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const jjDir = path.join(repoCloneDir, ".jj");
+    const workspacesDir = path.join(stateDir, "workspaces", "acme", "widgets");
+    const workspaceDir42 = path.join(workspacesDir, "widgets-42");
+    const workspaceDir43 = path.join(workspacesDir, "widgets-43");
+    const cloneTargets: string[] = [];
+    // Neither clone returns before both callers are inside `jj git clone`: both have passed the
+    // "already cloned?" check and hold a temporary destination, so two clones always run.
+    const bothCloning = Promise.withResolvers<void>();
+    process.env.LEGION_MAX_RECURSION_DEPTH = "11";
+
+    const deps = {
+      extensionPackage,
+      repo: "acme/widgets" as const,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      credentialHelper,
+      commandTimeoutMs,
+      run: async (cmd: string[]) => {
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+          const target = cmd[4];
+          if (!target) throw new Error("clone is missing its destination");
+          cloneTargets.push(target);
+          if (cloneTargets.length === 1) {
+            await bothCloning.promise;
+          } else {
+            bothCloning.resolve();
+            // The second clone finishes only once the first has been renamed into place, so its
+            // own rename collides with a complete clone — the branch under test.
+            await whenPathExists(path.dirname(repoCloneDir), jjDir);
+          }
+          await mkdir(path.join(target, ".jj"), { recursive: true });
+        }
+        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+          const directory = cmd[3];
+          if (!directory) throw new Error("workspace add is missing its directory");
+          await mkdir(directory, { recursive: true });
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      provisionIssueWorkspace("WIDGETS-42", deps),
+      provisionIssueWorkspace("WIDGETS-43", deps),
+    ]);
+
+    expect(first).toEqual({
+      repoCloneDir,
+      workspaceDir: workspaceDir42,
+      bookmark: "legion/WIDGETS-42",
+    });
+    expect(second).toEqual({
+      repoCloneDir,
+      workspaceDir: workspaceDir43,
+      bookmark: "legion/WIDGETS-43",
+    });
+    expect(existsSync(jjDir)).toBeTrue();
+    // The surplus clone is gone: no `widgets.clone-*` sibling beside the one that landed.
+    expect(await readdir(path.dirname(repoCloneDir))).toEqual(["widgets"]);
+    const temporaryClone = new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`);
+    expect(cloneTargets).toEqual([
+      expect.stringMatching(temporaryClone),
+      expect.stringMatching(temporaryClone),
+    ]);
+    expect(cloneTargets[1]).not.toBe(cloneTargets[0]);
+    expect(existsSync(workspaceDir42)).toBeTrue();
+    expect(existsSync(workspaceDir43)).toBeTrue();
   });
 
   test("creates a missing workspace parent before adding an issue workspace", async () => {
