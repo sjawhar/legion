@@ -1,4 +1,10 @@
-import { awaitShutdown, type Locator, type Runtime, type SpawnSpec } from "../runtime";
+import {
+  awaitShutdown,
+  type Locator,
+  type ProbeResult,
+  type Runtime,
+  type SpawnSpec,
+} from "../runtime";
 import type { WorkerRpcClient } from "../worker-rpc";
 
 export type FakeWorkerRpcClient = WorkerRpcClient & {
@@ -85,17 +91,28 @@ interface FakeProcess {
 /**
  * An in-memory `Runtime`: spawned processes live in a table keyed by a counter id and are
  * "alive" while they are in it. Locators are the kubernetes union member on purpose — nothing
- * tmux-shaped can leak through a test built on this fake.
+ * tmux-shaped can leak through a test built on this fake. `occupyHandle` moves a process out of
+ * the alive table into `strangers`: its handle is now held by some other process (tmux: a pane
+ * id reissued to another role, or a legacy locator with no identity to verify), so `probe`
+ * answers `dead`/`not-recorded-process` and `stop` never destroys what is there — the recorded
+ * process is still reachable over its own socket for the graceful ask, mirroring a still-live
+ * legacy process, and `strangers` keeps the entry until a test inspects it.
  */
 export class FakeRuntime implements Runtime {
   readonly spawned: Array<{ kind: "root" | "worker" | "controller"; spec: SpawnSpec }> = [];
   readonly stopped: Array<{
     locator: Locator;
     timeoutMs: number;
-    options: { skipGraceful?: boolean } | undefined;
+    options: { skipGraceful?: boolean; refuseKill?: boolean } | undefined;
   }> = [];
   readonly reconciled: Array<{ known: ReadonlySet<string>; graceMs: number }> = [];
   readonly connects: Locator[] = [];
+  /** Handles some other process now occupies, with the `detail` `probe` reports for each and
+   * whether the recorded process is still reachable over its own socket. */
+  readonly strangers = new Map<
+    string,
+    { process: FakeProcess; detail: string; reachable: boolean }
+  >();
   private readonly processes = new Map<string, FakeProcess>();
   private nextId = 1;
 
@@ -105,6 +122,21 @@ export class FakeRuntime implements Runtime {
       sleep?: (ms: number) => Promise<void>;
     } = {}
   ) {}
+
+  /** The handle at `locator` is no longer the recorded process's: see the class doc. The recorded
+   * process stays reachable over its socket (a still-live legacy process) unless `reachable` is
+   * false (it is gone; a stranger merely wears its handle). */
+  occupyHandle(locator: Locator, options: { detail?: string; reachable?: boolean } = {}): void {
+    const uid = this.uid(locator);
+    const process = this.processes.get(uid);
+    if (!process) throw new Error(`fake runtime: no live process for ${uid}`);
+    this.processes.delete(uid);
+    this.strangers.set(uid, {
+      process,
+      detail: options.detail ?? `handle ${uid} now runs another process`,
+      reachable: options.reachable ?? true,
+    });
+  }
 
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const id = this.nextId;
@@ -121,14 +153,22 @@ export class FakeRuntime implements Runtime {
     return locator;
   }
 
-  async probe(locator: Locator): Promise<{ status: "alive" | "dead" | "unknown"; pid?: number }> {
-    return { status: this.processes.has(this.uid(locator)) ? "alive" : "dead" };
+  async probe(locator: Locator): Promise<ProbeResult> {
+    const uid = this.uid(locator);
+    if (this.processes.has(uid)) return { status: "alive" };
+    const stranger = this.strangers.get(uid);
+    if (stranger)
+      return { status: "dead", reason: "not-recorded-process", detail: stranger.detail };
+    return { status: "dead", reason: "gone" };
   }
 
   async connect(locator: Locator): Promise<WorkerRpcClient> {
     this.connects.push(locator);
-    const process = this.processes.get(this.uid(locator));
-    if (!process) throw new Error(`fake runtime: no process for ${this.uid(locator)}`);
+    const uid = this.uid(locator);
+    const stranger = this.strangers.get(uid);
+    if (stranger && !stranger.reachable) throw new Error(`fake runtime: ECONNREFUSED ${uid}`);
+    const process = this.processes.get(uid) ?? stranger?.process;
+    if (!process) throw new Error(`fake runtime: no process for ${uid}`);
     process.client ??= (this.options.clientFactory ?? fakeWorkerRpcClient)();
     return process.client;
   }
@@ -136,14 +176,18 @@ export class FakeRuntime implements Runtime {
   async stop(
     locator: Locator,
     timeoutMs: number,
-    options?: { skipGraceful?: boolean }
+    options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
-    this.stopped.push({ locator, timeoutMs, options });
-    const process = this.processes.get(this.uid(locator));
-    if (process?.client && !options?.skipGraceful) {
+    const uid = this.uid(locator);
+    const stranger = this.strangers.get(uid);
+    const process = this.processes.get(uid) ?? stranger?.process;
+    if (process?.client && !options?.skipGraceful && stranger?.reachable !== false) {
       await awaitShutdown(process.client, timeoutMs, this.options.sleep);
     }
-    this.processes.delete(this.uid(locator));
+    // Never destroys what a stranger holds, and never anything when the caller refused the kill.
+    const destroy = !options?.refuseKill && !stranger && this.processes.has(uid);
+    this.stopped.push({ locator, timeoutMs, options });
+    if (destroy) this.processes.delete(uid);
   }
 
   async reconcileOrphans(known: ReadonlySet<string>, graceMs: number): Promise<void> {

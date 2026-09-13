@@ -33,7 +33,9 @@ export interface WorkerBootWatchdogDeps {
    * `WorkerBootWatchdog`'s own doc comment. */
   registrationDeadlineIntervals(): number;
   now(): number;
-  /** `Runtime.probe` — is the watched locator's own process still there? */
+  /** `Runtime.probe` — is the watched locator's own recorded process still there? A handle now
+   * occupied by some other process (`dead`/`not-recorded-process`) is not, exactly like a gone
+   * one: only the socket probe can then keep the watch alive. */
   probe(locator: Locator): Promise<ProbeResult>;
   /** `ProcessManager.clientFor` — connects through the manager's per-token cache, so a
    * connection this watchdog establishes is cached and wired like any other. */
@@ -66,8 +68,9 @@ export interface WorkerBootWatchdogDeps {
  * opened it yet) and, once connected, races the client's `closed` promise against the rest of
  * the interval — the fast path for a socket that closes well before the interval elapses.
  * Whichever way the interval ends, if `/worker/ready` has not confirmed this exact generation,
- * the watchdog probes before acting (`probeAlive`): a process that is both gone and refusing a
- * connection is dead, handled immediately by `retireUnconfirmedBoot` (retire, count a launch
+ * the watchdog probes before acting (`probeAlive`): a recorded process that is gone — or whose
+ * handle now belongs to some other process — and whose socket refuses a connection is dead,
+ * handled immediately by `retireUnconfirmedBoot` (retire, count a launch
  * failure, retry or give up at the threshold). A live process or a reachable socket re-arms the
  * watch for another interval instead — but only up to `registrationDeadlineIntervals` consecutive
  * times: a process that keeps answering forever without ever completing its ready path has not
@@ -171,10 +174,21 @@ export class WorkerBootWatchdog {
    * for its `runState`-seeding side effect; a rejection is caught and logged, never folded into
    * the liveness verdict itself. Used only to decide whether an unconfirmed boot that has
    * missed an observation interval is merely slow (never evicted for that alone) or genuinely
-   * dead (no process, no socket).
+   * dead (no process, no socket). A runtime probe that could not complete (tmux: `list-panes`
+   * itself failed) is neither: it is logged and counts as alive for this interval, so the watch
+   * re-arms and asks again rather than retiring a boot on a verdict nobody reached — the
+   * registration deadline still bounds how many such intervals a boot may spend unconfirmed.
    */
   private async probeAlive(token: string, locator: Locator): Promise<boolean> {
-    if ((await this.deps.probe(locator)).status === "alive") return true;
+    try {
+      if ((await this.deps.probe(locator)).status === "alive") return true;
+    } catch (error) {
+      console.error(
+        `[legion] worker ${token} liveness probe did not complete; re-arming the watch rather than deciding on it:`,
+        error
+      );
+      return true;
+    }
     const probe = await probeWorker(
       () => this.deps.connect(token, locator),
       this.deps.workerRpcTimeoutMs()
@@ -249,6 +263,40 @@ export class WorkerBootWatchdog {
       }
     };
 
+    /** `retireUnconfirmedBoot`, with its rejection caught unconditionally -- in practice a
+     * `ProcessStopFailed`: the pane would not die, or could not even be listed, and the claim
+     * keeps its locator -- treated like a probe that could not complete: the watch stays armed
+     * for one more interval and retires again then, rather than leaving the boot unwatched until
+     * a restart. Returns whether the watch is finished. The armed entry is removed before the
+     * call: the retirement's own `cancel` of this token must not flip `cancelled` on the watch
+     * retiring it. The catch therefore re-checks the three things a cancel landing during the
+     * await can leave behind -- `cancelled` set (the entry was found before the delete), the
+     * watchdog disposed, or a newer arm holding this token -- and finishes on any of them rather
+     * than loop another interval past `cancelAll()`. A same-token `cancel()` that found no entry
+     * set nothing, so that watch runs one more bounded interval; `retireUnconfirmedBoot`'s own
+     * re-validation of the claim it is handed (see its doc) makes the second call a no-op. */
+    const retire = async (): Promise<boolean> => {
+      if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
+      try {
+        await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
+        return true;
+      } catch (error) {
+        if (cancelled || this.disposed || this.armed.has(token)) {
+          console.error(
+            `[legion] worker ${issue}/${role} could not be retired, and its watch was cancelled, disposed, or superseded meanwhile; not re-armed:`,
+            error
+          );
+          return true;
+        }
+        console.error(
+          `[legion] worker ${issue}/${role} could not be retired; re-arming the watch for one more interval:`,
+          error
+        );
+        this.armed.set(token, { generation, cancel });
+        return false;
+      }
+    };
+
     const watch = async (): Promise<void> => {
       let aliveButUnconfirmedIntervals = 0;
       while (!cancelled) {
@@ -259,7 +307,8 @@ export class WorkerBootWatchdog {
           if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
           return;
         }
-        if (await this.probeAlive(token, locator)) {
+        const alive = await this.probeAlive(token, locator);
+        if (alive) {
           aliveButUnconfirmedIntervals += 1;
           const deadline = this.deps.registrationDeadlineIntervals();
           if (aliveButUnconfirmedIntervals < deadline) {
@@ -277,23 +326,15 @@ export class WorkerBootWatchdog {
             await this.yieldToEventLoop();
             continue;
           }
-          if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
-          console.error(
-            `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
-          );
-          await this.deps.retireUnconfirmedBoot(token, locator, generation, {
-            treeKey,
-            issue,
-            role,
-          });
-          return;
         }
-        if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
         console.error(
-          `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
+          alive
+            ? `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
+            : `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
         );
-        await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
-        return;
+        if (await retire()) return;
+        // Same macrotask boundary as the slow-boot re-arm above, for the same reason.
+        await this.yieldToEventLoop();
       }
     };
 

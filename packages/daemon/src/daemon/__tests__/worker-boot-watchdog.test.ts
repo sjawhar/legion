@@ -4,7 +4,7 @@
 // for why an uncleared timer would otherwise accumulate without bound across a long-lived daemon
 // watching a persistently borderline-slow worker), the registration deadline, and the
 // runtime-probe-then-socket fallback behind `probeAlive`.
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { Locator } from "../runtime";
 import {
@@ -86,7 +86,7 @@ function baseDeps(overrides: Partial<WorkerBootWatchdogDeps> = {}): WorkerBootWa
     registrationDeadlineIntervals: () => 1_000,
     workerRpcTimeoutMs: () => 5_000,
     now: () => Date.now(),
-    probe: async () => ({ status: "dead" }),
+    probe: async () => ({ status: "dead", reason: "gone" }),
     connect: async () => {
       throw new Error("no client configured for this test");
     },
@@ -115,7 +115,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           // Confirmed dead on the very next probe after the socket closes, so the watch
           // retires in one step rather than re-arming (isolating this test to the
           // closed-wins-the-race cleanup, not a second interval's own timers).
-          probe: async () => ({ status: "dead" }),
+          probe: async () => ({ status: "dead", reason: "gone" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -148,7 +148,7 @@ describe("WorkerBootWatchdog real-timer cleanup", () => {
           connect: async () => {
             throw new Error("shim not listening");
           },
-          probe: async () => ({ status: "dead" }),
+          probe: async () => ({ status: "dead", reason: "gone" }),
           retireUnconfirmedBoot: async () => {
             retired.push(token);
           },
@@ -292,7 +292,7 @@ describe("WorkerBootWatchdog liveness probe", () => {
         yield: async () => {},
         probe: async (probed) => {
           events.push(`probe:${probed.runtime === "tmux" ? probed.tmuxPaneId : probed.podUid}`);
-          return { status: "dead" };
+          return { status: "dead", reason: "gone" };
         },
         connect: async () => {
           events.push("connect");
@@ -311,5 +311,153 @@ describe("WorkerBootWatchdog liveness probe", () => {
     // falls through to the socket probe (refused) and retires the boot. The connect-retry loop's
     // own attempts precede the probe; only the tail after it is ordered here.
     expect(events.slice(events.indexOf("probe:%7"))).toEqual(["probe:%7", "connect", "retire"]);
+  });
+
+  it("re-arms, never retires, a boot whose runtime probe could not complete -- even with its socket refusing -- and still honors the registration deadline", async () => {
+    // A probe the runtime cannot complete (tmux: `list-panes` itself failed) is not a dead
+    // verdict: the watch treats the interval as alive-but-unconfirmed and asks again. The
+    // deadline still bounds how many such intervals a boot may spend; here it is 2.
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.01,
+          registrationDeadlineIntervals: () => 2,
+          sleep: async () => {},
+          yield: async () => {},
+          probe: async () => {
+            events.push("probe");
+            throw new Error("cannot verify pane %7: list-panes -t %7 exited 1");
+          },
+          connect: async () => {
+            events.push("connect");
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            events.push("retire");
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      for (let i = 0; i < 400 && !events.includes("retire"); i += 1) await Promise.resolve();
+
+      // Two probes that could not complete, each counted as alive-but-unconfirmed; only the
+      // registration deadline ends the watch. A dead verdict would have gone
+      // `probe -> connect -> retire` at the first interval (the socket fallback, refused); the
+      // deadline retires straight after the last probe, no socket consulted, and never after
+      // the first one. (The `connect` events before each probe are the connect-retry loop's own.)
+      expect(events.filter((event) => event === "probe")).toHaveLength(2);
+      expect(events.filter((event) => event === "retire")).toHaveLength(1);
+      expect(events.slice(events.lastIndexOf("probe"))).toEqual(["probe", "retire"]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("re-arms the watch when a retirement's stop cannot be confirmed, and retires the boot on the next interval once it can", async () => {
+    // `retireUnconfirmedBoot` rethrows a `ProcessStopFailed` before anything clears (the pane
+    // would not die, or could not even be listed): the claim and its locator are untouched, so
+    // the watch must not end there with the boot unwatched -- it stays armed for another
+    // interval and retires again. Here the first retirement fails and the second succeeds.
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let retirements = 0;
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.01,
+          sleep: async () => {},
+          yield: async () => {},
+          probe: async () => {
+            events.push("probe");
+            return { status: "dead", reason: "gone" };
+          },
+          connect: async () => {
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            retirements += 1;
+            events.push(`retire:${retirements}`);
+            if (retirements === 1) {
+              throw new Error(
+                "failed to stop pane %7: list-panes -t %7 exited 1: server not responding"
+              );
+            }
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      for (let i = 0; i < 400 && !events.includes("retire:2"); i += 1) await Promise.resolve();
+
+      // Probe, failed retire, then -- one interval later -- probe again and a retire that lands.
+      expect(events.filter((event) => event.startsWith("retire:"))).toEqual([
+        "retire:1",
+        "retire:2",
+      ]);
+      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
+      // The successful retirement ends the watch: with the fake `sleep`/`yield` a still-running
+      // loop would probe again within a few microtasks, and `events` would grow.
+      for (let i = 0; i < 50; i += 1) await Promise.resolve();
+      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("ends the watch, running nothing further, when cancelAll() lands while a retirement is in flight and that retirement then fails", async () => {
+    // The armed entry is removed before the retirement runs (so the retirement's own cancel of
+    // this token cannot flip `cancelled` on the very watch retiring it), which means a
+    // `cancelAll()` -- daemon dispose -- landing mid-await finds nothing to cancel. When the
+    // retirement then fails, the watch must still be finished: no further interval (real
+    // timers, connect dials), no `list-panes` probe, no second `retireUnconfirmedBoot` (which
+    // would `persist()` after the daemon's final save), no timer left behind. Real timers here
+    // (no `sleep` override), so a watch that looped would create one and `activeCount` would see
+    // it; the interval is short enough that the looping case is also observed as events.
+    const timers = trackRealTimers();
+    const events: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const retiring = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const watchdog = new WorkerBootWatchdog(
+        baseDeps({
+          workerBootTimeoutSeconds: () => 0.05,
+          probe: async () => {
+            events.push("probe");
+            return { status: "dead", reason: "gone" };
+          },
+          connect: async () => {
+            events.push("connect");
+            throw new Error("shim not listening");
+          },
+          retireUnconfirmedBoot: async () => {
+            events.push("retire");
+            retiring.resolve();
+            await release.promise;
+            throw new Error(
+              "failed to stop pane %7: list-panes -t %7 exited 1: server not responding"
+            );
+          },
+        })
+      );
+
+      watchdog.arm(root, child, role, token, locator, 1);
+      await retiring.promise;
+      // Dispose lands while the retirement is in flight; then the retirement fails.
+      watchdog.cancelAll();
+      const seenAtCancel = events.length;
+      release.resolve();
+      // Long enough for a looping watch to run a whole interval and probe again.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      expect(events.slice(seenAtCancel)).toEqual([]);
+      expect(timers.activeCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+      timers.restore();
+    }
   });
 });

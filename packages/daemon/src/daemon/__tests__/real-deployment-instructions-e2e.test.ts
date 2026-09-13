@@ -134,7 +134,6 @@ describe("real deployment instructions fragment (tmux + worker-shim, no mocks)",
         workerRpcTimeoutMs: () => cfg.workerRpcTimeoutSeconds * 1000,
         now: () => Date.now(),
         issueLocators: (issue) => locatorsForIssue(state, issue),
-        persist: async () => {},
       });
       const deps: ProcessManagerDeps = {
         state,

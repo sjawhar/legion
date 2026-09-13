@@ -171,43 +171,54 @@ export async function splitWindow(
   return { paneId, pid };
 }
 
-/** Trusts no recorded window id until it is confirmed live, so a human-killed window falls back to a fresh one. */
-export async function windowAlive(server: TmuxServer, windowId: string): Promise<boolean> {
-  const probe = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
-  return probe.exitCode === 0;
-}
+/** What a tmux command's stderr says when the pane it targets provably does not exist -- and
+ * neither does anything else on this daemon's private server: `can't find pane` (the pane was
+ * reaped), `no server running` (a socket file left behind by an exited server), or `error
+ * connecting to ... (No such file or directory)` (the socket was never created: a first boot after
+ * the upgrade runbook, or a reboot that cleared `TMUX_TMPDIR`). No server on the daemon's own
+ * socket means no Legion pane. Every other non-zero exit proves nothing about the pane. */
+export const PANE_GONE_STDERR =
+  /can't find pane|no server running|error connecting to .*\(No such file or directory\)/;
 
-/** Reads the live pid of `target`'s pane — the pane itself for a pane id, or a window's first
- * pane for a window id — or `undefined` if it cannot be read. `list-panes -t` always lists the
- * target's whole window (a pane id resolves to its window; without `-a`/`-s` there is no
- * single-pane listing), so the pane-id column picks the row: a pane-id target absent from the
- * listing is gone, never approximated by a sibling's pid. */
-export async function panePid(server: TmuxServer, target: string): Promise<number | undefined> {
+/** `lookupPane`'s verdict. `absent` is a proof (the pane is not there); `failed` is the lack of
+ * one -- the listing itself did not run to completion, so the pane may or may not exist -- and
+ * a caller must never read it as either alive or gone. */
+export type PaneLookup =
+  | { status: "present"; pid: number }
+  | { status: "absent" }
+  | { status: "failed"; detail: string };
+
+/** Looks up pane `paneId`'s live root pid. `list-panes -t` always lists the target's whole window
+ * (a pane id resolves to its window; without `-a`/`-s` there is no single-pane listing), so the
+ * pane-id column picks the row: a pane id absent from a successful listing is `absent`, never
+ * approximated by a sibling's pid. A nonzero exit is `absent` only when its stderr matches
+ * `PANE_GONE_STDERR`; any other nonzero exit (a client killed by the runner's timeout, a server
+ * not responding) -- or a row whose pid does not parse -- is `failed`. */
+export async function lookupPane(server: TmuxServer, paneId: string): Promise<PaneLookup> {
   const panes = await server.run(
-    argv(server, "list-panes", "-t", target, "-F", "#{pane_id} #{pane_pid}")
+    argv(server, "list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}")
   );
-  if (panes.exitCode !== 0) return undefined;
-  const rows = panes.stdout
+  if (panes.exitCode !== 0) {
+    const stderr = panes.stderr?.trim() ?? "";
+    if (PANE_GONE_STDERR.test(stderr)) return { status: "absent" };
+    return {
+      status: "failed",
+      detail: `list-panes -t ${paneId} exited ${panes.exitCode}${stderr ? `: ${stderr}` : ""}`,
+    };
+  }
+  const row = panes.stdout
     .split(/\r?\n/)
     .map((line) => line.trim().split(/\s+/))
-    .filter((row) => row[0] !== "");
-  const row = /^%\d+$/.test(target) ? rows.find((r) => r[0] === target) : rows[0];
-  const pid = Number(row?.[1]);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-/** Reads a window's own pane id (its first/sole pane), or `undefined` if it cannot be read.
- * Used to backfill a locator's `tmuxPaneId` once a window recorded before that field existed —
- * or written by some other pane-id-less path — is confirmed alive, so the reconciliation
- * sweep's pane-level check (see `listUnknownPanes`) eventually has a real id to compare against
- * instead of permanently exempting that window. */
-export async function firstPaneId(
-  server: TmuxServer,
-  windowId: string
-): Promise<string | undefined> {
-  const panes = await server.run(argv(server, "list-panes", "-t", windowId, "-F", "#{pane_id}"));
-  const paneId = panes.stdout.trim().split(/\s+/)[0];
-  return panes.exitCode === 0 && paneId && /^%\d+$/.test(paneId) ? paneId : undefined;
+    .find((r) => r[0] === paneId);
+  if (!row) return { status: "absent" };
+  const pid = Number(row[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return {
+      status: "failed",
+      detail: `list-panes -t ${paneId} reported an unparseable pid for ${paneId}: ${row.join(" ")}`,
+    };
+  }
+  return { status: "present", pid };
 }
 
 export async function killWindow(server: TmuxServer, windowId: string): Promise<void> {

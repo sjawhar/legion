@@ -19,7 +19,7 @@ import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
 import type { WorkerRpcClient } from "../worker-rpc";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 
 const { startDaemon } = daemonIndex;
 
@@ -41,6 +41,12 @@ async function flushEventLoopUntil(condition: () => boolean, maxTicks = 20_000):
   for (let tick = 0; tick < maxTicks && !condition(); tick += 1) {
     await onceEventLoop();
   }
+}
+
+/** A `/proc/<pid>/stat` line for whatever pid the fake tmux reported: every pane a daemon under
+ * test launches must record a process identity, and no real process exists behind these pids. */
+async function fakeProcStat(pid: number): Promise<string> {
+  return procStatLine(pid, 4242);
 }
 
 class FakeNats {
@@ -197,6 +203,7 @@ function daemonTestDependencies(
         };
       },
       statPrompt: async () => {},
+      readProcessStat: fakeProcStat,
       readPluginManifest: async () => validLegionPluginManifest,
       envoyPublish: async (topic, payload) => {
         publications.push({ topic, payload: JSON.parse(payload) });
@@ -387,6 +394,7 @@ describe("startDaemon", () => {
           resolveDaemonEnvironment: async () => daemonEnvironment,
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
@@ -517,6 +525,11 @@ describe("startDaemon", () => {
             if (command[0]?.endsWith("/tmux") && command[3] === "split-window") {
               return { stdout: "%2 4243", stderr: "", exitCode: 0 };
             }
+            // The root's just-opened pane is live and still its recorded process (pid 4242, the
+            // identity `fakeProcStat` reports), so the worker splits into the root's window.
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-panes") {
+              return { stdout: "%1 4242\n", stderr: "", exitCode: 0 };
+            }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           sleep: (ms) => {
@@ -553,6 +566,11 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
+          // No real process exists behind the fake tmux's pid 4242; the identity check's last step
+          // reads its command line, and the worker below splits into the root's window only if
+          // the root's pane verifies end to end.
+          readProcessCmdline: async () => "omp\0",
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
@@ -652,6 +670,7 @@ describe("startDaemon", () => {
           resolveDaemonEnvironment: async () => daemonEnvironment,
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async (topic, payload) => {
             published.push({ topic, payload });
           },
@@ -799,6 +818,7 @@ describe("startDaemon", () => {
           resolveDaemonEnvironment: async () => daemonEnvironment,
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
@@ -865,6 +885,8 @@ describe("startDaemon", () => {
         tmuxSession: `legion-${daemonConfig.project}`,
         tmuxWindowId: "@42",
         tmuxPaneId: "%7",
+        panePid: 7777,
+        paneStartTicks: 4242,
         socketPath: path.join(stateDir, "workers", "dead-tester.sock"),
         ompSessionFile,
       },
@@ -895,12 +917,20 @@ describe("startDaemon", () => {
             throw new Error("ECONNREFUSED: worker shim socket unreachable");
           },
           runner: async (command, runnerOptions) => {
+            // The dead worker's pane is still there and still the recorded process (pid 7777,
+            // start ticks 4242 per `fakeProcStat`) -- only its shim is dead -- so the retirement
+            // is allowed to kill it; a pane that no longer ran the recorded process would be
+            // refused instead, and this test is about the kill path.
+            if (command[0]?.endsWith("/tmux") && command[3] === "list-panes") {
+              return { stdout: "%7 7777\n", stderr: "", exitCode: 0 };
+            }
             if (command[0]?.endsWith("/tmux") && command[3] === "kill-pane") {
               killedPanes.push(command[5] ?? "");
               return { stdout: "", stderr: "can't find pane: %7", exitCode: 1 };
             }
             return baseRunner(command, runnerOptions);
           },
+          readProcessCmdline: async () => "omp\0",
         },
       });
 
@@ -982,6 +1012,7 @@ describe("startDaemon", () => {
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1464,6 +1495,7 @@ describe("startDaemon", () => {
           },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1532,6 +1564,7 @@ describe("startDaemon", () => {
           }),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -1673,6 +1706,7 @@ describe("startDaemon", () => {
           createNatsTransport: async () => new FakeNats(),
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
+          readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
@@ -1980,6 +2014,7 @@ describe("startDaemon", () => {
         },
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
@@ -2168,6 +2203,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
@@ -2315,6 +2351,7 @@ describe("startDaemon", () => {
         }),
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
         envoyPublish: async () => {
           throw new Error("listener down");
@@ -2388,6 +2425,7 @@ describe("startDaemon", () => {
       resolveDaemonEnvironment: async () => daemonEnvironment,
       readPluginManifest: async () => validLegionPluginManifest,
       statPrompt: async () => {},
+      readProcessStat: fakeProcStat,
       envoyPublish: async () => {},
       dispatchClient: fakeDispatchClient(),
       tokenManager: {

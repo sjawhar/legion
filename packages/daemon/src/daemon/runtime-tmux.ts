@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { controllerToken, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { parseProcStatStartTicks } from "./proc-stat";
 import {
   awaitShutdown,
   DAEMON_CLI_ENTRYPOINT,
@@ -10,20 +11,14 @@ import {
   ProcessStopFailed,
   type Runtime,
   type SpawnSpec,
+  sameProcess,
   shellPath,
   type TmuxLocator,
 } from "./runtime";
 import { writeSecretFile } from "./secrets";
-import type { TmuxServer } from "./tmux";
 import * as tmux from "./tmux";
+import { PANE_GONE_STDERR, type TmuxServer } from "./tmux";
 import type { WorkerRpcClient } from "./worker-rpc";
-
-/** `kill-pane` stderr shapes that mean "this pane is already gone" rather than "the kill
- * failed": the pane reaped itself; the private server exited (socket file left behind); or the
- * private socket was never created — on the daemon's own `-L legion-<project>` socket, no server
- * means no Legion pane. Every other non-zero exit is a real `ProcessStopFailed`. */
-const PANE_GONE_STDERR =
-  /can't find pane|no server running|error connecting to .*\(No such file or directory\)/;
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
@@ -84,32 +79,91 @@ export interface TmuxRuntimeDeps {
   /** `reconcileOrphans`' grace clock. */
   now(): number;
   /** The locators state currently records for `issue` — the tree's first (when `issue` is a tree
-   * root), then every role claim's — so a spawn can share the issue's window and a fresh window
-   * can be written back onto them in place. */
+   * root), then every role claim's — the windows a spawn may share, each trusted only while a
+   * pane in it still verifies as its recorded process. Never written to. */
   issueLocators(issue: IssueKey): readonly Locator[];
-  /** Saves state after `probe` backfills a locator's pane id in place. */
-  persist(): Promise<void>;
   readProcessCmdline?(pid: number): Promise<string>;
+  /** Reads `/proc/<pid>/stat` -- overridable for tests exactly like `readProcessCmdline`;
+   * rejects once the process is gone. */
+  readProcessStat?(pid: number): Promise<string>;
   /** Bounds a graceful stop's wait; overridable for tests, defaults to a real timer. */
   sleep?(ms: number): Promise<void>;
+}
+
+/** `verifyPaneProcess`'s verdict. Every `verified: false` names why and carries whatever the
+ * pane currently reports, so `describePaneVerdict` can show both identities side by side.
+ * `listing-failed` is the one reason that is not a verdict about the pane: the listing itself
+ * failed (see `tmux.lookupPane`), so the pane is neither confirmed nor refuted. */
+type PaneVerdict =
+  | { verified: true; pid: number; paneId: string }
+  | { verified: false; reason: "no-identity" | "pane-gone" }
+  | { verified: false; reason: "listing-failed"; detail: string }
+  | {
+      verified: false;
+      reason: "pid-mismatch" | "stat-unreadable" | "not-omp";
+      observedPid: number;
+    }
+  | { verified: false; reason: "start-mismatch"; observedPid: number; observedStartTicks: number };
+
+function describePaneVerdict(
+  locator: TmuxLocator,
+  verdict: Exclude<PaneVerdict, { verified: true }>
+): string {
+  const pane = locator.tmuxPaneId ?? locator.tmuxWindowId;
+  const recorded = `recorded pid ${locator.panePid ?? "?"} start ${locator.paneStartTicks ?? "?"}`;
+  switch (verdict.reason) {
+    case "no-identity":
+      return `pane ${pane} has no recorded process identity (locator predates identity tracking)`;
+    case "pane-gone":
+      return `pane ${pane} is gone`;
+    case "listing-failed":
+      return `cannot verify pane ${pane}: ${verdict.detail}`;
+    case "pid-mismatch":
+      return `pane ${pane} now runs pid ${verdict.observedPid} (${recorded})`;
+    case "stat-unreadable":
+      return `pane ${pane} pid ${verdict.observedPid} has no readable /proc stat (${recorded})`;
+    case "start-mismatch":
+      return `pane ${pane} runs pid ${verdict.observedPid} started at ${verdict.observedStartTicks} (${recorded})`;
+    case "not-omp":
+      return `pane ${pane} pid ${verdict.observedPid} is not running OMP (${recorded})`;
+  }
+}
+
+/** A `/proc/<pid>/...` read that failed because the process is gone: ENOENT (the directory has
+ * been reaped) or ESRCH (the kernel reports it while the entry lingers). Everything else is a
+ * host fault the caller must not read as a verdict. */
+function isProcessGoneError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 /**
  * The tmux implementation of `Runtime`: every Legion process is a `legion worker-shim` pane on
  * the daemon's private tmux server. One window per issue — the issue's first process (root
  * architect or phase worker alike) opens a window named for the issue and every later process
- * on that issue splits into it; the controller has a window of its own. That window sharing is
- * tmux's model and lives entirely here, never in the interface: `ProcessManager` only ever sees
- * opaque locators.
+ * on that issue splits into it while a pane recorded there still verifies as its recorded
+ * process; the controller has a window of its own. That window sharing is tmux's model and lives
+ * entirely here, never in the interface: `ProcessManager` only ever sees opaque locators.
+ *
+ * A pane id is never taken as proof of the process a locator recorded. A recreated tmux server
+ * hands out ids from `%1` again, so a stale locator's id can name some other role's live pane --
+ * one running OMP, so a command-line check alone passes. Every locator this runtime writes
+ * therefore records the pane's root pid and that process's `/proc/<pid>/stat` start ticks at
+ * launch, and `verifyPaneProcess` -- the one chokepoint -- re-checks pid, then start ticks, then
+ * OMP before `probe` reports a pane alive, before `stop` kills it, and before `probedWindowId`
+ * splits a new pane into its window.
  */
 export class TmuxRuntime implements Runtime {
   /** Serializes tmux window creation per issue, so two concurrent spawns never each see "no
    * window yet" and open two. */
   private readonly issueLaunchQueue = new Map<IssueKey, Promise<unknown>>();
-  /** A just-opened window for an issue with no persisted claim yet (its first-ever worker, still
-   * mid-launch): `recordedWindowId` falls back to this so a concurrent second spawn on the same
-   * issue splits into it instead of racing to open its own. */
-  private readonly issueWindowIds = new Map<IssueKey, string>();
+  /** The pane this runtime most recently opened a fresh window with for an issue, identity
+   * included: one more candidate for `probedWindowId`, so a concurrent second spawn on the same
+   * issue (or any later one, while every persisted locator still names a window nothing
+   * verifies in) can verify that pane and split into its window instead of racing to open its
+   * own. Never trusted by window id alone -- after a tmux server recreate the same `@N` can name
+   * some other issue's window, so an entry whose pane no longer verifies is dropped. */
+  private readonly issueWindows = new Map<IssueKey, TmuxLocator>();
 
   constructor(private readonly deps: TmuxRuntimeDeps) {}
 
@@ -156,11 +210,23 @@ export class TmuxRuntime implements Runtime {
       secret
     );
     const session = this.deps.tmux.socket;
-    const { tmuxWindowId, tmuxPaneId } = await serialize(this.issueLaunchQueue, issue, async () => {
+    // The identity is read inside the per-issue lane: a concurrent second spawn on this issue
+    // queued behind this one decides whether to split into the window it opened by verifying
+    // this very pane (`probedWindowId` via `issueWindows`), so the pane must be fully recorded --
+    // pid and start ticks -- before the lane is released to it.
+    return serialize(this.issueLaunchQueue, issue, async () => {
       const existingWindowId = await this.probedWindowId(issue);
       if (existingWindowId) {
-        const { paneId } = await tmux.splitWindow(this.deps.tmux, existingWindowId, paneArgv);
-        return { tmuxWindowId: existingWindowId, tmuxPaneId: paneId };
+        const { paneId, pid } = await tmux.splitWindow(this.deps.tmux, existingWindowId, paneArgv);
+        const identity = await this.recordedPaneIdentity(paneId, pid, token);
+        return {
+          runtime: "tmux",
+          tmuxSession: session,
+          tmuxWindowId: existingWindowId,
+          tmuxPaneId: paneId,
+          socketPath,
+          ...identity,
+        };
       }
       const window = await tmux.openWindow(
         this.deps.tmux,
@@ -169,10 +235,18 @@ export class TmuxRuntime implements Runtime {
         paneArgv,
         session
       );
-      this.rewriteIssueWindowId(issue, window.windowId);
-      return { tmuxWindowId: window.windowId, tmuxPaneId: window.paneId };
+      const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
+      const opened: TmuxLocator = {
+        runtime: "tmux",
+        tmuxSession: session,
+        tmuxWindowId: window.windowId,
+        tmuxPaneId: window.paneId,
+        socketPath,
+        ...identity,
+      };
+      this.issueWindows.set(issue, opened);
+      return opened;
     });
-    return { runtime: "tmux", tmuxSession: session, tmuxWindowId, tmuxPaneId, socketPath };
   }
 
   private async spawnController(
@@ -183,12 +257,14 @@ export class TmuxRuntime implements Runtime {
     const { socketPath, paneArgv } = await this.preparePane("controller", spec, token, secret);
     const session = this.deps.tmux.socket;
     const window = await tmux.openWindow(this.deps.tmux, session, "controller", paneArgv, session);
+    const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
     return {
       runtime: "tmux",
       tmuxSession: session,
       tmuxWindowId: window.windowId,
       tmuxPaneId: window.paneId,
       socketPath,
+      ...identity,
     };
   }
 
@@ -217,63 +293,170 @@ export class TmuxRuntime implements Runtime {
     return socketPath;
   }
 
-  private recordedWindowId(issue: IssueKey): string | undefined {
+  /**
+   * Every tmux locator recorded for `issue`, in the order a spawn should prefer their windows:
+   * what state records (the tree's root locator first, then each worker claim's -- see
+   * `deps.issueLocators`), then the pane this runtime opened `issue`'s newest window with
+   * (`issueWindows`, kept until that pane fails to verify). Once that launch's claim is
+   * persisted, state records the same pane too -- as a copy, not the object `spawn` returned:
+   * `/process/started` and `/worker/started` replace the stored locator with a spread of it --
+   * so the entry is deduplicated by process identity (`sameProcess`: pane id, pid, start
+   * ticks), and each pane is verified once.
+   */
+  private recordedLocators(issue: IssueKey): TmuxLocator[] {
+    const found: TmuxLocator[] = [];
     for (const locator of this.deps.issueLocators(issue)) {
-      if (locator.runtime === "tmux") return locator.tmuxWindowId;
+      if (locator.runtime === "tmux") found.push(locator);
     }
-    return this.issueWindowIds.get(issue);
+    const opened = this.issueWindows.get(issue);
+    if (opened && !found.some((locator) => sameProcess(locator, opened))) found.push(opened);
+    return found;
   }
 
   /**
-   * After opening a fresh window for `issue` (first spawn, or a fallback from a dead recorded
-   * window), every locator state records for that issue must point at the new window id in the
-   * same place, or `recordedWindowId` keeps handing a later spawn a stale id and each one opens
-   * yet another window instead of splitting into it.
+   * The window a new pane for `issue` splits into: the first recorded window (see
+   * `recordedLocators` for the order) that still holds a pane verifying as the process its
+   * locator recorded. A live window alone proves nothing: after the private tmux server is
+   * recreated, the same `@N` names some other issue's window, and the in-memory `issueWindows`
+   * entry outlives the cleared locators that once pointed there -- splitting into it would put
+   * this issue's worker in a stranger's window. When no recorded window verifies, returns
+   * `undefined` and the caller opens a fresh one, recorded in `issueWindows` alone: a locator's
+   * `tmuxWindowId` is a fact about where its pane lives and is never rewritten while that pane
+   * may be live. A legacy identity-less locator therefore keeps naming its real window (so
+   * `reconcileOrphans` keeps it known until that locator clears through its own probe), new
+   * workers land in the fresh window, and a dead window's stale locators clear through their own
+   * probes. A pane that could not be verified either way (`listing-failed`) is simply not reused:
+   * opening a fresh window has no destructive consequence, unlike the verdicts `probe` and `stop`
+   * refuse to fake. Any `issueWindows` entry that did not verify is dropped here -- including one
+   * that merely could not be listed -- so nothing hands it out again; when a tmux hiccup, not a
+   * dead pane, was the reason, the cost is one extra window for the issue (the pane itself is
+   * untouched and its persisted locator still names its window), which is the cheap side of that
+   * trade.
    */
-  private rewriteIssueWindowId(issue: IssueKey, windowId: string): void {
-    this.issueWindowIds.set(issue, windowId);
-    for (const locator of this.deps.issueLocators(issue)) {
-      if (locator.runtime === "tmux") locator.tmuxWindowId = windowId;
-    }
-  }
-
-  /** Trusts no recorded window id until it is confirmed live, so a human-killed window falls back to a fresh one. */
   private async probedWindowId(issue: IssueKey): Promise<string | undefined> {
-    const candidate = this.recordedWindowId(issue);
-    if (!candidate) return undefined;
-    return (await tmux.windowAlive(this.deps.tmux, candidate)) ? candidate : undefined;
+    for (const locator of this.recordedLocators(issue)) {
+      if ((await this.verifyPaneProcess(locator)).verified) return locator.tmuxWindowId;
+    }
+    // Reaching here means the in-memory entry (if any) was among the panes that failed.
+    this.issueWindows.delete(issue);
+    return undefined;
   }
 
-  /** Probes a locator's pane for a live OMP process. Backfills `locator.tmuxPaneId` in place
-   * (and persists) once confirmed alive if it was never recorded (state predating the field, or
-   * any other pane-id-less write) — see `reconcileOrphans` for why a locator missing its own pane
-   * id exempts its whole window from pane-level reaping; this is what shrinks that exemption to
-   * nothing over time. */
+  /** Field 22 of `/proc/<pid>/stat`, or `undefined` when the process is gone (ENOENT/ESRCH). Any
+   * other read error -- EACCES, EIO, EMFILE -- is a fault of this host, not evidence about the
+   * process, and is rethrown so it crashes loud instead of every pane at once reading as "not
+   * the recorded process". A malformed line throws from `parseProcStatStartTicks`: that is a bug,
+   * never "dead". */
+  private async readPaneStartTicks(pid: number): Promise<number | undefined> {
+    let stat: string;
+    try {
+      stat = this.deps.readProcessStat
+        ? await this.deps.readProcessStat(pid)
+        : await readFile(`/proc/${pid}/stat`, "utf8");
+    } catch (error) {
+      if (isProcessGoneError(error)) return undefined;
+      throw error;
+    }
+    return parseProcStatStartTicks(stat);
+  }
+
+  /** The identity every spawn records for a pane tmux just reported. Throws when its process is
+   * already gone -- a launch failure through the caller's existing path (`ProcessManager`'s
+   * launch-failure accounting); the pane closes itself with its process, so there is nothing left
+   * to record or reap. */
+  private async recordedPaneIdentity(
+    paneId: string,
+    pid: number,
+    token: string
+  ): Promise<{ panePid: number; paneStartTicks: number }> {
+    const paneStartTicks = await this.readPaneStartTicks(pid);
+    if (paneStartTicks === undefined) {
+      throw new Error(
+        `pane ${paneId} for ${token} exited before its process identity could be recorded (/proc/${pid}/stat unreadable)`
+      );
+    }
+    return { panePid: pid, paneStartTicks };
+  }
+
+  /**
+   * Is the process this locator recorded still this pane's process? Requires the pane's current
+   * pid to equal the recorded `panePid`, its `/proc/<pid>/stat` start ticks to equal the recorded
+   * `paneStartTicks`, then the OMP command-line check. A locator without identity (persisted
+   * before the fields existed, or without a pane id at all) never verifies, and never touches
+   * tmux. A `list-panes` that fails for a reason that does not prove the pane gone is
+   * `listing-failed`: not a verdict about the pane at all, and every caller treats it as "cannot
+   * verify" rather than as either alive or gone. `probe`, `stop`'s kill gate, and
+   * `probedWindowId` all go through this.
+   */
+  private async verifyPaneProcess(locator: TmuxLocator): Promise<PaneVerdict> {
+    if (
+      locator.tmuxPaneId === undefined ||
+      locator.panePid === undefined ||
+      locator.paneStartTicks === undefined
+    ) {
+      return { verified: false, reason: "no-identity" };
+    }
+    const pane = await tmux.lookupPane(this.deps.tmux, locator.tmuxPaneId);
+    if (pane.status === "failed") {
+      return { verified: false, reason: "listing-failed", detail: pane.detail };
+    }
+    if (pane.status === "absent") return { verified: false, reason: "pane-gone" };
+    const pid = pane.pid;
+    if (pid !== locator.panePid) {
+      return { verified: false, reason: "pid-mismatch", observedPid: pid };
+    }
+    const ticks = await this.readPaneStartTicks(pid);
+    if (ticks === undefined)
+      return { verified: false, reason: "stat-unreadable", observedPid: pid };
+    if (ticks !== locator.paneStartTicks) {
+      return {
+        verified: false,
+        reason: "start-mismatch",
+        observedPid: pid,
+        observedStartTicks: ticks,
+      };
+    }
+    if (!(await this.isOmpPane(pid)))
+      return { verified: false, reason: "not-omp", observedPid: pid };
+    return { verified: true, pid, paneId: locator.tmuxPaneId };
+  }
+
+  /** Alive only when `verifyPaneProcess` confirms the pane still runs the process the locator
+   * recorded. A pane that is gone is `dead`/`gone`; a pane that is present but fails the identity
+   * check -- a reissued id, or a legacy locator with nothing to verify -- is
+   * `dead`/`not-recorded-process` with both identities in `detail`, so the caller can still ask
+   * the locator's own process to shut down over its role-scoped socket and log what it decided.
+   * A pane that could not be verified either way (`list-panes` itself failed for a reason that
+   * does not prove the pane gone) throws: it is neither alive nor dead, and every caller's own
+   * failure handling logs and retries instead of clearing anything. */
   async probe(locator: Locator): Promise<ProbeResult> {
     const tmuxLocator = this.tmuxLocator(locator);
-    const target = tmuxLocator.tmuxPaneId ?? tmuxLocator.tmuxWindowId;
-    const pid = await tmux.panePid(this.deps.tmux, target);
-    if (pid === undefined) return { status: "dead" };
-    if (!(await this.isOmpPane(pid))) return { status: "dead" };
-    if (tmuxLocator.tmuxPaneId === undefined) {
-      const paneId = await tmux.firstPaneId(this.deps.tmux, tmuxLocator.tmuxWindowId);
-      if (paneId !== undefined) {
-        tmuxLocator.tmuxPaneId = paneId;
-        await this.deps.persist();
-      }
+    const verdict = await this.verifyPaneProcess(tmuxLocator);
+    if (verdict.verified) return { status: "alive", pid: verdict.pid };
+    if (verdict.reason === "pane-gone") return { status: "dead", reason: "gone" };
+    if (verdict.reason === "listing-failed") {
+      throw new Error(describePaneVerdict(tmuxLocator, verdict));
     }
-    return { status: "alive", pid };
+    return {
+      status: "dead",
+      reason: "not-recorded-process",
+      detail: describePaneVerdict(tmuxLocator, verdict),
+    };
   }
 
+  /** Is `pid` running OMP? Consulted only after `/proc/<pid>/stat` was just read, so the process
+   * existed a moment ago; a cmdline that has vanished since (ENOENT/ESRCH) means it exited in
+   * between and is not OMP any more. Any other read error crashes loud: it is a fault of this
+   * host, never evidence about the pane. */
   private async isOmpPane(pid: number): Promise<boolean> {
-    if ((await this.deps.tmux.run(["kill", "-0", String(pid)])).exitCode !== 0) return false;
     try {
       const cmdline = this.deps.readProcessCmdline
         ? await this.deps.readProcessCmdline(pid)
         : await readFile(`/proc/${pid}/cmdline`, "utf8");
       return cmdline.includes("omp");
-    } catch {
-      return false;
+    } catch (error) {
+      if (isProcessGoneError(error)) return false;
+      throw error;
     }
   }
 
@@ -298,20 +481,29 @@ export class TmuxRuntime implements Runtime {
    * waiting is NOT proof the process exited (a reset proves nothing about the pane), so it is
    * treated exactly like a timeout — fall through to `client.close()` and the kill-pane attempt.
    * A dead/unreachable shim, or `skipGraceful` (the caller already confirmed nothing live is
-   * there to ask), also skip straight to the kill. Every real locator carries a pane id (`spawn`
-   * always records one); a locator without one is a corrupt or legacy record, not a case to
-   * silently degrade for. Throws `ProcessStopFailed` for any `kill-pane` failure other than the
-   * pane having already been reaped on its own (`"can't find pane"`) or the private server itself
-   * not being there (`"no server running"` — the socket exists but its server exited; `"error
-   * connecting to … (No such file or directory)"` — the socket was never created, the shape a
-   * first boot after the upgrade runbook or a reboot that cleared `TMUX_TMPDIR` produces): no
-   * server on this daemon's own socket means no Legion pane exists. See `PANE_GONE_STDERR`. The
-   * caller must never treat the process as stopped when it cannot confirm that.
+   * there to ask), also skip straight to the kill. The kill itself is gated on
+   * `verifyPaneProcess`, and only a verified pane is ever killed:
+   * - A pane whose process is not the one this locator recorded -- some other role's pane
+   *   wearing a reissued id, or a locator with no identity to verify (persisted before identity
+   *   tracking, or without a pane id at all) -- is never killed by this runtime. It is treated
+   *   exactly like a pane already gone: the stop returns normally so the caller clears the
+   *   locator, and the refusal is logged with both identities unless the caller's own probe
+   *   already decided and logged it (`options.refuseKill`, the `ProbeResult` detail it saw). Once
+   *   such a locator clears, an orphaned pane is an unrecorded shim pane `reconcileOrphans` reaps
+   *   once it has been idle past the grace period (idle-bounded, never on a schedule: a legacy
+   *   process that ignores the shutdown and keeps producing output stays until it goes quiet).
+   * - A pane that could not be verified either way -- `list-panes` itself failed for a reason
+   *   that does not prove the pane gone (a client killed by the runner's timeout, a server not
+   *   responding) -- throws `ProcessStopFailed`, exactly like a `kill-pane` failure: the caller
+   *   must never treat the process as stopped when it cannot confirm that.
+   * Throws `ProcessStopFailed` for any `kill-pane` failure other than the pane having already been
+   * reaped on its own or the private server itself not being there (`PANE_GONE_STDERR`: no server
+   * on this daemon's own socket means no Legion pane exists).
    */
   async stop(
     locator: Locator,
     timeoutMs: number,
-    options?: { skipGraceful?: boolean }
+    options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
     const tmuxLocator = this.tmuxLocator(locator);
     const client =
@@ -323,14 +515,24 @@ export class TmuxRuntime implements Runtime {
       if (confirmed) return;
       client.close();
     }
-    if (!tmuxLocator.tmuxPaneId) {
-      throw new Error(`tmux locator for window ${tmuxLocator.tmuxWindowId} is missing a pane id`);
+    if (options?.refuseKill) return;
+    const verdict = await this.verifyPaneProcess(tmuxLocator);
+    if (verdict.verified) {
+      const killed = await tmux.killPane(this.deps.tmux, verdict.paneId);
+      if (killed.exitCode !== 0 && !PANE_GONE_STDERR.test(killed.stderr ?? "")) {
+        throw new ProcessStopFailed(
+          locator,
+          `kill-pane ${verdict.paneId} exited ${killed.exitCode}${killed.stderr ? `: ${killed.stderr}` : ""}`
+        );
+      }
+      return;
     }
-    const killed = await tmux.killPane(this.deps.tmux, tmuxLocator.tmuxPaneId);
-    if (killed.exitCode !== 0 && !PANE_GONE_STDERR.test(killed.stderr ?? "")) {
-      throw new ProcessStopFailed(
-        locator,
-        `kill-pane ${tmuxLocator.tmuxPaneId} exited ${killed.exitCode}${killed.stderr ? `: ${killed.stderr}` : ""}`
+    if (verdict.reason === "listing-failed") {
+      throw new ProcessStopFailed(locator, describePaneVerdict(tmuxLocator, verdict));
+    }
+    if (verdict.reason !== "pane-gone") {
+      console.error(
+        `[legion] not killing pane ${tmuxLocator.tmuxPaneId ?? tmuxLocator.tmuxWindowId}, treating it as already gone: ${describePaneVerdict(tmuxLocator, verdict)}`
       );
     }
   }
@@ -360,9 +562,10 @@ export class TmuxRuntime implements Runtime {
    * is exempted from the pane-level pass entirely: every pane in it (including the owner's own,
    * since we cannot tell which one it is without the id) would otherwise look exactly like the
    * unrecorded-crash-window-orphan this pass exists to catch, and killing it would kill a live
-   * root/controller/worker the daemon itself is still actively running. `probe` backfills the
-   * pane id the next time it confirms that locator alive, so this exemption — and the ambiguity
-   * it accepts — shrinks to nothing as every surviving locator gets its pane id recorded.
+   * root/controller/worker the daemon itself is still actively running. A locator without a pane
+   * id also carries no process identity, so `probe` never confirms it alive: its first probe
+   * retires or resurrects it onto a fully-recorded locator, and this exemption — and the
+   * ambiguity it accepts — shrinks to nothing as those legacy locators clear.
    */
   async reconcileOrphans(known: ReadonlySet<string>, graceMs: number): Promise<void> {
     const session = this.deps.tmux.socket;

@@ -69,6 +69,7 @@ interface DaemonDependencies {
   runner: CommandRunner;
   statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
   readProcessCmdline?: TmuxRuntimeDeps["readProcessCmdline"];
+  readProcessStat?: TmuxRuntimeDeps["readProcessStat"];
   readPluginManifest(manifestPath: string): Promise<string>;
   envoyPublish(topic: string, payloadJson: string): Promise<void>;
   dispatchClient: DispatchClient;
@@ -374,8 +375,8 @@ async function startDaemonLocked(
     now: deps.now,
     sleep: deps.sleep,
     readProcessCmdline: deps.readProcessCmdline,
+    readProcessStat: deps.readProcessStat,
     issueLocators: (issue) => locatorsForIssue(state, issue),
-    persist: save,
   });
   const processManager = new ProcessManager({
     state,

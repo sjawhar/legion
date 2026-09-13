@@ -34,6 +34,14 @@ export async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Prom
   throw new Error("condition never became true");
 }
 
+/** A `/proc/<pid>/stat` line for a process that no test ever really runs: `pid`, a comm, and
+ * every field a real line carries, with field 22 (`starttime`, clock ticks since boot) set to
+ * `startTicks`. Every fixture that fakes `readProcessStat` answers with this, so a recorded
+ * identity verifies against a fake tmux's pids exactly as it would against real `/proc`. */
+export function procStatLine(pid: number, startTicks: number, comm = "sh"): string {
+  return `${pid} (${comm}) S 1 ${pid} ${pid} 0 -1 4194560 812 0 0 0 3 1 0 0 20 0 1 0 ${startTicks} 8912896 486 18446744073709551615 1 1 0 0 0 0 0 0 65536 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n`;
+}
+
 interface Subscription {
   subject: string;
   callback: (subject: string, data: string, control: DurableMessageControl) => void;

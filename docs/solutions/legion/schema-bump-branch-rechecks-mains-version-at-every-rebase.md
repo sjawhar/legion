@@ -16,6 +16,8 @@ related_issues:
   - "LEGION-37"
   - "sjawhar/legion#991"
   - "sjawhar/legion#1001"
+  - "LEGION-27"
+  - "sjawhar/legion#981"
 symptoms:
   - "GitHub flips the PR to CONFLICTING right after an unrelated daemon PR merges; `legion-state.ts` and its test are the only conflicted files"
   - "two branches both declare `z.literal(N)` with different `migrateV(N-1)State` bodies"
@@ -78,6 +80,16 @@ main checkout wrote at the new pre-version: expect `state.json.vN.bak` byte-iden
 and `state.json` at N+1 with the objects, then a normal delivery. Say so in the PR body's
 Since-review line, with the reason (production already at N under main's meaning), so the tester
 and reviewer know the earlier proof is superseded rather than missing.
+
+## It happened again the same day (LEGION-27, #981)
+
+The pane-identity branch had bumped v24 -> v25; #993 (LEGION-33) took v25, so it moved to
+v25 -> v26; then #991 -- this note's own case -- landed its v25 -> v26 and the branch moved to
+`migrateV26State` -> v27, four hours later. Each time: keep main's step verbatim, renumber, and add
+the one row that decides it -- a file written at main's current version under main's meaning (here
+a v26 file with `{ kind, task }` pendings and identity-less locators) loads through exactly the
+branch's step, with `.vN.bak` and every other field byte-identical. The number is not the branch's
+to hold; check it at every rebase, not only when GitHub says CONFLICTING.
 
 ## Before every push of a schema-bump branch
 

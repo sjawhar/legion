@@ -6,15 +6,23 @@ import { probeWorkerSocket, type SocketProbeResult, type WorkerRpcClient } from 
 /** The daemon CLI every spawned process's `legion worker-shim` wrapper re-executes. */
 export const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
-/** Where a tmux-runtime process lives: its window, its pane, and the shim socket it listens on.
- * `tmuxPaneId`/`socketPath` are optional only for records predating those fields; every locator
- * the tmux runtime writes carries both. */
+/** Where a tmux-runtime process lives: its window, its pane, the shim socket it listens on, and
+ * the identity of the process the pane was opened with. `tmuxPaneId`/`socketPath` are optional
+ * only for records predating those fields; every locator the tmux runtime writes carries both. */
 export interface TmuxWindowLocator {
   tmuxSession: string;
   tmuxWindowId: string;
   tmuxPaneId?: string;
   socketPath?: string;
   ompSessionFile?: string;
+  /** The pane's root process id as tmux reported it at launch, paired with `paneStartTicks`:
+   * together the identity `TmuxRuntime` re-checks before ever trusting or killing this pane. A
+   * recreated tmux server hands out the same pane ids again, so the id alone can name some other
+   * role's live process. Absent only on a locator persisted before this field existed; such a
+   * locator never verifies and probes dead (`reason: "not-recorded-process"`) on its first probe. */
+  panePid?: number;
+  /** Field 22 of `/proc/<panePid>/stat` (start time in clock ticks since boot), read at launch. */
+  paneStartTicks?: number;
 }
 
 /** Where a Kubernetes-runtime process lives (root spec section 3): one pod per process
@@ -49,10 +57,22 @@ export type SpawnSpec = {
   secrets: Record<string, string>;
 };
 
-export interface ProbeResult {
-  status: "alive" | "dead" | "unknown";
-  pid?: number;
-}
+/**
+ * A runtime's liveness verdict on a locator. A `dead` verdict always says which kind: `gone` --
+ * nothing is where the locator points (tmux: the pane no longer exists; kubernetes: the pod is
+ * missing) -- or `not-recorded-process` -- something is there, but it is not the process this
+ * locator recorded (tmux: a pane id reissued to another role's process, or a legacy locator with
+ * no identity to verify). The two are decided differently by `ProcessManager`: a gone process has
+ * nothing left to ask, while a present-but-not-recorded one may still be exactly the daemon's own
+ * process reachable over the locator's role-scoped socket, so it is still asked to shut down and
+ * only the runtime's own kill is refused. `detail` is the runtime's one-line description of both
+ * identities (what is there now, what was recorded) for the decision's log line.
+ */
+export type ProbeResult =
+  | { status: "alive"; pid?: number }
+  | { status: "dead"; reason: "gone" }
+  | { status: "dead"; reason: "not-recorded-process"; detail: string }
+  | { status: "unknown" };
 
 /**
  * How a Legion process is started, probed, reached, stopped, and swept. `ProcessManager` owns
@@ -65,7 +85,16 @@ export interface Runtime {
   probe(locator: Locator): Promise<ProbeResult>;
   /** A raw dial: never negotiates, never caches. `ProcessManager.clientFor` owns both. */
   connect(locator: Locator, timeoutMs?: number): Promise<WorkerRpcClient>;
-  stop(locator: Locator, timeoutMs: number, options?: { skipGraceful?: boolean }): Promise<void>;
+  /** Asks the process to exit gracefully (unless `skipGraceful`), then destroys whatever is at
+   * the locator only if it still verifies as the recorded process -- never a stranger wearing a
+   * reused handle. `refuseKill` tells the runtime the caller's own probe already found the
+   * target is not the recorded process (and logged it): the graceful ask still goes out, the
+   * destroy step is skipped without re-verifying or re-logging. */
+  stop(
+    locator: Locator,
+    timeoutMs: number,
+    options?: { skipGraceful?: boolean; refuseKill?: boolean }
+  ): Promise<void>;
   /** Reaps every process this runtime owns whose handle (see `locatorHandles`) is not in `known`
    * and that has been idle at least `graceMs`. */
   reconcileOrphans(known: ReadonlySet<string>, graceMs: number): Promise<void>;
@@ -84,10 +113,19 @@ export class ProcessStopFailed extends Error {
 }
 
 /** Locator identity: the same process, not merely the same record. Two `undefined`s are the same
- * (absent) process; a locator from one runtime never matches one from another. */
+ * (absent) process; a locator from one runtime never matches one from another. For tmux the
+ * pane id alone is not identity -- a reissued id can name another process -- so the recorded
+ * pid and start ticks must match too (two legacy locators without them compare by pane id). */
 export function sameProcess(a: Locator | undefined, b: Locator | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;
-  if (a.runtime === "tmux") return b.runtime === "tmux" && a.tmuxPaneId === b.tmuxPaneId;
+  if (a.runtime === "tmux") {
+    return (
+      b.runtime === "tmux" &&
+      a.tmuxPaneId === b.tmuxPaneId &&
+      a.panePid === b.panePid &&
+      a.paneStartTicks === b.paneStartTicks
+    );
+  }
   return b.runtime === "kubernetes" && a.podUid === b.podUid;
 }
 
