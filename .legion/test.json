@@ -1,5 +1,5 @@
 {
-  "summary": "All five live acceptance lines of LEGION-108 pass on the real surface (the listener package Go suite on a Docker nats:2.10 testcontainer the go test process starts and removes; no rig of any kind was started). Lines 1-4 re-run independently as separate go test -v commands with output quoted below; line 6 read against the code; line 5 withdrawn. go vet clean, the listener+logging suite green, three fault injections each tripped exactly one lock, CI green at b7ddac82 (envoy-go run 34812601039), PR MERGEABLE, no .omp/config.yml in the PR. Verdict: pass. Two wording findings in the learning doc for the reviewer (documentationFeedback), neither a behaviour defect.",
+  "summary": "Round 2 (review-round-1 fixes, PR #1079 head 251fbd9078ec, code head b869bf3290ba): the blocking fix holds on the real surface — RequestCoreTo returns bus.ErrReceiptTimeout only from the receipt wait (bus test PASS), the listener maps raw and wrapped nats.ErrTimeout to delivery_failed and the sentinel to receipt_timeout (4-row lock PASS), the deaf-holder test still yields receipt_timeout through the real RequestCoreTo, and a tester probe that paused the test's own NATS container drove a real flush timeout through RequestCoreTo: 'bus: flush forward: nats: timeout' in 500ms, not the sentinel. The reserved-prefix 400 passes on a plain and an unheld role topic with the expected list asserted. vet clean, listener+logging+bus suites green, round-1 lines 1-4 still pass, CI green at 251fbd90, MERGEABLE, no .omp/config.yml. Two findings: (1) review round 1's body finding 4 — packages/envoy/docs/architecture.md lines 74 and 86 — did not land (still 'delivery_failed' for a receipt timeout, two reasons); (2) the flush-failure branch of RequestCoreTo has no regression lock in the committed suite (my fault injection there stayed green everywhere; only my throwaway probe caught it). Verdict: pass on A-C and E; D outstanding on the architecture.md docs item, for the implementer via the architect. Round 1 verdict below stands.",
   "verdict": "pass",
   "passed": 5,
   "failed": 0,
@@ -79,7 +79,98 @@
   ],
   "toolchain": "Go 1.26.8 via mise x go@1.26 (already in mise's tool store; no mise config, legion profile, or legion.yaml touched). Docker 29.7.2; testcontainers-go v0.41.0 pulled nats:2.10 and ryuk:0.13.0.",
   "fastFollow": "unchanged from the implementer: skills/envoy/SKILL.md 'Legion exception lane' names two reasons; lands with LEGION-109's plugin PR. The learning-doc snippet fix above is small enough for this PR at the reviewer's direction.",
+  "round2": {
+    "head": "251fbd9078ecae480bac67d9b89629d5130ee97f",
+    "codeHead": "b869bf3290ba7fc5b09a7a035073cbefd1a2b1fc",
+    "spec": "dispatch://LEGION-108/spec version 5 (New since we talked: receipt_timeout only after publish and flush; Design: bus.ErrReceiptTimeout, listener keys on it, reserved prefix 400; Errors: flush fails/times out -> delivery_failed, reserved prefix -> 400 naming dedupe_key)",
+    "review": "https://github.com/sjawhar/legion/pull/1079#pullrequestreview-5194835304 (REQUEST_CHANGES at 888e3e65)",
+    "verdict": "pass_with_findings",
+    "failures": [
+      {
+        "criterion": "Review round 1 body finding 4 (docs, in scope): packages/envoy/docs/architecture.md lines 74 and 86",
+        "evidence": "The reviewer's body said 'packages/envoy/docs/architecture.md line 74 still says no receipt within two seconds is delivery_failed, and line 86 lists reason as no_holder or delivery_failed. Please update both in the corrective push (that file cuts no release).' At head 251fbd90 the file is unchanged: line 74 'two seconds, delivery fails and Envoy emits its `delivery_failed` exception.'; line 86 '| `reason` | `no_holder` or `delivery_failed` |'. jj diff --from d35e8b5934c6 --to 251fbd9078ec --summary packages/envoy/docs/ prints nothing. The implementer's reviewRounds maps only the seven inline threads; this finding was in the review body, not a thread. Reproduce: cd packages/envoy && grep -n 'delivery_failed' docs/architecture.md. Fix: state the three reasons (no receipt within two seconds from a live holder after the forward was flushed is receipt_timeout; a forward not known to have reached the holder is delivery_failed; no claim is no_holder) at line 74 and list all three at line 86. Docs-only; no Go change; cuts no release.",
+        "owner": "implementer",
+        "blocking": false
+      }
+    ],
+    "items": [
+      {
+        "item": "A(1) bus-level sentinel",
+        "command": "cd packages/envoy && mise x go@1.26 -- go test ./internal/bus/ -count=1 -v -run 'TestRequestCoreTo'",
+        "observed": "--- PASS: TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout (3.11s); --- PASS: TestRequestCoreToReturnsNilOnAnEmptyReceipt (1.24s); ok github.com/sjawhar/envoy/internal/bus 4.465s. The first asserts errors.Is(err, bus.ErrReceiptTimeout) for a subject with no subscriber and that the call took the full 300ms window and no more than 2s; the second asserts nil with a live responder (so the sentinel is not merely 'window elapsed').",
+        "verdict": "pass"
+      },
+      {
+        "item": "A(2) listener seam: reason selected by error kind",
+        "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason",
+        "observed": "--- PASS (0.06s) with four subtests PASS: raw_nats.ErrTimeout_from_the_flush -> delivery_failed; flush_timeout_wrapped_by_the_client (fmt.Errorf('bus: flush forward: %w', nats.ErrTimeout)) -> delivery_failed; bus.ErrReceiptTimeout -> receipt_timeout; bus.ErrReceiptTimeout_wrapped -> receipt_timeout. Read the assertion: each row goes through assertDeliveryException on the exact reason, requires the log to carry the row's msg ('listener role forward failed' / 'listener role receipt timed out') and delivery_status ('failed' / 'receipt_timeout'), and for the delivery_failed rows fails if 'receipt_timeout' appears anywhere in the captured log.",
+        "verdict": "pass"
+      },
+      {
+        "item": "A(3) deaf holder on the real RequestCoreTo",
+        "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout",
+        "observed": "--- PASS (3.62s). main_test.go:682: captured exception envelope payload: {\"original_topic\":\"notifications.role.fresh-deaf-holder\",\"event_id\":\"ad4be166b08945a10b9a90d7cc151b14\",\"reason\":\"receipt_timeout\",\"payload_summary\":\"deaf role event\",\"payload\":\"{\\\"type\\\":\\\"worker-queued\\\"}\",\"dedupe_key\":\"publish.e741e69780f6632a4d8fe5a36094d714\",\"source\":\"agent\",\"source_session\":\"\"}. main_test.go:697: listener log line: {\"time\":\"2026-09-14T07:21:19.125522722Z\",\"level\":\"WARN\",\"msg\":\"listener role receipt timed out\",\"machine_id\":\"test\",\"ts\":\"2026-09-14T07:21:19.125511073Z\",\"session_id\":\"ses_deaf\",\"topic\":\"notifications.role.fresh-deaf-holder\",\"event_id\":\"ad4be166b08945a10b9a90d7cc151b14\",\"delivery_status\":\"receipt_timeout\",\"timeout\":\"2s\"}",
+        "verdict": "pass"
+      },
+      {
+        "item": "A(real flush stall) tester probe on the real RequestCoreTo",
+        "command": "throwaway packages/envoy/internal/bus/zz_tester_flush_stall_probe_test.go (deleted after, never committed): startNATS(t) (the package's own nats:2.10 testcontainer), bus.Connect, a receipt round trip as control, then `docker pause <container>` and RequestCoreTo(agentSubject, item, 500*time.Millisecond); unpaused before teardown; mise x go@1.26 -- go test ./internal/bus/ -count=1 -v -run TestTesterProbe_FlushStallIsNotReceiptTimeout",
+        "observed": "Head: zz_tester_flush_stall_probe_test.go:82: stalled server: RequestCoreTo err=bus: flush forward: nats: timeout elapsed=500.286616ms status-after=CONNECTED; --- PASS (2.20s). errors.Is(err, bus.ErrReceiptTimeout) false; errors.Is(err, nats.ErrTimeout) true; err.Error() has the 'bus: flush forward: ' prefix; the flush was bounded by the 500ms window, not the client's 10s default. This is the reviewer's stalled/reconnecting-connection scenario driven for real. Red check: with nats.go line 712 changed to `return ErrReceiptTimeout`, the probe failed: 'stalled server: a flush timeout was reported as the receipt sentinel: bus: no receipt inside the request window' (err=bus: no receipt inside the request window elapsed=500.680314ms). No paused container left behind (docker ps --filter status=paused empty).",
+        "verdict": "pass"
+      },
+      {
+        "item": "B reserved dedupe_key prefix",
+        "command": "cd packages/envoy && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestPublishHandler_RejectsReservedDedupeKeyPrefix",
+        "observed": "--- PASS (2.08s): subtests notifications.github.example-org.example-repo.reserved-prefix (0.25s) and notifications.role.reserved-prefix-unheld (0.25s). Assertion read: decodes apiError and requires response.Error == 'dedupe_key must not begin with the reserved prefix envoy.role.forward.', len(response.Expected) == 1, response.Expected[0] == 'dedupe_key', and the topic probe reading nothing in 250ms — the expected field list, not just the status. The unheld-role case passing with 400 proves the check precedes holder resolution (which would otherwise answer 404).",
+        "verdict": "pass"
+      },
+      {
+        "item": "C regression gates",
+        "command": "cd packages/envoy && mise x go@1.26 -- go vet ./... && mise x go@1.26 -- go test ./cmd/listener/... ./internal/logging/ ./internal/bus/ -count=1 && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'RoleFreshDeafHolderEmitsReceiptTimeout|RoleForwardPublishError|ExpiredRoleDropsClaim|RoleReleasedByReplacement|EmitsExceptionForControlTopicWithNoHolder|DedupeKey|ExplicitDedupeKeyForwardsAgain'",
+        "observed": "vet exit 0, no output. ok github.com/sjawhar/envoy/cmd/listener 35.638s; ok github.com/sjawhar/envoy/internal/logging 0.002s; ok github.com/sjawhar/envoy/internal/bus 40.645s. Round-1 lines: PASS DedupeKeySelection (4 subtests), RejectsDedupeKeyWithIdempotencyKey, RejectsReservedDedupeKeyPrefix (2 subtests), SendHandler_IgnoresDedupeKeyBesideIdempotencyKey, RoleFreshDeafHolderEmitsReceiptTimeout (2.26s), ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly (2.81s), RoleReleasedByReplacementHasNoHolder, ExpiredRoleDropsClaimAfterException, RoleForwardPublishErrorEmitsDeliveryFailed, EmitsExceptionForControlTopicWithNoHolder (role, agent); ok 8.089s.",
+        "verdict": "pass"
+      },
+      {
+        "item": "D docs",
+        "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --from b7ddac82a6ab --to b869bf3290ba --git packages/envoy/AGENTS.md docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md; grep -n 'delivery_failed' packages/envoy/docs/architecture.md",
+        "observed": "AGENTS.md role-lane bullet: keyed on bus.ErrReceiptTimeout, returned only after publish and flush succeeded and the receipt wait ran out; flush bounded by the two-second window; a flush that fails or times out is delivery_failed, never receipt_timeout; delivery_failed = not known to have reached the holder; no_holder = no claim; attempt-cache wording per the reviewer's r4002875086. Publish row: reserved forward mark envoy.role.forward. is a 400 naming dedupe_key. Learning doc: line 35 states the receipt-only sentinel and the flush rule; the Correct snippet keys on bus.ErrReceiptTimeout with the 'Never key on nats.ErrTimeout here' comment; line 116 tightened. All read true against nats.go 675-730, delivery.go 377-403, api.go 322-330. NOT landed: packages/envoy/docs/architecture.md lines 74 and 86 (review body finding 4) — see failures. PR body: E2E (tester) block present (restored by the implementer); round-2 evidence appended by me and the CI line brought to 251fbd90.",
+        "verdict": "pass for the two named docs; architecture.md outstanding"
+      },
+      {
+        "item": "E CI, mergeability, hygiene",
+        "command": "legion gh -- pr checks 1079; legion gh -- run view 34817295775|34817295542|34817295454 --json headSha,status,conclusion,jobs; legion gh -- pr view 1079 --json headRefOid,mergeable,mergeStateStatus; legion gh -- pr diff 1079 --name-only",
+        "observed": "Legion Envoy and Contracts run 34817295775 completed/success at 251fbd9078ecae480bac67d9b89629d5130ee97f (envoy-go pass 11m12s; six path-filtered jobs skipped); Tests run 34817295542 completed/success (lint 13s, typecheck 24s, test 1m7s); PR Title run 34817295454 completed/success. headRefOid 251fbd90; mergeable MERGEABLE; mergeStateStatus BLOCKED (review required, not CONFLICTING). PR file list: .legion/{implement,plan,review,test}.json, the learning doc, packages/envoy/AGENTS.md, cmd/listener/{api,api_test,delivery,main,main_test}.go, internal/bus/{nats.go,request_core_test.go}, internal/logging/{logging,logging_test}.go — no .omp/config.yml.",
+        "verdict": "pass"
+      }
+    ],
+    "faultInjections": [
+      {
+        "fault": "delivery.go line 378: `if errors.Is(err, nats.ErrTimeout) || errors.Is(err, bus.ErrReceiptTimeout)` (the pre-fix keying restored alongside the sentinel)",
+        "run": "mise x go@1.26 -- go test ./cmd/listener/ -count=1",
+        "result": "Exactly two subtests failed, both in TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason — raw_nats.ErrTimeout_from_the_flush and flush_timeout_wrapped_by_the_client: main_test.go:2285: exception reason = \"receipt_timeout\", want \"delivery_failed\". Nothing else failed (FAIL 35.909s). Reverted: jj restore packages/envoy/cmd/listener/delivery.go."
+      },
+      {
+        "fault": "nats.go line 712: flush-error return replaced by `return ErrReceiptTimeout`",
+        "run": "mise x go@1.26 -- go vet ./internal/bus/ && mise x go@1.26 -- go test ./internal/bus/ ./cmd/listener/ -count=1",
+        "result": "GREEN everywhere: ok internal/bus 43.996s, ok cmd/listener 35.961s. No committed test drives a real flush failure (the bus test exercises the receipt-wait branch against a healthy container; the listener seam test injects errors past RequestCoreTo). Only my throwaway paused-container probe turned it red (see item A(real flush stall)). Reverted: jj restore packages/envoy/internal/bus/nats.go. Recorded as observation/finding: the line that was review round 1's blocking finding has no regression lock."
+      },
+      {
+        "fault": "api.go line 327: `if false && strings.HasPrefix(request.DedupeKey, roleForwardDedupePrefix)`",
+        "run": "mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestPublishHandler_RejectsReservedDedupeKeyPrefix",
+        "result": "Both subtests failed: api_test.go:1104: status = 200, want 400 (GitHub topic; the envelope was published with dedupe_key envoy.role.forward.publish.abc) and status = 404, want 400; body = {\"error\":\"no holder for role reserved-prefix-unheld\"} (unheld role) — exactly the pre-fix behaviour the reviewer described. Reverted: jj restore packages/envoy/cmd/listener/api.go."
+      }
+    ],
+    "observations": [
+      "Working copy after every fault and after deleting the probe file: jj diff --from 251fbd9078ec --to @ --summary lists only .omp/config.yml.",
+      "The flush wrapper uses %w, so errors.Is(err, nats.ErrTimeout) is still true for a flush timeout; correctness rests entirely on the listener keying on bus.ErrReceiptTimeout and on RequestCoreTo never returning the sentinel from the flush branch — the second half is the unlocked line.",
+      "Per-command grants expire after ~60s: a polling loop for CI inside one bash call 403'd on every iteration after the first minute (Unable to redeem LEGION_GRANT (403)); a fresh command answered at once. Not a credential problem.",
+      "Envoy delivered {type: ci-green, sha: 251fbd90…} to this session at 07:30:29Z, matching the gh run view result."
+    ],
+    "notRun": "gofmt/biome/bun test/formatters; go test ./... (needs Postgres); any rig, scratch daemon, kind cluster, throwaway NATS outside go test, or scratch tmux server. The paused container was the bus package test's own testcontainer inside the go test process, unpaused before teardown and removed by the test."
+  },
+  "round1Summary": "All five live acceptance lines of LEGION-108 pass on the real surface (the listener package Go suite on a Docker nats:2.10 testcontainer the go test process starts and removes; no rig of any kind was started). Lines 1-4 re-run independently as separate go test -v commands with output quoted below; line 6 read against the code; line 5 withdrawn. go vet clean, the listener+logging suite green, three fault injections each tripped exactly one lock, CI green at b7ddac82 (envoy-go run 34812601039), PR MERGEABLE, no .omp/config.yml in the PR. Verdict: pass. Two wording findings in the learning doc for the reviewer (documentationFeedback), neither a behaviour defect.",
+  "round1Verdict": "pass at head b7ddac82a6ab (proof, gates, documentationFeedback, observations, implementerProof are round 1)",
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-14T06:43:50.323Z"
+  "completed": "2026-09-14T07:42:59.567Z"
 }
