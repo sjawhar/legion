@@ -2,68 +2,43 @@
   "pr": 1025,
   "prUrl": "https://github.com/sjawhar/legion/pull/1025",
   "branch": "legion/LEGION-44",
-  "round": 2,
-  "headReviewed": "4a307dfdd2e41dc206e46c59b9c665ed7a807c41",
-  "codeHead": "2a18313779ca",
-  "rebasedOnto": "9a6708feb9cd",
-  "spec": "dispatch://LEGION-44/spec (version 8): seven acceptance criteria unchanged from v7; new Errors row (stale working copy stays loud) and Design note (/worker/started keeps gitName/gitEmail) match the code",
-  "verdict": "review_clean_pending_legion_deletion",
+  "round": 3,
+  "headReviewed": "f581175cb6c80fbe2eb15d3ab1cacb89d30f0dfd",
+  "codeHead": "f017a1d79eaa",
+  "spec": "dispatch://LEGION-44/spec (version 8), unchanged since round 2",
+  "verdict": "review_clean_legion_deletion_may_be_pushed",
   "review": {
-    "id": 5190898373,
-    "url": "https://github.com/sjawhar/legion/pull/1025#pullrequestreview-5190898373",
+    "id": 5191140047,
+    "url": "https://github.com/sjawhar/legion/pull/1025#pullrequestreview-5191140047",
     "event": "COMMENT",
     "author": "legion-reviewer[bot]"
   },
-  "summary": "The four round-1 items are fixed in 9c167fefd8fe (dd8332bd58ac before the rebase) and each thread carries my Accepted: reply as its newest comment. The product diff is otherwise what round 1 reviewed, moved onto main with an unchanged fingerprint. No correctness finding stands; the only work left before approval is the .legion/ deletion push. A docs-wording fast-follow is named for the architect to place.",
+  "summary": "The docs fast-follow (f017a1d79eaa) addresses every item from my round-2 list and changes wording only — I verified the three touched .ts files hash identically once comment lines are stripped; the other four files are Markdown. CI green at f581175cb6c8, MERGEABLE, all four threads isResolved: true with my Accepted: as newest comment. The head is review-clean; the implementer may push exactly the .legion/ deletion, and I approve that head by SHA.",
   "githubFacts": {
-    "ci": "Tests runs 34759597925 and 34759626018 (lint, pr-title, typecheck, test success at 4a307dfdd2e4); Legion Envoy and Contracts run 34759597929 (changes, pi-envoy success; others skipped)",
-    "threads": "4 open, each newest comment = my Accepted: fixed in 9c167fefd8fe; 0 resolved until the implementer runs legion threads resolve",
-    "e2e": "tester round 2 at code head 2a18313779ca: real-runner kill of jj metaedit reported as timeout; live none-mode daemon started with all six identity keys leaked, tmux server and controller pane carried none; round-1 real-pane evidence stands (fingerprint unchanged across the rebase)"
+    "ci": "Tests runs 34763181541 and 34763192737 (lint, pr-title, typecheck, test success at f581175cb6c8); Legion Envoy and Contracts run 34763181516 (changes, pi-envoy success; others skipped)",
+    "threads": "4/4 isResolved: true; newest comment on each is my Accepted: fixed in 9c167fefd8fe",
+    "mergeState": "MERGEABLE / BLOCKED (branch protection awaiting approval)"
   },
-  "fingerprint": {
-    "round1CodeHead_831ae69f9bf0": "ccd0ffafd0a19544…",
-    "rebasedCopy_1c73d2424d43": "ccd0ffafd0a19544… (equal: rebase moved nothing)",
-    "preRebaseCorrective_70aafaf8e365": "c7c1a48d53c37954…",
-    "codeHead_2a18313779ca": "c7c1a48d53c37954… (equal to implementer's and tester's)",
-    "conflictResolution": "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md: additive scrub-list change only, main's bullets intact; jj resolve --list: no conflicts; packages/contracts, pi-envoy/package.json, .github identical to main"
+  "deltaVerified": {
+    "range": "2a18313779ca -> f017a1d79eaa, ~.legion: 7 files, 215 diff lines",
+    "nonCommentSourceChanges": "environment.ts a59f43edc791 -> a59f43edc791, environment.test.ts dbdada9ec268 -> dbdada9ec268, workspace.ts 65678f254779 -> 65678f254779 (comment-stripped sha256 prefixes, computed here): zero",
+    "docs": "config-env-keys-that-panes-also-carry.md, shared-main-repo-hazards-for-concurrent-issue-workspaces.md, daemon AGENTS.md, skills/legion-worker/SKILL.md"
   },
-  "threadsAccepted": [
-    {
-      "id": "PRRT_kwDORFy7ds6h4wLR",
-      "path": "packages/daemon/src/daemon/processes.ts",
-      "reply": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999757978"
-    },
-    {
-      "id": "PRRT_kwDORFy7ds6h4wLS",
-      "path": "packages/daemon/src/daemon/github-app-env.ts",
-      "reply": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999758014"
-    },
-    {
-      "id": "PRRT_kwDORFy7ds6h4wLU",
-      "path": "packages/daemon/src/daemon/AGENTS.md",
-      "reply": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999758095"
-    },
-    {
-      "id": "PRRT_kwDORFy7ds6h4wLW",
-      "path": "skills/legion-worker/SKILL.md",
-      "reply": "https://github.com/sjawhar/legion/pull/1025#discussion_r3999758160"
-    }
-  ],
-  "thermo": "deep-review + code-quality run once at 2a18313779ca scoped to the corrective delta dad0bf730cce..2a18313779ca: no blocking, no code should-fix. Verified by running: every stripDispatchEnv/paneEnv consumer enumerated and no committing daemon child lost a needed identity (jj git clone/workspace add/bookmark set exit 0 under no identity, adoption then sets author+committer to the App); commandFailure formats an exit-1 timedOut as a timeout; the /worker/ready failure rows go through the real adoptWorkingCopy -> real commandFailure; SKILL pre-push check parses on jj 0.45.1; --include-overridden probe matrix re-run",
-  "fastFollow": {
-    "kind": "docs wording only; not a gate",
-    "items": [
-      "skills/legion-worker/SKILL.md ~148-152: pre-push check needs 'on every commit you made' (main@origin..@ lists earlier phases' commits; a rebase legitimately sets committer = rebaser on other roles' commits — this branch's review: record handoff shows author reviewer / committer implementer); as written a tester/reviewer reports a non-problem, and LEGION-42 (tester -> review App) makes that routine",
-      "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md ~88-93: 'belt and braces for the daemon' overclaims — the daemon strips only the secret family + six identity keys; LEGION_OMP_PATH/LEGION_DAEMON_URL/LEGION_STATE_DIR in the same scrub list are load-bearing",
-      "packages/daemon/src/daemon/AGENTS.md ~102-105 and workspace.ts removeRepoScopedIdentity comment ~250-253: --include-overridden justified by the daemon's own JJ_USER, which the strip makes impossible through the daemon runner; restate as: ProvisionIssueWorkspaceDeps.run is injected and the package cannot assume a stripping runner",
-      "AGENTS.md ~116 'with jj's stderr' -> 'with the command's failure'; qualifier on 'stripping here is sufficient' (a server this daemon forked; legion restart preserves the server); environment.test.ts:159 'since LEGION-44'; workspace.ts ~242-248 'author and committer … inert for panes' contradiction; AGENTS.md waves/release clause grammar + line 101 rewrap; environment.ts 104-106 ragged reflow"
-    ],
-    "whereItLands": "architect's call: one docs-only push before the .legion/ deletion (tester bare gates, short reviewer re-check — round 1's precedent) or a follow-up LEGION issue. Reviewer recommends the push (items 1 and 2 mislead readers). Not a gate: head approvable after the deletion either way"
+  "fastFollowChecklist": {
+    "1_skillPrePushCheckPerOwnCommit": "addressed — 'on every commit you made' with both exceptions (earlier phases' own App; rebase sets committer to rebaser) in SKILL.md and the hazards doc; template gains description.first_line(); command runs on fork jj",
+    "2_runbookLoadBearingKeys": "addressed — 'two kinds of key'; every named load-bearing key (LEGION_DAEMON_URL, LEGION_STATE_DIR, LEGION_OMP_PATH, LEGION_TREE/ISSUE/ROLE/GENERATION/WORKSPACE/CONTROLLER) is in the runbook's env -u list; legion.ts keys on LEGION_ROLE/LEGION_CONTROLLER",
+    "3_includeOverriddenRationale": "addressed — injected-runner reason in AGENTS.md and workspace.ts",
+    "4_agentsMdCommandFailureWording": "addressed — 'the command's failure (jj's stderr, or the runner's timeout or abort report)' + slow_command_timeout_seconds named",
+    "5_strippingSufficientQualifier": "addressed — 'for a server this daemon forked' + legion restart caveat in environment.ts",
+    "6_sinceLegion44": "addressed — removed from environment.test.ts",
+    "7_workspaceCommentContradiction": "addressed — rewritten",
+    "8_grammarAndReflows": "addressed — waves/release clause, AGENTS.md line widths (none >100 in the paragraph), environment.ts reflow"
   },
-  "nextSteps": "Implementer: legion threads resolve --pr 1025 --repo sjawhar/legion (all four newest comments are Accepted:), then push the .legion/ deletion — alone, or after the docs push if the architect takes the fast-follow now. Reviewer: approve the resulting head by SHA once it differs from the reviewed head by the deletion alone (or by deletion + a re-checked docs push) and all four threads show isResolved: true.",
+  "thermo": "not run this round: wording-only delta, zero non-comment source changes; rounds 1 and 2 passes stand",
+  "nextSteps": "Implementer: push exactly the .legion/ deletion on top of f581175cb6c8 (plus this round-3 review handoff, which the deletion removes anyway). Reviewer: verify the new head differs from f581175cb6c8 by the .legion/ deletion alone (jj diff --summary shows only D .legion/*), threads still isResolved, CI green, then APPROVE naming that SHA.",
   "reviewerPushed": false,
-  "reviewerNote": "Review App has no contents permission; .legion/review.json is committed locally on the issue branch (jj split, re-authored as legion-reviewer[bot]) and rides the implementer's next push.",
+  "reviewerNote": "Committed locally on the issue branch as legion-reviewer[bot]; rides the implementer's deletion push or is removed by it — the GitHub review body is the durable record of this verdict.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T13:37:43.747Z"
+  "completed": "2026-09-13T15:26:35.249Z"
 }
