@@ -1,0 +1,61 @@
+{
+  "verdict": "changes_requested",
+  "round": 1,
+  "head": "78797cfe528858276bd2c4ef231a27a7ee36af2b",
+  "testedHead": "57f3e3b0ca6a7eb76786a10d7580b16282cf1af5",
+  "review": {
+    "id": 5190970348,
+    "url": "https://github.com/sjawhar/legion/pull/1018#pullrequestreview-5190970348",
+    "state": "CHANGES_REQUESTED",
+    "app": "legion-reviewer[bot]"
+  },
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/AGENTS.md",
+      "line": 241,
+      "thread": "https://github.com/sjawhar/legion/pull/1018#discussion_r3999826053",
+      "description": "The LEGION-52 parenthetical presents the 2026-09-13 incident as the pane-contract skew the gate catches and quotes `LEGION_GRANT is missing`. The incident was a pre-LEGION-54 daemon (no LEGION_GRANT_FILE) with plugin 1.17.1 whose env delivery the secretsd shim dropped: both sides at the same pane contract, so the number would not have refused it. A real skew prints grantFrom's `LEGION_GRANT_FILE names <path>, which could not be read ... the installed plugin predates LEGION-54` (cli/index.ts:122-139, index.test.ts:52-66). Drop the parenthetical or state the current message."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/CHANGELOG.md",
+      "line": 12,
+      "thread": "https://github.com/sjawhar/legion/pull/1018#discussion_r3999826055",
+      "description": "'refuses ... any release through 1.22.2 ... instead of spawning workers that fail because a pre-credential-file plugin never wrote the file' is false for 1.20.0-1.22.2: LEGION-54 builds (#992 in 1.20.0, released 06:06Z) that write the file, refused only for declaring 1 after LEGION-20. Also releases without the field print `contract none`, not `contract 1` (boot-probes.ts:271-274)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/legion-daemon-api.ts",
+      "line": 14,
+      "thread": "https://github.com/sjawhar/legion/pull/1018#discussion_r3999826056",
+      "description": "'every environment variable ...' enumeration (same in all five texts) omits LEGION_CONTROL_SUBJECT (root panes; processes.ts:2487, legion.ts:316) and ENVOY_NATS_URL/ENVOY_URL (processes.ts:2485-2486, envoy-client defaults.ts:27-34). Add them or say 'including'."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-envoy/AGENTS.md",
+      "line": 25,
+      "thread": "https://github.com/sjawhar/legion/pull/1018#discussion_r3999826058",
+      "description": "Identity variables scoped to what classify.ts reads; daemon AGENTS.md enumerates LEGION_WORKSPACE/LEGION_STATE_DIR, read in extensions/legion.ts:407,478,510. Align the two."
+    }
+  ],
+  "verified": {
+    "ci": "16 check runs success at 78797cfe: Tests runs 34760363169 and 34760804070 (lint, typecheck, pr-title, test); package run 34760363173 (changes, contracts, pi-envoy, envoy-client, envoy-plugin, envoy-go, dispatch, claude-envoy-bridge)",
+    "threads": "0 threads and 0 reviews before this round; 4 opened by this review (2 blocking, 2 minor), all unresolved",
+    "docsOnly": "jj diff --from 403c1f670ec5 (fork point) --to 78797cfe --summary: A .legion/implement.json, A .legion/test.json, M legion-daemon-api.ts, M daemon AGENTS.md, M boot-probes.ts, M pi-envoy AGENTS.md, M pi-envoy CHANGELOG.md; every +/- line in the two .ts files is a comment line (awk over the --git diff: no non-comment line). Thermo skipped per the legion-worker skill's docs-only rule.",
+    "contractHistory": "main: #962 (LEGION-21) set LEGION_DAEMON_API_VERSION=1 with the runtime locator discriminant; #975 (LEGION-20, merged 10:56:46Z) bumped to 2 with stateGate/GatesRegister; #975 is an ancestor of the 1.23.0 release commit (63dac108397d) and not of 1.22.2 (0d0a810d8fae). npm manifests: 1.17.0, 1.17.1, 1.20.0-1.22.2 declare 1; 1.23.0, 1.23.1, 1.24.0 declare 2. Releases <= 1.13.0 predate LEGION-21.",
+    "profile": "~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json: version 1.23.0, daemonApiVersion 2; plugins/package.json pins 1.23.0. PR body's Deployment section is true; no 1.23.1 claim remains.",
+    "changelog": "Single [Unreleased] section with Added/Fixed/Removed; the new ### Changed entry fits; main's CHANGELOG has no prior contract/daemonApiVersion entry (nothing duplicates #975). main gained #1020's Added bullet and the 1.24.0 package.json bump since the fork point; no textual conflict (MERGEABLE).",
+    "testerEvidence": "test.json covers acceptance 3 (refusal quoted; 0 state.json/legions.json, port unbound, no process), 4 (rig at 57f3e3b0, profile legion52-rig: planner first legion gh 13:20:41Z, implementer first jj git push 13:30:59Z, both first time; 0 LEGION_GRANT is missing, 0 403), 6 (contracts 104, daemon 1181/7 skip, pi-envoy 166, refusal tests 3, daemon-api-version 1). 57f3e3b0 is the parent of 78797cfe.",
+    "fingerprint": "6708d8d57a8e04ba9e695f0579253f6a7953f7641280f50c0b033a6adebd6e1a at 78797cfe (matches the PR body's post-rebase value)",
+    "independentAudit": "reviewer subagent DocAccuracyAudit confirmed finding 1 and surfaced findings 2-4; verified clean: boot ordering (gate awaited before loadState/NATS/API), refusal message shape, every code-location reference, strict State.response."
+  },
+  "bodyNotes": "PR body CI line names 57f3e3b0ca6a; the head reviewed was 78797cfe (green). Working copy carries provisioning's empty .omp/config.yml (LEGION-58) and the local bookmark had been re-pointed at @ (LEGION-70): the corrective commit must be path-scoped and the bookmark set explicitly before pushing.",
+  "nextRound": "After the corrective push: I answer each of the 4 threads (Accepted: fixed in <commit> / Accepted: not a defect / Still open), the implementer runs legion threads resolve before the push, then one COMMENT review if clean (head still carries .legion/), .legion/ deletion push, APPROVE by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:07:25.488Z"
+}
