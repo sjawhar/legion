@@ -1,0 +1,66 @@
+{
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/issue_queries.go",
+    "packages/envoy/internal/dispatch/api/issues_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/AGENTS.md",
+    "packages/contracts/src/dispatch-api.ts",
+    "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
+    "packages/dispatch/web/src/features/issue/GitHubLink.tsx",
+    "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
+    "packages/dispatch/e2e/issue.e2e.ts",
+    "packages/dispatch/e2e/labels.e2e.ts",
+    "packages/dispatch/AGENTS.md"
+  ],
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1088",
+  "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+  "proof": [
+    {
+      "criterion": "2. At 390px wide no control other than the title sits alone on a row; Close, Subscribers and the GitHub link share rows with their neighbours; the GitHub link shows the pull request's number and title, never a raw address; with two labels, a priority, a GitHub link, one subscriber and one open ask the header card is under 300px tall at 390x844.",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of this head served by the real Go Dispatch server (e2e/run-server.sh, header identity alice) with an isolated Postgres 16 container (127.0.0.1:55463) and the fake Envoy listener (port 9063), driven in Chromium 390x844 through the packages/dispatch Playwright harness.",
+      "command": "cd packages/dispatch && VITE_DISPATCH_E2E=1 bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium issue.e2e.ts (test 'issue header keeps every control in a shared row on a phone and the whose-turn indicator in view at every width'), plus a throwaway proof spec (removed) that took dispatch://LEGION-62/artifact/implemented-header-390-png",
+      "observed": "Header 238px tall (was 480). Status, Priority and Close all at y=197 on the state row; the details line at y=250 holds the whose-turn badge (x=37, in view), labels, Route, 'Subscribers: 1' and the GitHub link, which reads '#1051 sjawhar/legion' with the tooltip 'GitHub details are unavailable for this sign-in.' (no credentials on the e2e server; with credentials it reads '#1051 <title, truncated>' plus the state and checks pills, covered by the IssuePage unit tests). document.documentElement.scrollWidth 390 = clientWidth 390.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "The same test against the build of main 7a178581 measures a 480px header with Close at y=250 alone, Subscribers at y=406 alone and the raw URL link at y=458 alone; the assertion 'no link named https://github.com/sjawhar/legion/pull/1051' fails there."
+    },
+    {
+      "criterion": "3. With eight labels of thirty characters each the title line does not move and the details line scrolls sideways inside the header card instead of wrapping or pushing the page wider; the page's scroll width stays equal to the window width at 1280 and at 390.",
+      "surface": "Same local stack, Chromium 1280x900 and 390x844; labels patched through PATCH /api/v1/issues/{key}.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium labels.e2e.ts (test 'eight thirty-character labels scroll inside the header's details line without widening the page'); screenshots dispatch://LEGION-62/artifact/implemented-labels-1280-png and dispatch://LEGION-62/artifact/implemented-labels-390-png",
+      "observed": "1280: issue-metadata-rail overflow-x auto, clientWidth 502, scrollWidth 2448; document scrollWidth 1280 = clientWidth 1280; title box identical before and after the labels (x435.4 y37 w383.6 h58). 390: rail clientWidth 316, scrollWidth 2536; document scrollWidth 390 = clientWidth 390; title box identical (x37 y122 w264 h66).",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "On the build of main 7a178581 the same fixture gives document scrollWidth 2158 at 1280 and 1918 at 390 (the chips run past the card and the page pans), and the rail is display: contents at 1280, so the test's overflow-x and scrollWidth assertions fail there."
+    },
+    {
+      "criterion": "6. The header shows Waiting on you (N) while an open ask has an agent's reply as its newest, and Waiting on agents (N) after a human replies, live and after a reload, visible at 390, 1280 and 1536.",
+      "surface": "Same local stack (the Go server running this head's code), Chromium at 390x844, 1280x900 and 1536x900; the ask opened by the e2e-session agent through the API, the human reply posted as alice through POST /api/v1/issues/{key}/comments.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium issue.e2e.ts (test 'issue header flips between Waiting on you and Waiting on agents as the newest reply changes'); screenshots dispatch://LEGION-62/artifact/implemented-whose-turn-before-390-png, -after-390-png, -before-1280-png, -after-1280-png, -before-1536-png, -after-1536-png; go test ./internal/dispatch/api -run TestIssueDetailOpenAsksCarryLastReply",
+      "observed": "'Waiting on you (1)' on load at all three widths (badge at x=37 on the phone, x=357 on the desktop, in view). After alice's reply it reads 'Waiting on agents (1)' within the 10s live window and still after a reload; after the agent replies again it returns to 'Waiting on you (1)'. GET /api/v1/issues/{key} now returns open_asks[].last_reply as null before any reply, {author: alice (user)} after the human reply and {author: the session} after the agent's.",
+      "headSha": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "negativeControl": "With the Go server still running the previous code (open_asks without a last_reply key) the header rendered no whose-turn badge at all — hidden rather than wrong, per the spec's error rule — and the Go test's 'last_reply key present' check fails on that server."
+    }
+  ],
+  "verification": {
+    "unit": "cd packages/dispatch && bun test web/src: 891 pass, 0 fail (includes the new IssuePage test for the hidden-when-missing rule).",
+    "lint": "bunx biome check web/src e2e: clean. gofmt -l internal/dispatch: clean. go vet ./internal/dispatch/...: clean.",
+    "typecheck": "bunx tsc --noEmit in packages/dispatch and packages/contracts: clean.",
+    "go": "DISPATCH_TEST_DATABASE_URL=<isolated pg> go test ./internal/dispatch/api -count=1: ok (141s).",
+    "e2e": "Full Playwright suite on the VITE_DISPATCH_E2E=1 build of this head: chromium 102 passed, 6 skipped, 5 failed; iphone 102 passed, 6 skipped, 5 failed. All ten failures are LEGION-142's EACCES on fixed /tmp/<name>.png screenshot paths owned by another user of this box (agents, ask-blocks x2, inbox, polish); none is a header spec. issue, labels, layout, approval, live, board, inbox, threads and ask-blocks (apart from its screenshot write) are green on both projects."
+  },
+  "trickyParts": [
+    "Below 1280px styles.css forces every input and select to font-size 1rem (the iOS focus-zoom guard), so Tailwind text sizes cannot shrink the status and priority pills on a phone; the native priority select was 128px because of its 'Priority —' option plus the dropdown arrow. It is now appearance-none (text-only, like the status pill) with the unset label 'Priority', which leaves 14px of slack for Close on the 316px phone row even with this box's wide DejaVu Sans fallback font.",
+    "The details rail must be a real box to be a scroll container, so the xl:contents / 2xl:flex breakpoints are gone: the rail is 'min-w-0 grow flex-nowrap overflow-x-auto' with flex-basis auto, so it joins the state row only when its whole content fits and otherwise takes its own line and scrolls. The state-actions box lost shrink-0 and gained min-w-0 so a long approval row wraps inside the card instead of overflowing it (approval.e2e.ts caught this).",
+    "The Playwright locator getByLabel('Route') matches the route button's aria-label 'Messages default to no route' as well as the input, so the button is not rendered while the route form is open; the form itself now renders under the header rows rather than inside the nowrap line.",
+    "Harness gotcha: packages/dispatch's unit suite (classes-in-build-css.test.ts) rebuilds web/dist WITHOUT VITE_DISPATCH_E2E=1. Running the e2e suite against that production build fails live.e2e.ts (two stream connections on load, a cold reconnect) — rebuild with the flag before any e2e run after bun test.",
+    "The whose-turn badge leads the details line at every width (one DOM position) instead of trailing it with ml-auto: at 1280 with the sidebar and margin open the line is 502px and cannot hold every detail, so a trailing badge would be scrolled out of view."
+  ],
+  "deviations": [
+    "The architect's push instruction said 'jj bookmark set legion/LEGION-62 -r @'; the bookmark was set to @- instead, because @ is the daemon-provisioned working-copy commit holding only .omp/config.yml with no description, which jj refuses to push. The branch tip is the last described commit, 79f4d50c.",
+    "The unset priority option now reads 'Priority' instead of 'Priority —' and the priority select shows no native dropdown arrow (appearance-none), matching the status pill; both were needed to fit Status, Priority and Close on one 316px phone row.",
+    "gh pr create had to run from /tmp: inside the workspace it fails with 'not a git repository: /home/ubuntu/.../worktrees/legion-62' (the colocated worktree's gitdir points at another user's home)."
+  ],
+  "openQuestions": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T09:37:11.799Z"
+}
