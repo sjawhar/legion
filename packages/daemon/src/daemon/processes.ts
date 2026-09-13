@@ -19,12 +19,12 @@ import {
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
-import { appRoleForLegionRole } from "./api/github";
 import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
 import { gitIdentityEnv } from "./github-app-env";
+import { appRoleForLegionRole } from "./github-apps";
 import {
   activePhaseLabel,
   isActivePhase,
