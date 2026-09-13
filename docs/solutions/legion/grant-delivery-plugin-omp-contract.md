@@ -19,12 +19,22 @@ related_issues:
   - "LEGION-12"
   - "sjawhar/legion#974"
   - "LEGION-52"
+  - "LEGION-54"
+  - "sjawhar/legion#992"
 ---
 
 # pi-legion-envoy 1.17.1 delivers `LEGION_GRANT` as a bash `env` field that neither fork release in service applied to the shell
 
-This records what was observed and what was checked. LEGION-52 owns the durable fix (a contract
-check comparing the installed plugin against the resolved OMP build); nothing here is one.
+This records what was observed and what was checked at the time. **Resolved by LEGION-54 (pull request
+#992, pi-envoy 1.18.2):** the mechanism that dropped the field was located — not the OMP build but the
+`secretsd` plugin (`github:sjawhar/forward#v3.0.2`), which replaces the bash tool at session start with
+Oh My Pi's legacy `{command, timeout}` shim that discards `env` — and the grant no longer travels
+through the tool call at all: the hook writes it to the 0600 file the pane's `LEGION_GRANT_FILE`
+names and `legion` reads that file first. See
+`docs/solutions/envoy/omp-tool-call-hook-rewrites-are-model-visible.md` (lesson 2) and
+`docs/solutions/legion/worker-pane-shell-gotchas.md` §1. The plugin/OMP contract check this note
+asked LEGION-52 for is moot for grant delivery: nothing about the credential depends on which bash
+tool a plugin installs. The rest of this note stands as the record of the observation.
 
 ## Where the delivery shape changed
 

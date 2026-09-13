@@ -12,6 +12,7 @@ import {
 } from "@legion/contracts";
 import { spawnCapabilityKey } from "../api/auth";
 import type { DaemonConfig } from "../config";
+import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
 import {
   type LegionState,
@@ -717,7 +718,17 @@ describe("ProcessManager", () => {
         "-e",
         "GIT_TERMINAL_PROMPT=0",
         "-e",
-        "PATH=/full/bin:/usr/bin",
+        `PATH=${path.join(stateDir, "worker-bin")}:/full/bin:/usr/bin`,
+        "-e",
+        `GH_CONFIG_DIR=${path.join(stateDir, "gh")}`,
+        "-e",
+        "GH_TOKEN=",
+        "-e",
+        "GITHUB_TOKEN=",
+        "-e",
+        "GH_HOST=",
+        "-e",
+        `LEGION_GRANT_FILE=${path.join(stateDir, "secrets", `${roleToken("omp", root, "architect")}-grant`)}`,
         "-e",
         "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
@@ -780,7 +791,12 @@ describe("ProcessManager", () => {
       LEGION_PROJECT: "omp",
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
       ENVOY_URL: "http://127.0.0.1:9020",
-      PATH: "/full/bin:/usr/bin",
+      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
+      GH_CONFIG_DIR: path.join(stateDir, "gh"),
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
+      GH_HOST: "",
+      LEGION_GRANT_FILE: path.join(stateDir, "secrets", "legion-omp-controller-grant"),
     });
     expect(tmuxWindowEnvironment(rootWindow)).toEqual({
       LEGION_TREE: root,
@@ -799,8 +815,132 @@ describe("ProcessManager", () => {
       LEGION_CREDENTIAL_HELPER: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      PATH: "/full/bin:/usr/bin",
+      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
+      GH_CONFIG_DIR: path.join(stateDir, "gh"),
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
+      GH_HOST: "",
+      LEGION_GRANT_FILE: path.join(
+        stateDir,
+        "secrets",
+        `${roleToken("omp", root, "architect")}-grant`
+      ),
     });
+  });
+  it("puts the static credential environment on every pane, worker-bin first on PATH exactly once", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const launches = commands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
+    expect(launches).toHaveLength(3);
+    const workerBin = path.join(stateDir, "worker-bin");
+    const secretsDir = path.join(stateDir, "secrets");
+    const expectedGrantFiles = [
+      "legion-omp-controller-grant",
+      `${roleToken("omp", root, "architect")}-grant`,
+      `${roleToken("omp", root, "tester")}-grant`,
+    ];
+    launches.forEach((launch, index) => {
+      const environment = tmuxWindowEnvironment(launch);
+      expect(environment).toMatchObject({
+        GH_CONFIG_DIR: path.join(stateDir, "gh"),
+        GH_TOKEN: "",
+        GITHUB_TOKEN: "",
+        GH_HOST: "",
+        LEGION_GRANT_FILE: path.join(secretsDir, expectedGrantFiles[index] ?? ""),
+      });
+      expect(environment.PATH?.startsWith(`${workerBin}${path.delimiter}`)).toBe(true);
+      expect(environment.PATH?.split(path.delimiter).filter((e) => e === workerBin)).toHaveLength(
+        1
+      );
+      // The grant itself never rides a -e pair: the extension writes the named file later.
+      expect(environment.LEGION_GRANT).toBeUndefined();
+      for (const part of launch) expect(part.startsWith("LEGION_GRANT=")).toBe(false);
+    });
+  });
+  it("a daemon started from inside a Legion pane still launches panes with worker-bin exactly once", async () => {
+    // The daemon's `processPath` is `resolveDaemonEnvironment`'s pane PATH. Started from a pane,
+    // that function sees the pane's own `<state_dir>/worker-bin`-first PATH through `mise env`;
+    // it must strip every such entry so its own `gh` is never the shim and the one prefix
+    // `credentialProcessEnvironment` adds is the only one a launched pane carries.
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const inheritedWorkerBin = path.join(stateDir, "worker-bin");
+    const environment = await resolveDaemonEnvironment("mise x omp@1 -- omp", {
+      stateDir,
+      env: { PATH: "/narrow/bin" },
+      resolveExecutable: (command) =>
+        command === "mise"
+          ? "/tools/mise"
+          : command.startsWith("/")
+            ? command
+            : `/tools/${command}`,
+      run: async (command) => {
+        if (command[1] === "env") {
+          return {
+            stdout: JSON.stringify({
+              PATH: `${inheritedWorkerBin}:/full/bin:/other/state/worker-bin:/usr/bin`,
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
+      },
+    });
+    expect(environment.commands.gh).toBe("/tools/gh");
+
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      processPath: environment.paneEnv.PATH,
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const launches = commands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
+    expect(launches).toHaveLength(3);
+    for (const launch of launches) {
+      const entries = tmuxWindowEnvironment(launch).PATH?.split(path.delimiter) ?? [];
+      expect(entries[0]).toBe(inheritedWorkerBin);
+      expect(entries.filter((entry) => path.basename(entry) === "worker-bin")).toHaveLength(1);
+      expect(entries).toContain(path.join(stateDir, "bin"));
+    }
   });
   it("runs every tmux command against the private legion-<project> socket", async () => {
     const stateDir = await temporaryDir();
@@ -933,15 +1073,28 @@ describe("ProcessManager", () => {
         "legion-omp-controller",
       ].sort()
     );
+    // The grant files are the extension's to write, later in each pane's life; the daemon only
+    // names them (LEGION_GRANT_FILE) and prunes them with the pane's boot-token file.
+    const architectGrant = `${architectFile}-grant`;
+    const testerGrant = `${testerFile}-grant`;
+    const controllerGrant = path.join(dir, "legion-omp-controller-grant");
+    for (const file of [architectGrant, testerGrant, controllerGrant]) {
+      await writeFile(file, "g", { mode: 0o600 });
+    }
 
     await processes.markProcessDead(root);
 
     expect(await stat(architectFile).catch(() => undefined)).toBeUndefined();
+    expect(await stat(architectGrant).catch(() => undefined)).toBeUndefined();
     expect(await readFile(testerFile, "utf8")).toBe("worker-boot-token");
+    expect(await readFile(testerGrant, "utf8")).toBe("g");
 
     await processes.closeTree(root);
 
-    expect((await readdir(dir)).sort()).toEqual(["legion-omp-controller"]);
+    expect((await readdir(dir)).sort()).toEqual([
+      "legion-omp-controller",
+      "legion-omp-controller-grant",
+    ]);
   });
   it("reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot", async () => {
     const stateDir = await temporaryDir();
@@ -983,8 +1136,11 @@ describe("ProcessManager", () => {
     expect((await readdir(dir)).sort()).toEqual(
       [roleToken("omp", root, "architect"), token, "dispatch-token"].sort()
     );
+    // Written after the boot prune, as the extension does during the pane's life: the prune
+    // must have seeded the grant name from the live locator, not from the files it found.
+    await writeFile(path.join(dir, `${token}-grant`), "g", { mode: 0o600 });
 
-    // The tester's socket is dead: its locator clears, and the file this process never wrote
+    // The tester's socket is dead: its locator clears, and the files this process never wrote
     // itself must go with it on that same persist.
     await processes.reconnectWorkers();
 
@@ -1610,7 +1766,11 @@ describe("ProcessManager", () => {
       `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/architect-root.md)" --append-system-prompt '${addressingFragment("omp", root, root, "architect").replaceAll("'", "'\\''")}'`,
       `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc --append-system-prompt "$(cat ${extensionDir}/roles/controller-root.md)"`,
     ]);
-    expect(windows.map((command) => command.includes(`PATH=${processPath}`))).toEqual([true, true]);
+    expect(
+      windows.map((command) =>
+        command.includes(`PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath}`)
+      )
+    ).toEqual([true, true]);
   });
 
   it("prepends the configured omp_launch_prefix before the OMP invocation for root and controller windows", async () => {
@@ -5892,7 +6052,16 @@ describe("ProcessManager", () => {
       ENVOY_URL: "http://127.0.0.1:9020",
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      PATH: "/full/bin:/usr/bin",
+      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
+      GH_CONFIG_DIR: path.join(stateDir, "gh"),
+      GH_TOKEN: "",
+      GITHUB_TOKEN: "",
+      GH_HOST: "",
+      LEGION_GRANT_FILE: path.join(
+        stateDir,
+        "secrets",
+        `${roleToken("omp", root, "tester")}-grant`
+      ),
     });
     const promptPath = path.join(
       path.resolve(import.meta.dir, "../../../../pi-envoy"),

@@ -78,11 +78,19 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
 - Start rigs and scratch daemons with the inherited family scrubbed. The pattern that worked:
   `env -u LEGION_DAEMON_URL -u LEGION_STATE_DIR -u LEGION_TREE -u LEGION_ISSUE -u LEGION_ROLE
   -u LEGION_GENERATION -u LEGION_WORKSPACE -u LEGION_ROOT_WORKSPACE -u LEGION_PROJECT
-  -u LEGION_GRANT -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER -u LEGION_CONTROL_SUBJECT
-  -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u DISPATCH_TOKEN_FILE -u TMUX
-  -u GH_CONFIG_DIR …`, with `DISPATCH_URL`/`DISPATCH_TOKEN` re-supplied deliberately. The
-  checkpoints script must run under the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the
-  outer daemon's state.
+  -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
+  -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER
+  -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST …`, with
+  `DISPATCH_URL`/`DISPATCH_TOKEN` re-supplied deliberately. The checkpoints script must run under
+  the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
+- `PATH` needs no scrub. Since LEGION-54 a pane's `PATH` starts with `<state_dir>/worker-bin` for
+  the pane's life (the `gh` shim that execs `legion gh`), and `mise env` keeps an inherited PATH
+  head, so a daemon started from inside a pane would otherwise resolve its own `gh` to the shim
+  and hand every new pane a second `worker-bin` entry. `resolveDaemonEnvironment` therefore
+  strips every inherited `worker-bin` entry at the daemon boundary (`pathWithoutWorkerBin`),
+  exactly as it strips the inherited pane secrets, and `ProcessManager` then prepends the pane's
+  own entry exactly once. `legion gh` applies the same strip before spawning `gh`, so it never
+  re-enters itself through the shim either.
 - Write `daemon_url` (and `state_dir`) into every generated `legion.yaml`. The guard makes an
   omission a refusal on tmux, which is the point: a rig that forgets is told, not misrouted.
 - When reading a daemon's environment for evidence, print variable *names* only

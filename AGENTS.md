@@ -49,7 +49,7 @@ legion gh -- <args>                  # Run gh with a session-bound GitHub token 
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state
 legion handoff write|read|message    # Workers: write/read structured handoff data on issue branch
-legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates via LEGION_GRANT exactly like `legion gh`/`legion credential` — no session secret in the request)
+legion handoff complete --summary <text>  # Workers: report phase completion to the tree's architect, keeping the role claimed (authenticates exactly like `legion gh`/`legion credential`: reads the grant from LEGION_GRANT_FILE — the 0600 file the daemon names on the pane and the pi-envoy extension writes before each bash command; LEGION_GRANT is the manual fallback — and redeems it for this worker's issue/role/session, never a live session secret in the request)
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
 legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token (Kubernetes runtime; daemon-spawned)
 ```

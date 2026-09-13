@@ -19,7 +19,7 @@ import {
   parseControlDirective,
 } from "../src/legion/control";
 import { createLegionDaemonClient, LegionDaemonApiError } from "../src/legion/daemon-client";
-import { installWorkerGhShim, workerGhEnvironment } from "../src/legion/gh-shim";
+import { writeGrantFile } from "../src/legion/grant-file";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import { createLegionTool } from "../src/legion/tools";
 import { setJjIdentity } from "../src/legion/workspace-helpers";
@@ -655,10 +655,21 @@ export default function legionExtension(pi: PiApi): void {
       if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
         return {
           block: true,
-          reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+          reason: "Legion worker session is not registered; cannot mint its grant",
         };
       }
       return undefined;
+    }
+    // The daemon names the grant file on every pane it launches; a pane without one was launched
+    // by a daemon older than this plugin, and minting for it would only produce a grant nothing
+    // could read. A blank value (an operator's own export) is the same absence.
+    const grantFile = process.env.LEGION_GRANT_FILE;
+    if (grantFile === undefined || grantFile.trim() === "") {
+      return {
+        block: true,
+        reason:
+          "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+      };
     }
     try {
       const grant = await roleDaemon().grant({
@@ -667,28 +678,13 @@ export default function legionExtension(pi: PiApi): void {
         sessionId: sessionID,
         secret: active.secret,
       });
-      const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
-      const workerBin = await installWorkerGhShim(stateDir);
-      // The host writes this revised input back into the assistant message, so anything placed
-      // in `command` becomes text the model reads as its own and imitates on later calls with
-      // stale or made-up grants. The bash tool's `env` applies to this one command only, and
-      // with the hook's keys spread last an imitated `env` from the model changes nothing.
-      // PATH builds on the pane's, never on whatever the model supplied.
-      const modelEnv =
-        typeof toolCall.input.env === "object" &&
-        toolCall.input.env !== null &&
-        !Array.isArray(toolCall.input.env)
-          ? (toolCall.input.env as Record<string, unknown>)
-          : {};
-      return {
-        input: {
-          ...toolCall.input,
-          env: {
-            ...modelEnv,
-            ...workerGhEnvironment(grant.grantId, stateDir, workerBin, process.env.PATH),
-          },
-        },
-      };
+      // The host writes a hook's revised `input` back into the assistant message (text the model
+      // imitates — LEGION-12), and a plugin that replaces the bash tool may drop `env` (secretsd's
+      // legacy shim, LEGION-52). The grant therefore travels through neither: it is written to
+      // the pane's LEGION_GRANT_FILE, which `legion` reads first. GH_CONFIG_DIR, the shim-first
+      // PATH, and the emptied GitHub keys are on the pane from the daemon.
+      await writeGrantFile(grantFile, grant.grantId);
+      return undefined;
     } catch (error) {
       return { block: true, reason: messageFor(error) };
     }

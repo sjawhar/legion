@@ -1,5 +1,15 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -113,6 +123,7 @@ const environmentKeys = [
   "LEGION_BOOT_TOKEN_FILE",
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
+  "LEGION_GRANT_FILE",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
 // reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
@@ -289,43 +300,14 @@ async function jjConfig(directory: string, key: string): Promise<string> {
   if (exitCode !== 0) throw new Error(`jj config get failed: ${stderr}`);
   return stdout.trim();
 }
-async function commandOutput(
-  command: string[],
-  cwd?: string,
-  env?: NodeJS.ProcessEnv
-): Promise<string> {
-  const child = Bun.spawn(command, { cwd, env, stdout: "pipe", stderr: "pipe" });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
-    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
-  ]);
-  if (exitCode !== 0) throw new Error(`${command.join(" ")} failed: ${stderr}`);
-  return stdout.trim();
-}
-
-/** The bash input a worker's `tool_call` handler returned: the model's `command`, untouched,
- * plus the `env` record the hook filled in. Throws when the handler blocked or left the input
- * alone, so a test never asserts against `undefined`. */
-function rewrittenBashInput(result: unknown): {
-  readonly command: string;
-  readonly env: Record<string, unknown>;
-} {
-  if (
-    typeof result !== "object" ||
-    result === null ||
-    !("input" in result) ||
-    typeof result.input !== "object" ||
-    result.input === null ||
-    !("command" in result.input) ||
-    typeof result.input.command !== "string" ||
-    !("env" in result.input) ||
-    typeof result.input.env !== "object" ||
-    result.input.env === null
-  ) {
-    throw new Error(`worker shell was not given a daemon grant: ${JSON.stringify(result)}`);
-  }
-  return { command: result.input.command, env: result.input.env as Record<string, unknown> };
+/** What `legion` will read from the pane's grant file after a worker's `tool_call` handler ran:
+ * the trimmed contents and the file mode. Throws (ENOENT) when the hook never wrote it, so a
+ * test never asserts against an absent file. */
+async function grantFileContents(file: string): Promise<{ grant: string; mode: number }> {
+  return {
+    grant: (await readFile(file, "utf8")).trim(),
+    mode: (await stat(file)).mode & 0o777,
+  };
 }
 
 /** Boots a phase-worker session and returns its tool_call handler bound to that session. */
@@ -342,6 +324,9 @@ async function bootWorker(options: {
   readonly toolCall: Handler;
   readonly context: SessionContext;
   readonly token: string;
+  /** The pane's `LEGION_GRANT_FILE`, under a 0700 secrets dir, exactly as the daemon names it. */
+  readonly grantFile: string;
+  readonly secretsDir: string;
 }> {
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
@@ -355,6 +340,11 @@ async function bootWorker(options: {
   process.env.LEGION_ISSUE = issue;
   process.env.LEGION_ROLE = options.role;
   process.env.LEGION_WORKSPACE = options.workspace;
+  const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+  await chmod(secretsDir, 0o700);
+  temporaryPaths.push(secretsDir);
+  const grantFile = path.join(secretsDir, `${token}-grant`);
+  process.env.LEGION_GRANT_FILE = grantFile;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -392,7 +382,7 @@ async function bootWorker(options: {
     },
   };
   await sessionStart({}, context);
-  return { toolCall, context, token };
+  return { toolCall, context, token, grantFile, secretsDir };
 }
 
 describe("Legion OMP extension", () => {
@@ -1342,9 +1332,10 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_ISSUE = issue;
     process.env.LEGION_ROLE = role;
     process.env.LEGION_WORKSPACE = workspace;
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
-    temporaryPaths.push(stateDir);
-    process.env.LEGION_STATE_DIR = stateDir;
+    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+    temporaryPaths.push(secretsDir);
+    const grantFile = path.join(secretsDir, `${token}-grant`);
+    process.env.LEGION_GRANT_FILE = grantFile;
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -1389,9 +1380,8 @@ describe("Legion OMP extension", () => {
       context
     );
 
-    const input = rewrittenBashInput(result);
-    expect(input.command).toBe("echo hi");
-    expect(input.env.LEGION_GRANT).toBe("grant-recovered");
+    expect(result).toBeUndefined();
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-recovered", mode: 0o600 });
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(2);
     expect(requests.find((request) => request.path === "/legion/v1/worker-session")).toEqual({
       path: "/legion/v1/worker-session",
@@ -1451,9 +1441,7 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_ISSUE = issue;
     process.env.LEGION_ROLE = role;
     process.env.LEGION_WORKSPACE = workspace;
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
-    temporaryPaths.push(stateDir);
-    process.env.LEGION_STATE_DIR = stateDir;
+    process.env.LEGION_GRANT_FILE = path.join(secretsDir, `${token}-grant`);
     globalThis.fetch = (async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -1782,14 +1770,11 @@ describe("Legion OMP extension", () => {
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
   });
-  test("gives a booted worker's bash calls a fresh daemon grant and a PATH-scoped gh shim through the tool env", async () => {
+  test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
-    temporaryPaths.push(stateDir);
-    process.env.LEGION_STATE_DIR = stateDir;
 
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, grantFile } = await bootWorker({
       role: "reviewer",
       workspace,
       requests,
@@ -1801,15 +1786,16 @@ describe("Legion OMP extension", () => {
       },
     });
 
-    const command = "echo GH_TOKEN=$GH_TOKEN; echo CONFIG=$GH_CONFIG_DIR; which gh";
+    const command = "legion gh -- pr view 7";
     const result = await toolCall(
       { toolName: "bash", toolCallId: "call-1", input: { command } },
       context
     );
 
-    const input = rewrittenBashInput(result);
-    expect(input.command).toBe(command);
-    expect(input.env.LEGION_GRANT).toBe("grant-1");
+    // Neither `command` (model-visible once written back — LEGION-12) nor `env` (dropped by a
+    // plugin that replaces the bash tool — LEGION-52) carries anything: the hook returns nothing.
+    expect(result).toBeUndefined();
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
     expect(requests.at(-1)).toEqual({
       path: "/legion/v1/grants",
       body: {
@@ -1819,47 +1805,18 @@ describe("Legion OMP extension", () => {
         secret: "worker-secret",
       },
     });
-    expect(await readFile(path.join(stateDir, "worker-bin", "gh"), "utf8")).toContain(
-      'exec legion gh -- "$@"'
-    );
-
-    // The contract the shell observes is unchanged from the command-text days — no ambient
-    // token, the isolated gh config dir, the shim first on PATH — only the channel moved: the
-    // bash tool applies `env` to this one command, exactly as `sh -c` with a merged env does.
-    const output = await commandOutput(["sh", "-c", input.command], workspace, {
-      ...process.env,
-      GH_TOKEN: "ambient-personal-token",
-      GITHUB_TOKEN: "ambient-personal-token",
-      GH_HOST: "ambient-host",
-      ...(input.env as Record<string, string>),
-    });
-    expect(output).toBe(
-      [
-        "GH_TOKEN=",
-        `CONFIG=${path.join(stateDir, "gh")}`,
-        path.join(stateDir, "worker-bin", "gh"),
-      ].join("\n")
-    );
   });
   /**
    * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
    * last non-undefined result, mirroring the host's `emitToolCall`, which also never chains one
    * handler's revised input into the next. Stacked handlers are therefore observable only by
-   * counting `/legion/v1/grants` requests, never by inspecting the returned input.
-   *
-   * The host writes a hook's revised input back into the assistant message, so anything the hook
-   * puts in `command` becomes model-visible text the model imitates on later calls with stale or
-   * made-up ids. The grant must ride the bash tool's per-command `env`, and the hook's keys must
-   * win over whatever the model already put there.
+   * counting `/legion/v1/grants` requests, never by inspecting a returned input.
    */
-  test("delivers the worker grant through the bash tool env and never through the model-visible command text", async () => {
+  test("ignores whatever env or text the model supplied and never rewrites command or env", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
-    temporaryPaths.push(stateDir);
-    process.env.LEGION_STATE_DIR = stateDir;
     let minted = 0;
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, grantFile } = await bootWorker({
       role: "implementer",
       workspace,
       requests,
@@ -1875,48 +1832,29 @@ describe("Legion OMP extension", () => {
       },
     });
 
-    // A model that imitated an earlier call's env: a stale grant, its own PATH, an unrelated key.
-    const command = `printf '%s' "$LEGION_GRANT"`;
+    // A model imitating an earlier session's shape: a stale grant in env and in the command text.
+    const command = `export LEGION_GRANT='stale-imitated-grant'; legion credential get`;
     const result = await toolCall(
       {
         toolName: "bash",
         toolCallId: "call-env",
         input: {
           command,
-          env: { LEGION_GRANT: "stale-imitated-grant", PATH: "/model/path", KEEP: "model-value" },
+          env: { LEGION_GRANT: "stale-imitated-grant", PATH: "/model/path" },
         },
       },
       context
     );
 
-    const input = rewrittenBashInput(result);
-    const workerBin = path.join(stateDir, "worker-bin");
-    expect(input.command).toBe(command);
-    expect(input.env.LEGION_GRANT).toBe("grant-1");
-    // Based on the pane's PATH, never the model's, with the shim directory first.
-    expect(input.env.PATH).toBe(`${workerBin}${path.delimiter}${process.env.PATH}`);
-    expect(input.env.KEEP).toBe("model-value");
-    expect(input.env.GH_TOKEN).toBe("");
-    expect(input.env.GITHUB_TOKEN).toBe("");
-    expect(input.env.GH_HOST).toBe("");
-    expect(input.env.GH_CONFIG_DIR).toBe(path.join(stateDir, "gh"));
+    expect(result).toBeUndefined();
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
-
-    const output = await commandOutput(["sh", "-c", input.command], workspace, {
-      ...process.env,
-      GH_TOKEN: "ambient",
-      ...(input.env as Record<string, string>),
-    });
-    expect(output).toBe("grant-1");
   });
-  test("is idempotent when the host or the model re-feeds a revised bash input for the same tool call", async () => {
+  test("overwrites the file with a fresh mint on every call, leaving no temp file behind", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
-    temporaryPaths.push(stateDir);
-    process.env.LEGION_STATE_DIR = stateDir;
     let minted = 0;
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, grantFile, secretsDir } = await bootWorker({
       role: "implementer",
       workspace,
       requests,
@@ -1932,37 +1870,92 @@ describe("Legion OMP extension", () => {
       },
     });
 
-    const first = rewrittenBashInput(
-      await toolCall(
-        { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
-        context
-      )
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
+      context
     );
-    // The same tool call again, carrying the first pass's already-revised input: the shape a
-    // host double-invocation with write-back would take, and the shape model imitation takes.
-    const second = rewrittenBashInput(
-      await toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "call-twice",
-          input: { command: first.command, env: first.env },
-        },
-        context
-      )
+    // The same tool call again (a host double-invocation) and a later one: each mints afresh
+    // and the file always holds the newest grant.
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
+      context
     );
 
-    const workerBin = path.join(stateDir, "worker-bin");
-    expect(second.command).toBe("echo hi");
-    expect(second.env.LEGION_GRANT).toBe("grant-2");
-    expect(second.env.PATH).toBe(first.env.PATH);
-    expect(
-      String(second.env.PATH)
-        .split(path.delimiter)
-        .filter((entry) => entry === workerBin)
-    ).toHaveLength(1);
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-2", mode: 0o600 });
     // One mint per invocation: the extension never caches a grant, and the host invokes the hook
     // once per loop dispatch.
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(2);
+    // The atomic rename leaves exactly the named file: no `<file>.<pid>.<uuid>` residue.
+    expect(await readdir(secretsDir)).toEqual([path.basename(grantFile)]);
+  });
+  test("blocks the command naming the path when the grant file cannot be written", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context, secretsDir } = await bootWorker({
+      role: "implementer",
+      workspace,
+      requests,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          return Response.json({ grantId: "grant-1", expiresAt: "2099-01-01T00:00:00.000Z" });
+        }
+        return undefined;
+      },
+    });
+    const unwritable = path.join(secretsDir, "missing-dir", "x-grant");
+    process.env.LEGION_GRANT_FILE = unwritable;
+
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-unwritable", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: expect.stringContaining(`LEGION_GRANT_FILE ${unwritable} could not be written`),
+    });
+    // Mint-then-write: the grant was minted (one wasted 60 s grant), nothing ran under a stale one.
+    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
+
+    // A relative pointer (an operator's own export) is refused before any temp file could land
+    // in OMP's cwd — the issue workspace.
+    process.env.LEGION_GRANT_FILE = "relative/x-grant";
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-relative", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "LEGION_GRANT_FILE relative/x-grant could not be written: the path is not absolute",
+    });
+    expect(await readdir(workspace)).not.toContain(expect.stringMatching(/^x-grant\./));
+  });
+  test("blocks when the pane carries no LEGION_GRANT_FILE, or a blank one, without minting", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({ role: "implementer", workspace, requests });
+    const blocked = {
+      block: true,
+      reason:
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+    };
+
+    delete process.env.LEGION_GRANT_FILE;
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-no-file", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual(blocked);
+    process.env.LEGION_GRANT_FILE = "  ";
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-blank-file", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual(blocked);
+    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(0);
   });
   test("blocks a booted worker's bash calls when the daemon refuses to mint a grant", async () => {
     const workspace = await createJjWorkspace();
@@ -2011,7 +2004,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: "Legion worker session is not registered; cannot mint LEGION_GRANT",
+      reason: "Legion worker session is not registered; cannot mint its grant",
     });
   });
   test("does not block bash calls from the controller session", async () => {

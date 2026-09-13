@@ -55,6 +55,7 @@ import {
 import { runResync } from "./resync";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
+import { installWorkerGhShim } from "./worker-bin";
 import { connectWorkerRpc } from "./worker-rpc";
 import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
 
@@ -254,6 +255,10 @@ async function startDaemonLocked(
     stateDir: config.stateDir,
   });
   const runner = createDaemonRunner(environment, deps.runner);
+  // The `gh` shim every pane's PATH puts first (`ProcessManager.credentialProcessEnvironment`),
+  // installed before any pane can launch. An fs failure refuses startup: no pane may launch with a
+  // PATH whose first entry does not exist.
+  await installWorkerGhShim(config.stateDir);
   // The one Dispatch bearer every pane shares, delivered as a 0600 file pointer
   // (`DISPATCH_TOKEN_FILE`) rather than a `-e` argv value — see `secrets.ts`. An fs failure here
   // refuses startup exactly like a missing `DISPATCH_TOKEN` does: no pane may launch without it.

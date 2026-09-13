@@ -33,6 +33,7 @@ import {
   writeLegionEntry,
 } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
+import { pathWithoutWorkerBin } from "../daemon/worker-bin";
 import {
   readAllHandoffs,
   readMessages,
@@ -84,11 +85,47 @@ function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
   );
 }
 
+/** The trimmed contents of the 0600 file `variable` (an `X_FILE` pointer the daemon set on this
+ * pane) names. A set pointer is authoritative: a missing, unreadable, or empty file is an error
+ * naming both the variable and the path, never a fallback to the plain variable. */
+function readSecretPointer(variable: string, file: string): string {
+  let contents: string;
+  try {
+    contents = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    throw new CliError(
+      `${variable} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const secret = contents.trim();
+  if (!secret) throw new CliError(`${variable} names ${file}, which is empty`);
+  return secret;
+}
+
+/** The grant `legion gh`, `legion credential`, and `legion handoff complete` redeem:
+ * `LEGION_GRANT_FILE` (the file the daemon names on every pane and the pi-envoy extension writes
+ * before each bash command runs — never command text or the bash tool's `env`, see LEGION-12 and
+ * LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual export. */
 function grantFrom(env: NodeJS.ProcessEnv): string {
+  const file = env.LEGION_GRANT_FILE;
+  if (file !== undefined) {
+    try {
+      return readSecretPointer("LEGION_GRANT_FILE", file);
+    } catch (error) {
+      // The realistic skew: a daemon on this release naming the file for a pane whose plugin
+      // predates it and so never writes it. Name the cause and the remedy, not only the path.
+      if (error instanceof CliError && error.message.includes("ENOENT")) {
+        throw new CliError(
+          `${error.message}: the pi-envoy extension in this pane did not write it — the installed plugin predates LEGION-54; install the released plugin in the profile and relaunch the pane`
+        );
+      }
+      throw error;
+    }
+  }
   const grant = env.LEGION_GRANT;
   if (!grant) {
     throw new CliError(
-      "LEGION_GRANT is missing: the Legion worker extension injects it before credential commands run"
+      "LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs"
     );
   }
   return grant;
@@ -130,7 +167,10 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }
-  const exitCode = await deps.spawnGh(args, buildGitHubTokenEnv(payload.data.token, deps.env));
+  const childEnv = buildGitHubTokenEnv(payload.data.token, deps.env);
+  // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
+  if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);
+  const exitCode = await deps.spawnGh(args, childEnv);
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
 }
 
@@ -323,24 +363,11 @@ async function cmdLegions(): Promise<void> {
 }
 
 /** `LEGION_CONTROLLER_SECRET_FILE` (the 0600 file the daemon hands its controller pane; trimmed
- * contents) ahead of `LEGION_CONTROLLER_SECRET` (an interactive operator's own export). A set
- * pointer is authoritative: a missing, unreadable, or empty file is an error naming both the
- * variable and the path, never a fallback to the plain variable. */
+ * contents) ahead of `LEGION_CONTROLLER_SECRET` (an interactive operator's own export) — see
+ * `readSecretPointer` for the no-fallback rule. */
 export function resolveControllerSecret(env: NodeJS.ProcessEnv): string {
   const file = env.LEGION_CONTROLLER_SECRET_FILE;
-  if (file !== undefined) {
-    let contents: string;
-    try {
-      contents = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      throw new CliError(
-        `LEGION_CONTROLLER_SECRET_FILE names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    const secret = contents.trim();
-    if (!secret) throw new CliError(`LEGION_CONTROLLER_SECRET_FILE names ${file}, which is empty`);
-    return secret;
-  }
+  if (file !== undefined) return readSecretPointer("LEGION_CONTROLLER_SECRET_FILE", file);
   const secret = env.LEGION_CONTROLLER_SECRET;
   if (!secret) {
     throw new CliError(
@@ -465,9 +492,10 @@ export const handoffCommand = defineCommand({
         name: "complete",
         description:
           "Report phase completion to this issue's architect. Authenticates exactly like " +
-          "`legion gh`/`legion credential`: reads LEGION_GRANT from the environment (the " +
-          "pi-envoy worker extension injects it into every worker bash call) and redeems it " +
-          "for this worker's issue/role/session — never a live session secret in the request.",
+          "`legion gh`/`legion credential`: reads the grant from LEGION_GRANT_FILE (the 0600 " +
+          "file the daemon names on the pane and the pi-envoy extension writes before each bash " +
+          "command; LEGION_GRANT is the manual fallback) and redeems it for this worker's " +
+          "issue/role/session — never a live session secret in the request.",
       },
       args: {
         summary: {

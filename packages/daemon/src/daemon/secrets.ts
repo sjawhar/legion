@@ -19,6 +19,21 @@ export function secretFilePath(stateDir: string, name: string): string {
   return path.join(secretsDir(stateDir), name);
 }
 
+/** The grant file a pane's `LEGION_GRANT_FILE` names: `<role token>-grant`. The daemon never
+ * writes it — the pi-envoy extension does, before each of the pane's bash commands, with the grant
+ * it minted for that command — but the daemon names it on the pane and prunes it exactly like the
+ * pane's boot-token file, for as long as the pane's locator lives. */
+export function grantSecretName(roleToken: string): string {
+  return `${roleToken}-grant`;
+}
+
+/** Every `<stateDir>/secrets` file a pane's role token names: its own secret (the boot token, or
+ * the controller secret) and its grant file. `ProcessManager` tracks, holds, and prunes them as
+ * one set — a third per-token file lands here and nowhere else. */
+export function processSecretNames(roleToken: string): string[] {
+  return [roleToken, grantSecretName(roleToken)];
+}
+
 /** Writes `value` to `<stateDir>/secrets/<name>` (created or overwritten in place) and returns that
  * path. Re-applies 0700/0600 explicitly on every call: `mkdir`'s mode is umask-masked and ignored
  * for an existing directory, and `writeFile`'s mode applies only on create. */
@@ -36,22 +51,19 @@ export async function writeSecretFile(
   return file;
 }
 
-/** Removes every entry of `<stateDir>/secrets` whose name is not in `keep`, returning the removed
- * names and the ones that stayed (both sorted). A missing directory is an empty one. */
-export async function pruneSecretFiles(
-  stateDir: string,
-  keep: ReadonlySet<string>
-): Promise<{ removed: string[]; kept: string[] }> {
+/** Removes every entry of `<stateDir>/secrets` whose name is not in `keep`. A missing directory is
+ * an empty one. */
+export async function pruneSecretFiles(stateDir: string, keep: ReadonlySet<string>): Promise<void> {
   let names: string[];
   try {
     names = await readdir(secretsDir(stateDir));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], kept: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  names.sort();
-  const removed = names.filter((name) => !keep.has(name));
-  const kept = names.filter((name) => keep.has(name));
-  await Promise.all(removed.map((name) => rm(secretFilePath(stateDir, name), { force: true })));
-  return { removed, kept };
+  await Promise.all(
+    names
+      .filter((name) => !keep.has(name))
+      .map((name) => rm(secretFilePath(stateDir, name), { force: true }))
+  );
 }

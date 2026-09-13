@@ -63,7 +63,7 @@ passes the host tool AbortSignal to every Dispatch execution; the shared client 
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, daemon client, gh shim, jj attribution, control directives, tools |
+| Legion lifecycle modules | `src/legion/` | Classification, daemon client, grant file (`grant-file.ts`: the bash `tool_call` hook mints one grant per command, writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, and returns `undefined` — it never touches `command` or `env`; the static gh environment is the daemon's pane environment), jj attribution, control directives, tools |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
