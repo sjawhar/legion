@@ -148,11 +148,16 @@ not construct a token from a partial issue reference.
 
 ## Legion exception lane
 
-`no_holder` and `delivery_failed` for a Legion role are daemon liveness signals, not reasons to
-add a second subscriber or manually retry. For example, treat a `delivery_failed` wake as the
-daemon's responsibility to revive or recreate the backing worker and re-deliver; otherwise it
-resurrects the root process with derived catch-up and the workspace handoffs. Raw delivery failures
-stay out of architect context.
+`no_holder`, `delivery_failed`, and `receipt_timeout` for a Legion role are daemon liveness
+signals, not reasons to add a second subscriber or manually retry. `no_holder`: no live session
+holds the role. `delivery_failed`: the message was not forwarded at all — the holder lookup
+failed, the holder was stale, or the publish errored. `receipt_timeout`: the listener forwarded
+the message to a registered, live holder and no receipt arrived inside the window; its payload
+keeps `original_topic`, `event_id`, `payload`, and the original `dedupe_key`, so the daemon can
+re-send the same message and the receiver's dedupe drops a copy that did arrive. Treat any of
+these wakes as the daemon's responsibility to revive or recreate the backing worker and
+re-deliver; otherwise it resurrects the root process with derived catch-up and the workspace
+handoffs. Raw delivery failures stay out of architect context.
 
 ## Slack
 

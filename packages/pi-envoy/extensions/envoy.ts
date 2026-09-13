@@ -463,6 +463,24 @@ export default function envoyExtension(pi: PiApi): void {
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
+    // Acknowledge first. The listener's role lane waits two seconds for this
+    // receipt and reports a miss as a failed delivery, which the daemon answers
+    // by re-sending the message (LEGION-101); everything below — the inbox
+    // update, a Dispatch round trip, the injection — can outlast that window
+    // under load. A frame renderInbound throws on never reaches this line, so
+    // an undecodable frame is still not acknowledged. A receipt that cannot be
+    // published is logged and delivery goes on: the message must not be lost
+    // locally because the acknowledgement was.
+    if (reply !== "" && subject === agentSubject(sessionID)) {
+      try {
+        (await ensureConnection()).publish(reply);
+      } catch (error) {
+        console.warn(
+          `[envoy] failed to acknowledge envelope ${rendered.envelope?.event_id ?? "unknown"}`,
+          error
+        );
+      }
+    }
     // A human unsubscribed one of our topics: drop it locally too, the same
     // way envoy_unsubscribe does, so the resubscribe-on-drop recovery path
     // below does not undo the human's action a few seconds later. The event
@@ -540,9 +558,6 @@ export default function envoyExtension(pi: PiApi): void {
           if (!oldest.done) dedupeKeys.delete(oldest.value);
         }
       }
-    }
-    if (reply !== "" && subject === agentSubject(sessionID)) {
-      (await ensureConnection()).publish(reply);
     }
   };
 

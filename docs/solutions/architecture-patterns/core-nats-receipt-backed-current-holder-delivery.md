@@ -93,12 +93,13 @@ if err := client.RequestCoreTo(
 }
 ```
 
-The agent pump replies only after accepting the forwarded envelope for injection:
+The agent pump replies as soon as the forwarded envelope is decoded, before injecting it or calling any service; the receipt says "a live receiver has this frame", not "the host has finished with it" (LEGION-101):
 
 ```ts
 await deliver(message.subject, codec.decode(message.data), message.reply ?? "");
 
-// inside deliver(), after pi.sendMessage accepts the envelope
+// inside deliver(), immediately after renderInbound() returns and before the
+// inbox update, any Dispatch call, or pi.sendMessage
 if (reply !== "" && subject === agentSubject(sessionID)) {
   (await ensureConnection()).publish(reply);
 }
