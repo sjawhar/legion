@@ -1835,10 +1835,13 @@ export class ProcessManager {
       // Either way the deadline was cancelled above. For the first case the root would sit
       // active and unconfirmed with its locator intact until a restart -- the resync backstop
       // probes only confirmed roots -- so re-arm this same generation's deadline, as
-      // `retireUnconfirmedRoot`'s stop-failure branch does; for the second, or when a newer
-      // generation has since taken the tree over, `treeStillUnconfirmed` declines and the tree
-      // is already where its own path put it. Logged here, once, saying which; the deadline's
-      // own catch never sees it.
+      // `retireUnconfirmedRoot`'s stop-failure branch does; otherwise `treeStillUnconfirmed`
+      // declines -- the tree is no longer this generation's active, unconfirmed one (a spawn
+      // failure queued or launch-failed it, a newer generation took it, it was confirmed, parked,
+      // or closed, or the daemon is disposing) -- and it is already where its own path put it.
+      // Logged here, once, with what was observed; the deadline's own catch never sees it.
+      // `treeStillUnconfirmed` is a type guard; read the tree afresh for the log so the
+      // declined branch is not narrowed to `never`.
       if (this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) {
         console.error(
           `[legion] failed to resurrect an unconfirmed root for ${treeKey}; its locator is untouched and its registration deadline is re-armed:`,
@@ -1846,12 +1849,23 @@ export class ProcessManager {
         );
         this.armRootRegistrationDeadline(treeKey, generation);
       } else {
+        const observed = this.describeTreeForLog(treeKey);
         console.error(
-          `[legion] failed to resurrect an unconfirmed root for ${treeKey}; the tree has already moved on (queued, launch-failed, or a newer generation), so no deadline is re-armed:`,
+          `[legion] failed to resurrect an unconfirmed root for ${treeKey} (generation ${generation}); the tree is no longer that generation's active, unconfirmed root (${observed}${this.disposed ? "; daemon disposing" : ""}), so no deadline is re-armed:`,
           error
         );
       }
     }
+  }
+
+  /** `status`/`generation`/confirmation of `treeKey`'s tree as recorded right now, for a log
+   * line explaining why a recovery declined -- reads the tree outside `treeStillUnconfirmed`'s
+   * type guard, which narrows a declined tree to `never`. */
+  private describeTreeForLog(treeKey: IssueKey): string {
+    const current = this.deps.state.trees[treeKey];
+    if (!current) return "no tree recorded";
+    const confirmed = current.readyConfirmedAt === undefined ? "" : ", ready-confirmed";
+    return `status ${current.status}, generation ${current.generation}${confirmed}`;
   }
 
   /**

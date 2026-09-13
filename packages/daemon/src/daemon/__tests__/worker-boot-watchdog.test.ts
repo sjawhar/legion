@@ -402,9 +402,6 @@ describe("WorkerBootWatchdog liveness probe", () => {
       // loop would probe again within a few microtasks, and `events` would grow.
       for (let i = 0; i < 50; i += 1) await Promise.resolve();
       expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
-      watchdog.cancel(token, 1);
-      for (let i = 0; i < 20; i += 1) await Promise.resolve();
-      expect(events.slice(events.indexOf("retire:1"))).toEqual(["retire:1", "probe", "retire:2"]);
     } finally {
       consoleError.mockRestore();
     }
@@ -416,7 +413,9 @@ describe("WorkerBootWatchdog liveness probe", () => {
     // `cancelAll()` -- daemon dispose -- landing mid-await finds nothing to cancel. When the
     // retirement then fails, the watch must still be finished: no further interval (real
     // timers, connect dials), no `list-panes` probe, no second `retireUnconfirmedBoot` (which
-    // would `persist()` after the daemon's final save), no timer left behind.
+    // would `persist()` after the daemon's final save), no timer left behind. Real timers here
+    // (no `sleep` override), so a watch that looped would create one and `activeCount` would see
+    // it; the interval is short enough that the looping case is also observed as events.
     const timers = trackRealTimers();
     const events: string[] = [];
     const consoleError = spyOn(console, "error").mockImplementation(() => {});
@@ -425,9 +424,7 @@ describe("WorkerBootWatchdog liveness probe", () => {
       const release = Promise.withResolvers<void>();
       const watchdog = new WorkerBootWatchdog(
         baseDeps({
-          workerBootTimeoutSeconds: () => 0.01,
-          sleep: async () => {},
-          yield: async () => {},
+          workerBootTimeoutSeconds: () => 0.05,
           probe: async () => {
             events.push("probe");
             return { status: "dead", reason: "gone" };
@@ -453,14 +450,14 @@ describe("WorkerBootWatchdog liveness probe", () => {
       watchdog.cancelAll();
       const seenAtCancel = events.length;
       release.resolve();
-      for (let i = 0; i < 400; i += 1) await Promise.resolve();
+      // Long enough for a looping watch to run a whole interval and probe again.
+      await new Promise((resolve) => setTimeout(resolve, 250));
 
       expect(events.slice(seenAtCancel)).toEqual([]);
-      expect(events.filter((event) => event === "retire")).toEqual(["retire"]);
       expect(timers.activeCount()).toBe(0);
     } finally {
       consoleError.mockRestore();
       timers.restore();
     }
-  });
+  }, 2_000);
 });

@@ -263,20 +263,24 @@ export class WorkerBootWatchdog {
       }
     };
 
-    /** `retireUnconfirmedBoot`, with a rejection -- in practice a `ProcessStopFailed`: the pane
-     * would not die, or could not even be listed; `retireWorkerLocator` rethrows before anything
-     * clears, so the claim and its locator are untouched -- treated exactly like a probe that
-     * could not complete: the watch stays armed for one more interval and retires again then,
-     * rather than ending here with the boot unwatched until a restart. Returns whether the watch
-     * is finished. The armed entry is removed before the call, never after: the retirement's own
-     * cancel of this token's watch must not flip `cancelled` on the very watch that is retiring
-     * it. That also means a `cancelAll()` (daemon dispose) or a same-token cancel landing during
-     * the await finds no entry to cancel -- so the catch re-checks: a cancelled or disposed
-     * watch, or one a newer arm has superseded (`armed` already holds this token), is finished
+    /** `retireUnconfirmedBoot`, with a rejection -- the catch is unconditional; in practice a
+     * `ProcessStopFailed`: the pane would not die, or could not even be listed; `retireWorkerLocator`
+     * rethrows before anything clears, so the claim and its locator are untouched -- treated
+     * exactly like a probe that could not complete: the watch stays armed for one more interval
+     * and retires again then, rather than ending here with the boot unwatched until a restart.
+     * Returns whether the watch is finished. The armed entry is removed before the call, never
+     * after: the retirement's own cancel of this token's watch must not flip `cancelled` on the
+     * very watch that is retiring it. So the catch re-checks what a cancel landing during the
+     * await could not reach: a watch whose `cancelled` flag was set anyway (`cancel()` found the
+     * entry before the delete), a disposed watchdog (`cancelAll()` sets `disposed` whether or not
+     * an entry exists), or a superseded one (a newer arm already holds this token) is finished
      * here, never looped for another interval of timers, dials, and a second retirement that
-     * would persist after the daemon's final save. Only a watch that is none of those puts its
-     * entry back under the same generation, so a later `/worker/ready` or tree close still
-     * cancels it. */
+     * would persist after the daemon's final save. A same-token `cancel()` that lands during the
+     * await finds no entry and sets nothing: that watch re-inserts and runs one more bounded
+     * interval, and the next interval's claim check (a cancelled boot is confirmed, retired, or
+     * replaced by then) ends it -- one interval late, never a second retirement. Only a watch
+     * none of the re-check sees puts its entry back under the same generation, so a later
+     * `/worker/ready` or tree close still cancels it. */
     const retire = async (): Promise<boolean> => {
       if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
       try {
@@ -285,7 +289,7 @@ export class WorkerBootWatchdog {
       } catch (error) {
         if (cancelled || this.disposed || this.armed.has(token)) {
           console.error(
-            `[legion] worker ${issue}/${role} could not be retired, and its watch was cancelled meanwhile; leaving it to the next arm:`,
+            `[legion] worker ${issue}/${role} could not be retired, and its watch was cancelled, disposed, or superseded meanwhile; not re-armed:`,
             error
           );
           return true;

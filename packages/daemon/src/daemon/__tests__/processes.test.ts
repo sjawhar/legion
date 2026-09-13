@@ -6512,18 +6512,21 @@ describe("ProcessManager", () => {
     {
       subject: "the root architect",
       paneId: "%0",
-      token: () => roleToken("omp", root, "architect"),
+      roleTokenUnderTest: roleToken("omp", root, "architect"),
       seed: (state: LegionState) => {
         tree(state);
         state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
         return state.trees[root].locator;
       },
       locatorAfter: (state: LegionState) => state.trees[root].locator,
+      // What else must be untouched: the tree itself -- same generation, still active.
+      untouched: (state: LegionState) =>
+        expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" }),
     },
     {
       subject: "the controller",
       paneId: "%1",
-      token: () => controllerToken("omp"),
+      roleTokenUnderTest: controllerToken("omp"),
       seed: (state: LegionState) => {
         state.controllerLocator = {
           runtime: "tmux",
@@ -6536,16 +6539,19 @@ describe("ProcessManager", () => {
         return state.controllerLocator;
       },
       locatorAfter: (state: LegionState) => state.controllerLocator,
+      // No role claim was minted for a controller nobody confirmed alive.
+      untouched: (state: LegionState) =>
+        expect(state.roles[controllerToken("omp")]).toBeUndefined(),
     },
   ])("handleException logs once, naming the role token, and clears nothing when $subject's liveness probe cannot complete", async ({
     paneId,
-    token,
+    roleTokenUnderTest,
     seed,
     locatorAfter,
+    untouched,
   }) => {
     const state = newLegionState("omp", 1);
     const seededLocator = seed(state);
-    const roleTokenUnderTest = token();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const {
       manager: processes,
@@ -6575,9 +6581,7 @@ describe("ProcessManager", () => {
       errorLog.mockRestore();
     }
     expect(locatorAfter(state)).toBe(seededLocator);
-    if (state.trees[root]) {
-      expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
-    }
+    untouched(state);
     expect(
       commands.filter((command) => command[3] === "new-window" || command[3] === "kill-pane")
     ).toEqual([]);
