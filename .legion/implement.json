@@ -2,7 +2,7 @@
   "pr": 1025,
   "prUrl": "https://github.com/sjawhar/legion/pull/1025",
   "branch": "legion/LEGION-44",
-  "head": "2a18313779ca",
+  "head": "f017a1d79eaa",
   "commits": [
     "a9df6b94612b daemon: carry each phase worker's commit identity in its pane environment",
     "d0ff6975dd20 workspace: remove the repository-scoped jj identity earlier worker boots wrote",
@@ -12,7 +12,9 @@
     "831ae69f9bf0 daemon: adopt the issue's working copy for the role at every assignment, so jj split keeps the right author",
     "f121a8e0aab9 review: record handoff (reviewer's, unpushed until this push)",
     "dd8332bd58ac daemon: adopt the working copy under the slow budget with the runner's kill report, and strip the pane identity from every daemon child (review round 1)",
-    "70aafaf8e365 daemon, workspace: comments describe current behaviour; one harness identity literal (review fast-follow)"
+    "70aafaf8e365 daemon, workspace: comments describe current behaviour; one harness identity literal (review fast-follow)",
+    "7b7063350b96 review: record round 2 handoff (reviewer's, unpushed until this push)",
+    "f017a1d79eaa docs: the pre-push identity check is per own commit; what each scrubbed key protects; probe rationale is the injected runner (docs fast-follow, review round 2)"
   ],
   "filesChanged": [
     "packages/daemon/src/daemon/github-app-env.ts",
@@ -57,7 +59,8 @@
     "Criterion 5: after provisioning on this branch, `jj -R <clone> config list --repo --include-overridden user` prints nothing; a seeded `jj config set --repo -R <clone> user.name '\"stale\"'` before the next launch is removed with one `[legion] removing repository-scoped jj user.name …` daemon log line.",
     "Negative control for the probe: with `JJ_USER=x` exported, `jj config list --repo -R <clone> user.name` prints nothing for a set key while `--include-overridden` prints `# user.name = …`.",
     "Corrective round 1 bare gates at 70aafaf8e365: the diff against main changed only in processes.ts (adoptWorkingCopy timeout + commandFailure), environment.ts (six keys in PANE_SECRET_ENV_KEYS), tests, docs. Real-surface re-check worth one look: on the rig, a daemon started from a worker pane whose environ carries the six variables must now give root-architect and controller panes none of them (`tr '\\0' '\\n' < /proc/<pane_pid>/environ | grep -E '^(JJ_USER|JJ_EMAIL|GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL))='` prints nothing on those two panes) while worker panes still carry them.",
-    "Rebase 1 (conflict-forced, fingerprint unchanged c7c1a48d…5899 → c7c1a48d…5899): per the skill, bare gates only — CI green at 9c15e4e1fb9b and the smoke check — and change the E2E line's head with `rebase re-check 41adba50927e → 9c15e4e1fb9b: fingerprint unchanged, bare gates only`; the real-surface verification is not repeated. Compute the fingerprint at the head your E2E line names (41adba50927e) and at the new head yourself."
+    "Rebase 1 (conflict-forced, fingerprint unchanged c7c1a48d…5899 → c7c1a48d…5899): per the skill, bare gates only — CI green at 9c15e4e1fb9b and the smoke check — and change the E2E line's head with `rebase re-check 41adba50927e → 9c15e4e1fb9b: fingerprint unchanged, bare gates only`; the real-surface verification is not repeated. Compute the fingerprint at the head your E2E line names (41adba50927e) and at the new head yourself.",
+    "Docs fast-follow (review round 2) at f017a1d79eaa: docs and comments only — verified no non-comment .ts line changed — so the fingerprint over '~(.legion | docs/solutions)' changes only by the comment lines in environment.ts / environment.test.ts / workspace.ts and the AGENTS.md text; bare gates (CI green at the new tip, smoke check) are the re-check."
   ],
   "openQuestions": [
     "For the architect, not this PR's scope: provisioning's `.omp/config.yml` (writeOmpConfig) is tracked by jj in every working copy, so `@` is never empty; workers must point `legion/<KEY>` at `@-` (`--allow-backwards`, since provisioning re-points it at `@` on every launch) or jj refuses the push for lack of a description. Either ignore `.omp/` in the repo's `.gitignore` or have provisioning write it as untracked."
@@ -117,7 +120,25 @@
     "prComment": "https://github.com/sjawhar/legion/pull/1025#issuecomment-5653414510",
     "workingCopyNote": "Resolved the conflict from a scratch child of the conflicted commit (`jj new 3dcfb486` → edit → `jj squash --into`), which left @ on that side; restored it with `jj edit mswtpyws` — this pane's own undescribed working-copy commit (`.omp/config.yml` only), now atop the rebased tip — never a parent, and the empty scratch commit auto-abandoned. Nothing of another role was touched."
   },
+  "docs_followup_1": {
+    "review": "https://github.com/sjawhar/legion/pull/1025#pullrequestreview-5190898373",
+    "ruling": "Architect: the round-2 docs fast-follow lands now as one docs commit, before the .legion/ deletion push.",
+    "commit": "f017a1d7 — documentation and comments only (skills/legion-worker/SKILL.md, docs/solutions/daemon/config-env-keys-that-panes-also-carry.md, docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md, packages/daemon/src/daemon/AGENTS.md, comment blocks in environment.ts, environment.test.ts, workspace.ts). No code, tests, or .github lines changed: verified by grepping the .ts diff for non-comment lines (empty).",
+    "items": {
+      "a_skill_pre_push_check": "SKILL.md: the check now reads 'your role's App in both columns **on every commit you made** — not on the whole list', with the two legitimate exceptions named (earlier phases' commits authored by their own App; a conflict-forced rebase sets every rebased commit's committer to the rebaser), and the template gained description.first_line() so a reader can tell which commits are theirs. Hazard 1's identical check in the hazards doc carries the same qualifier and template.",
+      "b_runbook_belt_and_braces": "config-env-keys-that-panes-also-carry.md scrub bullet: 'belt and braces' removed; the list is split into what the daemon strips itself (secret family + six identity keys, via PANE_SECRET_ENV_KEYS) and what it does not — LEGION_DAEMON_URL (refused on tmux by the guard, honoured on kubernetes), LEGION_STATE_DIR (outer daemon's state dir; instance lock refuses a second daemon), LEGION_OMP_PATH (honoured as the OMP override), and the pane-identity family LEGION_TREE/ISSUE/ROLE/GENERATION/WORKSPACE/CONTROLLER (tells pi-legion-envoy in the daemon's own OMP probes it is a pane). Claims limited to what the doc's own guard section, AGENTS.md, and pi-envoy AGENTS.md state.",
+      "c_include_overridden_rationale": "AGENTS.md and workspace.ts removeRepoScopedIdentity comment: --include-overridden is justified by ProvisionIssueWorkspaceDeps.run being injected — the package cannot assume a runner that strips JJ_USER/JJ_EMAIL — not by the daemon's own JJ_USER (which the strip now makes impossible through the daemon runner).",
+      "d_smaller_wording": "AGENTS.md 'fails the delivery with jj's stderr' -> 'with the command's failure (jj's stderr, or the runner's timeout or abort report)' and the slow-budget clause added beside the metaedit argv; environment.ts 'stripping here is sufficient' qualified to 'for a server this daemon forked' with the legion-restart-preserves-the-server parenthetical, and the ragged block reflowed; environment.test.ts 'since LEGION-44' dropped; workspace.ts 'author and committer … inert for panes' pair rewritten (a value there applies to every tree; a pane's commits are unaffected because identity rides the environment; anything else committing from the clone would take it); AGENTS.md waves/release clause regrammared ('a child's once waves/release admits it as its own tree') and the paragraph rewrapped."
+    },
+    "threadsResolve": "legion threads resolve --pr 1025 --repo sjawhar/legion before the push, exit 0: resolved r3999622780, r3999622781, r3999622783, r3999622785.",
+    "gates": {
+      "daemon": "bunx biome check --error-on-warnings src/ clean; tsc clean; bun test 1186 pass / 7 skip / 0 fail",
+      "workspace": "bunx biome check src/ clean; tsc clean; bun test 15 pass / 0 fail (no CI job; local run is the gate)",
+      "pi-envoy": "bun run lint clean; tsc clean; bun test 166 pass / 0 fail"
+    },
+    "notDone": "The .legion/ deletion is not in this push — next assignment, after the tester's bare gates and the reviewer's re-check."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T13:00:14.848Z"
+  "completed": "2026-09-13T14:00:34.075Z"
 }
