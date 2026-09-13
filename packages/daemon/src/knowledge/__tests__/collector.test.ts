@@ -125,6 +125,16 @@ describe("collectLearningFeedback", () => {
       filesChanged: ["packages/daemon/src/knowledge/collector.ts"],
       learningsHelpful: ["docs/solutions/knowledge/workspace-helpful.md"],
       learningsInjected: ["docs/solutions/knowledge/workspace-helpful.md"],
+      proof: [
+        {
+          criterion: "1",
+          surface: "scratch workspace",
+          command: "legion handoff write --phase implement",
+          observed: "exit 0",
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          negativeControl: "the same payload without proof -> exit 1",
+        },
+      ],
     });
 
     const result = await collectLearningFeedback({

@@ -12,6 +12,16 @@ import {
   writePhaseHandoff,
 } from "../ledger";
 
+const proof = {
+  criterion: "1",
+  surface: "scratch workspace",
+  command: "legion handoff write --phase implement",
+  observed: "exit 0",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  negativeControl: "the same payload without proof -> exit 1",
+};
+const implementerProof = { verdict: "verified", how: "re-ran its command" };
+
 describe("handoff ledger", () => {
   let workspaceDir: string | null = null;
 
@@ -122,6 +132,7 @@ describe("handoff ledger", () => {
       JSON.stringify({
         completed: new Date().toISOString(),
         phase: "implement",
+        proof: [proof],
         schemaVersion: 2,
       }),
       "utf-8"
@@ -211,13 +222,14 @@ describe("handoff ledger", () => {
     ensureLegionDir(workspaceDir);
     const legionDir = getLegionDir(workspaceDir);
 
-    // trickyParts should be string[], not a string
+    // trickyParts should be string[], not a string; the proof is valid so the type is the one fault
     await writeFile(
       path.join(legionDir, "implement.json"),
       JSON.stringify({
         schemaVersion: 1,
         phase: "implement",
         completed: new Date().toISOString(),
+        proof: [proof],
         trickyParts: "not an array",
       }),
       "utf-8"
@@ -251,6 +263,8 @@ describe("handoff ledger", () => {
         phase: "test",
         completed: "Tuesday",
         passed: 5,
+        implementerProof,
+        proof: [proof],
       }),
       "utf-8"
     );
@@ -263,8 +277,8 @@ describe("handoff ledger", () => {
     const phases = [
       { phase: "architect" as const, extra: { scope: "small" } },
       { phase: "plan" as const, extra: { taskCount: 3 } },
-      { phase: "implement" as const, extra: { filesChanged: ["a.ts"] } },
-      { phase: "test" as const, extra: { passed: 5, failed: 0 } },
+      { phase: "implement" as const, extra: { filesChanged: ["a.ts"], proof: [proof] } },
+      { phase: "test" as const, extra: { passed: 5, failed: 0, implementerProof, proof: [proof] } },
       { phase: "review" as const, extra: { verdict: "approved" } },
     ];
 
@@ -294,6 +308,7 @@ describe("handoff ledger", () => {
     // All phases should validate without learnings fields
     writePhaseHandoff(workspaceDir, "implement", {
       filesChanged: ["b.ts"],
+      proof: [proof],
       trickyParts: ["none"],
     });
 

@@ -154,6 +154,16 @@ describe("captureLearningFeedbackFromWorkspace", () => {
     await mkdir(workspaceDir, { recursive: true });
     writePhaseHandoff(workspaceDir, "implement", {
       filesChanged: ["packages/daemon/src/knowledge/types.ts"],
+      proof: [
+        {
+          criterion: "1",
+          surface: "scratch workspace",
+          command: "legion handoff write --phase implement",
+          observed: "exit 0",
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          negativeControl: "the same payload without proof -> exit 1",
+        },
+      ],
       trickyParts: ["none"],
     });
 

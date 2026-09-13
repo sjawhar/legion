@@ -23,6 +23,15 @@ function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "legion-cli-handoff-"));
 }
 
+const proofJson = JSON.stringify({
+  criterion: "1",
+  surface: "branch CLI in a scratch workspace",
+  command: "bun packages/daemon/src/cli/index.ts handoff write --phase implement",
+  observed: "exit 0",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  negativeControl: "the same payload without proof -> exit 1",
+});
+
 function getSubCommand(command: unknown, name: string): RunnableCommand {
   const subCommands = (command as RunnableCommand).subCommands;
   if (!subCommands || !(name in subCommands)) {
@@ -134,7 +143,7 @@ describe("handoff command", () => {
 
     await runCommand(write, {
       phase: "implement",
-      data: '{"filesChanged":["src/file.ts"]}',
+      data: `{"filesChanged":["src/file.ts"],"proof":[${proofJson}]}`,
       workspace: workspaceDir,
     });
 
@@ -170,7 +179,7 @@ describe("handoff command", () => {
     await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
     await runCommand(write, {
       phase: "implement",
-      data: '{"filesChanged":["a.ts"]}',
+      data: `{"filesChanged":["a.ts"],"proof":[${proofJson}]}`,
     });
     await runCommand(read, {});
 
