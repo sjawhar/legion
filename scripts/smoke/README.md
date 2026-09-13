@@ -25,6 +25,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
 | `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` |
+| `SMOKE_WORKER_CAP` | The generated config's `worker_cap` (running phase workers). Set it to `1` for an exercise that needs a task queued behind a full cap, such as the queued idle-resume promotion path. | `6` |
 
 `LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable. `up.sh` creates this exercise's own root Dispatch issue inside that shared project (or reuses one already recorded under `SMOKE_DIR` from an earlier run of the same rig) and records its key at `${SMOKE_DIR}/root-issue`; checkpoints read that file (or `SMOKE_ROOT_ISSUE`, if set) rather than guessing which of the shared project's parentless issues belongs to this run.
 

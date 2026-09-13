@@ -664,6 +664,7 @@ describe("startDaemon", () => {
       },
     };
     state.workerAdmission.queue.push(testerToken);
+    const published: Array<{ topic: string; payload: string }> = [];
     const client = fakeWorkerRpcClient();
     // What `reconnectWorkers`' probe does to a real idle worker: `get_state` reports no stream
     // and seeds the fresh client idle.
@@ -695,7 +696,9 @@ describe("startDaemon", () => {
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
-          envoyPublish: async () => {},
+          envoyPublish: async (topic, payload) => {
+            published.push({ topic, payload });
+          },
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
             getToken: async () => ({
@@ -733,6 +736,13 @@ describe("startDaemon", () => {
             (command[3] === "new-window" || command[3] === "split-window")
         )
       ).toEqual([]);
+      // The architect learns of the delivery through the Envoy listener's publish API — the
+      // only path a role-topic notice reaches its holder by (a bare NATS publish is rejected as
+      // an invalid envelope and lost).
+      expect(published).toContainEqual({
+        topic: roleTopic(roleToken(daemonConfig.project, issue, "architect")),
+        payload: JSON.stringify({ type: "worker-started", issue, role: "tester" }),
+      });
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

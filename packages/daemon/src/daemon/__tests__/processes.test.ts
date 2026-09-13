@@ -459,7 +459,7 @@ function manager(
     state,
     saveState: async () => {},
     config: config("/state"),
-    natsPublish: (subject, json) => publications.push({ subject, json }),
+    publishRole: (subject, json) => publications.push({ subject, json }),
     natsRequest: async (subject, json) => {
       controlRequests.push({ subject, json });
       return JSON.stringify({ type: "ack" });
@@ -2435,7 +2435,7 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     const { manager: processes } = manager(state, {
       config: config(stateDir),
-      natsPublish: (subject) => {
+      publishRole: (subject) => {
         if (subject === `notifications.role.${controllerToken("omp")}`) {
           throw new Error("nats down");
         }
@@ -3905,7 +3905,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/tester.sock" ? testerClient : reviewerClient,
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         if (
           subject === architectTopic &&
           json === JSON.stringify({ type: "worker-started", issue: root, role: "planner" })
@@ -9006,7 +9006,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9090,7 +9090,7 @@ describe("ProcessManager", () => {
       config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/planner.sock" ? plannerClient : testerClient,
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9217,7 +9217,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9516,7 +9516,7 @@ describe("ProcessManager", () => {
     });
     const architectTopic = roleTopic(roleToken("omp", root, "architect"));
     const { processes, state, managedState, stateDir } = await workerCapFixture(2, {
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         records.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -9920,7 +9920,7 @@ describe("ProcessManager", () => {
     });
     const architectTopic = roleTopic(roleToken("omp", root, "architect"));
     const { processes, state, managedState } = await workerCapFixture(2, {
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         records.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -10018,7 +10018,7 @@ describe("ProcessManager", () => {
         clients.push(client);
         return client;
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (subject === architectTopic && json.includes("worker-started")) resolvePromoted?.();
       },
@@ -11524,7 +11524,7 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
       },
-      natsPublish: (subject, json) => {
+      publishRole: (subject, json) => {
         publications.push({ subject, json });
         if (
           subject === roleTopic(roleToken("omp", root, "architect")) &&

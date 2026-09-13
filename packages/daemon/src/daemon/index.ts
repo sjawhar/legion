@@ -388,7 +388,13 @@ async function startDaemonLocked(
     processPath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
     run: runner,
-    natsPublish: (subject, data) => nats.publish(subject, data),
+    // Through the listener, never `nats.publish`: a bare payload on a role subject is rejected by
+    // the listener's envelope validation and reaches no holder (see `ProcessManagerDeps.publishRole`).
+    publishRole: (topic, json) => {
+      deps.envoyPublish(topic, json).catch((error) => {
+        console.error(`[legion] failed to publish a daemon notice to ${topic}:`, error);
+      });
+    },
     natsRequest: (subject, data) => nats.request(subject, data),
     mintControllerCapability: async () => api.mintControllerCapability(),
     mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),

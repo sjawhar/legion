@@ -234,7 +234,7 @@ function processManagerDeps(
     processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
     run: runner,
-    natsPublish: () => {},
+    publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",

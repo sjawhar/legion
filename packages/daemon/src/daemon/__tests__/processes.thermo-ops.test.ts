@@ -66,7 +66,7 @@ function manager(
       commands.push(command);
       return await run(command, options);
     },
-    natsPublish: () => {},
+    publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",

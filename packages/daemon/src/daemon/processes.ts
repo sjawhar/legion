@@ -111,7 +111,16 @@ export interface ProcessManagerDeps {
     timedOut?: CommandResult["timedOut"];
     aborted?: CommandResult["aborted"];
   }>;
-  natsPublish(subject: string, json: string): void;
+  /** Publishes one of the daemon's own notices to a role topic — `worker-queued`,
+   * `worker-started`, `worker-died`, `launch-failed`, the controller's `revive-failed`, and a
+   * redelivered exception payload. Fire-and-forget: the caller never waits on it, and a failed
+   * publish is logged by the implementation, never thrown back here (a missed wake is recovered
+   * by the role's catch-up, never by a replay). `index.ts` wires it to the Envoy listener's
+   * `POST /v1/messages/publish` (`envoyPublish`), which wraps the JSON in an envelope and routes
+   * it to the topic's live holder — never to a bare `nats.publish`: the listener validates every
+   * role-lane message as an envelope and drops a bare payload as `invalid envelope: event_id is
+   * required`, so a raw publish reaches nobody. */
+  publishRole(topic: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
@@ -1009,7 +1018,7 @@ export class ProcessManager {
       | { type: "worker-queued"; issue: IssueKey; role: LegionRole }
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
   ): void {
-    this.deps.natsPublish(
+    this.deps.publishRole(
       roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
       JSON.stringify(payload)
     );
@@ -2306,7 +2315,7 @@ export class ProcessManager {
     );
     if (reply === "ack") {
       if (redeliver && "redeliver" in directive) {
-        this.deps.natsPublish(directive.redeliver.topic, directive.redeliver.payload);
+        this.deps.publishRole(directive.redeliver.topic, directive.redeliver.payload);
       }
       return true;
     }
@@ -3175,7 +3184,7 @@ export class ProcessManager {
       // rotation retries the same token repeatedly; `>=` would republish on each one past the
       // crossing).
       if (failures === MAX_LAUNCH_FAILURES) {
-        this.deps.natsPublish(
+        this.deps.publishRole(
           roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
           JSON.stringify({ type: "launch-failed", issue, role, failures })
         );
@@ -3442,7 +3451,7 @@ export class ProcessManager {
   }
 
   private publishWorkerDied(root: IssueKey, issue: IssueKey, role: LegionRole): void {
-    this.deps.natsPublish(
+    this.deps.publishRole(
       roleTopic(roleToken(this.deps.state.project, root, "architect")),
       JSON.stringify({ type: "worker-died", issue, role })
     );
@@ -3453,7 +3462,7 @@ export class ProcessManager {
       | { type: "revive-failed"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; failures: number }
   ): void {
-    this.deps.natsPublish(
+    this.deps.publishRole(
       roleTopic(controllerToken(this.deps.state.project)),
       JSON.stringify(payload)
     );

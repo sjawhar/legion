@@ -363,6 +363,10 @@ write_daemon_config() {
   # `-` (not `:-`) so an explicitly empty SMOKE_OMP_LAUNCH_PREFIX ("disable the prefix") is
   # preserved as empty rather than falling back to the default — only truly unset uses it.
   local omp_launch_prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}"
+  # The running-worker cap: an exercise that needs a worker queued behind a full cap (the
+  # queued idle-resume promotion path) sets it to 1 instead of editing the generated file.
+  local worker_cap="${SMOKE_WORKER_CAP:-6}"
+  [[ "$worker_cap" =~ ^[0-9]+$ ]] || fail "SMOKE_WORKER_CAP must be a whole number: ${worker_cap}"
   local omp_launch_prefix_yaml
   # Resolved here, not handed in: `up.test.sh` calls this function on its own, and the same
   # `resolve_design_gate` answer is what main() records in `${smoke_dir}/design-gate`.
@@ -394,7 +398,7 @@ dispatch_project: ${smoke_dispatch_project}
 repos:
   - ${SMOKE_REPO}
 admission_cap: 4
-worker_cap: 6
+worker_cap: ${worker_cap}
 max_recursion_depth: 8
 linger_hours: 72
 max_fix_attempts: 3

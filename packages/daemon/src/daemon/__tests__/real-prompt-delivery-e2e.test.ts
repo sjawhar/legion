@@ -282,7 +282,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
     run: runner,
-    natsPublish: (_subject, json) => {
+    publishRole: (_subject, json) => {
       publications.push(json);
     },
     natsRequest: async () => JSON.stringify({ type: "ack" }),
