@@ -1,0 +1,34 @@
+{
+  "filesChanged": [
+    "scripts/smoke/up.sh",
+    "scripts/smoke/down.sh",
+    "scripts/smoke/README.md",
+    "scripts/smoke/up.test.sh",
+    "scripts/smoke/down.test.sh"
+  ],
+  "pullRequest": 1010,
+  "pullRequestUrl": "https://github.com/sjawhar/legion/pull/1010",
+  "implementationCommit": "f9787c2c190bc6a3e63e0f01c72a36a835a54cf5",
+  "prHead": "the `implement: record handoff` commit directly on top of f9787c2c190bc6a3e63e0f01c72a36a835a54cf5 (the PR body's CI line names it once pr-checks-result reports)",
+  "recordFile": "${SMOKE_DIR}/nats-container -- written by up.sh main() beside ${SMOKE_DIR}/webhook-mode, after SMOKE_PROJECT is validated; down.sh reads it and needs no environment. Left in place after teardown so a repeat down.sh still names this rig's container instead of falling through to the fixed name.",
+  "derivedNameRule": "slug = SMOKE_PROJECT lower-cased with every non-alphanumeric character removed (the existing project_slug); NATS container = legion-smoke-nats-<slug> (nats_container_name); listener ENVOY_MACHINE_ID = legion-smoke-<slug> (listener_machine_id). sjawhar/16 -> legion-smoke-nats-sjawhar16 / legion-smoke-sjawhar16. down.sh with no record removes the old fixed name legion-smoke-nats and prints 'no <record> record; falling back to the old fixed name legion-smoke-nats'; a record not matching ^legion-smoke-nats-[a-z0-9]+$ is refused with a warning and nothing is removed.",
+  "testCommands": [
+    "bash scripts/smoke/up.test.sh -> 17 PASS lines, exit 0 (needs `bun install` in the workspace first: the pre-existing --check-config case runs the daemon CLI)",
+    "bash scripts/smoke/down.test.sh -> 4 PASS lines, exit 0",
+    "real docker, scratch SMOKE_DIR: down.sh with a record naming an absent container printed only RIG DOWN; with no record printed the fallback line then RIG DOWN; docker ps -a showed nothing touched (no NATS containers exist on this machine)",
+    "shellcheck -x on all four scripts: three pre-existing findings only (up.sh:21 SC2155, up.sh:312 SC2086, down.test.sh:108 SC2016), none on changed lines"
+  ],
+  "trickyParts": [
+    "up.test.sh sources up.sh minus its last line, so every top-level readonly runs at source time before the test exports SMOKE_PROJECT; the container name therefore cannot be a top-level readonly. It is derived in main() and passed to ensure_nats as $1 (a `readonly` inside main would also break the test, which calls main() four times).",
+    "up.test.sh stubs ensure_nats in its main() cases, so the record file is written by main() itself (beside webhook-mode), not by ensure_nats -- that is what lets the test assert the record without docker.",
+    "down.sh keeps the record after teardown on purpose: deleting it would make the next down.sh fall back to legion-smoke-nats, a container that may belong to an older rig still running."
+  ],
+  "deviations": [
+    "The spec's acceptance 1 says both names 'default to today's values when SMOKE_PROJECT is unset'. up.sh requires SMOKE_PROJECT (require_env plus the <owner>/<number> check) before either name is used, so it has no unset path and gets no fallback; down.sh never reads SMOKE_PROJECT for the container name -- its fallback to legion-smoke-nats is keyed on the record's absence, per the architect's assignment and the spec's Errors table.",
+    "Nothing was rebased: main@origin has advanced past this branch's base (82757405) but there is no conflict; 4b934e60 (LEGION-10, #957) is an ancestor of the head."
+  ],
+  "forTester": "Acceptance 2 is yours: two rigs with different SMOKE_PROJECT, SMOKE_DIR, NATS_PORT, ENVOY_PORT, LEGION_DAEMON_PORT started concurrently, both reaching the controller-alive check; docker ps before and after each down.sh quoted in the PR body's E2E line, showing each removes only its own legion-smoke-nats-<slug>. Negative control suggestion: run down.sh from a SMOKE_DIR whose nats-container record names the *other* rig's container -- it will remove that one (the record is trusted), so instead use a malformed record (e.g. 'not-a-rig-container') and observe the refusal warning with both containers still in docker ps.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T08:39:42.486Z"
+}
