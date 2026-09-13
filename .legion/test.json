@@ -1,0 +1,60 @@
+{
+  "pr": 1026,
+  "headSha": "16a4617cdaf30a200576ca7c3ef005502bc41d00",
+  "route": "a: LEGION-41 #1010 (and LEGION-40 #1011) still OPEN at test time; #1026 MERGEABLE (mergeStateStatus BLOCKED = awaiting review, not a conflict). Every #1010-independent gate run; the concurrent two-rig E2E (acceptance 1 as written) is outstanding solely on #1010.",
+  "passed": 12,
+  "failed": 0,
+  "failures": [],
+  "outstanding": [
+    "Acceptance 1 concurrent form: two rigs with different SMOKE_PROJECT started at the same time on this machine in isolated mode, each daemon log carrying only its own keys, checkpoints 1-4 OK on both. Blocked on LEGION-41 #1010 (per-rig NATS container name + ENVOY_MACHINE_ID); the architect resumes this tester once #1010 merges. The sequential form of the same criterion was proven by the implementer and audited here."
+  ],
+  "gates": {
+    "lintDaemonCI": "packages/daemon: bunx biome check --error-on-warnings src/ -> Checked 160 files, exit 0",
+    "lintSmokeTs": "biome check --error-on-warnings scripts/smoke/issue-relay.ts scripts/smoke/issue-relay.test.ts -> clean, exit 0 (envoy-bridge.ts/.test.ts carry 3 pre-existing import-sort/format errors on main; untouched by this PR per acceptance 3 and outside CI's src/ glob)",
+    "typecheckDaemonCI": "packages/daemon: bunx tsc --noEmit -> exit 0",
+    "typecheckSmokeTs": "tsc -p throwaway tsconfig extending packages/daemon/tsconfig.json (strict, noUnusedLocals/Parameters) over scripts/smoke/issue-relay.ts + issue-relay.test.ts -> exit 0",
+    "unit": "bun test scripts/smoke/issue-relay.test.ts -> 22 pass, 0 fail, 101 expect() calls",
+    "upHarness": "bash scripts/smoke/up.test.sh -> 17 PASS, exit 0 (incl. 'isolated mode starts the issue relay for the recorded root only after the root issue exists, waits for it before RIG READY, and never starts the envoy bridge')",
+    "checkpointsHarness": "bash scripts/smoke/checkpoints.test.sh -> 25 PASS, exit 0; assertions read, not trusted by label: none and forward loops assert exit 3 + 'CHECKPOINT 12 SKIPPED-BLOCKED' with zero Dispatch requests; isolated asserts 12 reaches its own assertion (exit 1, 'closed tree is still active or queued issue was not promoted') and then 'CHECKPOINT 12 OK: LEGSMOKE-1 released its admission slot and LEGSMOKE-2 was promoted' against a promoted-state fixture; dead relay -> exit 1 naming issue-relay.pid; RELAY RETRY newest -> exit 1; RELAY RECOVERED clears it",
+    "downHarness": "bash scripts/smoke/down.test.sh -> 4 PASS, exit 0 (incl. 'stops the isolated issue relay with a start-time-validated PID record and removes its records')",
+    "ciAtHead": "GitHub Actions 'Tests' runs 34754461501 and 34754473218 both completed/success at 16a4617c"
+  },
+  "directProbes": {
+    "checkpoint12Gating": "Real checkpoints.sh, own temp SMOKE_DIR with root-issue=LEGSMOKE-1, no relay: mode none -> 'CHECKPOINT 12 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: ...' exit 3; forward -> same naming forward, exit 3; isolated -> 'CHECKPOINT 12 FAILED: isolated relay is not running (no live process recorded at <dir>/issue-relay.pid) ...' exit 1 (mode gate open, relay-feed check reached). Checkpoint 1 under isolated without a relay -> same FAILED line, exit 1.",
+    "downStopsRelay": "Real down.sh with docker/tmux faked (logged: 'docker container inspect legion-smoke-nats', 'tmux -L legion-exampleorg61 has-session'), a planted `sleep 300` recorded as issue-relay.pid + /proc start ticks in issue-relay.start: after down.sh the process is dead, both records removed, 'RIG DOWN' printed, exit 0.",
+    "negativeControls": [
+      "down.sh with issue-relay.pid naming a live process but issue-relay.start holding mismatched start ticks -> the process is left alive and the stale records are removed (start-time validation refuses to kill an unrelated pid).",
+      "checkpoints.sh 12 under isolated with no relay -> exit 1 naming issue-relay.pid; never a false OK and never SKIPPED-BLOCKED."
+    ]
+  },
+  "evidenceAudit": {
+    "method": "The implementer's cited files were read on this machine and the key sets recomputed with grep over the whole daemon logs and jq over the persisted state, not taken from the PR body.",
+    "rigA": "/tmp/legion-smoke-61: root-issue=LEGSMOKE-122, webhook-mode=isolated; daemon.log consumed-event keys = {LEGSMOKE-122: 7}; every LEGSMOKE-<n> token in the file is LEGSMOKE-122 (8 mentions); daemon/state.json issues=[LEGSMOKE-122], trees LEGSMOKE-122 lingering, admission.active=[]; issue-relay.log RELAYED=7, RELAY READY root=LEGSMOKE-122 downstream=nats://127.0.0.1:14261, relayed subjects all LEGSMOKE-122.",
+    "rigB": "/tmp/legion-smoke-62: root-issue=LEGSMOKE-123, webhook-mode=isolated; daemon.log consumed-event keys = {LEGSMOKE-123: 12, LEGSMOKE-124: 4}; no other LEGSMOKE-<n> token in the file; daemon/state.json issues=[LEGSMOKE-123, LEGSMOKE-124]; issue-relay.log RELAYED=16 with RELAY READY, 'RELAY TRACKING LEGSMOKE-124 parent=LEGSMOKE-123', three RELAY RETRY (Unable to connect) then 'RELAY RECOVERED after 3 attempts', exactly as the PR quotes.",
+    "countDelta": "Counts exceed the PR body's quoted 6 / 10+3 by exactly the issue.closed and child.status rows relayed when the implementer closed LEGSMOKE-122/123/124 at teardown (dispatch-4634; dispatch-4654..4656), all still own-rig keys.",
+    "crossContamination": "LEGSMOKE-122 appears 0 times in rig B's daemon.log; LEGSMOKE-123/124 appear 0 times in rig A's. Both rigs are down (no *.pid records in either dir).",
+    "codeLevel": "scripts/smoke/issue-relay.ts runRelay: `tracked` seeds with config.rootIssue only; children are discovered via GET /api/v1/issues?project=<P>&parent=<tracked key>; events are fetched only via GET /api/v1/issues/<tracked key>/events. No project-wide feed exists in the relay."
+  },
+  "acceptanceStatus": {
+    "1": "Sequential form proven (implementer) and audited (tester); concurrent form outstanding on #1010 — see outstanding.",
+    "2": "Gate proof: checkpoint 12 opens under isolated and passes against the promoted fixture in checkpoints.test.sh, blocked (exit 3) under none/forward; live 1-4 OK on both rigs audited. Architect-decided standard (spec v3): no live checkpoint 12 required.",
+    "3": "envoy-bridge.ts and envoy-bridge.test.ts have an empty diff against main; README none row unchanged ('Deliberately no live ingress'); harness none/forward cases pass.",
+    "4": "README diff: SMOKE_WEBHOOK_MODE row and human-gates table carry the isolated row naming it as the pre-merge proof; envoy row reworded to say it relays every project's issues; start block exports isolated; three docs/solutions one-liners updated.",
+    "5": "down.test.sh relay case PASS plus the direct down.sh probe above."
+  },
+  "observations": [
+    "Both rig daemon logs show 'failed to connect controller/architect shim socket on ready: Worker RPC negotiate_protocol timed out after 60000ms' under the host load the implementer reported (~100 on 32 cores); checkpoints 1-4 still passed because the daemon reconnects later. Not this PR's surface; worth remembering when reading rig logs on a loaded box.",
+    "Rig B's child LEGSMOKE-124 stays `active` in trees/admission after its issue.closed was consumed: reduceIssueClosed routes child-closed to the parent's architect, who owns the child tree's close, and the single-turn smoke architect never acted. Expected, not a defect.",
+    "scripts/smoke/envoy-bridge.ts and envoy-bridge.test.ts fail `biome check` on main (import sort + formatting); they are outside CI's packages/daemon/src glob and untouched by this PR. A one-line `biome check --write` on those two files would fit LEGION-61's retro or any smoke-rig follow-up.",
+    "`bunx biome` at the repository root resolves a different npm package and prints nothing (as the implementer noted); use packages/daemon/node_modules/.bin/biome or run from packages/daemon.",
+    "At this tester's boot the workspace held an empty untracked `.omp/config.yml` and the local bookmark legion/LEGION-61 had been moved to the empty working-copy commit (op 034bf1efabc5, 11:28:52Z, same second the file appeared). The file was removed from the working copy before the handoff commit so it could not ride along on a bookmark push; nothing of it was ever pushed.",
+    "Environment note recorded once, per the tester charter: the harnesses and probes were run with LEGION_TREE/LEGION_ISSUE/LEGION_ROLE/LEGION_OMP_PATH/TMUX unset (env -u) so the pane's own Legion identity could not leak into up.sh's preflight; no live rig was started by this tester in route (a)."
+  ],
+  "requiredSkillsFollowed": [
+    "legion-worker",
+    "verification-before-completion"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T11:39:44.870Z"
+}
