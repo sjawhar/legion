@@ -35,6 +35,7 @@ import {
 import {
   DISPATCH_TOKEN_SECRET,
   grantSecretName,
+  processSecretNames,
   pruneSecretFiles,
   secretFilePath,
 } from "./secrets";
@@ -77,7 +78,9 @@ export interface ProcessManagerDeps {
   saveState(): Promise<void>;
   config: DaemonConfig;
   ompInvocation: string;
-  /** The `PATH` every spawned process receives (the daemon's resolved tool environment). */
+  /** The `PATH` every spawned process receives: the daemon's resolved tool environment
+   * (`resolveDaemonEnvironment`), `<state_dir>/bin` first and never a `worker-bin` entry —
+   * `credentialProcessEnvironment` prepends the pane's own. */
   processPath: string;
   credentialHelper: string;
   run(
@@ -2936,8 +2939,10 @@ export class ProcessManager {
    * `legion gh`, and `legion handoff complete` read ahead of `LEGION_GRANT`); the daemon only names
    * it here and prunes it with the pane's boot-token file (`trackProcessSecrets`). PATH puts
    * `<state_dir>/worker-bin` (the `gh` shim `index.ts` installs at startup) first exactly once:
-   * `processPath` is the daemon's own resolved PATH, which never contains it — the daemon's `gh`
-   * must never resolve to the shim. `GH_CONFIG_DIR` isolates a raw `gh` from any operator login
+   * `processPath` is the daemon's resolved PATH with every inherited `worker-bin` entry already
+   * stripped by `resolveDaemonEnvironment` (a daemon started from inside a Legion pane inherits
+   * that pane's shim-first PATH through `mise env`), so the daemon's own `gh` is never the shim and
+   * the prefix added here is the only one. `GH_CONFIG_DIR` isolates a raw `gh` from any operator login
    * state, and the emptied `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` (tmux renders `''` as `-e KEY=`,
    * an empty variable) keep an ambient token or host from shadowing the per-call one `legion gh`
    * redeems. */
@@ -2953,14 +2958,15 @@ export class ProcessManager {
     };
   }
 
-  /** Tracks both files a pane's role token names — its boot-token/controller-secret file and its
-   * grant file — so the steady-state prune reaps them together once the pane's locator clears. */
+  /** Tracks every file a pane's role token names (`processSecretNames`) so the steady-state prune
+   * reaps them together once the pane's locator clears. */
   private trackProcessSecrets(token: string): void {
-    this.processSecretFiles.add(token);
-    this.processSecretFiles.add(grantSecretName(token));
+    for (const name of processSecretNames(token)) this.processSecretFiles.add(name);
   }
 
-  /** Holds `<state_dir>/secrets/<token>` exempt from pruning while a launch for that role is in
+  /** Holds every `<state_dir>/secrets` file the role token names (`processSecretNames`: its
+   * boot-token/controller-secret file and its grant file) exempt from pruning while a launch for
+   * that role is in
    * flight. The launch owner (`spawnRoot`, `launchWorker`, `spawnController`) takes the hold
    * before anything is written and releases it only once the process's locator is stored in
    * state — or the launch has given up — immediately before the persist that follows, so that
@@ -2983,8 +2989,8 @@ export class ProcessManager {
 
   /** Every secret file some live process still needs: the shared Dispatch bearer, and — for each
    * tree root with a locator, each worker claim with a locator, the controller when it has a
-   * locator, and every launch currently in flight — both the process's own secret file and its
-   * grant file. */
+   * locator, and every launch currently in flight — every file its role token names
+   * (`processSecretNames`). */
   private liveSecretFiles(): Set<string> {
     const project = this.deps.state.project;
     const tokens = [...this.launchingSecrets.keys()];
@@ -2995,10 +3001,7 @@ export class ProcessManager {
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
       if ("issue" in claim && claim.locator) tokens.push(token);
     }
-    return new Set<string>([
-      DISPATCH_TOKEN_SECRET,
-      ...tokens.flatMap((token) => [token, grantSecretName(token)]),
-    ]);
+    return new Set<string>([DISPATCH_TOKEN_SECRET, ...tokens.flatMap(processSecretNames)]);
   }
 
   /** The boot-time half of secret-file hygiene (`index.ts`): lists `<state_dir>/secrets` and

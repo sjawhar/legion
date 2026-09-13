@@ -1916,23 +1916,45 @@ describe("Legion OMP extension", () => {
     });
     // Mint-then-write: the grant was minted (one wasted 60 s grant), nothing ran under a stale one.
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
+
+    // A relative pointer (an operator's own export) is refused before any temp file could land
+    // in OMP's cwd — the issue workspace.
+    process.env.LEGION_GRANT_FILE = "relative/x-grant";
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-relative", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "LEGION_GRANT_FILE relative/x-grant could not be written: the path is not absolute",
+    });
+    expect(await readdir(workspace)).not.toContain(expect.stringMatching(/^x-grant\./));
   });
-  test("blocks when the pane carries no LEGION_GRANT_FILE, without minting", async () => {
+  test("blocks when the pane carries no LEGION_GRANT_FILE, or a blank one, without minting", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
     const { toolCall, context } = await bootWorker({ role: "implementer", workspace, requests });
-    delete process.env.LEGION_GRANT_FILE;
+    const blocked = {
+      block: true,
+      reason:
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+    };
 
+    delete process.env.LEGION_GRANT_FILE;
     await expect(
       toolCall(
         { toolName: "bash", toolCallId: "call-no-file", input: { command: "jj git push" } },
         context
       )
-    ).resolves.toEqual({
-      block: true,
-      reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
-    });
+    ).resolves.toEqual(blocked);
+    process.env.LEGION_GRANT_FILE = "  ";
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-blank-file", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toEqual(blocked);
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(0);
   });
   test("blocks a booted worker's bash calls when the daemon refuses to mint a grant", async () => {

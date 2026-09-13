@@ -662,9 +662,9 @@ export default function legionExtension(pi: PiApi): void {
     }
     // The daemon names the grant file on every pane it launches; a pane without one was launched
     // by a daemon older than this plugin, and minting for it would only produce a grant nothing
-    // could read.
+    // could read. A blank value (an operator's own export) is the same absence.
     const grantFile = process.env.LEGION_GRANT_FILE;
-    if (grantFile === undefined) {
+    if (grantFile === undefined || grantFile.trim() === "") {
       return {
         block: true,
         reason:

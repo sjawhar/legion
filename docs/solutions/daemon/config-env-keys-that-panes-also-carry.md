@@ -83,12 +83,14 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST …`, with
   `DISPATCH_URL`/`DISPATCH_TOKEN` re-supplied deliberately. The checkpoints script must run under
   the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
-- Reset `PATH` too. Since LEGION-54 a pane's `PATH` starts with `<state_dir>/worker-bin` for the
-  pane's life (the `gh` shim that execs `legion gh`), and the daemon prepends it in
-  `ProcessManager`, never in `resolveDaemonEnvironment`, precisely so the daemon's own `gh` never
-  resolves to the shim. A daemon started from inside a pane inherits that `PATH` and would: start
-  rigs with `PATH` reset to the mise PATH (`PATH=$(mise env -s sh | sed -n 's/^export PATH=//p' | tr -d "'\"")`,
-  or simply the entries after the `worker-bin` one).
+- `PATH` needs no scrub. Since LEGION-54 a pane's `PATH` starts with `<state_dir>/worker-bin` for
+  the pane's life (the `gh` shim that execs `legion gh`), and `mise env` keeps an inherited PATH
+  head, so a daemon started from inside a pane would otherwise resolve its own `gh` to the shim
+  and hand every new pane a second `worker-bin` entry. `resolveDaemonEnvironment` therefore
+  strips every inherited `worker-bin` entry at the daemon boundary (`pathWithoutWorkerBin`),
+  exactly as it strips the inherited pane secrets, and `ProcessManager` then prepends the pane's
+  own entry exactly once. `legion gh` applies the same strip before spawning `gh`, so it never
+  re-enters itself through the shim either.
 - Write `daemon_url` (and `state_dir`) into every generated `legion.yaml`. The guard makes an
   omission a refusal on tmux, which is the point: a rig that forgets is told, not misrouted.
 - When reading a daemon's environment for evidence, print variable *names* only

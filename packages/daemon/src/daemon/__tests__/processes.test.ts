@@ -12,6 +12,7 @@ import {
 } from "@legion/contracts";
 import { spawnCapabilityKey } from "../api/auth";
 import type { DaemonConfig } from "../config";
+import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
 import {
   type LegionState,
@@ -877,6 +878,69 @@ describe("ProcessManager", () => {
       expect(environment.LEGION_GRANT).toBeUndefined();
       for (const part of launch) expect(part.startsWith("LEGION_GRANT=")).toBe(false);
     });
+  });
+  it("a daemon started from inside a Legion pane still launches panes with worker-bin exactly once", async () => {
+    // The daemon's `processPath` is `resolveDaemonEnvironment`'s pane PATH. Started from a pane,
+    // that function sees the pane's own `<state_dir>/worker-bin`-first PATH through `mise env`;
+    // it must strip every such entry so its own `gh` is never the shim and the one prefix
+    // `credentialProcessEnvironment` adds is the only one a launched pane carries.
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    const inheritedWorkerBin = path.join(stateDir, "worker-bin");
+    const environment = await resolveDaemonEnvironment("mise x omp@1 -- omp", {
+      stateDir,
+      env: { PATH: "/narrow/bin" },
+      resolveExecutable: (command) =>
+        command === "mise"
+          ? "/tools/mise"
+          : command.startsWith("/")
+            ? command
+            : `/tools/${command}`,
+      run: async (command) => {
+        if (command[1] === "env") {
+          return {
+            stdout: JSON.stringify({
+              PATH: `${inheritedWorkerBin}:/full/bin:/other/state/worker-bin:/usr/bin`,
+            }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
+      },
+    });
+    expect(environment.commands.gh).toBe("/tools/gh");
+
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir),
+      processPath: environment.paneEnv.PATH,
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const launches = commands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
+    expect(launches).toHaveLength(3);
+    for (const launch of launches) {
+      const entries = tmuxWindowEnvironment(launch).PATH?.split(path.delimiter) ?? [];
+      expect(entries[0]).toBe(inheritedWorkerBin);
+      expect(entries.filter((entry) => path.basename(entry) === "worker-bin")).toHaveLength(1);
+      expect(entries).toContain(path.join(stateDir, "bin"));
+    }
   });
   it("runs every tmux command against the private legion-<project> socket", async () => {
     const stateDir = await temporaryDir();

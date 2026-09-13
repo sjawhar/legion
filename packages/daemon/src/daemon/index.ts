@@ -256,8 +256,8 @@ async function startDaemonLocked(
   });
   const runner = createDaemonRunner(environment, deps.runner);
   // The `gh` shim every pane's PATH puts first (`ProcessManager.credentialProcessEnvironment`),
-  // installed once here rather than lazily by the extension. An fs failure refuses startup: no
-  // pane may launch with a PATH whose first entry does not exist.
+  // installed before any pane can launch. An fs failure refuses startup: no pane may launch with a
+  // PATH whose first entry does not exist.
   await installWorkerGhShim(config.stateDir);
   // The one Dispatch bearer every pane shares, delivered as a 0600 file pointer
   // (`DISPATCH_TOKEN_FILE`) rather than a `-e` argv value — see `secrets.ts`. An fs failure here

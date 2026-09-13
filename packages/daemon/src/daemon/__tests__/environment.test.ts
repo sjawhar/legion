@@ -224,6 +224,56 @@ describe("resolveDaemonEnvironment", () => {
     for (const key of STRIPPED_KEYS) expect(received[0]?.options?.env).not.toHaveProperty(key);
   });
 
+  it("strips every inherited worker-bin entry from the pane base PATH, so the daemon's own gh is never the shim", async () => {
+    // A daemon started from inside a Legion pane: `mise env` keeps that pane's PATH head, which is
+    // the pane's own `<state_dir>/worker-bin` (the `gh` shim), and may carry another daemon's
+    // worker-bin further down. Both must go: the daemon's tool resolution and every pane it
+    // launches run over this PATH, and `credentialProcessEnvironment` prepends worker-bin itself.
+    const inheritedWorkerBin = path.join(stateDir, "worker-bin");
+    const otherWorkerBin = "/other/state/worker-bin";
+    const legionBinDir = path.join(stateDir, "bin");
+    const cleanSearchPath = `${legionBinDir}${path.delimiter}/full/bin:/usr/bin`;
+    const resolved: Array<{ command: string; searchPath: string | undefined }> = [];
+    const environment = await resolveDaemonEnvironment(
+      `mise x ${OMP_PIN} -- omp`,
+      dependencies({
+        env: { PATH: "/narrow/bin" },
+        resolveExecutable(command, searchPath) {
+          resolved.push({ command, searchPath });
+          if (command === "mise") return "/tools/mise";
+          if (command === "/mise/omp/bin/omp") return "/mise/omp/bin/omp";
+          // The shim would be found first by any resolver honoring an unstripped PATH.
+          if (searchPath?.split(path.delimiter).includes(inheritedWorkerBin)) {
+            return path.join(inheritedWorkerBin, command);
+          }
+          return `/tools/${command}`;
+        },
+        run: async (command) => {
+          if (command.join(" ") === "/tools/mise env --json") {
+            return {
+              stdout: JSON.stringify({
+                PATH: `${inheritedWorkerBin}:/full/bin:${otherWorkerBin}:/usr/bin`,
+                HOME: "/home/legion",
+              }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
+            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
+          }
+          throw new Error(`Unexpected startup command: ${command.join(" ")}`);
+        },
+      })
+    );
+
+    expect(environment.paneEnv.PATH).toBe(cleanSearchPath);
+    expect(environment.commands.gh).toBe("/tools/gh");
+    for (const entry of resolved.filter((r) => r.command === "gh")) {
+      expect(entry.searchPath).toBe(cleanSearchPath);
+    }
+  });
+
   it("strips dispatch env keys from the bootstrap `mise env`/`mise where` calls that predate createDaemonRunner", async () => {
     const received: Array<{ command: string[]; options?: Parameters<CommandRunner>[1] }> = [];
     const environment = await resolveDaemonEnvironment(

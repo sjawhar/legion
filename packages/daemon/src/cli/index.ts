@@ -108,7 +108,20 @@ function readSecretPointer(variable: string, file: string): string {
  * LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual export. */
 function grantFrom(env: NodeJS.ProcessEnv): string {
   const file = env.LEGION_GRANT_FILE;
-  if (file !== undefined) return readSecretPointer("LEGION_GRANT_FILE", file);
+  if (file !== undefined) {
+    try {
+      return readSecretPointer("LEGION_GRANT_FILE", file);
+    } catch (error) {
+      // The realistic skew: a daemon on this release naming the file for a pane whose plugin
+      // predates it and so never writes it. Name the cause and the remedy, not only the path.
+      if (error instanceof CliError && error.message.includes("ENOENT")) {
+        throw new CliError(
+          `${error.message}: the pi-envoy extension in this pane did not write it — the installed plugin predates LEGION-54; install the released plugin in the profile and relaunch the pane`
+        );
+      }
+      throw error;
+    }
+  }
   const grant = env.LEGION_GRANT;
   if (!grant) {
     throw new CliError(

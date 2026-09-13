@@ -24,6 +24,14 @@ SOURCE_PROFILE_DIR="$HOME/.omp/profiles/${RIG_SOURCE_PROFILE:-legion}"
 PLUGINS_MODE=${RIG_PLUGINS:-extension-only}
 LEGION_BUILD=${RIG_LEGION_BUILD:-branch}
 
+# This script removes and rewrites the rig profile's plugins/ and agent/extensions/. It must never
+# be the profile it copies from: only the operator edits ~/.omp/profiles/legion. Checked first,
+# before any filesystem action, by canonical path (a symlinked alias is the same profile).
+if [ "$(realpath -m -- "$PROFILE_DIR")" = "$(realpath -m -- "$SOURCE_PROFILE_DIR")" ]; then
+  echo "refusing: rig profile equals source profile ($PROFILE_DIR is $SOURCE_PROFILE_DIR); set RIG_PROFILE to a scratch profile name" >&2
+  exit 2
+fi
+
 test -f "$SRC/packages/pi-envoy/extensions/legion.ts" || {
   echo "not a legion checkout: $SRC" >&2
   exit 2
@@ -82,7 +90,7 @@ else
 fi
 
 # Scratch state directory: what the daemon's `state_dir` holds for a pane.
-mkdir -p "$RIG/state/bin" "$RIG/state/secrets" "$RIG/state/worker-bin" "$RIG/state/gh" "$RIG/ws"
+mkdir -p "$RIG/state/bin" "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
 chmod 0700 "$RIG/state/secrets"
 printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"

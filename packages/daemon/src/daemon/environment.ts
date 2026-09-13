@@ -2,6 +2,7 @@ import { accessSync, constants, realpathSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
+import { pathWithoutWorkerBin } from "./worker-bin";
 
 const REQUIRED_DAEMON_TOOLS = ["jj", "git", "gh", "tmux"] as const;
 type DaemonTool = (typeof REQUIRED_DAEMON_TOOLS)[number];
@@ -232,7 +233,12 @@ async function installLegionCliLauncher(stateDir: string): Promise<string> {
  * restores the user's complete tool environment; every daemon child then gets
  * explicit tool paths and that same PATH instead of the launcher context. Also installs the
  * `legion` CLI launcher (see `legionCliLauncherScript`) and prepends its directory to the pane
- * PATH every root, worker, and controller pane inherits.
+ * PATH every root, worker, and controller pane inherits. That PATH carries no `worker-bin` entry:
+ * `mise env` keeps the inherited PATH head, and a daemon started from inside a Legion pane inherits
+ * that pane's `<state_dir>/worker-bin`-first PATH — left in place, the daemon's own `gh` would
+ * resolve to the shim (every GitHub read failing `LEGION_GRANT_FILE is missing`) and every pane
+ * would carry worker-bin twice once `ProcessManager.credentialProcessEnvironment` prepends its own.
+ * Stripped here, at the daemon boundary, exactly like the inherited pane secrets (`stripDispatchEnv`).
  */
 export async function resolveDaemonEnvironment(
   ompInvocation: string,
@@ -251,7 +257,7 @@ export async function resolveDaemonEnvironment(
   const legionBinDir = await installLegionCliLauncher(deps.stateDir);
   const paneEnv: FullMiseEnvironment = {
     ...miseEnv,
-    PATH: `${legionBinDir}${path.delimiter}${miseEnv.PATH}`,
+    PATH: `${legionBinDir}${path.delimiter}${pathWithoutWorkerBin(miseEnv.PATH)}`,
   };
   const missing: string[] = [];
   const commands = {} as Record<DaemonTool, string>;

@@ -48,7 +48,10 @@ The copied tree is reused by later production runs; `RIG_REFRESH_PLUGINS=1` re-c
 extensions symlinked from the checkout under test. The two modes never mix.
 
 `setup.sh` never reads or writes `~/.omp/profiles/legion` beyond copying `plugins/`, `config.yml`,
-and `models.yml`; only the operator edits that profile.
+and `models.yml`; only the operator edits that profile. Its first action after resolving the
+profile names is a refusal (exit 2, nothing touched) when the rig profile and the source profile
+resolve to the same directory — `RIG_PROFILE=legion`, or `RIG_SOURCE_PROFILE=l12rig`, would
+otherwise `rm -rf` the very tree it copies from.
 
 ## Before runs
 
@@ -92,9 +95,12 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 ## Environment the worker gets
 
 `run.ts` builds it (`workerEnvironment`) from the current shell minus every `LEGION_*` and
-`DISPATCH_*` value (and any inherited `worker-bin` PATH entry), then sets what the daemon sets
-for a phase-worker pane — the launch keys and the static credential environment
-(`ProcessManager.credentialProcessEnvironment`), which is the pane's for life, never per command:
+`DISPATCH_*` value and every inherited `worker-bin` PATH entry (the daemon's own strip,
+`pathWithoutWorkerBin` from `packages/daemon/src/daemon/worker-bin.ts`, imported rather than
+re-implemented — a rig started from a Legion pane carries that pane's worker-bin first), then sets
+what the daemon sets for a phase-worker pane — the launch keys and the static credential
+environment (`ProcessManager.credentialProcessEnvironment`), which is the pane's for life, never
+per command:
 
 | variable | value |
 | --- | --- |

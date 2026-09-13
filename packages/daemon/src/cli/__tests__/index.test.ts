@@ -60,8 +60,10 @@ describe("grant resolution", () => {
       )
     ).rejects.toEqual(
       expect.objectContaining({
-        message: expect.stringContaining(
-          `LEGION_GRANT_FILE names ${missing}, which could not be read`
+        message: expect.stringMatching(
+          new RegExp(
+            `^LEGION_GRANT_FILE names ${missing.replaceAll(".", "\\.")}, which could not be read: .*ENOENT.*: the pi-envoy extension in this pane did not write it — the installed plugin predates LEGION-54`
+          )
         ),
         code: 1,
       })

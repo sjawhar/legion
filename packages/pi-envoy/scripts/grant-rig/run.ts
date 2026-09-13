@@ -38,6 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { roleToken } from "@legion/contracts";
+import { pathWithoutWorkerBin } from "../../../daemon/src/daemon/worker-bin";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** One credential line as the unfixed hook wrote it (single-quoted), or as a model imitation
@@ -216,10 +217,9 @@ function workerEnvironment(launch: WorkerLaunch): Record<string, string> {
   const home = os.homedir();
   const agentDir = path.join(home, ".omp", "profiles", launch.profile, "agent");
   const stateDir = path.join(launch.rig, "state");
-  const inheritedPath = (env.PATH ?? "")
-    .split(path.delimiter)
-    .filter((entry) => entry.length > 0 && !entry.endsWith(`${path.sep}worker-bin`))
-    .join(path.delimiter);
+  // The same strip the daemon applies at its boundary (`resolveDaemonEnvironment`): this rig may
+  // itself run from a Legion pane whose PATH carries a worker-bin entry.
+  const inheritedPath = pathWithoutWorkerBin(env.PATH ?? "");
   Object.assign(env, {
     OMP_PROFILE: launch.profile,
     PI_PROFILE: launch.profile,

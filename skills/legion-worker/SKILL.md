@@ -155,7 +155,11 @@ refuses `pr merge` (and a raw `gh api …/merge`): no worker role merges a pull 
 queue does, under its own authority. The credential reaches `legion` through the file
 `$LEGION_GRANT_FILE` names, written before each of your bash commands by the extension; never
 `cat`, `echo`, copy, or `export` it — `legion credential`, `legion gh`, `jj git push`, and
-`legion handoff complete` read it themselves.
+`legion handoff complete` read it themselves. The file is the pane's, not the command's: a `task`
+subagent, an `eval` subprocess, or a background job in your pane reads the grant your last bash
+command minted, so its `legion gh` or `jj git push` succeeds only within 60 seconds of that call
+and 403s afterwards — a timing artifact, not a broken credential; run credentialed commands from
+your own bash calls.
 
 ## GitHub PR comment attribution
 
