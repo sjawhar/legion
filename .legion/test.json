@@ -1,0 +1,118 @@
+{
+  "headSha": "431a0d7a82922dcbda249634263e1619c7fca892",
+  "pullRequest": 1010,
+  "pullRequestUrl": "https://github.com/sjawhar/legion/pull/1010",
+  "passed": 4,
+  "failed": 0,
+  "failures": [],
+  "verdictPerAcceptance": {
+    "1": "PASS — bare gates at head: `bash scripts/smoke/up.test.sh` 17 PASS lines / exit 0 (includes 'derives the NATS container name and listener machine id from SMOKE_PROJECT' and 'records the per-project NATS container name and hands the listener a per-project ENVOY_MACHINE_ID'); `bash scripts/smoke/down.test.sh` 4 PASS lines / exit 0 (includes 'removes only the NATS container recorded for this rig, falls back to legion-smoke-nats only without a record, and refuses a malformed record'). Both after `bun install` in the workspace.",
+    "2": "PASS — two rigs (sjawhar/41 and sjawhar/42) started concurrently on this machine from the PR head with SMOKE_WEBHOOK_MODE=none; both RIG READY at 08:51Z; both daemons recorded a controller locator whose tmux window was live on their own private server at 09:01:29Z; down.sh for rig A removed only legion-smoke-nats-sjawhar41 and left rig B (daemon, listener, controller window, container) intact; down.sh for rig B removed legion-smoke-nats-sjawhar42, leaving no legion-smoke-nats* container. Three docker ps snapshots below.",
+    "3": "PASS — the README diff (main@origin..head, scripts/smoke/README.md) adds the coexistence paragraph naming `legion-smoke-nats-<slug>` / `legion-smoke-<slug>` / `${SMOKE_DIR}/nats-container` and rewrites the teardown paragraph to name `legion-smoke-nats-<slug>` and the no-record fallback to `legion-smoke-nats`.",
+    "4": "PASS — the PR description's Base section names LEGION-10 (#957) merge commit 4b934e60; `jj log -r '4b934e60 & ancestors(@-)'` resolves to 4b934e600b2a 'fix(smoke): the smoke rig can start on this machine again (LEGION-10) (#957)', so it is an ancestor of the head and no rebase was needed."
+  },
+  "controllerAliveCheck": "checkpoints.sh checkpoint 1 is SKIPPED-BLOCKED under SMOKE_WEBHOOK_MODE=none (documented), so the README's equivalent was used: each daemon's GET /legion/v1/state carried controllerLocator {runtime: tmux, tmuxSession: legion-sjawhar4N, tmuxWindowId: '@1', tmuxPaneId: '%1'} plus a `controller` role claim, and `tmux -L legion-sjawhar4N list-windows -t legion-sjawhar4N` listed '@1 controller' — the same window/pane assertion checkpoint_one makes. The controller spawns on the first periodic resync (resync_interval_seconds: 600 in the generated legion.yaml) publishing to an unheld controller role, so it appeared ~10 min after boot on both rigs. checkpoints.sh 13 (not mode-gated) also passed on both: 'CHECKPOINT 13 OK: 2 processes on legion-sjawhar41 carry no bearer or boot secret; default server hosts no legion-sjawhar41' and the same for sjawhar42.",
+  "rigs": [
+    {
+      "name": "A",
+      "SMOKE_PROJECT": "sjawhar/41",
+      "SMOKE_DIR": "/tmp/legion-smoke-41",
+      "NATS_PORT": 14231,
+      "ENVOY_PORT": 19031,
+      "LEGION_DAEMON_PORT": 19381,
+      "workerStreamPort": 19382,
+      "container": "legion-smoke-nats-sjawhar41",
+      "listenerMachineId": "legion-smoke-sjawhar41",
+      "rootIssue": "LEGSMOKE-109",
+      "daemonPid": 499378,
+      "listenerPid": 498878
+    },
+    {
+      "name": "B",
+      "SMOKE_PROJECT": "sjawhar/42",
+      "SMOKE_DIR": "/tmp/legion-smoke-42",
+      "NATS_PORT": 14232,
+      "ENVOY_PORT": 19032,
+      "LEGION_DAEMON_PORT": 19391,
+      "workerStreamPort": 19392,
+      "container": "legion-smoke-nats-sjawhar42",
+      "listenerMachineId": "legion-smoke-sjawhar42",
+      "rootIssue": "LEGSMOKE-108",
+      "daemonPid": 499350,
+      "listenerPid": 498820
+    }
+  ],
+  "commands": [
+    "cd $LEGION_WORKSPACE && bun install",
+    "bash scripts/smoke/up.test.sh  # 17 PASS, exit 0",
+    "bash scripts/smoke/down.test.sh  # 4 PASS, exit 0",
+    "preflight: docker ps -a showed no legion-smoke-nats* container; ss -Hltn showed 14231/19031/19381/19382/14232/19032/19391/19392 free",
+    "launcher (scratch /tmp/legion41-rig.sh, deleted): cd $LEGION_WORKSPACE && env -u LEGION_* -u DISPATCH_TOKEN_FILE -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=<p> SMOKE_DIR=<d> NATS_PORT=<n> ENVOY_PORT=<e> LEGION_DAEMON_PORT=<l> SMOKE_WEBHOOK_MODE=none DISPATCH_URL=http://sami-agents:8766 secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" DISPATCH_TOKEN=\"$(jq -r .dispatch.token ~/.config/opencode/envoy.json)\" exec bash scripts/smoke/up.sh'",
+    "both launchers started at once (hub start, pty off) with (sjawhar/41 /tmp/legion-smoke-41 14231 19031 19381) and (sjawhar/42 /tmp/legion-smoke-42 14232 19032 19391); both exited 0 with RIG READY within ~5 s",
+    "controller wait: polled GET http://127.0.0.1:{19381,19391}/legion/v1/state for controllerLocator and tmux -L legion-sjawhar4N list-windows every 10 s; CONTROLLERS ALIVE at 2026-09-13T09:01:29Z",
+    "env -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CONTROLLER_SECRET_FILE SMOKE_DIR=/tmp/legion-smoke-4N SMOKE_PROJECT=sjawhar/4N SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/checkpoints.sh 13  # OK on both",
+    "docker ps --format '{{.Names}} {{.Ports}}' | grep legion-smoke-nats  # snapshot 1",
+    "negative control: mkdir /tmp/legion-smoke-negctl; printf 'not-a-rig-container\\n' > /tmp/legion-smoke-negctl/nats-container; SMOKE_DIR=/tmp/legion-smoke-negctl SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh",
+    "SMOKE_DIR=/tmp/legion-smoke-41 SMOKE_PROJECT=sjawhar/41 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # then snapshot 2 + rig B liveness",
+    "SMOKE_DIR=/tmp/legion-smoke-42 SMOKE_PROJECT=sjawhar/42 SMOKE_REPO=sjawhar/legion-smoke bash scripts/smoke/down.sh  # then snapshot 3"
+  ],
+  "dockerPsSnapshots": {
+    "1_beforeAnyTeardown_2026-09-13T09:02:04Z": [
+      "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14231->4222/tcp, [::]:14231->4222/tcp",
+      "legion-smoke-nats-sjawhar42 6222/tcp, 8222/tcp, 0.0.0.0:14232->4222/tcp, [::]:14232->4222/tcp"
+    ],
+    "2_afterRigA_down_2026-09-13T09:02:32Z": [
+      "legion-smoke-nats-sjawhar42 6222/tcp, 8222/tcp, 0.0.0.0:14232->4222/tcp, [::]:14232->4222/tcp"
+    ],
+    "3_afterRigB_down_2026-09-13T09:02:51Z": [],
+    "rigA_downOutput": [
+      "STOPPED tmux session legion-sjawhar41 on private socket legion-sjawhar41",
+      "STOPPED NATS container legion-smoke-nats-sjawhar41",
+      "RIG DOWN"
+    ],
+    "rigB_downOutput": [
+      "STOPPED tmux session legion-sjawhar42 on private socket legion-sjawhar42",
+      "STOPPED NATS container legion-smoke-nats-sjawhar42",
+      "RIG DOWN"
+    ],
+    "rigB_afterRigA_down": "daemon pid 499350 alive, listener pid 498820 alive, /legion/v1/state controllerLocator.tmuxWindowId '@1', tmux -L legion-sjawhar42 list-windows -> '@1 controller', listener healthz status healthy; ports 14231/19031/19381/19382 freed, 14232/19032/19391/19392 still bound",
+    "afterRigB_down": "no legion-smoke-nats* in docker ps or docker ps -a; both daemons and listeners dead; no legion-sjawhar41/42 tmux server; all eight ports free; both ${SMOKE_DIR}/nats-container records still present (by design)"
+  },
+  "negativeControl": {
+    "input": "SMOKE_DIR=/tmp/legion-smoke-negctl with nats-container record 'not-a-rig-container', down.sh run at 2026-09-13T09:02:13Z while both rig containers were up",
+    "output": [
+      "warning: refusing to remove NATS container: /tmp/legion-smoke-negctl/nats-container does not name a rig container (not-a-rig-container)",
+      "RIG DOWN",
+      "exit=0"
+    ],
+    "dockerPsAfter": [
+      "legion-smoke-nats-sjawhar41 6222/tcp, 8222/tcp, 0.0.0.0:14231->4222/tcp, [::]:14231->4222/tcp",
+      "legion-smoke-nats-sjawhar42 6222/tcp, 8222/tcp, 0.0.0.0:14232->4222/tcp, [::]:14232->4222/tcp"
+    ],
+    "note": "A record naming the other rig's container was deliberately not used: the record is trusted by design and down.sh would remove it."
+  },
+  "unitTests": {
+    "up.test.sh": {
+      "pass": 17,
+      "exit": 0
+    },
+    "down.test.sh": {
+      "pass": 4,
+      "exit": 0
+    }
+  },
+  "ci": "Tests runs 34748320522 and 34748371374 at 431a0d7a82922dcbda249634263e1619c7fca892: lint, pr-title, typecheck, test all success (gh pr checks 1010; check-runs API). No job named pr-checks-result exists on this workflow.",
+  "observations": [
+    "FINDING for the architect/implementer (rig coexistence, adjacent to this change): the daemon also binds worker_stream_port = LEGION_DAEMON_PORT + 1 (default), but up.sh asserts only LEGION_DAEMON_PORT is free (assert_port_free 'Legion daemon' \"$daemon_port\") and the README's 'Two rigs share one machine when each has its own SMOKE_PROJECT, SMOKE_DIR, and ports' does not mention the neighbour port. First attempt used daemon ports 19381 (rig A) and 19382 (rig B): rig B came up, rig A's daemon died at boot — daemon.log: 'error: worker_stream_port 19382 on 127.0.0.1 is unavailable: Failed to listen at 127.0.0.1' (EADDRINUSE) — and up.sh reported 'error: Legion daemon exited; inspect /tmp/legion-smoke-41'. Suggested fix in this PR: assert_port_free 'Legion worker stream' \"$((daemon_port + 1))\" in up.sh main() and one README sentence saying the daemon binds LEGION_DAEMON_PORT+1 too (so two rigs need daemon ports at least 2 apart). Recorded in the PR body's E2E section as a tester finding.",
+    "Pre-existing, unrelated to this PR: both rig daemons logged '[legion] failed to connect controller shim socket on ready: … Worker RPC \"negotiate_protocol\" timed out after 5000ms' right after /controller/ready; the controller pane stayed alive, its role claim was recorded, and the tmux window was live. Not a container-name defect; noted for whoever owns the controller RPC path.",
+    "Pre-existing quirk in down.sh (untouched by this PR): terminate_pid_file prints 'STOPPED <name>' only when the process needed SIGKILL; a daemon or listener that exits promptly on SIGTERM is stopped silently. Teardown output therefore shows only the tmux-session and NATS lines.",
+    "During the first attempt's teardown (08:49Z) another tester's rig container with the OLD fixed name legion-smoke-nats (port 14222, from a pre-PR up.sh) was live on this machine; my two down.sh runs removed only legion-smoke-nats-sjawhar41 and legion-smoke-nats-sjawhar42 and left legion-smoke-nats listed — incidental real-world confirmation that a record-bearing rig's teardown never touches the fixed-name container.",
+    "SMOKE_WEBHOOK_MODE=none was used (envoy mode would bridge production events and admit real work into the rigs; the criterion is coexistence). Under none, checkpoint 1 is SKIPPED-BLOCKED by design, so the controller-alive check was made directly against daemon state and the private tmux server, exactly as checkpoint_one's controller half does.",
+    "Environment scrub: the launcher removed every LEGION_* variable and DISPATCH_TOKEN_FILE from this worker pane's environment before exec'ing up.sh, so neither rig daemon inherited this pane's LEGION_OMP_PATH, LEGION_DAEMON_URL, or role identity. Secrets came only from the `secrets` wrapper and ~/.config/opencode/envoy.json's dispatch.token, never printed.",
+    "Cleanup: both rigs torn down; no legion-smoke-nats* container remains; scratch /tmp/legion-smoke-negctl, /tmp/legion41-rig.sh, /tmp/legion41-wait-controller.sh, /tmp/legion-smoke-41 and /tmp/legion-smoke-42 removed after the handoff was written. Two disposable root issues remain in LEGSMOKE (LEGSMOKE-108, LEGSMOKE-109), per the rig's documented intent."
+  ],
+  "documentationFeedback": "README should state that the daemon also binds LEGION_DAEMON_PORT+1 (worker_stream_port) so two rigs' daemon ports must not be adjacent; otherwise the coexistence paragraph and teardown paragraph are accurate to what was observed.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T09:05:38.412Z"
+}
