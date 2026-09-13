@@ -1,0 +1,162 @@
+{
+  "verdict": "pass",
+  "passed": 2,
+  "failed": 0,
+  "failures": [],
+  "verificationOnly": true,
+  "sourceChanged": false,
+  "deviations": [
+    "Acceptance line 2 as written names a rerun of run 34769221690 (`legion gh -- run rerun 34769221690 --failed`) passing with no new commit on PR #1037's branch. That rerun never happened: GitHub reports run 34769221690 at run_attempt 1, conclusion failure, last updated 2026-09-13T16:40:09Z. Instead the retro commit 7a53215d89db86b96eba646d015f5766f091ca2c (docs(solutions): LEGION-79 retro, committed 16:51:33Z) landed on the branch, a fresh Tests run 34769852801 at that head passed all four jobs (typecheck completed 16:52:18Z), and the PR merged at 16:55:54Z with headRefOid 7a53215d, not a6b38398. The outcome line 2 protects holds: the only commit above a6b38398 touches docs/solutions/ alone (jj diff --from a6b38398 --to 7a53215d --summary lists 4 paths, all under docs/solutions/; the same diff with '~docs/solutions' prints nothing), which by the deployment rule does not void the approval at a6b38398. Whether that satisfies line 2 as worded is the architect's call; it is reported here, not redefined.",
+    "On main pushes the pr-title job is skipped by design (.github/workflows/pr-and-main.yaml: `if: github.event_name == 'pull_request'`), so main's four jobs read lint/typecheck/test = success and pr-title = skipped in every main run quoted below; the PR run 34769852801 shows all four as success."
+  ],
+  "acceptance": {
+    "line1_mainTestsGreen": {
+      "fixingCommit": {
+        "headSha": "8af58deb9270619387f99b406b86903404e6fb8f",
+        "title": "fix(daemon): panes run the configured `mise x <tool> -- omp` invocation, never the resolved install path (#1045)",
+        "runId": 34769578687,
+        "createdAt": "2026-09-13T16:46:17Z",
+        "attempt": 1,
+        "conclusion": "success",
+        "jobs": {
+          "lint": "success",
+          "typecheck": "success",
+          "test": "success",
+          "pr-title": "skipped (push event; job runs only on pull_request)"
+        }
+      },
+      "currentHead": {
+        "headSha": "7f60bbfb57cbfb3cff02e37f4402f4ae5c423038",
+        "title": "ci(release): resolve the same-package version-bump race in push-main (LEGION-75) (#1035)",
+        "committedAt": "2026-09-13T16:58:51Z",
+        "runId": 34770191056,
+        "createdAt": "2026-09-13T16:58:54Z",
+        "attempt": 1,
+        "conclusion": "success",
+        "jobs": {
+          "lint": "success",
+          "typecheck": "success",
+          "test": "success",
+          "pr-title": "skipped (push event; job runs only on pull_request)"
+        },
+        "source": "legion gh -- api repos/sjawhar/legion/branches/main reports sha 7f60bbfb57cb; legion gh -- run list --branch main --workflow Tests --limit 15 shows it as the newest run"
+      },
+      "intermediateMainRuns": [
+        {
+          "runId": 34770050249,
+          "headSha": "22b9c18218ef",
+          "title": "PR #1037 merge (LEGION-79)",
+          "conclusion": "success"
+        },
+        {
+          "runId": 34769713369,
+          "headSha": "6ac81cfee867",
+          "title": "fix(dispatch): allow manual lifecycle status changes (#1041)",
+          "conclusion": "success"
+        },
+        {
+          "runId": 34770122211,
+          "headSha": "e1bd5148297c",
+          "title": "docs(solutions): LEGION-74 retro",
+          "conclusion": "success"
+        },
+        {
+          "runId": 34770127429,
+          "headSha": "36664b62050e",
+          "title": "fix(dispatch): make ask cards compact and copyable (#1046)",
+          "conclusion": "success"
+        }
+      ],
+      "negativeControl": {
+        "headSha": "0149a47a13484879c68a39d6bea1c42cca80f4e7",
+        "title": "daemon: a worker prompt is delivered only when its turn starts (LEGION-60, #1030)",
+        "runId": 34769165866,
+        "createdAt": "2026-09-13T16:37:59Z",
+        "conclusion": "failure",
+        "jobs": {
+          "typecheck": "failure",
+          "lint": "success",
+          "test": "success",
+          "pr-title": "skipped"
+        },
+        "logFailedLine": "typecheck\tTypecheck daemon\t2026-09-13T16:38:15.0173188Z src/daemon/__tests__/real-prompt-delivery-e2e.test.ts(293,5): error TS2741: Property 'baseEnv' is missing in type '{ runner: () => Promise<...>; tokenManager: {...}; repo: \"sjawhar/legi...",
+        "priorGreenMain": {
+          "runId": 34769160388,
+          "headSha": "2553ca37c517",
+          "title": "LEGION-74 merge (#1007)",
+          "conclusion": "success"
+        },
+        "fileAtBrokenCommit": "jj file show -r 0149a47a1348 packages/daemon/src/daemon/__tests__/real-prompt-delivery-e2e.test.ts contains no baseEnv line"
+      }
+    },
+    "line2_pr1037Typecheck": {
+      "pr": 1037,
+      "state": "MERGED",
+      "mergedAt": "2026-09-13T16:55:54Z",
+      "mergeCommit": "22b9c18218efbad5191079d029dfc9c57bb0a651",
+      "headRefOid": "7a53215d89db86b96eba646d015f5766f091ca2c",
+      "baseRefName": "main",
+      "commitCount": 14,
+      "lastTwoCommits": [
+        {
+          "oid": "a6b3839858d465278c1def7fca02a163c3a410ea",
+          "committedDate": "2026-09-13T16:37:56Z",
+          "headline": "chore: remove .legion/ handoffs after clean review (LEGION-79)"
+        },
+        {
+          "oid": "7a53215d89db86b96eba646d015f5766f091ca2c",
+          "committedDate": "2026-09-13T16:51:33Z",
+          "headline": "docs(solutions): LEGION-79 retro — sibling-PR conflict planning, smoke rig from a pane"
+        }
+      ],
+      "failedRunAtA6b38398": {
+        "runId": 34769221690,
+        "headSha": "a6b3839858d465278c1def7fca02a163c3a410ea",
+        "runAttempt": 1,
+        "conclusion": "failure",
+        "updatedAt": "2026-09-13T16:40:09Z",
+        "jobs": {
+          "typecheck": "failure",
+          "lint": "success",
+          "test": "success",
+          "pr-title": "success"
+        },
+        "rerunObserved": false
+      },
+      "greenRunAt7a53215d": {
+        "runId": 34769852801,
+        "headSha": "7a53215d89db86b96eba646d015f5766f091ca2c",
+        "runAttempt": 1,
+        "conclusion": "success",
+        "jobs": {
+          "typecheck": "success (completed 2026-09-13T16:52:18Z)",
+          "lint": "success",
+          "test": "success",
+          "pr-title": "success"
+        },
+        "statusCheckRollup": "pr view 1037 --json statusCheckRollup: pr-title, lint, typecheck, test all COMPLETED/SUCCESS pointing at run 34769852801"
+      },
+      "approvalStandsBecause": "jj diff --from a6b38398 --to 7a53215d --summary: A docs/solutions/daemon/a-sweep-for-a-condition-a-reducer-handles-live-shares-its-predicate-and-executor-and-surfaces-bare-fixtures.md; M docs/solutions/daemon/config-env-keys-that-panes-also-carry.md; A docs/solutions/legion/sibling-pr-rewrites-your-function-spell-both-shapes-in-the-plan-and-expect-the-fingerprint-to-change.md; A docs/solutions/testing/smoke-rig-from-a-worker-pane-mains-scripts-env-u-app-keys-and-a-session-actor.md. Same diff with '~docs/solutions' prints nothing (exit 0). Deployment rule: a retro commit touching only docs/solutions/ does not void the reviewer's approval."
+    }
+  },
+  "fixPresentOnMain": {
+    "command": "jj git fetch && jj file show -r main@origin packages/daemon/src/daemon/__tests__/real-prompt-delivery-e2e.test.ts | awk '/baseEnv/ {print NR\": \"$0}'",
+    "mainOrigin": "7f60bbfb57cbfb3cff02e37f4402f4ae5c423038",
+    "line": "294:       baseEnv: {},",
+    "context": "line 293 `workerCatchup: {`, line 294 `baseEnv: {},`, line 295 `runner: async () => ({ stdout: \"[]\", stderr: \"\", exitCode: 0 }),`"
+  },
+  "localTypecheck": {
+    "at": "22b9c18218ef (workspace parent; post-fix main, PR #1037 merge) plus the provisioned .omp/config.yml",
+    "commands": "bun install --frozen-lockfile (exit 0, 1172 packages) && cd packages/daemon && bunx tsc --noEmit",
+    "result": "exit 0 in 17s; mirrors the CI typecheck job's steps",
+    "note": "a first bunx tsc without node_modules pulled an unpinned TypeScript and failed on tsconfig (TS5102/TS5090) — an environment artifact, not a project error; discarded, workspace diff unchanged (only the pre-existing .omp/config.yml)"
+  },
+  "observations": [
+    "No source file was changed; the workspace diff before and after this phase is exactly the provisioned .omp/config.yml.",
+    "Every main Tests run from the fixing commit 8af58deb (16:46Z) through the current head 7f60bbfb (16:58Z) concluded success; the only red main run in the last 15 is 34769165866 at 0149a47a.",
+    "PR #1037's failed run 34769221690 was never rerun (run_attempt 1); its branch went green on a fresh run after the docs-only retro commit, and merged at that head."
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T17:07:51.701Z"
+}
