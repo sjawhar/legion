@@ -661,45 +661,94 @@ checkpoint_twelve() {
     fail "closed tree is still active or queued issue was not promoted"
 }
 
-# Spec LEGION-6 acceptance 2 and 4, and LEGION-74: no recorded Legion process — the private tmux
-# server itself, the controller pane, every tree root pane, every worker pane — carries a bearer, a
-# boot secret, or either GitHub App private key (the daemon's own, for token minting; a pane must
-# never see them) on its argv or in its environment; the private server's global environment has
-# none; and the default tmux server hosts no legion-<slug> session. SMOKE_CANARY_ENV is a
-# space-separated list of further names the operator planted in the daemon's environment
-# (e.g. FOO_SECRET=canary) to prove the allow-list drops what it does not name.
+# Sets `entry` to the `NAME=value` record for `name` in `/proc/<pid>/<file>` (`environ` or
+# `cmdline`, both NUL-separated) and `found` to 1, or clears `entry` and sets `found` to 0 when the
+# name is absent; fails the checkpoint when the file cannot be read (grep exit 2: the process
+# vanished between the caller's `-r` guard and this read). The capture happens inside a
+# conditional list so a miss never trips `set -e`. `grep -z` reads the file itself and must stay the
+# only process that can exit early, upstream: `tr` merely drains grep's already-closed pipe to EOF,
+# so nothing upstream can ever take SIGPIPE and turn a hit into a nonzero pipeline under `pipefail`.
+# `-a` keeps a value with bytes invalid in the locale from suppressing the match; `-z` anchors `^`
+# per NUL record, so a value containing a newline can never false-match a name.
+proc_entry() {
+  local pid="$1" file="$2" name="$3" status=0
+  entry="$(grep -a -z -m1 -- "^${name}=" "/proc/${pid}/${file}" 2>/dev/null | tr -d '\0'; exit "${PIPESTATUS[0]}")" || status=$?
+  case "$status" in
+    0) found=1 ;;
+    1) found=0 ;;
+    *) fail "cannot read /proc/${pid}/${file} (grep exited ${status})" ;;
+  esac
+}
+
+# Spec LEGION-6 acceptance 2 and 4, LEGION-74, and LEGION-43: no recorded Legion pane — the
+# controller pane, every tree root pane, every worker pane — carries a bearer, a boot secret, either
+# GitHub App private key (the daemon's own, for token minting; a pane must never see them), or the
+# launching shell's OMP_SESSION_ID (each pane's OMP mints its own session id; an inherited one names
+# another session) on its argv or in its environment; the private tmux server carries none of them
+# on its argv and none in its global environment — `show-environment -g`, the table tmux hands
+# every new pane, which the daemon scrubs against its allow-list at the launch hold
+# (`TmuxRuntime.scrubServerEnvironment`, called from `startDaemonLocked` in
+# packages/daemon/src/daemon/index.ts once the OMP probes pass and before `enableLaunches()`,
+# removing from both the global table and the session table every name `paneEnv` does not carry);
+# and the default tmux server hosts no legion-<slug> session. SMOKE_CANARY_ENV is a space-separated
+# list of further names the operator planted in the daemon's environment (e.g. FOO_SECRET=canary)
+# to prove the allow-list drops what it does not name.
+#
+# The server's own /proc/<pid>/environ is the environment it was exec'd with, frozen for its
+# lifetime; the scrub edits tmux's tables, not that record, so what it holds is judged by what the
+# variable is. A bearer, boot secret, App key, or canary there is a real leak — readable for as long
+# as the server lives — and fails, with the only remedy in the message: stop the daemon, kill the
+# private server once, start the daemon. OMP_SESSION_ID there is inert — no new pane inherits it once
+# the tables are scrubbed, and the id is not a secret — so it is reported as a note, never a failure.
 checkpoint_thirteen() {
-  local slug socket server_pid pane pid entry name pattern joined
-  local -a pids=()
-  local -a names=(DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64)
+  local slug socket server_pid pane pid entry found name pattern joined
+  local -a pane_pids=()
+  local -a secret_names=(DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64)
   local -a canaries=()
   read -r -a canaries <<<"${SMOKE_CANARY_ENV:-}"
-  names+=("${canaries[@]}")
+  secret_names+=("${canaries[@]}")
+  local -a names=("${secret_names[@]}" OMP_SESSION_ID)
   pattern="$(IFS='|'; printf '%s' "${names[*]}")"
   joined="$(IFS=' '; printf '%s' "${names[*]}")"
   slug="$(project_slug)"
   socket="legion-${slug}"
   server_pid="$(legion_tmux display-message -p '#{pid}')" || fail "private tmux server ${socket} is not running"
-  pids+=("$server_pid")
   while IFS= read -r pane; do
     [[ -n "$pane" ]] || continue
     pid="$(legion_tmux display-message -p -t "$pane" '#{pane_pid}')" || fail "recorded pane ${pane} is absent from ${socket}"
-    pids+=("$pid")
+    pane_pids+=("$pid")
   done < <(state | jq -r '
     [ .controllerLocator.tmuxPaneId?,
       (.trees[]? | .locator.tmuxPaneId?),
       (.roles[]? | select(has("issue")) | .locator.tmuxPaneId?) ]
     | map(select(. != null)) | .[]')
-  ((${#pids[@]} > 1)) || fail "daemon state records no pane to inspect"
-  for pid in "${pids[@]}"; do
+  ((${#pane_pids[@]} > 0)) || fail "daemon state records no pane to inspect"
+  [[ -r "/proc/${server_pid}/environ" && -r "/proc/${server_pid}/cmdline" ]] || fail "cannot read /proc/${server_pid}"
+  for name in "${names[@]}"; do
+    proc_entry "$server_pid" cmdline "$name"
+    ((found == 0)) || fail "private tmux server pid ${server_pid} cmdline carries ${entry%%=*}=…"
+    proc_entry "$server_pid" environ "$name"
+    ((found == 1)) || continue
+    case "$name" in
+      OMP_SESSION_ID)
+        printf 'CHECKPOINT 13 NOTE: private tmux server pid %s was forked with %s in its environment (frozen for its lifetime; new panes inherit the scrubbed tmux environment tables checked below, not this record)\n' \
+          "$server_pid" "${entry%%=*}" ;;
+      *)
+        fail "private tmux server pid ${server_pid} was forked with ${entry%%=*}=… in its environment (readable for the server's lifetime, and the daemon's boot scrub edits tmux's tables, never a process's initial environment — stop the daemon, run \`tmux -L ${socket} kill-server\` once, then start the daemon)" ;;
+    esac
+  done
+  for pid in "${pane_pids[@]}"; do
     [[ -r "/proc/${pid}/environ" && -r "/proc/${pid}/cmdline" ]] || fail "cannot read /proc/${pid}"
     for name in "${names[@]}"; do
-      if entry="$(tr '\0' '\n' <"/proc/${pid}/environ" | grep -m1 "^${name}=")"; then
-        fail "pid ${pid} environ carries ${entry%%=*}=… (no Legion pane may carry it)"
+      proc_entry "$pid" environ "$name"
+      if ((found == 1)); then
+        case "$name" in
+          OMP_SESSION_ID) fail "pid ${pid} environ carries ${entry%%=*}=… (inherited from the launching shell; a pane's OMP mints its own session id)" ;;
+          *) fail "pid ${pid} environ carries ${entry%%=*}=… (no Legion pane may carry it)" ;;
+        esac
       fi
-      if entry="$(tr '\0' '\n' <"/proc/${pid}/cmdline" | grep -m1 "^${name}=")"; then
-        fail "pid ${pid} cmdline carries ${entry%%=*}=…"
-      fi
+      proc_entry "$pid" cmdline "$name"
+      ((found == 0)) || fail "pid ${pid} cmdline carries ${entry%%=*}=…"
     done
   done
   if entry="$(legion_tmux show-environment -g | grep -m1 -E "^(${pattern})=")"; then
@@ -708,8 +757,8 @@ checkpoint_thirteen() {
   if tmux has-session -t "$socket" 2>/dev/null; then
     fail "default tmux server still hosts a ${socket} session"
   fi
-  printf 'CHECKPOINT 13 OK: %d processes on %s carry none of %s; default server hosts no %s\n' \
-    "${#pids[@]}" "$socket" "$joined" "$socket"
+  printf 'CHECKPOINT 13 OK: %d panes on %s carry none of %s, and its global environment has none; default server hosts no %s\n' \
+    "${#pane_pids[@]}" "$socket" "$joined" "$socket"
 }
 
 if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then

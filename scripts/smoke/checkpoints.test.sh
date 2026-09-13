@@ -79,7 +79,11 @@ esac
 EOF
 # Understands the `-L <socket>` global option the real daemon and checkpoints.sh use, logging
 # `<socket> <args…>` per invocation so the harness can assert every call targeted the private
-# server. `has-session` on the default server (no socket) reports no session.
+# server. `has-session` on the default server (no socket) reports no session. `display-message`
+# answers the server's own pid (`FAKE_TMUX_SERVER_PID`, defaulting to `FAKE_TMUX_PID`) when asked
+# without a `-t` target and a pane's pid (`FAKE_TMUX_PID`) otherwise, so checkpoint 13's server and
+# pane checks can be pointed at different real processes; `show-environment -g` appends
+# `FAKE_TMUX_GLOBAL_ENV` when set, standing in for a global table the daemon never scrubbed.
 cat >"${fake_bin}/tmux" <<'EOF'
 #!/usr/bin/env bash
 socket=""
@@ -87,8 +91,8 @@ if [[ "${1:-}" == "-L" ]]; then socket="$2"; shift 2; fi
 printf '%s\n' "$socket $*" >>"${TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   has-session) [[ -n "$socket" ]] ;;
-  display-message) printf '%s\n' "$FAKE_TMUX_PID" ;;
-  show-environment) printf 'PATH=/usr/bin\n' ;;
+  display-message) if [[ "$*" == *" -t "* ]]; then printf '%s\n' "$FAKE_TMUX_PID"; else printf '%s\n' "${FAKE_TMUX_SERVER_PID:-$FAKE_TMUX_PID}"; fi ;;
+  show-environment) printf 'PATH=/usr/bin\n'; [[ -z "${FAKE_TMUX_GLOBAL_ENV:-}" ]] || printf '%s\n' "$FAKE_TMUX_GLOBAL_ENV" ;;
   list-windows|list-panes)
     if [[ "$*" == *"#{window_id}"* ]]; then printf '@1\n@2\n@3\n'; else printf 'controller\nlegsmoke-1\nlegsmoke-2\n'; fi ;;
   *) printf 'controller\nlegsmoke-1\nlegsmoke-2\n' ;;
@@ -116,25 +120,35 @@ grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
 
 # Checkpoint 13 inspects `/proc/<pid>/environ` of every pid the fake tmux reports, so those pids
 # must be real, long-lived processes the harness owns: one with a clean environment, one with a
-# planted `DISPATCH_TOKEN` plus a planted App key and canary, and one with only the canary (a
-# `$PPID` trick would name a command-substitution subshell that has already exited by the time
-# /proc is read). All three scrub every variable the checkpoint inspects from whatever shell runs
-# this harness (a Legion worker's own pane carries a boot token; a box's panes may carry the keys).
+# planted `DISPATCH_TOKEN` plus a planted App key and canary, one with only the canary, one with a
+# planted `OMP_SESSION_ID`, and one with a planted `DISPATCH_TOKEN` at the head of a 70 KB
+# environment (a `$PPID` trick would name a command-substitution subshell that has already exited
+# by the time /proc is read). Each scrubs every variable the checkpoint inspects from whatever shell
+# runs this harness (a Legion worker's own pane carries a boot token and, before LEGION-74, the
+# launching shell's OMP_SESSION_ID; a box's panes may carry the keys).
 scrubbed=(-u DISPATCH_TOKEN -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET
-  -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u FOO_SECRET)
+  -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u FOO_SECRET -u OMP_SESSION_ID)
 env "${scrubbed[@]}" sleep 300 &
 clean_pid=$!
 env "${scrubbed[@]}" DISPATCH_TOKEN="leaked-into-a-pane" GH_AGENT_APP_PRIVATE_KEY_B64="leaked-into-a-pane" FOO_SECRET="leaked-canary" sleep 300 &
 planted_pid=$!
 env "${scrubbed[@]}" FOO_SECRET="leaked-canary" sleep 300 &
 canary_pid=$!
-trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+env "${scrubbed[@]}" OMP_SESSION_ID="01a083dd-4579-7000-8202-9898ac713e12" sleep 300 &
+planted_session_pid=$!
+env -i DISPATCH_TOKEN="leaked-into-a-large-pane" LARGE_PAD="$(head -c 70000 /dev/zero | tr '\0' x)" sleep 300 &
+planted_large_pid=$!
+trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" "$planted_session_pid" "$planted_large_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
 
 checkpoint_thirteen_against() {
-  # $1: the pid the fake tmux reports for every pane; $2: SMOKE_CANARY_ENV (may be empty).
+  # $1: the pid the fake tmux reports for every pane; $2: SMOKE_CANARY_ENV (may be empty);
+  # $3: the pid it reports as the private server's own (defaults to the clean process, so a case
+  # exercises the pane rule unless it names a server); $4: an extra `show-environment -g` line
+  # (may be empty), standing in for a global table the daemon never scrubbed.
   PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
     SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$1" \
-    SMOKE_CANARY_ENV="$2" env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1
+    SMOKE_CANARY_ENV="$2" FAKE_TMUX_SERVER_PID="${3:-$clean_pid}" FAKE_TMUX_GLOBAL_ENV="${4:-}" \
+    env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1
 }
 
 if ! checkpoint_thirteen_against "$clean_pid" ""; then
@@ -189,6 +203,77 @@ fi
   exit 1
 }
 printf 'PASS: checkpoint 13 inspects an operator-planted canary only when SMOKE_CANARY_ENV names it\n'
+
+# LEGION-43: the launching shell's OMP_SESSION_ID is checked beside the secrets, with its own
+# message (a pane's OMP mints its own session id; no `_FILE` twin exists for it).
+if checkpoint_thirteen_against "$planted_session_pid" ""; then
+  printf 'expected checkpoint 13 to fail when a recorded process environment carries OMP_SESSION_ID\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"pid ${planted_session_pid} environ carries OMP_SESSION_ID="*"a pane's OMP mints its own session id"* && "$(<"$output_file")" != *'_FILE'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 fails naming the pid and OMP_SESSION_ID, without promising an _FILE twin, when a recorded process inherited a session id\n'
+
+# The pane rule must bite whatever the environment's size. The planted secret heads a 70 KB
+# environment — past the pipe buffer, where a read with the matching process downstream of a
+# writer can miss under pipefail — and the checkpoint runs 20 times, since such a miss is a
+# scheduling race that one run cannot rule out.
+((  $(wc -c <"/proc/${planted_large_pid}/environ") > 65536 )) || {
+  printf 'the large planted process environment must exceed the 64 KB pipe buffer\n' >&2
+  exit 1
+}
+for attempt in $(seq 1 20); do
+  if checkpoint_thirteen_against "$planted_large_pid" ""; then
+    printf 'expected checkpoint 13 to fail when a recorded process with a 70 KB environment carries DISPATCH_TOKEN (attempt %s)\n' "$attempt" >&2
+    exit 1
+  fi
+  [[ "$(<"$output_file")" == *"pid ${planted_large_pid} environ carries DISPATCH_TOKEN="* ]] || {
+    cat "$output_file" >&2
+    exit 1
+  }
+done
+printf 'PASS: checkpoint 13 fails naming the pid and variable 20/20 times when the planted secret heads a 70 KB environment\n'
+
+# LEGION-43 acceptance 6: a private server that outlived a pre-LEGION-74 daemon was forked with the
+# launching shell's OMP_SESSION_ID, and /proc/<server pid>/environ records that for the server's
+# whole life -- but the daemon has scrubbed the tmux tables new panes actually inherit, so a clean
+# pane on that server passes, with the frozen record reported as a note.
+if ! checkpoint_thirteen_against "$clean_pid" "" "$planted_session_pid"; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"CHECKPOINT 13 NOTE: private tmux server pid ${planted_session_pid} was forked with OMP_SESSION_ID in its environment"* && "$(<"$output_file")" == *'CHECKPOINT 13 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 passes, noting the frozen record, when only the surviving server process was forked with OMP_SESSION_ID and its panes are clean\n'
+
+# A bearer, boot secret, or App key in that same frozen record is the opposite case (LEGION-6): it
+# is readable for as long as the server lives and no table scrub can remove it, so it fails even
+# though every pane is clean, and the message names the only remedy (kill the private server once).
+if checkpoint_thirteen_against "$clean_pid" "" "$planted_pid"; then
+  printf 'expected checkpoint 13 to fail when the surviving server process was forked with DISPATCH_TOKEN\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"CHECKPOINT 13 FAILED: private tmux server pid ${planted_pid} was forked with DISPATCH_TOKEN="*"tmux -L legion-exampleorg24 kill-server"* && "$(<"$output_file")" != *'CHECKPOINT 13 NOTE'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 fails naming the secret and the kill-server remedy when the surviving server process was forked with DISPATCH_TOKEN\n'
+
+# The global table is the operative fact for the server: one that still lists the id (a daemon
+# that never scrubbed it) fails even though every pane is clean.
+if checkpoint_thirteen_against "$clean_pid" "" "$clean_pid" "OMP_SESSION_ID=01a083dd-4579-7000-8202-9898ac713e12"; then
+  printf 'expected checkpoint 13 to fail when the private server global environment carries OMP_SESSION_ID\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'private tmux server global environment carries OMP_SESSION_ID'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 13 fails naming the variable when the private server global environment still carries OMP_SESSION_ID\n'
 
 PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
