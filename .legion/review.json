@@ -1,0 +1,104 @@
+{
+  "summary": "Round 1 on PR #1079 at head 888e3e65952ae9ece2af90fa1a617623e63d9b8a: REQUEST_CHANGES. One correctness finding against the LEGION-101 contract: RequestCoreTo's Conn.Flush() (FlushTimeout(10s) in nats.go v1.50.0) returns the same nats.ErrTimeout sentinel as the receipt wait, so a forward still sitting in the client's buffer during a NATS reconnect or a stalled connection is reported as receipt_timeout, which the daemon treats as delivered and the message is lost; it was delivery_failed and recovered before this change. One gate item: the PR body has no E2E (tester) line. One small hardening: an explicit dedupe_key beginning envoy.role.forward. on a role topic gets a 200 and is silently dropped by roleTopicDelivery's first guard. Every other contract clause is met; CI green at the head; MERGEABLE; no .omp/config.yml on the branch.",
+  "verdict": "changes_requested",
+  "pr": {
+    "number": 1079,
+    "url": "https://github.com/sjawhar/legion/pull/1079",
+    "headReviewed": "888e3e65952ae9ece2af90fa1a617623e63d9b8a",
+    "codeHead": "fc7c2ab3ae2f4fe3fe04c16c5be826ca4612fe72",
+    "reviewUrl": "https://github.com/sjawhar/legion/pull/1079#pullrequestreview-5194835304",
+    "reviewId": 5194835304
+  },
+  "verifiedOnGitHub": {
+    "ci": "Legion Envoy and Contracts run 34814916154 (envoy-go success), Tests run 34814916147 (lint/typecheck/test success), PR Title run 34814953013 success, all at 888e3e65952ae9ece2af90fa1a617623e63d9b8a",
+    "mergeable": "MERGEABLE / BLOCKED (awaiting review), not CONFLICTING",
+    "threadsBefore": 0,
+    "e2eImplementer": "present; surface listener Go suite on nats:2.10 testcontainer, command, observation, head fc7c2ab3 (ancestor of 888e3e65), negative control both keys -> 400",
+    "e2eTester": "MISSING from the PR body; evidence exists in .legion/test.json but the charter refuses approval until the line is in the body",
+    "branchHygiene": "jj file list -r 888e3e65 .omp is empty; skills/** and packages/pi-envoy/** untouched"
+  },
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at 888e3e65 as two reviewer subagents with those charters (named agents not installed in this pane). Deep review: one blocking (the Flush sentinel), one hardening (reserved prefix), stale sibling docs. Code quality: no blocking defects; wording and test-hygiene notes folded into inline comments and the fast-follow.",
+  "contractCheck": {
+    "no_holder": "met (roleTopicDelivery line 309)",
+    "delivery_failed": "met for lookup failed, stale cleanup, stale holder, non-timeout forward errors",
+    "receipt_timeout": "NOT met in one case: Flush() ErrTimeout is misreported as receipt_timeout (blocking finding)",
+    "exceptionPayload": "met: original_topic, event_id, payload, original dedupe_key (publishDeliveryException uses item, never the forward prefix)",
+    "publishDedupeKey": "met: verbatim; exclusive with idempotency_key -> 400 expected [dedupe_key, idempotency_key] before any publish; empty string absent",
+    "sendUnchanged": "met: check is publish-only; validateMessageBody and sendHandler untouched; TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey locks it",
+    "dedupeCacheOnlyDelivered": "met: recordDedupe true on delivered branch only; clearAttempt true on both forward failures; locked by TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly"
+  },
+  "findings": [
+    {
+      "severity": "blocking",
+      "path": "packages/envoy/cmd/listener/delivery.go",
+      "line": 374,
+      "issue": "nats.ErrTimeout from RequestCoreTo can come from Conn.Flush() (FlushTimeout(10s)), not only the receipt wait; during RECONNECTING the PUB is buffered client-side and Flush times out, so a never-sent forward is reported receipt_timeout",
+      "fix": "in internal/bus RequestCoreTo return a distinct sentinel (e.g. bus.ErrReceiptTimeout) only from the receipt wait (remaining<=0 and NextMsg ErrTimeout); delivery.go checks errors.Is(err, bus.ErrReceiptTimeout); optionally FlushTimeout(time.Until(deadline)); lock: inject nats.ErrTimeout via forwardRole and assert delivery_failed"
+    },
+    {
+      "severity": "gate",
+      "path": "PR body",
+      "issue": "E2E (tester) line missing",
+      "fix": "tester adds surface, command, observation, head, negative control to the PR body"
+    },
+    {
+      "severity": "hardening",
+      "path": "packages/envoy/cmd/listener/api.go",
+      "line": 328,
+      "issue": "explicit dedupe_key with the reserved envoy.role.forward. prefix on a role topic answers 200 and is silently dropped by roleTopicDelivery's first guard",
+      "fix": "400 naming dedupe_key before publish; one test row"
+    },
+    {
+      "severity": "docs-in-scope",
+      "path": "packages/envoy/docs/architecture.md",
+      "line": 74,
+      "issue": "lines 74 and 86 still say two seconds -> delivery_failed and reason is no_holder or delivery_failed",
+      "fix": "name the three reasons; that file cuts no release"
+    },
+    {
+      "severity": "minor",
+      "path": "packages/envoy/cmd/listener/delivery.go",
+      "line": 40,
+      "issue": "forwardRole comment claims ErrTimeout means the holder never answered",
+      "fix": "name the receipt sentinel after the blocking fix"
+    },
+    {
+      "severity": "minor",
+      "path": "packages/envoy/AGENTS.md",
+      "line": 90,
+      "issue": "'Every reason emits an exception and clears the attempt cache' overstates: only the two forward failures roll back an entry",
+      "fix": "reword as suggested inline"
+    },
+    {
+      "severity": "minor",
+      "path": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+      "line": 35,
+      "issue": "'A missing receiver ... is delivery_failed' ambiguous against the preceding receipt_timeout sentence",
+      "fix": "'a holder absent from the session registry'"
+    },
+    {
+      "severity": "minor",
+      "path": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+      "line": 91,
+      "issue": "Correct snippet must test the receipt sentinel once it exists",
+      "fix": "errors.Is(err, bus.ErrReceiptTimeout)"
+    },
+    {
+      "severity": "minor-optional",
+      "path": "packages/envoy/cmd/listener/api_test.go",
+      "line": 1068,
+      "issue": "byte-for-byte 400 body compare pins the English sentence beyond the contract",
+      "fix": "decode and assert Expected == [dedupe_key, idempotency_key]"
+    }
+  ],
+  "notesForArchitect": [
+    "Spec Design names errors.Is(err, nats.ErrTimeout) as the mechanism; the Flush finding shows it insufficient against the spec's own 'emitted only when the forward request was published and the wait for the reply timed out'. Amend the Design sentence when the fix lands (a bus-level receipt sentinel).",
+    "Sequencing, not a finding: packages/daemon/src/daemon/events.ts exceptionInfo accepts only no_holder/delivery_failed today, so until LEGION-107 lands a receipt_timeout is dropped at the daemon, including a holder dead inside the stale window that used to be delivery_failed. The parent spec accepts this ('deploying them in any order is safe'; resync probe is the backstop)."
+  ],
+  "fastFollow": "plugin-package and skills copies of the two-reason wording (packages/pi-envoy/AGENTS.md 14-16, packages/pi-envoy/README.md 11-12, skills/envoy/SKILL.md 151-152) land with LEGION-109's plugin PR since those paths cut a pi-envoy release.",
+  "nextRound": "After the corrective push: answer each of the 7 threads with Accepted:/Still open:, re-check CI and mergeable at the new head, verify the E2E (tester) line, then COMMENT if clean (head still carries .legion/) and direct the .legion/ deletion; APPROVE only the head that differs by that deletion alone.",
+  "notRun": "no rig, scratch daemon, NATS container outside go test, tmux server, formatters, bun test, or go test ./... (standing order 2026-09-13). No Go test re-run was needed: findings are code-reading facts against nats.go v1.50.0 source.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T07:05:05.849Z"
+}
