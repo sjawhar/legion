@@ -1305,6 +1305,82 @@ describe("core-NATS event pump", () => {
     pump.stop();
   });
 
+  it("parses a receipt_timeout exception and carries the payload's dedupe_key", async () => {
+    const { state, implementer } = stateForIssue();
+    const nats = new FakeNats();
+    const exceptions: Parameters<EventPumpDeps["onException"]>[0][] = [];
+    const pump = startEventPump(
+      deps(
+        state,
+        nats,
+        async () => {},
+        async (exception) => {
+          exceptions.push(exception);
+        }
+      )
+    );
+
+    // The `dedupe_key` under test is the one inside the exception PAYLOAD (the failed envelope's,
+    // reported by the listener beside `reason`) — never the exception envelope's own top-level
+    // `dedupe_key`, which the `envelope()` helper fills with `dedupe-event-1`.
+    nats.emit(
+      `notifications.envoy.exceptions.notifications.role.${implementer}`,
+      envelope({
+        original_topic: roleTopic(implementer),
+        event_id: "original-event",
+        reason: "receipt_timeout",
+        dedupe_key: "publish.abc",
+        payload: '{"type":"pr-comment"}',
+      })
+    );
+    await flush();
+
+    expect(exceptions).toEqual([
+      {
+        roleToken: implementer,
+        reason: "receipt_timeout",
+        original: {
+          topic: roleTopic(implementer),
+          payload: '{"type":"pr-comment"}',
+          eventId: "original-event",
+          dedupeKey: "publish.abc",
+        },
+      },
+    ]);
+    pump.stop();
+  });
+
+  it("ignores an exception whose reason is not one of the three known ones", async () => {
+    const { state, implementer } = stateForIssue();
+    const nats = new FakeNats();
+    const exceptions: Parameters<EventPumpDeps["onException"]>[0][] = [];
+    const pump = startEventPump(
+      deps(
+        state,
+        nats,
+        async () => {},
+        async (exception) => {
+          exceptions.push(exception);
+        }
+      )
+    );
+
+    nats.emit(
+      `notifications.envoy.exceptions.notifications.role.${implementer}`,
+      envelope({
+        original_topic: roleTopic(implementer),
+        event_id: "original-event",
+        reason: "timeout",
+        dedupe_key: "publish.abc",
+        payload: '{"type":"pr-comment"}',
+      })
+    );
+    await flush();
+
+    expect(exceptions).toEqual([]);
+    pump.stop();
+  });
+
   it("forwards mention envelopes directly to the controller role", async () => {
     const { state } = stateForIssue();
     state.roles[controllerToken(state.project)] = {

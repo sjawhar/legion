@@ -43,6 +43,7 @@ import {
   StopFailed,
   TreeClosingError,
 } from "./process-errors";
+import { MAX_RESENDS, ResendLedger } from "./resend-ledger";
 import {
   awaitShutdown,
   boundedWait,
@@ -68,15 +69,6 @@ import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
 
-/** How many times `handleException` republishes one role message to a live architect before it
- * stops: a receipt that arrives after the listener's window is reported as `delivery_failed`
- * even though the holder has the message, and each republish is a fresh envelope the listener
- * may fail the same way, so without a cap a loaded box turns one late receipt into the same
- * message every few seconds for as long as the load lasts (LEGION-103: 28 copies in two
- * minutes). Three redeliveries cover a genuinely lost message; past that the holder has it. */
-export const MAX_ROLE_REDELIVERIES = 3;
-/** Redelivery counts are kept per (role token, payload) for this long, then start over. */
-const ROLE_REDELIVERY_PERIOD_MS = 30 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
 const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
@@ -101,6 +93,16 @@ class SpawnPersistenceFailure extends Error {
 }
 
 type Redelivery = { topic: string; payload: string; eventId: string };
+
+/** The `ResendLedger` key for one role-lane message: the topic and the verbatim payload every
+ * failed copy of that message shares. Never the event id — the listener mints a fresh `event_id`
+ * for each publish and the exception reports the failed copy's, so a per-event-id count reaches
+ * 1 per chain in production and bounds nothing. Two byte-identical messages to one role whose
+ * deliveries both fail within `RESEND_LEDGER_TTL_MS` share one budget; each re-send still
+ * carries its own exception's dedupe key, so the plugin's dedupe never conflates them. */
+function resendChainKey(original: ExceptionInfo["original"]): string {
+  return `${original.topic}\n${original.payload}`;
+}
 
 export type ControlDirective =
   | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
@@ -141,8 +143,11 @@ export interface ProcessManagerDeps {
    * `POST /v1/messages/publish` (`envoyPublish`), which wraps the JSON in an envelope and routes
    * it to the topic's live holder — never to a bare `nats.publish`: the listener validates every
    * role-lane message as an envelope and drops a bare payload as `invalid envelope: event_id is
-   * required`, so a raw publish reaches nobody. */
-  publishRole(topic: string, json: string): void;
+   * required`, so a raw publish reaches nobody. `dedupeKey` is the listener publish body's
+   * `dedupe_key`, set only by `handleException`'s re-send of a failed copy (the triggering
+   * exception's own key) so the plugin's dedupe recognises the copy as the message it already
+   * saw; every other notice leaves it unset and the listener mints a fresh key. */
+  publishRole(topic: string, json: string, dedupeKey?: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
   mintBootToken(tree: IssueKey, generation: number): Promise<string>;
@@ -347,6 +352,14 @@ export class ProcessManager {
    * and does nothing. Under a test-injected `sleep` (no real timer, `cancel` a no-op) the same check
    * is what neutralizes a stale fire. */
   private readonly idleRetireWaits = new Map<string, { cancel: () => void }>();
+  /** The bound on `handleException`'s re-send of a failed role-lane message to an alive root
+   * architect (`resend-ledger.ts`): at most `MAX_RESENDS` per message, each after its pause.
+   * In memory only — a restart forgets every chain and also ends every one. */
+  private readonly resendLedger = new ResendLedger(() => this.deps.now());
+  /** The re-send pause in flight per chain key (`resendChainKey`), mirroring `idleRetireWaits`:
+   * bound to the exact wait by object identity, so a wait `dispose()` cancelled (or a test's
+   * injected `sleep` still fires) sees the map no longer holds this entry and sends nothing. */
+  private readonly resendWaits = new Map<string, { cancel: () => void }>();
   /** Set once by `dispose()`, never cleared: a `retireUnconfirmedRoot` expiry already in flight
    * (blocked on its own `probe`/`stopProcessSerialized` await) has no map entry left for
    * `dispose()`'s own `cancelAllRootRegistrationDeadlines` to clear, since it never deletes its
@@ -364,10 +377,6 @@ export class ProcessManager {
    * gated: the hold is about opening panes. */
   private launchesEnabled = false;
   private readonly heldResurrects = new Set<IssueKey>();
-  /** Per-period counters for `handleException`: redeliveries of one role message to one live
-   * architect (`<token>\n<payload>`, see `MAX_ROLE_REDELIVERIES`) and late receipts per role
-   * (`<token>\nlate-receipt`, logged once). */
-  private readonly roleRedeliveries = new Map<string, { count: number; firstAt: number }>();
   private heldControllerRequest = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
@@ -515,17 +524,21 @@ export class ProcessManager {
     this.bootWatchdog.cancel(token, generation);
   }
 
-  /** Cancels every armed boot watchdog, idle-retire clock, and any pending controller/root
-   * registration wait. Daemon shutdown calls this once before drain and again after — an
-   * in-flight handler during drain (a launch's own success path, `reconnectWorkers`) can still
-   * arm a watchdog after the first call, and this is the only guaranteed-safe way to catch that:
-   * no background timer may outlive the ProcessManager. Idempotent. */
+  /** Cancels every armed boot watchdog, idle-retire clock, re-send pause, and any pending
+   * controller/root registration wait, and forgets the re-send ledger. Daemon shutdown calls
+   * this once before drain and again after — an in-flight handler during drain (a launch's own
+   * success path, `reconnectWorkers`) can still arm a watchdog after the first call, and this is
+   * the only guaranteed-safe way to catch that: no background timer may outlive the
+   * ProcessManager. Idempotent. */
   dispose(): void {
     this.disposed = true;
     this.bootWatchdog.cancelAll();
     this.cancelControllerRegistrationDeadline();
     this.cancelAllRootRegistrationDeadlines();
     this.cancelAllIdleRetireClocks();
+    for (const { cancel } of this.resendWaits.values()) cancel();
+    this.resendWaits.clear();
+    this.resendLedger.clear();
   }
 
   admit(issue: IssueKey): "spawned" | "queued" {
@@ -2472,10 +2485,17 @@ export class ProcessManager {
     return result;
   }
 
+  /** Sends `directive` to the tree's root architect pane over `legion.ctl.<tree>.<generation>`
+   * and, on `ack`, re-publishes a `reclaim-architect` directive's `redeliver` message to its role
+   * topic unless `redeliver` is `false`. `redeliver.dedupeKey` is the triggering exception's
+   * dedupe key, handed to `publishRole` (the listener publish body's `dedupe_key`) and never
+   * placed in the directive JSON — the directive shape is part of the unbumped daemon/plugin
+   * contract. A nack on any directive but `shutdown` is reported to the controller as
+   * `revive-failed`. */
   async controlDirective(
     tree: IssueKey,
     directive: ControlDirective,
-    redeliver = true
+    redeliver: { dedupeKey?: string } | false = {}
   ): Promise<boolean> {
     const generation = this.deps.state.trees[tree]?.generation;
     if (generation === undefined) throw new Error(`Unknown Legion tree: ${tree}`);
@@ -2486,8 +2506,12 @@ export class ProcessManager {
       )
     );
     if (reply === "ack") {
-      if (redeliver && "redeliver" in directive) {
-        this.deps.publishRole(directive.redeliver.topic, directive.redeliver.payload);
+      if (redeliver !== false && "redeliver" in directive) {
+        this.deps.publishRole(
+          directive.redeliver.topic,
+          directive.redeliver.payload,
+          redeliver.dedupeKey
+        );
       }
       return true;
     }
@@ -2565,23 +2589,27 @@ export class ProcessManager {
 
   /**
    * Recovers the role a core-NATS delivery exception names: the controller through
-   * `ensureController`, a tree's root architect by probing its process (alive: told to reclaim
-   * its role and, for a `no_holder`, redelivered the missed event; dead: resurrected), any other
-   * role through `resumeWorker`. A `delivery_failed` whose holder is alive — an architect whose
-   * pane probes alive, a worker whose shim client is connected — is a receipt that arrived after
-   * the listener's window, not a lost message: the holder has it, and republishing it or sending
-   * a catch-up only interrupts the holder's turn with a duplicate (LEGION-103: one late receipt
-   * became the same message every few seconds for as long as the load lasted, and a worker's
-   * catch-up queued against its own running turn was retried into `promptFailures` and a
-   * relaunch). Such an exception is logged once per role per `ROLE_REDELIVERY_PERIOD_MS` and
-   * otherwise ignored; a `no_holder`, or a `delivery_failed` whose holder is gone, recovers as
-   * before. The exception lane has no redelivery -- core NATS has no nak, and the event
-   * pump only records a rejected handler in memory, surfaced at shutdown -- so every failure
-   * past parsing the token (a liveness probe the runtime could not complete, a recovery that
-   * failed past it, a token naming an issue no tree records) is logged here, naming the role
-   * token, and nothing more is done with it: the retry is the resync backstop (a confirmed
-   * root), the registration deadline (an unconfirmed one), or the next controller-bound effect
-   * or exception. What each failing step left behind is that step's own business (a probe
+   * `ensureController` for every reason; a tree's root architect and any other role by reason.
+   * `receipt_timeout` (the holder is live but its receipt missed the listener's window): a
+   * process that probes alive — the root's pane; a worker's cached shim client or its pane
+   * (`workerAlive`) — is logged once, naming the role token and event id, and nothing else
+   * happens: the holder is slow, not gone, and re-sending would only hand a busy model a second
+   * copy. A dead one takes the existing path for every reason: the root is resurrected, any other
+   * role goes through `resumeWorker`. `delivery_failed` and `no_holder` on the root architect keep
+   * the `reclaim-architect` directive and re-send, but bounded (`resendToRootArchitect`); on any
+   * other role, `resumeWorker` as before. This is LEGION-101's contract with the listener
+   * (LEGION-108) and the plugin (LEGION-109), and it supersedes LEGION-103's daemon stopgap, which
+   * read every `delivery_failed` on an alive holder as a late receipt and dropped it: once the
+   * listener reports a late receipt as `receipt_timeout`, a `delivery_failed` is a forward that
+   * never happened and deserves the bounded re-send; before that, the pause before the first copy
+   * and the cap bound a slow holder's copies the same way. The exception lane has no redelivery
+   * -- core NATS has no nak, and the event pump only records a rejected handler in memory,
+   * surfaced at shutdown -- so every failure past parsing the token (a liveness probe the runtime
+   * could not complete, a recovery that failed past it, a token naming an issue no tree records)
+   * is logged here, naming the role token, and nothing more is done with it: the retry is the
+   * resync backstop (a confirmed root), the registration deadline (an unconfirmed one), or the
+   * next controller-bound effect or exception. What each failing step left behind is that step's
+   * own business (a probe
    * throw clears nothing; a failed `spawnRoot` has already done its own rollback).
    */
   async handleException(exception: ExceptionInfo): Promise<void> {
@@ -2594,25 +2622,23 @@ export class ProcessManager {
       }
       const root = this.rootForIssue(parsed.issue);
       if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
-      if (parsed.role === "architect" && parsed.issue === root) {
-        if ((await this.probe(root)) === "alive") {
-          if (exception.reason === "delivery_failed") {
-            this.noteLateReceipt(exception);
-            return;
-          }
-          const redeliver = this.countRoleRedelivery(exception);
-          await this.controlDirective(
-            root,
-            { type: "reclaim-architect", issue: parsed.issue, redeliver: exception.original },
-            redeliver
+      const isRoot = parsed.role === "architect" && parsed.issue === root;
+      if (exception.reason === "receipt_timeout") {
+        const alive = isRoot
+          ? (await this.probe(root)) === "alive"
+          : await this.workerAlive(exception.roleToken);
+        if (alive) {
+          console.error(
+            `[legion] ${exception.roleToken}: receipt_timeout for event ${exception.original.eventId} on a live process; the holder is slow, not gone — nothing re-sent`
           );
-        } else {
-          await this.resurrect(root);
+          return;
         }
+        if (isRoot) await this.resurrect(root);
+        else await this.resumeWorker(root, parsed.issue, parsed.role);
         return;
       }
-      if (exception.reason === "delivery_failed" && this.workerClients.has(exception.roleToken)) {
-        this.noteLateReceipt(exception);
+      if (isRoot) {
+        await this.resendToRootArchitect(root, exception);
         return;
       }
       await this.resumeWorker(root, parsed.issue, parsed.role);
@@ -2624,43 +2650,81 @@ export class ProcessManager {
     }
   }
 
-  /** One more `delivery_failed` for a role whose holder is alive (see `handleException`): counted
-   * per role token so the first in each `ROLE_REDELIVERY_PERIOD_MS` is logged and the rest are
-   * silent — a loaded box produces these by the dozen, and each is the same fact. */
-  private noteLateReceipt(exception: ExceptionInfo): void {
-    if (this.countRedelivery(`${exception.roleToken}\nlate-receipt`) !== 1) return;
-    console.error(
-      `[legion] ${exception.roleToken} is alive but its receipt for ${exception.original.eventId} came after the listener's window; the message was delivered, so nothing is republished or caught up (further late receipts for this role are not logged for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes)`
-    );
+  /** Whether a phase worker or sub-architect counts as alive for a `receipt_timeout`: its claim
+   * has a locator and either a cached shim client (a closed one is evicted by
+   * `onWorkerClientClosed`) or a pane that probes alive. The pane probe is a `list-panes` plus
+   * `/proc` start-ticks check with no side effects; dialing the socket instead would cache a
+   * client as a side effect of a log-only decision. A probe the runtime cannot complete throws
+   * through to `handleException`'s catch (logged once, nothing cleared). */
+  private async workerAlive(token: string): Promise<boolean> {
+    const claim = this.deps.state.roles[token];
+    if (!claim || !("issue" in claim) || !claim.locator) return false;
+    if (this.workerClients.has(token)) return true;
+    return (await this.probeLocator(claim.locator, token)).status === "alive";
   }
 
-  /** Counts one more redelivery of `exception.original` to its role and says whether it may go
-   * out: true up to `MAX_ROLE_REDELIVERIES` per (role token, payload) within
-   * `ROLE_REDELIVERY_PERIOD_MS`, false after — logged once, at the first refusal. The
-   * `reclaim-architect` directive still goes out either way (the architect re-asserts its claim);
-   * only the republish is withheld. */
-  private countRoleRedelivery(exception: ExceptionInfo): boolean {
-    const count = this.countRedelivery(`${exception.roleToken}\n${exception.original.payload}`);
-    if (count <= MAX_ROLE_REDELIVERIES) return true;
-    if (count === MAX_ROLE_REDELIVERIES + 1) {
+  /**
+   * The `delivery_failed`/`no_holder` recovery for a root architect: a dead root is resurrected at
+   * once; an alive one is told to reclaim its role and redelivered the failed message — but
+   * bounded by `resendLedger` (LEGION-101: before this, every exception re-sent at once and
+   * without limit, so a holder busy for a minute turned one message into dozens of paid turns).
+   * The chain is the message itself (`resendChainKey`); every re-send, the first included, waits
+   * its pause (`RESEND_PAUSES_MS`) so a busy holder's turn can end, and the root is probed again
+   * after it — a root that died meanwhile is resurrected, never sent a directive it cannot
+   * acknowledge (a nack would publish a misleading `revive-failed`). An exception for a chain
+   * whose pause is still running is a duplicate of the failure that started it, not the failure of
+   * the pending copy, and is dropped uncounted; the cap drops the entry with one line and sends
+   * nothing — the resync backstop and the role's next catch-up recover the holder. The re-sent
+   * copy carries the triggering exception's dedupe key to `publishRole` (the listener publish
+   * body's `dedupe_key`) so a LEGION-108 listener stamps it on the envelope and the plugin's
+   * dedupe drops the copy as already seen; the key never enters the directive JSON, whose shape
+   * is unchanged. The pause is cancelled by `dispose()` (`resendWaits`), after which the wait's
+   * expiry sends nothing. Every line here names the role token, the event id, and the dedupe key
+   * — never the payload.
+   */
+  private async resendToRootArchitect(root: IssueKey, exception: ExceptionInfo): Promise<void> {
+    const token = exception.roleToken;
+    // Destructured, never assigned whole: `dedupeKey` must not leak into the directive JSON.
+    const { topic, payload, eventId, dedupeKey } = exception.original;
+    if ((await this.probe(root)) !== "alive") {
+      await this.resurrect(root);
+      return;
+    }
+    const key = resendChainKey(exception.original);
+    const decision = this.resendLedger.claim(key);
+    const keyLabel = dedupeKey ?? "none";
+    if (decision.kind === "capped") {
       console.error(
-        `[legion] not redelivering to ${exception.roleToken} again: the same message drew ${exception.reason} ${MAX_ROLE_REDELIVERIES} times in a row; further exceptions for it are ignored for ${ROLE_REDELIVERY_PERIOD_MS / 60_000} minutes`
+        `[legion] ${token}: re-send cap reached for event ${eventId} (dedupe key ${keyLabel}) after ${decision.attempts} re-sends; dropping it — the resync backstop and the role's next catch-up recover the holder`
       );
+      return;
     }
-    return false;
-  }
-
-  /** Increments and returns `key`'s count within the current `ROLE_REDELIVERY_PERIOD_MS`, pruning
-   * every entry whose period has passed as the map is touched. */
-  private countRedelivery(key: string): number {
-    const now = this.deps.now();
-    for (const [entry, record] of this.roleRedeliveries) {
-      if (now - record.firstAt >= ROLE_REDELIVERY_PERIOD_MS) this.roleRedeliveries.delete(entry);
+    if (decision.kind === "in-flight") {
+      console.error(
+        `[legion] ${token}: event ${eventId} (dedupe key ${keyLabel}) arrived while its re-send is pending; dropped without counting`
+      );
+      return;
     }
-    const record = this.roleRedeliveries.get(key) ?? { count: 0, firstAt: now };
-    record.count += 1;
-    this.roleRedeliveries.set(key, record);
-    return record.count;
+    console.error(
+      `[legion] ${token}: re-sending event ${eventId} (dedupe key ${keyLabel}) — attempt ${decision.attempt} of ${MAX_RESENDS} after ${decision.pauseMs / 1000}s`
+    );
+    const { timedOut, cancel } = boundedWait(decision.pauseMs, this.deps.sleep);
+    const wait = { cancel };
+    this.resendWaits.set(key, wait);
+    await timedOut;
+    // A cancelled wait still resolves (see `resendWaits`); only the current arm acts.
+    if (this.disposed || this.resendWaits.get(key) !== wait) return;
+    this.resendWaits.delete(key);
+    this.resendLedger.settle(key);
+    if ((await this.probe(root)) !== "alive") {
+      await this.resurrect(root);
+      return;
+    }
+    await this.controlDirective(
+      root,
+      { type: "reclaim-architect", issue: root, redeliver: { topic, payload, eventId } },
+      { dedupeKey }
+    );
   }
 
   /**
@@ -2695,7 +2759,10 @@ export class ProcessManager {
    * by `/process/started`, carries neither a locator nor a `resumeSessionFile`. A catch-up never
    * replaces a queued architect assignment either: checked here to skip the fetch, and again
    * inside the role's lock in `deliverToWorker` for a `spawn_worker` that lands while the
-   * catch-up is being computed.
+   * catch-up is being computed. A catch-up queued behind the cap, a busy client, or a boot never
+   * publishes `worker-queued` (`WorkerAdmission.publishQueued`): the architect did not ask for it
+   * and cannot act on it, and before LEGION-107 every role-lane exception for one busy worker
+   * told the architect `worker-queued` again (LEGION-60's eight notices for one queued catch-up).
    */
   async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
