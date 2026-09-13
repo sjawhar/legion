@@ -8,6 +8,7 @@ import {
   awaitShutdown,
   boundedWait,
   DAEMON_CLI_ENTRYPOINT,
+  describeProcessLocation,
   type Locator,
   locatorHandles,
   ProcessStopFailed,
@@ -1361,5 +1362,31 @@ describe("runtime helpers", () => {
       stateError: undefined,
     });
     expect(idle.getStateCalls).toBe(1);
+  });
+});
+
+describe("describeProcessLocation", () => {
+  it("names a tmux window and the attach command when the locator predates pane ids, never `pane undefined`", () => {
+    const described = describeProcessLocation({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@7",
+    });
+    expect(described).toBe(
+      "window @7 of tmux server legion-omp (attach with `tmux -L legion-omp attach -t legion-omp`)"
+    );
+    expect(described).not.toContain("undefined");
+  });
+
+  it("names a kubernetes pod and its namespace", () => {
+    expect(
+      describeProcessLocation({
+        runtime: "kubernetes",
+        namespace: "legion",
+        podName: "legion-omp-LEGION-42-1",
+        podUid: "uid-1",
+        pvcName: "pvc-1",
+      })
+    ).toBe("pod legion-omp-LEGION-42-1 in namespace legion");
   });
 });

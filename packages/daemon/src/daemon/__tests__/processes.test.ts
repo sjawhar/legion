@@ -5081,6 +5081,8 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const commands: string[][] = [];
     const controllerRelaunched = Promise.withResolvers<void>();
+    let errorsAtKill = -1;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       saveState: async () => {
@@ -5108,34 +5110,52 @@ describe("ProcessManager", () => {
         commands.push(command);
         if (command[3] === "list-panes") return livePanes(command);
         if (command[3] === "new-window") return { stdout: "@44 %3 65432\n", exitCode: 0 };
-        if (command[0] === "tmux" && command[3] === "kill-pane") return { stdout: "", exitCode: 0 };
+        if (command[0] === "tmux" && command[3] === "kill-pane") {
+          errorsAtKill = errors.mock.calls.length;
+          return { stdout: "", exitCode: 0 };
+        }
         return { stdout: "", exitCode: 0 };
       },
     });
 
-    // Alive pane, no role claim: arms the registration deadline.
-    await processes.ensureController();
-    // The role never gets claimed -- the deadline elapses with nothing having changed.
-    sleepGate.resolve();
-    // The respawn chain routes through real fs I/O (spawnController's own config write): the
-    // save that records the fresh locator is the event, never a tick budget racing that I/O.
-    await controllerRelaunched.promise;
+    try {
+      // Alive pane, no role claim: arms the registration deadline.
+      await processes.ensureController();
+      // The role never gets claimed -- the deadline elapses with nothing having changed.
+      sleepGate.resolve();
+      // The respawn chain routes through real fs I/O (spawnController's own config write): the
+      // save that records the fresh locator is the event, never a tick budget racing that I/O.
+      await controllerRelaunched.promise;
 
-    // The stuck pane was retired (no graceful shim response, so straight to kill-pane) and a
-    // fresh one spawned in its place.
-    const killPaneRan = commands.some(
-      (command) => command[0] === "tmux" && command[3] === "kill-pane"
-    );
-    expect(killPaneRan).toBe(true);
-    expect(commands.some((command) => command[3] === "new-window")).toBe(true);
-    expect(managedState.controllerLocator).toEqual({
-      runtime: "tmux",
-      tmuxSession: "legion-omp",
-      tmuxWindowId: "@44",
-      tmuxPaneId: "%3",
-      socketPath: path.join(stateDir, "workers", "controller.sock"),
-      ...paneIdentity(65432),
-    });
+      // The stuck pane was retired (no graceful shim response, so straight to kill-pane) and a
+      // fresh one spawned in its place.
+      const killPaneRan = commands.some(
+        (command) => command[0] === "tmux" && command[3] === "kill-pane"
+      );
+      expect(killPaneRan).toBe(true);
+      expect(commands.some((command) => command[3] === "new-window")).toBe(true);
+      expect(managedState.controllerLocator).toEqual({
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@44",
+        tmuxPaneId: "%3",
+        socketPath: path.join(stateDir, "workers", "controller.sock"),
+        ...paneIdentity(65432),
+      });
+
+      // The retirement of a live-but-unclaimed controller is announced first, once, naming the
+      // pane, the deadline it missed, and how to attach -- never an environment value -- so an
+      // operator reading the daemon log learns why the controller was replaced (LEGION-88).
+      const lines = errors.mock.calls.map((call) => String(call[0]));
+      const retiring = lines.filter((line) => line.startsWith("[legion] retiring the controller"));
+      expect(retiring).toHaveLength(1);
+      expect(retiring[0]).toContain("pane %1 in window @controller");
+      expect(retiring[0]).toContain("360s registration deadline");
+      expect(retiring[0]).toContain("tmux -L legion-omp attach -t legion-omp");
+      expect(lines.indexOf(retiring[0] as string)).toBeLessThan(errorsAtKill);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("dispose() cancels a pending controller-registration deadline so its stale expiry never retires or respawns", async () => {
@@ -5447,6 +5467,7 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     const windows = windowCounter();
     let paneAlive = true;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       // Only the first armed deadline (this test's own, generation 1) is under this test's
@@ -5488,18 +5509,26 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.spawnRoot(root);
-    expect(windows.count).toBe(1);
+    try {
+      await processes.spawnRoot(root);
+      expect(windows.count).toBe(1);
 
-    // The pane dies on its own before the deadline elapses.
-    paneAlive = false;
-    firstGate.resolve();
-    await windows.reached(2);
-    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
-    await processes.drainSpawns();
+      // The pane dies on its own before the deadline elapses.
+      paneAlive = false;
+      firstGate.resolve();
+      await windows.reached(2);
+      // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+      await processes.drainSpawns();
 
-    expect(windows.count).toBe(2);
-    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+      expect(windows.count).toBe(2);
+      expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+      // The `retiring … root architect` line means alive-but-unregistered; a pane that died on
+      // its own still resurrects silently (LEGION-88).
+      const lines = errors.mock.calls.map((call) => String(call[0]));
+      expect(lines.filter((line) => line.includes("root architect (generation"))).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("re-arms the same generation's registration deadline when the resurrection's own re-probe cannot complete, leaving the locator intact, and resurrects normally once it can", async () => {
@@ -5616,6 +5645,8 @@ describe("ProcessManager", () => {
     const windows = windowCounter();
     let paneAlive = true;
     const launchedPids = new Map<string, number>();
+    let errorsAtKill = -1;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
@@ -5653,31 +5684,48 @@ describe("ProcessManager", () => {
           // A real kill-pane actually kills the pane -- the resurrect that follows must see it
           // dead now, exactly as it would against a real tmux server.
           paneAlive = false;
+          errorsAtKill = errors.mock.calls.length;
           return { stdout: "", exitCode: 0 };
         }
         return { stdout: "", exitCode: 0 };
       },
     });
 
-    await processes.spawnRoot(root);
-    expect(windows.count).toBe(1);
+    try {
+      await processes.spawnRoot(root);
+      expect(windows.count).toBe(1);
 
-    // The pane never confirms via `/process/ready` and is still alive when the deadline elapses.
-    firstGate.resolve();
-    await windows.reached(2);
-    // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
-    await processes.drainSpawns();
+      // The pane never confirms via `/process/ready` and is still alive when the deadline elapses.
+      firstGate.resolve();
+      await windows.reached(2);
+      // The resurrection's whole spawn -- locator recorded, tree active, persisted -- is the event.
+      await processes.drainSpawns();
 
-    expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
-      true
-    );
-    expect(windows.count).toBe(2);
-    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
-    // The retirement counts toward `launchFailures` itself -- `spawnRoot`'s own success path no
-    // longer resets it on a mere pane-open, only a confirmed `/process/ready` does
-    // (`confirmRootReady`), so repeated never-confirmed cycles still escalate to
-    // `MAX_LAUNCH_FAILURES` instead of looping forever.
-    expect(managedState.trees[root]?.launchFailures).toBe(1);
+      expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
+        true
+      );
+      expect(windows.count).toBe(2);
+      expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+      // The retirement counts toward `launchFailures` itself -- `spawnRoot`'s own success path no
+      // longer resets it on a mere pane-open, only a confirmed `/process/ready` does
+      // (`confirmRootReady`), so repeated never-confirmed cycles still escalate to
+      // `MAX_LAUNCH_FAILURES` instead of looping forever.
+      expect(managedState.trees[root]?.launchFailures).toBe(1);
+
+      // The retirement of a live-but-unregistered root is announced first, once, naming the
+      // pane, the deadline it missed, and how to attach -- never an environment value (LEGION-88).
+      const lines = errors.mock.calls.map((call) => String(call[0]));
+      const retiring = lines.filter((line) =>
+        line.startsWith(`[legion] retiring ${root}'s root architect (generation 1)`)
+      );
+      expect(retiring).toHaveLength(1);
+      expect(retiring[0]).toContain("pane %1 in window @41");
+      expect(retiring[0]).toContain("360s registration deadline");
+      expect(retiring[0]).toContain("tmux -L legion-omp attach -t legion-omp");
+      expect(lines.indexOf(retiring[0] as string)).toBeLessThan(errorsAtKill);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("a stale root-registration-deadline expiry no-ops once a newer generation has superseded it", async () => {

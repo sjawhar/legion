@@ -40,6 +40,7 @@ import {
   awaitShutdown,
   boundedWait,
   DAEMON_CLI_ENTRYPOINT,
+  describeProcessLocation,
   type Locator,
   locatorHandles,
   type ProbeResult,
@@ -1961,6 +1962,18 @@ export class ProcessManager {
     await this.controllerSpawn;
   }
 
+  /** The one registration budget a freshly-launched controller or root gets to register --
+   * `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, the same budget
+   * a worker's own boot watchdog uses -- read by both arm sites below and by the two retirement
+   * lines that name how long the process was given. */
+  private get registrationDeadlineMs(): number {
+    return (
+      this.deps.config.workerBootTimeoutSeconds *
+      1_000 *
+      this.deps.config.workerBootRegistrationDeadlineIntervals
+    );
+  }
+
   /** Arms a bounded wait for `locator` to be claimed, unless one is already armed (for this or
    * any other locator) -- at most one wait is ever in flight, and only the wait that observed
    * this exact locator may ever act on it (see `retireAndRespawnStuckController`'s doc
@@ -1969,11 +1982,7 @@ export class ProcessManager {
     locator: NonNullable<LegionState["controllerLocator"]>
   ): void {
     if (this.controllerRegistrationWait) return;
-    const deadlineMs =
-      this.deps.config.workerBootTimeoutSeconds *
-      1_000 *
-      this.deps.config.workerBootRegistrationDeadlineIntervals;
-    const { timedOut, cancel } = boundedWait(deadlineMs, this.deps.sleep);
+    const { timedOut, cancel } = boundedWait(this.registrationDeadlineMs, this.deps.sleep);
     this.controllerRegistrationWait = { locator, cancel };
     void timedOut.then(() =>
       this.retireAndRespawnStuckController(locator).catch((error) => {
@@ -2001,11 +2010,7 @@ export class ProcessManager {
    * for the same tree is a newer generation superseding an older, still-unconfirmed one. */
   private armRootRegistrationDeadline(treeKey: IssueKey, generation: number): void {
     this.rootRegistrationWaits.get(treeKey)?.cancel();
-    const deadlineMs =
-      this.deps.config.workerBootTimeoutSeconds *
-      1_000 *
-      this.deps.config.workerBootRegistrationDeadlineIntervals;
-    const { timedOut, cancel } = boundedWait(deadlineMs, this.deps.sleep);
+    const { timedOut, cancel } = boundedWait(this.registrationDeadlineMs, this.deps.sleep);
     this.rootRegistrationWaits.set(treeKey, { generation, cancel });
     void timedOut.then(() =>
       this.retireUnconfirmedRoot(treeKey, generation).catch((error) => {
@@ -2286,7 +2291,9 @@ export class ProcessManager {
    * it. Either a dead process or a retired alive-but-unconfirmed one counts toward `launchFailures`
    * via the shared `escalateOrRetryUnconfirmedRoot` helper, so repeated never-confirmed cycles
    * still escalate to `MAX_LAUNCH_FAILURES` instead of looping forever, exactly like
-   * `spawnRoot`'s own throw-driven escalation.
+   * `spawnRoot`'s own throw-driven escalation. The retirement of an alive process is announced
+   * first -- names only: the tree, the pane and window, the deadline in seconds, the attach
+   * command -- because the cause is on the pane the line points at (LEGION-88).
    */
   private async retireUnconfirmedRoot(treeKey: IssueKey, generation: number): Promise<void> {
     const stillUnconfirmed = (): TreeState | undefined => {
@@ -2320,6 +2327,9 @@ export class ProcessManager {
     const locator = tree.locator;
     if (!locator) return;
     const token = roleToken(this.deps.state.project, treeKey, "architect");
+    console.error(
+      `[legion] retiring ${treeKey}'s root architect (generation ${generation}): alive in ${describeProcessLocation(locator)} but it never reached ready within its ${this.registrationDeadlineMs / 1_000}s registration deadline; stopping it, counting a launch failure, and resurrecting it — if that one stalls the same way, attach and read its pane before the deadline`
+    );
     try {
       await this.stopProcessSerialized(token, locator, this.workerStopTimeoutMs);
     } catch (error) {
@@ -2351,7 +2361,9 @@ export class ProcessManager {
    * locator exactly as it was -- clearing it and spawning a second controller over a process that
    * never actually stopped would orphan that process with nothing tracking it; a later
    * `ensureController` call re-observes this same stuck locator and re-arms a fresh wait for it
-   * instead.
+   * instead. The retirement of an alive process is announced first -- names only: the pane and
+   * window, the deadline in seconds, the attach command -- because the cause is on the pane the
+   * line points at (LEGION-88).
    */
   private async retireAndRespawnStuckController(
     locator: NonNullable<LegionState["controllerLocator"]>
@@ -2364,6 +2376,9 @@ export class ProcessManager {
     if (this.deps.state.roles[token]) return;
     if (!stillAlive) return;
     if (this.deps.state.controllerLocator !== locator) return;
+    console.error(
+      `[legion] retiring the controller: alive in ${describeProcessLocation(locator)} but it never claimed its role within its ${this.registrationDeadlineMs / 1_000}s registration deadline; stopping it and launching a fresh one — if that one stalls the same way, attach and read its pane before the deadline`
+    );
     try {
       await this.stopProcess(token, locator, this.workerStopTimeoutMs);
     } catch (error) {

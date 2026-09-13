@@ -139,6 +139,21 @@ export function locatorHandles(locator: Locator): readonly string[] {
   return [locator.podName];
 }
 
+/** Where a process lives, for a daemon log line an operator will follow to the process itself --
+ * shared by both sides of the runtime boundary like `locatorHandles`, so `ProcessManager` never
+ * reads a runtime-specific locator field to say it. tmux: the pane (omitted when the locator
+ * predates pane ids -- never the text `pane undefined`), its window, the private server, and the
+ * attach command (`tmuxSession` is the socket name, `legion-<project>`). kubernetes: the pod and
+ * its namespace. Names only, never an environment value (LEGION-88). */
+export function describeProcessLocation(locator: Locator): string {
+  if (locator.runtime === "tmux") {
+    const pane = locator.tmuxPaneId === undefined ? "" : `pane ${locator.tmuxPaneId} in `;
+    const server = locator.tmuxSession;
+    return `${pane}window ${locator.tmuxWindowId} of tmux server ${server} (attach with \`tmux -L ${server} attach -t ${server}\`)`;
+  }
+  return `pod ${locator.podName} in namespace ${locator.namespace}`;
+}
+
 /** A bounded wait whose underlying timer is cancellable, so a graceful stop that resolves quickly
  * doesn't leave a stray one running for the rest of `ms`. A test-injected `sleep` has no real
  * timer behind it to cancel. */
