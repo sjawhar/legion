@@ -98,6 +98,26 @@ export interface PrState {
   ciReconciled: boolean;
   fixAttempts: number;
   reviewDecision?: "approved" | "changes_requested";
+  /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
+   * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
+   * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
+   * deletes it; the next `resetPrHead` sets or deletes it afresh. Never written as `false` —
+   * literal `true` keeps one representation of "not counted" (absent), mirroring
+   * `reviewDecision`'s set/delete handling. */
+  headCounted?: true;
+  /** The latest push webhook's classification for a head that has not arrived yet (push `after`
+   * !== `headSha`). A later push for another not-yet-arrived sha overwrites it (latest push wins,
+   * one slot). `resetPrHead` consumes (deletes) it when a head with that exact sha arrives — from
+   * the synchronize webhook or from resync's GitHub read alike. A push for the CURRENT head never
+   * touches this slot (it only takes back). Keyed by sha, so a stale slot can only ever describe
+   * the commit it names. */
+  pendingPush?: { sha: string; handoffOnly: boolean };
+  /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
+   * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
+   * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
+   * `fixAttempts` equals `blockedAttempts` deletes it (a pr-blocked published for that count is
+   * forgotten). */
+  blockedAttempts?: number;
 }
 
 export interface WorkerRoleClaim {
@@ -150,7 +170,7 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 24;
+  version: 25;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -276,6 +296,12 @@ const PrStateSchema = z
     ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
+    headCounted: z.literal(true).optional(),
+    pendingPush: z
+      .object({ sha: z.string().min(1), handoffOnly: z.boolean() })
+      .strict()
+      .optional(),
+    blockedAttempts: z.number().int().nonnegative().optional(),
   })
   .strict();
 const WorkerRoleClaimSchema = z
@@ -340,7 +366,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(24),
+    version: z.literal(25),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -400,7 +426,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 24,
+    version: 25,
     project,
     issues: {},
     trees: {},
@@ -862,6 +888,16 @@ function migrateV23State(state: unknown): unknown {
   };
 }
 
+/** v24 -> v25: PrState gains the optional push-classification fields `headCounted`,
+ * `pendingPush`, `blockedAttempts` (LEGION-33); a pure version bump — every existing record
+ * validates with them absent, and absent is the correct starting value: no counted head with a
+ * take-back pending, no push pending, no pr-blocked recorded (a red PR already past the limit
+ * publishes pr-blocked once more on its next red settlement, then stops). */
+function migrateV24State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 24) return state;
+  return { ...state, version: 25 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -899,13 +935,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV21State,
     migrateV22State,
     migrateV23State,
+    migrateV24State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 24) {
+  if (version !== 25) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

@@ -104,9 +104,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v24 state with a valid project and admission capacity", () => {
+  it("initializes empty v25 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 24,
+      version: 25,
       project: "omp",
       issues: {},
       trees: {},
@@ -474,7 +474,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, and v24", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, v24, and v25", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -488,7 +488,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -577,7 +577,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v24), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v25), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -606,7 +606,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -662,7 +662,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(24);
+      expect(migrated.version).toBe(25);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -730,7 +730,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(24);
+      expect(migrated.version).toBe(25);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -798,7 +798,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(24);
+    expect(migrated.version).toBe(25);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
@@ -865,12 +865,52 @@ describe("legion state", () => {
     }
   });
 
-  it("rejects a v24 locator that carries no runtime discriminant", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-untagged-"));
+  it("migrates v24 state to v25 as a pure version bump, leaving PR records untouched", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-"));
     const file = path.join(tempDir, "state.json");
-    const v24State = JSON.parse(JSON.stringify(stateWithTree()));
-    delete v24State.trees[issue].locator.runtime;
-    await writeFile(file, JSON.stringify(v24State), "utf8");
+    const current = stateWithTree();
+    const raw = JSON.stringify({ ...current, version: 24 });
+    await writeFile(file, raw, "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated).toEqual(current);
+    expect(migrated.version).toBe(25);
+    expect(Object.keys(migrated.prs[prKey] ?? {})).toEqual(Object.keys(current.prs[prKey] ?? {}));
+    expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
+  });
+
+  it("round-trips a PR carrying headCounted, pendingPush, and blockedAttempts", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-push-fields-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const pr = current.prs[prKey];
+    if (!pr) throw new Error("fixture PR missing");
+    pr.headCounted = true;
+    pr.pendingPush = { sha: "def456", handoffOnly: true };
+    pr.blockedAttempts = 3;
+
+    await saveState(file, current);
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("rejects headCounted: false", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-head-counted-false-"));
+    const file = path.join(tempDir, "state.json");
+    const state = JSON.parse(JSON.stringify(stateWithTree()));
+    state.prs[prKey].headCounted = false;
+    await writeFile(file, JSON.stringify(state), "utf8");
+
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+  });
+
+  it("rejects a v25 locator that carries no runtime discriminant", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-untagged-"));
+    const file = path.join(tempDir, "state.json");
+    const v25State = JSON.parse(JSON.stringify(stateWithTree()));
+    delete v25State.trees[issue].locator.runtime;
+    await writeFile(file, JSON.stringify(v25State), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
