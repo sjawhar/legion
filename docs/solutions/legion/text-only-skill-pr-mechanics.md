@@ -110,8 +110,10 @@ and change every hit in the same commit; the tester's greps for the new phrase e
   before writing an agent name.
 - A "not yet runnable until PR X merges" caveat needs a removal step tied to PR X. Three skills kept
   theirs for weeks after #873/#923 landed.
-- The worker skill's PR-body template names the `Tests` workflow run and its jobs (lint, pr-title,
-  typecheck, test); fill the `CI:` line verbatim from `gh run view <run-id> --json jobs,headSha,conclusion`.
+- The worker skill's PR-body template names the `Tests` workflow run and its jobs (lint, typecheck,
+  test) and the `PR Title` workflow run and its job (pr-title) — two runs since LEGION-90 moved the
+  title check out of Tests; fill the `CI:` line verbatim from
+  `gh run view <run-id> --json jobs,headSha,conclusion` for each.
   A template line that names a check or job no workflow here defines is fixed in the template
   (LEGION-38, #1008), never explained away in the PR body or recorded here as a workaround.
 
