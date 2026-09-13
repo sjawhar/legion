@@ -15,6 +15,7 @@ export interface TabDefinition<Id extends string> {
 export function Tabs<Id extends string>({
   activeTab,
   ariaLabel,
+  compact = false,
   idPrefix,
   onBeforeTabChange,
   onSelect,
@@ -22,6 +23,7 @@ export function Tabs<Id extends string>({
 }: {
   activeTab: Id;
   ariaLabel: string;
+  compact?: boolean;
   idPrefix: string;
   onBeforeTabChange?: (current: Id) => void;
   onSelect: (tab: Id) => void;
@@ -61,10 +63,13 @@ export function Tabs<Id extends string>({
     tabRefs.current[next.id]?.focus();
   };
 
+  const tabMinHeight = compact ? "min-h-11 md:min-h-9" : "min-h-11";
+  const tabPadding = compact ? "px-3 md:px-2" : "px-3";
+
   return (
     <div
       aria-label={ariaLabel}
-      className={`mb-3 flex gap-1 border-b ${borderDefault}`}
+      className={`${compact ? "mb-0" : "mb-3"} flex gap-1 border-b ${borderDefault}`}
       role="tablist"
     >
       {tabs.map((tab) => (
@@ -73,8 +78,8 @@ export function Tabs<Id extends string>({
           aria-selected={activeTab === tab.id}
           className={
             activeTab === tab.id
-              ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-              : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnCanvas}`
+              ? `${tabMinHeight} ${tabPadding} border-b-2 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+              : `${tabMinHeight} ${tabPadding} py-2 text-sm ${textSecondaryOnCanvas}`
           }
           id={`${idPrefix}-${tab.id}-tab`}
           key={tab.id}

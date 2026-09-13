@@ -2,7 +2,14 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { InboxRow } from "../../api/types";
-import { linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
+import {
+  linkHoverText,
+  linkText,
+  surfaceMutedStrongBg,
+  textMutedOnCanvas,
+  textSecondaryHoverToPrimary,
+  textSecondaryOnSurface,
+} from "../../theme/classes";
 import { formatAskAge } from "./ask-age";
 
 /** Open asks whose latest reply is not a human's are waiting for the viewer. */
@@ -10,9 +17,29 @@ export function waitingOnYou<T extends Pick<InboxRow, "last_reply">>(asks: reado
   return asks.filter((ask) => ask.last_reply?.author.kind !== "user");
 }
 
-export function BlockedOnYou({ asks }: { asks: readonly InboxRow[] }): ReactNode {
+export function BlockedOnYou({
+  asks,
+  className,
+  variant = "banner",
+}: {
+  asks: readonly InboxRow[];
+  className?: string;
+  variant?: "banner" | "pill";
+}): ReactNode {
   const waiting = waitingOnYou(asks);
   if (waiting.length === 0) return null;
+
+  if (variant === "pill") {
+    return (
+      <Link
+        className={`${className ?? ""} inline-flex min-h-11 items-center rounded-full px-3 text-xs font-medium md:min-h-9 md:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary}`}
+        to="/"
+      >
+        Blocked on you · {waiting.length}
+      </Link>
+    );
+  }
+
   const oldest = waiting.reduce((earlier, ask) => {
     const earlierAt = Date.parse(earlier.created_at);
     const askAt = Date.parse(ask.created_at);

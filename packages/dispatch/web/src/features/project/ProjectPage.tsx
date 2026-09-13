@@ -9,13 +9,13 @@ import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
   borderDefault,
   dangerText,
-  linkHoverText,
-  linkText,
   surfaceMutedBg,
   surfaceMutedStrongBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textSecondaryHoverToPrimary,
   textSecondaryOnCanvas,
+  textSecondaryOnSurface,
 } from "../../theme/classes";
 import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
@@ -103,62 +103,77 @@ export function ProjectPage(): ReactNode {
 
   return (
     <section>
-      <BlockedOnYou asks={inbox.data ?? []} />
-      <header className="mb-6">
+      <header className="flex flex-wrap items-center gap-3 md:min-h-12 md:flex-nowrap">
+        <h1
+          className={`order-1 min-w-0 flex-1 truncate text-lg font-semibold md:flex-none ${textPrimaryOnCanvas}`}
+        >
+          {project.name}
+        </h1>
         <Link
-          className={`text-sm font-semibold ${linkText} ${linkHoverText}`}
+          className={`order-2 inline-flex min-h-11 shrink-0 items-center rounded-full px-3 text-xs font-semibold md:min-h-9 md:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary}`}
           to={buildProjectPath({ kind: "project", project: route.project })}
         >
           {route.project}
         </Link>
-        <h1 className={`mt-2 text-2xl font-semibold ${textPrimaryOnCanvas}`}>{project.name}</h1>
+        <BlockedOnYou
+          asks={inbox.data ?? []}
+          className="order-3 shrink-0 md:order-5"
+          variant="pill"
+        />
+        <div aria-hidden className="order-4 basis-full md:hidden" />
+        <div className="order-5 shrink-0 md:order-3">
+          <Tabs
+            activeTab={activeTab}
+            ariaLabel="Project"
+            compact
+            idPrefix="project"
+            onSelect={selectTab}
+            tabs={tabs}
+          />
+        </div>
+        {activeTab === "issues" ? (
+          <fieldset
+            className={`order-6 inline-flex shrink-0 rounded-xl border p-1 md:order-4 md:ml-auto ${borderDefault}`}
+          >
+            <legend className="sr-only">Issue view</legend>
+            {(["list", "board"] as const).map((view) => (
+              <button
+                aria-pressed={issueView === view}
+                className={`min-h-11 rounded-lg px-3 text-sm font-medium md:min-h-9 md:px-2 ${
+                  issueView === view ? surfaceMutedStrongBg : surfaceMutedBg
+                } ${textSecondaryOnCanvas}`}
+                key={view}
+                onClick={() => {
+                  setIssueView(view);
+                  if (login !== undefined) {
+                    window.localStorage.setItem(
+                      userPreferenceStorageKey(login, "project.issue-view"),
+                      view
+                    );
+                  }
+                }}
+                type="button"
+              >
+                {view === "list" ? "List" : "Board"}
+              </button>
+            ))}
+          </fieldset>
+        ) : null}
       </header>
-      <Tabs
-        activeTab={activeTab}
-        ariaLabel="Project"
-        idPrefix="project"
-        onSelect={selectTab}
-        tabs={tabs}
-      />
       <div
         aria-hidden={activeTab !== "issues"}
         aria-labelledby="project-issues-tab"
+        className="mt-3"
         hidden={activeTab !== "issues"}
         id="project-issues-panel"
         role="tabpanel"
       >
         {activeTab === "issues" ? (
-          <>
-            <fieldset className={`mb-4 inline-flex rounded-xl border p-1 ${borderDefault}`}>
-              <legend className="sr-only">Issue view</legend>
-              {(["list", "board"] as const).map((view) => (
-                <button
-                  aria-pressed={issueView === view}
-                  className={`min-h-11 rounded-lg px-3 text-sm font-medium ${
-                    issueView === view ? surfaceMutedStrongBg : surfaceMutedBg
-                  } ${textSecondaryOnCanvas}`}
-                  key={view}
-                  onClick={() => {
-                    setIssueView(view);
-                    if (login !== undefined) {
-                      window.localStorage.setItem(
-                        userPreferenceStorageKey(login, "project.issue-view"),
-                        view
-                      );
-                    }
-                  }}
-                  type="button"
-                >
-                  {view === "list" ? "List" : "Board"}
-                </button>
-              ))}
-            </fieldset>
-            {issueView === "list" ? (
-              <IssueList project={route.project} />
-            ) : (
-              <IssueBoard project={route.project} />
-            )}
-          </>
+          issueView === "list" ? (
+            <IssueList project={route.project} />
+          ) : (
+            <IssueBoard project={route.project} />
+          )
         ) : null}
       </div>
       <div
