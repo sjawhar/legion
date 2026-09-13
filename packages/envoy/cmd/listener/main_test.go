@@ -2099,6 +2099,47 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	}
 }
 
+func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "forward-publish-error"
+	if err := harness.sessions.Put("ses_unreachable", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_unreachable", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var forwards atomic.Int32
+	cfg := harness.config
+	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		forwards.Add(1)
+		return errors.New("nats: connection closed")
+	}
+	handler := coreNATSDeliveryHandler(cfg)
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-publish-error")
+	item.Payload = `{"type":"worker-queued"}`
+	data := marshalListenerEnvelope(t, item)
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+	handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+
+	if got := forwards.Load(); got != 2 {
+		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear the attempt cache", got)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
+		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
+	}
+}
+
 func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
 	cases := []struct {
 		name  string
