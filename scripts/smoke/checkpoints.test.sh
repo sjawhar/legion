@@ -520,31 +520,37 @@ printf 'PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingre
 # first prove that feed is alive and stop with exit 1 (a rig fault, not a human-controlled gate)
 # when it is not -- before any Dispatch request. With a live, READY relay they run exactly as
 # under envoy; 5-7 and 9-11 stay blocked with the GitHub-ingress reason; 8 and 13 stay ungated.
+# `run_checkpoint` above supplies the rig environment; extra variables ride in front of it.
+expect_status() {
+  [[ "$1" == "$2" ]] || {
+    printf 'expected exit %s, got %s; output:\n%s\n' "$2" "$1" "$(<"$output_file")" >&2
+    exit 1
+  }
+}
+expect_no_output() {
+  [[ "$(<"$output_file")" != *"$1"* ]] || {
+    printf 'expected output not to contain: %s\n' "$1" >&2
+    cat "$output_file" >&2
+    exit 1
+  }
+}
+expect_no_dispatch_request() {
+  [[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+    printf '%s\n' "$1" >&2
+    exit 1
+  }
+}
 printf 'isolated\n' >"${smoke_dir}/webhook-mode"
 rm -f "${smoke_dir}/issue-relay.pid" "${smoke_dir}/issue-relay.start" "${smoke_dir}/issue-relay.log"
 curl_calls_before="$(wc -l <"$curl_log")"
 for relay_checkpoint in 1 12; do
-  if PATH="${fake_bin}:${PATH}" \
-    SMOKE_DIR="$smoke_dir" \
-    SMOKE_REPO="example-org/legion-smoke" \
-    SMOKE_PROJECT="example-org/24" \
-    DISPATCH_URL="http://dispatch.test" \
-    DISPATCH_TOKEN="test-dispatch-token" \
-    env -u SMOKE_QUEUED_ISSUE bash "$checkpoints_script" "$relay_checkpoint" >"$output_file" 2>&1; then
-    printf 'expected checkpoint %s under isolated to fail without a live relay\n' "$relay_checkpoint" >&2
-    exit 1
-  else
-    status=$?
-  fi
-  [[ "$status" == 1 && "$(<"$output_file")" == *"CHECKPOINT ${relay_checkpoint} FAILED: isolated relay is not running (no live process recorded at ${smoke_dir}/issue-relay.pid): the Dispatch issue-event feed for LEGSMOKE-1 is missing"*"inspect ${smoke_dir}/issue-relay.log"* && "$(<"$output_file")" != *'SKIPPED-BLOCKED'* ]] || {
-    printf 'expected exit 1 naming the missing relay for checkpoint %s; got %s:\n%s\n' "$relay_checkpoint" "$status" "$(<"$output_file")" >&2
-    exit 1
-  }
+  (unset SMOKE_QUEUED_ISSUE; run_checkpoint "$relay_checkpoint") && { printf 'checkpoint %s passed under isolated without a live relay\n' "$relay_checkpoint" >&2; exit 1; }
+  expect_status "$?" 1
+  expect_output "CHECKPOINT ${relay_checkpoint} FAILED: isolated relay is not running (no live process recorded at ${smoke_dir}/issue-relay.pid): the Dispatch issue-event feed for LEGSMOKE-1 is missing"
+  expect_output "inspect ${smoke_dir}/issue-relay.log"
+  expect_no_output 'SKIPPED-BLOCKED'
 done
-[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
-  printf 'expected a dead-relay stop to make no Dispatch request\n' >&2
-  exit 1
-}
+expect_no_dispatch_request 'expected a dead-relay stop to make no Dispatch request'
 printf 'PASS: isolated mode fails checkpoints 1 and 12 with exit 1 naming issue-relay.pid when no live relay is recorded\n'
 
 # A planted live relay: a real long-lived process with a start-time-validated pid record, the
@@ -556,159 +562,59 @@ printf '%s\n' "$relay_pid" >"${smoke_dir}/issue-relay.pid"
 awk '{print $22}' "/proc/${relay_pid}/stat" >"${smoke_dir}/issue-relay.start"
 printf 'RELAY READY root=LEGSMOKE-1 project=LEGSMOKE dispatch=http://dispatch.test downstream=nats://127.0.0.1:14222\nRELAYED subject=notifications.dispatch.issue.LEGSMOKE-1.issue.created event=dispatch-100 seq=1 stream_seq=1 duplicate=false\nRELAY TRACKING LEGSMOKE-2 parent=LEGSMOKE-1\n' >"${smoke_dir}/issue-relay.log"
 for ok_checkpoint in 1 2 3 4; do
-  PATH="${fake_bin}:${PATH}" \
-    SMOKE_DIR="$smoke_dir" \
-    SMOKE_REPO="example-org/legion-smoke" \
-    SMOKE_PROJECT="example-org/24" \
-    DISPATCH_URL="http://dispatch.test" \
-    DISPATCH_TOKEN="test-dispatch-token" \
-    bash "$checkpoints_script" "$ok_checkpoint" >"$output_file" 2>&1
-  [[ "$(<"$output_file")" == *"CHECKPOINT ${ok_checkpoint} OK"* ]] || {
-    printf 'expected checkpoint %s to pass under isolated with a live READY relay; got:\n%s\n' "$ok_checkpoint" "$(<"$output_file")" >&2
-    exit 1
-  }
+  run_checkpoint "$ok_checkpoint"
+  expect_output "CHECKPOINT ${ok_checkpoint} OK"
 done
 # Checkpoint 12 passes the mode gate and reaches its own assertion: against the shared fixture
 # (root still active) it fails on that assertion, and against a state whose root released its
 # slot to the queued issue it prints OK.
-if PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  SMOKE_QUEUED_ISSUE="LEGSMOKE-2" \
-  bash "$checkpoints_script" 12 >"$output_file" 2>&1; then
-  printf 'expected checkpoint 12 to reach its own assertion and fail against the still-active root\n' >&2
-  exit 1
-else
-  status=$?
-fi
-[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 12 FAILED: closed tree is still active or queued issue was not promoted'* ]] || {
-  printf 'expected checkpoint 12 under isolated to fail on its own assertion, not the mode gate; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
-  exit 1
-}
-cp "${smoke_dir}/daemon/state.json" "${temporary_dir}/state.shared.json"
-jq '.admission.active = ["LEGSMOKE-2"] | .trees["LEGSMOKE-1"].status = "closed"' "${temporary_dir}/state.shared.json" >"${smoke_dir}/daemon/state.json"
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  SMOKE_QUEUED_ISSUE="LEGSMOKE-2" \
-  bash "$checkpoints_script" 12 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 12 OK: LEGSMOKE-1 released its admission slot and LEGSMOKE-2 was promoted'* ]] || {
-  printf 'expected checkpoint 12 to pass under isolated once the root released its slot; got:\n%s\n' "$(<"$output_file")" >&2
-  exit 1
-}
-cp "${temporary_dir}/state.shared.json" "${smoke_dir}/daemon/state.json"
+SMOKE_QUEUED_ISSUE="LEGSMOKE-2" run_checkpoint 12 && { printf 'checkpoint 12 passed against the still-active root\n' >&2; exit 1; }
+expect_status "$?" 1
+expect_output 'CHECKPOINT 12 FAILED: closed tree is still active or queued issue was not promoted'
+jq -c '.admission.active = ["LEGSMOKE-2"] | .trees["LEGSMOKE-1"].status = "closed"' \
+  "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+SMOKE_QUEUED_ISSUE="LEGSMOKE-2" run_checkpoint 12
+expect_output 'CHECKPOINT 12 OK: LEGSMOKE-1 released its admission slot and LEGSMOKE-2 was promoted'
+write_state '{}'
 printf 'PASS: isolated mode with a live READY relay runs checkpoints 1-4 to OK and lets checkpoint 12 reach its own assertion and pass\n'
 
 # The same live relay whose newest RELAY line is a retry: Dispatch is unreachable, so the feed is
 # stalled and the checkpoint stops naming it instead of reading state that cannot be current.
-printf 'RELAY RETRY attempt=3 next=4000ms: GET /api/v1/issues/LEGSMOKE-1/events?after=1&limit=200 answered HTTP 502\n' >>"${smoke_dir}/issue-relay.log"
+printf 'RELAY RETRY attempt=3 next=4000ms: GET /api/v1/issues?project=LEGSMOKE&updated_since=2026-09-13T10%%3A00%%3A00.100Z answered HTTP 502\n' >>"${smoke_dir}/issue-relay.log"
 curl_calls_before="$(wc -l <"$curl_log")"
-if PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
-  printf 'expected checkpoint 1 to fail while the relay is retrying Dispatch\n' >&2
-  exit 1
-else
-  status=$?
-fi
-[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 1 FAILED: isolated relay cannot reach Dispatch (RELAY RETRY attempt=3 next=4000ms: '*'); the feed for LEGSMOKE-1 is stalled'* ]] || {
-  printf 'expected the stalled-feed failure naming the retry line; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
-  exit 1
-}
-[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
-  printf 'expected a stalled-relay stop to make no Dispatch request\n' >&2
-  exit 1
-}
+run_checkpoint 1 && { printf 'checkpoint 1 passed while the relay is retrying Dispatch\n' >&2; exit 1; }
+expect_status "$?" 1
+expect_output 'CHECKPOINT 1 FAILED: isolated relay cannot reach Dispatch (RELAY RETRY attempt=3 next=4000ms: '
+expect_output '); the feed for LEGSMOKE-1 is stalled'
+expect_no_dispatch_request 'expected a stalled-relay stop to make no Dispatch request'
 # A recovery line after the retry clears the stall, and RELAYED lines never count as RELAY status.
 printf 'RELAY RECOVERED after 3 attempts\nRELAYED subject=notifications.dispatch.issue.LEGSMOKE-1.issue.updated event=dispatch-101 seq=2 stream_seq=2 duplicate=false\n' >>"${smoke_dir}/issue-relay.log"
-PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 1 >"$output_file" 2>&1
-[[ "$(<"$output_file")" == *'CHECKPOINT 1 OK'* ]] || {
-  printf 'expected checkpoint 1 to pass again once the relay logged RELAY RECOVERED; got:\n%s\n' "$(<"$output_file")" >&2
-  exit 1
-}
+run_checkpoint 1
+expect_output 'CHECKPOINT 1 OK'
 # A live relay that never reached READY is not a feed yet.
 printf 'RELAY RETRY attempt=1 next=1000ms: connect ECONNREFUSED\n' >"${smoke_dir}/issue-relay.log"
-if PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  DISPATCH_URL="http://dispatch.test" \
-  DISPATCH_TOKEN="test-dispatch-token" \
-  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
-  printf 'expected checkpoint 1 to fail while the relay has never reported READY\n' >&2
-  exit 1
-else
-  status=$?
-fi
-[[ "$status" == 1 && "$(<"$output_file")" == *"CHECKPOINT 1 FAILED: isolated relay has not reported RELAY READY; inspect ${smoke_dir}/issue-relay.log"* ]] || {
-  printf 'expected the not-yet-READY failure; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
-  exit 1
-}
+run_checkpoint 1 && { printf 'checkpoint 1 passed while the relay has never reported READY\n' >&2; exit 1; }
+expect_status "$?" 1
+expect_output "CHECKPOINT 1 FAILED: isolated relay has not reported RELAY READY; inspect ${smoke_dir}/issue-relay.log"
 printf 'PASS: isolated mode stops checkpoint 1 with exit 1 while the relay is retrying Dispatch or has never reported READY, and passes again after RELAY RECOVERED\n'
 
 # GitHub-fed checkpoints under isolated: blocked with the GitHub-ingress reason naming isolated,
 # no Dispatch request; 8 reaches its branch-protection gate; 13 runs ungated.
 curl_calls_before="$(wc -l <"$curl_log")"
 for blocked_checkpoint in 5 6 7 9 10 11; do
-  if PATH="${fake_bin}:${PATH}" \
-    SMOKE_DIR="$smoke_dir" \
-    SMOKE_REPO="example-org/legion-smoke" \
-    SMOKE_PROJECT="example-org/24" \
-    bash "$checkpoints_script" "$blocked_checkpoint" >"$output_file" 2>&1; then
-    printf 'expected isolated mode to block checkpoint %s\n' "$blocked_checkpoint" >&2
-    exit 1
-  else
-    status=$?
-  fi
-  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=isolated: "*'requires live GitHub webhook ingress'*'use SMOKE_WEBHOOK_MODE=envoy or forward'* ]] || {
-    printf 'expected exit 3 and the GitHub-ingress reason naming isolated for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
-    exit 1
-  }
+  run_checkpoint "$blocked_checkpoint" && { printf 'isolated mode let checkpoint %s past the GitHub-ingress gate\n' "$blocked_checkpoint" >&2; exit 1; }
+  expect_status "$?" 3
+  expect_output "CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=isolated: "
+  expect_output 'requires live GitHub webhook ingress'
+  expect_output 'use SMOKE_WEBHOOK_MODE=envoy or forward'
 done
-[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
-  printf 'expected an isolated-blocked checkpoint to make no Dispatch request\n' >&2
-  exit 1
-}
-if PATH="${fake_bin}:${PATH}" \
-  SMOKE_DIR="$smoke_dir" \
-  SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" \
-  env -u SMOKE_BRANCH_PROTECTION bash "$checkpoints_script" 8 >"$output_file" 2>&1; then
-  printf 'expected checkpoint 8 under isolated to be blocked by its branch-protection gate\n' >&2
-  exit 1
-else
-  status=$?
-fi
-[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 8 SKIPPED-BLOCKED: SMOKE_BRANCH_PROTECTION=1 requires branch protection/ruleset availability'* && "$(<"$output_file")" != *'ingress'* ]] || {
-  printf 'expected checkpoint 8 under isolated to report only its branch-protection reason; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
-  exit 1
-}
-if ! PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
-  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$clean_pid" \
-  env -u DISPATCH_TOKEN bash "$checkpoints_script" 13 >"$output_file" 2>&1; then
-  cat "$output_file" >&2
-  exit 1
-fi
-[[ "$(<"$output_file")" == *'CHECKPOINT 13 OK'* ]] || {
-  cat "$output_file" >&2
-  exit 1
-}
+expect_no_dispatch_request 'expected an isolated-blocked checkpoint to make no Dispatch request'
+(unset SMOKE_BRANCH_PROTECTION; run_checkpoint 8) && { printf 'checkpoint 8 under isolated passed its branch-protection gate unarmed\n' >&2; exit 1; }
+expect_status "$?" 3
+expect_output 'CHECKPOINT 8 SKIPPED-BLOCKED: SMOKE_BRANCH_PROTECTION=1 requires branch protection/ruleset availability'
+expect_no_output 'ingress'
+FAKE_TMUX_PID="$clean_pid" run_checkpoint 13
+expect_output 'CHECKPOINT 13 OK'
 kill "$relay_pid" 2>/dev/null || true
 wait "$relay_pid" 2>/dev/null || true
 relay_pid=""

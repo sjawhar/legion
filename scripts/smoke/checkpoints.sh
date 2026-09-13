@@ -18,6 +18,8 @@ require_env() {
 
 # shellcheck source=scripts/smoke/dispatch-config.sh
 source "$(dirname "${BASH_SOURCE[0]}")/dispatch-config.sh"
+# shellcheck source=scripts/smoke/pid-record.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pid-record.sh"
 
 # The daemon's own persisted LegionState -- `GET /legion/v1/state` only ever returns `{project}`
 # (see LegionDaemonApi.State.response and its handler), so the tree/role/gate/admission fields
@@ -113,24 +115,15 @@ dispatch_ingress_block_reason() {
 # The isolated relay is the rig's only Dispatch feed, so a checkpoint that reads daemon state
 # first proves the feed is alive: a dead or stalled relay makes "the daemon never saw the root"
 # a rig fault to fix (exit 1), never a false FAILED against the daemon or a human-controlled gate.
-relay_is_live() {
-  local pid_file="${smoke_dir}/issue-relay.pid"
-  local start_file="${smoke_dir}/issue-relay.start"
-  local pid
-
-  [[ -r "$pid_file" && -r "$start_file" ]] || return 1
-  pid="$(<"$pid_file")"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
-  [[ "$(awk '{print $22}' "/proc/${pid}/stat")" == "$(<"$start_file")" ]]
-}
-
+# Liveness is up.sh's own record check (pid-record.sh), so the three scripts agree on what a
+# recorded rig process is.
 require_isolated_relay() {
   local root
   local log_file="${smoke_dir}/issue-relay.log"
   local last_relay_line
 
   root="$(dispatch_root_key)"
-  relay_is_live ||
+  pid_is_live "${smoke_dir}/issue-relay.pid" ||
     fail "isolated relay is not running (no live process recorded at ${smoke_dir}/issue-relay.pid): the Dispatch issue-event feed for ${root} is missing, so daemon state cannot reflect it; rerun up.sh and inspect ${log_file}"
   { [[ -r "$log_file" ]] && grep -Fq 'RELAY READY ' "$log_file"; } ||
     fail "isolated relay has not reported RELAY READY; inspect ${log_file}"

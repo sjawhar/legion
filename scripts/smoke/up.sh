@@ -27,6 +27,8 @@ fail() {
 
 # shellcheck source=scripts/smoke/dispatch-config.sh
 source "$(dirname "${BASH_SOURCE[0]}")/dispatch-config.sh"
+# shellcheck source=scripts/smoke/pid-record.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pid-record.sh"
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
@@ -173,32 +175,12 @@ require_numeric() {
   [[ "${!1:-}" =~ ^[0-9]+$ ]] || fail "$1 must be numeric"
 }
 
-process_start_time() {
-  local pid="$1"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
-  awk '{print $22}' "/proc/${pid}/stat"
-}
 process_group_id() {
   local pid="$1"
   [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
   awk '{print $5}' "/proc/${pid}/stat"
 }
 
-
-pid_is_live() {
-  local pid_file="$1"
-  local start_file="${pid_file%.pid}.start"
-  local pid
-  local expected_start
-  local actual_start
-
-  [[ -r "$pid_file" && -r "$start_file" ]] || return 1
-  pid="$(<"$pid_file")"
-  expected_start="$(<"$start_file")"
-  kill -0 "$pid" 2>/dev/null || return 1
-  actual_start="$(process_start_time "$pid")" || return 1
-  [[ "$actual_start" == "$expected_start" ]]
-}
 assert_port_free() {
   local name="$1"
   local port="$2"

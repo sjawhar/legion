@@ -18,12 +18,13 @@ main_output_file="$(mktemp)"
 trap 'rm -f "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file" "$order_log" "$actor_body_file" "$main_output_file"; rm -rf "$fake_bin" "$source_dir"' EXIT
 export SMOKE_DIR="${fake_bin}/smoke"
 
-# up.sh sources dispatch-config.sh from its own directory (by BASH_SOURCE), so the stripped copy
-# needs that file beside it; the copy is what the harness sources, exactly as before. The copy
-# resolves repo_root from its own mktemp location, so it is pinned to this harness's project
-# root: main() must build and launch from the checkout whatever the cwd.
+# up.sh sources dispatch-config.sh and pid-record.sh from its own directory (by BASH_SOURCE), so
+# the stripped copy needs both files beside it; the copy is what the harness sources, exactly as
+# before. The copy resolves repo_root from its own mktemp location, so it is pinned to this
+# harness's project root: main() must build and launch from the checkout whatever the cwd.
 sed -e '$d' -e "s|^repo_root=.*|repo_root=\"${project_root}\"|" "$up_script" >"${source_dir}/up.sh"
 cp "${project_root}/scripts/smoke/dispatch-config.sh" "${source_dir}/dispatch-config.sh"
+cp "${project_root}/scripts/smoke/pid-record.sh" "${source_dir}/pid-record.sh"
 grep -Fxq "repo_root=\"${project_root}\"" "${source_dir}/up.sh" || {
   printf 'fixture error: repo_root was not pinned in the sourced copy\n' >&2
   exit 1
@@ -998,9 +999,9 @@ for expected_line in \
     exit 1
   }
 done
-# up.sh builds the command from its own repo_root (which, sourced from a temp copy, is not this
-# harness's project_root), exactly as the envoy-bridge command is built.
-[[ "$(tail -n 1 "$relay_argv")" == "${repo_root}/scripts/smoke/issue-relay.ts" && "$(tail -n 3 "$relay_argv" | head -n 1)" == "bun" ]] || {
+# The command names the relay under repo_root (pinned to this harness's project root above),
+# exactly as the envoy-bridge command is built.
+[[ "$(tail -n 1 "$relay_argv")" == "${project_root}/scripts/smoke/issue-relay.ts" && "$(tail -n 3 "$relay_argv" | head -n 1)" == "bun" ]] || {
   printf 'expected the relay command to end with bun run .../scripts/smoke/issue-relay.ts; argv:\n%s\n' "$(<"$relay_argv")" >&2
   exit 1
 }

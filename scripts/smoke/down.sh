@@ -12,6 +12,9 @@ readonly rig_config="${smoke_dir}/legion.yaml"
 readonly nats_record="${smoke_dir}/nats-container"
 readonly legacy_nats_name="legion-smoke-nats"
 
+# shellcheck source=scripts/smoke/pid-record.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pid-record.sh"
+
 warn() {
   printf 'warning: %s\n' "$*" >&2
 }
@@ -91,12 +94,6 @@ published_ports() {
     ports="${ports:+${ports} }${BASH_REMATCH[1]}"
   done <<<"$published"
   printf '%s\n' "${ports:-none}"
-}
-
-process_start_time() {
-  local pid="$1"
-  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/stat" ]] || return 1
-  awk '{print $22}' "/proc/${pid}/stat"
 }
 
 terminate_pid_file() {

@@ -3,6 +3,12 @@
 // envelope the production outbox (packages/envoy/internal/dispatch/outbox/publisher.go) publishes.
 // SMOKE_WEBHOOK_MODE=isolated starts it; nothing else reaches the rig, so two rigs on one machine
 // never consume each other's issues, and no production NATS or personal GitHub identity is needed.
+//
+// Steady state is one request per tick whatever the tree size: the project's issue summaries
+// updated since the last tick (`GET /api/v1/issues?project=<P>&updated_since=<watermark>`) carry
+// each issue's `parent` and `last_seq`, which is all the relay needs to learn which children
+// joined the root's tree and which tracked issues have rows it has not relayed yet; only those
+// are fetched from `/api/v1/issues/<key>/events`, and only tracked keys are ever published.
 
 import { type ConnectionOptions, connect } from "nats";
 import { z } from "zod";
@@ -13,8 +19,8 @@ import { ISSUE_KEY_PATTERN } from "../../packages/daemon/src/daemon/legion-state
 export const POLL_INTERVAL_MS = 2_000;
 /** Dispatch caps `GET /api/v1/issues/<key>/events?limit=` at 200. */
 export const EVENT_PAGE_LIMIT = 200;
-export const RETRY_INITIAL_MS = 1_000;
-export const RETRY_CAP_MS = 30_000;
+const RETRY_INITIAL_MS = 1_000;
+const RETRY_CAP_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface RelayConfig {
@@ -42,7 +48,22 @@ const DispatchEventRowSchema = z
   .passthrough();
 export type DispatchEventRow = z.infer<typeof DispatchEventRowSchema>;
 const EventPageSchema = z.array(DispatchEventRowSchema);
-const IssueSummariesSchema = z.array(z.object({ key: z.string() }).passthrough());
+/** One row of `GET /api/v1/issues?project=<P>[&updated_since=<RFC 3339>]`: the Go
+ * `model.IssueSummary`. `parent` places the issue in a tree, `last_seq` says how many rows its
+ * event log holds, `updated_at` (raised by every event) is the next tick's watermark. A key or
+ * parent that is not a Dispatch issue key is a contract break, reported like any other shape
+ * mismatch — never dropped. */
+const IssueSummarySchema = z
+  .object({
+    key: z.string().regex(ISSUE_KEY_PATTERN),
+    parent: z.string().regex(ISSUE_KEY_PATTERN).nullable(),
+    last_seq: z.number().int().nonnegative(),
+    updated_at: z
+      .string()
+      .refine((value) => Number.isFinite(Date.parse(value)), "must be an RFC 3339 timestamp"),
+  })
+  .passthrough();
+const IssueSummariesSchema = z.array(IssueSummarySchema);
 
 export interface RelayPublisher {
   publish(
@@ -167,7 +188,7 @@ export function messageId(envelope: Envelope): string {
 
 /** Dispatch allocates event ids in commit order across every issue, so ascending id is the
  * order the production outbox publishes in; within one key it is also ascending seq. */
-export function orderEvents(batches: DispatchEventRow[][]): DispatchEventRow[] {
+function orderEvents(batches: DispatchEventRow[][]): DispatchEventRow[] {
   return batches.flat().sort((left, right) => left.id - right.id);
 }
 
@@ -212,11 +233,16 @@ export async function runRelay(
   deps: RelayDeps = defaultDeps()
 ): Promise<void> {
   const encoder = new TextEncoder();
-  // key -> parent key (null for the root); insertion order is discovery order.
+  // Every issue summary the project list has ever returned: key -> its parent and event count.
+  // The tracked set below is derived from it, so a list answer that fails mid-tick loses nothing.
+  const summaries = new Map<string, { parent: string | null; lastSeq: number }>();
+  // key -> parent key (null for the root): the root's transitive closure over `parent`.
   const tracked = new Map<string, string | null>([[config.rootIssue, null]]);
   // key -> seq of the last row whose publish was acked; only an ack advances it.
   const cursors = new Map<string, number>();
-  let rootVerified = false;
+  // The greatest `updated_at` any summary has shown; the next list asks for `>=` it (inclusive:
+  // an issue re-listed at the watermark costs nothing, since its rows are behind its cursor).
+  let watermark: string | undefined;
   let ready = false;
   let attempt = 0;
   let backoff = RETRY_INITIAL_MS;
@@ -232,11 +258,6 @@ export async function runRelay(
         `Dispatch answered ${response.status} for GET ${path}: the bearer token is not accepted`
       );
     }
-    if (response.status === 404 && path === `/api/v1/issues/${config.rootIssue}`) {
-      throw new RelayUnhealthy(
-        `root issue ${config.rootIssue} does not exist on ${config.dispatchUrl} (404)`
-      );
-    }
     if (!response.ok) {
       throw new Error(`GET ${path} answered HTTP ${response.status}`);
     }
@@ -250,7 +271,10 @@ export async function runRelay(
   const requestParsed = async <Shape>(path: string, schema: z.ZodType<Shape>): Promise<Shape> => {
     const parsed = schema.safeParse(await request(path));
     if (!parsed.success) {
-      throw new Error(`GET ${path} returned an unexpected shape: ${parsed.error.message}`);
+      const issues = parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+        .join("; ");
+      throw new Error(`GET ${path} returned an unexpected shape: ${issues}`);
     }
     return parsed.data;
   };
@@ -269,44 +293,57 @@ export async function runRelay(
     }
   };
 
-  const children = async (parent: string): Promise<string[]> => {
-    const summaries = await requestParsed(
-      `/api/v1/issues?project=${config.project}&parent=${parent}`,
+  const tick = async (): Promise<void> => {
+    // One request: the project's summaries updated since the watermark (every summary on the
+    // first tick), merged into `summaries` before anything else so a failure later in the tick
+    // still leaves the relay knowing which keys have rows to fetch.
+    const listed = await requestParsed(
+      watermark === undefined
+        ? `/api/v1/issues?project=${config.project}`
+        : `/api/v1/issues?project=${config.project}&updated_since=${encodeURIComponent(watermark)}`,
       IssueSummariesSchema
     );
-    return summaries.map((summary) => summary.key).filter((key) => ISSUE_KEY_PATTERN.test(key));
-  };
-
-  const tick = async (): Promise<void> => {
-    if (!rootVerified) {
-      await request(`/api/v1/issues/${config.rootIssue}`);
-      rootVerified = true;
-    }
-    // Events before discovery, per level: a row that names a child was appended after that
-    // child's own issue.created, so a child first seen here is always fetched in this same
-    // tick and its earlier rows sort ahead of the row that named it.
-    const batches: DispatchEventRow[][] = [];
-    let pending = [...tracked.keys()];
-    while (pending.length > 0) {
-      const keys = pending;
-      pending = [];
-      for (const key of keys) batches.push(await newEvents(key));
-      for (const key of keys) {
-        for (const child of await children(key)) {
-          if (tracked.has(child)) continue;
-          tracked.set(child, key);
-          pending.push(child);
-          deps.log(`RELAY TRACKING ${child} parent=${key}`);
-        }
+    for (const summary of listed) {
+      summaries.set(summary.key, { parent: summary.parent, lastSeq: summary.last_seq });
+      if (watermark === undefined || Date.parse(summary.updated_at) > Date.parse(watermark)) {
+        watermark = summary.updated_at;
       }
+    }
+    if (!summaries.has(config.rootIssue)) {
+      throw new RelayUnhealthy(
+        `root issue ${config.rootIssue} is not an issue of project ${config.project} on ${config.dispatchUrl}`
+      );
+    }
+    // The root's transitive closure over `parent`, to a fixed point: a grandchild listed before
+    // its parent in the same answer joins on the next pass.
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const [key, summary] of summaries) {
+        if (tracked.has(key) || summary.parent === null || !tracked.has(summary.parent)) continue;
+        tracked.set(key, summary.parent);
+        grew = true;
+        deps.log(`RELAY TRACKING ${key} parent=${summary.parent}`);
+      }
+    }
+    // Events only for tracked keys whose log grew past the acked cursor; never for any other key.
+    const batches: DispatchEventRow[][] = [];
+    for (const [key, summary] of summaries) {
+      if (!tracked.has(key) || summary.lastSeq <= (cursors.get(key) ?? 0)) continue;
+      batches.push(await newEvents(key));
     }
     for (const row of orderEvents(batches)) {
       const envelope = envelopeForEvent(row);
-      const ack = await publisher.publish(
-        envelope.topic,
-        encoder.encode(JSON.stringify(envelope)),
-        { msgID: messageId(envelope) }
-      );
+      // A bare NATS error code (`503`: no responder, i.e. no JetStream stream on the rig NATS
+      // takes this subject) says nothing on its own; name the step and the subject.
+      const ack = await publisher
+        .publish(envelope.topic, encoder.encode(JSON.stringify(envelope)), {
+          msgID: messageId(envelope),
+        })
+        .catch((error: unknown) => {
+          throw new Error(
+            `publish of ${envelope.event_id} to ${envelope.topic} on the rig NATS failed: ${errorMessage(error)}`
+          );
+        });
       cursors.set(row.issue_key, row.seq);
       deps.log(
         `RELAYED subject=${envelope.topic} event=${envelope.event_id} seq=${row.seq} stream_seq=${ack.seq} duplicate=${ack.duplicate}`

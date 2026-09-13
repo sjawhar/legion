@@ -9,10 +9,7 @@ import {
   EVENT_PAGE_LIMIT,
   envelopeForEvent,
   messageId,
-  orderEvents,
   POLL_INTERVAL_MS,
-  RETRY_CAP_MS,
-  RETRY_INITIAL_MS,
   type RelayConfig,
   relayConfigFromEnvironment,
   runRelay,
@@ -114,22 +111,6 @@ describe("envelopeForEvent", () => {
   });
 });
 
-describe("orderEvents", () => {
-  test("interleaves every key's rows by global event id", () => {
-    const row = (id: number, key: string, seq: number): DispatchEventRow => ({
-      ...(issueCreatedRoot as DispatchEventRow),
-      id,
-      issue_key: key,
-      seq,
-    });
-    const ordered = orderEvents([
-      [row(10, "LEGSMOKE-1", 1), row(13, "LEGSMOKE-1", 2)],
-      [row(11, "LEGSMOKE-2", 1), row(12, "LEGSMOKE-2", 2)],
-    ]);
-    expect(ordered.map((entry) => entry.id)).toEqual([10, 11, 12, 13]);
-  });
-});
-
 interface FakeIssue {
   key: string;
   parent: string | null;
@@ -143,6 +124,13 @@ interface FakeDispatch {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
+/** Event ids double as milliseconds past a fixed instant, so every row has its own strictly
+ * increasing `created_at` and an issue's `updated_at` (the greatest of its rows') is exact. */
+const EPOCH_MS = Date.parse("2026-09-13T10:00:00.000Z");
+const createdAt = (id: number): string => new Date(EPOCH_MS + id).toISOString();
+/** An issue that has no rows yet was created before any row landed. */
+const NO_ROWS_UPDATED_AT = new Date(EPOCH_MS - 1000).toISOString();
+
 const row = (id: number, key: string, seq: number, type = "issue.updated"): DispatchEventRow => ({
   id,
   issue_key: key,
@@ -152,11 +140,36 @@ const row = (id: number, key: string, seq: number, type = "issue.updated"): Disp
   type,
   actor: { kind: "session", id: "legion-daemon:LEGSMOKE" },
   notify: false,
-  created_at: "2026-09-13T10:00:00.000000Z",
+  created_at: createdAt(id),
   payload: { key, parent: null, status: "todo" },
 });
 
+const listUrl = "http://dispatch.test/api/v1/issues?project=LEGSMOKE";
+const listSinceUrl = (updatedAt: string) =>
+  `${listUrl}&updated_since=${encodeURIComponent(updatedAt)}`;
+const eventsUrl = (key: string, after: number) =>
+  `http://dispatch.test/api/v1/issues/${key}/events?after=${after}&limit=${EVENT_PAGE_LIMIT}`;
+
+/** Serves `GET /api/v1/issues?project=&updated_since=` from `issues` + `events` the way Dispatch
+ * does (every issue's summary carries `parent`, `last_seq`, and an `updated_at` raised by each of
+ * its rows; `updated_since` is inclusive) and `GET /api/v1/issues/<key>/events` from `events`. */
 function fakeDispatch(issues: FakeIssue[], events: DispatchEventRow[]): FakeDispatch {
+  const summary = (issue: FakeIssue) => {
+    const rows = dispatch.events.filter((event) => event.issue_key === issue.key);
+    return {
+      key: issue.key,
+      title: `Fixture ${issue.key}`,
+      status: "todo",
+      priority: null,
+      rank: "a0",
+      labels: [],
+      parent: issue.parent,
+      updated_at:
+        rows.length === 0 ? NO_ROWS_UPDATED_AT : createdAt(Math.max(...rows.map((r) => r.id))),
+      last_seq: rows.length === 0 ? 0 : Math.max(...rows.map((r) => r.seq)),
+      open_asks: 0,
+    };
+  };
   const dispatch: FakeDispatch = {
     issues,
     events,
@@ -187,19 +200,18 @@ function fakeDispatch(issues: FakeIssue[], events: DispatchEventRow[]): FakeDisp
         );
       }
       if (parsed.pathname === "/api/v1/issues") {
-        const parent = parsed.searchParams.get("parent");
+        if (parsed.searchParams.get("project") !== "LEGSMOKE") {
+          return Response.json({ code: "UNEXPECTED_PROJECT" }, { status: 400 });
+        }
+        const since = parsed.searchParams.get("updated_since");
+        if (since !== null && !Number.isFinite(Date.parse(since))) {
+          return Response.json({ code: "INVALID_UPDATED_SINCE" }, { status: 400 });
+        }
         return Response.json(
           dispatch.issues
-            .filter((issue) => issue.parent === parent)
-            .map((issue) => ({ key: issue.key, parent: issue.parent, status: "todo" }))
+            .map(summary)
+            .filter((entry) => since === null || Date.parse(entry.updated_at) >= Date.parse(since))
         );
-      }
-      const issueMatch = parsed.pathname.match(/^\/api\/v1\/issues\/([^/]+)$/);
-      if (issueMatch) {
-        const issue = dispatch.issues.find((candidate) => candidate.key === issueMatch[1]);
-        return issue
-          ? Response.json({ key: issue.key, parent: issue.parent })
-          : Response.json({ code: "NOT_FOUND" }, { status: 404 });
       }
       return Response.json({ code: "NOT_FOUND" }, { status: 404 });
     },
@@ -220,7 +232,9 @@ interface Harness {
   backoffs: number[];
   connections: number;
   drained: boolean;
-  run: (ticks: number) => Promise<void>;
+  /** Requests made since the previous call (each tick's own set). */
+  requestsSince: () => string[];
+  run: (ticks: number, onTick?: (tick: number) => void) => Promise<void>;
 }
 
 const config: RelayConfig = {
@@ -237,6 +251,7 @@ function harness(issues: FakeIssue[], events: DispatchEventRow[]): Harness {
   const seen = new Set<string>();
   const log: string[] = [];
   const backoffs: number[] = [];
+  let requestMark = 0;
   const state: Harness = {
     dispatch,
     published,
@@ -244,7 +259,12 @@ function harness(issues: FakeIssue[], events: DispatchEventRow[]): Harness {
     backoffs,
     connections: 0,
     drained: false,
-    run: async (ticks: number) => {
+    requestsSince: () => {
+      const slice = dispatch.requests.slice(requestMark);
+      requestMark = dispatch.requests.length;
+      return slice;
+    },
+    run: async (ticks: number, onTick?: (tick: number) => void) => {
       const controller = new AbortController();
       let polls = 0;
       await runRelay(config, {
@@ -271,7 +291,8 @@ function harness(issues: FakeIssue[], events: DispatchEventRow[]): Harness {
           };
         },
         // A backoff sleep always follows its RELAY RETRY line; every other sleep is the poll
-        // interval (whose 2000 ms coincides with the second backoff step).
+        // interval (whose 2000 ms coincides with the second backoff step). `onTick` runs between
+        // ticks, after a successful one, so a test can land new rows "between polls".
         sleep: async (ms: number) => {
           if (log.at(-1)?.startsWith("RELAY RETRY")) {
             backoffs.push(ms);
@@ -280,6 +301,7 @@ function harness(issues: FakeIssue[], events: DispatchEventRow[]): Harness {
           expect(ms).toBe(POLL_INTERVAL_MS);
           polls += 1;
           if (polls >= ticks) controller.abort();
+          else onTick?.(polls);
         },
         log: (line: string) => {
           log.push(line);
@@ -291,14 +313,22 @@ function harness(issues: FakeIssue[], events: DispatchEventRow[]): Harness {
   return state;
 }
 
+const relayed = (rig: Harness) => rig.log.filter((line) => line.startsWith("RELAYED"));
+const tracking = (rig: Harness) => rig.log.filter((line) => line.startsWith("RELAY TRACKING"));
+const retries = (rig: Harness) => rig.log.filter((line) => line.startsWith("RELAY RETRY"));
+const ready = (rig: Harness) => rig.log.filter((line) => line.startsWith("RELAY READY"));
+
 describe("runRelay", () => {
-  test("discovers the root's children, publishes every key's rows in global id order once, and only asks for newer rows afterwards", async () => {
+  test("one project list per tick: discovers the root's transitive children from it, fetches events only for tracked keys whose last_seq grew, publishes in global id order, and asks only for summaries updated since the watermark afterwards", async () => {
+    // The grandchild is listed before its parent, so the closure needs a second pass; another
+    // rig's root and that root's child share the project and must never be fetched or published.
     const rig = harness(
       [
         { key: "LEGSMOKE-1", parent: null },
-        { key: "LEGSMOKE-2", parent: "LEGSMOKE-1" },
         { key: "LEGSMOKE-3", parent: "LEGSMOKE-2" },
+        { key: "LEGSMOKE-2", parent: "LEGSMOKE-1" },
         { key: "LEGSMOKE-99", parent: null },
+        { key: "LEGSMOKE-98", parent: "LEGSMOKE-99" },
       ],
       [
         row(100, "LEGSMOKE-1", 1, "issue.created"),
@@ -307,11 +337,20 @@ describe("runRelay", () => {
         row(103, "LEGSMOKE-3", 1, "issue.created"),
         row(104, "LEGSMOKE-99", 1, "issue.created"),
         row(105, "LEGSMOKE-2", 2),
+        row(106, "LEGSMOKE-98", 1, "issue.created"),
       ]
     );
+    const firstTick: string[] = [];
+    await rig.run(2, () => firstTick.push(...rig.requestsSince()));
 
-    await rig.run(2);
-
+    expect(firstTick[0]).toBe(listUrl);
+    expect(firstTick.slice(1).sort()).toEqual(
+      [eventsUrl("LEGSMOKE-1", 0), eventsUrl("LEGSMOKE-2", 0), eventsUrl("LEGSMOKE-3", 0)].sort()
+    );
+    expect(tracking(rig)).toEqual([
+      "RELAY TRACKING LEGSMOKE-2 parent=LEGSMOKE-1",
+      "RELAY TRACKING LEGSMOKE-3 parent=LEGSMOKE-2",
+    ]);
     expect(rig.published.map((entry) => entry.envelope.event_id)).toEqual([
       "dispatch-100",
       "dispatch-101",
@@ -329,33 +368,71 @@ describe("runRelay", () => {
     expect(rig.published.map((entry) => entry.msgID)).toEqual(
       rig.published.map((entry) => `${entry.envelope.dedupe_key}:${entry.subject}`)
     );
-    expect(rig.log.filter((line) => line.startsWith("RELAY TRACKING"))).toEqual([
-      "RELAY TRACKING LEGSMOKE-2 parent=LEGSMOKE-1",
-      "RELAY TRACKING LEGSMOKE-3 parent=LEGSMOKE-2",
-    ]);
-    expect(rig.log.filter((line) => line.startsWith("RELAY READY"))).toEqual([
-      "RELAY READY root=LEGSMOKE-1 project=LEGSMOKE dispatch=http://dispatch.test downstream=nats://127.0.0.1:14222",
-    ]);
-    expect(rig.log.filter((line) => line.startsWith("RELAYED"))).toEqual([
+    expect(relayed(rig)).toEqual([
       "RELAYED subject=notifications.dispatch.issue.LEGSMOKE-1.issue.created event=dispatch-100 seq=1 stream_seq=1 duplicate=false",
       "RELAYED subject=notifications.dispatch.issue.LEGSMOKE-2.issue.created event=dispatch-101 seq=1 stream_seq=2 duplicate=false",
       "RELAYED subject=notifications.dispatch.issue.LEGSMOKE-1.child.status event=dispatch-102 seq=2 stream_seq=3 duplicate=false",
       "RELAYED subject=notifications.dispatch.issue.LEGSMOKE-3.issue.created event=dispatch-103 seq=1 stream_seq=4 duplicate=false",
       "RELAYED subject=notifications.dispatch.issue.LEGSMOKE-2.issue.updated event=dispatch-105 seq=2 stream_seq=5 duplicate=false",
     ]);
-    // Nothing for another rig's root (LEGSMOKE-99) was ever fetched.
-    expect(rig.dispatch.requests.some((url) => url.includes("LEGSMOKE-99"))).toBe(false);
-    // The second tick asks each key only for rows newer than its acked cursor.
-    const secondTickEventRequests = rig.dispatch.requests
-      .filter((url) => url.includes("/events?"))
-      .slice(-3);
-    expect(secondTickEventRequests).toEqual([
-      `http://dispatch.test/api/v1/issues/LEGSMOKE-1/events?after=2&limit=${EVENT_PAGE_LIMIT}`,
-      `http://dispatch.test/api/v1/issues/LEGSMOKE-2/events?after=2&limit=${EVENT_PAGE_LIMIT}`,
-      `http://dispatch.test/api/v1/issues/LEGSMOKE-3/events?after=1&limit=${EVENT_PAGE_LIMIT}`,
+    expect(ready(rig)).toEqual([
+      "RELAY READY root=LEGSMOKE-1 project=LEGSMOKE dispatch=http://dispatch.test downstream=nats://127.0.0.1:14222",
     ]);
+    // The second tick, with nothing new: exactly one request, asking from the watermark (the
+    // greatest updated_at seen: LEGSMOKE-98's row 106, another rig's issue this relay only ever
+    // reads a summary of), and no /events at all since no tracked key's last_seq moved.
+    expect(rig.requestsSince()).toEqual([listSinceUrl(createdAt(106))]);
+    // Nothing outside the root's tree was ever fetched from /events or published.
+    expect(rig.dispatch.requests.filter((url) => /LEGSMOKE-9[89]\/events/.test(url))).toEqual([]);
+    expect(rig.published.some((entry) => entry.subject.includes("LEGSMOKE-9"))).toBe(false);
     expect(rig.connections).toBe(1);
     expect(rig.drained).toBe(true);
+  });
+
+  test("rows and children that land between ticks are picked up from the updated summaries alone: events are fetched from the acked cursor for the changed key only, a new child is tracked and fetched, an unchanged key and another rig's changed issue are left alone", async () => {
+    const rig = harness(
+      [
+        { key: "LEGSMOKE-1", parent: null },
+        { key: "LEGSMOKE-2", parent: "LEGSMOKE-1" },
+        { key: "LEGSMOKE-99", parent: null },
+      ],
+      [row(100, "LEGSMOKE-1", 1, "issue.created"), row(101, "LEGSMOKE-2", 1, "issue.created")]
+    );
+    const requestsByTick: string[][] = [];
+    await rig.run(3, (tick) => {
+      requestsByTick.push(rig.requestsSince());
+      if (tick === 1) {
+        rig.dispatch.events.push(
+          row(110, "LEGSMOKE-2", 2),
+          row(111, "LEGSMOKE-99", 1, "issue.created"),
+          row(112, "LEGSMOKE-4", 1, "issue.created")
+        );
+        rig.dispatch.issues.push({ key: "LEGSMOKE-4", parent: "LEGSMOKE-1" });
+      }
+    });
+    requestsByTick.push(rig.requestsSince());
+
+    expect(requestsByTick[1][0]).toBe(listSinceUrl(createdAt(101)));
+    expect(requestsByTick[1].slice(1).sort()).toEqual(
+      [eventsUrl("LEGSMOKE-2", 1), eventsUrl("LEGSMOKE-4", 0)].sort()
+    );
+    expect(tracking(rig)).toEqual([
+      "RELAY TRACKING LEGSMOKE-2 parent=LEGSMOKE-1",
+      "RELAY TRACKING LEGSMOKE-4 parent=LEGSMOKE-1",
+    ]);
+    expect(rig.published.map((entry) => entry.envelope.event_id)).toEqual([
+      "dispatch-100",
+      "dispatch-101",
+      "dispatch-110",
+      "dispatch-112",
+    ]);
+    // Third tick: the watermark moved to the newest summary seen (LEGSMOKE-4's row 112), nothing
+    // changed, one request.
+    expect(requestsByTick[2]).toEqual([listSinceUrl(createdAt(112))]);
+    expect(rig.dispatch.requests.filter((url) => url.includes("LEGSMOKE-1/events"))).toEqual([
+      eventsUrl("LEGSMOKE-1", 0),
+    ]);
+    expect(rig.dispatch.requests.some((url) => url.includes("LEGSMOKE-99/events"))).toBe(false);
   });
 
   test("pages a key whose backlog exceeds one page", async () => {
@@ -367,55 +444,96 @@ describe("runRelay", () => {
     await rig.run(1);
 
     expect(rig.published).toHaveLength(EVENT_PAGE_LIMIT + 3);
-    expect(rig.dispatch.requests.filter((url) => url.includes("/events?"))).toEqual([
-      `http://dispatch.test/api/v1/issues/LEGSMOKE-1/events?after=0&limit=${EVENT_PAGE_LIMIT}`,
-      `http://dispatch.test/api/v1/issues/LEGSMOKE-1/events?after=${EVENT_PAGE_LIMIT}&limit=${EVENT_PAGE_LIMIT}`,
+    expect(rig.dispatch.requests).toEqual([
+      listUrl,
+      eventsUrl("LEGSMOKE-1", 0),
+      eventsUrl("LEGSMOKE-1", EVENT_PAGE_LIMIT),
     ]);
   });
 
-  test("retries a Dispatch failure with doubling backoff, advances no cursor, then publishes the missed rows and recovers", async () => {
+  test.each([
+    ["key", { key: "legsmoke-1", parent: null }],
+    ["parent", { key: "LEGSMOKE-5", parent: "not a key" }],
+  ])("a summary whose %s is not a Dispatch issue key is a loud shape error, never a silent drop", async (field, bogus) => {
+    const rig = harness([{ key: "LEGSMOKE-1", parent: null }], [row(100, "LEGSMOKE-1", 1)]);
+    let served = false;
+    rig.dispatch.failure = (url) => {
+      if (served || !url.startsWith(listUrl)) return undefined;
+      served = true;
+      return Response.json([
+        { ...bogus, last_seq: 1, updated_at: createdAt(100) },
+        {
+          key: "LEGSMOKE-1",
+          parent: null,
+          last_seq: 1,
+          updated_at: createdAt(100),
+        },
+      ]);
+    };
+
+    await rig.run(1);
+
+    expect(retries(rig)).toHaveLength(1);
+    expect(retries(rig)[0]).toMatch(
+      new RegExp(
+        `^RELAY RETRY attempt=1 next=1000ms: GET /api/v1/issues\\?project=LEGSMOKE returned an unexpected shape: 0\\.${field}: `
+      )
+    );
+    expect(retries(rig)[0]).not.toContain("\n");
+    // Nothing from the rejected answer was used; the next, well-formed answer is.
+    expect(rig.published.map((entry) => entry.envelope.event_id)).toEqual(["dispatch-100"]);
+    expect(rig.log.filter((line) => line.startsWith("RELAY RECOVERED"))).toEqual([
+      "RELAY RECOVERED after 1 attempts",
+    ]);
+  });
+
+  test("retries a Dispatch failure with doubling backoff, keeps what earlier answers taught it, advances no cursor, then publishes the missed row and recovers", async () => {
     const rig = harness([{ key: "LEGSMOKE-1", parent: null }], [row(100, "LEGSMOKE-1", 1)]);
     let failures = 0;
     rig.dispatch.failure = (url) => {
-      // Tick 2 onwards: the events read fails seven times (network, 502, then non-JSON bodies)
-      // while a new row lands on Dispatch, unseen until the read succeeds again.
-      if (!url.includes("/events?") || rig.published.length === 0 || failures >= 7)
-        return undefined;
+      // After the first tick: the /events read fails seven times (network, 502, then non-JSON
+      // bodies). Meanwhile the list answers nothing at all, so the retried fetch can only come
+      // from the summary the relay already merged before the first failure.
+      if (rig.published.length === 0) return undefined;
+      if (url.startsWith(listUrl)) return failures >= 1 ? Response.json([]) : undefined;
+      if (!url.includes("/events?") || failures >= 7) return undefined;
       failures += 1;
-      if (failures === 1) {
-        rig.dispatch.events.push(row(101, "LEGSMOKE-1", 2));
-        return new Error("connect ECONNREFUSED");
-      }
+      if (failures === 1) return new Error("connect ECONNREFUSED");
       if (failures === 2) return new Response("<html>bad gateway</html>", { status: 502 });
       return new Response("not json", { status: 200 });
     };
-
-    await rig.run(3);
+    await rig.run(3, (tick) => {
+      if (tick === 1) rig.dispatch.events.push(row(101, "LEGSMOKE-1", 2));
+    });
 
     expect(rig.backoffs).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
-    expect(RETRY_INITIAL_MS).toBe(1000);
-    expect(RETRY_CAP_MS).toBe(30000);
-    const retries = rig.log.filter((line) => line.startsWith("RELAY RETRY"));
-    expect(retries).toHaveLength(7);
-    expect(retries[0]).toMatch(/^RELAY RETRY attempt=1 next=1000ms: .*ECONNREFUSED/);
-    expect(retries[1]).toMatch(/^RELAY RETRY attempt=2 next=2000ms: .*502/);
-    expect(retries[6]).toMatch(/^RELAY RETRY attempt=7 next=30000ms: /);
+    expect(retries(rig)).toHaveLength(7);
+    expect(retries(rig)[0]).toMatch(/^RELAY RETRY attempt=1 next=1000ms: .*ECONNREFUSED/);
+    expect(retries(rig)[1]).toMatch(/^RELAY RETRY attempt=2 next=2000ms: .*502/);
+    expect(retries(rig)[6]).toMatch(/^RELAY RETRY attempt=7 next=30000ms: /);
     expect(rig.log.filter((line) => line.startsWith("RELAY RECOVERED"))).toEqual([
       "RELAY RECOVERED after 7 attempts",
     ]);
-    // Every retried read re-asked from the last acked cursor; the missed row was published once.
-    expect(
-      rig.dispatch.requests.filter((url) => url.endsWith("/events?after=1&limit=200"))
-    ).toHaveLength(8);
+    // Every retried read re-asked from the acked cursor (seq 1), eight times: seven failures
+    // and the one that succeeded.
+    expect(rig.dispatch.requests.filter((url) => url === eventsUrl("LEGSMOKE-1", 1))).toHaveLength(
+      8
+    );
     expect(rig.published.map((entry) => entry.envelope.event_id)).toEqual([
       "dispatch-100",
       "dispatch-101",
     ]);
-    expect(rig.log.filter((line) => line.startsWith("RELAY READY"))).toHaveLength(1);
+    expect(ready(rig)).toHaveLength(1);
   });
 
-  test("a rejected publish is retried without skipping the row", async () => {
-    const rig = harness([{ key: "LEGSMOKE-1", parent: null }], [row(100, "LEGSMOKE-1", 1)]);
+  test("a rejected publish is retried without skipping or repeating a row: the key already acked is not fetched again, the one behind is fetched from its cursor", async () => {
+    const rig = harness(
+      [
+        { key: "LEGSMOKE-1", parent: null },
+        { key: "LEGSMOKE-2", parent: "LEGSMOKE-1" },
+      ],
+      [row(100, "LEGSMOKE-1", 1, "issue.created"), row(101, "LEGSMOKE-2", 1, "issue.created")]
+    );
     const controller = new AbortController();
     let publishes = 0;
     let polls = 0;
@@ -426,7 +544,7 @@ describe("runRelay", () => {
         jetstream: () => ({
           publish: async (subject: string) => {
             publishes += 1;
-            if (publishes === 1) throw new Error("nats: timeout");
+            if (publishes === 2) throw new Error("nats: timeout");
             published.push(subject);
             return { seq: publishes, duplicate: false };
           },
@@ -449,24 +567,36 @@ describe("runRelay", () => {
     });
 
     expect(rig.backoffs).toEqual([1000]);
-    expect(published).toEqual(["notifications.dispatch.issue.LEGSMOKE-1.issue.updated"]);
-    expect(rig.log.filter((line) => line.startsWith("RELAY RETRY"))).toEqual([
-      "RELAY RETRY attempt=1 next=1000ms: nats: timeout",
+    expect(retries(rig)).toEqual([
+      "RELAY RETRY attempt=1 next=1000ms: publish of dispatch-101 to notifications.dispatch.issue.LEGSMOKE-2.issue.created on the rig NATS failed: nats: timeout",
+    ]);
+    expect(published).toEqual([
+      "notifications.dispatch.issue.LEGSMOKE-1.issue.created",
+      "notifications.dispatch.issue.LEGSMOKE-2.issue.created",
+    ]);
+    expect(rig.dispatch.requests.filter((url) => url.includes("LEGSMOKE-1/events"))).toEqual([
+      eventsUrl("LEGSMOKE-1", 0),
+    ]);
+    expect(rig.dispatch.requests.filter((url) => url.includes("LEGSMOKE-2/events"))).toEqual([
+      eventsUrl("LEGSMOKE-2", 0),
+      eventsUrl("LEGSMOKE-2", 0),
     ]);
     // READY waits for the first tick that fully succeeds, publishes included.
-    expect(rig.log.indexOf("RELAY RETRY attempt=1 next=1000ms: nats: timeout")).toBeLessThan(
-      rig.log.findIndex((line) => line.startsWith("RELAY READY"))
-    );
+    expect(rig.log.indexOf(retries(rig)[0])).toBeLessThan(rig.log.indexOf(ready(rig)[0]));
   });
 
-  test("a root with no events yet is READY once, publishes nothing, and keeps polling", async () => {
+  test("a root with no rows yet is READY once, publishes nothing, and keeps listing once per tick", async () => {
     const rig = harness([{ key: "LEGSMOKE-1", parent: null }], []);
 
     await rig.run(3);
 
     expect(rig.published).toEqual([]);
-    expect(rig.log.filter((line) => line.startsWith("RELAY READY"))).toHaveLength(1);
-    expect(rig.dispatch.requests.filter((url) => url.includes("/events?"))).toHaveLength(3);
+    expect(ready(rig)).toHaveLength(1);
+    expect(rig.dispatch.requests).toEqual([
+      listUrl,
+      listSinceUrl(NO_ROWS_UPDATED_AT),
+      listSinceUrl(NO_ROWS_UPDATED_AT),
+    ]);
     expect(rig.backoffs).toEqual([]);
   });
 
@@ -481,12 +611,14 @@ describe("runRelay", () => {
     expect(rig.drained).toBe(true);
   });
 
-  test("a root issue Dispatch does not know is unhealthy, never retried", async () => {
+  test("a root issue absent from the project's issues is unhealthy, never retried", async () => {
     const rig = harness([{ key: "LEGSMOKE-2", parent: null }], []);
 
-    await expect(rig.run(2)).rejects.toThrow("root issue LEGSMOKE-1 does not exist");
+    await expect(rig.run(2)).rejects.toThrow(
+      "root issue LEGSMOKE-1 is not an issue of project LEGSMOKE on http://dispatch.test"
+    );
 
     expect(rig.backoffs).toEqual([]);
-    expect(rig.dispatch.requests).toEqual(["http://dispatch.test/api/v1/issues/LEGSMOKE-1"]);
+    expect(rig.dispatch.requests).toEqual([listUrl]);
   });
 });
