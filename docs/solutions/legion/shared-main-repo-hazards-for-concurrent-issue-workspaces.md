@@ -60,12 +60,15 @@ environment: a pinned value would put the wrong App back on your commits, which 
 closed. Verify before a push instead:
 
 ```bash
-jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ "\n"'
+jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'
 ```
 
-Both columns must be your role's App on every commit you made. If a commit is wrong, the pane
-environment is wrong — a pane opened before the daemon that set it, or a command run outside the
-pane with the variables unset — and the fix is to report it to the architect, not to pin.
+Both columns must be your role's App on every commit you made — not on the whole list: earlier
+phases' commits are legitimately authored by their own role's App, and a conflict-forced rebase
+legitimately sets the committer of every rebased commit, other roles' included, to the rebaser. If
+one of your own commits is wrong, the pane environment is wrong — a pane opened before the daemon
+that set it, or a command run outside the pane with the variables unset — and the fix is to report
+it to the architect, not to pin.
 
 ## Hazard 2 — another workspace's `jj undo` / `op restore` rewinds your operations (LEGION-45)
 

@@ -282,17 +282,17 @@ async function writeOmpConfig(workspaceDir: string): Promise<void> {
 }
 
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
- * workspace is the one config file every workspace of the clone shares, so a value there is the
- * author and committer for every tree's commits at once; identity rides each pane's environment
- * (`JJ_USER`/`JJ_EMAIL`, read over any config), so a value there is inert for panes but still
- * wrong for anything else that commits from the clone. Removed here, once, logged; nothing writes
- * it. Runs on every provisioning, not only workspace creation, so a value written between launches
- * is removed at the next one. A key is probed first (`jj config list --repo` exits 0 with empty
+ * workspace is the one config file every workspace of the clone shares, so a value there applies
+ * to every tree at once. A pane's commits are unaffected — identity rides each pane's environment
+ * (`JJ_USER`/`JJ_EMAIL`, read over any config) — but anything else that commits from the clone
+ * would take the value as its author and committer. Removed here, once, logged; nothing writes it.
+ * Runs on every provisioning, not only workspace creation, so a value written between launches is
+ * removed at the next one. A key is probed first (`jj config list --repo` exits 0 with empty
  * stdout when unset) because `jj config unset` exits 1 on a key that does not exist. The probe
  * carries `--include-overridden`: without it jj hides a repository value that a higher layer
- * overrides, and the daemon's own environment can carry `JJ_USER`/`JJ_EMAIL` (a daemon started
- * from inside a Legion pane inherits the pane's identity), which would make the probe print
- * nothing for a value the repo file does hold and the unset silently never run. A failed unset is
+ * overrides, and `deps.run` is injected — this package cannot assume a runner that strips
+ * `JJ_USER`/`JJ_EMAIL` from the command's environment — so a bare probe could print nothing for a
+ * value the repo file does hold and the unset would silently never run. A failed unset is
  * re-probed once, since two issues provisioning at the same time can both see the key and only
  * one of them removes it. */
 async function removeRepoScopedIdentity(

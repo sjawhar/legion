@@ -157,9 +157,12 @@ assignment, since `jj split`/`jj describe` keep its author). Never set or overri
 `git config`: `--config` outranks the pane environment and would put the wrong App back on your
 commits, and the repository-scoped jj config is one file shared by every issue workspace of the
 clone. Before a push, check
-`jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ "\n"'`
-shows your role's App in both columns; a wrong commit is a pane-environment problem to report to
-the architect, not something to pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
+`jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
+shows your role's App in both columns **on every commit you made** — not on the whole list:
+earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
+rebase legitimately sets the committer of every rebased commit, other roles' included, to the
+rebaser. A wrong identity on your own commit is a pane-environment problem to report to the
+architect, not something to pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
 Hazard 1). Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
