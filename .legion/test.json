@@ -1,5 +1,5 @@
 {
-  "headSha": "bfe5999e24fa910d039504da71c18d493a8da1ad",
+  "headSha": "975ecc3ac0ca773dc2eb1a8ae3e12098b3b86eb5",
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
   "verdict": "pass",
@@ -65,7 +65,8 @@
     "The daemon log carries no timestamps; the rig timeline above comes from a 2 s state.json poller (evidence/state-timeline.jsonl) and the OMP transcripts' own timestamps.",
     "Bound-only positive path: a healthy worker's agent_start follows the acknowledgement within milliseconds, so the rig positive path shows the commit at the moment the turn started but cannot by itself distinguish commit-on-ack from commit-on-start; the negative control and the unit/e2e red-green runs are what prove the new ordering.",
     "Rebase re-check 785d1b1d881b -> 52fcae689ef3: fingerprint changed (three scripts/smoke paths only, main #1010 mechanism adopted), packages/daemon/src unchanged; bare gates + up/down.test.sh only, no rig round, per the SKILL rule and the architect's instruction.",
-    "Round 2 at bfe5999e24fa: both review findings verified green on head and red on 167754ae9e25; the reviewer's repro fails its stranded-locator expectation at both caps on head; confinement diff shows only the socket-closed / get_state-failed / reason-plumbing hunks. One test-quality finding: the new ready-close regression tests are load-sensitive (tick-bounded wait over real relaunch I/O) — see round2.flakeFinding."
+    "Round 2 at bfe5999e24fa: both review findings verified green on head and red on 167754ae9e25; the reviewer's repro fails its stranded-locator expectation at both caps on head; confinement diff shows only the socket-closed / get_state-failed / reason-plumbing hunks. One test-quality finding: the new ready-close regression tests are load-sensitive (tick-bounded wait over real relaunch I/O) — see round2.flakeFinding.",
+    "Round 3 at 975ecc3ac0ca: tests-only stability commit verified (17 assertions identical; wait is now the worker-started publish event); 20/20 stability runs green at loadavg 130-139; production hunks byte-identical to round 2; the second rebase changed only the AGENTS.md /worker/spawn row text (#1024), this branch's qualifier preserved. The round-2 flakeFinding is closed by c299392fb4f6."
   ],
   "documentationFeedback": "AGENTS.md rows 19/20 and bullets 65/68 and the SKILL.md worker-queued row match the observed behaviour exactly, including the observation strings (`get_state: isStreaming=false`) and the retire-at-three/--resume path.",
   "negativeControlSummary": "Ack-only OMP stand-in behind a real legion worker-shim: three acknowledged prompts, no turn, three logged PromptNotStarted failures, pane retired at the third, real worker relaunched with --resume and ran the queued task.",
@@ -150,7 +151,63 @@
     },
     "evidence": "/tmp/legion60-test/evidence/r2.* on this box; throwaway scripts /tmp/legion60-test/direct-close.throwaway*.test.ts (not committed)."
   },
+  "round3": {
+    "headSha": "975ecc3ac0ca773dc2eb1a8ae3e12098b3b86eb5",
+    "codeHead": "c299392fb4f6 (test-stability commit; the code tip before the second rebase). Production code head unchanged from round 2: 188f8d697265 (now 5fe293152f81 after the rebase).",
+    "verdict": "pass",
+    "github": "headRefOid 975ecc3ac0ca773dc2eb1a8ae3e12098b3b86eb5, mergeable MERGEABLE, mergeStateStatus BLOCKED (review pending); CI green: Tests run 34767582917 (lint, pr-title, typecheck, test) and Legion Envoy and Contracts run 34767504519 at that SHA.",
+    "delta": "c299392fb4f6 (tests only) + a conflict-forced rebase onto main 1c7499430c5d (#1024 rewrote the AGENTS.md /worker/spawn row).",
+    "confinement": {
+      "nonTestProduction": "PR change-set compared per path, rebase-aware (diff from fork_point(main@origin|tip) to tip, --git --context 0, minus @@/index, excluding .legion and docs/solutions) at bfe5999e24fa (round 2) and 975ecc3ac0ca: all 6 non-test production paths under packages/daemon/src — index.ts, legion-state.ts, process-errors.ts, processes.ts, worker-admission.ts, worker-rpc.ts — carry byte-identical hunks (0 differing). Tip-to-tip check: `jj diff --from bfe5999e24fa --to 975ecc3ac0ca --git --context 0` on packages/daemon/src minus __tests__ minus AGENTS.md, changed lines only, hashes equal to main a7c01347fd69 -> 1c7499430c5d on the same fileset (34d54e47d10405e4) — exactly main's own movement, nothing from this PR. (With default context the hashes differ because main's hunks now neighbour this PR's lines; the changed-line normalization is the one the SKILL fingerprint uses.) The empty-diff requirement is therefore met for the PR's contribution; the raw 188f8d697265 -> tip diff is non-empty only because it spans the rebase.",
+      "agentsMd": "The only non-test path whose PR hunk differs between round 2 and round 3 is packages/daemon/src/daemon/AGENTS.md: 4 changed lines at both tips, same shape (one -/+ pair for the /worker/ready row and one for the /worker/spawn row); the base side of the /worker/spawn row differs because #1024 rewrote it, and this branch's own qualifier — `resumed`: the worker's turn was observed to start; an acknowledgement no turn follows within `worker_rpc_timeout_seconds` answers `queued` … — is carried verbatim onto the new row text. Word-diff of the two added rows shows only #1024's wording (liveAncestorTree, the sub-architect admission case). Documentation only.",
+      "tests": "c299392fb4f6 touches only packages/daemon/src/daemon/__tests__/processes.test.ts, two hunks in the two `retires a ready-time worker whose socket closes … (workerCap 1|2)` cases: a `publishRole` override records publications and resolves a `promoted` promise when the architect topic receives `worker-started`; `await flushEventLoopUntil(() => … tmuxPaneId === \"%302\")` becomes `await promoted.promise`. Assertion lines compared side by side (every `expect(` in the two cases at 188f8d697265 vs c299392fb4f6): 17 lines, identical text and order — none removed or weakened. The wait cannot false-green: an unresolved promise fails on bun's test timeout with the assertions unreached. Every other PR __tests__ hunk (fake-runtime, index.test, worker-rpc.test, real-*-e2e, watchdog, thermo-ops, the delayed-start fixture) is byte-identical to round 2."
+    },
+    "stability": {
+      "wholeFile": {
+        "command": "cd packages/daemon && bun test src/daemon/__tests__/processes.test.ts",
+        "runs": [
+          "run 1 16:09:13 loadavg=[130.05 120.20 114.69] PASS ( 266 pass 0 fail )",
+          "run 2 16:09:16 loadavg=[133.09 121.00 114.98] PASS ( 266 pass 0 fail )",
+          "run 3 16:09:20 loadavg=[134.52 121.50 115.17] PASS ( 266 pass 0 fail )",
+          "run 4 16:09:23 loadavg=[134.52 121.50 115.17] PASS ( 266 pass 0 fail )",
+          "run 5 16:09:26 loadavg=[131.84 121.16 115.10] PASS ( 266 pass 0 fail )",
+          "run 6 16:09:28 loadavg=[131.84 121.16 115.10] PASS ( 266 pass 0 fail )",
+          "run 7 16:09:32 loadavg=[130.41 121.04 115.09] PASS ( 266 pass 0 fail )",
+          "run 8 16:09:35 loadavg=[133.50 121.83 115.38] PASS ( 266 pass 0 fail )",
+          "run 9 16:09:38 loadavg=[133.50 121.83 115.38] PASS ( 266 pass 0 fail )",
+          "run 10 16:09:41 loadavg=[138.91 123.15 115.84] PASS ( 266 pass 0 fail )"
+        ],
+        "summary": "10 pass / 0 fail, 266 tests each, loadavg 130-139 (higher than round 2's 110-130 where 2 of 8 failed)"
+      },
+      "filtered": {
+        "command": "bun test src/daemon/__tests__/processes.test.ts -t \"retires a ready-time worker whose socket closes after acknowledging its first task and relaunches the task cold with --resume\"",
+        "runs": [
+          "run 1 16:09:56 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 2 16:09:56 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 3 16:09:57 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 4 16:09:57 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 5 16:09:58 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 6 16:09:58 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 7 16:09:59 loadavg=[136.70 123.50 116.08] PASS ( 2 pass 0 fail )",
+          "run 8 16:09:59 loadavg=[137.45 123.87 116.24] PASS ( 2 pass 0 fail )",
+          "run 9 16:10:00 loadavg=[137.45 123.87 116.24] PASS ( 2 pass 0 fail )",
+          "run 10 16:10:00 loadavg=[137.45 123.87 116.24] PASS ( 2 pass 0 fail )"
+        ],
+        "summary": "10 pass / 0 fail, both cap variants each run (2 pass per run), loadavg 136-137"
+      },
+      "inSuite": "both cases pass inside the full 64-file suite run below."
+    },
+    "gates": {
+      "daemonSuite": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1217 pass, 0 fail, 64 files, 64.53 s (the three real-prompt-delivery e2e cases pass; +8 tests vs round 2 are main's)",
+      "daemonTsc": "bunx tsc --noEmit: exit 0",
+      "daemonBiome": "bunx biome check src/: Checked 162 files, no fixes, exit 0",
+      "piEnvoy": "cd packages/pi-envoy && bunx tsc --noEmit: exit 0; bun test src/legion: 21 pass, 0 fail (+5 vs round 2 are main's)",
+      "agentsWording": "packages/daemon/src/daemon/AGENTS.md at the tip still carries this branch's delivery definition: /worker/ready row (\"cleared once the worker's turn is observed to start — never on the shim's acknowledgement alone\", reason no-turn / socket-closed, \"boot left unconfirmed for the socket-close handler to retire\"), /worker/spawn row (`resumed`: turn observed; ack without turn answers `queued`), bullet 66 (spawn_worker resumes…), bullet 69 (delivery = observed turn start; \"The shim's `{success:true}` is not delivery\"; PromptReceipt, commitPromptDelivery, commitLateStart, retireUnconfirmedBoot named) — evidence/r3.agents-wording.txt.",
+      "ci": "GitHub Tests run 34767582917 and Legion Envoy and Contracts run 34767504519 at 975ecc3ac0ca: all jobs success"
+    },
+    "evidence": "/tmp/legion60-test/evidence/r3.* (pr-view, per-path prdiff at both tips, confinement hashes, tests-only diff, assertion lists at both heads, 20 stability run lines, gate logs, AGENTS.md wording grep)."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T15:51:59.214Z"
+  "completed": "2026-09-13T16:11:33.454Z"
 }
