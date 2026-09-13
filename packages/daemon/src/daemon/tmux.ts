@@ -25,19 +25,6 @@ function argv(server: TmuxServer, ...rest: string[]): string[] {
   return ["tmux", "-L", server.socket, ...rest];
 }
 
-/** An entry of `show-environment` is a line `NAME=value`: everything up to the first `=` is the
- * name, whatever characters it holds (a dashed bash function `BASH_FUNC_foo-bar%%`, npm's
- * `//registry.npmjs.org/:_authToken`) — a name this parser skipped would be a name the scrub
- * silently left in the server. Skipped on purpose: `-NAME` (tmux's marker for a variable it unsets
- * in new panes; it reaches none, and a name starting with `-` cannot be told apart from the marker
- * in this format), and a value's continuation lines that start with a space or `}` (a bash exported
- * function body). tmux prints a value's embedded newlines literally when the client's locale is
- * UTF-8 (`paneEnv` carries the daemon's `LANG`) and vis-encodes them as `_` in the C locale, so a
- * continuation line of some other multi-line value — the `=`-padded last base64 line of a PEM
- * block — is indistinguishable from an entry in this format; what this yields are *candidates*:
- * `environmentHas` confirms each against the table before it is unset or logged. */
-const ENVIRONMENT_ENTRY = /^([^\s=}-][^=]*)=/;
-
 /** A pane inherits two tmux environment tables beneath its own `-e` pairs: the server's global
  * table (`-g`, the environment the server was forked with) and its session's table (`-t
  * <session>`, which `update-environment` fills from every attaching client — the operator's
@@ -46,6 +33,10 @@ export type EnvironmentTable = { readonly session: string } | undefined;
 
 function tableFlags(table: EnvironmentTable): string[] {
   return table === undefined ? ["-g"] : ["-t", table.session];
+}
+
+function tableName(table: EnvironmentTable): string {
+  return table === undefined ? "global" : `session ${table.session}`;
 }
 
 /** `no server running` / socket never created (`NO_SERVER_STDERR`), or the named session is not
@@ -62,48 +53,88 @@ function failure(result: { stderr?: string }): string {
   return detail ? `: ${detail}` : "";
 }
 
-/** The candidate variable names in one of the server's environment tables (see
- * `EnvironmentTable`), or `undefined` when there is nothing to read: no server is running on this
- * socket, or the named session does not exist yet. Names only: the values are never kept. A
- * candidate may be a fragment of a multi-line value (see `ENVIRONMENT_ENTRY`); `environmentHas`
- * tells them apart. Any other failure throws with tmux's stderr. */
-export async function environmentCandidates(
-  server: TmuxServer,
-  table: EnvironmentTable
-): Promise<string[] | undefined> {
-  const flags = tableFlags(table);
-  const result = await server.run(argv(server, "show-environment", ...flags));
-  if (result.exitCode !== 0) {
-    if (targetAbsent(result.stderr)) return undefined;
-    throw new Error(
-      `tmux show-environment ${flags.join(" ")} failed (exit ${result.exitCode})${failure(result)}`
-    );
-  }
+/** The characters tmux's `-s` output escapes inside a value with a backslash (tmux 3.7c
+ * `environment.c`: `$`, `` ` ``, `"`, `\`). */
+const SHELL_ESCAPED = new Set(["$", "`", '"', "\\"]);
+
+/**
+ * Parses `show-environment -s` output — the whole text, never line by line — into the names of
+ * the table's entries. tmux prints each set entry as `NAME="value"; export NAME;` followed by a
+ * newline, escaping `$`, `` ` ``, `"` and `\` inside the value with a backslash and leaving a
+ * value's own newlines in place, and each variable it unsets for new panes as `unset NAME;` (a
+ * marker: it reaches no pane, so it is not a name here). A name is everything up to the first `=`
+ * (tmux refuses `=` in a name; a space, `"` or `;` in one is fine — `A B`, `Q"N`, `X;` all print and
+ * parse). The closing `"` is the first *unescaped* one, and the entry closes only on the exact
+ * `; export <the same NAME>;` — so a multi-line value's continuation line, whatever it contains
+ * (`HOME;=x`, `key = value`, the `=`-padded last line of a PEM, even the text `"; export X;`
+ * escaped), can never read as a name, and no per-name probe is needed. Anything else is a parse
+ * failure that names the table and the byte offset — never the text at it, which is a value.
+ */
+export function parseShellEnvironment(dump: string, table: EnvironmentTable): string[] {
   const names: string[] = [];
-  for (const line of result.stdout.split("\n")) {
-    const entry = ENVIRONMENT_ENTRY.exec(line);
-    if (entry?.[1]) names.push(entry[1]);
+  const fail = (offset: number, what: string): never => {
+    throw new Error(
+      `tmux show-environment -s (${tableName(table)}): ${what} at byte ${offset}, cannot read the table`
+    );
+  };
+  let i = 0;
+  while (i < dump.length) {
+    if (dump.startsWith("unset ", i)) {
+      const end = dump.indexOf(";\n", i);
+      if (end === -1) fail(i, "unterminated unset marker");
+      i = end + 2;
+      continue;
+    }
+    const eq = dump.indexOf("=", i);
+    const lineEnd = dump.indexOf("\n", i);
+    if (eq === -1 || eq === i || (lineEnd !== -1 && lineEnd < eq)) fail(i, "expected NAME=");
+    const name = dump.slice(i, eq);
+    if (dump[eq + 1] !== '"') fail(eq + 1, 'expected `"` after NAME=');
+    let j = eq + 2;
+    for (;;) {
+      if (j >= dump.length) fail(j, "unterminated value");
+      const ch = dump[j];
+      if (ch === "\\") {
+        if (!SHELL_ESCAPED.has(dump[j + 1] ?? "")) fail(j, "unknown escape in value");
+        j += 2;
+        continue;
+      }
+      if (ch === '"') break;
+      j += 1;
+    }
+    const trailer = `"; export ${name};\n`;
+    if (!dump.startsWith(trailer, j)) fail(j, 'expected `"; export NAME;` closing the entry');
+    names.push(name);
+    i = j + trailer.length;
   }
   return names;
 }
 
-/** Whether `name` is an entry of the table: `show-environment <table> <name>` exits 0 when it is
- * (including a `-NAME` unset marker, which the parser never yields) and 1 with
- * `unknown variable: <name>` when it is not — a value fragment the parser mistook for a name. Its
- * stdout is the value and is never read: only the exit code and stderr decide. Any other refusal
- * throws with tmux's stderr, like the rest of the scrub. */
-export async function environmentHas(
+/** The variable names in one of the server's environment tables (see `EnvironmentTable`) — read
+ * with `show-environment -s` and `parseShellEnvironment`, so every name is exact — or `undefined`
+ * when there is nothing to read: no server is running on this socket, or the named session does
+ * not exist yet. Names only: the values are never kept. Any other failure throws with tmux's
+ * stderr. */
+export async function environmentNames(
   server: TmuxServer,
-  table: EnvironmentTable,
-  name: string
-): Promise<boolean> {
+  table: EnvironmentTable
+): Promise<string[] | undefined> {
   const flags = tableFlags(table);
-  const result = await server.run(argv(server, "show-environment", ...flags, name));
-  if (result.exitCode === 0) return true;
-  if ((result.stderr ?? "").trim() === `unknown variable: ${name}`) return false;
-  throw new Error(
-    `tmux show-environment ${flags.join(" ")} ${name} failed (exit ${result.exitCode})${failure(result)}`
-  );
+  const result = await server.run(argv(server, "show-environment", "-s", ...flags));
+  if (result.exitCode !== 0) {
+    if (targetAbsent(result.stderr)) return undefined;
+    throw new Error(
+      `tmux show-environment -s ${flags.join(" ")} failed (exit ${result.exitCode})${failure(result)}`
+    );
+  }
+  return parseShellEnvironment(result.stdout, table);
+}
+
+/** A name as a tmux argv token: tmux strips a trailing `;` from a token (its command separator), so
+ * a name ending in `;` would collapse onto the name before it — `HOME;` onto `HOME`. `\;` is the
+ * literal. */
+function nameToken(name: string): string {
+  return name.endsWith(";") ? `${name.slice(0, -1)}\\;` : name;
 }
 
 /** Removes `name` from one of the server's environment tables (`-u`: the entry is gone, not merely
@@ -114,7 +145,7 @@ export async function unsetEnvironment(
   name: string
 ): Promise<void> {
   const flags = tableFlags(table);
-  const result = await server.run(argv(server, "set-environment", ...flags, "-u", name));
+  const result = await server.run(argv(server, "set-environment", ...flags, "-u", nameToken(name)));
   if (result.exitCode !== 0) {
     throw new Error(
       `tmux set-environment ${flags.join(" ")} -u ${name} failed (exit ${result.exitCode})${failure(result)}`

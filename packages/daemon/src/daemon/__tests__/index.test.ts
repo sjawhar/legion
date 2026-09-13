@@ -1610,11 +1610,14 @@ describe("startDaemon", () => {
             saves += 1;
           },
           createNatsTransport: async () => nats,
-          runner: async () => ({
-            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-            stderr: "",
-            exitCode: 0,
-          }),
+          runner: async (command) =>
+            command[0] === "sh"
+              ? {
+                  stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                  stderr: "",
+                  exitCode: 0,
+                }
+              : { stdout: "", stderr: "", exitCode: 0 },
           resolveDaemonEnvironment: async () => daemonEnvironment,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -2058,7 +2061,8 @@ describe("startDaemon", () => {
         saveState: async () => {},
         createNatsTransport: async () => nats,
         runner: async (command) => {
-          if (command[0] === "sh") probeCommands.push(command);
+          if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+          probeCommands.push(command);
           return {
             stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
             stderr: "",
@@ -2126,7 +2130,8 @@ describe("startDaemon", () => {
           saveState: async () => {},
           createNatsTransport: async () => nats,
           runner: async (command, options) => {
-            if (command[0] === "sh") probeEnvs.push(options?.env);
+            if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+            probeEnvs.push(options?.env);
             return {
               stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
               stderr: "",
@@ -2181,6 +2186,20 @@ describe("startDaemon", () => {
     const warnSpy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
       warnings.push(args.map(String).join(" "));
     });
+    // The tables as tmux would print them with `show-environment -s` (values already escaped); the
+    // fake applies each `-u` to them so the scrub's post-removal verification reads the truth.
+    const globalTable = new Map<string, string>([
+      ["GH_AGENT_APP_PRIVATE_KEY_B64", "leaked-agent-key"],
+      ["GH_REVIEW_APP_PRIVATE_KEY_B64", "leaked-review-key"],
+      [
+        "RAW_FAKE_PEM",
+        "-----BEGIN FAKE KEY-----\nZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw=\n-----END FAKE KEY-----",
+      ],
+      ["PATH", "/full/bin:/usr/bin"],
+      ["PWD", "/srv"],
+      ["SHLVL", "0"],
+    ]);
+    const sessionTable = new Map<string, string>([["SSH_AUTH_SOCK", "/tmp/ssh-x/agent.1"]]);
 
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
@@ -2198,28 +2217,31 @@ describe("startDaemon", () => {
               };
             }
             if (command[0] === "/tools/tmux") tmuxCommands.push(command.slice(3));
+            if (command[0] === "/tools/tmux" && command[3] === "set-environment") {
+              // tmux strips a trailing `;` from an argv token; `\;` is the literal.
+              const token = command.at(-1) ?? "";
+              const name = token.endsWith("\\;")
+                ? `${token.slice(0, -2)};`
+                : token.replace(/;$/, "");
+              (command[4] === "-g" ? globalTable : sessionTable).delete(name);
+              return { stdout: "", stderr: "", exitCode: 0 };
+            }
             if (command[0] === "/tools/tmux" && command[3] === "show-environment") {
-              // The global table an earlier daemon forked the server with (a PEM-shaped value whose
-              // padded last line looks like `NAME=`), and the session table an operator attach
-              // filled through tmux's default update-environment. A per-name probe answers exit 0
-              // for a real entry and `unknown variable` for anything else, like tmux 3.7c.
-              const probed = command[4] === "-g" ? command[5] : command[6];
-              if (probed !== undefined) {
-                const entries = [
-                  "GH_AGENT_APP_PRIVATE_KEY_B64",
-                  "GH_REVIEW_APP_PRIVATE_KEY_B64",
-                  "RAW_FAKE_PEM",
-                  "SSH_AUTH_SOCK",
-                ];
-                return entries.includes(probed)
-                  ? { stdout: `${probed}=never-read`, stderr: "", exitCode: 0 }
-                  : { stdout: "", stderr: `unknown variable: ${probed}`, exitCode: 1 };
-              }
+              // `show-environment -s`: the global table an earlier daemon forked the server with
+              // (a PEM-shaped value whose padded last base64 line looks like `NAME=`), and the
+              // session table an operator attach filled through tmux's default
+              // update-environment, plus that table's unset markers.
+              const dump = (t: Map<string, string>, markers: string[]) =>
+                [...t.entries()]
+                  .map(([k, v]) => `${k}="${v}"; export ${k};`)
+                  .concat(markers.map((m) => `unset ${m};`))
+                  .map((l) => `${l}\n`)
+                  .join("");
               return {
                 stdout:
-                  command[4] === "-g"
-                    ? "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-agent-key\nGH_REVIEW_APP_PRIVATE_KEY_B64=leaked-review-key\nRAW_FAKE_PEM=-----BEGIN FAKE KEY-----\nZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw=\n-----END FAKE KEY-----\nPATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
-                    : "-DISPLAY\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\n-XAUTHORITY\n",
+                  command[5] === "-g"
+                    ? dump(globalTable, [])
+                    : dump(sessionTable, ["DISPLAY", "XAUTHORITY"]),
                 stderr: "",
                 exitCode: 0,
               };
@@ -2251,8 +2273,8 @@ describe("startDaemon", () => {
         },
       });
 
-      expect(tmuxCommands).toContainEqual(["show-environment", "-g"]);
-      expect(tmuxCommands).toContainEqual(["show-environment", "-t", "legion-acme1"]);
+      expect(tmuxCommands).toContainEqual(["show-environment", "-s", "-g"]);
+      expect(tmuxCommands).toContainEqual(["show-environment", "-s", "-t", "legion-acme1"]);
       expect(
         tmuxCommands.filter(
           (command) => command[0] === "set-environment" || command[0] === "set-option"
@@ -2269,6 +2291,7 @@ describe("startDaemon", () => {
       ]);
       expect(warnings.join("\n")).not.toContain("leaked-");
       expect(warnings.join("\n")).not.toContain("ZmFr");
+      expect([...globalTable.keys()]).toEqual(["PATH", "PWD", "SHLVL"]);
     } finally {
       warnSpy.mockRestore();
       await daemon?.stop();
@@ -2306,9 +2329,9 @@ describe("startDaemon", () => {
             if (command[0] === "/tools/tmux" && command[3] === "show-environment") {
               return {
                 stdout:
-                  command[4] === "-g"
-                    ? "PATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
-                    : "-DISPLAY\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n",
+                  command[5] === "-g"
+                    ? 'PATH="/full/bin:/usr/bin"; export PATH;\nPWD="/srv"; export PWD;\nSHLVL="0"; export SHLVL;\n'
+                    : "unset DISPLAY;\nunset SSH_AUTH_SOCK;\nunset SSH_CONNECTION;\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -2493,11 +2516,14 @@ describe("startDaemon", () => {
         loadState: async () => state,
         saveState: async () => {},
         createNatsTransport: async () => nats,
-        runner: async () => ({
-          stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-          stderr: "",
-          exitCode: 0,
-        }),
+        runner: async (command) =>
+          command[0] === "sh"
+            ? {
+                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr: "",
+                exitCode: 0,
+              }
+            : { stdout: "", stderr: "", exitCode: 0 },
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         readProcessStat: fakeProcStat,
@@ -2608,11 +2634,14 @@ describe("startDaemon", () => {
       await expect(
         startDaemon(daemonConfig, {
           deps: {
-            runner: async () => ({
-              stdout: "",
-              stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-              exitCode: 0,
-            }),
+            runner: async (command) =>
+              command[0] === "sh"
+                ? {
+                    stdout: "",
+                    stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                    exitCode: 0,
+                  }
+                : { stdout: "", stderr: "", exitCode: 0 },
             dispatchClient: fakeDispatchClient(),
             resolveDaemonEnvironment: async () => daemonEnvironment,
             readPluginManifest: async () => {
@@ -2643,11 +2672,14 @@ describe("startDaemon", () => {
         loadState: async () => state,
         saveState: async () => {},
         createNatsTransport: async () => nats,
-        runner: async () => ({
-          stdout: "[]",
-          stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-          exitCode: 0,
-        }),
+        runner: async (command) =>
+          command[0] === "sh"
+            ? {
+                stdout: "[]",
+                stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                exitCode: 0,
+              }
+            : { stdout: "", stderr: "", exitCode: 0 },
         resolveDaemonEnvironment: async () => daemonEnvironment,
         statPrompt: async () => {},
         readProcessStat: fakeProcStat,
@@ -2716,11 +2748,14 @@ describe("startDaemon", () => {
       loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
       saveState: async () => {},
       createNatsTransport: async () => new FakeNats(),
-      runner: async () => ({
-        stdout: "[]",
-        stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-        exitCode: 0,
-      }),
+      runner: async (command: string[]) =>
+        command[0] === "sh"
+          ? {
+              stdout: "[]",
+              stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              exitCode: 0,
+            }
+          : { stdout: "", stderr: "", exitCode: 0 },
       resolveDaemonEnvironment: async () => daemonEnvironment,
       readPluginManifest: async () => validLegionPluginManifest,
       statPrompt: async () => {},

@@ -115,8 +115,8 @@ secretsd (human tier; a YubiKey tap may be needed)`, runs `secrets get <NAME> --
 base64-decodes stdout, and refuses unless it begins `-----BEGIN`; the PEM is held in memory like
 command output. A missing `secrets` on the launcher's PATH, an unknown key, an unparsable status,
 a non-PEM value, or any secretsd refusal names `github_apps.<role>.private_key_secret` and the key,
-never the material. Both `secrets` children run with the same stripped environment as
-`private_key_command` minus `SECRETSD_SESSION_TOKEN_FILE` (only that variable: `SECRETSD_SOCK` is
+never the material. Both `secrets` children run under the daemon's own `process.env`, like
+`private_key_command`, minus exactly `SECRETSD_SESSION_TOKEN_FILE` (only that variable: `SECRETSD_SOCK` is
 the broker's socket path, not a session), and inherit the daemon's stdin: secretsd scopes a
 tokenless caller by `isatty(0)` plus `/proc/self/fd/0`, so the daemon must be started with stdin
 on its launcher pane's terminal and its grant is that pane's, never an agent session's. There is no
@@ -197,8 +197,9 @@ command forks, therefore of every pane. On top of it a pane gets only the explic
 `GIT_CONFIG_COUNT=0`, `GIT_TERMINAL_PROMPT=0`, `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`, the credential
 pane environment below, and the `*_FILE` secret pointers). Nothing else the daemon was started with
 reaches a pane: not the GitHub App private keys (`GH_AGENT_APP_PRIVATE_KEY_B64`/
-`GH_REVIEW_APP_PRIVATE_KEY_B64` — read only by `private_key_command`, the one child that runs
-under the daemon's own `process.env` on purpose), not provider
+`GH_REVIEW_APP_PRIVATE_KEY_B64` — read only by the daemon's own key readers in `config.ts`,
+`private_key_command` and `private_key_secret`'s `secrets get` children (`runSecretsGet`), the two
+children that run under the daemon's own `process.env` on purpose), not provider
 keys (they reach a pane only through `omp_launch_prefix`), not `DISPATCH_TOKEN`, `ENVOY_*`
 secrets, `SECRETSD_SESSION_TOKEN_FILE`, `OMP_SESSION_ID`, `JJ_CONFIG`, `TMUX`/`TMUX_PANE`,
 `SSH_AUTH_SOCK`, or an outer pane's `LEGION_*`. A `gh` child the daemon spawns for a GitHub App role
@@ -272,30 +273,34 @@ default `update-environment` from every attaching client: an operator's
 `tmux -L legion-<project> attach` copies their `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `SSH_ASKPASS`,
 `DISPLAY`, … in, and every pane opened afterwards inherits the operator's SSH agent. Every boot
 therefore, once the probes pass and before the launch hold releases
-(`TmuxRuntime.scrubServerEnvironment`): reads the global table (`show-environment -g`, names only —
-`environmentCandidates` in `tmux.ts`; a candidate is everything up to a line's first `=`, and it
-skips the `-NAME` unset markers a fresh session table consists of and a bash function body's
-continuation lines), empties the session's `update-environment` option (`set-option -t
+(`TmuxRuntime.scrubServerEnvironment`): reads the global table with `show-environment -s -g`
+(`environmentNames` in `tmux.ts`, over `parseShellEnvironment`: the whole output is scanned as
+text, never line by line — each set entry is `NAME="value"; export NAME;` with `$`, `` ` ``, `"`
+and `\` backslash-escaped inside the value and a value's own newlines left in place, each unset
+marker is `unset NAME;`, and an entry closes only on the first unescaped `"` followed by exactly
+`; export <the same NAME>;` — so a multi-line value's continuation line, whatever it contains
+(`HOME;=x`, `key = value`, the `=`-padded last line of a PEM), can never read as a name and no
+per-name probe is ever sent; any other shape is a parse failure naming the table and the byte
+offset, never the text there), empties the session's `update-environment` option (`set-option -t
 legion-<project> update-environment ''`, `disableEnvironmentUpdates`) *before* reading the session
-table (`show-environment -t legion-<project>`) so an attach landing in between cannot slip a copy
-in behind the read, and, for each candidate that is not a key of `paneEnv` (`PWD` and `SHLVL`,
-which tmux itself writes into the global table at server start, are the only exemptions — checked
-as own properties, so a table entry named `constructor` is removed like any other), first confirms
-it is an entry of the table (`environmentHas`: `show-environment <table> <name>` exits 0 when it
-is and 1 with `unknown variable: <name>` when it is not — the daemon reads only the exit code and
-stderr, never that command's stdout, which is the value) and only then `set-environment -u`s it and
-records it: a continuation line of a multi-line value — the `=`-padded last base64 line of a PEM
-block — looks exactly like `NAME=` in the dump, and a value fragment must never reach the log, so
-an unconfirmed candidate is dropped silently and the count stays exact. One line is logged with the
-de-duplicated names: `[legion] removed <n> variable(s) from the private tmux server environment
-that panes may not inherit: <NAME1>, <NAME2>, …` — names, never values (a tmux failure's message
-carries stderr only, never `show-environment`'s stdout). `openWindow` creates the session and
-empties its `update-environment` in one tmux invocation (`new-session … \; set-option -t <session>
-update-environment ''`), so no attach can ever copy a client's environment into it. A server this
-daemon forked itself carries exactly `paneEnv` in its global table and only markers in its session
-table, so it logs nothing; a variable the operator's `tmux.conf` `set-environment -g`s (TPM's
-`TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any other. A tmux failure reading, probing,
-or writing either table is as fatal as a failed probe. No server on the daemon's socket is not
+table (`show-environment -s -t legion-<project>`) so an attach landing in between cannot slip a
+copy in behind the read, and `set-environment -u`s from each table every name that is not a key of
+`paneEnv` (`PWD` and `SHLVL`, which tmux itself writes into the global table at server start, are
+the only exemptions — checked as own properties, so a table entry named `constructor` is removed
+like any other; a name ending in `;` is passed as `\;`, since tmux strips a trailing `;` from an
+argv token). After the removals each table is listed again and two invariants checked, throwing
+(names only) on a violation: every allow-listed name that was present is still present, and no
+removed name remains — the guard against any argv re-tokenisation surprise on the unset side. One
+line is logged with the de-duplicated names: `[legion] removed <n> variable(s) from the private
+tmux server environment that panes may not inherit: <NAME1>, <NAME2>, …` — names, never values
+(a tmux failure's message carries stderr only, never `show-environment`'s stdout). `openWindow`
+creates the session and empties its `update-environment` in one tmux invocation (`new-session …
+\; set-option -t <session> update-environment ''`), so no attach can ever copy a client's
+environment into it. A server this daemon forked itself carries exactly `paneEnv` in its global
+table and only markers in its session table, so it logs nothing; a variable the operator's
+`tmux.conf` `set-environment -g`s (TPM's `TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any
+other. A tmux failure reading or writing either table, a dump the parser cannot read, or a
+post-scrub invariant violation is as fatal as a failed probe. No server on the daemon's socket is not
 (nothing to scrub: `openWindow` forks one under `paneEnv` with the option set); a server without
 the daemon's session still has its global table scrubbed, and only the session step is skipped
 (`openWindow` creates the session with the option set). A plain daemon restart is therefore

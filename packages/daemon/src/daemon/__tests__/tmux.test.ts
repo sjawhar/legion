@@ -5,10 +5,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   disableEnvironmentUpdates,
-  environmentCandidates,
-  environmentHas,
+  environmentNames,
   lookupPane,
   openWindow,
+  parseShellEnvironment,
   type TmuxServer,
   unsetEnvironment,
 } from "../tmux";
@@ -95,65 +95,119 @@ describe("lookupPane", () => {
   });
 });
 
-describe("environmentCandidates", () => {
-  it("lists each global entry's name over the private server, skipping unset markers and value continuation lines", async () => {
-    // `BASH_FUNC__aws%%` is a bash exported function: its body continues over lines that start
-    // with a space or `}` and may themselves contain `=` — never a new entry. A name is everything
-    // up to the first `=`, whatever it contains: a dashed function, npm's `//host/:_authToken`.
-    const stdout = [
-      "-DISPATCH_TOKEN",
-      'BASH_FUNC__aws%%=() {  local use_tty="";',
-      ' [ -t 0 ] && use_tty="-it";',
-      ' "$AWSCLI_DOCKER_BIN" run --rm $use_tty --env AWS_CLI_AUTO_PROMPT=$AWS_CLI_AUTO_PROMPT',
-      "}",
-      "BASH_FUNC_git-fixup%%=() {  git commit --fixup=HEAD",
-      "}",
-      "GH_AGENT_APP_PRIVATE_KEY_B64=abc",
-      "HOME=/h",
-      "PATH=/x:/y",
-      "//registry.npmjs.org/:_authToken=npm_abc",
-      "npm_config_user_agent=bun/1.3",
-      "some.dotted:name=1",
+describe("parseShellEnvironment", () => {
+  it("names every set entry of a show-environment -s dump and skips the unset markers", () => {
+    // Real tmux 3.7c output shapes: a dashed bash function whose body spans lines, npm's
+    // `//host/:_authToken`, a name with a space, a name with a `"`, a name ending in `;`, an empty
+    // value, a value ending in a backslash, and `unset NAME;` markers.
+    const dump = [
+      '//registry.example/:_authToken="npm_abc"; export //registry.example/:_authToken;',
+      'A B="spaced"; export A B;',
+      'BASH_FUNC_git-fixup%%="() {  git commit --fixup=HEAD',
+      '}"; export BASH_FUNC_git-fixup%%;',
+      'EMPTY=""; export EMPTY;',
+      'HOME="/home/legion"; export HOME;',
+      "unset MARKED;",
+      'PATH="/full/bin:/usr/bin"; export PATH;',
+      'Q"N="q"; export Q"N;',
+      'TRAILBS="ends\\\\"; export TRAILBS;',
+      'X;="semi"; export X;;',
       "",
     ].join("\n");
-    const commands: string[][] = [];
-    expect(
-      await environmentCandidates(server({ stdout, exitCode: 0 }, commands), undefined)
-    ).toEqual([
-      "BASH_FUNC__aws%%",
+    expect(parseShellEnvironment(dump, undefined)).toEqual([
+      "//registry.example/:_authToken",
+      "A B",
       "BASH_FUNC_git-fixup%%",
-      "GH_AGENT_APP_PRIVATE_KEY_B64",
+      "EMPTY",
       "HOME",
       "PATH",
-      "//registry.npmjs.org/:_authToken",
-      "npm_config_user_agent",
-      "some.dotted:name",
+      'Q"N',
+      "TRAILBS",
+      "X;",
     ]);
-    expect(commands).toEqual([["tmux", "-L", "legion-omp", "show-environment", "-g"]]);
   });
 
-  it("reads a session's table with -t, where a fresh session holds only update-environment's unset markers and an attach fills in real entries", async () => {
-    // tmux 3.7: a new session's table is the `-NAME` marker for every default `update-environment`
-    // name; a client attach then sets the ones it carries.
-    const fresh =
-      "-DISPLAY\n-KRB5CCNAME\n-MSYSTEM\n-SSH_AGENT_PID\n-SSH_ASKPASS\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n-WAYLAND_DISPLAY\n-WINDOWID\n-XAUTHORITY\n-XDG_CURRENT_DESKTOP\n-XDG_SESSION_DESKTOP\n-XDG_SESSION_TYPE\n";
-    const commands: string[][] = [];
-    expect(
-      await environmentCandidates(server({ stdout: fresh, exitCode: 0 }, commands), {
-        session: "legion-omp",
-      })
-    ).toEqual([]);
-    expect(commands).toEqual([
-      ["tmux", "-L", "legion-omp", "show-environment", "-t", "legion-omp"],
+  it("scans a multi-line value as one entry, whatever its continuation lines contain", () => {
+    // The reviewer's shapes: a PEM whose `=`-padded last base64 line looks like `NAME=`, a value
+    // whose lines read `HOME;=x` and `key = value`, a function body with an escaped `"` and `$`,
+    // a value containing `"`, `\`, a backtick and `$` (all backslash-escaped by tmux), and a value
+    // that itself contains the text `"; export HOME;` — escaped, so it never closes the entry.
+    const dump = [
+      'BASH_FUNC_x%%="() {  echo \\"hi \\$1\\";',
+      " local a=1",
+      '}"; export BASH_FUNC_x%%;',
+      'EVIL="a\\"; export HOME;',
+      'b"; export EVIL;',
+      'QUOTEY="say \\"hi\\" \\\\ back \\`tick\\` \\$dollar"; export QUOTEY;',
+      'RAW_FAKE_PEM="-----BEGIN FAKE KEY-----',
+      "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+      "ZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw=",
+      "SE9NRTs9eA==",
+      '-----END FAKE KEY-----"; export RAW_FAKE_PEM;',
+      'TRICKY="l1',
+      "HOME;=x",
+      'key = value"; export TRICKY;',
+      "",
+    ].join("\n");
+    expect(parseShellEnvironment(dump, undefined)).toEqual([
+      "BASH_FUNC_x%%",
+      "EVIL",
+      "QUOTEY",
+      "RAW_FAKE_PEM",
+      "TRICKY",
     ]);
+  });
 
-    const attached =
-      "-DISPLAY\nSSH_ASKPASS=/usr/bin/false\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\nSSH_CONNECTION=100.100.92.97 57158 100.113.243.90 22\n-WAYLAND_DISPLAY\n";
+  it("parses the C-locale rendering identically (embedded newlines vis-encoded as `_`)", () => {
+    const dump =
+      'RAW_FAKE_PEM="-----BEGIN FAKE KEY-----_ZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw=_-----END FAKE KEY-----"; export RAW_FAKE_PEM;\nTRICKY="l1_HOME;=x_key = value"; export TRICKY;\n';
+    expect(parseShellEnvironment(dump, undefined)).toEqual(["RAW_FAKE_PEM", "TRICKY"]);
+  });
+
+  it("is empty for a fresh session table (markers only) and for no output", () => {
     expect(
-      await environmentCandidates(server({ stdout: attached, exitCode: 0 }), {
-        session: "legion-omp",
-      })
-    ).toEqual(["SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_CONNECTION"]);
+      parseShellEnvironment("unset DISPLAY;\nunset SSH_AUTH_SOCK;\n", { session: "s" })
+    ).toEqual([]);
+    expect(parseShellEnvironment("", undefined)).toEqual([]);
+  });
+
+  it("fails loudly on any other shape, naming the table and the byte offset — never the text there", () => {
+    const cases: Array<[string, string]> = [
+      ['A="leaked-value', "unterminated value at byte 15"],
+      ['A="x\\n"; export A;\n', "unknown escape in value at byte 4"],
+      ['A="leaked"; export B;\n', 'expected `"; export NAME;` closing the entry at byte 9'],
+      ["A=leaked-value; export A;\n", 'expected `"` after NAME= at byte 2'],
+      ["leaked-value\n", "expected NAME= at byte 0"],
+    ];
+    for (const [dump, detail] of cases) {
+      let message = "";
+      try {
+        parseShellEnvironment(dump, undefined);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toBe(`tmux show-environment -s (global): ${detail}, cannot read the table`);
+      expect(message).not.toContain("leaked");
+    }
+    expect(() => parseShellEnvironment("unset X", { session: "legion-omp" })).toThrow(
+      "tmux show-environment -s (session legion-omp): unterminated unset marker at byte 0, cannot read the table"
+    );
+  });
+});
+
+describe("environmentNames", () => {
+  it("reads a table with show-environment -s over the private server and returns its exact names", async () => {
+    const commands: string[][] = [];
+    const fake = server(
+      { stdout: 'FOO_SECRET="stale"; export FOO_SECRET;\n', exitCode: 0 },
+      commands
+    );
+    expect(await environmentNames(fake, undefined)).toEqual(["FOO_SECRET"]);
+    expect(await environmentNames(fake, { session: "legion-omp" })).toEqual(["FOO_SECRET"]);
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "show-environment", "-s", "-g"],
+      ["tmux", "-L", "legion-omp", "show-environment", "-s", "-t", "legion-omp"],
+    ]);
   });
 
   it("is undefined when no server is behind the socket (a first boot, or the server exited), or the session does not exist", async () => {
@@ -165,7 +219,7 @@ describe("environmentCandidates", () => {
         exitCode: 1,
       }),
     };
-    expect(await environmentCandidates(gone, undefined)).toBeUndefined();
+    expect(await environmentNames(gone, undefined)).toBeUndefined();
     const neverCreated: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({
@@ -174,95 +228,45 @@ describe("environmentCandidates", () => {
         exitCode: 1,
       }),
     };
-    expect(await environmentCandidates(neverCreated, undefined)).toBeUndefined();
+    expect(await environmentNames(neverCreated, undefined)).toBeUndefined();
     const noSession: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({ stdout: "", stderr: "no such session: legion-omp", exitCode: 1 }),
     };
-    expect(await environmentCandidates(noSession, { session: "legion-omp" })).toBeUndefined();
+    expect(await environmentNames(noSession, { session: "legion-omp" })).toBeUndefined();
   });
 
   it("throws on any other failure, carrying tmux's stderr and never its stdout (the value dump)", async () => {
     const broken: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({
-        stdout: "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-value\n",
+        stdout:
+          'GH_AGENT_APP_PRIVATE_KEY_B64="leaked-value"; export GH_AGENT_APP_PRIVATE_KEY_B64;\n',
         stderr: "server version is too old",
         exitCode: 1,
       }),
     };
-    await expect(environmentCandidates(broken, undefined)).rejects.toThrow(
-      "tmux show-environment -g failed (exit 1): server version is too old"
+    await expect(environmentNames(broken, undefined)).rejects.toThrow(
+      "tmux show-environment -s -g failed (exit 1): server version is too old"
     );
-    await expect(environmentCandidates(broken, { session: "legion-omp" })).rejects.toThrow(
-      "tmux show-environment -t legion-omp failed (exit 1): server version is too old"
+    await expect(environmentNames(broken, { session: "legion-omp" })).rejects.toThrow(
+      "tmux show-environment -s -t legion-omp failed (exit 1): server version is too old"
     );
     const silent: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({
-        stdout: "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-value\n",
+        stdout:
+          'GH_AGENT_APP_PRIVATE_KEY_B64="leaked-value"; export GH_AGENT_APP_PRIVATE_KEY_B64;\n',
         stderr: "",
         exitCode: 1,
       }),
     };
     let message = "";
-    await environmentCandidates(silent, undefined).catch((error: Error) => {
+    await environmentNames(silent, undefined).catch((error: Error) => {
       message = error.message;
     });
-    expect(message).toBe("tmux show-environment -g failed (exit 1)");
+    expect(message).toBe("tmux show-environment -s -g failed (exit 1)");
     expect(message).not.toContain("leaked-value");
-  });
-});
-
-describe("environmentHas", () => {
-  it("confirms a candidate against the table with show-environment <table> <name>, reading only the exit code", async () => {
-    const commands: string[][] = [];
-    // stdout is the value: present or not, it is never read.
-    const present = server({ stdout: "FOO_SECRET=leaked-value\n", exitCode: 0 }, commands);
-    expect(await environmentHas(present, undefined, "FOO_SECRET")).toBe(true);
-    expect(await environmentHas(present, { session: "legion-omp" }, "SSH_AUTH_SOCK")).toBe(true);
-    expect(commands).toEqual([
-      ["tmux", "-L", "legion-omp", "show-environment", "-g", "FOO_SECRET"],
-      ["tmux", "-L", "legion-omp", "show-environment", "-t", "legion-omp", "SSH_AUTH_SOCK"],
-    ]);
-  });
-
-  it("classifies `unknown variable: <name>` as absent — a value fragment the dump parser mistook for a name", async () => {
-    const absent: TmuxServer = {
-      socket: "legion-omp",
-      run: async (cmd) => ({
-        stdout: "",
-        stderr: `unknown variable: ${cmd.at(-1)}`,
-        exitCode: 1,
-      }),
-    };
-    expect(await environmentHas(absent, undefined, "ZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw")).toBe(false);
-    expect(await environmentHas(absent, { session: "legion-omp" }, "QUJD")).toBe(false);
-  });
-
-  it("throws on any other refusal, carrying stderr only", async () => {
-    const broken: TmuxServer = {
-      socket: "legion-omp",
-      run: async () => ({
-        stdout: "FOO=leaked-value\n",
-        stderr: "server version is too old",
-        exitCode: 1,
-      }),
-    };
-    let message = "";
-    await environmentHas(broken, undefined, "FOO").catch((error: Error) => {
-      message = error.message;
-    });
-    expect(message).toBe("tmux show-environment -g FOO failed (exit 1): server version is too old");
-    expect(message).not.toContain("leaked-value");
-    // `unknown variable` for a *different* name is not this name's absence.
-    const other: TmuxServer = {
-      socket: "legion-omp",
-      run: async () => ({ stdout: "", stderr: "unknown variable: BAR", exitCode: 1 }),
-    };
-    await expect(environmentHas(other, undefined, "FOO")).rejects.toThrow(
-      "tmux show-environment -g FOO failed (exit 1): unknown variable: BAR"
-    );
   });
 });
 
@@ -275,6 +279,14 @@ describe("unsetEnvironment", () => {
     expect(commands).toEqual([
       ["tmux", "-L", "legion-omp", "set-environment", "-g", "-u", "FOO_SECRET"],
       ["tmux", "-L", "legion-omp", "set-environment", "-t", "legion-omp", "-u", "SSH_AUTH_SOCK"],
+    ]);
+  });
+
+  it("escapes a trailing `;` on the name as `\\;`, so tmux does not strip it and collapse the name onto another entry", async () => {
+    const commands: string[][] = [];
+    await unsetEnvironment(server({ stdout: "", exitCode: 0 }, commands), undefined, "HOME;");
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "set-environment", "-g", "-u", "HOME\\;"],
     ]);
   });
 
