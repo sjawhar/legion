@@ -39,7 +39,8 @@
     "test(pi-envoy): grant rig loads the production plugin tree and scores the grant file per command",
     "docs: LEGION_GRANT_FILE delivery - why the bash tool env was abandoned, what the pane carries",
     "docs: record the LEGION-54 pull request number",
-    "docs: LEGION-54 ships as pi-envoy 1.17.4 (main released 1.17.3 first); the LEGION-32 observation note records its resolution"
+    "docs: LEGION-54 ships as pi-envoy 1.17.4 (main released 1.17.3 first); the LEGION-32 observation note records its resolution",
+    "fix(daemon): strip inherited worker-bin from the daemon and pane PATH at the boundary; refuse a rig profile equal to the source profile"
   ],
   "deviations": [
     "Plan 1d named the pane-env method `credentialPaneEnvironment`; it is `credentialProcessEnvironment` because runtime.contract.test.ts ('ProcessManager's members carry no tmux vocabulary') forbids pane/window in ProcessManager identifiers. Same body, same call sites.",
@@ -80,13 +81,27 @@
     "rigRerun": "Both branch legs re-run at the rebased tree (rig-mode commit fb351195 = d61f711a's tree): /tmp/l54rig/runs/fixed-rpc-rebased-2026-09-13T02-56-52-261Z — 34 calls, 34 mints, 4 instances, 27/27 own-mint 0600, legion probes on calls 30/31/32/34 exit=0 with 200s, A-G PASS; /tmp/l54rig/runs/fixed-tui-rebased-2026-09-13T03-00-07-323Z — 9 calls, 9 mints, 2 instances, A-G PASS; negative control 403; acceptance-5 grep empty for 34+9 ids. The two before runs stand (released builds).",
     "rebasedUnit": "pi-envoy bun run test 159/159; daemon full bun test 986/991 on a loaded box, then processes.test.ts 214/214 x3 on an idle box; the rotating failures (retires an older generation's launch as stale / repeated dead-before-ready cycles / reconnectRoots re-arms / retires its own just-opened pane) are #980's timing-sensitive boot-watchdog tests and reproduce on a read-only export of main@origin under the same load (launchFailures count race, Expected 2 / Received 1). biome --error-on-warnings + tsc (daemon), lint/typecheck/build (pi-envoy) clean; contracts diff vs main empty."
   },
-  "deployment": "Operator installs @sjawhar/pi-legion-envoy@1.17.3 (release-bump from the fix(pi-envoy) title; the merger records the number the workflow actually publishes) into ~/.omp/profiles/legion/plugins, then immediately `legion restart sjawhar-legion` on merged main; live panes keep working via LEGION_GRANT fallback (no LEGION_GRANT_FILE in their env). Acceptance 7 is the sign-off's first fresh worker.",
+  "deployment": "Operator installs @sjawhar/pi-legion-envoy@1.17.4 (release-bump from the fix(pi-envoy) title; the merger records the number the workflow actually publishes) into ~/.omp/profiles/legion/plugins, then immediately `legion restart sjawhar-legion` on merged main; live panes keep working via LEGION_GRANT fallback (no LEGION_GRANT_FILE in their env). Acceptance 7 is the sign-off's first fresh worker.",
   "openQuestions": [],
   "subPlanningNeeded": false,
-  "head": "d61f711aa28ff10d0c5fada5375f8957a1c4861f (rebased; the handoff commit follows it)",
+  "head": "fa521041e866a2c23adee5264d944758b155713d (review round 2 fix; the round-2 handoff commit follows it)",
   "rebase": "Rebased once onto main@origin abaf08175c9b (chore: release pi-envoy v1.17.3) because GitHub reported the PR CONFLICTING/DIRTY. One textual conflict: the bun:test import line of packages/daemon/src/cli/__tests__/index.test.ts (main's #980 added spyOn, this branch added afterAll; both kept). Semantic merge checked by hand: installWorkerGhShim still runs in startDaemonLocked before the boot probes (index.ts:260 vs 285), and credentialProcessEnvironment + trackProcessSecrets survive at all three spawn sites in processes.ts. Main's #980/#983 daemon changes (boot probe retry, launch hold, per-claim reconnect) merged without further conflict.",
   "ci": "Dispatched for d61f711a: Tests run 34734634479 success (lint, typecheck, test); Legion Envoy and Contracts run 34734634480 success (pi-envoy job). PR mergeable=MERGEABLE, mergeStateStatus=BLOCKED (awaiting review). The daemon also published ci-green for d61f711a.",
+  "reviewRound2": {
+    "review": "https://github.com/sjawhar/legion/pull/992#pullrequestreview-5189463654 (REQUEST_CHANGES at 2ec1de35; 2 blocking, 8 non-blocking)",
+    "fixCommit": "fa521041e866",
+    "chain": "The reviewer's local 'review: record handoff' commit 4319ece9 (.legion/review.json; the review App cannot push) is kept in the chain and pushed with the fix.",
+    "blocking": [
+      "1 processes.ts:2915 — processPath could carry an inherited worker-bin (daemon started from a Legion pane; mise env keeps the PATH head). Fix: resolveDaemonEnvironment builds paneEnv.PATH = legionBinDir + pathWithoutWorkerBin(miseEnv.PATH) (helper reused from worker-bin.ts; no second helper). Tests: environment.test.ts 'strips every inherited worker-bin entry from the pane base PATH…' (worker-bin at head and mid-list; clean PATH, commands.gh not under it, every gh resolution over the clean search path); processes.test.ts 'a daemon started from inside a Legion pane still launches panes with worker-bin exactly once' (real resolveDaemonEnvironment output fed in as processPath; each of 3 launches has worker-bin exactly once, first, with <state_dir>/bin present). Docstring, ProcessManagerDeps.processPath, daemon AGENTS.md (incl. installWorkerGhShim in the boot-ordering sentence), and config-env-keys doc now state the guarantee.",
+      "2 setup.sh:53 — no rig≠source profile guard. Fix: first action after profile variables resolve compares realpath -m of both dirs and exits 2 naming both paths; redundant mkdir of $RIG/state/worker-bin dropped. Proven dry in both directions (RIG_PROFILE=legion; RIG_SOURCE_PROFILE=l12rig): exit 2, legion-profile fingerprint identical before/after, rig dir never created — output in the PR body."
+    ],
+    "nonBlocking": "All eight folded into fa521041 and answered in-thread: subagent timing sentence in skills/legion-worker/SKILL.md; grantFrom ENOENT remedy text (+ test); pathWithoutWorkerBin docstring rewritten, run.ts imports it, WORKER_BIN_DIRNAME unexported; installWorkerGhShim writes gh.<pid>.<uuid> then renames; blank LEGION_GRANT_FILE blocks before minting and writeGrantFile refuses a relative path (+ tests); pruneSecretFiles returns void and processSecretNames dedupes the token/grant pairing; index.ts and holdProcessSecret comments describe current behavior; the LEGION-12 changelog line folded into the LEGION-54 entry.",
+    "rigRerun": "Both legs at fa521041's tree, launched from a PATH deliberately carrying two worker-bin entries (this pane's own first + /tmp/other-daemon/worker-bin): fixed-rpc-r2 34 calls/34 mints/4 instances/27/27 own-mint 0600, legion probes calls 30-34 exit=0 with 200s, A-G PASS, probe PATH has worker-bin exactly once; fixed-tui-r2 9/9, 2 instances, A-G PASS; negative control 403; acceptance-5 grep empty for 34+9 ids. Dirs: /tmp/l54rig/runs/fixed-rpc-r2-2026-09-13T04-09-42-737Z, /tmp/l54rig/runs/fixed-tui-r2-2026-09-13T04-13-30-477Z.",
+    "tests": "daemon named files 91/91, processes.test.ts 215/215, pi-envoy legion.test.ts 54/54 and full 159/159, daemon full bun test 989/993 (the #980 launchFailures timing flake reproduced on main in round 1; the 3 live-tmux tests environmental/skipped); biome --error-on-warnings, tsc, pi-envoy lint/typecheck clean.",
+    "ci": "Dispatched for fa521041: Tests run 34737467249 success; Legion Envoy and Contracts run 34737467244 success; daemon published ci-green for fa521041.",
+    "threads": "All ten answered in-thread with the commit SHA; not resolved by me — the reviewer resolves them."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T03:08:49.796Z"
+  "completed": "2026-09-13T04:21:03.200Z"
 }
