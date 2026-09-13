@@ -118,11 +118,14 @@ write_daemon_config
 }
 
 
-[[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
+# The default-mode cases must not see an inherited SMOKE_WEBHOOK_MODE: the README's start block
+# exports it in an operator's shell, so each clears it in its own subshell, exactly as the
+# LEGION-40 cases below clear DISPATCH_URL/DISPATCH_TOKEN.
+[[ "$(unset SMOKE_WEBHOOK_MODE; SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
   printf 'expected available webhook forwarding to default to forward mode\n' >&2
   exit 1
 }
-[[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=1 resolve_webhook_mode)" == "none" ]] || {
+[[ "$(unset SMOKE_WEBHOOK_MODE; SMOKE_GH_WEBHOOK_HELP_EXIT=1 resolve_webhook_mode)" == "none" ]] || {
   printf 'expected unavailable webhook forwarding to default to none mode\n' >&2
   exit 1
 }
