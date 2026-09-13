@@ -1,7 +1,7 @@
 {
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
-  "headSha": "361126e8b944 (round 3 test-stability fix; the pushed tip is the handoff commit on top of it, differing only in .legion/implement.json)",
+  "headSha": "577635f3591b (round 3 tip after the conflict-forced rebase onto main 1c749943; test fix at c299392fb4f6; the pushed tip is the handoff commit on top of it)",
   "commits": [
     "9d48d41d0185 daemon: deliver a worker prompt only when its turn is observed to start (LEGION-60) (was 372310dc3b21 before the conflict-forced rebase)",
     "48ad9b49c27f daemon: send worker-queued/worker-started and the other ProcessManager notices through the Envoy listener (was 208d87937e58)",
@@ -140,11 +140,25 @@
       "kind": "test stability only; production code untouched",
       "finding": "Tester round 2 (.legion/test.json round2.flakeFinding): the two `retires a ready-time worker whose socket closes after acknowledging its first task … (workerCap 1|2)` cases bounded their wait for the cold relaunch with flushEventLoopUntil, a 5000 setImmediate-tick budget, while the relaunch does real filesystem I/O (session-file stat, boot-token secret file, workspace .omp/config.yml, socket dir) before and after its tmux call; on this box (loadavg ~110-130) 2 of 8 whole-file processes.test.ts runs failed on `tmuxPaneId toBe(\"%302\")` after the daemon had already logged `respawning …`.",
       "fix": "processes.test.ts: both cases now await the relaunch's worker-started publish through a publishRole hook resolving a Promise.withResolvers — the idiom the queued-promotion tests (e.g. `promotes the queued worker once the running one goes idle, publishing worker-started`) already use for exactly this real-I/O-before-tmux race. worker-started is published by promoteQueuedWorker only after launchWorker resolved (fresh claim written, token dequeued, persisted), so every assertion is deterministic behind it; a wait that never resolves fails on bun's own test timeout with the assertions unreached, never a false green. No assertion loosened or removed; the publications array the assertions read is the hook's own.",
-      "runs": "bun test src/daemon/__tests__/processes.test.ts x10 in a row at loadavg 97-101: 10 pass / 0 fail (264 pass, 0 fail each run).",
-      "gates": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail (64 files); bunx tsc --noEmit clean; bunx biome check src/ clean."
+      "runs": "bun test src/daemon/__tests__/processes.test.ts x10 in a row at loadavg 97-101: 10 pass / 0 fail (264 pass, 0 fail each run). After the rebase, again x10 at loadavg 116-123 (the tester's failing range): 10 pass / 0 fail (266 pass each).",
+      "gates": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail (64 files); bunx tsc --noEmit clean; bunx biome check src/ clean.",
+      "rebase": {
+        "reason": "After the round-3 push (95ee8dbf) GitHub reported the PR CONFLICTING against main 1c7499430c5d: #1024 (LEGION-57) rewrote the `POST /legion/v1/worker/spawn` row in packages/daemon/src/daemon/AGENTS.md that this branch also edits. Conflict in that file only (jj grouped the neighbouring /worker/ready and spawn_worker rows into the same hunks; main did not change those two). Resolution: my `resumed`-clause edit applied onto main's rewritten spawn row (verified as a pure substring substitution of the base; main's `two cases`/`liveAncestorTree` words kept), the ready row and the spawn_worker bullet taken from this branch; the round-2 commit's inherited conflict on the same rows resolved the same way. No code file conflicted.",
+        "from": "95ee8dbf6f6260526671b76d498dd6f72ae52691",
+        "to": "577635f3591b53251f7722993e183b9c14f659d8",
+        "fingerprintBefore": "1d908afd4bced024eec1ce7efbfd60b3fb7e8b8a5e95fe1bc524355889203f05",
+        "fingerprintAfter": "6ca9d17b2ebeb50f1f38c5b67e769a965acdeba6f4d66b13db60d92845eadddc",
+        "verdict": "changed",
+        "changedPaths": [
+          "packages/daemon/src/daemon/AGENTS.md — only the `POST /legion/v1/worker/spawn` row hunk: both its -/+ lines now carry #1024's rewritten Dispatch-status paragraph (`two cases`, `liveAncestorTree`) because the base moved; the branch's own edit to that row (the `resumed` clause) is byte-identical before and after"
+        ],
+        "identicalPaths": 22,
+        "packagesDaemonSrcDiffers": "docs only — packages/daemon/src/daemon/AGENTS.md; no .ts under packages/daemon/src differs",
+        "gatesOnRebasedTip": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1217 pass, 0 fail (64 files); bunx tsc --noEmit clean; bunx biome check src/ clean; bun test src/daemon/__tests__/processes.test.ts x10 at loadavg 116-123: 10 pass / 0 fail (266 pass each)."
+      }
     }
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T15:58:14.139Z"
+  "completed": "2026-09-13T16:04:36.314Z"
 }
