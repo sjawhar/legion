@@ -31,14 +31,15 @@
   ],
   "pullRequest": "https://github.com/sjawhar/legion/pull/992",
   "branch": "legion/LEGION-54",
-  "headAtPrOpen": "a3920b228fba38452e255c82924cf12459f4c2b5",
+  "headAtPrOpen": "48c7d90f88e603d0c80ad5e26092729e4e8e09cc (pre-rebase)",
   "commits": [
     "feat(daemon): name LEGION_GRANT_FILE and the static gh environment on every pane; install the gh shim at startup",
     "fix(cli): read the grant from LEGION_GRANT_FILE ahead of LEGION_GRANT",
     "fix(pi-envoy): write each bash command's grant to LEGION_GRANT_FILE instead of the tool env",
     "test(pi-envoy): grant rig loads the production plugin tree and scores the grant file per command",
     "docs: LEGION_GRANT_FILE delivery - why the bash tool env was abandoned, what the pane carries",
-    "docs: record the LEGION-54 pull request number"
+    "docs: record the LEGION-54 pull request number",
+    "docs: LEGION-54 ships as pi-envoy 1.17.4 (main released 1.17.3 first); the LEGION-32 observation note records its resolution"
   ],
   "deviations": [
     "Plan 1d named the pane-env method `credentialPaneEnvironment`; it is `credentialProcessEnvironment` because runtime.contract.test.ts ('ProcessManager's members carry no tmux vocabulary') forbids pane/window in ProcessManager identifiers. Same body, same call sites.",
@@ -46,7 +47,8 @@
     "Rig: record-grant writes `<grant file contents> <mode> <LEGION_GRANT or ->` (a third field beyond plan 4a's two) so the 1.17.0 before run still shows what each text-delivered command ran under; the analyzer only scores the first two.",
     "Rig: run.ts's 20-minute deadline is a cleared setTimeout instead of Bun.sleep — the pending sleep kept the process alive ~17 minutes after the report was printed, which blocks `hub wait`.",
     "Rig: the long leg has 34 bash calls (record steps 20-28 instead of 20-26) so `legion credential get`, `legion gh -- --version`, and `legion handoff complete` are bash calls 30-34 — acceptance 2 says 'on the 30th or later command' and with plan 4b's 32-call numbering `legion gh` was call 29. The before runs used the earlier prompt (they produced 34 and 39 bash calls themselves).",
-    "The PR number was added to the two docs' related_issues in a sixth commit after `gh pr create` (it cannot be known before the PR exists); no history rewrite of pushed commits."
+    "The PR number was added to the two docs' related_issues in a sixth commit after `gh pr create` (it cannot be known before the PR exists); no history rewrite of pushed commits.",
+    "Release version: the plan wrote 1.17.3 into the two docs; main released pi-envoy 1.17.3 (#983) before this PR merged, so the fix(pi-envoy) title yields 1.17.4 — the docs and PR deployment note now say 1.17.4. docs/solutions/legion/grant-delivery-plugin-omp-contract.md (from LEGION-32, landed on main during this phase; it said the drop mechanism was not located and LEGION-52 owned the fix) gained a resolution note pointing at LEGION-54/#992 so the two records agree."
   ],
   "trickyParts": [
     "Boot prune seeding: `pruneSecretFiles()` now seeds `processSecretFiles` from every live-locator name (token and its -grant) rather than from the files found on disk, so a grant file the extension writes later in a pane's life is still reaped when the locator clears (test 'reaps a secret file inherited from a previous daemon process...' writes the grant file after the boot prune).",
@@ -60,7 +62,7 @@
     "Working in a 1.17.0 pane while fixing this: the model (this worker) emitted a second `export LEGION_GRANT=` block on several bash calls, 403ing `jj git push` twice; the push and `gh pr create` went through eval's `tool.bash` (command string built in code), the LEGION-29 workaround from the gotchas doc."
   ],
   "verification": {
-    "unit": "packages/daemon bun test 968/970 (the 2 are the environmental live-tmux tests; a third run flaked the pre-existing retire trio, 965/971); packages/pi-envoy bun run test 159/159; biome --error-on-warnings (daemon), lint/typecheck/build (pi-envoy), tsc (both) clean; daemon-api-version test pins LEGION_DAEMON_API_VERSION=1 = legion.daemonApiVersion=1; packages/contracts/src/legion-daemon-api.ts diff against main@origin empty.",
+    "unit": "packages/daemon bun test 968/970 (the 2 are the environmental live-tmux tests; a third run flaked the pre-existing retire trio, 965/971); packages/pi-envoy bun run test 159/159; biome --error-on-warnings (daemon), lint/typecheck/build (pi-envoy), tsc (both) clean; daemon-api-version test pins LEGION_DAEMON_API_VERSION=1 = legion.daemonApiVersion=1; packages/contracts/src/legion-daemon-api.ts diff against main@origin empty. (pre-rebase numbers; see rebasedUnit)",
     "rig": {
       "before-1.17.1": "/tmp/l54rig/runs/before-1.17.1-2026-09-13T01-54-44-216Z",
       "before-1.17.0": "/tmp/l54rig/runs/before-1.17.0-2026-09-13T02-14-29-023Z",
@@ -74,12 +76,17 @@
     "fixed-tui": "9 bash calls, 9 mints, 2 instances, 6/6 file=own-mint; A-G PASS",
     "negativeControl": "fabricated id in a 0600 file -> Unable to redeem LEGION_GRANT (403); stand-in logged /git-credential 403",
     "acceptance5Grep": "empty for all 34 (rpc) and 9 (tui) minted ids over events.jsonl/pane.txt, the session transcript, and the OMP log; grant file -rw------- under /tmp/l54rig/state/secrets/",
-    "pr961": "OPEN at PR-open time (head legion/LEGION-16, base main): this branch does not migrate its controller wrap; #961 lands second and migrates ghEnvironmentPrelude to writeGrantFile per its recorded recipe (PR body Chain line)."
+    "pr961": "OPEN at PR-open time (head legion/LEGION-16, base main): this branch does not migrate its controller wrap; #961 lands second and migrates ghEnvironmentPrelude to writeGrantFile per its recorded recipe (PR body Chain line).",
+    "rigRerun": "Both branch legs re-run at the rebased tree (rig-mode commit fb351195 = d61f711a's tree): /tmp/l54rig/runs/fixed-rpc-rebased-2026-09-13T02-56-52-261Z — 34 calls, 34 mints, 4 instances, 27/27 own-mint 0600, legion probes on calls 30/31/32/34 exit=0 with 200s, A-G PASS; /tmp/l54rig/runs/fixed-tui-rebased-2026-09-13T03-00-07-323Z — 9 calls, 9 mints, 2 instances, A-G PASS; negative control 403; acceptance-5 grep empty for 34+9 ids. The two before runs stand (released builds).",
+    "rebasedUnit": "pi-envoy bun run test 159/159; daemon full bun test 986/991 on a loaded box, then processes.test.ts 214/214 x3 on an idle box; the rotating failures (retires an older generation's launch as stale / repeated dead-before-ready cycles / reconnectRoots re-arms / retires its own just-opened pane) are #980's timing-sensitive boot-watchdog tests and reproduce on a read-only export of main@origin under the same load (launchFailures count race, Expected 2 / Received 1). biome --error-on-warnings + tsc (daemon), lint/typecheck/build (pi-envoy) clean; contracts diff vs main empty."
   },
   "deployment": "Operator installs @sjawhar/pi-legion-envoy@1.17.3 (release-bump from the fix(pi-envoy) title; the merger records the number the workflow actually publishes) into ~/.omp/profiles/legion/plugins, then immediately `legion restart sjawhar-legion` on merged main; live panes keep working via LEGION_GRANT fallback (no LEGION_GRANT_FILE in their env). Acceptance 7 is the sign-off's first fresh worker.",
   "openQuestions": [],
   "subPlanningNeeded": false,
+  "head": "d61f711aa28ff10d0c5fada5375f8957a1c4861f (rebased; the handoff commit follows it)",
+  "rebase": "Rebased once onto main@origin abaf08175c9b (chore: release pi-envoy v1.17.3) because GitHub reported the PR CONFLICTING/DIRTY. One textual conflict: the bun:test import line of packages/daemon/src/cli/__tests__/index.test.ts (main's #980 added spyOn, this branch added afterAll; both kept). Semantic merge checked by hand: installWorkerGhShim still runs in startDaemonLocked before the boot probes (index.ts:260 vs 285), and credentialProcessEnvironment + trackProcessSecrets survive at all three spawn sites in processes.ts. Main's #980/#983 daemon changes (boot probe retry, launch hold, per-claim reconnect) merged without further conflict.",
+  "ci": "Dispatched for d61f711a: Tests run 34734634479 success (lint, typecheck, test); Legion Envoy and Contracts run 34734634480 success (pi-envoy job). PR mergeable=MERGEABLE, mergeStateStatus=BLOCKED (awaiting review). The daemon also published ci-green for d61f711a.",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T02:45:46.735Z"
+  "completed": "2026-09-13T03:08:49.796Z"
 }
