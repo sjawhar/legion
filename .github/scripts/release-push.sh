@@ -23,12 +23,14 @@
 #            main's copy of that file, set its .version to the version being
 #            released (each run derives its version from the newest tag, so the
 #            release in flight is always the newest for its package), continue
-#            the rebase, and push again. Any other conflicted path is a real
-#            divergence: the rebase is aborted and the step fails naming the
-#            paths. Exhausting the attempts fails the step too. Every failure
-#            here says, in the log and in the job summary, that the publish,
-#            tag and GitHub release already succeeded and only this push to
-#            main is outstanding.
+#            the rebase, and push again. Any other conflicted path — or the
+#            manifest deleted on main — is a real divergence: the rebase is
+#            aborted and the step fails naming the paths. Exhausting the
+#            attempts fails the step too. Every failure here — a rejected push,
+#            an unreachable origin, a rebase that stops for any other reason —
+#            says, in the log and in the job summary, that the publish, tag and
+#            GitHub release already succeeded and only this push to main is
+#            outstanding.
 set -euo pipefail
 
 command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh push-main <package-dir> <version>}
@@ -77,26 +79,35 @@ case "$command" in
       if [ "$attempt" = 5 ]; then
         fail_outstanding "The version-bump commit for $package_dir v$version lost the push race to main 5 times."
       fi
-      git fetch origin main
+      git fetch origin main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD)
       if git rebase "$upstream"; then
         continue
       fi
       conflicted=$(git diff --name-only --diff-filter=U)
-      if [ "$conflicted" != "$manifest" ]; then
-        git rebase --abort || true
+      # Resolvable only when exactly the manifest conflicted and main still has
+      # it: a modify/delete conflict lists that same one path.
+      if [ "$conflicted" != "$manifest" ] || ! git cat-file -e "HEAD:$manifest" 2>/dev/null; then
+        git rebase --abort 2>/dev/null || true
         if [ -z "$conflicted" ]; then
           fail_outstanding "Rebasing the version-bump commit onto main ($upstream) failed without conflicting paths."
         fi
-        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: $(printf '%s' "$conflicted" | tr '\n' ' '). Only a conflict confined to $manifest is resolved automatically."
+        fail_outstanding "Rebasing the version-bump commit onto main ($upstream) conflicts in: $(printf '%s' "$conflicted" | tr '\n' ' '). Only a conflict confined to $manifest, with the file still present on main, is resolved automatically."
       fi
       echo "Resolving the $manifest version-line conflict to v$version"
       # During a rebase stop HEAD is main's side (plus any commit already
-      # replayed), so this keeps every other change main made to the file.
-      # The merge backend opens an editor on --continue; give it none.
-      git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest"
-      git add "$manifest"
-      GIT_EDITOR=true git rebase --continue
+      # replayed), so this keeps every other change main made to the file. The
+      # rewrite lands through a temp file so a failed pipe never leaves a
+      # truncated manifest. The merge backend opens an editor on --continue;
+      # give it none.
+      if ! { git show "HEAD:$manifest" | jq --arg v "$version" '.version = $v' > "$manifest.tmp" \
+          && mv "$manifest.tmp" "$manifest" \
+          && git add "$manifest" \
+          && GIT_EDITOR=true git rebase --continue; }; then
+        rm -f "$manifest.tmp"
+        git rebase --abort 2>/dev/null || true
+        fail_outstanding "Resolving the $manifest version-line conflict onto main ($upstream) failed; the rebase was aborted."
+      fi
     done
     ;;
   *)

@@ -12,6 +12,10 @@
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
 set -euo pipefail
+# Hermetic: the developer's global/system git config (commit.gpgsign,
+# core.hooksPath, rerere, rebase.*) must not reach the seed repos or the script
+# under test. Needs git >= 2.32.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 release_push="$script_dir/release-push.sh"
@@ -88,12 +92,17 @@ not_rebasing() { [ ! -d "$1/.git/rebase-merge" ] && [ ! -d "$1/.git/rebase-apply
 
 echo "Case 1: two releases of one package race on the version line"
 setup "$work/c1"
+# a's bump also changes another key, so the resolution must keep main's copy of
+# the file (HEAD at the rebase stop), not just replay b's version line.
+jq '.description = "set on main by a"' "$work/c1/a/packages/pkg/package.json" > "$work/c1/a/tmp.json" \
+  && mv "$work/c1/a/tmp.json" "$work/c1/a/packages/pkg/package.json"
 bump "$work/c1/a" 1.0.1
 git -C "$work/c1/a" push -q origin main
 bump "$work/c1/b" 1.0.2
 push_main "$work/c1/b" 1.0.2
 check "push-main exits 0" "$(is "$rc" 0)"
 check "origin/main holds the higher version" "$(is "$(origin_version "$work/c1")" 1.0.2)"
+check "origin/main keeps main's other change to the manifest" "$(is "$(git -C "$work/c1/origin.git" show main:packages/pkg/package.json | jq -r .description)" "set on main by a")"
 check "origin/main has one bump commit per release" "$(is "$(release_commits "$work/c1")" 2)"
 check "the rebased bump commit keeps its message" "$(is "$(origin_tip_subject "$work/c1")" "chore: release pkg v1.0.2 [skip ci]")"
 check "clone is not left mid-rebase" "$(not_rebasing "$work/c1/b")"
@@ -156,6 +165,32 @@ push_main "$work/c4/b" 1.0.1
 check "push-main exits 0" "$(is "$rc" 0)"
 check "origin/main holds the bump" "$(is "$(origin_version "$work/c4")" 1.0.1)"
 check "origin/main has both release commits" "$(is "$(release_commits "$work/c4")" 2)"
+
+echo
+echo "Case 5: an unreachable origin fails through the same message"
+setup "$work/c5"
+bump "$work/c5/b" 1.0.1
+git -C "$work/c5/b" remote set-url origin "$work/c5/nowhere.git"
+push_main "$work/c5/b" 1.0.1 "$work/c5/summary.md"
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error names the fetch" "$(contains "$out" '^::error::Fetching main from origin failed on attempt 1\.')"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c5/summary.md" 2>/dev/null)" 'The release itself succeeded.*only this version-bump push to main is outstanding')"
+check "clone is not left mid-rebase" "$(not_rebasing "$work/c5/b")"
+
+echo
+echo "Case 6: the manifest deleted on main is a real divergence, not resolved"
+setup "$work/c6"
+git -C "$work/c6/a" rm -q -r packages/pkg
+git -C "$work/c6/a" commit -q -m "a: remove pkg"
+git -C "$work/c6/a" push -q origin main
+bump "$work/c6/b" 1.0.1
+push_main "$work/c6/b" 1.0.1
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error names the manifest as the conflict" "$(contains "$out" '^::error::.*conflicts in: packages/pkg/package\.json\.')"
+check "rebase was aborted" "$(not_rebasing "$work/c6/b")"
+check "clone's manifest is intact, not truncated" "$(is "$(jq -r .version "$work/c6/b/packages/pkg/package.json")" 1.0.1)"
+check "origin/main is untouched" "$(is "$(origin_tip_subject "$work/c6")" "a: remove pkg")"
 
 echo
 echo "---"
