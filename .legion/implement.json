@@ -2,7 +2,7 @@
   "pr": 1025,
   "prUrl": "https://github.com/sjawhar/legion/pull/1025",
   "branch": "legion/LEGION-44",
-  "head": "70aafaf8e365",
+  "head": "2a18313779ca",
   "commits": [
     "a9df6b94612b daemon: carry each phase worker's commit identity in its pane environment",
     "d0ff6975dd20 workspace: remove the repository-scoped jj identity earlier worker boots wrote",
@@ -56,7 +56,8 @@
     "Criterion 1 on a real pane: run this branch's daemon (smoke rig, SMOKE_WEBHOOK_MODE=envoy) and grep `/proc/<pane_pid>/environ` of a spawned worker for the six variables; the controller and root architect panes are the negative control (none). Then, in that worker's workspace, `jj log -r @ -T 'author.name()'` after the assignment was delivered should already be the role's App (adoption ran at /worker/ready), and its `jj split` commit carries that author and committer.",
     "Criterion 5: after provisioning on this branch, `jj -R <clone> config list --repo --include-overridden user` prints nothing; a seeded `jj config set --repo -R <clone> user.name '\"stale\"'` before the next launch is removed with one `[legion] removing repository-scoped jj user.name …` daemon log line.",
     "Negative control for the probe: with `JJ_USER=x` exported, `jj config list --repo -R <clone> user.name` prints nothing for a set key while `--include-overridden` prints `# user.name = …`.",
-    "Corrective round 1 bare gates at 70aafaf8e365: the diff against main changed only in processes.ts (adoptWorkingCopy timeout + commandFailure), environment.ts (six keys in PANE_SECRET_ENV_KEYS), tests, docs. Real-surface re-check worth one look: on the rig, a daemon started from a worker pane whose environ carries the six variables must now give root-architect and controller panes none of them (`tr '\\0' '\\n' < /proc/<pane_pid>/environ | grep -E '^(JJ_USER|JJ_EMAIL|GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL))='` prints nothing on those two panes) while worker panes still carry them."
+    "Corrective round 1 bare gates at 70aafaf8e365: the diff against main changed only in processes.ts (adoptWorkingCopy timeout + commandFailure), environment.ts (six keys in PANE_SECRET_ENV_KEYS), tests, docs. Real-surface re-check worth one look: on the rig, a daemon started from a worker pane whose environ carries the six variables must now give root-architect and controller panes none of them (`tr '\\0' '\\n' < /proc/<pane_pid>/environ | grep -E '^(JJ_USER|JJ_EMAIL|GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL))='` prints nothing on those two panes) while worker panes still carry them.",
+    "Rebase 1 (conflict-forced, fingerprint unchanged c7c1a48d…5899 → c7c1a48d…5899): per the skill, bare gates only — CI green at 9c15e4e1fb9b and the smoke check — and change the E2E line's head with `rebase re-check 41adba50927e → 9c15e4e1fb9b: fingerprint unchanged, bare gates only`; the real-surface verification is not repeated. Compute the fingerprint at the head your E2E line names (41adba50927e) and at the new head yourself."
   ],
   "openQuestions": [
     "For the architect, not this PR's scope: provisioning's `.omp/config.yml` (writeOmpConfig) is tracked by jj in every working copy, so `@` is never empty; workers must point `legion/<KEY>` at `@-` (`--allow-backwards`, since provisioning re-points it at `@` on every launch) or jj refuses the push for lack of a description. Either ignore `.omp/` in the repo's `.gitignore` or have provisioning write it as untracked."
@@ -82,7 +83,41 @@
     },
     "identity": "This pane predates the fix and carries none of the six variables; every jj command this round ran under explicit JJ_USER/JJ_EMAIL for legion-implementer[bot]. The reviewer's f121a8e0 left @ with committer legion-reviewer[bot]; the two splits under the implementer identity produced author = committer = legion-implementer[bot] on both new commits."
   },
+  "rebase_1": {
+    "reason": "GitHub reported PR #1025 mergeable: CONFLICTING / mergeStateStatus: DIRTY after main moved 12:38-12:44Z (#1016 LEGION-46, #1011 LEGION-40, release commits for pi-envoy v1.23.1 and cli v1.9.2).",
+    "ontoMain": "9a6708feb9cd fix(smoke): read DISPATCH_TOKEN and DISPATCH_URL from envoy.json when unset (LEGION-40) (#1011)",
+    "previousForkPoint": "52c5e03e7cb3",
+    "command": "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin (14 commits: the whole chain, the reviewer's f121a8e0 → dad0bf730cce included)",
+    "tips": {
+      "before": "ac6c40b73d3a",
+      "after": "9c15e4e1fb9b"
+    },
+    "codeHeads": {
+      "before": "70aafaf8e365",
+      "after": "2a18313779ca"
+    },
+    "fingerprints": {
+      "before": "c7c1a48d53c37954185bfac08fd2bc70356fc13daeadc56f05a747d0c7995899",
+      "after": "c7c1a48d53c37954185bfac08fd2bc70356fc13daeadc56f05a747d0c7995899",
+      "verdict": "unchanged",
+      "command": "jj diff --from \"fork_point(main@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum"
+    },
+    "conflicts": {
+      "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md": "2-sided, introduced at the round-1 commit (dd8332bd → 9c167fefd8fe). Main (LEGION-77 + LEGION-40) rewrote the same `env -u` scrub bullet: added -u LEGION_OMP_PATH, folded DISPATCH_URL/DISPATCH_TOKEN into the scrub, dropped 're-supplied deliberately', and added three bullets (LEGION_OMP_PATH since LEGION-77; the rig honours it; DISPATCH_* scrubbed not re-supplied). This branch had added the six identity variables and the daemon-strips-them sentence to the old bullet. Resolution: main's bullet text and its three new bullets verbatim, plus -u JJ_USER -u JJ_EMAIL -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL appended to the scrub and the daemon-strips-them sentence kept. Outside the fingerprint fileset (docs/solutions)."
+    },
+    "noConflict": "packages/daemon/src/daemon/AGENTS.md merged clean (LEGION-46's timer-bound wording present, this branch's identity paragraphs present); LEGION_DAEMON_API_VERSION is main's value 2 on both sides, untouched by this branch; no config or test file conflicted.",
+    "committerNote": "The rebased reviewer commit dad0bf730cce keeps author legion-reviewer[bot]; its committer is now legion-implementer[bot] because the rebase rewrote it under this pane's identity — inherent to rebasing another role's commit, not a regression of this issue's fix.",
+    "gates": {
+      "daemon": "bunx biome check --error-on-warnings src/ clean; tsc clean; bun test 1186 pass / 7 skip / 0 fail (main's new tests included)",
+      "workspace": "bunx biome check src/ clean; tsc clean; bun test 15 pass / 0 fail (no CI job; local run is the gate)",
+      "pi-envoy": "bun run lint clean; tsc clean; bun test 166 pass / 0 fail",
+      "ci": "Tests run 34758483769 (lint, pr-title, typecheck, test all success) and Legion Envoy and Contracts run 34758483777 (changes, pi-envoy success) at 9c15e4e1fb9b"
+    },
+    "mergeableAfter": "MERGEABLE (mergeStateStatus BLOCKED: branch protection awaiting review, not a conflict)",
+    "prComment": "https://github.com/sjawhar/legion/pull/1025#issuecomment-5653414510",
+    "workingCopyNote": "Resolved the conflict from a scratch child of the conflicted commit (`jj new 3dcfb486` → edit → `jj squash --into`), which left @ on that side; restored it with `jj edit mswtpyws` — this pane's own undescribed working-copy commit (`.omp/config.yml` only), now atop the rebased tip — never a parent, and the empty scratch commit auto-abandoned. Nothing of another role was touched."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T12:51:03.429Z"
+  "completed": "2026-09-13T13:00:14.848Z"
 }
