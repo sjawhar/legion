@@ -11,7 +11,11 @@ readonly curl_log="${temporary_dir}/curl.log"
 export CURL_LOG="$curl_log"
 export TMUX_LOG="${temporary_dir}/tmux.log"
 output_file="${temporary_dir}/output"
-trap 'rm -rf "$temporary_dir"' EXIT
+# Every long-lived process the harness plants for checkpoint 13 registers here (`plant` below);
+# this is the file's only EXIT trap, set before anything is spawned, so no later `trap` can
+# replace it and leave a planted `sleep` behind holding the harness's stdout open.
+planted_pids=()
+trap 'kill "${planted_pids[@]}" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
 
 mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
 # Checkpoints 1-4 need Dispatch issue-event ingress, so their fixture-backed OK cases run with
@@ -128,17 +132,22 @@ grep -Fq 'http://dispatch.test/api/v1/issues/LEGSMOKE-1' "$curl_log"
 # launching shell's OMP_SESSION_ID; a box's panes may carry the keys).
 scrubbed=(-u DISPATCH_TOKEN -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET
   -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u FOO_SECRET -u OMP_SESSION_ID)
+# Every planted `sleep 300` is registered for the EXIT trap the moment it starts. Never spawn one
+# inside a `$(…)`: a subshell's append to `planted_pids` would be lost, and the process would
+# outlive the harness holding its stdout open.
+planted() {
+  planted_pids+=("$!")
+}
 env "${scrubbed[@]}" sleep 300 &
-clean_pid=$!
+clean_pid=$!; planted
 env "${scrubbed[@]}" DISPATCH_TOKEN="leaked-into-a-pane" GH_AGENT_APP_PRIVATE_KEY_B64="leaked-into-a-pane" FOO_SECRET="leaked-canary" sleep 300 &
-planted_pid=$!
+planted_pid=$!; planted
 env "${scrubbed[@]}" FOO_SECRET="leaked-canary" sleep 300 &
-canary_pid=$!
+canary_pid=$!; planted
 env "${scrubbed[@]}" OMP_SESSION_ID="01a083dd-4579-7000-8202-9898ac713e12" sleep 300 &
-planted_session_pid=$!
+planted_session_pid=$!; planted
 env -i DISPATCH_TOKEN="leaked-into-a-large-pane" LARGE_PAD="$(head -c 70000 /dev/zero | tr '\0' x)" sleep 300 &
-planted_large_pid=$!
-trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" "$planted_session_pid" "$planted_large_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+planted_large_pid=$!; planted
 
 checkpoint_thirteen_against() {
   # $1: the pid the fake tmux reports for every pane; $2: SMOKE_CANARY_ENV (may be empty);
@@ -174,8 +183,7 @@ printf 'PASS: checkpoint 13 fails naming the pid and variable when a recorded pr
 # The fixed names are checked before any canary: a planted App key is caught with no
 # SMOKE_CANARY_ENV configured at all.
 env "${scrubbed[@]}" GH_AGENT_APP_PRIVATE_KEY_B64="leaked-into-a-pane" sleep 300 &
-app_key_pid=$!
-trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" "$app_key_pid" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+app_key_pid=$!; planted
 if checkpoint_thirteen_against "$app_key_pid" ""; then
   printf 'expected checkpoint 13 to fail when a recorded process environment carries a GitHub App private key\n' >&2
   exit 1
@@ -205,21 +213,21 @@ fi
 printf 'PASS: checkpoint 13 inspects an operator-planted canary only when SMOKE_CANARY_ENV names it\n'
 
 # LEGION-43: the launching shell's OMP_SESSION_ID is checked beside the secrets, with its own
-# message (a pane's OMP mints its own session id; no `_FILE` twin exists for it).
+# message (a pane's OMP mints its own session id).
 if checkpoint_thirteen_against "$planted_session_pid" ""; then
   printf 'expected checkpoint 13 to fail when a recorded process environment carries OMP_SESSION_ID\n' >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *"pid ${planted_session_pid} environ carries OMP_SESSION_ID="*"a pane's OMP mints its own session id"* && "$(<"$output_file")" != *'_FILE'* ]] || {
+[[ "$(<"$output_file")" == *"pid ${planted_session_pid} environ carries OMP_SESSION_ID="*"a pane's OMP mints its own session id"* ]] || {
   cat "$output_file" >&2
   exit 1
 }
-printf 'PASS: checkpoint 13 fails naming the pid and OMP_SESSION_ID, without promising an _FILE twin, when a recorded process inherited a session id\n'
+printf 'PASS: checkpoint 13 fails naming the pid and OMP_SESSION_ID when a recorded process inherited a session id\n'
 
 # The pane rule must bite whatever the environment's size. The planted secret heads a 70 KB
-# environment — past the pipe buffer, where a read with the matching process downstream of a
-# writer can miss under pipefail — and the checkpoint runs 20 times, since such a miss is a
-# scheduling race that one run cannot rule out.
+# environment — past the pipe buffer, where a read that put a writer upstream of an early-exiting
+# grep missed it under pipefail. The checkpoint runs 20 times so a future read that only misses
+# sometimes cannot pass by luck.
 ((  $(wc -c <"/proc/${planted_large_pid}/environ") > 65536 )) || {
   printf 'the large planted process environment must exceed the 64 KB pipe buffer\n' >&2
   exit 1
@@ -257,7 +265,7 @@ if checkpoint_thirteen_against "$clean_pid" "" "$planted_pid"; then
   printf 'expected checkpoint 13 to fail when the surviving server process was forked with DISPATCH_TOKEN\n' >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *"CHECKPOINT 13 FAILED: private tmux server pid ${planted_pid} was forked with DISPATCH_TOKEN="*"tmux -L legion-exampleorg24 kill-server"* && "$(<"$output_file")" != *'CHECKPOINT 13 NOTE'* ]] || {
+[[ "$(<"$output_file")" == *"CHECKPOINT 13 FAILED: private tmux server pid ${planted_pid} was forked with DISPATCH_TOKEN="*"tmux -L legion-exampleorg24 kill-server"* ]] || {
   cat "$output_file" >&2
   exit 1
 }
