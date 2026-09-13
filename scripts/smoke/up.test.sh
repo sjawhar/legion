@@ -460,6 +460,9 @@ chmod +x "${fake_bin}/curl"
 # Stubs every other main() dependency so the boot sequence runs with no real daemon, tmux pane,
 # Docker container, or Go build -- only relative call order and the root-issue POST body matter
 # here (`ensure_root_issue` itself, and its underlying curl invocation, are left real).
+# The real assert_port_free stays reachable as real_assert_port_free for the port-check case at
+# the end of this file; every other main() case below stubs it.
+eval "$(declare -f assert_port_free | sed '1s/^assert_port_free /real_assert_port_free /')"
 require_command() { :; }
 assert_port_free() { :; }
 ensure_nats() { printf 'ensure_nats\n' >>"$order_log"; }
@@ -649,3 +652,48 @@ grep -Fxq 'ENVOY_MACHINE_ID=legion-smoke-exampleorg7' "${SMOKE_DIR}/start_proces
   exit 1
 }
 printf 'PASS: records the per-project NATS container name and hands the listener a per-project ENVOY_MACHINE_ID\n'
+
+# Acceptance 5 (LEGION-41): the daemon binds LEGION_DAEMON_PORT + 1 for its worker stream
+# (worker_stream_port defaults to port + 1), so up.sh must refuse when only that neighbour is
+# occupied -- two rigs on adjacent daemon ports killed the first one at boot. This case runs the
+# real assert_port_free over a fake ss that reports exactly one busy port; every other main()
+# dependency keeps the stubs above, and the failure must land before any of them is reached.
+cat >"${fake_bin}/ss" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${SMOKE_SS_BUSY_PORT:-}" && "${*: -1}" == "sport = :${SMOKE_SS_BUSY_PORT}" ]]; then
+  printf 'LISTEN 0 4096 127.0.0.1:%s 0.0.0.0:*\n' "$SMOKE_SS_BUSY_PORT"
+fi
+EOF
+chmod +x "${fake_bin}/ss"
+worker_stream_port="$((daemon_port + 1))"
+: >"$order_log"
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
+neighbour_status="$(set +e; (set -e; assert_port_free() { real_assert_port_free "$@"; }; SMOKE_SS_BUSY_PORT="$worker_stream_port" main) >"$assertion_file" 2>&1; echo $?)"
+[[ "$neighbour_status" != 0 ]] || {
+  printf 'expected main() to refuse when only the worker-stream port %s is occupied; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ "$(<"$assertion_file")" == *"Legion daemon worker stream port ${worker_stream_port} is already in use"* ]] || {
+  printf 'expected the refusal to name the worker stream and port %s; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
+  exit 1
+}
+[[ ! -s "$order_log" ]] || {
+  printf 'expected no process to start when the worker-stream port is occupied; order log:\n%s\n' "$(<"$order_log")" >&2
+  exit 1
+}
+# The same neighbour occupied by this rig's own recorded daemon is a re-run, not a collision: the
+# daemon port check's live-PID exception must cover the worker-stream check too. This harness
+# process stands in for that daemon (its pid and /proc start time go in the daemon's records).
+printf '%s\n' "$$" >"${SMOKE_DIR}/daemon.pid"
+awk '{print $22}' "/proc/$$/stat" >"${SMOKE_DIR}/daemon.start"
+: >"$order_log"
+if ! (assert_port_free() { real_assert_port_free "$@"; }; SMOKE_SS_BUSY_PORT="$worker_stream_port" main) >"$main_output_file" 2>&1; then
+  printf 'expected main() to reuse this rig'"'"'s own live daemon despite its worker-stream port being bound; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$main_output_file")" == *'RIG READY'* ]] || {
+  printf 'expected RIG READY on the own-daemon re-run; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+}
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
+printf 'PASS: refuses to start when only the daemon worker-stream port (LEGION_DAEMON_PORT + 1) is occupied, unless by this rig'"'"'s own recorded daemon\n'

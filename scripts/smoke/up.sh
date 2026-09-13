@@ -633,6 +633,10 @@ main() {
   printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
+  # The daemon also binds worker_stream_port, which defaults to port + 1 (the generated legion.yaml
+  # leaves it at that default), so two rigs on adjacent daemon ports kill the first one at boot.
+  # The same live-PID exception covers a re-run against this rig's own daemon.
+  assert_port_free 'Legion daemon worker stream' "$((daemon_port + 1))" "${smoke_dir}/daemon.pid"
   write_daemon_config
   (
     cd "${repo_root}/packages/envoy"
