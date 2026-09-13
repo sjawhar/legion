@@ -1,5 +1,5 @@
 {
-  "headSha": "52fcae689ef3fc0a6ab3539c10d6ac8964eac1b2",
+  "headSha": "bfe5999e24fa910d039504da71c18d493a8da1ad",
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
   "verdict": "pass",
@@ -64,7 +64,8 @@
     "The index.test.ts boot-redrive case passes against the pre-change production code as well; it is a regression pin of the existing reconnect+drain path (acceptance 4 needed no new code per the plan), not evidence of new behaviour. The rig negative control exercised that boot redrive for real.",
     "The daemon log carries no timestamps; the rig timeline above comes from a 2 s state.json poller (evidence/state-timeline.jsonl) and the OMP transcripts' own timestamps.",
     "Bound-only positive path: a healthy worker's agent_start follows the acknowledgement within milliseconds, so the rig positive path shows the commit at the moment the turn started but cannot by itself distinguish commit-on-ack from commit-on-start; the negative control and the unit/e2e red-green runs are what prove the new ordering.",
-    "Rebase re-check 785d1b1d881b -> 52fcae689ef3: fingerprint changed (three scripts/smoke paths only, main #1010 mechanism adopted), packages/daemon/src unchanged; bare gates + up/down.test.sh only, no rig round, per the SKILL rule and the architect's instruction."
+    "Rebase re-check 785d1b1d881b -> 52fcae689ef3: fingerprint changed (three scripts/smoke paths only, main #1010 mechanism adopted), packages/daemon/src unchanged; bare gates + up/down.test.sh only, no rig round, per the SKILL rule and the architect's instruction.",
+    "Round 2 at bfe5999e24fa: both review findings verified green on head and red on 167754ae9e25; the reviewer's repro fails its stranded-locator expectation at both caps on head; confinement diff shows only the socket-closed / get_state-failed / reason-plumbing hunks. One test-quality finding: the new ready-close regression tests are load-sensitive (tick-bounded wait over real relaunch I/O) — see round2.flakeFinding."
   ],
   "documentationFeedback": "AGENTS.md rows 19/20 and bullets 65/68 and the SKILL.md worker-queued row match the observed behaviour exactly, including the observation strings (`get_state: isStreaming=false`) and the retire-at-three/--resume path.",
   "negativeControlSummary": "Ack-only OMP stand-in behind a real legion worker-shim: three acknowledged prompts, no turn, three logged PromptNotStarted failures, pane retired at the third, real worker relaunched with --resume and ran the queued task.",
@@ -87,7 +88,69 @@
     },
     "rigEvidenceStillApplies": "The smoke-rig positive path and ack-only negative control recorded under `rig` were run at 785d1b1d881b; every packages/daemon/src path this PR changes carries a byte-identical hunk at 52fcae689ef3 and the tree's tip-to-tip delta is exactly main's, so the daemon under test is unchanged and that evidence stands. The only changed paths are the smoke rig scripts, whose own test suites (up.test.sh / down.test.sh) pass at the new head; the rig recipe now selects a second rig by SMOKE_PROJECT (legion-smoke-nats-<slug>) instead of SMOKE_NATS_NAME."
   },
+  "round2": {
+    "headSha": "bfe5999e24fa910d039504da71c18d493a8da1ad",
+    "codeHead": "188f8d697265",
+    "answers": "reviewer CHANGES_REQUESTED at b23aa9429fce (https://github.com/sjawhar/legion/pull/1030#pullrequestreview-5191097841)",
+    "verdict": "pass",
+    "github": "headRefOid bfe5999e24fa910d039504da71c18d493a8da1ad, mergeable MERGEABLE, mergeStateStatus BLOCKED (review pending); CI green: Tests run 34765741716 (lint, pr-title, typecheck, test) and Legion Envoy and Contracts run 34765661915 (pi-envoy) at that SHA.",
+    "findings": {
+      "blocking_r3999956952": {
+        "verdict": "pass",
+        "green": "processes.test.ts `retires a ready-time worker whose socket closes after acknowledging its first task and relaunches the task cold with --resume (workerCap 1)` and `(workerCap 2)`: pass inside the full daemon suite (1209/0) and in 15 of 17 solo runs (see flake note); asserted end state: dead pane %301 killed, claim relaunched as %302 at generation 2 unconfirmed, pendingAssignment kept, launchFailures 1, promptFailures undefined, queue [], phases {}, argv carries --resume=<session file>, publications exactly [worker-started], one error line naming the token. `does not count a socket that closes during a queued promotion's wait as a prompt failure…` pass.",
+        "red": "Same three tests against the pre-fix production files (processes.ts, process-errors.ts, worker-admission.ts at 167754ae9e25, tests from head): both cap variants fail with locator still %301 (Expected \"%302\", Received \"%301\" — the dead locator kept, the stranding); the promotion-path test fails with promptFailures Expected 0 Received 1 (the close counted as a swallowed prompt). Logs: evidence/r2.unit.green-red.log.",
+        "reviewerRepro": "/tmp/legion-60-repro/ready-close.test.ts at REPRO_CAP=1 and 2. On 188f8d697265 it fails on its own `expect(claim.locator).toBeDefined()` at both caps — after ready: locator cleared, readyConfirmedAt undefined, promptFailures undefined, launchFailures 1, pendingAssignment kept, queue [token]; after the sweep: worker-started published, queue []. On 167754ae9e25 (WS pointed at the pre-fix copy) it passes at both caps, reproducing the stranding: locator kept, readyConfirmedAt set, promptFailures 1, launchFailures undefined, only worker-queued published, and at cap 2 the queue entry dropped as stale after the sweep. Log: evidence/r2.repro.ready-close.log.",
+        "reasonPlumbing": "PromptNotStarted now carries reason \"no-turn\" | \"socket-closed\"; awaitTurnStart tags a close seen before or during its wait (a flag set from client.closed, consulted after the confirming get_state too) as socket-closed. Guards on every site: workerReady returns before confirming/queueing on socket-closed (one `…; boot left unconfirmed for the socket-close handler to retire` line); queueUnstartedPrompt records a prompt failure only for no-turn (direct path passes error.reason); promoteQueuedWorker's catch records only when the error is not a PromptNotStarted or its reason is no-turn. Throwaway direct-path check (evidence/r2.throwaway.direct-close.head.log, built from the reviewer's harness at cap 2 with an idle-seeded client): spawn_worker's direct prompt sent (`prompts: [\"plan #99\"]`), socket closed → result queued, promptFailures absent, task kept, worker-queued published, log line `…(socket closed); queued for promotion`, then the close handler retired the worker (resumeSessionFile set) and the drain logged `respawning LEGION-42 by resuming OMP session …`; on the pre-fix copy the same scenario shows promptFailures 1 (evidence/r2.throwaway.direct-close.prefix.log). So a socket close is counted against promptFailures on none of the three paths.",
+        "round1Preserved": "On head, solo: `confirms the boot but queues the assignment and counts a prompt failure when the ready-time prompt is acknowledged without a turn` pass (no-turn on the ready path still confirms the boot, queues the task, counts promptFailures 1); A1, A5-direct, A3 retire-at-three, and the late-start case all pass (evidence/r2.unit.head.round1-preserved.log)."
+      },
+      "minor_r3999956955": {
+        "verdict": "pass",
+        "green": "processes.test.ts `credits a turn that starts while the confirming get_state is failing, counting no prompt failure`: pass on head — get_state emits agent_start then rejects; queue [], pendingAssignment cleared, promptFailures 0, phases written, exactly one worker-started, no worker-queued, zero console.error calls.",
+        "red": "Against 167754ae9e25 it fails: worker-started Expected length 1, Received 0 (the get_state-failed branch returned not-started without consulting receipt.hasStarted, so the turn was counted as a failure and queued)."
+      }
+    },
+    "confinement": {
+      "method": "jj diff --from 167754ae9e25 --to 188f8d697265 (the rig-proven code head of rounds 1/rebase vs the round-2 code head); bfe5999e24fa adds only .legion/implement.json.",
+      "pathsChanged": [
+        "packages/daemon/src/daemon/process-errors.ts",
+        "packages/daemon/src/daemon/processes.ts",
+        "packages/daemon/src/daemon/worker-admission.ts",
+        "packages/daemon/src/daemon/AGENTS.md",
+        "packages/daemon/src/daemon/__tests__/processes.test.ts",
+        ".legion/*"
+      ],
+      "hunks": [
+        "process-errors.ts @@ -26,18 +26,27: new `PromptNotStartedReason = \"no-turn\" | \"socket-closed\"`; PromptNotStarted gains `readonly reason` (3rd ctor arg); doc comment.",
+        "processes.ts @@ -28,7 +28,12: import PromptNotStartedReason.",
+        "processes.ts @@ -765,12 +770,21 (promptExistingWorker): the commitLateStart continuation is attached only for reason no-turn (a closed socket's receipt can never settle); PromptNotStarted thrown with outcome.reason.",
+        "processes.ts @@ -778,44 +792,78 (awaitTurnStart): return type gains reason; a `socketClosed` flag is set from client.closed (both branches) and raced as before; the \"closed\" race outcome → socket-closed; after the confirming get_state (success or failure) receipt.hasStarted is consulted first → started; then socketClosed → socket-closed (observation `socket closed` or `socket closed (get_state failed: …)`); then a get_state failure → no-turn `get_state failed: …`; else no-turn `get_state: isStreaming=false`. Doc comment rewritten.",
+        "processes.ts @@ -1030,6 +1078,26 (workerReady catch): on error.reason === \"socket-closed\" log one line and return without confirmBoot/cancelBootWatchdog/queueUnstartedPrompt — the claim stays an unconfirmed boot for onWorkerClientClosed → retireUnconfirmedBoot.",
+        "processes.ts @@ -1046,7 +1114,15 (workerReady catch, no-turn branch): passes error.reason into queueUnstartedPrompt (unchanged behaviour for no-turn).",
+        "worker-admission.ts @@ -7,7 +7,12: import PromptNotStartedReason.",
+        "worker-admission.ts @@ -390,25 +395,29 (queueUnstartedPrompt): new `reason` parameter; recordPromptFailure only when reason === \"no-turn\"; doc comment.",
+        "worker-admission.ts @@ -465,7 +474,7 (resumeOrQueueExisting catch): passes error.reason.",
+        "worker-admission.ts @@ -682,9 +691,14 (promoteQueuedWorker catch): recordPromptFailure only when the error is not a PromptNotStarted or its reason is no-turn; comment."
+      ],
+      "assessment": "Confined to the socket-closed observation (awaitTurnStart flag + tagging), the get_state-failed branch (hasStarted consulted after the call), the reason plumbing (type, ctor arg, three call sites), the ready-path socket-closed early return, and the reason guards around recordPromptFailure. commitPromptDelivery, commitLateStart, promoteQueuedWorker's success/dequeue path, and the no-turn retry/retire accounting are not touched: for reason no-turn every site behaves byte-for-byte as in round 1 (the guards are identity for no-turn; the late-start continuation is attached exactly as before). Per the architect's instruction no smoke-rig round was run for this delta; the production-like proof is the real-tmux e2e plus the full suite.",
+      "productionLikeProof": "LEGION_E2E=1 bun test src/daemon/__tests__/real-prompt-delivery-e2e.test.ts at bfe5999e24fa: 3 pass, 0 fail (9.38 s; real tmux server, real legion worker-shim, real sockets; stand-in starts / acks-and-never-starts → three failures + retire + cold relaunch / starts late → credited once), and again inside the full suite. The round-1 rig positive path and negative control (785d1b1d, daemon code identical to 167754ae9e25) exercised the no-turn path, which this round leaves unchanged."
+    },
+    "gates": {
+      "daemonSuite": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1209 pass, 0 fail, 64 files, 66.07 s (evidence/r2.gate.daemon-suite.log; the four round-2 tests pass inside it)",
+      "daemonTsc": "bunx tsc --noEmit: exit 0",
+      "daemonBiome": "bunx biome check src/: Checked 162 files, no fixes, exit 0",
+      "piEnvoy": "cd packages/pi-envoy && bunx tsc --noEmit: exit 0; bun test src/legion: 16 pass, 0 fail",
+      "ci": "GitHub Tests run 34765741716 and Legion Envoy and Contracts run 34765661915 at bfe5999e24fa: all jobs success"
+    },
+    "flakeFinding": {
+      "severity": "test quality (not a production defect); recommend a fast-follow fix before merge if the reviewer treats CI flakes as T1",
+      "what": "The new `retires a ready-time worker whose socket closes … (workerCap 1|2)` tests are timing-sensitive on a loaded box (loadavg ~110–130 here). Whole-file `bun test src/daemon/__tests__/processes.test.ts` on head: 6 pass / 2 fail over 8 runs, and 3 of an earlier 3 runs each had one cap variant fail (263 pass / 1 fail); solo `-t` runs: cap 1 failed 2 of 17, cap 2 0 of 8. Inside the 64-file suite (`bun test`) it passed in this session's run and in the implementer's two runs.",
+      "mode": "Every failure is `expect(tmuxFields(relaunched.locator)?.tmuxPaneId).toBe(\"%302\")` → Received undefined at processes.test.ts:12227, after the daemon has already logged `[legion] respawning LEGION-42 by resuming OMP session …` (i.e. the retirement ran and the relaunch was in flight). `flushEventLoopUntil(() => … === \"%302\")` bounds the wait at 5000 setImmediate ticks (microseconds each) while the relaunch path does real filesystem work — `stat` of the recorded session file (processes.ts:2641), `mkdir`/`writeFile` of the boot-token secret file (secrets.ts:46-49) and the workspace `.omp/config.yml` (processes.ts:3237-3238), `mkdir` of the socket dir (runtime-tmux.ts:291) — whose completion is not tick-bounded under load. One early solo failure additionally printed `Refusing to start LEGION-42 fresh while respawning: recorded OMP session file is missing`: the test had already failed on the tick bound and afterAll removed its temp dir while the detached relaunch was still running.",
+      "proofOfDiagnosis": "A throwaway copy of the head tree with only that wait changed to a wall-clock bound (poll every 5 ms for up to 10 s; no other change) passed 8 of 8 whole-file runs on the same loaded box (evidence/r2.unit.head.infile-widened-wait.log). Logs: evidence/r2.unit.head.flake-loop.log, r2.unit.head.infile-loop.log, r2.unit.head.infile-loop2.log, r2.unit.head.infile-failure-detail.log, r2.unit.head.infile-run-fail1.log, r2.unit.head.cap1-failure-full.log.",
+      "recommendation": "Make the wait in these two tests time-bounded (or fake the relaunch filesystem work) so the regression lock does not fail CI under load; the behaviour it locks is correct and is proven by the reviewer's repro and the pre-fix red runs."
+    },
+    "evidence": "/tmp/legion60-test/evidence/r2.* on this box; throwaway scripts /tmp/legion60-test/direct-close.throwaway*.test.ts (not committed)."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T14:06:46.790Z"
+  "completed": "2026-09-13T15:51:59.214Z"
 }
