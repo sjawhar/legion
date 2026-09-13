@@ -2,9 +2,9 @@
   "pr": 1025,
   "prUrl": "https://github.com/sjawhar/legion/pull/1025",
   "branch": "legion/LEGION-44",
-  "headTested": "4966167026ca (tip, .legion/ only; code head 2a18313779ca, rebased onto main 9a6708feb9cd)",
+  "headTested": "10247d548629 (tip, .legion/ only; code head f017a1d79eaa — docs-only fast-follow on 2a18313779ca)",
   "spec": "dispatch://LEGION-44/spec (version 7), seven acceptance criteria",
-  "verdict": "PASS on both rounds: round 1 verified all seven criteria at code head 831ae69f9bf0; round 2 verifies the four corrective items of review 5190677894 and the conflict-forced rebase at code head 2a18313779ca — no item failed",
+  "verdict": "PASS on all three rounds: round 1 verified all seven criteria at code head 831ae69f9bf0; round 2 verified the four corrective items and the conflict-forced rebase at 2a18313779ca; round 3 (bare gates) confirms the docs-only fast-follow f017a1d79eaa changes no non-comment code and every gate is green",
   "passed": 7,
   "failed": 0,
   "failures": [],
@@ -86,7 +86,35 @@
     "crossAdmission": "three envoy-mode rigs sharing LEGSMOKE admitted each other's issues (my rig took LEGION-60's LEGSMOKE-129/131 and opened sjawhar/legion-smoke PR #42); reported to LEGION-60 and torn down 12:03Z"
   },
   "documentationFeedback": "None outstanding: round 1's spawnTree precision note is fixed by item iii; the two docs the reviewer flagged (Hazard 1, SKILL.md) now carry a never-pin rule and a check instead of a PIN block.",
+  "round3": {
+    "scope": "bare gates only, per the architect: the reviewer round-2 fast-follow f017a1d79eaa is documentation and comments; no rig, no recipes",
+    "verdictPerItem": {
+      "1_diffIsCommentsAndDocsOnly": "PASS",
+      "2_bareGates": "PASS",
+      "3_skillPrePushCheckWording": "PASS",
+      "4_prMergeable": "PASS"
+    },
+    "1_diffIsCommentsAndDocsOnly": {
+      "summary": "`jj diff --from 2a18313779ca --to f017a1d79eaa --summary`: M .legion/implement.json, .legion/review.json, .legion/test.json, docs/solutions/daemon/config-env-keys-that-panes-also-carry.md, docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md, packages/daemon/src/daemon/AGENTS.md, packages/daemon/src/daemon/__tests__/environment.test.ts, packages/daemon/src/daemon/environment.ts, packages/workspace/src/workspace.ts, skills/legion-worker/SKILL.md",
+      "tsHunks": "three .ts files, 55 changed lines total, all inside comments: environment.ts — the PANE_SECRET_ENV_KEYS doc block reflowed and given the `legion restart` preserved-server caveat; workspace.ts — removeRepoScopedIdentity doc block reworded (pane commits unaffected; probe rationale is the injected runner); environment.test.ts — one leading comment reworded. Mechanical check: every +/- line matches ^\\s*(//|\\*|/\\*\\*) (0 non-comment changed lines); and each file with /* */ blocks and // lines stripped hashes IDENTICAL between 2a18313779ca and f017a1d79eaa. No non-comment code change."
+    },
+    "2_bareGates": {
+      "daemon": "packages/daemon at f017a1d79eaa: `bunx biome check --error-on-warnings src/` clean (160 files); `bunx tsc --noEmit` clean; `bun test` -> 1186 pass / 7 skip / 0 fail, 5332 expect() calls, 63 files, 41.45 s",
+      "workspace": "packages/workspace (no CI job; this run is its gate): `bunx biome check src/` clean (3 files); `bunx tsc --noEmit` clean; `bun test` -> ` 15 pass / 0 fail / 96 expect() calls / Ran 15 tests across 1 file. [9.84s]`",
+      "piEnvoy": "packages/pi-envoy: `bun run lint` clean (19 files); `bunx tsc --noEmit` clean; `bun test` -> 166 pass / 0 fail, 517 expect() calls, 7 files, 12.77 s",
+      "ci": "`legion gh -- pr checks 1025` at tip 10247d548629: lint, pr-title, typecheck, test pass (Tests run 34761515740); changes, pi-envoy pass (Legion Envoy and Contracts run 34761430975; other packages skipping, paths untouched). `gh run list`: 34761430883 Tests success 10247d548629 (the run the implementer named), 34761515740 Tests success 10247d548629, 34761430975 Legion Envoy and Contracts success 10247d548629"
+    },
+    "3_skillPrePushCheckWording": {
+      "text": "skills/legion-worker/SKILL.md identity paragraph now: the check template adds `description.first_line()`, and the rule reads `shows your role App in both columns **on every commit you made** — not on the whole list: earlier phases commits are legitimately authored by their own role App, and a conflict-forced rebase legitimately sets the committer of every rebased commit, other roles included, to the rebaser. A wrong identity on your own commit is a pane-environment problem to report to the architect, not something to pin` — both exceptions named",
+      "appliedToThisPr": "ran the exact command `jj -R $LEGION_WORKSPACE log -r main@origin..@ -T author.email() | committer.email() description` over this branch: 19 rows; 17 are 271566630+legion-implementer[bot] in both columns (the implementer own commits, plus the planner and tester handoffs, which map to the same App on this branch); `review: record round 2 handoff` is 271566912+legion-reviewer[bot] / 271566912+legion-reviewer[bot] (exception 1: another role own-App commit); `review: record handoff` is 271566912+legion-reviewer[bot] / 271566630+legion-implementer[bot] (exception 2: rebased by the implementer). Under the new wording an implementer finds nothing to flag; the pre-rewording sentence (both columns over the whole list) would have flagged both of those rows as defects, which is what the rewording fixes"
+    },
+    "4_prMergeable": {
+      "command": "`legion gh -- pr view 1025 --json mergeable,mergeStateStatus,reviewDecision`",
+      "result": "mergeable=MERGEABLE mergeStateStatus=BLOCKED reviewDecision=REVIEW_REQUIRED at head 10247d548629 — BLOCKED is branch protection awaiting the reviewer approval of the .legion/-free head, not a conflict"
+    },
+    "collectedAt": "2026-09-13T13:5xZ–14:0xZ"
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T13:20:58.059Z"
+  "completed": "2026-09-13T14:36:56.797Z"
 }
