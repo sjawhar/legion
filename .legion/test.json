@@ -1,103 +1,53 @@
 {
   "pr": 1026,
-  "headSha": "9b241b02e8722a61bd735e4203fe05fe943b908f",
-  "handoffHeadSha": "32ef7210856ebea2e440fe80652aeef0398fd813",
-  "route": "c: LEGION-41 #1010 merged 13:33Z (9a3bb41b) and LEGION-40 #1011 merged 12:44Z (9a6708fe); branch rebased onto 9a3bb41b (fork_point(main@origin | head) = 9a3bb41b); #1026 MERGEABLE (mergeStateStatus BLOCKED = awaiting review). Fingerprint changed on purpose per the architect (README none-mode correction + new up.test.sh case), so this was a full round: every bare gate at the new head plus the concurrent two-rig E2E as acceptance 1 is written.",
-  "passed": 14,
+  "headSha": "4e46aa77b94defdbf1535b91161edf2fc55fa5d3",
+  "implementationHeadSha": "bcaf80c1086420c083b4ddcc4c2d48c6f3d30093",
+  "route": "b: the corrective-round head is CONFLICTING against main, so this head was not tested (architect's standing rule: never test a stale head). Reported to the architect by envoy_publish (message 4224557aaa3bf6b66cfd21073c271a7b) at 2026-09-13 ~15:2xZ.",
+  "passed": 0,
   "failed": 0,
   "failures": [],
-  "outstanding": [],
-  "gates": {
-    "ciAtHead": "GitHub Actions 'Tests' runs 34760576651 and 34760696293 completed/success at 9b241b02; run 34760733620 completed/success at the handoff head 32ef7210.",
-    "lintDaemonCI": "packages/daemon: bunx biome check --error-on-warnings src/ -> Checked 160 files, exit 0",
-    "lintSmokeTs": "biome check --error-on-warnings scripts/smoke/issue-relay.ts scripts/smoke/issue-relay.test.ts -> Checked 2 files, exit 0",
-    "typecheckDaemonCI": "packages/daemon: bunx tsc --noEmit -> exit 0",
-    "typecheckSmokeTs": "tsc -p throwaway tsconfig extending packages/daemon/tsconfig.json (strict, noUnusedLocals/Parameters) over scripts/smoke/issue-relay.ts + issue-relay.test.ts -> exit 0",
-    "unit": "bun test scripts/smoke/issue-relay.test.ts -> 22 pass, 0 fail, 101 expect() calls",
-    "upHarness": "bash scripts/smoke/up.test.sh -> 26 PASS, exit 0 (incl. the LEGION-41 per-project NATS/machine-id cases, the LEGION-40 envoy.json cases, 'isolated mode starts the issue relay for the recorded root only after the root issue exists...', and the new 'the isolated relay receives the Dispatch URL and token resolve_dispatch_config resolved from envoy.json, exactly as the daemon does')",
-    "checkpointsHarness": "bash scripts/smoke/checkpoints.test.sh -> 26 PASS, exit 0 (none/forward: exit 3 SKIPPED-BLOCKED on 1-4 and 12 with zero Dispatch requests; isolated: dead relay -> exit 1 naming issue-relay.pid, live READY relay -> 1-4 OK and 12 reaches its own assertion then 'CHECKPOINT 12 OK: LEGSMOKE-1 released its admission slot and LEGSMOKE-2 was promoted' against the promoted fixture, RELAY RETRY newest -> exit 1, RELAY RECOVERED clears it, 5-7/9-11 blocked, 8/13 ungated)",
-    "downHarness": "bash scripts/smoke/down.test.sh -> 7 PASS, exit 0 (incl. 'stops the isolated issue relay with a start-time-validated PID record and removes its records' and the LEGION-41 per-rig container cases)",
-    "readmeNoneMode": "scripts/smoke/README.md none row no longer claims 'controller spawn': main@origin line 48 read 'Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13'; the branch (line 49) reads 'Exercises rig start-up and the fail-closed OMP probe. The daemon opens no pane at all until an event reaches the rig - a fresh none-mode rig on an empty state directory has no controller pane and no root pane'; the Start-and-stop paragraph (line 66) says the same. No remaining none+controller-spawn phrasing (grep)."
-  },
-  "directProbes": {
-    "checkpoint12Gating": "Real checkpoints.sh, own temp SMOKE_DIR (root-issue=LEGSMOKE-1, no relay): none -> 'CHECKPOINT 12 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: ...' exit 3; forward -> same naming forward, exit 3; isolated -> 'CHECKPOINT 12 FAILED: isolated relay is not running (no live process recorded at <dir>/issue-relay.pid) ...' exit 1 (mode gate open, relay-feed check reached).",
-    "downStopsRelayPlanted": "Real down.sh, temp dir with legion.yaml naming project example-org/61 (LEGION-41 shape), docker/tmux faked and logged ('docker container inspect legion-smoke-nats-exampleorg61', 'tmux -L legion-exampleorg61 has-session -t legion-exampleorg61'), a planted `sleep 300` recorded as issue-relay.pid + /proc start ticks: after down.sh the process is dead, both records removed, 'RIG DOWN', exit 0. Negative control: a pid record whose start ticks mismatch the live process -> that process left alive, stale records removed."
-  },
-  "concurrentE2E": {
-    "when": "2026-09-13 14:07:05Z-14:13:30Z on this machine (load average ~119 on 32 cores; LEGION_WORKER_RPC_TIMEOUT_SECONDS=60 and LEGION_WORKER_BOOT_TIMEOUT_SECONDS=600 in the rig environment, documented daemon env keys, no code change)",
-    "launch": "Both rigs started at the same instant as supervised processes through a throwaway launcher (/tmp/legion61-rig.sh, deleted afterwards) that scrubbed this pane's LEGION_*/TMUX/TMUX_PANE/DISPATCH_*/GH_* variables and ran the README's start command: SMOKE_REPO=sjawhar/legion-smoke, SMOKE_WEBHOOK_MODE=isolated, `secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'`; DISPATCH_URL and DISPATCH_TOKEN both unset so resolve_dispatch_config took them from ~/.config/opencode/envoy.json; provider keys via the generated legion.yaml's default omp_launch_prefix (secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --). All six secrets are agent-tier; no YubiKey touch.",
-    "rigA": {
-      "project": "sjawhar/61",
-      "dir": "/tmp/legion-smoke-61c",
-      "ports": "NATS 14261, listener 19261, daemon 19610/19611",
-      "natsContainer": "legion-smoke-nats-sjawhar61",
-      "listenerMachineId": "legion-smoke-sjawhar61",
-      "tmuxServer": "legion-sjawhar61",
-      "root": "LEGSMOKE-148",
-      "rigReadyAt": "14:07:13Z (8.5 s after launch)",
-      "checkpoints": {
-        "1": "14:08:46Z OK: Dispatch tracks LEGSMOKE-148 past triage; controller locator is live",
-        "2": "14:08:46Z OK: Dispatch reports LEGSMOKE-148 in_progress; architect locator is live",
-        "3": "14:11:49Z OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker claimed on the root (single-issue tree) observed",
-        "4": "14:11:49Z OK: a planner phase worker claimed on the root (single-issue tree)"
-      },
-      "consumedEvents": "dispatch-5087 issue.created, 5097 issue.updated, 5098 issue.updated, 5107 artifact.version, 5115 issue.closed - all LEGSMOKE-148",
-      "relayed": "5 (4 before teardown + issue.closed), RELAY READY root=LEGSMOKE-148 downstream=nats://127.0.0.1:14261, no RETRY",
-      "stateAtCheckpoints": "issues=[LEGSMOKE-148] trees LEGSMOKE-148 active, admission.active=[LEGSMOKE-148], roles controller/architect/planner"
-    },
-    "rigB": {
-      "project": "sjawhar/62",
-      "dir": "/tmp/legion-smoke-62c",
-      "ports": "NATS 14262, listener 19262, daemon 19620/19621",
-      "natsContainer": "legion-smoke-nats-sjawhar62",
-      "listenerMachineId": "legion-smoke-sjawhar62",
-      "tmuxServer": "legion-sjawhar62",
-      "root": "LEGSMOKE-149",
-      "rigReadyAt": "14:07:13Z (8.5 s after launch)",
-      "checkpoints": {
-        "1": "14:08:46Z OK: Dispatch tracks LEGSMOKE-149 past triage; controller locator is live",
-        "2": "14:08:47Z OK: Dispatch reports LEGSMOKE-149 in_progress; architect locator is live",
-        "3": "14:12:19Z OK: posted spec artifact, no design gate or approval request (gates.design: off), and a planner phase worker claimed on the root (single-issue tree) observed",
-        "4": "14:12:19Z OK: a planner phase worker claimed on the root (single-issue tree)"
-      },
-      "consumedEvents": "dispatch-5088 issue.created, 5099 issue.updated, 5100 issue.updated, 5111 artifact.version, 5116 issue.closed - all LEGSMOKE-149",
-      "relayed": "5 (4 before teardown + issue.closed), RELAY READY root=LEGSMOKE-149 downstream=nats://127.0.0.1:14262, no RETRY",
-      "stateAtCheckpoints": "issues=[LEGSMOKE-149] trees LEGSMOKE-149 active, admission.active=[LEGSMOKE-149], roles controller/architect/planner"
-    },
-    "isolationGreps": [
-      "$ grep -o 'consumed event [^ ]* subject=notifications.dispatch.issue.LEGSMOKE-[0-9]*' /tmp/legion-smoke-61c/daemon.log | sed 's/consumed event [^ ]* //' | sort | uniq -c  ->  4 subject=notifications.dispatch.issue.LEGSMOKE-148 (5 after the teardown close)",
-      "$ grep -o 'consumed event [^ ]* subject=notifications.dispatch.issue.LEGSMOKE-[0-9]*' /tmp/legion-smoke-62c/daemon.log | sed 's/consumed event [^ ]* //' | sort | uniq -c  ->  4 subject=notifications.dispatch.issue.LEGSMOKE-149 (5 after the teardown close)",
-      "$ grep -o 'LEGSMOKE-[0-9]*' /tmp/legion-smoke-61c/daemon.log | sort | uniq -c  ->  6 LEGSMOKE-148 (every token in the file)",
-      "$ grep -o 'LEGSMOKE-[0-9]*' /tmp/legion-smoke-62c/daemon.log | sort | uniq -c  ->  6 LEGSMOKE-149 (every token in the file)",
-      "$ grep -c 'LEGSMOKE-149' /tmp/legion-smoke-61c/daemon.log  ->  0",
-      "$ grep -c 'LEGSMOKE-148' /tmp/legion-smoke-62c/daemon.log  ->  0"
-    ],
-    "negativeControl": "Rig A while both rigs were live: `kill $(cat /tmp/legion-smoke-61c/issue-relay.pid)` -> `checkpoints.sh 1` printed 'CHECKPOINT 1 FAILED: isolated relay is not running (no live process recorded at /tmp/legion-smoke-61c/issue-relay.pid): the Dispatch issue-event feed for LEGSMOKE-148 is missing, so daemon state cannot reflect it; rerun up.sh and inspect /tmp/legion-smoke-61c/issue-relay.log' exit 1. `up.sh` rerun: REUSED NATS container legion-smoke-nats-sjawhar61, REUSED listener, REUSED daemon, REUSED root issue LEGSMOKE-148, STARTED issue-relay (pid 3487954), RIG READY; the relay replayed dispatch-5087/5097/5098/5107 all `duplicate=true`; the daemon's consumed-event count stayed at 4; `checkpoints.sh 1` OK again.",
-    "liveClose": "PATCH /api/v1/issues/LEGSMOKE-148 and /LEGSMOKE-149 {status: done} (200 each) reached each rig within one relay poll (dispatch-5115 seq=5 and dispatch-5116 seq=5); each daemon consumed its own issue.closed; both trees `lingering`, admission.active=[].",
-    "teardown": "down.sh per rig (acceptance 5): rig A relay pid 3487954 alive before -> dead after, daemon and listener dead, pid/start records removed, 'STOPPED tmux session legion-sjawhar61 on private socket legion-sjawhar61', 'STOPPED NATS container legion-smoke-nats-sjawhar61', 'RIG DOWN' exit 0; rig B relay pid 3251898 likewise with legion-sjawhar62 / legion-smoke-nats-sjawhar62. Afterwards: other agents' rigs (legion53t-nats, legion-24-nats) still running, the deployment daemon (legion-sjawharlegion) answers 200. Rig directories /tmp/legion-smoke-61c and -62c are left in place as the evidence the PR body quotes."
-  },
-  "acceptanceStatus": {
-    "1": "PASS (concurrent, as written): two rigs with different SMOKE_PROJECT started at the same time, each daemon log carries consumed-event lines only for its own LEGSMOKE key, zero cross-mentions.",
-    "2": "PASS: checkpoints 1-4 OK live on both rigs (quoted above); checkpoint 12 opens under isolated and passes against the promoted fixture in checkpoints.test.sh while none/forward block it (exit 3); the architect-decided standard (spec v3) needs no live checkpoint 12.",
-    "3": "PASS: envoy-bridge.ts and envoy-bridge.test.ts have an empty diff against the fork point; README none row still 'Deliberately no live ingress'; harness none/forward cases pass; direct probes exit 3.",
-    "4": "PASS: README SMOKE_WEBHOOK_MODE row and human-gates table carry the isolated row naming it as the pre-merge proof; envoy row reworded; start block exports isolated; none row corrected (no controller-spawn claim); three docs/solutions one-liners updated.",
-    "5": "PASS: down.test.sh relay case, the planted-relay probe, and both live teardowns above."
-  },
-  "observations": [
-    "RIG READY arrives ~8.5 s after launch because the daemon API answers while the OMP capability probes are still at the launch hold; the controller pane appeared ~90 s later and checkpoint 1 flipped from 'has not progressed past triage' (exit 1, its own assertion, never the relay gate) to OK at 14:08:46Z on both rigs within one second of each other.",
-    "Both rig daemon logs again show one 'failed to connect controller shim socket on ready: Worker RPC negotiate_protocol timed out after 60000ms' under load ~119; the daemon reconnected and every checkpoint passed. Same as the implementer's runs; not this PR's surface.",
-    "down.sh prints no STOPPED line for a relay that exits on SIGTERM within its 10 s window (terminate_pid_file only announces the kill -KILL escalation) - pre-existing behaviour shared with daemon/listener; liveness was verified by pid instead.",
-    "The rig's smoke architects chose single-issue trees on both rigs (planner on the root), so no child discovery ran in this round; the implementer's rig B (LEGSMOKE-123 -> child LEGSMOKE-124, RELAY TRACKING) covered that path and was audited in the previous round.",
-    "At this tester's second boot the workspace again held an empty untracked .omp/config.yml (session-boot artifact); removed before the handoff commit, never pushed.",
-    "Environment note, recorded once: harnesses and probes ran with LEGION_TREE/LEGION_ISSUE/LEGION_ROLE/LEGION_OMP_PATH/TMUX unset; the live rigs ran with the launcher's full scrub list (LEGION_*, TMUX, TMUX_PANE, DISPATCH_URL/TOKEN/TOKEN_FILE, GH_TOKEN/GITHUB_TOKEN/GH_HOST/GH_CONFIG_DIR) and TMUX_TMPDIR kept so up.sh, checkpoints.sh, and down.sh addressed the same private sockets."
+  "outstanding": [
+    "The full round the architect specified for the relay's rewritten polling loop (bare gates incl. pid-record.sh from up.sh/checkpoints.sh/down.sh; checkpoint-12 gate probes; down.sh relay probe; concurrent two-rig E2E with child discovery via the single list request, RELAY TRACKING + child rows in global id order, one-list-request-per-tick pattern, negative control, down.sh teardown) runs on the post-rebase head once #1026 is MERGEABLE again."
   ],
-  "previousRound": "Route (a) at 16a4617c (pre-rebase): same gates green, sequential two-rig evidence audited; superseded by this full round.",
+  "conflict": {
+    "observed": "legion gh -- pr view 1026 --json mergeable,mergeStateStatus -> mergeable=CONFLICTING, mergeStateStatus=DIRTY, headRefOid=4e46aa77b94d",
+    "base": "fork_point(main@origin | legion/LEGION-61@origin) = 1c749943 (#1024, LEGION-57), which is after 108e2cec (#1038); main@origin = d35e8b59",
+    "collidingMainCommits": {
+      "2553ca37 #1007 (LEGION-74: panes, probes, and daemon children inherit an allow-listed environment)": [
+        "scripts/smoke/checkpoints.sh",
+        "scripts/smoke/checkpoints.test.sh",
+        "scripts/smoke/README.md"
+      ],
+      "0149a47a #1030 (LEGION-60: a worker prompt is delivered only when its turn starts)": [
+        "scripts/smoke/up.sh",
+        "scripts/smoke/README.md"
+      ],
+      "8af58deb #1045 (panes run the configured mise x <tool> -- omp invocation, never the resolved install path)": [
+        "scripts/smoke/up.sh",
+        "scripts/smoke/up.test.sh",
+        "scripts/smoke/README.md"
+      ]
+    },
+    "untouchedOnMain": [
+      "scripts/smoke/issue-relay.ts",
+      "scripts/smoke/issue-relay.test.ts",
+      "scripts/smoke/pid-record.sh",
+      "scripts/smoke/down.sh",
+      "scripts/smoke/down.test.sh"
+    ],
+    "newOnMainInThisArea": "docs/solutions/testing/smoke-rig-from-a-worker-pane-mains-scripts-env-u-app-keys-and-a-session-actor.md (LEGION-74 retro) - may be relevant to how a tester launches the rig from a worker pane after #1007",
+    "ciAtHead": "green but against the pre-conflict base: run 34767764900 at bcaf80c1; runs 34767992299 and 34768001092 at 4e46aa77"
+  },
+  "previousRound": "Route (c) full round at 9b241b02 (concurrent two-rig E2E, 14 passed / 0 failed) - see the history of this file at ad7b19a1; superseded once the rebased corrective head is tested.",
+  "observations": [
+    "Nothing in this round exercised the rewritten relay loop; every claim about it waits for the mergeable head.",
+    "At this tester's boot the workspace again held an empty untracked .omp/config.yml; removed before committing."
+  ],
   "requiredSkillsFollowed": [
     "legion-worker",
-    "verification-before-completion",
-    "using-secrets"
+    "verification-before-completion"
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T14:15:50.309Z"
+  "completed": "2026-09-13T17:29:59.235Z"
 }
