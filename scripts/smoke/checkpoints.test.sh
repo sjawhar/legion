@@ -100,11 +100,16 @@ EOF
 # `api …/pulls/<n>/reviews…` PR_REVIEWS_FILE — the concatenated pages a real `--paginate` prints;
 # `api …/pulls/<n>/files…` PR_FILES_FILE; `api …/pulls/<n>` PR_FILE; `api …/commits/<sha>` the
 # per-SHA view `${COMMIT_DIR}/<sha>.json`; `api …/git/ref/heads/main --jq .object.sha` a fixed
-# SHA. Anything else fails naming the call.
+# SHA. Anything else fails naming the call. A call whose argument list contains GH_FAIL fails the
+# way a real gh does on an HTTP error: one stderr line, exit 1, nothing on stdout.
 cat >"${fake_bin}/gh" <<'EOF'
 #!/usr/bin/env bash
 request="$*"
 printf '%s\n' "$request" >>"${GH_LOG:-/dev/null}"
+if [[ -n "${GH_FAIL:-}" && "$request" == *"$GH_FAIL"* ]]; then
+  printf 'gh: HTTP 502: Server Error (fake, GH_FAIL=%s)\n' "$GH_FAIL" >&2
+  exit 1
+fi
 serve() {
   [[ -n "${!1:-}" && -r "${!1}" ]] || {
     printf 'fake gh: %s is unset or unreadable for: %s\n' "$1" "$request" >&2
@@ -958,6 +963,39 @@ PR_LIST_OUTPUT='[{"number":7,"headRefName":"legion/LEGSMOKE-1"},{"number":9,"hea
   SMOKE_PR='' run_github_checkpoint 5 && { printf 'checkpoint 5 guessed one of two Legion pull requests\n' >&2; exit 1; }
 expect_output 'CHECKPOINT 5 FAILED: SMOKE_PR is unset and example-org/legion-smoke has 2 legion/<KEY> pull requests: #7 (legion/LEGSMOKE-1), #9 (legion/LEGSMOKE-4); set SMOKE_PR to the one this exercise opened'
 printf 'PASS: without SMOKE_PR the one legion/<KEY> pull request is used, and two candidates fail naming both\n'
+
+# The list is the newest 100 pull requests: 99 entries with one candidate are used, a full page
+# fails naming the window before any pull request is read -- an older legion/<KEY> candidate
+# could be missing from it, so a single match on a full page would be a silent guess.
+PR_LIST_OUTPUT="$(jq -cn '[range(98) | {number: (. + 100), headRefName: "feature/\(.)"}] + [{number: 7, headRefName: "legion/LEGSMOKE-1"}]')" \
+  SMOKE_PR='' run_github_checkpoint 5
+expect_output 'CHECKPOINT 5 OK: PR #7 on legion/LEGSMOKE-1: 1 commits carry App bot identity'
+gh_calls_before="$(wc -l <"$GH_LOG")"
+PR_LIST_OUTPUT="$(jq -cn '[range(99) | {number: (. + 100), headRefName: "feature/\(.)"}] + [{number: 7, headRefName: "legion/LEGSMOKE-1"}]')" \
+  SMOKE_PR='' run_github_checkpoint 5 && { printf 'checkpoint 5 picked the one candidate on a full page of 100 pull requests\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: SMOKE_PR is unset and gh pr list returned the newest 100 pull requests of example-org/legion-smoke, so older legion/<KEY> candidates may be missing; set SMOKE_PR to the one this exercise opened'
+[[ "$(($(wc -l <"$GH_LOG") - gh_calls_before))" == 1 ]] || {
+  printf 'expected the full-page failure to stop after the one pr list call; gh log tail:\n%s\n' "$(tail -n 3 "$GH_LOG")" >&2
+  exit 1
+}
+printf 'PASS: smoke_pr uses a candidate among 99 listed pull requests and fails naming the window when the newest-100 page is full\n'
+
+# A gh that fails inside the helpers' command substitutions (errexit does not reach into them):
+# the checkpoint names the failed gh call, never the empty-list or several-candidates condition.
+GH_FAIL='/pulls/7/commits' run_github_checkpoint 5 && { printf 'checkpoint 5 passed with the commits read failing\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: gh api repos/example-org/legion-smoke/pulls/7/commits failed'
+[[ "$(<"$output_file")" != *'has no commits'* ]] || {
+  printf 'a failing commits read was reported as an empty commit list:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+}
+GH_FAIL='pr list' PR_LIST_OUTPUT='[{"number":7,"headRefName":"legion/LEGSMOKE-1"}]' \
+  SMOKE_PR='' run_github_checkpoint 5 && { printf 'checkpoint 5 passed with pr list failing\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 5 FAILED: gh pr list -R example-org/legion-smoke failed'
+[[ "$(<"$output_file")" != *'legion/<KEY> pull requests'* ]] || {
+  printf 'a failing pr list was reported as a candidate count:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'PASS: a failing gh inside pr_commits or smoke_pr fails the checkpoint naming that call, not an empty list or a candidate count\n'
 
 # Checkpoint 7: the retro commit touches docs/solutions/; the .legion deletion c3 is committed by
 # the implementer at 12:00 and the reviewer approves at 12:05; the final diff has no .legion path;

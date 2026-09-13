@@ -212,8 +212,11 @@ readonly legion_branch_pattern='^legion/[A-Z][A-Z0-9]*-[0-9]+$'
 # The pull request checkpoints 5, 7, and 8 inspect: SMOKE_PR when set, otherwise the repository's
 # one `legion/<KEY>` pull request in any state. Several candidates fail naming each one -- on a
 # shared sandbox repository another rig's pull request could otherwise be picked silently (the
-# same lesson moved the root issue to a recorded value) -- and none fails naming the remedy.
+# same lesson moved the root issue to a recorded value) -- and none fails naming the remedy. The
+# discovery reads the newest 100 pull requests (`gh pr list --limit 100`); a full page fails too,
+# since an older candidate could be missing from it and the pick would be a silent guess.
 smoke_pr() {
+  local listed
   local candidates
   local count
   if [[ -n "${SMOKE_PR:-}" ]]; then
@@ -221,8 +224,13 @@ smoke_pr() {
     printf '%s\n' "$SMOKE_PR"
     return
   fi
-  candidates="$(gh pr list -R "$SMOKE_REPO" --state all --limit 100 --json number,headRefName |
-    jq -c --arg pattern "$legion_branch_pattern" '[.[] | select(.headRefName | test($pattern))]')"
+  # errexit does not reach into `$(...)`, so a failing gh must fail here by hand, or the helper
+  # would go on with an empty list and name a condition that did not happen.
+  listed="$(gh pr list -R "$SMOKE_REPO" --state all --limit 100 --json number,headRefName)" ||
+    fail "gh pr list -R ${SMOKE_REPO} failed"
+  (($(jq 'length' <<<"$listed") < 100)) ||
+    fail "SMOKE_PR is unset and gh pr list returned the newest 100 pull requests of ${SMOKE_REPO}, so older legion/<KEY> candidates may be missing; set SMOKE_PR to the one this exercise opened"
+  candidates="$(jq -c --arg pattern "$legion_branch_pattern" '[.[] | select(.headRefName | test($pattern))]' <<<"$listed")"
   count="$(jq 'length' <<<"$candidates")"
   case "$count" in
     0) fail "set SMOKE_PR or open a legion/<KEY> pull request" ;;
@@ -242,7 +250,8 @@ pr_commits() {
   local pr="$1"
   local commits
   local count
-  commits="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/commits?per_page=100")"
+  commits="$(gh api "repos/${SMOKE_REPO}/pulls/${pr}/commits?per_page=100")" ||
+    fail "gh api repos/${SMOKE_REPO}/pulls/${pr}/commits failed"
   count="$(jq 'length' <<<"$commits")"
   ((count > 0)) || fail "PR #${pr} has no commits (0 listed)"
   ((count < 100)) ||
