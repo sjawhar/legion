@@ -4,7 +4,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly project_root
 readonly up_script="${project_root}/scripts/smoke/up.sh"
-source_file="$(mktemp)"
+source_dir="$(mktemp -d)"
 warning_file="$(mktemp)"
 assertion_file="$(mktemp)"
 fake_bin="$(mktemp -d)"
@@ -15,12 +15,15 @@ gh_call_file="$(mktemp)"
 order_log="$(mktemp)"
 actor_body_file="$(mktemp)"
 main_output_file="$(mktemp)"
-trap 'rm -f "$source_file" "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file" "$order_log" "$actor_body_file" "$main_output_file"; rm -rf "$fake_bin"' EXIT
+trap 'rm -f "$warning_file" "$assertion_file" "$headers_file" "$body_file" "$response_file" "$gh_call_file" "$order_log" "$actor_body_file" "$main_output_file"; rm -rf "$fake_bin" "$source_dir"' EXIT
 export SMOKE_DIR="${fake_bin}/smoke"
 
-sed '$d' "$up_script" >"$source_file"
+# up.sh sources dispatch-config.sh from its own directory (by BASH_SOURCE), so the stripped copy
+# needs that file beside it; the copy is what the harness sources, exactly as before.
+sed '$d' "$up_script" >"${source_dir}/up.sh"
+cp "${project_root}/scripts/smoke/dispatch-config.sh" "${source_dir}/dispatch-config.sh"
 # shellcheck source=/dev/null
-source "$source_file"
+source "${source_dir}/up.sh"
 
 GITHUB_WEBHOOK_SECRET=$' \tlegion-smoke-secret\r\n '
 normalize_github_webhook_secret >"$warning_file" 2>&1
@@ -115,11 +118,14 @@ write_daemon_config
 }
 
 
-[[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
+# The default-mode cases must not see an inherited SMOKE_WEBHOOK_MODE: the README's start block
+# exports it in an operator's shell, so each clears it in its own subshell, exactly as the
+# LEGION-40 cases below clear DISPATCH_URL/DISPATCH_TOKEN.
+[[ "$(unset SMOKE_WEBHOOK_MODE; SMOKE_GH_WEBHOOK_HELP_EXIT=0 resolve_webhook_mode)" == "forward" ]] || {
   printf 'expected available webhook forwarding to default to forward mode\n' >&2
   exit 1
 }
-[[ "$(SMOKE_GH_WEBHOOK_HELP_EXIT=1 resolve_webhook_mode)" == "none" ]] || {
+[[ "$(unset SMOKE_WEBHOOK_MODE; SMOKE_GH_WEBHOOK_HELP_EXIT=1 resolve_webhook_mode)" == "none" ]] || {
   printf 'expected unavailable webhook forwarding to default to none mode\n' >&2
   exit 1
 }
@@ -356,6 +362,79 @@ fi
   exit 1
 }
 printf 'PASS: the real daemon loader rejects the pre-#941 gates.merge block\n'
+
+# LEGION-40: DISPATCH_URL/DISPATCH_TOKEN resolve from the environment, else from the same envoy.json
+# the production launcher reads. XDG_CONFIG_HOME points at harness-owned directories so every case
+# is independent of the box's own ~/.config/opencode/envoy.json (present here, absent in CI) and of
+# the DISPATCH_URL a Legion pane carries; each subshell also clears both variables explicitly.
+xdg_file_dir="${fake_bin}/xdg-with-file"
+xdg_scratch_dir="${fake_bin}/xdg-scratch"
+mkdir -p "${xdg_file_dir}/opencode" "${xdg_scratch_dir}/opencode"
+printf '{"dispatch":{"enabled":true,"serverUrl":"http://file.test","token":"file-token"}}\n' >"${xdg_file_dir}/opencode/envoy.json"
+
+[[ "$(unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_file_dir" resolve_dispatch_config && printf '%s %s' "$DISPATCH_URL" "$DISPATCH_TOKEN")" == "http://file.test file-token" ]] || {
+  printf 'expected DISPATCH_URL and DISPATCH_TOKEN to resolve from envoy.json when both are unset\n' >&2
+  exit 1
+}
+# Assigned, not exported: no child of the resolving shell sees the bearer unless handed it.
+[[ "$(unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_file_dir" resolve_dispatch_config && env | grep -c '^DISPATCH_TOKEN=' || true)" == "0" ]] || {
+  printf 'expected resolve_dispatch_config to assign DISPATCH_TOKEN without exporting it\n' >&2
+  exit 1
+}
+printf 'PASS: DISPATCH_URL and DISPATCH_TOKEN fall back to .dispatch.serverUrl/.dispatch.token in envoy.json\n'
+
+# An operator's export reaches the resolver as a child's environment, so these two cases run it in
+# a fresh bash whose environment carries the pair exactly as given (a prefix assignment on the child,
+# never a write to this shell's own variables) and print the pair it left.
+resolved_from_environment() {
+  DISPATCH_URL="$1" DISPATCH_TOKEN="$2" XDG_CONFIG_HOME="$xdg_file_dir" \
+    bash -c 'fail() { printf "error: %s\n" "$*" >&2; exit 1; }; source "$1"; resolve_dispatch_config && printf "%s %s" "$DISPATCH_URL" "$DISPATCH_TOKEN"' \
+    _ "${source_dir}/dispatch-config.sh"
+}
+[[ "$(resolved_from_environment "http://env.test" "env-token")" == "http://env.test env-token" ]] || {
+  printf 'expected an exported DISPATCH_URL/DISPATCH_TOKEN to win over envoy.json\n' >&2
+  exit 1
+}
+# An exported empty string is "not provided", not a value.
+[[ "$(resolved_from_environment "" "")" == "http://file.test file-token" ]] || {
+  printf 'expected an empty DISPATCH_URL/DISPATCH_TOKEN to fall back to envoy.json\n' >&2
+  exit 1
+}
+printf 'PASS: an exported DISPATCH_URL/DISPATCH_TOKEN wins over envoy.json\n'
+
+# Neither source: the message names the variable, the file, and the key -- the exact text the README
+# quotes -- and nothing else is consulted. DISPATCH_URL is checked first, so with both unset and no
+# file it is the one named.
+if (unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_scratch_dir" resolve_dispatch_config) >"$assertion_file" 2>&1; then
+  printf 'expected resolve_dispatch_config to fail with no environment value and no envoy.json\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == "error: DISPATCH_URL is unset and ${xdg_scratch_dir}/opencode/envoy.json does not exist; export DISPATCH_URL or set .dispatch.serverUrl in that file" ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# The file exists and has the URL but not the token: the production launcher's bare `jq -r` would
+# print the literal `null` here; the rig must stop and name .dispatch.token instead.
+printf '{"dispatch":{"enabled":true,"serverUrl":"http://file.test"}}\n' >"${xdg_scratch_dir}/opencode/envoy.json"
+if (unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_scratch_dir" resolve_dispatch_config) >"$assertion_file" 2>&1; then
+  printf 'expected resolve_dispatch_config to fail when envoy.json lacks .dispatch.token\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == "error: DISPATCH_TOKEN is unset and ${xdg_scratch_dir}/opencode/envoy.json has no .dispatch.token; export DISPATCH_TOKEN or set .dispatch.token in that file" ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+# Not JSON at all: reported as such (with jq's own line above it), never as a missing key.
+printf '{' >"${xdg_scratch_dir}/opencode/envoy.json"
+if (unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_scratch_dir" resolve_dispatch_config) >"$assertion_file" 2>&1; then
+  printf 'expected resolve_dispatch_config to fail on an unparsable envoy.json\n' >&2
+  exit 1
+fi
+[[ "$(<"$assertion_file")" == *"error: DISPATCH_URL is unset and ${xdg_scratch_dir}/opencode/envoy.json could not be parsed as JSON (see the jq error above); export DISPATCH_URL or set .dispatch.serverUrl in that file" ]] || {
+  cat "$assertion_file" >&2
+  exit 1
+}
+printf 'PASS: with neither source present, resolution stops naming the variable, the envoy.json path, and the key\n'
 
 export DISPATCH_URL="http://dispatch.test"
 export DISPATCH_TOKEN="test-dispatch-token"

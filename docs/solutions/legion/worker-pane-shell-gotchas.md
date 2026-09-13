@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, and a pane `legion` that is the deployed build, not your branch"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, and a bash tool `jq` that is jaq, not the jq your script runs"
 category: legion
 tags:
   - legion
@@ -10,6 +10,8 @@ tags:
   - bun-test
   - rig
   - session-identity
+  - jq
+  - jaq
 date: 2026-09-12
 status: active
 module: legion
@@ -40,6 +42,8 @@ related_issues:
   - "sjawhar/legion#1003"
   - "LEGION-78"
   - "sjawhar/legion#1015"
+  - "LEGION-40"
+  - "sjawhar/legion#1011"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -57,6 +61,8 @@ symptoms:
   - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
   - "The Legion PR footer names a session id three days older than the worker; printenv OMP_SESSION_ID disagrees with envoy_whoami"
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
+  - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
+  - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -70,7 +76,9 @@ LEGION-12's own retro and is filed as LEGION-37; the slow-push paragraph in §1 
 whose implementer, on a pane still running the pre-LEGION-12 plugin, hit §1, §3, §8, §9, and §11 across five rounds
 and confirmed each as written (the architect filed the §1 harness fix as LEGION-52); §13 and the §12 correction are
 from LEGION-34 (sjawhar/legion#1003), whose implementer hit §1 again on a pane running the fixed plugin — by copying
-the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace.
+the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace;
+§14 is from LEGION-40 (sjawhar/legion#1011), whose plan, harness comments, and shipped header comment all named the
+wrong `jq`.
 None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
 delivery fixed for good by LEGION-54 (pi-envoy 1.20.1): the workarounds are recorded only so a worker still running
@@ -434,3 +442,36 @@ from plugin 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carrie
 worker on an issue that changes a skill reads the branch file, not `skill://`, for the rest of that tree, and the
 architect's task for each later phase says which template to follow. A skill fix reaches other trees only after the
 plugin release built from the merged commit is installed — a release step, unlike the CLI's checkout advance above.
+
+## 14. The bash tool's `jq` is jaq, a shell builtin; every script you write runs mise's jq (from LEGION-40)
+
+In the bash tool's own shell, `type jq` answers `jq is a shell builtin` and `jq --version` prints `jaq 2.3.0`
+(`type -a jq` lists the mise install and shim behind it). That builtin exists nowhere else: a child `bash` — `bash -c`,
+`bash scripts/smoke/up.sh`, every `*.test.sh` harness, every script a pane's daemon or an operator runs — resolves
+`jq` through `PATH` to `/home/ubuntu/.mise/installs/jq/1.8.2/jq` (`jq-1.8.2`; `/usr/bin/jq` is `jq-1.7`). So an
+expression checked interactively in the tool shell was checked against jaq, and the script's behaviour is jq's.
+LEGION-40's plan recorded "`jq` on this box's PATH is jaq 2.3.0", the harness and the shipped `dispatch-config.sh`
+header repeated it, and the reviewer's thermo pass caught it as false for the context the resolver actually runs in.
+
+The two engines agree on most of `jq`, and the difference bites exactly where a missing config key is being tolerated.
+Verified on this box with `jq -r '<expr>' envoy.json`, `envoy.json` as named, exit code and output:
+
+| `envoy.json` | `.dispatch.token // empty` | `.dispatch.token? // empty` | `(.dispatch.token)? // empty` |
+| :--- | :--- | :--- | :--- |
+| `{"dispatch":{"token":"t"}}` | `t` on all three | `t` | `t` |
+| `{"dispatch":{}}`, `{}` | jq 1.7/1.8.2: empty, exit 0; **jaq: exit 5** (`cannot use null as iterable`) on `{}` | empty, exit 0 on all three | empty, exit 0 |
+| `{"dispatch":null}` | jq: empty, exit 0; **jaq: exit 5** | empty, exit 0 | empty, exit 0 |
+| `{"dispatch":"str"}` | **exit 5 on all three** (jq: `Cannot index string with string "token"`) | empty, exit 0 on all three | empty, exit 0 |
+| `[1,2]` (top level not an object) | exit 5 on all three | **exit 5 on all three** (`?` binds to the last index only) | empty, exit 0 |
+
+What follows for a script that reads an optional key: the trailing `?` is load-bearing under real jq too — a
+non-object parent raises without it — and jaq additionally raises on a null or absent parent; `// empty` is what
+turns jq's `null` (which `-r` would print as the literal `null`, the production launcher's bug) into nothing. Only
+`(<path>)?` also survives a top level that is not an object, which is why the reviewer's fast-follow on
+`dispatch-config.sh` asks for that form. Two rules:
+
+- Verify a `jq` expression with the `jq` the script will run: `bash -c 'jq -r "…" file'`, never bare `jq` in the tool
+  shell. When the verdict matters, run the matrix above on `bash -c 'jq'`, `/usr/bin/jq`, and the tool shell, and
+  record which engine each result came from.
+- Do not write "the `jq` on PATH is jaq" into a script comment or a plan premise. `type -P jq` from a child bash is the
+  fact to quote; the tool shell's builtin is a fact about your session, not about the box.

@@ -26,6 +26,9 @@ fail() {
   exit 1
 }
 
+# shellcheck source=scripts/smoke/dispatch-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/dispatch-config.sh"
+
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
@@ -598,8 +601,7 @@ main() {
   require_env GH_REVIEW_APP_PRIVATE_KEY_B64
   require_numeric LEGION_IMPLEMENT_APP_ID
   require_numeric LEGION_REVIEW_APP_ID
-  require_env DISPATCH_URL
-  require_env DISPATCH_TOKEN
+  resolve_dispatch_config
 
   [[ "$SMOKE_REPO" =~ ^[^/]+/[^/]+$ ]] || fail "SMOKE_REPO must be <owner>/<repo>"
   [[ "$SMOKE_PROJECT" =~ ^[^/]+/[0-9]+$ ]] || fail "SMOKE_PROJECT must be <owner>/<number>"

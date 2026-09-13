@@ -17,7 +17,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `SMOKE_REPO` | Dedicated repository as `<owner>/<repo>`. | Required. |
-| `DISPATCH_URL` | Base URL of the shared Dispatch server the daemon talks to for the issue lifecycle. `up.sh` never reads a config file for this — export it yourself (e.g. from this box's `~/.config/opencode/envoy.json` → `.dispatch.serverUrl`). | Required; `up.sh` fails loudly naming `DISPATCH_URL`/`DISPATCH_TOKEN` if either is unset. |
+| `DISPATCH_URL` | Base URL of the shared Dispatch server the daemon talks to for the issue lifecycle. When unset, `up.sh` and `checkpoints.sh` read `.dispatch.serverUrl` from `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/envoy.json` — the same file and key the production daemon launcher reads. An exported value wins. | `.dispatch.serverUrl` from that file. When neither has a value, `up.sh` stops in preflight, before anything starts: `error: DISPATCH_URL is unset and <config dir>/opencode/envoy.json has no .dispatch.serverUrl; export DISPATCH_URL or set .dispatch.serverUrl in that file` (`… does not exist; …` when the file is absent, `… could not be parsed as JSON (see the jq error above); …` when it is not JSON). |
 | `SMOKE_PROJECT` | Legion's own daemon identity (`LEGION_ID`), as `<owner>/<number>`; unrelated to the Dispatch project. | Required. |
 | `SMOKE_WEBHOOK_MODE` | `forward` starts `gh webhook forward` (live GitHub events only); `envoy` starts the production-Envoy NATS bridge (live GitHub events and Dispatch issue events); `none` omits every ingress transport — neither GitHub events nor Dispatch issue events reach the rig NATS. | `forward` when `gh webhook forward --help` is available; otherwise `none`. |
 | `SMOKE_DISPATCH_INGRESS` | Where the rig's Dispatch issue events come from. `shared`: the shared Dispatch server, whose events reach the rig NATS only through the `envoy` webhook mode's bridge. `rig`: a scratch Dispatch server that publishes into the rig NATS itself (the armed-gate exercise below), so those events arrive whatever the webhook mode and `checkpoints.sh` no longer blocks checkpoints 1–4 and 12 on it. Recorded at `${SMOKE_DIR}/dispatch-ingress`; any other value stops `up.sh` naming the two. | `shared` |
@@ -33,11 +33,11 @@ It also requires these secret inputs:
 | Variable | Meaning |
 | --- | --- |
 | `GITHUB_WEBHOOK_SECRET` | Secret used by Envoy and the locally signed listener ping; `forward` mode also supplies it to GitHub webhook forwarding. |
-| `DISPATCH_TOKEN` | Bearer token for the Dispatch server named by `DISPATCH_URL` (e.g. this box's `~/.config/opencode/envoy.json` → `.dispatch.token`). |
+| `DISPATCH_TOKEN` | Bearer token for the Dispatch server named by `DISPATCH_URL`. It is **not** a `secrets` key on this machine: when unset, `up.sh` and `checkpoints.sh` read `.dispatch.token` from `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/envoy.json`, exactly as the production daemon launcher does; an exported value wins. When neither has a value the script stops naming the variable, the file, and the key — `error: DISPATCH_TOKEN is unset and <config dir>/opencode/envoy.json has no .dispatch.token; export DISPATCH_TOKEN or set .dispatch.token in that file` from `up.sh` (in preflight, before anything starts), the same text after `CHECKPOINT <n> FAILED:` from `checkpoints.sh` — with the same `does not exist` / `could not be parsed as JSON` variants as `DISPATCH_URL`. Neither script persists it under `SMOKE_DIR`. |
 | `GH_AGENT_APP_PRIVATE_KEY_B64` | Base64-encoded implementation App private key. |
 | `GH_REVIEW_APP_PRIVATE_KEY_B64` | Base64-encoded reviewer App private key. |
 
-Provide secrets with the `secrets` wrapper rather than writing a `.env` file. The private keys stay in the process environment; `up.sh` writes only `private_key_command` references into its generated daemon configuration. `up.sh` trims leading and trailing whitespace from `GITHUB_WEBHOOK_SECRET` once during validation and prints `WARNING` when the stored secret contains whitespace. It passes that same normalized secret to the listener and, only in `forward` mode, to `gh webhook forward --secret`.
+Provide the three GitHub secrets with the `secrets` wrapper rather than writing a `.env` file; `DISPATCH_TOKEN` needs no wrapper (see its row). The private keys stay in the process environment; `up.sh` writes only `private_key_command` references into its generated daemon configuration. `up.sh` trims leading and trailing whitespace from `GITHUB_WEBHOOK_SECRET` once during validation and prints `WARNING` when the stored secret contains whitespace. It passes that same normalized secret to the listener and, only in `forward` mode, to `gh webhook forward --secret`.
 
 ### Human-controlled gates
 
@@ -54,16 +54,15 @@ The sandbox repository includes the 20-second `ci` check and the `.fail-me`-cont
 ## Start and stop
 
 ```sh
-export SMOKE_REPO=example-org/legion-smoke
-export SMOKE_PROJECT=example-org/24
+export SMOKE_REPO=sjawhar/legion-smoke
+export SMOKE_PROJECT=sjawhar/24
 export SMOKE_WEBHOOK_MODE=envoy
-export DISPATCH_URL=http://localhost:8766
 
-secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 DISPATCH_TOKEN -- \
+secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \
   bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
 ```
 
-The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. In `none` mode, `up.sh` builds the Envoy listener binary, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, proves the listener accepts a locally signed GitHub `ping`, prints the explicit webhook-ingress block, then launches the daemon against the Dispatch server named by `DISPATCH_URL`/`DISPATCH_TOKEN`. The daemon starts its controller, but no Dispatch issue event ever reaches the rig NATS, so the root issue `up.sh` creates is never admitted: a `none` run exercises start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13, and `checkpoints.sh` blocks 1–4 and 12 with the Dispatch-ingress reason. The daemon uses installation tokens minted from the GitHub Apps. In `forward` mode, the same local listener assertion runs before `gh webhook forward` and its GitHub hook registration; `forward` relays live GitHub events only, so Dispatch issue events still never reach the rig NATS and checkpoints 1–4 and 12 stay blocked exactly as in `none` mode. The rig waits for the forwarder's `Forwarding Webhook events from GitHub...` tunnel-ready signal before launching the daemon with its normal Bun command:
+The `secrets` command injects `ENVOY_GITHUB_WEBHOOK_SECRET`, so a wrapper must map it to the public rig interface name `GITHUB_WEBHOOK_SECRET` without printing it. `DISPATCH_URL` and `DISPATCH_TOKEN` are not in that list: with nothing exported, `up.sh` takes both from `~/.config/opencode/envoy.json` (rows above). `sjawhar/legion-smoke` is the sandbox repository both Legion Apps are installed for. In `none` mode, `up.sh` builds the Envoy listener binary, starts an isolated NATS container at `127.0.0.1:14222`, waits for listener health at `127.0.0.1:19020/healthz`, proves the listener accepts a locally signed GitHub `ping`, prints the explicit webhook-ingress block, then launches the daemon against the Dispatch server named by `DISPATCH_URL`/`DISPATCH_TOKEN`. The daemon starts its controller, but no Dispatch issue event ever reaches the rig NATS, so the root issue `up.sh` creates is never admitted: a `none` run exercises start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13, and `checkpoints.sh` blocks 1–4 and 12 with the Dispatch-ingress reason. The daemon uses installation tokens minted from the GitHub Apps. In `forward` mode, the same local listener assertion runs before `gh webhook forward` and its GitHub hook registration; `forward` relays live GitHub events only, so Dispatch issue events still never reach the rig NATS and checkpoints 1–4 and 12 stay blocked exactly as in `none` mode. The rig waits for the forwarder's `Forwarding Webhook events from GitHub...` tunnel-ready signal before launching the daemon with its normal Bun command:
 
 ```sh
 bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /path/to/legion.yaml
@@ -118,10 +117,10 @@ Legion panes never appear in your own `tmux list-sessions`; attach with `tmux -L
 Run the numbered assertions during the end-to-end exercise:
 
 ```sh
-secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <1-13>
+bash scripts/smoke/checkpoints.sh <1-13>
 ```
 
-`DISPATCH_TOKEN` is a secret: the `secrets` wrapper injects it only for this one invocation and never persists it under `SMOKE_DIR` (the same wrapper the start command above uses for `up.sh`). `DISPATCH_URL` is not a secret and must already be exported in the shell, exactly as in "Start and stop" above. Checkpoint 13 needs no `DISPATCH_TOKEN`; run it bare.
+`checkpoints.sh` resolves `DISPATCH_URL` and `DISPATCH_TOKEN` exactly as `up.sh` does — the environment when set, otherwise `.dispatch.serverUrl` / `.dispatch.token` from `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/envoy.json` (the two rows in "Prerequisites") — at the moment a checkpoint makes a Dispatch request, and never persists either under `SMOKE_DIR`. When neither source has the token it prints `CHECKPOINT <n> FAILED: DISPATCH_TOKEN is unset and <config dir>/opencode/envoy.json has no .dispatch.token; export DISPATCH_TOKEN or set .dispatch.token in that file` and exits 1 before any request. Checkpoint 13 makes no Dispatch request and needs neither.
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated. Such a directory also has no recorded webhook mode: `checkpoints.sh` reads `${SMOKE_DIR}/webhook-mode`, falls back to an exported `SMOKE_WEBHOOK_MODE` (`envoy`, `forward`, or `none`), and otherwise stops naming the missing file — it never guesses a mode, because the mode decides which checkpoints are reachable at all.
 
