@@ -86,36 +86,41 @@ function onceEventLoop(): Promise<void> {
   return promise;
 }
 
-/** Drains an async chain built entirely from injected fake `sleep`/`now` (never a real timer) by
- * yielding the event loop repeatedly, so a boot watchdog's connect-retry/retire loop settles
- * deterministically without guessing a real wall-clock wait. */
+/** For negative waits only — a fixed drain over a decline that does no file write and runs no
+ * injected fake, so a tick count IS the whole event (the fired deadline or clock reaches its
+ * identity/role/disposed check by microtask hops and returns). Every positive wait awaits its
+ * event through the fixture's observers (`saves`, `runs`, `sleeps`, `published`, an
+ * `eventCounter`); a drain must never be the thing a test waits on for work that includes a
+ * file write or an injected `run`, because its tick budget races that I/O under load. Each
+ * caller carries a `// Negative wait:` line naming the decline it drains over. */
 async function flushEventLoop(ticks = 2_000): Promise<void> {
   for (let tick = 0; tick < ticks; tick += 1) {
     await onceEventLoop();
   }
 }
 
-/** As `flushEventLoop`, but stops as soon as `condition` is met rather than a fixed tick count —
- * for a chain whose length in event-loop ticks before some expected effect isn't known exactly. */
-async function flushEventLoopUntil(condition: () => boolean, maxTicks = 5_000): Promise<void> {
-  for (let tick = 0; tick < maxTicks && !condition(); tick += 1) {
-    await onceEventLoop();
-  }
-}
-
-/** Counts a fake tmux's `new-window` launches and lets a test await the Nth one as a real event.
- * `spawnRoot` does real fs I/O (workspace provisioning, secret files) before it ever reaches
- * tmux, so a `setImmediate` budget racing it is load-sensitive; a waiter resolved from inside the
- * fake runner the moment the launch is issued is not. A wait that never resolves fails the test
- * on bun's own timeout with the assertion still unreached, never a false green. */
-function windowCounter(): {
+/** Counts occurrences of one event and lets a test await the Nth as a real event. `spawnRoot`
+ * does real fs I/O (workspace provisioning, secret files) before it ever reaches tmux, so a
+ * `setImmediate` budget racing it is load-sensitive; a waiter resolved from inside the fake dep
+ * the moment the event happens is not. `reached(n)` resolves on the macrotask AFTER the count
+ * reaches n (one `onceEventLoop()`), so the awaiting test resumes after every microtask
+ * continuation that event unblocked in the code under test (the synchronous re-check that
+ * follows a probe, the locator write that follows a spawn) — but not after any further real
+ * I/O; await that I/O's own event instead. A wait that never resolves fails the test on bun's
+ * own timeout with the assertion still unreached, never a false green. */
+interface EventCounter {
   readonly count: number;
   increment(): void;
   reached(n: number): Promise<void>;
-} {
+  /** `reached(count + 1)` captured now — for "the next one after this trigger" when the prior
+   * count is incidental to the test's story. Call it BEFORE the trigger. */
+  next(): Promise<void>;
+}
+
+function eventCounter(): EventCounter {
   let count = 0;
   const waiters: Array<{ n: number; resolve: () => void }> = [];
-  return {
+  const counter: EventCounter = {
     get count() {
       return count;
     },
@@ -126,13 +131,62 @@ function windowCounter(): {
         else waiters.push(waiter);
       }
     },
-    reached(n) {
-      if (count >= n) return Promise.resolve();
-      const { promise, resolve } = Promise.withResolvers<void>();
-      waiters.push({ n, resolve });
-      return promise;
+    async reached(n) {
+      if (count < n) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        waiters.push({ n, resolve });
+        await promise;
+      }
+      await onceEventLoop();
+    },
+    next() {
+      return counter.reached(count + 1);
     },
   };
+  return counter;
+}
+
+/** One injected dep observed at both ends. `issued` counts calls as they are made (before the
+ * test's fake runs — the event to await when the fake blocks on a gate the test releases later);
+ * `completed` counts them as they resolve (the event to await when the assertions need the
+ * call's result to have reached the code under test). */
+interface CallObserver {
+  readonly issued: EventCounter;
+  readonly completed: EventCounter;
+}
+
+function callObserver(): CallObserver {
+  return { issued: eventCounter(), completed: eventCounter() };
+}
+
+/** A lazily-created observer per key, so a test can request `reached` before any event. */
+function keyed<K, T>(create: () => T): (key: K) => T {
+  const entries = new Map<K, T>();
+  return (key) => {
+    const existing = entries.get(key);
+    if (existing) return existing;
+    const created = create();
+    entries.set(key, created);
+    return created;
+  };
+}
+
+/** The root/controller registration deadline `config` arms, in ms -- so a test names the
+ * deadline sleep it awaits instead of a literal. */
+function registrationDeadlineMs(config: DaemonConfig): number {
+  return config.workerBootTimeoutSeconds * 1000 * config.workerBootRegistrationDeadlineIntervals;
+}
+
+/** Polls `condition` every 5 ms of real time until it holds. The timer is a poll interval, never
+ * a wait budget: the wait ends the moment the condition holds and is bounded only by bun's
+ * per-test timeout, so a condition that never holds fails the test loud with its assertion
+ * unreached. Fake time cannot drive this one: it is reserved for an effect with no injectable
+ * seam -- today the secret-file write `TmuxRuntime.preparePane` makes through `secrets.ts`
+ * directly, with no injected dep between it and a tmux call the test can hold -- so there is no
+ * fake to resolve from. Every other wait in this file awaits its event through the fixture's
+ * observers. */
+async function waitFor(condition: () => boolean): Promise<void> {
+  while (!condition()) await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
 
 async function temporaryDir(): Promise<string> {
@@ -433,6 +487,18 @@ function manager(
   controlRequests: Array<{ subject: string; json: string }>;
   publications: Array<{ subject: string; json: string }>;
   revokedSessions: string[];
+  /** Every `deps.saveState` call (the test's override or the default no-op), both ends. */
+  saves: CallObserver;
+  /** Every `deps.run` call keyed by verb -- a tmux subcommand (`list-panes`, `kill-pane`,
+   * `new-window`, `split-window`, `has-session`) or the executable (`jj`) -- both ends. */
+  runs(verb: string): CallObserver;
+  /** Every `deps.sleep` call keyed by its duration, counted the moment the wait is armed. Only
+   * counted when the test injected a `sleep`: under real timers nothing is observed, and a
+   * `reached` on it fails loud on the test timeout. */
+  sleeps(ms: number): EventCounter;
+  /** Every `deps.natsPublish` call keyed by the payload's `type` (`"?"` when absent), counted
+   * after the injected fn (the test's override or the default `publications.push`) ran. */
+  published(type: string): EventCounter;
 } {
   const commands: string[][] = [];
   const publications: Array<{ subject: string; json: string }> = [];
@@ -471,7 +537,11 @@ function manager(
       }
       return { stdout: "", exitCode: 0 };
     });
-  const deps: Omit<ProcessManagerDeps, "runtime"> = {
+  const saves = callObserver();
+  const runs = keyed<string, CallObserver>(callObserver);
+  const sleeps = keyed<number, EventCounter>(eventCounter);
+  const published = keyed<string, EventCounter>(eventCounter);
+  const injected: Omit<ProcessManagerDeps, "runtime" | "run"> = {
     state,
     saveState: async () => {},
     config: config("/state"),
@@ -504,19 +574,57 @@ function manager(
     dispatchClient: fakeDispatchClient(),
     revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),
     ...overrides,
+  };
+  // Observed from outside the test's own fakes (`saveState`/`natsPublish`/`sleep`/`run` above),
+  // which keep working unchanged: `issued` fires before the injected fn, `completed` after it.
+  const injectedSleep = injected.sleep;
+  const deps: Omit<ProcessManagerDeps, "runtime"> = {
+    ...injected,
+    saveState: async () => {
+      saves.issued.increment();
+      await injected.saveState();
+      saves.completed.increment();
+    },
+    natsPublish: (subject, json) => {
+      injected.natsPublish(subject, json);
+      const payload: unknown = JSON.parse(json);
+      published(
+        typeof payload === "object" &&
+          payload !== null &&
+          "type" in payload &&
+          typeof payload.type === "string"
+          ? payload.type
+          : "?"
+      ).increment();
+    },
+    ...(injectedSleep
+      ? {
+          sleep: (ms: number) => {
+            sleeps(ms).increment();
+            return injectedSleep(ms);
+          },
+        }
+      : {}),
     run: async (command, runnerOptions) => {
+      const observer = runs((command[0] === "tmux" ? command[3] : command[0]) ?? "?");
+      observer.issued.increment();
       const result = await commandRunner(command, runnerOptions);
+      if (result.exitCode === 0) {
+        if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
+          const cloneDir = command[4];
+          if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
+          await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
+        }
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+          const workspaceDir = command[3];
+          if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+          await mkdir(workspaceDir, { recursive: true });
+        }
+      }
+      // Counted after the jj side effects and before the stdout defaulting: the code under test
+      // sees this result on its next microtask, which `reached()`'s deferral covers.
+      observer.completed.increment();
       if (result.exitCode !== 0) return result;
-      if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
-        const cloneDir = command[4];
-        if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
-        await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
-      }
-      if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
-        const workspaceDir = command[3];
-        if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
-        await mkdir(workspaceDir, { recursive: true });
-      }
       if (
         command[0] === "tmux" &&
         (command[3] === "new-window" || command[3] === "new-session") &&
@@ -562,6 +670,10 @@ function manager(
     controlRequests,
     publications,
     revokedSessions,
+    saves,
+    runs,
+    sleeps,
+    published,
   };
 }
 
@@ -588,12 +700,28 @@ async function workerCapFixture(
     commands,
     publications,
     controlRequests,
+    saves,
+    runs,
+    sleeps,
+    published,
   } = manager(
     state,
     { config: config(stateDir, { workerCap }), ...overrides },
     { skipEnableLaunches }
   );
-  return { processes, state, managedState, commands, publications, controlRequests, stateDir };
+  return {
+    processes,
+    state,
+    managedState,
+    commands,
+    publications,
+    controlRequests,
+    stateDir,
+    saves,
+    runs,
+    sleeps,
+    published,
+  };
 }
 
 function tmuxWindowEnvironment(command: readonly string[]): Record<string, string> {
@@ -1713,12 +1841,13 @@ describe("ProcessManager", () => {
     // Generation 2 writes its boot token to the shared `legion-omp-<root>-architect` secret file
     // before its launch queues behind generation 1's still-open tmux call; wait until that write
     // has landed so the older generation settles *after* the newer one already depends on it.
+    // The write is `TmuxRuntime.preparePane`'s own `writeSecretFile` (no injected dep between it
+    // and the lane-serialised `split-window` held below), so the file's content is the only
+    // observable event -- polled, never tick-bounded (see `waitFor`).
     const architectFile = path.join(stateDir, "secrets", roleToken("omp", root, "architect"));
-    await flushEventLoopUntil(
+    await waitFor(
       () => existsSync(architectFile) && readFileSync(architectFile, "utf8") === "boot-gen-2"
     );
-    // `flushEventLoopUntil` returns silently on exhaustion; a wait that gave up would let
-    // generation 1 settle first and turn the assertions below into a false green.
     expect(readFileSync(architectFile, "utf8")).toBe("boot-gen-2");
 
     // Only now does the older, generation-1 launch's tmux call finally resolve; generation 2's
@@ -4792,9 +4921,7 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("claim missing after spawn");
     processes.cancelBootWatchdog(token, claim.generation);
 
-    // Drains the just-cancelled watchdog's in-flight connect-retry loop deterministically
-    // (yielding the event loop, never guessing a real-time wait), rather than racing an
-    // unsettled background promise.
+    // Negative wait: cancelBootWatchdog's abort reaches only cancelableSleep's unwind (the connect-retry loop exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(publications).toEqual([]);
@@ -4822,6 +4949,7 @@ describe("ProcessManager", () => {
       manager: processes,
       commands,
       state: managedState,
+      runs,
     } = manager(state, {
       config: config(stateDir, {
         workerBootTimeoutSeconds: 1,
@@ -4859,16 +4987,10 @@ describe("ProcessManager", () => {
       "first-generation shim cannot connect"
     );
 
-    await flushEventLoopUntil(() => {
-      const claim = managedState.roles[token];
-      return (
-        claim !== undefined &&
-        "issue" in claim &&
-        claim.generation === 2 &&
-        claim.launchFailures === 1 &&
-        claim.locator !== undefined
-      );
-    }, 50_000);
+    // The relaunch's own event: generation 1's pane was the 1st new-window; its retired locator
+    // is gone and its window no longer verifies (`readProcessCmdline` says bash), so the retry
+    // opens a 2nd. Generation, locator, and launchFailures are written synchronously after it.
+    await runs("new-window").completed.reached(2);
 
     const relaunched = managedState.roles[token];
     if (!relaunched || !("issue" in relaunched) || !relaunched.locator) {
@@ -4908,6 +5030,7 @@ describe("ProcessManager", () => {
       publications,
       commands,
       state: managedState,
+      published,
     } = manager(state, {
       config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
       now: () => currentTime,
@@ -4935,15 +5058,7 @@ describe("ProcessManager", () => {
     // `WorkerAdmission.enqueueForRetry`), so it publishes its own `worker-started` exactly like
     // any other successful relaunch — flushing on the *first* publication would stop after that
     // intermediate one, so this waits specifically for the terminal `worker-died`.
-    await flushEventLoopUntil(
-      () =>
-        publications.some(
-          (publication) =>
-            publication.subject === roleTopic(roleToken("omp", root, "architect")) &&
-            publication.json.includes("worker-died")
-        ),
-      50_000
-    );
+    await published("worker-died").reached(1);
 
     // The watchdog probed the pane itself (its own row, by pane id) before retiring the boot.
     expect(
@@ -4981,6 +5096,7 @@ describe("ProcessManager", () => {
       manager: processes,
       publications,
       state: managedState,
+      runs,
     } = manager(state, {
       config: config(stateDir, {
         workerBootTimeoutSeconds: 1,
@@ -5002,17 +5118,19 @@ describe("ProcessManager", () => {
       },
     });
 
+    // The watchdog is armed inside spawnWorker and its first poll sleep fires in spawnWorker's
+    // own tail, so its interval start -- what `now()` read at arm time -- is the clock BEFORE the
+    // spawn, not after it.
+    const startTime = currentTime;
     await processes.spawnWorker(root, child, role, "do the work");
 
-    const startTime = currentTime;
-    // Three full workerBootTimeoutSeconds cycles' worth of ticks (each interval's own
-    // connect-retry loop alone needs ~10 fake-clock-driven sleeps at this timeout), driven
-    // entirely off the injected fake clock/sleep plus the watchdog's own real macrotask yield
-    // on every re-arm (see `armBootWatchdog`'s doc comment) - no real wait despite simulating
-    // several seconds of elapsed boot time. Stops as soon as the fake clock has advanced far
-    // enough rather than guessing a fixed tick count for a chain whose exact length (connect
-    // retries plus a real macrotask yield per re-arm) isn't known.
-    await flushEventLoopUntil(() => currentTime - startTime >= 3_000, 20_000);
+    // Three full workerBootTimeoutSeconds cycles (each interval's own connect-retry loop alone
+    // needs ~10 fake-clock-driven sleeps at this timeout), driven entirely off the injected fake
+    // clock/sleep plus the watchdog's own real macrotask yield on every re-arm (see
+    // `armBootWatchdog`'s doc comment) - no real wait despite simulating several seconds of
+    // elapsed boot time. Three liveness probes (one `list-panes` per observation interval) are
+    // the event: the fake clock is +3 000 at the third.
+    await runs("list-panes").completed.reached(3);
 
     expect(publications).toEqual([]);
     const stillBooting = managedState.roles[token];
@@ -5027,6 +5145,7 @@ describe("ProcessManager", () => {
     stillBooting.readyConfirmedAt = currentTime;
     processes.cancelBootWatchdog(token, stillBooting.generation);
     const attemptsAtConfirmation = connectAttempts;
+    // Negative wait: cancelBootWatchdog's abort reaches only cancelableSleep's unwind (the connect-retry loop exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(400);
 
     expect(connectAttempts).toBe(attemptsAtConfirmation);
@@ -5059,6 +5178,7 @@ describe("ProcessManager", () => {
       manager: processes,
       publications,
       state: managedState,
+      runs,
     } = manager(state, {
       config: config(stateDir, {
         workerBootTimeoutSeconds: 1,
@@ -5088,10 +5208,13 @@ describe("ProcessManager", () => {
       connectWorkerRpc: async () => client,
     });
 
+    // As in the slow-boot test above: the interval start is the clock before the spawn.
+    const startTime = currentTime;
     await processes.spawnWorker(root, child, role, "do the work");
 
-    const startTime = currentTime;
-    await flushEventLoopUntil(() => currentTime - startTime >= 3_000, 20_000);
+    // Three liveness probes (one `list-panes` per observation interval) are the event: the fake
+    // clock is +3 000 at the third, and each one's socket probe has already rejected get_state.
+    await runs("list-panes").completed.reached(3);
 
     expect(publications).toEqual([]);
     expect(getStateCalls).toBeGreaterThan(0);
@@ -5117,7 +5240,7 @@ describe("ProcessManager", () => {
     const implementerToken = roleToken("omp", child, "implementer");
     const testerToken = roleToken("omp", child, "tester");
     const stateDir = await temporaryDir();
-    let connectAttempts = 0;
+    const connects = eventCounter();
     const {
       manager: processes,
       publications,
@@ -5131,7 +5254,7 @@ describe("ProcessManager", () => {
       // reached on its own before dispose() would count a launch failure that is not the point.
       config: config(stateDir, { workerBootRegistrationDeadlineIntervals: 1_000 }),
       connectWorkerRpc: async () => {
-        connectAttempts += 1;
+        connects.increment();
         throw new Error("shim not listening yet");
       },
       sleep: async () => {
@@ -5142,16 +5265,17 @@ describe("ProcessManager", () => {
     await processes.spawnWorker(root, child, "implementer", "implement it");
     await processes.spawnWorker(root, child, "tester", "test it");
     // Let both watchdogs' connect-retry loops genuinely spin for a while first.
-    await flushEventLoop(200);
-    const attemptsBeforeDispose = connectAttempts;
+    await connects.reached(10);
+    const attemptsBeforeDispose = connects.count;
     expect(attemptsBeforeDispose).toBeGreaterThan(0);
 
     processes.dispose();
-    const attemptsAtDispose = connectAttempts;
+    const attemptsAtDispose = connects.count;
 
+    // Negative wait: dispose()'s abort reaches only both loops' cancelableSleep unwinds (each exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
-    expect(connectAttempts).toBe(attemptsAtDispose);
+    expect(connects.count).toBe(attemptsAtDispose);
     expect(publications).toEqual([]);
     const implementerClaim = managedState.roles[implementerToken];
     const testerClaim = managedState.roles[testerToken];
@@ -5310,6 +5434,7 @@ describe("ProcessManager", () => {
     // Only now does the deadline elapse -- its own callback must re-check the role rather than
     // trust whatever was true when it was armed.
     sleepGate.resolve();
+    // Negative wait: the fired deadline reaches only retireAndRespawnStuckController's role check (the claim is already recorded) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(commands.some((command) => command[3] === "new-window")).toBe(false);
@@ -5427,6 +5552,7 @@ describe("ProcessManager", () => {
     // cancel), but dispose() must have cleared the tracking `cancelControllerRegistrationDeadline`
     // relies on, so this stale fire is recognized as such and does nothing.
     sleepGate.resolve();
+    // Negative wait: the stale fire reaches only retireAndRespawnStuckController's wait-identity check (dispose() cleared the tracked wait) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
@@ -5440,7 +5566,7 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const firstSleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
-    const windows = windowCounter();
+    const windows = eventCounter();
     const launchedPids = new Map<string, number>();
     const controllerRelaunched = Promise.withResolvers<void>();
     const { manager: processes, state: managedState } = manager(state, {
@@ -5567,6 +5693,7 @@ describe("ProcessManager", () => {
     // The stale wait's own timer finally fires, late -- it must recognize itself as superseded
     // and touch neither the fresh locator nor spawn yet another replacement.
     staleSleepGate.resolve();
+    // Negative wait: the stale fire reaches only retireAndRespawnStuckController's wait-identity check (the fresh spawn replaced the tracked wait) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(windowCount).toBe(1);
@@ -5591,7 +5718,11 @@ describe("ProcessManager", () => {
     const sleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let listPanesCalls = 0;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      runs,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -5622,7 +5753,9 @@ describe("ProcessManager", () => {
 
     await processes.ensureController();
     sleepGate.resolve();
-    await flushEventLoop();
+    // The 2nd list-panes is the post-deadline re-check whose await the role claim lands in; the
+    // re-check that follows it is synchronous.
+    await runs("list-panes").completed.reached(2);
 
     expect(listPanesCalls).toBeGreaterThanOrEqual(2);
     expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
@@ -5677,6 +5810,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.launchFailures).toBe(0);
 
     sleepGate.resolve();
+    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by confirmRootReady) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     // The deadline was cancelled by the confirmation above: its stale fire takes no action.
@@ -5697,7 +5831,7 @@ describe("ProcessManager", () => {
     const firstGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    const windows = windowCounter();
+    const windows = eventCounter();
     let paneAlive = true;
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
@@ -5775,7 +5909,7 @@ describe("ProcessManager", () => {
     ];
     const commands: string[][] = [];
     let sessionExists = false;
-    const windows = windowCounter();
+    const windows = eventCounter();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
@@ -5865,7 +5999,7 @@ describe("ProcessManager", () => {
     const firstGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    const windows = windowCounter();
+    const windows = eventCounter();
     let paneAlive = true;
     const launchedPids = new Map<string, number>();
     const { manager: processes, state: managedState } = manager(state, {
@@ -5999,6 +6133,7 @@ describe("ProcessManager", () => {
     // (generation 1 no longer matches the currently-armed generation 2) and touch nothing.
     paneAlive = true;
     staleGate.resolve();
+    // Negative wait: the stale fire reaches only retireUnconfirmedRoot's stillUnconfirmed() (generation 1 no longer matches the armed generation 2) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsBeforeStaleFire);
@@ -6052,6 +6187,7 @@ describe("ProcessManager", () => {
     // The registration deadline armed by the spawn above must have been cancelled by
     // `closeTree`: its stale fire takes no action on the now-closed tree.
     sleepGate.resolve();
+    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by closeTree) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsAfterClose);
@@ -6070,7 +6206,11 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let listPanesCalls = 0;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      runs,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6107,7 +6247,8 @@ describe("ProcessManager", () => {
     expect(windowCount).toBe(1);
 
     sleepGate.resolve();
-    await flushEventLoopUntil(() => listPanesCalls >= 1, 20_000);
+    // Issuance, not completion: the fake blocks this probe on `probeGate` until released below.
+    await runs("list-panes").issued.reached(1);
 
     // `/process/ready` confirms this exact generation while the deadline's own probe is still
     // pending.
@@ -6115,7 +6256,9 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.readyConfirmedAt).toBeDefined();
 
     probeGate.resolve();
-    await flushEventLoop();
+    // The released probe completes; the stillUnconfirmed() re-check that declines is its
+    // synchronous continuation.
+    await runs("list-panes").completed.reached(1);
 
     expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
       false
@@ -6137,7 +6280,11 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let listPanesCalls = 0;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      runs,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6172,7 +6319,8 @@ describe("ProcessManager", () => {
     expect(windowCount).toBe(1);
 
     sleepGate.resolve();
-    await flushEventLoopUntil(() => listPanesCalls >= 1, 20_000);
+    // Issuance, not completion: the fake blocks this probe on `probeGate` until released below.
+    await runs("list-panes").issued.reached(1);
 
     // Daemon shutdown begins while the deadline's own probe is still in flight -- unlike
     // cancelling the wait map entry (already gone by construction here: the probe already ran),
@@ -6181,7 +6329,9 @@ describe("ProcessManager", () => {
     const commandsBeforeProbeResolves = commands.length;
 
     probeGate.resolve();
-    await flushEventLoop();
+    // The released probe completes; the disposed re-check that declines is its synchronous
+    // continuation.
+    await runs("list-panes").completed.reached(1);
 
     expect(commands.length).toBe(commandsBeforeProbeResolves);
     expect(windowCount).toBe(1);
@@ -6202,12 +6352,13 @@ describe("ProcessManager", () => {
     let sleepCalls = 0;
     const commands: string[][] = [];
     let sessionExists = false;
-    const windows = windowCounter();
+    const windows = eventCounter();
     let paneAlive = true;
     const {
       manager: processes,
       state: managedState,
       publications,
+      published,
     } = manager(state, {
       config: config(stateDir),
       // Only the first three armed deadlines (one per resurrect cycle) are under this test's
@@ -6272,7 +6423,9 @@ describe("ProcessManager", () => {
     // The third dead-before-ready cycle reaches MAX_LAUNCH_FAILURES: it escalates instead of
     // resurrecting a fourth time.
     gates[2].resolve();
-    await flushEventLoopUntil(() => managedState.trees[root]?.status === "launch-failed", 20_000);
+    // The escalation's own event: status, locator, revoke, and admission slot are all written
+    // synchronously around this publish (escalateOrRetryUnconfirmedRoot, releaseSlot's prefix).
+    await published("launch-failed").reached(1);
 
     expect(windows.count).toBe(3);
     expect(managedState.trees[root]?.launchFailures).toBe(3);
@@ -6282,10 +6435,9 @@ describe("ProcessManager", () => {
       true
     );
     // Three resurrect cycles, each opening a real pane through `spawnTree`'s
-    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above) and each
-    // requiring `flushEventLoopUntil` to drain a potentially large number of real macrotask
-    // (`setImmediate`) ticks so that I/O actually completes: under a CPU/IO-starved host this can
-    // legitimately take longer than bun's default 5000ms per-test budget even though every
+    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above): the
+    // awaits above resolve only once that I/O has completed, which under a CPU/IO-starved host
+    // can legitimately take longer than bun's default 5000ms per-test budget even though every
     // timer/clock the test itself controls above is fake.
   }, 20_000);
 
@@ -6302,7 +6454,11 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let paneAlive = true;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      saves,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6342,12 +6498,16 @@ describe("ProcessManager", () => {
 
     paneAlive = false;
     sleepGate.resolve();
-    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+    // Issuance, not completion: the fake blocks this 2nd save (the retry's pre-resurrect persist)
+    // on `saveGate` until released below.
+    await saves.issued.reached(2);
 
     // Daemon shutdown begins while the retry's own pre-resurrect persist is still in flight.
     processes.dispose();
     saveGate.resolve();
-    await flushEventLoop();
+    // The released save completes; the treeStillUnconfirmed() re-check that declines (disposed)
+    // is its synchronous continuation.
+    await saves.completed.reached(2);
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -6368,7 +6528,11 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let paneAlive = true;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      saves,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6407,7 +6571,9 @@ describe("ProcessManager", () => {
 
     paneAlive = false;
     sleepGate.resolve();
-    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+    // Issuance, not completion: the fake blocks this 2nd save (the retry's pre-resurrect persist)
+    // on `saveGate` until released below.
+    await saves.issued.reached(2);
 
     // The real root process answers /process/ready for this exact generation while the retry's
     // own pre-resurrect persist is still in flight -- the probe that found it "dead" a moment
@@ -6415,7 +6581,9 @@ describe("ProcessManager", () => {
     // decision already in flight.
     processes.confirmRootReady(root, 1);
     saveGate.resolve();
-    await flushEventLoop();
+    // The released save completes; the treeStillUnconfirmed() re-check that declines
+    // (readyConfirmedAt set) is its synchronous continuation.
+    await saves.completed.reached(2);
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -6438,7 +6606,11 @@ describe("ProcessManager", () => {
     let sessionExists = false;
     let windowCount = 0;
     let paneAlive = true;
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      saves,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6476,7 +6648,9 @@ describe("ProcessManager", () => {
 
     paneAlive = false;
     sleepGate.resolve();
-    await flushEventLoopUntil(() => saveStateCalls >= 2, 20_000);
+    // Issuance, not completion: the fake blocks this 2nd save (the retry's pre-resurrect persist)
+    // on `saveGate` until released below.
+    await saves.issued.reached(2);
 
     // closeTree runs to completion on its own (its own saves are never gated) while the retry's
     // pre-resurrect persist is still pending.
@@ -6484,7 +6658,9 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.status).toBe("closed");
 
     saveGate.resolve();
-    await flushEventLoop();
+    // The released save completes; the treeStillUnconfirmed() re-check that declines (status
+    // closed) is its synchronous continuation.
+    await saves.completed.reached(2);
 
     expect(windowCount).toBe(1);
     expect(managedState.trees[root]?.status).toBe("closed");
@@ -6515,7 +6691,7 @@ describe("ProcessManager", () => {
     state.trees[child] = { root: child, generation: 0, status: "queued", launchFailures: 0 };
     const sleepGate = Promise.withResolvers<void>();
     let sleepCalls = 0;
-    const windows = windowCounter();
+    const windows = eventCounter();
     const {
       manager: processes,
       state: managedState,
@@ -6576,10 +6752,10 @@ describe("ProcessManager", () => {
       true
     );
     // The freed slot's promotion drives a real spawn for the queued child through `spawnTree`'s
-    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above), and
-    // `flushEventLoopUntil` must drain real macrotask (`setImmediate`) ticks for that I/O to
-    // complete: under a CPU/IO-starved host this can legitimately take longer than bun's default
-    // 5000ms per-test budget even though every timer/clock the test itself controls is fake.
+    // `provisionWorkspace` (real `mkdir` I/O -- see `onceEventLoop`'s doc comment above): the
+    // awaits above resolve only once that I/O has completed, which under a CPU/IO-starved host
+    // can legitimately take longer than bun's default 5000ms per-test budget even though every
+    // timer/clock the test itself controls is fake.
   }, 20_000);
 
   it("re-arms the same generation's deadline when the alive-but-unconfirmed pane's stop fails, instead of stranding it with no retry", async () => {
@@ -6593,12 +6769,17 @@ describe("ProcessManager", () => {
     const secondGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
     let sessionExists = false;
-    const windows = windowCounter();
+    const windows = eventCounter();
     let killPaneShouldFail = true;
     let killPaneSucceeded = false;
     const launchedPids = new Map<string, number>();
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir),
+    const cfg = config(stateDir);
+    const {
+      manager: processes,
+      state: managedState,
+      sleeps,
+    } = manager(state, {
+      config: cfg,
       sleep: async () => {
         sleepCalls += 1;
         if (sleepCalls === 1) {
@@ -6652,7 +6833,9 @@ describe("ProcessManager", () => {
     // it re-arms the same generation's deadline instead of stranding it with nothing left to
     // retry it.
     firstGate.resolve();
-    await flushEventLoopUntil(() => sleepCalls >= 2, 20_000);
+    // The re-armed deadline's own sleep is the event: armRootRegistrationDeadline arms it
+    // synchronously after the failed stop's catch.
+    await sleeps(registrationDeadlineMs(cfg)).reached(2);
 
     expect(windows.count).toBe(1);
     expect(managedState.trees[root]).toMatchObject({ generation: 1, status: "active" });
@@ -6693,7 +6876,7 @@ describe("ProcessManager", () => {
     const sleepGate = Promise.withResolvers<void>();
     let sleepCalls = 0;
     const commands: string[][] = [];
-    const windows = windowCounter();
+    const windows = eventCounter();
     let paneAlive = true;
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
@@ -6840,6 +7023,7 @@ describe("ProcessManager", () => {
     // The registration deadline armed by the spawn above must have been cancelled by
     // `beginLinger`: its stale fire takes no action on the now-lingering tree.
     sleepGate.resolve();
+    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by beginLinger) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsAfterLinger);
@@ -6860,7 +7044,11 @@ describe("ProcessManager", () => {
     state.controllerLocator = { ...locator };
     const sleepGate = Promise.withResolvers<void>();
     const commands: string[][] = [];
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      runs,
+    } = manager(state, {
       config: config(stateDir),
       sleep: async () => {
         await sleepGate.promise;
@@ -6881,7 +7069,9 @@ describe("ProcessManager", () => {
 
     await processes.ensureController();
     sleepGate.resolve();
-    await flushEventLoop();
+    // The failed kill-pane is the last injected call: the stop's rejection, the catch, and the
+    // log that leaves the locator in place are its synchronous continuation.
+    await runs("kill-pane").completed.reached(1);
 
     // The kill-pane attempt ran and failed, but the locator survives exactly as it was -- never
     // cleared, and no second controller spawned onto what may still be a live pane.
@@ -7613,6 +7803,15 @@ describe("ProcessManager", () => {
     const token = roleToken("omp", root, role);
     let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
     const runtime = new FakeRuntime({ sleep: async () => {} });
+    // Wrapped like `idleWorkerFixture`'s `client.shutdown`: every spawn the fake completes is one
+    // event, and the relaunch is the 2nd.
+    const spawns = eventCounter();
+    const spawn = runtime.spawn.bind(runtime);
+    runtime.spawn = async (kind, spec) => {
+      const locator = await spawn(kind, spec);
+      spawns.increment();
+      return locator;
+    };
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
       runtime,
@@ -7629,18 +7828,10 @@ describe("ProcessManager", () => {
     const workerLocator = booting.locator;
     runtime.occupyHandle(workerLocator, { reachable: false });
 
-    // The retirement's own event: the same claim relaunched onto a fresh process (counted as
-    // one launch failure), not merely the counter ticking before the promotion has run.
-    await flushEventLoopUntil(() => {
-      const claim = managedState.roles[token];
-      return (
-        claim !== undefined &&
-        "issue" in claim &&
-        claim.launchFailures === 1 &&
-        claim.locator !== undefined &&
-        !sameProcess(claim.locator, workerLocator)
-      );
-    }, 50_000);
+    // The retirement's own event: the same claim relaunched onto a fresh process (the 2nd spawn;
+    // launchFailures was counted before it, and the fresh locator is written synchronously after
+    // it), not merely the counter ticking before the promotion has run.
+    await spawns.reached(2);
 
     // The retirement stopped exactly the old locator, once, letting the runtime decide the kill
     // (no `skipGraceful`: the graceful ask is still attempted; no verdict handed down -- the
@@ -11367,10 +11558,11 @@ describe("ProcessManager", () => {
     expect(worker.clock.pending.some((wait) => wait.ms === 600_000)).toBeTrue();
     expect(worker.shutdownCalls).toEqual([]);
 
+    // The retirement's own persist is the event; its socket-close tail (the reconnect probe and
+    // the queued no-op markWorkerDead) is microtask-only and settles inside `next()`'s deferral.
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
-    // Let the socket-close handler's reconnect probe and its queued markWorkerDead settle too.
-    await flushEventLoop(50);
+    await retired;
 
     expect(worker.shutdownCalls).toEqual([worker.token]);
     expect(
@@ -11399,6 +11591,7 @@ describe("ProcessManager", () => {
     const worker = await idleWorkerFixture({ role: "implementer" });
     const seededLocator = structuredClone(worker.claim().locator);
 
+    // Negative wait: nothing fires (the armed clock stays pending in manualSleep), so nothing reaches the code under test; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11415,6 +11608,7 @@ describe("ProcessManager", () => {
     worker.client.emitRunState("running");
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's runState check (the client is running) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11428,8 +11622,9 @@ describe("ProcessManager", () => {
     // not block it.
     worker.client.emitRunState("idle");
     expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
+    await retired;
 
     expect(worker.shutdownCalls).toEqual([worker.token]);
   });
@@ -11447,6 +11642,7 @@ describe("ProcessManager", () => {
 
     // Oldest first: the superseded clock expires.
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the stale fire reaches only armIdleRetire's wait-identity check (superseded by the re-arm) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11456,9 +11652,9 @@ describe("ProcessManager", () => {
     expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
 
     // The live clock expires: exactly one retirement.
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
-    await flushEventLoop(50);
+    await retired;
 
     expect(worker.shutdownCalls).toEqual([worker.token]);
     expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
@@ -11473,6 +11669,7 @@ describe("ProcessManager", () => {
     worker.manager.dispose();
     // dispose() cannot un-record the wait under an injected sleep; the fire still reaches the code.
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's disposed check by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11490,6 +11687,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's active-phase check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11508,6 +11706,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's pendingAssignment check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11529,6 +11728,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's active-phase check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11538,9 +11738,9 @@ describe("ProcessManager", () => {
     expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
 
     worker.state.phases[root] = { phase: "planner", sessionId: "ses_planner" };
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
-    await flushEventLoop(50);
+    await retired;
 
     expect(worker.shutdownCalls).toEqual([worker.token]);
     expect(
@@ -11563,6 +11763,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's pendingAssignment check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11571,9 +11772,9 @@ describe("ProcessManager", () => {
     expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
 
     delete worker.claim().pendingAssignment;
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
-    await flushEventLoop(50);
+    await retired;
 
     expect(worker.shutdownCalls).toEqual([worker.token]);
     expect(worker.claim().locator).toBeUndefined();
@@ -11588,6 +11789,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
+    // Negative wait: the fired clock reaches only retireIdleWorker's architect check (never retired, never re-armed) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11604,17 +11806,17 @@ describe("ProcessManager", () => {
     expect(worker.clock.pending).toEqual([]);
     // The composed idle callback lost nothing: the trigger fired once for the queue re-check.
     expect(worker.client.idleFireCount).toBe(1);
-
-    await flushEventLoop(20);
+    // No wait: armIdleRetire no-ops synchronously at 0 and reconnectWorkers was awaited above,
+    // so nothing is in flight.
     expect(worker.shutdownCalls).toEqual([]);
     expect(worker.claim().locator).toBeDefined();
   });
 
   it("resumes a retired worker with --resume on its next spawn_worker, exactly like a dead-pane recovery", async () => {
     const worker = await idleWorkerFixture({ role: "implementer" });
+    const retired = worker.saves.completed.next();
     expect(worker.clock.fire(600_000)).toBeTrue();
-    await flushEventLoopUntil(() => worker.claim().locator === undefined);
-    await flushEventLoop(50);
+    await retired;
     expect(worker.claim().resumeSessionFile).toBe(worker.sessionFile);
 
     const result = await worker.manager.spawnWorker(
@@ -13824,7 +14026,12 @@ describe("ProcessManager", () => {
     };
     const stateDir = await temporaryDir();
     const commands: string[][] = [];
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The live claim's first watchdog interval ends in a re-arm, observed through its log line:
+    // the spy gates on it, installed before `reconnectWorkers` so an early line is never missed.
+    const rearmed = Promise.withResolvers<void>();
+    const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("re-arming the watch")) rearmed.resolve();
+    });
     let log = "";
     let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
     const { manager: processes } = manager(
@@ -13857,14 +14064,9 @@ describe("ProcessManager", () => {
     try {
       await processes.reconnectWorkers();
       // One watchdog interval for the live claim: its pane verifies (pid 2001 / ticks 5000) so
-      // the watch re-arms instead of retiring -- observed through the re-arm log line.
-      const startTime = currentTime;
-      await flushEventLoopUntil(
-        () =>
-          currentTime - startTime >= 1_000 &&
-          errors.mock.calls.flat().join("\n").includes("re-arming the watch"),
-        20_000
-      );
+      // the watch re-arms instead of retiring -- the re-arm log line is the event. The stale
+      // claim was already retired inside the awaited `reconnectWorkers()` above.
+      await rearmed.promise;
     } finally {
       processes.dispose();
       log = errors.mock.calls.flat().join("\n");
@@ -13889,8 +14091,8 @@ describe("ProcessManager", () => {
    * `list-panes` answers each launched pane with ITS OWN launched pid (so a freshly-recorded
    * identity verifies) until the test reissues a pane id to another process. `resurrected`
    * settles on the `saveState` call that records the resurrected generation's fresh locator --
-   * the actual event those tests wait for. A tick-bounded `flushEventLoopUntil` guess would
-   * race `spawnRoot`'s real workspace/secret-file writes and time out under load instead. */
+   * the actual event those tests wait for -- never a tick-bounded guess, which would race
+   * `spawnRoot`'s real workspace/secret-file writes and time out under load instead. */
   function reissuablePanes(
     state: LegionState,
     resurrectedGeneration: number,
