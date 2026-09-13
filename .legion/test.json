@@ -1,9 +1,9 @@
 {
-  "summary": "PASS on every acceptance line the tester can reach without a daemon. On both jj binaries (0.45.1 on this box, stock 0.44.0 as in CI) and in both working-copy shapes, provisioning after a merged branch's deletion leaves the workspace not stale, the pushed commit beneath the working copy, its file on disk, the bookmark gone, and the fetch's operation touching only the two bookmark sections; main's provisioning code through the same driver shows the stale working copy and the rewritten commits. The guarded settings write runs once per clone; a failing read or write on the real binary stops provisioning before the fetch; the fast-follow commit is behaviour-neutral; the docs match the spec's Design. The live post-merge resume remains the implementer's production check, as the spec says.",
+  "summary": "PASS, twice. Round 1 at b30a301eed3d: every acceptance line reachable without a daemon passes on both jj binaries and in both working-copy shapes; main's provisioning code through the same driver shows the stale working copy. Round 2 at f055d9e2f193 after the reviewer's corrective round: the only change is the test-only commit 4f16355316097ee5b0df58d33c76d9da52830616 (no production file differs from b30a301e), the workspace suite, biome, and tsc pass, the reviewer's mutation (an identity write inside the removal path) now fails both LEGION-44 identity tests, and CI is green at f055d9e2. The round-1 proof stands unchanged; the live post-merge resume remains the implementer's production check.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1080",
   "branch": "legion/LEGION-84",
-  "headSha": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
-  "prHeadAtTest": "2f8dc2d3d45506948b6394d24cf794f5be3c99f3 (implement: record handoff — adds only .legion/implement.json above b30a301e; CI Tests run 34814398689 and PR Title run 34814398690 green there)",
+  "headSha": "f055d9e2f193ce47139288cac48628797d230bae",
+  "prHeadAtTest": "f055d9e2f193ce47139288cac48628797d230bae (implement: record corrective-round handoff; round 1 was taken at PR head 2f8dc2d3d455 on review head b30a301eed3d)",
   "specVersion": 5,
   "passed": 6,
   "failed": 0,
@@ -61,7 +61,23 @@
   "learningsHelpful": [
     "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md"
   ],
+  "recheck": {
+    "round": 2,
+    "reason": "Reviewer's one blocking thread: the two LEGION-44 identity tests excluded the `get`/`set` subcommands from their `jj config` pin, so an identity write added to provisioning would have passed them. Corrective commit 4f16355316097ee5b0df58d33c76d9da52830616 pins the full `jj config` call list with readKeepUnreachableCommitsCommand/writeKeepUnreachableCommitsCommand explicitly.",
+    "fromHead": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+    "toHead": "f055d9e2f193ce47139288cac48628797d230bae",
+    "productionUnchanged": "jj diff --from b30a301eed3d --to f055d9e2f193 --summary: A .legion/implement.json, A .legion/review.json, A .legion/test.json, M packages/workspace/src/workspace.test.ts — nothing else; the same with '~(.legion | glob:\"**/*.test.ts\")' prints nothing. jj show 4f1635531609 --stat: packages/workspace/src/workspace.test.ts | 22 ++++++++++++---------- (12 insertions, 10 deletions), one file. Content: in both identity tests the filter `cmd[2] !== \"get\" && cmd[2] !== \"set\"` is replaced by pinning every `jj config` command, beginning with readKeepUnreachableCommitsCommand(repoCloneDir), writeKeepUnreachableCommitsCommand(repoCloneDir), then the identity probes and unsets as before.",
+    "gates": "packages/workspace bun test at f055d9e2: 25 pass / 0 fail / 282 expects (10.4 s; the real-jj tests iterate JJ_BINARIES = jj 0.45.1-sami.20260910 and mise x github:jj-vcs/jj@0.44.0); bunx biome check --error-on-warnings src/: Checked 3 files, no fixes; bunx tsc --noEmit exit 0.",
+    "mutation": {
+      "applied": "Inserted at the top of the `for (const key of [\"user.name\", \"user.email\"])` loop in removeRepoScopedIdentity (workspace.ts): `await run(deps, [\"jj\", \"config\", \"set\", \"--repo\", key, \"x\", \"-R\", repoCloneDir]);`",
+      "unmutated": "bun test -t 'repository-scoped jj identity|stale identity another provisioning removed': 2 pass / 0 fail / 4 expects",
+      "mutated": "same command: 0 pass / 2 fail — `removes a repository-scoped jj identity from the shared clone, logging each key` and `treats a stale identity another provisioning removed first as already gone` both fail `expect(received).toEqual(expected)` with `Expected - 0 / Received + 20`, the received list carrying `[\"jj\",\"config\",\"set\",\"--repo\",\"user.name\",\"x\",\"-R\",<clone>]` and the same for user.email",
+      "reverted": "mutation removed with the edit tool; jj diff --from f055d9e2f193 --to @ --stat packages/workspace/src/workspace.ts: 0 files changed; jj diff --summary shows only `A .omp/config.yml` (the daemon-written working-copy file, present before this phase); the two tests pass again (2 tests, 0 fail, 4 expects)"
+    },
+    "ci": "Tests run 34820029438 at f055d9e2f193ce47139288cac48628797d230bae: jobs lint, typecheck, test all success; PR Title runs 34820029445 / 34820068934 / 34820169073 success. PR #1080: MERGEABLE, mergeStateStatus BLOCKED (review required).",
+    "notRepeated": "The round-1 driver runs, Errors-row probes, fast-follow check, docs check, and implementer-proof re-observation were not repeated: no production file changed between the heads, and the round-1 proof entries below stand at b30a301eed3d."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-14T06:57:33.934Z"
+  "completed": "2026-09-14T08:01:01.378Z"
 }
