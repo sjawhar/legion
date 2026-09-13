@@ -431,27 +431,34 @@ export class TmuxRuntime implements Runtime {
    * beneath that pane's own `-e` pairs: its global table (the environment it was forked with — an
    * earlier daemon's, plus whatever the operator's `tmux.conf` set) and the daemon's session's
    * table (which tmux's default `update-environment` fills from every attaching client: the
-   * operator's `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, …). Removes from both every variable
-   * `paneEnv` does not carry, empties the session's `update-environment` so no later attach
-   * refills it, and returns the removed names, sorted and de-duplicated; nothing on a server this
-   * daemon forked itself (its global table is `paneEnv` by construction plus tmux's own
-   * `PWD`/`SHLVL`; a fresh session table holds only `-NAME` unset markers) and when no server or
-   * no session is running. Panes already open are untouched: a process's environment is copied at
-   * exec. Boot calls this before the launch hold releases, so no pane opens into an unscrubbed
-   * server.
+   * operator's `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `DISPLAY`, …). Empties the session's
+   * `update-environment` first — before the session table is read, so an attach landing in
+   * between cannot slip a copy in behind the read — then removes from both tables every variable
+   * `paneEnv` does not carry and returns the removed names, sorted and de-duplicated; nothing on a
+   * server this daemon forked itself (its global table is `paneEnv` by construction plus tmux's
+   * own `PWD`/`SHLVL`; a fresh session table holds only `-NAME` unset markers) and when no server
+   * or no session is running. Panes already open are untouched: a process's environment is
+   * copied at exec. Boot calls this before the launch hold releases, so no pane opens into an
+   * unscrubbed server.
    */
   async scrubServerEnvironment(paneEnv: NodeJS.ProcessEnv): Promise<string[]> {
     const removed = new Set<string>();
-    const session = { session: this.deps.tmux.socket };
-    for (const table of [undefined, session] as const) {
-      const names = await tmux.environmentNames(this.deps.tmux, table);
-      if (names === undefined) continue;
-      if (table !== undefined) await tmux.disableEnvironmentUpdates(this.deps.tmux, table.session);
+    const unsetForbidden = async (table: tmux.EnvironmentTable, names: readonly string[]) => {
       for (const name of names) {
-        if (Object.hasOwn(paneEnv, name) || TMUX_OWN_GLOBALS[name]) continue;
+        if (Object.hasOwn(paneEnv, name) || Object.hasOwn(TMUX_OWN_GLOBALS, name)) continue;
         await tmux.unsetEnvironment(this.deps.tmux, table, name);
         removed.add(name);
       }
+    };
+    const globalNames = await tmux.environmentNames(this.deps.tmux, undefined);
+    // No server on the daemon's socket: no table to scrub and no session to configure —
+    // `openWindow` will fork one under `paneEnv` with `update-environment` already empty.
+    if (globalNames === undefined) return [];
+    await unsetForbidden(undefined, globalNames);
+    const session = { session: this.deps.tmux.socket };
+    if (await tmux.disableEnvironmentUpdates(this.deps.tmux, session.session)) {
+      const sessionNames = await tmux.environmentNames(this.deps.tmux, session);
+      if (sessionNames !== undefined) await unsetForbidden(session, sessionNames);
     }
     return [...removed].sort();
   }

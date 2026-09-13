@@ -97,26 +97,34 @@ describe("lookupPane", () => {
 describe("environmentNames", () => {
   it("lists each global entry's name over the private server, skipping unset markers and value continuation lines", async () => {
     // `BASH_FUNC__aws%%` is a bash exported function: its body continues over lines that start
-    // with a space or `}` and may themselves contain `=` — never a new entry.
+    // with a space or `}` and may themselves contain `=` — never a new entry. A name is everything
+    // up to the first `=`, whatever it contains: a dashed function, npm's `//host/:_authToken`.
     const stdout = [
       "-DISPATCH_TOKEN",
       'BASH_FUNC__aws%%=() {  local use_tty="";',
       ' [ -t 0 ] && use_tty="-it";',
       ' "$AWSCLI_DOCKER_BIN" run --rm $use_tty --env AWS_CLI_AUTO_PROMPT=$AWS_CLI_AUTO_PROMPT',
       "}",
+      "BASH_FUNC_git-fixup%%=() {  git commit --fixup=HEAD",
+      "}",
       "GH_AGENT_APP_PRIVATE_KEY_B64=abc",
       "HOME=/h",
       "PATH=/x:/y",
+      "//registry.npmjs.org/:_authToken=npm_abc",
       "npm_config_user_agent=bun/1.3",
+      "some.dotted:name=1",
       "",
     ].join("\n");
     const commands: string[][] = [];
     expect(await environmentNames(server({ stdout, exitCode: 0 }, commands), undefined)).toEqual([
       "BASH_FUNC__aws%%",
+      "BASH_FUNC_git-fixup%%",
       "GH_AGENT_APP_PRIVATE_KEY_B64",
       "HOME",
       "PATH",
+      "//registry.npmjs.org/:_authToken",
       "npm_config_user_agent",
+      "some.dotted:name",
     ]);
     expect(commands).toEqual([["tmux", "-L", "legion-omp", "show-environment", "-g"]]);
   });
@@ -169,10 +177,14 @@ describe("environmentNames", () => {
     expect(await environmentNames(noSession, { session: "legion-omp" })).toBeUndefined();
   });
 
-  it("throws on any other failure, carrying tmux's stderr", async () => {
+  it("throws on any other failure, carrying tmux's stderr and never its stdout (the value dump)", async () => {
     const broken: TmuxServer = {
       socket: "legion-omp",
-      run: async () => ({ stdout: "", stderr: "server version is too old", exitCode: 1 }),
+      run: async () => ({
+        stdout: "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-value\n",
+        stderr: "server version is too old",
+        exitCode: 1,
+      }),
     };
     await expect(environmentNames(broken, undefined)).rejects.toThrow(
       "tmux show-environment -g failed (exit 1): server version is too old"
@@ -180,6 +192,20 @@ describe("environmentNames", () => {
     await expect(environmentNames(broken, { session: "legion-omp" })).rejects.toThrow(
       "tmux show-environment -t legion-omp failed (exit 1): server version is too old"
     );
+    const silent: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({
+        stdout: "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-value\n",
+        stderr: "",
+        exitCode: 1,
+      }),
+    };
+    let message = "";
+    await environmentNames(silent, undefined).catch((error: Error) => {
+      message = error.message;
+    });
+    expect(message).toBe("tmux show-environment -g failed (exit 1)");
+    expect(message).not.toContain("leaked-value");
   });
 });
 
@@ -207,17 +233,46 @@ describe("unsetEnvironment", () => {
 });
 
 describe("disableEnvironmentUpdates", () => {
-  it("empties the session's update-environment option", async () => {
+  it("empties the session's update-environment option and reports the session as present", async () => {
     const commands: string[][] = [];
-    await disableEnvironmentUpdates(server({ stdout: "", exitCode: 0 }, commands), "legion-omp");
+    expect(
+      await disableEnvironmentUpdates(server({ stdout: "", exitCode: 0 }, commands), "legion-omp")
+    ).toBe(true);
     expect(commands).toEqual([
       ["tmux", "-L", "legion-omp", "set-option", "-t", "legion-omp", "update-environment", ""],
     ]);
   });
+
+  it("reports false, having changed nothing, when no server or no such session is there", async () => {
+    const noSession: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "no such session: legion-omp", exitCode: 1 }),
+    };
+    expect(await disableEnvironmentUpdates(noSession, "legion-omp")).toBe(false);
+    const noServer: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({
+        stdout: "",
+        stderr: "no server running on /tmp/tmux-1000/legion-omp",
+        exitCode: 1,
+      }),
+    };
+    expect(await disableEnvironmentUpdates(noServer, "legion-omp")).toBe(false);
+  });
+
+  it("throws on any other failure", async () => {
+    const refusing: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "bad option", exitCode: 1 }),
+    };
+    await expect(disableEnvironmentUpdates(refusing, "legion-omp")).rejects.toThrow(
+      "tmux set-option -t legion-omp update-environment '' failed (exit 1): bad option"
+    );
+  });
 });
 
 describe("openWindow", () => {
-  it("empties update-environment on the session it creates, before anything can attach to it", async () => {
+  it("creates the session and empties its update-environment in one tmux invocation, so nothing can attach in between", async () => {
     const commands: string[][] = [];
     const fake: TmuxServer = {
       socket: "legion-omp",
@@ -229,22 +284,28 @@ describe("openWindow", () => {
       },
     };
     await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp");
-    const subcommands = commands.map((cmd) => cmd.slice(3, 4)[0]);
-    expect(subcommands.indexOf("new-session")).toBeGreaterThanOrEqual(0);
-    expect(subcommands.indexOf("set-option")).toBeGreaterThan(subcommands.indexOf("new-session"));
-    expect(subcommands.indexOf("set-option")).toBeLessThan(subcommands.indexOf("new-window"));
-    expect(
-      commands.find((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")
-    ).toEqual([
+    // `;` as its own argv element is tmux's command separator (a shell would spell it `\;`).
+    expect(commands[1]).toEqual([
       "tmux",
       "-L",
       "legion-omp",
+      "new-session",
+      "-d",
+      "-s",
+      "legion-omp",
+      "-n",
+      "__legion_bootstrap",
+      "sleep 3600",
+      ";",
       "set-option",
       "-t",
       "legion-omp",
       "update-environment",
       "",
     ]);
+    expect(
+      commands.filter((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")
+    ).toEqual([]);
   });
 
   it("leaves an existing session's options alone", async () => {

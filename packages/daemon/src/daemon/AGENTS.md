@@ -187,8 +187,9 @@ daemon's own. `resolveDaemonEnvironment` (`environment.ts`, `PANE_ENV_ALLOW_LIST
 `SECRETSD_SOCK`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (both cases), `SSL_CERT_DIR`,
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, and `PATH` (which `mise env` then replaces) — lays the
 complete `mise env --json` output over them, and drops any credential-shaped name
-(`isSecretLikeName`: `*_SECRET`, `*_TOKEN`, `*_GRANT`, `*_API_KEY`, `*_PASSWORD`, their `*_FILE`
-twins, and anything containing `PRIVATE_KEY`) as a second line of defence. That object is
+(`isSecretLikeName`, case-insensitive: `*_SECRET`, `*_TOKEN`, `*_GRANT`, `*_KEY`, `*_PASSWORD`,
+`*_PASSWD`, `*_PAT`, `*_CREDENTIALS`, their `*_FILE` twins, and anything containing
+`PRIVATE_KEY`) as a second line of defence. That object is
 `paneEnv`: the environment of every command `createDaemonRunner` runs (jj, git, gh, tmux, both
 start-up probes), therefore of the private tmux server the first `tmux -L legion-<project>`
 command forks, therefore of every pane. On top of it a pane gets only the explicit `-e` pairs
@@ -197,7 +198,7 @@ command forks, therefore of every pane. On top of it a pane gets only the explic
 pane environment below, and the `*_FILE` secret pointers). Nothing else the daemon was started with
 reaches a pane: not the GitHub App private keys (`GH_AGENT_APP_PRIVATE_KEY_B64`/
 `GH_REVIEW_APP_PRIVATE_KEY_B64` — read only by `private_key_command`, the one child that runs
-under the daemon's own `process.env` on purpose, with the codebase index's `jj log`), not provider
+under the daemon's own `process.env` on purpose), not provider
 keys (they reach a pane only through `omp_launch_prefix`), not `DISPATCH_TOKEN`, `ENVOY_*`
 secrets, `SECRETSD_SESSION_TOKEN_FILE`, `OMP_SESSION_ID`, `JJ_CONFIG`, `TMUX`/`TMUX_PANE`,
 `SSH_AUTH_SOCK`, or an outer pane's `LEGION_*`. A `gh` child the daemon spawns for a GitHub App role
@@ -271,25 +272,33 @@ default `update-environment` from every attaching client: an operator's
 `tmux -L legion-<project> attach` copies their `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `SSH_ASKPASS`,
 `DISPLAY`, … in, and every pane opened afterwards inherits the operator's SSH agent. Every boot
 therefore, once the probes pass and before the launch hold releases
-(`TmuxRuntime.scrubServerEnvironment`): reads both tables (`show-environment -g` and
-`show-environment -t legion-<project>`, names only — `environmentNames` in `tmux.ts`, which skips
-the `-NAME` unset markers a fresh session table consists of), empties the session's
-`update-environment` option (`set-option -t legion-<project> update-environment ''`,
-`disableEnvironmentUpdates`) so no later attach refills it, and `set-environment -u`s from each
-table every name that is not a key of `paneEnv` (`PWD` and `SHLVL`, which tmux itself writes into
-the global table at server start, are the only exemptions), logging one line with the
-de-duplicated names: `[legion] removed <n> variable(s) from the private tmux server environment
-that panes may not inherit: <NAME1>, <NAME2>, …` — names, never values. `openWindow` sets the same
-empty `update-environment` on the session the moment it creates it, before anything can attach. A
-server this daemon forked itself carries exactly `paneEnv` in its global table and only markers in
-its session table, so it logs nothing; a variable the operator's `tmux.conf` `set-environment -g`s
-(TPM's `TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any other. Panes already open are
-untouched (a process's environment is copied at exec); a tmux failure reading or writing either
-table is as fatal as a failed probe; a server that is up without the daemon's session (nothing to
-scrub or configure there — `new-session` will create it with the option set) is not. A plain
-daemon restart is therefore enough to stop new panes inheriting a variable the allow-list no
-longer passes, from either table: no `kill-server` is needed for this change, only for the socket
-move above.
+(`TmuxRuntime.scrubServerEnvironment`): reads the global table (`show-environment -g`, names only —
+`environmentNames` in `tmux.ts`; a name is everything up to a line's first `=`, and it skips the
+`-NAME` unset markers a fresh session table consists of and a bash function body's continuation
+lines), empties the session's `update-environment` option (`set-option -t legion-<project>
+update-environment ''`, `disableEnvironmentUpdates`) *before* reading the session table
+(`show-environment -t legion-<project>`) so an attach landing in between cannot slip a copy in
+behind the read, and `set-environment -u`s from each table every name that is not a key of
+`paneEnv` (`PWD` and `SHLVL`, which tmux itself writes into the global table at server start, are
+the only exemptions — checked as own properties, so a table entry named `constructor` is removed
+like any other), logging one line with the de-duplicated names: `[legion] removed <n> variable(s)
+from the private tmux server environment that panes may not inherit: <NAME1>, <NAME2>, …` — names,
+never values (a tmux failure's message carries stderr only, never `show-environment`'s stdout).
+`openWindow` creates the session and empties its `update-environment` in one tmux invocation
+(`new-session … \; set-option -t <session> update-environment ''`), so no attach can ever copy a
+client's environment into it. A server this daemon forked itself carries exactly `paneEnv` in its
+global table and only markers in its session table, so it logs nothing; a variable the operator's
+`tmux.conf` `set-environment -g`s (TPM's `TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any
+other. A tmux failure reading or writing either table is as fatal as a failed probe; no server on
+the daemon's socket, or a server without the daemon's session, is not (nothing to scrub or
+configure — `openWindow` creates both with the option set). A plain daemon restart is therefore
+enough for *inheritance*: a pane opened after it gets nothing the allow-list does not pass, from
+either table, and no `kill-server` is needed for that. It does not revoke what was already handed
+out: the running server process and every pre-upgrade pane keep their fork-time environment —
+readable through `/proc/<pid>/environ` by any same-uid process (a process's environment is copied
+at exec and the scrub edits tmux's tables, not a process) — until `kill-server` (the server) or
+retirement (the panes) ends them, or the key rotation revokes the material itself. `kill-server` is
+needed for the socket move above, not for this change.
 
 The daemon probes the exact resolved OMP executable with an isolated extension and refuses to serve unless it confirms `pi.agents`. Both this probe and the plugin-load probe below start in `startDaemonLocked` right after the plugin contract gate (third paragraph below) — itself preceded by `resolveDaemonEnvironment` and `installWorkerGhShim` (`worker-bin.ts`), so the `gh` shim every pane's PATH puts first exists before any probe or pane runs, and an fs failure writing it refuses startup — but are awaited only at the launch hold, just before the first pane could open: state load, core NATS, the API bind, and the worker reconnect all proceed while a probe is still retrying, so `GET /legion/v1/state` answers and the durable lane keeps acking throughout. Each probe attempt runs under `slow_command_timeout_seconds`. A **transient** failure — the runner killed the probe at that budget, or OMP printed its marker and then exited non-zero (it died under host load) — is retried with exponential backoff from 10 s doubling to a 5 min cap, without limit (`DAEMON_PROBE_RETRY`), each attempt logged as `[legion] <name> probe failed transiently (attempt N); retrying in <delay>s: <detail>` (a timeout's detail reads `command timed out after <limit> s (ran <wall> s)`); the daemon waits the load out inside the process instead of handing the failure back to its supervisor's relaunch loop, which would add an OMP spawn per second to the load it was dying of. A **definitive** negative — the `LEGION_OMP_AGENTS=missing` marker, a clean exit without the marker, or the launch command failing before OMP ever ran (e.g. `secrets` denying a key) — still refuses: the daemon closes the event pump, API, worker stream, NATS, and the instance lock it had opened, `startDaemon` rejects with the probe's error, and `legion start` exits 1. An attempt the daemon itself abandoned — boot failed for another reason (state load, NATS, the API bind) while the attempt was running, so `startDaemon`'s abort signal made the runner kill it and report `aborted` — is neither: the chain ends at once with no `probe failed transiently` line and no `retrying in` line (a retry that will not happen is not announced), and the start-up error that caused the abort is the only thing logged; the same holds for a failed attempt that finished just as the signal aborted (a passed one still passes; the chain then stops at the next probe's loop-top check before anything is spawned). Both probes run through the same configured `omp_launch_prefix` as a spawned pane — one launch path, never a probe-only shortcut that could pass with credentials a real pane would lack. `legion probe-image` runs the same probes with a bounded policy (`IMAGE_PROBE_RETRY`: six attempts, about five minutes of waiting at worst) because an image build has no supervisor and must finish. The daemon also refuses startup with every missing required tool listed. Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path to override discovery. The `mise x <tool> -- omp` form is required for `omp_invocation`; set `LEGION_OMP_PATH` when selecting a direct OMP binary. Supervisor note: `restart=on-failure` remains the right policy; the daemon simply no longer fails for a transient reason.
 

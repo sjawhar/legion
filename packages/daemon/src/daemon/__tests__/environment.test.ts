@@ -8,6 +8,7 @@ import {
   createDaemonRunner,
   isSecretLikeName,
   legionCliLauncherScript,
+  PANE_ENV_ALLOW_LIST,
   type ResolveDaemonEnvironmentDeps,
   resolveDaemonEnvironment,
 } from "../environment";
@@ -446,7 +447,7 @@ describe("resolveDaemonEnvironment", () => {
 });
 
 describe("isSecretLikeName", () => {
-  it("recognises a credential-shaped name by its trailing segment or a PRIVATE_KEY fragment", () => {
+  it("recognises a credential-shaped name by its trailing segment or a PRIVATE_KEY fragment, whatever its case", () => {
     for (const name of [
       "DISPATCH_TOKEN",
       "DISPATCH_TOKEN_FILE",
@@ -457,16 +458,28 @@ describe("isSecretLikeName", () => {
       "GH_TOKEN",
       "GITHUB_TOKEN",
       "ANTHROPIC_API_KEY",
+      "ENVOY_TAILSCALE_OAUTH_CLIENT_KEY",
+      "AWS_SECRET_ACCESS_KEY",
+      "STARSHIP_SESSION_KEY",
       "GH_AGENT_APP_PRIVATE_KEY_B64",
       "ENVOY_GITHUB_WEBHOOK_SECRET",
       "DB_PASSWORD",
+      "DB_PASSWD",
+      "GITHUB_PAT",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "GOOGLE_APPLICATION_CREDENTIALS_FILE",
+      "npm_config_token",
+      "my_api_key",
+      "some_private_key_pem",
     ]) {
       expect(isSecretLikeName(name)).toBe(true);
     }
   });
 
   it("leaves ordinary names alone, including ones that merely contain a suffix mid-word", () => {
-    // `TOKENIZER`: `_TOKEN` must end the name (or be followed only by `_FILE`), never sit inside it.
+    // The segment must end the name (or be followed only by `_FILE`): `TOKENIZER`, `X_PATH`
+    // (`_PAT` + `H`), `X_KEYBOARD` (`_KEY` + `BOARD`) are not credentials. Every allow-listed name
+    // must land here, or the allow-list would hand a pane nothing.
     for (const name of [
       "PATH",
       "HOME",
@@ -476,8 +489,15 @@ describe("isSecretLikeName", () => {
       "TOKENIZER",
       "MISE_DATA_DIR",
       "DISPATCH_URL",
+      "LEGION_OMP_PATH",
+      "XDG_KEYBOARD",
+      "SSL_CERT_FILE",
+      "NODE_EXTRA_CA_CERTS",
+      "LEGION_CREDENTIAL_HELPER",
+      "GH_CONFIG_DIR",
     ]) {
       expect(isSecretLikeName(name)).toBe(false);
     }
+    for (const name of PANE_ENV_ALLOW_LIST) expect(isSecretLikeName(name)).toBe(false);
   });
 });

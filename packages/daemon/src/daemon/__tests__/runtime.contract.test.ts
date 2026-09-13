@@ -524,10 +524,25 @@ describe("TmuxRuntime", () => {
     const socketPath = socketFor(harness.stateDir, "architect-9e2fb104");
     expect(harness.server.commands).toEqual([
       tmuxArgv("has-session", "-t", "legion-omp"),
-      tmuxArgv("new-session", "-d", "-s", "legion-omp", "-n", "__legion_bootstrap", "sleep 3600"),
-      // Before anything can attach: no client's SSH_AUTH_SOCK/SSH_CONNECTION/DISPLAY may be copied
-      // into the session table every later pane inherits.
-      tmuxArgv("set-option", "-t", "legion-omp", "update-environment", ""),
+      // One invocation (`;` = tmux's command separator): the session exists with an empty
+      // `update-environment`, so no attach can ever copy a client's SSH_AUTH_SOCK/SSH_CONNECTION/
+      // DISPLAY into the session table every later pane inherits — not even one landing between
+      // creation and the option.
+      tmuxArgv(
+        "new-session",
+        "-d",
+        "-s",
+        "legion-omp",
+        "-n",
+        "__legion_bootstrap",
+        "sleep 3600",
+        ";",
+        "set-option",
+        "-t",
+        "legion-omp",
+        "update-environment",
+        ""
+      ),
       tmuxArgv("set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"),
       tmuxArgv(
         "new-window",

@@ -157,8 +157,14 @@ export const PANE_ENV_ALLOW_LIST: readonly string[] = [
 
 /** Second line of defence behind the allow-list: a credential-shaped name never reaches a child even
  * when an allowed source carries it (`mise env` output, or an allow-list entry added by mistake). Also
- * the scrub `github-app-env.ts` applies to a `gh` child's base environment. */
-const SECRET_LIKE_NAME = /(?:_SECRET|_TOKEN|_GRANT|_API_KEY|_PASSWORD)(?:_FILE)?$|PRIVATE_KEY/;
+ * the scrub `github-app-env.ts` applies to a `gh` child's base environment — in a pane, where no
+ * allow-list precedes it, this predicate is the only line. A trailing segment `_SECRET`, `_TOKEN`,
+ * `_GRANT`, `_KEY` (so `_API_KEY`, `_CLIENT_KEY`, `_ACCESS_KEY`, `_SESSION_KEY`), `_PASSWORD`,
+ * `_PASSWD`, `_PAT`, or `_CREDENTIALS`, optionally followed by `_FILE` (the pointer twin), or
+ * `PRIVATE_KEY` anywhere; case-insensitive, so a lowercase spelling is caught too. The segment must
+ * end the name: `TOKENIZER`, `X_PATH`, `X_KEYBOARD` are not credentials. */
+const SECRET_LIKE_NAME =
+  /(?:_SECRET|_TOKEN|_GRANT|_KEY|_PASSWORD|_PASSWD|_PAT|_CREDENTIALS)(?:_FILE)?$|PRIVATE_KEY/i;
 
 export function isSecretLikeName(name: string): boolean {
   return SECRET_LIKE_NAME.test(name);

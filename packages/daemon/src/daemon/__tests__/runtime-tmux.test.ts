@@ -9,6 +9,10 @@ interface Reply {
   exitCode: number;
 }
 
+const OK: Reply = { stdout: "", stderr: "", exitCode: 0 };
+
+/** A fake server whose global and session tables answer `show-environment`; `set-option -t` answers
+ * like the session table does (a missing session refuses both the same way). */
 function runtimeOver(tables: { global: Reply; session: Reply }) {
   const commands: string[][] = [];
   const runtime = new TmuxRuntime({
@@ -17,7 +21,8 @@ function runtimeOver(tables: { global: Reply; session: Reply }) {
       run: async (cmd) => {
         commands.push(cmd);
         if (cmd[3] === "show-environment") return cmd[4] === "-g" ? tables.global : tables.session;
-        return { stdout: "", stderr: "", exitCode: 0 };
+        if (cmd[3] === "set-option") return tables.session.exitCode === 0 ? OK : tables.session;
+        return OK;
       },
     },
     project: "omp",
@@ -28,15 +33,13 @@ function runtimeOver(tables: { global: Reply; session: Reply }) {
     workerRpcTimeoutMs: () => 5_000,
     now: () => 0,
     issueLocators: () => [],
-    persist: async () => {},
   });
   return { runtime, commands };
 }
 
+const subcommands = (commands: string[][]) => commands.map((cmd) => cmd.slice(3));
 const writes = (commands: string[][]) =>
-  commands
-    .filter((cmd) => cmd[3] === "set-environment" || cmd[3] === "set-option")
-    .map((cmd) => cmd.slice(3));
+  subcommands(commands).filter((cmd) => cmd[0] === "set-environment" || cmd[0] === "set-option");
 
 const FRESH_SESSION_TABLE =
   "-DISPLAY\n-KRB5CCNAME\n-SSH_AGENT_PID\n-SSH_ASKPASS\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n-XAUTHORITY\n";
@@ -88,6 +91,45 @@ describe("TmuxRuntime.scrubServerEnvironment", () => {
     ]);
   });
 
+  it("empties update-environment before it reads the session table, so an attach landing in between cannot slip a copy in behind the read", async () => {
+    const { runtime, commands } = runtimeOver({
+      global: { stdout: "PATH=/full/bin\n", exitCode: 0 },
+      session: { stdout: "SSH_AUTH_SOCK=/tmp/ssh-x/agent.1\n", exitCode: 0 },
+    });
+
+    await runtime.scrubServerEnvironment({ PATH: "/full/bin" });
+
+    const sequence = subcommands(commands);
+    const disabledAt = sequence.findIndex((cmd) => cmd[0] === "set-option");
+    const sessionReadAt = sequence.findIndex(
+      (cmd) => cmd[0] === "show-environment" && cmd[1] === "-t"
+    );
+    expect(disabledAt).toBeGreaterThanOrEqual(0);
+    expect(sessionReadAt).toBeGreaterThan(disabledAt);
+  });
+
+  it("unsets a table entry named like an Object.prototype member, exactly like any other", async () => {
+    // `constructor`, `toString`, `hasOwnProperty`, `__proto__`: a prototype-chain lookup on the
+    // exemption table would find these truthy and leave them in the server.
+    const { runtime, commands } = runtimeOver({
+      global: {
+        stdout:
+          "PATH=/full/bin\nconstructor=stale\ntoString=stale\nhasOwnProperty=stale\n__proto__=stale\nvalueOf=stale\n",
+        exitCode: 0,
+      },
+      session: { stdout: FRESH_SESSION_TABLE, exitCode: 0 },
+    });
+
+    expect(await runtime.scrubServerEnvironment({ PATH: "/full/bin" })).toEqual([
+      "__proto__",
+      "constructor",
+      "hasOwnProperty",
+      "toString",
+      "valueOf",
+    ]);
+    expect(writes(commands).filter((cmd) => cmd[1] === "-g")).toHaveLength(5);
+  });
+
   it("only empties update-environment on a server this daemon forked itself, whose tables hold nothing to remove", async () => {
     const { runtime, commands } = runtimeOver({
       global: {
@@ -127,6 +169,13 @@ describe("TmuxRuntime.scrubServerEnvironment", () => {
     });
 
     expect(await runtime.scrubServerEnvironment({ PATH: "/full/bin" })).toEqual(["FOO_SECRET"]);
-    expect(writes(commands)).toEqual([["set-environment", "-g", "-u", "FOO_SECRET"]]);
+    expect(writes(commands)).toEqual([
+      ["set-environment", "-g", "-u", "FOO_SECRET"],
+      // The refused set-option is what told us the session is absent; nothing else was tried.
+      ["set-option", "-t", "legion-omp", "update-environment", ""],
+    ]);
+    expect(
+      subcommands(commands).some((cmd) => cmd[0] === "show-environment" && cmd[1] === "-t")
+    ).toBe(false);
   });
 });

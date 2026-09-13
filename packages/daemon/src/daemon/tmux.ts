@@ -25,11 +25,14 @@ function argv(server: TmuxServer, ...rest: string[]): string[] {
   return ["tmux", "-L", server.socket, ...rest];
 }
 
-/** An entry of `show-environment` starts a line as `NAME=value` (`-NAME` marks a variable tmux
- * unsets for new panes; it reaches none, so it is not a name here). A value's continuation lines
- * — a bash exported function body — never start with a name, so they match nothing. `%` admits
- * bash's `BASH_FUNC_<name>%%` entries. */
-const ENVIRONMENT_ENTRY = /^([A-Za-z_][A-Za-z0-9_%]*)=/;
+/** An entry of `show-environment` is a line `NAME=value`: everything up to the first `=` is the
+ * name, whatever characters it holds (a dashed bash function `BASH_FUNC_foo-bar%%`, npm's
+ * `//registry.npmjs.org/:_authToken`) — a name this parser skipped would be a name the scrub
+ * silently left in the server. Skipped on purpose: `-NAME` (tmux's marker for a variable it unsets
+ * in new panes; it reaches none, and a name starting with `-` cannot be told apart from the marker
+ * in this format), and a value's continuation lines — a bash exported function body, whose lines
+ * start with a space or `}` — which are never a new entry even when they contain `=`. */
+const ENVIRONMENT_ENTRY = /^([^\s=}-][^=]*)=/;
 
 /** A pane inherits two tmux environment tables beneath its own `-e` pairs: the server's global
  * table (`-g`, the environment the server was forked with) and its session's table (`-t
@@ -39,6 +42,19 @@ export type EnvironmentTable = { readonly session: string } | undefined;
 
 function tableFlags(table: EnvironmentTable): string[] {
   return table === undefined ? ["-g"] : ["-t", table.session];
+}
+
+/** `no server running` / socket never created (`NO_SERVER_STDERR`), or the named session is not
+ * there: nothing behind the target to read or write. */
+function targetAbsent(stderr: string | undefined): boolean {
+  return NO_SERVER_STDERR.test(stderr ?? "") || (stderr ?? "").startsWith("no such session");
+}
+
+/** The failure detail for an error message: tmux's stderr only, never stdout — for
+ * `show-environment` stdout is the value dump, and no value may reach a log or error string. */
+function failure(result: { stderr?: string }): string {
+  const detail = result.stderr?.trim();
+  return detail ? `: ${detail}` : "";
 }
 
 /** The variable names in one of the server's environment tables (see `EnvironmentTable`), or
@@ -52,10 +68,9 @@ export async function environmentNames(
   const flags = tableFlags(table);
   const result = await server.run(argv(server, "show-environment", ...flags));
   if (result.exitCode !== 0) {
-    const stderr = result.stderr ?? "";
-    if (NO_SERVER_STDERR.test(stderr) || stderr.startsWith("no such session")) return undefined;
+    if (targetAbsent(result.stderr)) return undefined;
     throw new Error(
-      `tmux show-environment ${flags.join(" ")} failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`
+      `tmux show-environment ${flags.join(" ")} failed (exit ${result.exitCode})${failure(result)}`
     );
   }
   const names: string[] = [];
@@ -77,28 +92,34 @@ export async function unsetEnvironment(
   const result = await server.run(argv(server, "set-environment", ...flags, "-u", name));
   if (result.exitCode !== 0) {
     throw new Error(
-      `tmux set-environment ${flags.join(" ")} -u ${name} failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`
+      `tmux set-environment ${flags.join(" ")} -u ${name} failed (exit ${result.exitCode})${failure(result)}`
     );
   }
 }
 
-/** Empties `session`'s `update-environment` option, so an attaching client (the operator's
- * `tmux -L legion-<project> attach`) no longer copies its `SSH_AUTH_SOCK`, `SSH_CONNECTION`,
- * `DISPLAY`, … into the session table every pane opened afterwards would inherit. tmux's
- * default list is a per-session option seeded from the server's global one, so it is set on the
- * session itself: at creation (`openWindow`) and again on every boot against a running server. */
+/** The `set-option` that empties a session's `update-environment`, so an attaching client (the
+ * operator's `tmux -L legion-<project> attach`) no longer copies its `SSH_AUTH_SOCK`,
+ * `SSH_CONNECTION`, `DISPLAY`, … into the session table every pane opened afterwards would
+ * inherit. tmux's default list is a per-session option seeded from the server's global one, so it
+ * is set on the session itself. */
+function disableEnvironmentUpdatesArgs(session: string): string[] {
+  return ["set-option", "-t", session, "update-environment", ""];
+}
+
+/** Empties an existing session's `update-environment` (see `disableEnvironmentUpdatesArgs`) —
+ * every boot against a running server does this before it reads the session table, so an attach
+ * landing meanwhile cannot slip a copy in behind the read. Returns `false`, having changed nothing,
+ * when no server or no such session is there; throws on any other failure. */
 export async function disableEnvironmentUpdates(
   server: TmuxServer,
   session: string
-): Promise<void> {
-  const result = await server.run(
-    argv(server, "set-option", "-t", session, "update-environment", "")
+): Promise<boolean> {
+  const result = await server.run(argv(server, ...disableEnvironmentUpdatesArgs(session)));
+  if (result.exitCode === 0) return true;
+  if (targetAbsent(result.stderr)) return false;
+  throw new Error(
+    `tmux set-option -t ${session} update-environment '' failed (exit ${result.exitCode})${failure(result)}`
   );
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `tmux set-option -t ${session} update-environment '' failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`
-    );
-  }
 }
 
 const BOOTSTRAP_WINDOW = "__legion_bootstrap";
@@ -185,13 +206,26 @@ export async function openWindow(
   const sessionExists =
     (await server.run(argv(server, "has-session", "-t", session))).exitCode === 0;
   if (!sessionExists) {
+    // One client invocation (`;` is tmux's command separator): the session exists with
+    // `update-environment` already empty, so no attach can ever copy a client's environment into
+    // it — not even one landing between the two commands.
     const create = await server.run(
-      argv(server, "new-session", "-d", "-s", session, "-n", BOOTSTRAP_WINDOW, "sleep 3600")
+      argv(
+        server,
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-n",
+        BOOTSTRAP_WINDOW,
+        "sleep 3600",
+        ";",
+        ...disableEnvironmentUpdatesArgs(session)
+      )
     );
     if (create.exitCode !== 0) {
       throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
     }
-    await disableEnvironmentUpdates(server, session);
     await markOwner(server, session, owner, "session");
   }
 
