@@ -1,0 +1,141 @@
+{
+  "pr": "https://github.com/sjawhar/legion/pull/1087",
+  "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+  "filesChanged": [
+    "packages/workspace/src/workspace.ts",
+    "packages/workspace/src/workspace.test.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md"
+  ],
+  "commits": [
+    {
+      "change": "kyolxozx",
+      "commit": "6ddf8490f4d1fe41c606c09a3d1ae9eb6c757d9d",
+      "subject": "feat(workspace): remove a finished issue's jj workspace and its unreachable commits (LEGION-104)"
+    },
+    {
+      "change": "kxzkouwm",
+      "commit": "177d3baab1f992e68d9b1e3bc3c5ac6bc5e45167",
+      "subject": "feat(daemon): remove a closed tree's finished workspaces before the record turns closed (LEGION-104)"
+    },
+    {
+      "change": "lxzvqovo",
+      "commit": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "subject": "docs(daemon): record when a finished issue's workspace is removed and the jj facts it rests on (LEGION-104)"
+    }
+  ],
+  "redMessages": {
+    "workspace": "SyntaxError: Export named 'removeIssueWorkspace' not found in module '.../packages/workspace/src/workspace.ts'. (the whole file failed to load; 0 pass, 1 fail, 1 error)",
+    "daemon": [
+      "removes the workspaces of a done root and its done child...: expect(forgotten).toEqual([\"legion-42\", \"legion-43\"]) received []",
+      "keeps a parked root's workspace at close...: backlog — expected the kept line, received [] (no log line existed)",
+      "logs a failed workspace removal once...: expect(forget ran).toBeFalse() received true — no removal existed, so the assertion tripped on today's absence of any forget/kept semantics (the directory also survived)",
+      "runs no workspace removal at linger start: PASSED on today's code, as a guard must — beginLinger never removed and never will",
+      "provisions a root admitted while its previous tree is still closing...: expect(jj commands before the close settled).toEqual([]) received [[\"jj\",\"workspace\",\"update-stale\"]] — provisioning ran mid-close"
+    ]
+  },
+  "tests": {
+    "workspace": "cd packages/workspace && bun test src/workspace.test.ts → 28 pass, 0 fail (24 after LEGION-84 landed + 3 new, each on both JJ_BINARIES + LEGION-84's own); also green with an empty JJ_CONFIG and XDG_CONFIG_HOME (the CI runner's shape)",
+    "daemon": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test → 1303 pass, 0 fail (5 new); no existing exact-command pin needed extending",
+    "lint": "bunx biome check --error-on-warnings src/ clean in packages/daemon and packages/workspace",
+    "typecheck": "bunx tsc --noEmit clean in packages/daemon and packages/workspace",
+    "ci": "Tests run 34828675157 (lint, typecheck, test all success) and PR title run 34828675152 (pr-title success) at 0658feec27896a1c5bf3480ccef713632d8030d6"
+  },
+  "rebase": "GitHub reported CONFLICTING after LEGION-84 (#1080) and LEGION-15 (#1027) merged. Rebased the whole chain once: 266f64d73be34f3455876af668f32aadc0e600d2 → 0658feec27896a1c5bf3480ccef713632d8030d6; fingerprint 2d8c5c2aa9d9f8c5e91c7a8b3a4d47493399d30eee3842727e00c6a91c4d8476 → d1de1d24a9ff70f221c83e47d4413c668a011efc03e30629f9a95be38071392b (changed: the fifth daemon test's waits rewritten to LEGION-15's convention and the console spies restored in a finally; no production file changed). Two append-append conflicts resolved: workspace.test.ts (LEGION-84's test kept before this branch's three) and AGENTS.md (main's rewritten Workspace clone bullet kept, Workspace removal inserted after it). Posted as https://github.com/sjawhar/legion/pull/1087#issuecomment-5661947372.",
+  "jjFacts": {
+    "date": "2026-09-14",
+    "binaries": [
+      "jj 0.45.1-sami.20260910 (the box's jj)",
+      "jj 0.44.0 via mise x github:jj-vcs/jj@0.44.0"
+    ],
+    "scripts": [
+      "sh /tmp/legion-104-jjfacts.sh <jj>",
+      "sh /tmp/legion-104-crashshape.sh <jj>"
+    ],
+    "outputs": [
+      "/tmp/legion-104-facts-0451.txt",
+      "/tmp/legion-104-facts-0440.txt",
+      "/tmp/legion-104-crash-0451.txt",
+      "/tmp/legion-104-crash-0440.txt"
+    ],
+    "rows": {
+      "a": "the revset lists a@ alone while legion/A exists; a@ plus the legion/A commit after the fetch deleted the bookmark; only c@ for a workspace whose pushed commit still carries legion/C; exit 0, 0 lines for none()",
+      "b": "jj abandon -r '<id> | <id>' --ignore-working-copy -R clone after rm -rf a: 'Abandoned 2 commits', exit 0; workspace list shows 'a: … (empty) (no description set)', visible as a@ in b's log; -r is an alias of [REVSETS]...",
+      "c": "jj workspace forget a --ignore-working-copy -R clone: exit 0; b's log without any a commit, still with b work and legion/C; forget again: 'Warning: No such workspace: a' / 'Nothing changed.' exit 0; a@ unregistered: 'Error: Workspace `a` doesn't have a working-copy commit' exit 1",
+      "d": "jj workspace list -T 'name ++ \"\\n\"' prints one name per line on both",
+      "e": "jj abandon -r 'none()': 'No revisions to abandon.' exit 0",
+      "f": "git worktree: 0.45.1 names a as prunable after rm -rf a and prune removes the row; 0.44.0 never lists it and prune is a no-op exit 0",
+      "g": "directory gone but registered: jj workspace add → 'Error: Workspace named 'a' already exists' exit 1; forget, prune, add → exit 0. Registration gone but directory present: update-stale → 'Error: Nothing checked out in this workspace' exit 1 (0.45.1 also 'Removed Git worktree for …')"
+    }
+  },
+  "driver": {
+    "script": "/tmp/legion-104-driver.ts (bun; JJ_BIN selects the binary; argv[2] selects the module under test)",
+    "outputs": [
+      "/tmp/legion-104-driver-0451-r2.txt",
+      "/tmp/legion-104-driver-0440-r2.txt",
+      "/tmp/legion-104-driver-control-r2.txt"
+    ],
+    "before": "jj workspace list names default, widgets-42 (empty) (no description set), widgets-43 legion/WIDGETS-43 | b work; B's jj log -r 'all()' shows widgets-42@ and 'a work' beside 'b work'; A directory exists: true; git worktree list names A's directory on 0.45.1 only",
+    "result": "{ workspaceDir: …/widgets-42, removed: true, abandoned: [2 ids] } — 0.45.1: 3d4ec6a2…, 9b63f14d…; 0.44.0: 84af664c…, 1c3a4ae1…",
+    "after": "jj workspace list names default and widgets-43 only; git worktree list without A; B's log shows b work, main, root() and nothing of A; A directory exists: false; second call { removed: false, abandoned: [] }; re-provisioned A: @- = main and legion/WIDGETS-42 = A's @ on both binaries",
+    "control": "main@origin's workspace.ts (617b778e, LEGION-84 merged): same BEFORE, then TypeError: removeIssueWorkspace is not a function, exit 1"
+  },
+  "proof": [
+    {
+      "criterion": "Acceptance 2 — removing a finished issue's workspace forgets it in jj, prunes the colocated git worktree, deletes its directory, and makes its commits leave other workspaces' logs; fails on today's code",
+      "surface": "the real removal (removeIssueWorkspace, the function ProcessManager.removeTreeWorkspaces calls at every tree close) against two real jj binaries — the box's jj 0.45.1-sami.20260910 and stock 0.44.0 (mise x github:jj-vcs/jj@0.44.0) — on a colocated scratch clone with two provisioned workspaces",
+      "command": "cd packages/workspace && bun test src/workspace.test.ts -t \"removes a finished\"",
+      "observed": "1 pass on both binaries (each expect carries the binary's name): after the removal, jj workspace list no longer names widgets-42 and still names widgets-43; git worktree list --porcelain does not name A's directory (it did before on 0.45.1; 0.44.0 never creates the worktree); the directory is gone; B's jj log -r 'all()' no longer lists A's 'a work' or its working copy and still lists B's own commit; the five commands ran verbatim in order (list, log of the own-commits revset, abandon of the two ids, forget, prune); a second removal returned { removed: false, abandoned: [] } having run only the list. Before the implementation the whole file failed to load: SyntaxError: Export named 'removeIssueWorkspace' not found.",
+      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "negativeControl": "The test's own precondition and today's code: before the removal call the same test asserts A's commits ARE visible heads in B's log and widgets-42 IS registered (today's leftover); and main@origin's workspace.ts has no removeIssueWorkspace export, so the same file fails to load against it (the RED message above)."
+    },
+    {
+      "criterion": "Acceptance 3 — a worker resumed on the removed issue gets a fresh workspace at main with legion/<KEY> on its working copy",
+      "surface": "the same real-jj test's second provisioning of WIDGETS-42 through the real provisionIssueWorkspace, both binaries",
+      "command": "cd packages/workspace && bun test src/workspace.test.ts -t \"removes a finished\"",
+      "observed": "provisionIssueWorkspace resolved { repoCloneDir, workspaceDir, bookmark } and ran ['jj','bookmark','set','legion/WIDGETS-42','-r','@']; after a snapshot, @- equals main's commit and legion/WIDGETS-42 equals the new @; a.txt is absent — the brand-new-issue shape (LEGION-70).",
+      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "negativeControl": "The driver's control run against main@origin's module never reaches a re-provisioning: it throws TypeError: removeIssueWorkspace is not a function right after BEFORE, so on today's code the resumed worker would find the old workspace (widgets-42 still registered, a.txt present), never a fresh one."
+    },
+    {
+      "criterion": "Acceptance 4 — pushed work is kept: a workspace whose bookmark still exists is removed but its commit stays under the bookmark and in B's log",
+      "surface": "real-jj test on both binaries with A's bookmark pushed and surviving at removal",
+      "command": "cd packages/workspace && bun test src/workspace.test.ts -t \"keeps pushed work\"",
+      "observed": "removeIssueWorkspace returned { removed: true, abandoned: [<A's empty working copy>] } — one id, not two; the directory is gone and widgets-42 unregistered; legion/WIDGETS-42 still resolves to 'a pushed work', which is still in B's jj log -r 'all()' while the abandoned working copy is not; the next provisioning re-created the workspace on that bookmark (no jj bookmark command; @- equals the pushed commit).",
+      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "negativeControl": "The fact script's (a) row: with the bookmark deleted the same revset lists two commits and the abandon takes both — the only difference between 'kept' and 'abandoned' is whether a bookmark reaches the commit; the acceptance-2 test asserts exactly that two-id shape."
+    },
+    {
+      "criterion": "Acceptance 5 — the daemon removes the right workspaces at the right time: done root and done child removed, unfinished child kept with a log line, backlog/icebox root kept with no jj command, a failed removal logged once and the tree still closed, no removal at linger start, a root admitted mid-close provisions only after the close and that close removes nothing",
+      "surface": "ProcessManager.closeTree / beginLinger / admit through the fake tmux runtime and command recorder (the daemon's own test harness), with a real scratch stateDir whose fake clone has .jj and real workspace directories",
+      "command": "cd packages/daemon && LEGION_E2E=1 bun test src/daemon/__tests__/processes.test.ts -t \"workspaces of a done root|parked root's workspace|failed workspace removal|no workspace removal at linger|admitted while its previous tree\"",
+      "observed": "5 pass. The done root and done child recorded 'jj workspace forget legion-42' and 'legion-43' plus 'jj abandon -r aaaa | bbbb --ignore-working-copy -R <clone>', every jj command after the last tmux stop, their directories deleted and the in_progress grandchild's kept, exactly three 'workspace of' log lines (two removed…abandoned 2 commit(s) nothing else reached, one kept…Dispatch status \"in_progress\"); backlog and icebox roots closed with zero jj/git commands, the directory intact and the kept line; a failing abandon produced exactly one 'failed to remove the workspace of …' line carrying the error (Revision `aaaa` doesn't exist), the directory already gone, no forget, tree closed; beginLinger ran no jj/git command; the reopened root's spawn logged 'launch of LEGION-42 waits for the close of tree LEGION-42 to finish' and ran no jj command until the close settled, the close logged 'kept every workspace of tree LEGION-42 at its close: the tree record is \"active\", not lingering (re-admitted while closing)', ran no forget or abandon, and every provisioning jj command (update-stale first) came after the close.",
+      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "negativeControl": "The same five tests on the pre-implementation daemon: four failed (forgotten [] instead of ['legion-42','legion-43']; no kept line for backlog; no failed-removal semantics; provisioning's update-stale ran before the close settled) and only the linger-start guard passed, as it must. The failing-abandon test is itself a negative control on the removal: a non-zero jj exit stops the sequence before forget and prune."
+    },
+    {
+      "criterion": "Acceptance 6 — before the merge the real code is exercised outside the test runner against a scratch clone with two workspaces on both binaries; BEFORE/AFTER quoted in the pull request; no rig, no daemon",
+      "surface": "bun /tmp/legion-104-driver.ts: the branch's packages/workspace/src/workspace.ts imported directly, driving provisionIssueWorkspace and removeIssueWorkspace against a colocated scratch clone with a local remote, on jj 0.45.1-sami.20260910 and stock 0.44.0",
+      "command": "cd packages/workspace && bun /tmp/legion-104-driver.ts   and   JJ_BIN=\"mise x github:jj-vcs/jj@0.44.0 -- jj\" bun /tmp/legion-104-driver.ts   (outputs /tmp/legion-104-driver-0451-r2.txt, /tmp/legion-104-driver-0440-r2.txt)",
+      "observed": "BEFORE: jj workspace list names widgets-42 (empty working copy) beside default and widgets-43; B's jj log -r 'all()' shows widgets-42@ and 'a work'; A directory exists: true; git worktree list names A on 0.45.1. removeIssueWorkspace → { removed: true, abandoned: [2 ids] }. AFTER: widgets-42 gone from jj workspace list and git worktree list; B's log shows only b work, main, root(); A directory exists: false; second call { removed: false, abandoned: [] }; re-provisioned A has @- = main and legion/WIDGETS-42 = A's @ (identical shape on both binaries; quoted with the ids in the PR body's E2E line).",
+      "headSha": "0658feec27896a1c5bf3480ccef713632d8030d6",
+      "negativeControl": "The same driver against main@origin's workspace.ts (jj file show -r main@origin packages/workspace/src/workspace.ts > /tmp/legion-104-old-workspace.ts; bun /tmp/legion-104-driver.ts /tmp/legion-104-old-workspace.ts): prints the same BEFORE leftover and then exits 1 with TypeError: removeIssueWorkspace is not a function (/tmp/legion-104-driver-control-r2.txt)."
+    }
+  ],
+  "trickyParts": [
+    "The rebase GitHub's CONFLICTING forced: LEGION-15 removed flushEventLoopUntil, so the fifth daemon test now awaits the root stop arming its timeout sleep through a gate its own sleep fake resolves, and its one remaining tick-budget drain carries the required '// Negative wait:' line; the three console.error spies now restore in a finally, because a later test (LEGION-107's receipt_timeout) counts console.error calls and a spy left in place made it inherit this branch's three lines.",
+    "workspaceCommandRunner is a class field (the daemon runner with stderr normalised), shared by provisionWorkspace and removeWorkspace, typed as the workspace package's own run so both functions accept it unchanged.",
+    "removeIssueWorkspace asks jj only when <clone>/.jj exists, so a tree that closes without ever having provisioned logs nothing; every existing daemon close test under config('/state') therefore records no new command and no pin needed extending."
+  ],
+  "deviations": [
+    "The plan expected 5 daemon tests to fail before the implementation; 4 did. 'runs no workspace removal at linger start' passes on today's code because beginLinger has never removed anything — it is a guard against moving the removal there, which the spec's acceptance 5 names explicitly, so it is kept.",
+    "The plan's test-file argv helpers (abandonCommand, forgetCommand, pruneCommand, ownCommitsCommand) were inlined into the one exact-pin expectation per the repository's tiny-functions rule; workspaceListCommand (three call sites) and gitWorktrees (asserts) stay."
+  ],
+  "openQuestions": [],
+  "productionCheck": "Acceptance 7 is pending the merge and the operator's restart of the live daemon on this box: the first tree close's 'removed the workspace of …' log line, jj workspace list -R <clone> without the issue, the absent directory, and another workspace's jj log without that issue's commits, to be quoted on the PR and the issue when the architect resumes this session.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T09:37:52.453Z"
+}
