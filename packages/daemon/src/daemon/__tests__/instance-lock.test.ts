@@ -141,7 +141,7 @@ describe("acquireInstanceLock", () => {
 
     // Every round starts from a dead daemon's leftover text in the same, unlocked file. The kernel
     // lock is per open file description, so contenders inside one process conflict exactly as
-    // separate daemons would. The third contender is the one the old takeover window admitted.
+    // separate daemons would.
     for (let round = 0; round < 25; round += 1) {
       await writeFile(lockFile, String(DEAD_PID), "utf8");
       const results = await Promise.allSettled([

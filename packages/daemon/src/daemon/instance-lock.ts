@@ -42,44 +42,44 @@ const C_LIBRARIES: Partial<Record<NodeJS.Platform, CLibrary>> = {
   },
 };
 
-interface Flock extends Pick<CLibrary, "wouldBlock" | "cloexec"> {
-  lock(fd: number, operation: number): number;
+interface LibC extends Pick<CLibrary, "wouldBlock" | "cloexec"> {
+  flock(fd: number, operation: number): number;
   errno(): number;
 }
 
-let flock: Flock | undefined;
+let libc: LibC | undefined;
 
 /** Binds flock(2) and the errno accessor from the platform's C library, once per process and only
  * when a lock is first taken: the `legion` CLI imports this module for every subcommand and must
  * neither pay for nor risk a `dlopen` at import. */
-function loadFlock(): Flock {
-  if (flock) return flock;
-  const c = C_LIBRARIES[process.platform];
-  if (!c) {
+function loadLibC(): LibC {
+  if (libc) return libc;
+  const row = C_LIBRARIES[process.platform];
+  if (!row) {
     throw new Error(
       `Legion daemon instance lock needs flock(2) from the C library, and no C library name is known for platform ${process.platform}`
     );
   }
   const symbols = {
     flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-    [c.errnoSymbol]: { args: [], returns: FFIType.ptr },
+    [row.errnoSymbol]: { args: [], returns: FFIType.ptr },
   } as const;
   let library: Library<typeof symbols>;
   try {
-    library = dlopen(c.library, symbols);
+    library = dlopen(row.library, symbols);
   } catch (error) {
     throw new Error(
-      `Cannot load flock and ${c.errnoSymbol} from ${c.library}: ${error instanceof Error ? error.message : String(error)}`
+      `Cannot load flock and ${row.errnoSymbol} from ${row.library}: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  const errnoLocation = library.symbols[c.errnoSymbol] as () => Pointer;
-  flock = {
-    lock: library.symbols.flock,
+  const errnoLocation = library.symbols[row.errnoSymbol] as () => Pointer;
+  libc = {
+    flock: library.symbols.flock,
     errno: () => readMemory.i32(errnoLocation(), 0),
-    wouldBlock: c.wouldBlock,
-    cloexec: c.cloexec,
+    wouldBlock: row.wouldBlock,
+    cloexec: row.cloexec,
   };
-  return flock;
+  return libc;
 }
 
 /** True if `pid` names a live process this user can see (or one owned by another user — still live). */
@@ -108,12 +108,12 @@ function processAlive(pid: number): boolean {
 export async function acquireInstanceLock(stateDir: string): Promise<InstanceLock> {
   await mkdir(stateDir, { recursive: true });
   const lockFile = path.join(stateDir, "daemon.lock");
-  const c = loadFlock();
-  const fd = openSync(lockFile, constants.O_RDWR | constants.O_CREAT | c.cloexec, 0o644);
-  if (c.lock(fd, LOCK_EX | LOCK_NB) !== 0) {
-    const errno = c.errno();
+  const libc = loadLibC();
+  const fd = openSync(lockFile, constants.O_RDWR | constants.O_CREAT | libc.cloexec, 0o644);
+  if (libc.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+    const errno = libc.errno();
     closeSync(fd);
-    if (errno !== c.wouldBlock) throw new Error(`flock(${lockFile}) failed with errno ${errno}`);
+    if (errno !== libc.wouldBlock) throw new Error(`flock(${lockFile}) failed with errno ${errno}`);
     throw await alreadyRunning(lockFile);
   }
   try {
@@ -138,18 +138,16 @@ export async function acquireInstanceLock(stateDir: string): Promise<InstanceLoc
 /** Another process holds the kernel lock; name it. The holder writes its pid right after locking,
  * so a blank file, or one still naming the previous dead holder, is re-read for a bounded moment. */
 async function alreadyRunning(lockFile: string): Promise<Error> {
-  for (let attempt = 1; ; attempt += 1) {
+  let holder = "holder pid not recorded yet";
+  for (let attempt = 1; attempt <= HOLDER_PID_REREADS; attempt += 1) {
     const holderPid = Number(readFileSync(lockFile, "utf8").trim());
     if (Number.isSafeInteger(holderPid) && holderPid > 0 && processAlive(holderPid)) {
-      return new Error(
-        `Legion daemon already running for this project (pid ${holderPid}, lock file ${lockFile})`
-      );
+      holder = `pid ${holderPid}`;
+      break;
     }
-    if (attempt === HOLDER_PID_REREADS) {
-      return new Error(
-        `Legion daemon already running for this project (holder pid not recorded yet, lock file ${lockFile})`
-      );
-    }
-    await sleep(HOLDER_PID_REREAD_MS);
+    if (attempt < HOLDER_PID_REREADS) await sleep(HOLDER_PID_REREAD_MS);
   }
+  return new Error(
+    `Legion daemon already running for this project (${holder}, lock file ${lockFile})`
+  );
 }

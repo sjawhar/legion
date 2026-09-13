@@ -15,6 +15,9 @@ import { acquireInstanceLock } from "../../instance-lock";
 const [stateDir, mode] = process.argv.slice(2);
 if (!stateDir) throw new Error("usage: lock-holder.ts <stateDir> [--raw]");
 
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+
 let recordPid: (() => void) | undefined;
 if (mode === "--raw") {
   const library = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
@@ -26,7 +29,9 @@ if (mode === "--raw") {
     constants.O_RDWR | constants.O_CREAT,
     0o644
   );
-  if (symbols.flock(fd, 2 | 4) !== 0) throw new Error("raw holder could not take the lock");
+  if (symbols.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+    throw new Error("raw holder could not take the lock");
+  }
   recordPid = () => {
     ftruncateSync(fd, 0);
     writeSync(fd, String(process.pid), 0);
