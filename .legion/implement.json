@@ -1,0 +1,99 @@
+{
+  "issue": "LEGION-45",
+  "pr": {
+    "number": 1020,
+    "url": "https://github.com/sjawhar/legion/pull/1020",
+    "branch": "legion/LEGION-45",
+    "base": "main",
+    "headSha": "5c3a1824fa5fc944b7b2d80b6963e67277c35855",
+    "headShaNote": "The last implementation commit; `implement: record handoff` follows it on the branch and is the pushed tip."
+  },
+  "rebasedOnto": "Not rebased: main@origin stayed at 52c5e03e7cb3 (the plan's base) for the whole phase.",
+  "planStepsExecuted": "0 -> 1 -> 1b -> 2 -> 3 -> 5 -> 4 -> 6, TDD per step: every new test was run and seen failing before its production change (step 1: all 19 bash rows allowed by mistake; step 1b: the subagent's bash undo passed; step 5: all 6 eval/hub rows allowed by mistake); steps 2 and 3 passed with no production change, as the plan predicted.",
+  "commits": [
+    {
+      "change": "xtpzzzpxvwls",
+      "commit": "f6fac927a37855742b75adfe90859bb799d34093",
+      "step": "1",
+      "description": "feat(pi-envoy): refuse jj operation-log rewrites in phase-worker panes (LEGION-45)"
+    },
+    {
+      "change": "roqusxwkplto",
+      "commit": "a0c40829d71792c3c026d6c8036a750f32ab9cc2",
+      "step": "1b (architect-approved D1 option B; spec Acceptance 6)",
+      "description": "feat(pi-envoy): the operation-log guard binds a phase worker's task subagents (LEGION-45)"
+    },
+    {
+      "change": "sxzkloznnonr",
+      "commit": "06d234f212154cac4da5dab21ffa91bc6d744a2c",
+      "step": "2",
+      "description": "test(pi-envoy): pin the jj commands the operation-log guard leaves alone (LEGION-45)"
+    },
+    {
+      "change": "zwtnqorvlzuz",
+      "commit": "dfd0cb91def8e95aaecaef18b9113b7b7e80aea6",
+      "step": "3",
+      "description": "test(pi-envoy): the operation-log guard binds phase workers only (LEGION-45)"
+    },
+    {
+      "change": "vmlourorouqw",
+      "commit": "5f24fa1974adcf2f07ac7c70d32aa91f0a3e9cc6",
+      "step": "5",
+      "description": "feat(pi-envoy): the operation-log guard covers eval code and hub process starts (LEGION-45)"
+    },
+    {
+      "change": "yyxkumwuvttp",
+      "commit": "5c163ecc3169fb80e7f1d64ac8aaf6468e815085",
+      "step": "4",
+      "description": "docs(skills): the operation-log commands are refused by the extension, with the recovery rule (LEGION-45)"
+    },
+    {
+      "change": "kunsyxsuxqlo",
+      "commit": "5c3a1824fa5fc944b7b2d80b6963e67277c35855",
+      "step": "6",
+      "description": "test(pi-envoy): grant rig takes --prompt-file for the LEGION-45 e2e"
+    }
+  ],
+  "filesChanged": [
+    "packages/pi-envoy/extensions/legion.ts",
+    "packages/pi-envoy/extensions/legion.test.ts",
+    "packages/pi-envoy/CHANGELOG.md",
+    "packages/pi-envoy/scripts/grant-rig/run.ts",
+    "packages/pi-envoy/scripts/grant-rig/README.md",
+    "skills/legion-worker/SKILL.md"
+  ],
+  "acceptanceToTests": {
+    "1 bash refusal, every form, any pipeline position, message names command + shared log + recovery": "legion.test.ts 'refuses a phase worker's bash command that would rewrite the shared jj operation log' (19 refused rows incl. -R, cd &&, op restore <id>, --repository, operation restore, op undo, pipeline xargs, --at-op, unquoted -m undo, sh -c quoted, subshell, newline, /usr/local/bin/jj, un\"do\", unterminated quote; no grant minted; five reason phrases asserted with stringContaining)",
+    "2 jj restore <paths>, jj op log, jj op show, quoted 'undo this' allowed": "legion.test.ts 'leaves file-level jj restore, jj op log, jj op show, and quoted message words alone' (13 allowed rows incl. the skill's rebase, fingerprint, split, and log commands; exactly one grant minted per allowed call)",
+    "3 root architect and controller unaffected; reviewer .legion/ path unaffected": "legion.test.ts 'does not block bash calls from the controller session' (+ jj -R ... undo -> undefined), 'blocks code tools in a root architect session' (+ jj undo -> the architect reason, never the shared-log one), 'applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone' (six roles; the reviewer's .legion/ cleanup command is its sanctioned row); existing 'restricts phase-worker tool access per LEGION_ROLE' and 'allows xd:// tool-device writes ...' unchanged and green",
+    "4 SKILL.md says blocked by the extension + recovery rule": "PR diff of skills/legion-worker/SKILL.md (commit 5c163ecc); the paragraph also names eval, hub, and task subagents as covered, and tells workers to write mentioning text with the write tool",
+    "5 eval code and hub start refused with the same message": "legion.test.ts 'refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule' (6 refused: two eval code strings, an eval argv literal, hub start with program jj, hub start bash -c, hub send text; 5 allowed incl. hub {} and eval code that only mentions jj op log / jj restore; refusal reads 'hub: jj undo')",
+    "6 a task subagent of a phase worker is refused the same commands while its other calls stay exempt": "legion.test.ts 'refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated' (boots the phase-worker env with a subagent transcript as in the 'never bootstraps ... even with phase-worker environment' test; bash jj -R ... undo -> block with the shared-log reason; bash legion state -> undefined; no /legion/ route called)",
+    "Errors: unparseable command -> plain-text rule, never allow": "step 1 row `jj -R \"$LEGION_WORKSPACE\" describe -m 'undo` (unterminated quote) is refused, naming the trimmed command",
+    "Real surface (tester)": "grant rig with --prompt-file (plan testerNotes.e2e), production-profile mode, branch build, negative control on the released plugin 1.22.2"
+  },
+  "deviations": [
+    "Plan M2 said a sub-architect's jj undo would be answered first by the architect's blanket bash gate. Under the architect-approved D1 option B the guard is judged from the pane's environment right after the debug log, ahead of the subagent exemption and therefore ahead of every role gate, and a sub-architect's pane classifies as phase-worker; so a sub-architect's jj undo now gets the shared-log reason (still refused). The role-matrix test's architect row expects that, with a comment; the root-architect test still expects the architect reason (its pane is not phase-worker).",
+    "The existing test 'blocks a bash call from a worker session that has not completed its boot handshake' set LEGION_TREE and LEGION_ROLE without LEGION_ISSUE; the hoisted classifySession call throws 'LEGION_ISSUE is required for Legion' for that env, exactly as session_start does. The fixture now carries the pane's full launch environment (LEGION_ISSUE added, one comment); its contract — block with 'Legion worker session is not registered' — is unchanged. Squashed into the step-1b commit.",
+    "The plan's step-5 eval row `\"await Bun.$`jj op restore ${id}`\"` trips biome's noTemplateCurlyInString (a warning; the pi-envoy job runs lint, and repo biome runs --error-on-warnings). Same runtime string written as a template literal with an escaped placeholder. Squashed into the step-5 commit.",
+    "Plan verification.repoCi named root `bunx tsc --noEmit` (no root tsconfig; tsc prints its help banner) and root `bun test` (sweeps every package; dispatch's React suites, claude-envoy-bridge, envoy-plugin, and daemon processes.test.ts fail from the root cwd — none touched here; processes.test.ts passes 252/0 from packages/daemon). The Tests workflow's lint/typecheck/test jobs actually run inside packages/daemon: `biome check --error-on-warnings src/` and `tsc --noEmit` there are clean. The root biome check the plan named was run and is clean."
+  ],
+  "trickyParts": [
+    "Guard ordering: phaseWorkerPane ??= classifySession(process.env).kind === \"phase-worker\" is evaluated on the first tool_call of each module instance (a subagent has its own instance and inherits the pane env), then jjLogRewriteAttempt runs before checkSubagentSession. A malformed pane env throws from the hook exactly as session_start would; never computed at module load.",
+    "The bookmark legion/LEGION-45 auto-advances onto the working-copy commit in this provisioned workspace (which carries the untracked-on-main .omp/config.yml). Setting it to the described tip needs `jj bookmark set legion/LEGION-45 -r @- --allow-backwards`; the push is a plain fast-forward for origin.",
+    "The two post-hoc fixes were moved into their motivating commits with `jj squash --from @ --into <rev> <path>` one hunk at a time (temporarily restoring the other hunk in the working copy), so each commit on the branch stands on its own."
+  ],
+  "verification": {
+    "targetedTests": "cd packages/pi-envoy && bun test extensions/legion.test.ts -t \"operation-log|shared jj operation log|quoted message words alone|plain-text rule|controller session|root architect session|restricts phase-worker tool access|tool-device writes|subagent session\" -> 11 pass, 0 fail, 84 expect() calls",
+    "packageCi": "cd packages/pi-envoy && bun run build && bun run lint && bun run typecheck && bun run test -> build ok, lint 0 warnings, tsc clean, 171 pass / 0 fail across 7 files",
+    "daemonJob": "cd packages/daemon && bunx biome check --error-on-warnings src/ (clean) && bunx tsc --noEmit (clean); bun test src/daemon/__tests__/processes.test.ts -> 252 pass, 3 skip, 0 fail",
+    "repoBiome": "bunx biome check --error-on-warnings packages/pi-envoy/extensions packages/pi-envoy/src packages/pi-envoy/scripts -> clean",
+    "rigSmoke": "cd packages/pi-envoy && bunx tsc --noEmit && bun scripts/grant-rig/run.ts prompt | head -3 -> default prompt unchanged; `prompt --prompt-file /dev/null` parses",
+    "ci": "GitHub CI at the pushed tip is watched after this handoff commit; the PR body's CI line is updated with the run id and head once it settles."
+  },
+  "testerNotes": "Follow plan.json testerNotes.e2e verbatim: the rig's --prompt-file flag is in commit 5c3a1824 (packages/pi-envoy/scripts/grant-rig/README.md documents it under 'Running it'). Re-read ~/.config/legion/sjawhar-legion/legion.yaml for the OMP pin. Expected: items 3-7 of the prompt refused with 'every Legion issue workspace shares' (bash undo, bash op restore, bash abandon, eval, hub start), items 1, 2, 8, 9 run, and `jj -R $RIG/ws op log` shows the describe from item 2 as the newest mutating operation. Negative control on RIG_LEGION_BUILD=1.22.2: item 3 runs and the op log gains an undo operation. Note for writing the E2E line and any PR comment through bash under the new plugin: quoted text that mentions jj with undo/abandon/op restore is refused — use the write tool for such files, or say 'operation-log rollback'.",
+  "fastFollow": "none",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T10:13:11.679Z"
+}
