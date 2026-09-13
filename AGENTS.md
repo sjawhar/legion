@@ -45,7 +45,7 @@ legion status <issue> <status>       # Set an issue's Dispatch lifecycle status 
 legion stop <team>                   # Stop swarm
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
-legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses `pr merge`; the merge queue merges, not workers)
+legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses `pr merge` and every GitHub-issue write — Legion issues live on Dispatch; the merge queue merges, not workers)
 legion threads resolve --pr <n> --repo <owner>/<repo>  # Implementer before every push that answers a review, merger before READY: resolves each unresolved review thread whose newest comment is its opener's `Accepted:` reply (the review App cannot); exits 1 naming a thread GitHub refuses
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state

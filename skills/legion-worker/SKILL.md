@@ -152,22 +152,29 @@ that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same 
 redeems a fresh token from your session's grant — identity is supplied per call, never stored.
 Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
 refuses `pr merge` (and a raw `gh api …/merge`): no worker role merges a pull request — the merge
-queue does, under its own authority. The credential reaches `legion` through the file
-`$LEGION_GRANT_FILE` names, written before each of your bash commands by the extension; never
-`cat`, `echo`, copy, or `export` it — `legion credential`, `legion gh`, `jj git push`, and
-`legion handoff complete` read it themselves. The file is the pane's, not the command's: a `task`
-subagent, an `eval` subprocess, or a background job in your pane reads the grant your last bash
-command minted, so its `legion gh` or `jj git push` succeeds only within 60 seconds of that call
-and 403s afterwards — a timing artifact, not a broken credential; run credentialed commands from
-your own bash calls.
+queue does, under its own authority. It also refuses every GitHub-issue write — the `issue`
+subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `unpin`, `transfer`,
+`lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not
+GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
+comments live on that path too, so edit them with `gh pr comment`) — printing
+`Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
+Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
+`api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
+through the file `$LEGION_GRANT_FILE` names, written before each of your bash commands by the
+extension; never `cat`, `echo`, copy, or `export` it — `legion credential`, `legion gh`,
+`jj git push`, and `legion handoff complete` read it themselves. The file is the pane's, not the
+command's: a `task` subagent, an `eval` subprocess, or a background job in your pane reads the
+grant your last bash command minted, so its `legion gh` or `jj git push` succeeds only within 60
+seconds of that call and 403s afterwards — a timing artifact, not a broken credential; run
+credentialed commands from your own bash calls.
 
 ## GitHub PR comment attribution
 
 Append this exact structured footer to **every** pull-request comment and review that this
 phase posts on GitHub. It preserves session provenance on the artifact itself so work stays
 attributable to the session that produced it. Dispatch comments carry session provenance
-natively through their own `actor`/`origin` fields; this footer is only for GitHub PR
-artifacts:
+natively through their own `actor`/`origin` fields; this footer is for GitHub PR artifacts and
+for the retro's Dispatch message (`skills/legion-retro`):
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->

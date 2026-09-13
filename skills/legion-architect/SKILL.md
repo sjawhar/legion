@@ -204,13 +204,13 @@ legion({
   op: "spawn_worker",
   issue: "LEGION-40",
   role: "implementer",
-  task: "Run the legion-retro skill now. Capture durable learnings and post the issue comment; do not create a .legion handoff file."
+  task: "Run the legion-retro skill now. Capture durable learnings and post the retro message on the Dispatch issue with dispatch_message; do not create a .legion handoff file."
 })
 ```
 
 Wait for the implementer to report its durable retro result. Retro output is
-`docs/solutions/` plus an issue comment; it must not create a `.legion` file or rewrite
-the reviewer-approved head after cleanup.
+`docs/solutions/` plus one `dispatch_message` on the issue; it must not create a `.legion`
+file or rewrite the reviewer-approved head after cleanup.
 
 ## 6. Architect sign-off and merge
 

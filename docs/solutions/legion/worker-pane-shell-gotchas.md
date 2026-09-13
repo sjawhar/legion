@@ -38,6 +38,8 @@ related_issues:
   - "LEGION-52"
   - "LEGION-34"
   - "sjawhar/legion#1003"
+  - "LEGION-78"
+  - "sjawhar/legion#1015"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -54,6 +56,7 @@ symptoms:
   - "bash tool: Unable to connect. Is the computer able to access the url?"
   - "Unable to connect. Is the computer able to access the url? on every bash tool call, whatever the command"
   - "The Legion PR footer names a session id three days older than the worker; printenv OMP_SESSION_ID disagrees with envoy_whoami"
+  - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -408,3 +411,26 @@ body re-runs the whole `Tests` workflow (`pull_request: types: [opened, edited, 
 `.github/workflows/pr-and-main.yaml`), so paste command output into the body once per round, after that round's last
 push, never per fact; the `CI:` line cites the `Tests` run id at the head
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).
+
+**Two corrections from LEGION-78 (sjawhar/legion#1015), where the branch made `legion gh` refuse a command the
+deployed build still forwarded.** First, the stale build is not always harmless. §13's example is a subcommand that
+answers `Unknown command`; when the change is a *refusal*, the pane's old build does the thing instead of refusing it.
+The tester ran `legion gh -- issue comment 1015 --repo sjawhar/legion --body smoke` once through the pane's `legion`
+and it posted a real comment on the PR (id 5652558869, deleted with `pr comment --delete-last --yes` through the
+branch entry). Prove a refusal only through `bun packages/daemon/src/cli/index.ts gh -- …` from the workspace, and
+run the positive control (a forwarded `pr view`) through the same entry so the `E2E` line names one code path.
+Second, "the operator restarts the daemon" is one release too many for a CLI-only change: the launcher re-execs
+`bun <daemon checkout>/packages/daemon/src/cli/index.ts` on every call, so a change that touches only
+`packages/daemon/src/cli/` is live in every pane the moment the daemon checkout carries the merge — no restart. What
+needs updating is that checkout (on this box `/home/ubuntu/legion-ws-RunDaemon`, at `main`); the architect raises it
+after the merge. A change to the daemon process itself still needs the restart.
+
+**The same indirection holds for skills, through a different surface.** A pane's `skill://legion-<name>` is not the
+branch's `skills/legion-<name>/SKILL.md` and not the daemon checkout's either: OMP loads it from the installed
+`@sjawhar/pi-legion-envoy` plugin release (`~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/skills/`,
+the `skills` entry of its `package.json` `omp` manifest). During LEGION-78's own retro, `skill://legion-retro`
+served the pre-change template (`legion gh -- issue comment <issue-number>`, the exact hazard the branch fixed)
+from plugin 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carried the `dispatch_message` call. So a
+worker on an issue that changes a skill reads the branch file, not `skill://`, for the rest of that tree, and the
+architect's task for each later phase says which template to follow. A skill fix reaches other trees only after the
+plugin release built from the merged commit is installed — a release step, unlike the CLI's checkout advance above.

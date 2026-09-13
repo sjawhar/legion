@@ -282,6 +282,176 @@ describe("legion gh", () => {
 
     expect(spawnArgs).toEqual(["pr", "view", "merge-fix"]);
   });
+
+  it("refuses gh issue comment before any grant is redeemed: Legion issues live on Dispatch", async () => {
+    let fetchCalled = false;
+    let spawnCalled = false;
+
+    await expect(
+      cmdGh(["issue", "comment", "27", "--repo", "sjawhar/legion", "--body", "## Retro Complete"], {
+        env: { LEGION_GRANT: "grant-123", LEGION_ISSUE: "LEGION-27" },
+        fetch: async () => {
+          fetchCalled = true;
+          return Response.json({ token: "unused", appLogin: "legion-implementer[bot]" });
+        },
+        spawnGh: async () => {
+          spawnCalled = true;
+          return 0;
+        },
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "Legion issues live on Dispatch; use dispatch_message or dispatch_comment on LEGION-27",
+        code: 1,
+      })
+    );
+    expect(fetchCalled).toBe(false);
+    expect(spawnCalled).toBe(false);
+  });
+
+  it("rejects the --repo bypass of the issue-write guard and names the issue generically without LEGION_ISSUE", async () => {
+    let fetchCalled = false;
+    let spawnCalled = false;
+
+    await expect(
+      cmdGh(["issue", "--repo", "acme/widgets", "comment", "5"], {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: async () => {
+          fetchCalled = true;
+          return Response.json({ token: "unused", appLogin: "legion-implementer[bot]" });
+        },
+        spawnGh: async () => {
+          spawnCalled = true;
+          return 0;
+        },
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "Legion issues live on Dispatch; use dispatch_message or dispatch_comment on the Dispatch issue",
+        code: 1,
+      })
+    );
+    expect(fetchCalled).toBe(false);
+    expect(spawnCalled).toBe(false);
+  });
+
+  it.each([
+    "comment",
+    "create",
+    "edit",
+    "close",
+    "reopen",
+    "delete",
+    "pin",
+    "unpin",
+    "transfer",
+    "lock",
+    "unlock",
+    "develop",
+  ])("refuses every gh issue write verb: %s", async (verb) => {
+    let fetchCalled = false;
+    let spawnCalled = false;
+
+    await expect(
+      cmdGh(["issue", verb, "5"], {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: async () => {
+          fetchCalled = true;
+          return Response.json({ token: "unused", appLogin: "legion-implementer[bot]" });
+        },
+        spawnGh: async () => {
+          spawnCalled = true;
+          return 0;
+        },
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringMatching(/^Legion issues live on Dispatch/),
+        code: 1,
+      })
+    );
+    expect(fetchCalled).toBe(false);
+    expect(spawnCalled).toBe(false);
+  });
+
+  it.each([
+    // An explicit method.
+    [["api", "-X", "POST", "repos/acme/widgets/issues/5/comments", "-f", "body=hi"]],
+    // Creates an issue; `-f` alone makes gh POST.
+    [["api", "repos/acme/widgets/issues", "-f", "title=x"]],
+    // `--input` alone makes gh POST.
+    [["api", "repos/acme/widgets/issues/5/comments", "--input", "body.json"]],
+    // Attached method value.
+    [["api", "--method=PATCH", "repos/acme/widgets/issues/5", "-F", "state=closed"]],
+    // Attached short method; a PR conversation comment by raw API is refused by design.
+    [["api", "-XDELETE", "repos/acme/widgets/issues/comments/99"]],
+    // A full URL.
+    [["api", "-X", "PUT", "https://api.github.com/repos/acme/widgets/issues/5/lock"]],
+  ])("refuses a raw gh api write to an /issues path: %j", async (args) => {
+    let fetchCalled = false;
+    let spawnCalled = false;
+
+    await expect(
+      cmdGh(args, {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: async () => {
+          fetchCalled = true;
+          return Response.json({ token: "unused", appLogin: "legion-implementer[bot]" });
+        },
+        spawnGh: async () => {
+          spawnCalled = true;
+          return 0;
+        },
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringMatching(/^Legion issues live on Dispatch/),
+        code: 1,
+      })
+    );
+    expect(fetchCalled).toBe(false);
+    expect(spawnCalled).toBe(false);
+  });
+
+  it.each([
+    [["pr", "comment", "5", "--body", "Verification complete.", "--repo", "acme/widgets"]],
+    [["pr", "review", "5", "--approve"]],
+    [["api", "--method", "POST", "repos/acme/widgets/pulls/5/reviews", "--input", "body.json"]],
+    [
+      [
+        "api",
+        "graphql",
+        "-f",
+        'query=mutation { resolveReviewThread(input: {threadId: "x"}) { thread { id } } }',
+      ],
+    ],
+    [["issue", "view", "5", "--repo", "acme/widgets", "--json", "title"]],
+    [["issue", "list", "--state", "open"]],
+    // A GET on an issues path.
+    [["api", "repos/acme/widgets/issues/5/comments", "--jq", "length"]],
+    // A GET with query parameters: `-f` does not make an explicit GET a write.
+    [["api", "--method", "GET", "repos/acme/widgets/issues", "-f", "state=open"]],
+  ])("still forwards %j", async (args) => {
+    let fetchCalled = false;
+    let spawnArgs: string[] | undefined;
+
+    await cmdGh(args, {
+      env: { LEGION_GRANT_FILE: grantFile("grant-123"), LEGION_ISSUE: "LEGION-78" },
+      fetch: async () => {
+        fetchCalled = true;
+        return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
+      },
+      spawnGh: async (spawned) => {
+        spawnArgs = spawned;
+        return 0;
+      },
+    });
+
+    expect(fetchCalled).toBe(true);
+    expect(spawnArgs).toEqual(args);
+  });
 });
 describe("legion start --check-config", () => {
   // The env is an input to cmdCheckConfig, never read from the process: a Legion worker pane

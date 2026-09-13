@@ -17,7 +17,8 @@ retrospective's durable output.
 1. Tester green and all code-review cycles finish.
 2. The implementer pushes the `.legion/` deletion at the reviewer's direction, and the reviewer
    approves that head.
-3. Run this retro: commit durable learnings to `docs/solutions/` and post the issue comment.
+3. Run this retro: commit durable learnings to `docs/solutions/` and post the retro message on
+   the Dispatch issue.
    Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
 4. The merger verifies the tip is the approved head plus commits that change only
    `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
@@ -66,18 +67,22 @@ date: YYYY-MM-DD
 status: active
 module: affected-module
 related_issues:
-  - "owner/repo#123"
+  - "LEGION-123"      # the Dispatch issue
+  - "owner/repo#456"  # the pull request
 ---
 ```
 
 Commit the documentation on the existing issue branch, advance its existing bookmark, and push
-that branch. Do not create a replacement branch or bookmark. Then post an issue comment naming
-the documents and the one-to-three most useful takeaways. The comment must carry this revived
-implementer's structured attribution footer with `phase` set to `retro`:
+that branch. Do not create a replacement branch or bookmark. Then post one Dispatch message on
+the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
+issue, and the `gh` shim refuses every GitHub-issue write — naming the documents and the
+one-to-three most useful takeaways. The message must carry this revived implementer's structured
+attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
 
-```bash
-legion gh -- issue comment <issue-number> \
-  --body $'## Retro Complete
+```ts
+dispatch_message({
+  issue: "<KEY>",
+  body: `## Retro Complete
 
 **Learnings documented in:**
 - docs/solutions/<path>.md
@@ -85,11 +90,11 @@ legion gh -- issue comment <issue-number> \
 **Key takeaways:**
 - <reusable lesson>
 
-<!-- legion: {"session":"<session-id>","phase":"retro"} -->' \
-  --repo <owner>/<repo>
+<!-- legion: {"session":"<session-id>","phase":"retro"} -->`,
+})
 ```
 
-The issue comment and `docs/solutions/` commit are the only retro outputs. Never write a
+The Dispatch message and the `docs/solutions/` commit are the only retro outputs. Never write a
 handoff, phase artifact, local feedback log, or completion label; `.legion/` was deleted before
 retro and nothing recreates it. Report completion with `legion handoff complete` alone (its
 summary: two sentences for the architect) — no `legion handoff write`.
@@ -100,7 +105,7 @@ Before returning, verify all of the following:
 
 - The reviewer cleanup commit remains below the retro documentation commit, and the reviewer's
   approval of that cleanup head stands: the merger accepts the approved head plus this commit.
-- The learning documents and issue comment both exist.
+- The learning documents and the Dispatch message both exist.
 - No `.legion` file was created or modified by retro.
 - The fresh-eyes analysis was considered alongside the implementer's context.
 - The merger remains a subsequent step, not work performed by retro.
