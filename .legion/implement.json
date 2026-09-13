@@ -2,8 +2,8 @@
   "pr": 1026,
   "prUrl": "https://github.com/sjawhar/legion/pull/1026",
   "branch": "legion/LEGION-61",
-  "headSha": "9b241b02e8722a61bd735e4203fe05fe943b908f",
-  "base": "main@9a3bb41b (rebased a second time, conflict-forced, after #1011 LEGION-40 and #1010 LEGION-41 merged; first rebase onto 63dac108 was forced by LEGION-20 #975)",
+  "headSha": "bcaf80c1086420c083b4ddcc4c2d48c6f3d30093",
+  "base": "main@108e2cec (third conflict-forced rebase, after #1029 LEGION-71; earlier: 9a3bb41b after #1011/#1010, 63dac108 after #975)",
   "filesChanged": [
     "docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md",
     "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
@@ -15,18 +15,24 @@
     "scripts/smoke/down.test.sh",
     "scripts/smoke/issue-relay.test.ts",
     "scripts/smoke/issue-relay.ts",
+    "scripts/smoke/pid-record.sh",
     "scripts/smoke/up.sh",
     "scripts/smoke/up.test.sh"
   ],
   "trickyParts": [
     "Dispatch caps GET /api/v1/issues/<key>/events?limit= at 200 (parseEventLimit), not the plan's 500; the relay pages at 200 and the fake Dispatch in the unit test rejects a larger limit with 400 so the cap cannot regress silently.",
-    "Within one tick the relay fetches events for every tracked key BEFORE discovering their children, then fetches the newly discovered keys, repeating per level: a root row that names a child was appended after that child's issue.created, so the child is always discovered in the same tick and its lower-id rows sort ahead of the row that named it (orderEvents by global id). Rig B's log shows the child's dispatch-4643 landing between the root's 4642 and 4645.",
     "The envelope is a field-for-field port of publisher.go envelope()/payloadSummary including in_reply_to and urgency where the outbox sets them; the JetStream msgID is nats.go's `<dedupe_key>:<topic>` so a relay restart replays as duplicate=true and the daemon's consumed-event count does not move (proved live on rig A).",
     "RELAY READY is logged after the first tick that fetched AND published without error, so RIG READY in isolated mode means the root's history is already in the rig NATS; the README/harness key on that.",
     "The root-issue existence probe (GET /api/v1/issues/<root>, 404 -> RELAY UNHEALTHY exit 1) runs once inside the retry loop, so a Dispatch outage at boot is retried while a missing root is definitive; the events endpoint itself answers [] for an unknown key and would never expose that.",
     "The unit test's fake sleep cannot tell a backoff from the poll interval by duration (the second backoff step is also 2000 ms): it classifies by whether the last log line is a RELAY RETRY, which is the contract the checkpoint precheck also relies on (newest `RELAY ` line).",
     "Running the rig from a Legion worker pane: the pane's own LEGION_* identity (including LEGION_OMP_PATH, which up.sh would treat as an operator override) and TMUX must be scrubbed from the environment before up.sh, otherwise the smoke daemon inherits them; the throwaway launcher /tmp/legion61-rig.sh did that. Host load ~100/32 cores needed LEGION_WORKER_RPC_TIMEOUT_SECONDS=60 and LEGION_WORKER_BOOT_TIMEOUT_SECONDS=600 (documented daemon env keys, no code change) for controller/architect panes to complete their RPC handshake.",
-    "up.test.sh sources up.sh from a temp copy, so up.sh's repo_root there is `/` and the recorded relay command ends in `//scripts/smoke/issue-relay.ts`; the assertion compares against the sourced repo_root, exactly as the envoy-bridge argv is built."
+    "up.test.sh sources up.sh from a temp copy, so up.sh's repo_root there is `/` and the recorded relay command ends in `//scripts/smoke/issue-relay.ts`; the assertion compares against the sourced repo_root, exactly as the envoy-bridge argv is built.",
+    "One list per tick: summaries are merged into an accumulated map BEFORE any /events fetch, and the watermark advances at merge time, so a tick that fails after the list (an /events 502, a publish timeout) retries with the list possibly answering nothing new and still fetches the right keys from `summaries` (lastSeq > acked cursor). The unit test proves it by returning [] from the list during the retries.",
+    "The watermark is the greatest updated_at seen, compared with Date.parse (ms) and passed back verbatim (URL-encoded) so Go's RFC 3339 parser sees the server's own microsecond string; `updated_since` is inclusive (>=) so an issue re-listed at the watermark costs nothing (its rows are behind the cursor). Verified live against the production Dispatch: quiet ticks with a 6-digit-fraction timestamp, no 400.",
+    "The root-existence probe is gone: the seed list is the authority — a root absent from the project's summaries is RELAY UNHEALTHY. 401/403 on the list is UNHEALTHY as before.",
+    "NATS `503` from js.publish means no responder (no stream takes the subject) — in the rig the listener creates ENVOY_NOTIFICATIONS before the relay starts, but a bare `503` in a RETRY line said nothing, so the publish failure now names the event and subject.",
+    "zod v4's error.message is multi-line JSON; the RETRY line uses a one-line `path: message; ...` rendering so checkpoints.sh's newest-`RELAY `-line rule keeps working.",
+    "Implementer replies on review threads report the fix (`Fixed in <sha> — …`); `Accepted:` is the opener's verdict and the only thing `legion threads resolve` acts on — I first wrote `Accepted:` myself, then rewrote both comments."
   ],
   "deviations": [
     "Checkpoint 12 gained a `CHECKPOINT 12 OK: <root> released its admission slot and <queued> was promoted` line; it previously passed silently, contradicting the README's one-OK-line contract, and the harness case for 12 needed an observable pass.",
@@ -34,10 +40,12 @@
     "EVENT_PAGE_LIMIT is 200 (Dispatch's maximum), not the plan's 500.",
     "Two-rig proof was sequential (rig A, down, rig B) as the architect decided for spec v3: LEGION-41 (#1010) is not in main, so up.sh still hardcodes the legion-smoke-nats container name and listener machine id. The tester owns the concurrent run once #1010 lands. Both rigs' smoke architects were single-turn users of provider credit; rig A chose a single-issue tree (planner on the root), rig B decomposed into LEGSMOKE-124, so checkpoints 3 and 4 were exercised on both branches of main's new tree_progress/root_phase_worker logic.",
     "Second conflict-forced rebase (architect-directed) onto main 9a3bb41b after #1011/#1010 merged: down.sh (LEGION-41's rewritten main() vs the relay stop), up.test.sh (both sides appended at end of file), README (start block; runtime/two-rigs paragraphs) conflicted and were merged keeping both sides. The diff is CHANGED (fingerprints above), in two steps: the merged resolutions themselves (down.sh reads the rig identity before terminate_pid_file issue-relay; the README two-rigs paragraph gains the isolated sentence; the start block keeps LEGION-40's sjawhar values with isolated as the mode), then integration commit 9b241b02: up.test.sh proves the relay env block carries the Dispatch URL/token resolve_dispatch_config resolved from envoy.json exactly as the daemon's does; up.sh names those sources at the relay start; README no longer claims a none-mode rig spawns its controller (LEGION-44's tester proved a fresh none rig opens no pane until an event arrives) and says checkpoint 13 has something to inspect only once a pane exists. No relay or script behaviour changed: the relay's NATS URL was already the per-rig nats_url, and its Dispatch values were already the ones resolve_dispatch_config assigns in main().",
-    "The first rebase's deviation, kept for the record: rebased onto main 63dac108 before the proof because the rig daemon on the 52c5e03e base refused to boot against pi-legion-envoy 1.23.0 (contract 2 vs required 1) and #975 rewrote the same checkpoints/README regions; 3 conflicted files merged keeping both sides; SMOKE_DISPATCH_INGRESS=rig and isolated coexist."
+    "The first rebase's deviation, kept for the record: rebased onto main 63dac108 before the proof because the rig daemon on the 52c5e03e base refused to boot against pi-legion-envoy 1.23.0 (contract 2 vs required 1) and #975 rewrote the same checkpoints/README regions; 3 conflicted files merged keeping both sides; SMOKE_DISPATCH_INGRESS=rig and isolated coexist.",
+    "Third conflict-forced rebase (architect-directed) onto main 108e2cec after #1029 (LEGION-71), carrying the reviewer's locally committed review.json (ee1c285d -> e30b7114) since the review App cannot push. README (checkpoints paragraph) and checkpoints.test.sh (bare-dir lines) conflicted; integrated with #1029's wording and trapped temp dir. Fingerprint 3193064d -> 67514dda, CHANGED: rebase alone gives 7ef730b9 (the two merged hunks), the corrective commit bcaf80c1 the rest.",
+    "Both review findings fixed in this PR (architect decision: repo-rule hits, no fast-follow) and the review's fast-follow tidy-ups landed in the same commit. Fast-follow: none."
   ],
   "openQuestions": [
-    "None. Both dependency PRs are in main; the branch sits on 9a3bb41b. The concurrent two-rig run (acceptance 1 as written) is now possible on LEGION-41's shape and remains the tester's E2E line."
+    "None. Awaiting the reviewer's Accepted: on the two threads (then `legion threads resolve` resolves them) and the tester's round on bcaf80c1."
   ],
   "liveProof": {
     "rigA": {
@@ -78,29 +86,60 @@
     "teardown": "LEGSMOKE-122/123/124 closed as done via the API (the relay carried issue.closed within one poll; trees went lingering); down.sh ran for both rigs; the deployment daemon and the LEGION-43 tester's legion-smoke-nats-legion43 rig were untouched."
   },
   "localChecks": {
-    "unit": "bun test scripts/smoke/issue-relay.test.ts: 22 pass (at 9b241b02)",
-    "lint": "packages/daemon/node_modules/.bin/biome check scripts/smoke/issue-relay.ts scripts/smoke/issue-relay.test.ts: clean; CI invocation `bunx biome check --error-on-warnings src/` in packages/daemon: clean",
-    "types": "tsc --noEmit over the relay and its test via a throwaway tsconfig extending packages/daemon/tsconfig.json (types: bun): exit 0; `bunx tsc --noEmit` in packages/daemon: exit 0",
-    "harnesses": "up.test.sh (incl. the new envoy.json relay case), checkpoints.test.sh (4 isolated PASS lines), down.test.sh (LEGION-41's rewritten cases plus the relay case) all PASS with LEGION_TREE/LEGION_ISSUE/LEGION_ROLE/LEGION_OMP_PATH/TMUX unset"
+    "unit": "bun test scripts/smoke/issue-relay.test.ts: 24 pass (at bcaf80c1)",
+    "lint": "packages/daemon: bunx biome check --error-on-warnings src/ clean; biome check on issue-relay.ts + issue-relay.test.ts clean",
+    "types": "packages/daemon: bunx tsc --noEmit exit 0; strict tsc --noEmit over issue-relay.ts + test via a throwaway tsconfig extending packages/daemon/tsconfig.json (types: bun): exit 0",
+    "harnesses": "up.test.sh 27 PASS, checkpoints.test.sh 31 PASS (4 isolated), down.test.sh 7 PASS, with LEGION_TREE/LEGION_ISSUE/LEGION_ROLE/LEGION_OMP_PATH/TMUX unset",
+    "live": "new loop against the production Dispatch for LEGSMOKE-123/-124 into a throwaway NATS with the ENVOY_NOTIFICATIONS stream: seed list, RELAY TRACKING LEGSMOKE-124, 17 rows relayed in global id order, RELAY READY, quiet updated_since ticks; container removed afterwards"
   },
   "subPlanningNeeded": false,
   "rebase": {
-    "at": "2026-09-13T13:43Z",
-    "tipBefore": "83b64a80f539",
-    "tipAfter": "9b241b02e872",
-    "fingerprintBefore": "45abf9b4c796009cf6d06ccb54e721b622938f8a59de72bcbb916f8f23ed26de",
-    "fingerprintRebasedOnly": "ccc5ded1b8caf8c048f2d8ea09a978d986e2048d877133dd018a1454d4353f81 (head d0b2e12c1541, before the integration commit)",
-    "fingerprintAfter": "3193064de16c1457abccf2775c0820c2453743bc461a0390fb6659e623e37add",
+    "at": "2026-09-13T16:10Z",
+    "tipBefore": "cfcf576b18d8 (remote; the reviewer's local ee1c285d3c38 shares the fingerprint, its commit is .legion only)",
+    "tipAfter": "bcaf80c10864",
+    "fingerprintBefore": "3193064de16c1457abccf2775c0820c2453743bc461a0390fb6659e623e37add",
+    "fingerprintRebasedOnly": "7ef730b98ef4008edb7b7046734c8c1820558ed7c2d99a54e98636313b33c61f (head e30b7114eb7c: the chain rebased past #1029 with the reviewer's review.json carried, before the corrective commit)",
+    "fingerprintAfter": "67514dda27a4f88eb54aaae70c83b4716ab4304f24d0c99560603825fa2cfc31",
     "verdict": "changed",
     "conflictedFiles": [
-      "scripts/smoke/down.sh",
-      "scripts/smoke/up.test.sh",
-      "scripts/smoke/README.md"
+      "scripts/smoke/README.md",
+      "scripts/smoke/checkpoints.test.sh"
     ],
-    "comment": "https://github.com/sjawhar/legion/pull/1026#issuecomment-5653653339",
-    "ci": "Tests run 34760576651 success at 9b241b02e872"
+    "comment": "https://github.com/sjawhar/legion/pull/1026#issuecomment-5654438883",
+    "ci": "Tests run 34767764900 success at bcaf80c10864",
+    "previous": [
+      {
+        "at": "2026-09-13T13:43Z",
+        "tipBefore": "83b64a80f539",
+        "tipAfter": "9b241b02e872",
+        "fingerprintBefore": "45abf9b4c796009cf6d06ccb54e721b622938f8a59de72bcbb916f8f23ed26de",
+        "fingerprintAfter": "3193064de16c1457abccf2775c0820c2453743bc461a0390fb6659e623e37add",
+        "verdict": "changed",
+        "comment": "https://github.com/sjawhar/legion/pull/1026#issuecomment-5653653339"
+      }
+    ]
+  },
+  "reviewRound": {
+    "review": "https://github.com/sjawhar/legion/pull/1026#pullrequestreview-5191228290 (COMMENT, two Minor threads)",
+    "fixCommit": "bcaf80c10864",
+    "threads": [
+      {
+        "id": "PRRT_kwDORFy7ds6h53ab",
+        "finding": "children() silently dropped a summary whose key fails ISSUE_KEY_PATTERN",
+        "fix": "IssueSummarySchema validates key and parent with ISSUE_KEY_PATTERN; the filter is gone; a mismatch is a RELAY RETRY 'unexpected shape' line",
+        "reply": "https://github.com/sjawhar/legion/pull/1026#discussion_r4000105328"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6h53ac",
+        "finding": "2 requests per tracked key per 2 s tick against the shared production Dispatch",
+        "fix": "one GET /api/v1/issues?project=<P>&updated_since=<watermark> per tick; closure over parent and /events decisions (last_seq > acked cursor) derived from the accumulated summaries; isolation unchanged",
+        "reply": "https://github.com/sjawhar/legion/pull/1026#discussion_r4000105384"
+      }
+    ],
+    "threadsResolve": "left open x2 at bcaf80c1 (newest reply by legion-implementer is not an acceptance); the reviewer's Accepted: resolves them on the next run",
+    "fastFollowLanded": "pid-record.sh (process_start_time/pid_is_live shared by up.sh, checkpoints.sh, down.sh; relay_is_live and down.sh's process_start_time removed); checkpoints.test.sh isolated block on run_checkpoint/expect_output; relay tests pin no retry constants, orderEvents describe folded into the loop test, two-key publish-failure case added; README modes-table cell is a plain noun phrase"
   },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T13:45:32.794Z"
+  "completed": "2026-09-13T16:14:04.379Z"
 }
