@@ -1950,6 +1950,56 @@ describe("Legion OMP extension", () => {
     // Each allowed command went down the ordinary path: one grant minted per call.
     expect(mints()).toBe(mintsBefore + allowed.length);
   });
+  test("applies the operation-log guard to every phase-worker role and leaves each role's sanctioned jj commands alone", async () => {
+    // What each role actually runs per the legion-worker skill and its role prompt.
+    const sanctioned: Record<LegionRole, string> = {
+      planner: 'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
+      implementer:
+        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" new && rm -rf .legion && jj -R "$LEGION_WORKSPACE" describe -m "chore: remove .legion handoffs" && jj -R "$LEGION_WORKSPACE" bookmark set legion/REPO-43 && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/REPO-43',
+      tester: 'jj -R "$LEGION_WORKSPACE" split -m "test: record handoff" .legion/test.json',
+      reviewer:
+        'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r @- .legion && legion gh -- api --method POST repos/o/r/pulls/7/reviews --input body.json',
+      merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
+      architect: "legion handoff complete --summary x",
+    };
+    for (const role of LEGION_ROLES) {
+      const workspace = await createJjWorkspace();
+      const { toolCall, context } = await bootWorker({
+        role,
+        workspace,
+        sessionId: `ses_${role}_jj_guard`,
+        extraRoutes: (url) =>
+          url.pathname === "/legion/v1/grants"
+            ? Response.json({ grantId: `grant-${role}`, expiresAt: "2099-01-01T00:00:00.000Z" })
+            : undefined,
+      });
+      const undo = await toolCall(
+        {
+          toolName: "bash",
+          toolCallId: `call-${role}-jj-undo`,
+          input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+        },
+        context
+      );
+      // A sub-architect's pane classifies as a phase worker's, so the operation-log guard (judged
+      // from the environment, ahead of every role gate so that it also binds a subagent) answers
+      // before its blanket bash gate; the root architect's pane, by contrast, never reaches it.
+      expect(undo).toEqual({
+        block: true,
+        reason: expect.stringContaining("every Legion issue workspace shares"),
+      });
+      await expect(
+        toolCall(
+          {
+            toolName: "bash",
+            toolCallId: `call-${role}-jj-sanctioned`,
+            input: { command: sanctioned[role] },
+          },
+          context
+        )
+      ).resolves.toBeUndefined();
+    }
+  });
   test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
@@ -2221,6 +2271,18 @@ describe("Legion OMP extension", () => {
           toolName: "bash",
           toolCallId: "call-controller-bash",
           input: { command: "legion state" },
+        },
+        context
+      )
+    ).resolves.toBeUndefined();
+    // LEGION-45: the controller does not commit and is not a phase worker; the operation-log guard
+    // never binds it.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-controller-jj",
+          input: { command: "jj -R /tmp/legion-workspace undo" },
         },
         context
       )
@@ -2980,6 +3042,17 @@ describe("Legion OMP extension", () => {
           toolCallId: "architect-bash",
           input: { command: "echo should-not-run" },
         },
+        context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "the architect delegates all code work to phase workers",
+    });
+    // LEGION-45: the root architect's blanket bash gate answers first; the phase-worker
+    // operation-log guard never reaches it (its behaviour is unchanged by that guard).
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "architect-bash-jj", input: { command: "jj undo" } },
         context
       )
     ).resolves.toEqual({
