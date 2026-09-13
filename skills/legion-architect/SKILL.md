@@ -97,16 +97,24 @@ sequence **before any Legion-role spawn**, including a sub-architect:
 
 ```text
 dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary document in place
-{ artifact, version } = dispatch_request_approval({ issue: "<root issue>", artifact: "spec" })
-legion({ op: "register_gate", issue: "<root issue>", artifactId: artifact, version })
+result = dispatch_request_approval({ issue: "<root issue>" })   // the primary document by default
+legion({
+  op: "register_gate",
+  issue: "<root issue>",
+  artifactId: result.details.artifact,   // the document id, a UUID such as 4e0aca36-77b3-43bd-96cf-d58890ae64e4
+  version: result.details.version,       // the version number the human is asked to approve
+})
 ```
 
 `dispatch_request_approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
 document's own header. Never open a `dispatch_ask` with an `Approve` option yourself: an
-ordinary question is not a gate and the daemon ignores its answer. The `artifact` and `version`
-values you pass to `register_gate` are the document id and the version the human is being asked
-to approve; the daemon uses them to recognize the document's approval events. Calling
+ordinary question is not a gate and the daemon ignores its answer. Copy `artifactId` and
+`version` from the result of `dispatch_request_approval` — its text reads "Approval requested for
+spec.md (document id <UUID>) at version <N>" and its `details.artifact` / `details.version` carry
+the same two values. The document id is never the slug or file name you passed in (`spec`,
+`spec.md`): the daemon recognizes the document's approval events by that id, and both the
+`legion` tool and the daemon refuse a value that is not a UUID. Calling
 `dispatch_request_approval` again while a request is open returns the same open request, so it
 is safe to repeat.
 

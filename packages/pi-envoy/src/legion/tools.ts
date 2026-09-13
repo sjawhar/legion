@@ -33,6 +33,10 @@ function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[
   return (LIFECYCLE_STATUSES as readonly string[]).includes(value);
 }
 
+/** A Dispatch artifact id (Postgres `gen_random_uuid()`): what `artifact.approved` and its
+ * siblings carry as `artifact_id`, and therefore the only value `register_gate` may record. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // pi.zod exposes only object/string/number/array/enum/unknown (no union or
 // discriminatedUnion), so per-op typing cannot be expressed as a discriminated
 // union at the schema layer. The schema stays a flat optional-fields bag; execute()
@@ -73,8 +77,10 @@ export function createLegionTool(deps: {
     label: "legion",
     description:
       "Perform a Legion lifecycle write through the Legion daemon. " +
-      "register_gate records the root spec document a human must approve: pass the `artifact` " +
-      "and `version` values dispatch_request_approval returned as `artifactId` and `version`. " +
+      "register_gate records the root spec document a human must approve: `artifactId` is the " +
+      "document id (a UUID) and `version` the version number, both copied from the `artifact` and " +
+      "`version` fields of dispatch_request_approval's result — never the slug or file name you " +
+      "passed to that tool. " +
       'spawn_worker\'s response "status" means: "spawned" — a fresh pane just opened and is ' +
       'running now; "resumed" — an existing worker was prompted directly over its live socket, ' +
       "or (if its boot has not confirmed yet) its task was recorded to deliver once that boot " +
@@ -123,12 +129,18 @@ export function createLegionTool(deps: {
             if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) {
               throw new Error("register_gate requires a positive integer version");
             }
+            const artifactId = stringInput("artifactId");
+            if (!UUID_PATTERN.test(artifactId)) {
+              throw new Error(
+                `register_gate requires artifactId to be the document id (a UUID) from dispatch_request_approval's result, not "${artifactId}"`
+              );
+            }
             await daemon.gatesRegister({
               tree: architect.tree,
               sessionId,
               secret: architect.secret,
               issue: stringInput("issue"),
-              artifactId: stringInput("artifactId"),
+              artifactId,
               version,
             });
             return jsonSuccess({});

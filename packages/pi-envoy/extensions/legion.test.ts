@@ -2516,13 +2516,18 @@ describe("Legion OMP extension", () => {
         details: {},
       },
       {
-        input: { op: "register_gate", issue, artifactId: "art-1", version: 2 },
+        input: {
+          op: "register_gate",
+          issue,
+          artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+          version: 2,
+        },
         request: {
           path: "/legion/v1/gates/register",
           body: {
             tree,
             issue,
-            artifactId: "art-1",
+            artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
             version: 2,
             sessionId: "ses_architect",
             secret: "root-secret",
@@ -2610,13 +2615,33 @@ describe("Legion OMP extension", () => {
     expect(
       await legion.execute(
         "call-no-version",
-        { op: "register_gate", issue, artifactId: "art-1" },
+        { op: "register_gate", issue, artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4" },
         undefined,
         undefined,
         context
       )
     ).toEqual({
       content: [{ type: "text", text: "register_gate requires a positive integer version" }],
+      details: {},
+      isError: true,
+    });
+    // The slug the architect typed into dispatch_request_approval is not the document id its
+    // result carries; the daemon's approval events name the id, so a slug never opens a gate.
+    expect(
+      await legion.execute(
+        "call-slug",
+        { op: "register_gate", issue, artifactId: "spec", version: 2 },
+        undefined,
+        undefined,
+        context
+      )
+    ).toEqual({
+      content: [
+        {
+          type: "text",
+          text: 'register_gate requires artifactId to be the document id (a UUID) from dispatch_request_approval\'s result, not "spec"',
+        },
+      ],
       details: {},
       isError: true,
     });

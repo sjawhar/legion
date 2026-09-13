@@ -164,13 +164,14 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
   }
 });
 
-test("GatesRegister.request names the spec document and version, never an ask id", () => {
+test("GatesRegister.request names the spec document by its id and version, never an ask id or a slug", () => {
   const capability = { tree: "WIDGETS-1", sessionId: "ses_architect", secret: "root-secret" };
+  const documentId = "4e0aca36-77b3-43bd-96cf-d58890ae64e4";
   expect(
     LegionDaemonApi.GatesRegister.request.safeParse({
       ...capability,
       issue: "WIDGETS-1",
-      artifactId: "art-1",
+      artifactId: documentId,
       version: 2,
     }).success
   ).toBeTrue();
@@ -180,17 +181,29 @@ test("GatesRegister.request names the spec document and version, never an ask id
     askId: "ask-1",
   });
   expect(askId.success).toBeFalse();
+  // The slug an architect typed into dispatch_request_approval is not the document id the
+  // approval events carry; registering it would create a gate no event can open.
+  const slug = LegionDaemonApi.GatesRegister.request.safeParse({
+    ...capability,
+    issue: "WIDGETS-1",
+    artifactId: "spec",
+    version: 2,
+  });
+  expect(slug.success).toBeFalse();
+  expect(slug.success ? [] : slug.error.issues.map((issue) => issue.path.join("."))).toEqual([
+    "artifactId",
+  ]);
   const missingVersion = LegionDaemonApi.GatesRegister.request.safeParse({
     ...capability,
     issue: "WIDGETS-1",
-    artifactId: "art-1",
+    artifactId: documentId,
   });
   expect(missingVersion.success).toBeFalse();
   expect(
     LegionDaemonApi.GatesRegister.request.safeParse({
       ...capability,
       issue: "WIDGETS-1",
-      artifactId: "art-1",
+      artifactId: documentId,
       version: 0,
     }).success
   ).toBeFalse();

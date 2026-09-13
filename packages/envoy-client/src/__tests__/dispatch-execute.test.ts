@@ -847,7 +847,9 @@ describe("executeDispatchTool", () => {
 
     expect(posts).toHaveLength(1);
     expect((posts[0]?.body as { actor: { kind: string } }).actor.kind).toBe("session");
-    expect(result.text).toContain("spec.md at version 3");
+    // The architect copies the document id and version from this text into register_gate, so
+    // both must be stated — the id in particular, since the slug it typed is not the id.
+    expect(result.text).toContain("spec.md (document id artifact-42) at version 3");
     expect(result.text).toContain("ask ask-9");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details?.topic).toBe("notifications.dispatch.issue.DSP-42.>");

@@ -247,10 +247,12 @@ export const LegionDaemonApi = {
   GatesRegister: {
     // `artifactId` and `version` are the `artifact` and `version` values from
     // `dispatch_request_approval`'s result: the document a human must approve, at the version the
-    // architect requested approval of.
+    // architect requested approval of. Dispatch artifact ids are UUIDs, and the approval events the
+    // daemon matches carry that UUID as `artifact_id` — so a slug or file name (`spec`, `spec.md`)
+    // is rejected here, naming the field, instead of registering a gate no event can ever open.
     request: architectCapability.extend({
       issue: nonEmptyString,
-      artifactId: nonEmptyString,
+      artifactId: z.uuid(),
       version: z.number().int().positive(),
     }),
     response: z.object({}),

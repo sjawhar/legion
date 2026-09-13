@@ -655,7 +655,11 @@ describe("Legion HTTP API", () => {
       tmuxPaneId: "%0",
       socketPath: "/tmp/legion/controller.sock",
     };
-    state.gates[root] = { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 };
+    state.gates[root] = {
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+      latestVersion: 3,
+      approvedVersion: 3,
+    };
     state.pendingStatusWrites[child] = { status: "in_progress", statusAtRecord: "todo" };
     state.controllerPendingNotices.push({ payloadJson: '{"type":"escalate"}', eventId: "evt-1" });
     state.roles[controllerToken(state.project)] = {
@@ -728,7 +732,11 @@ describe("Legion HTTP API", () => {
     });
     expect(body.admission).toEqual({ cap: 2, active: [], queue: [] });
     expect(body.gates).toEqual({
-      [root]: { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 },
+      [root]: {
+        artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+        latestVersion: 3,
+        approvedVersion: 3,
+      },
     });
     expect(body.controllerLocator).toEqual({
       runtime: "tmux",
@@ -1085,7 +1093,7 @@ describe("Legion HTTP API", () => {
     const outOfTree = await json("/legion/v1/gates/register", {
       tree: root,
       issue: foreign,
-      artifactId: "art-out-of-tree",
+      artifactId: "0f0f0f0f-0000-4000-8000-00000000f00d",
       version: 1,
       ...architect,
     });
@@ -1095,26 +1103,33 @@ describe("Legion HTTP API", () => {
     const registered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: child,
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       version: 3,
       ...architect,
     });
     expect(registered.response.status).toBe(200);
-    expect(state.gates[child]).toEqual({ artifactId: "art-1", latestVersion: 3 });
+    expect(state.gates[child]).toEqual({
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+      latestVersion: 3,
+    });
 
     // The same document at a later version keeps the approval already recorded (the gate is
     // now closed until that version is approved) and only raises latestVersion.
-    state.gates[child] = { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 };
+    state.gates[child] = {
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+      latestVersion: 3,
+      approvedVersion: 3,
+    };
     const reRegistered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: child,
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       version: 5,
       ...architect,
     });
     expect(reRegistered.response.status).toBe(200);
     expect(state.gates[child]).toEqual({
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       latestVersion: 5,
       approvedVersion: 3,
     });
@@ -1123,12 +1138,15 @@ describe("Legion HTTP API", () => {
     const replaced = await json("/legion/v1/gates/register", {
       tree: root,
       issue: child,
-      artifactId: "art-2",
+      artifactId: "9c1d3f5a-2b4e-4c6d-8e0f-1a2b3c4d5e6f",
       version: 1,
       ...architect,
     });
     expect(replaced.response.status).toBe(200);
-    expect(state.gates[child]).toEqual({ artifactId: "art-2", latestVersion: 1 });
+    expect(state.gates[child]).toEqual({
+      artifactId: "9c1d3f5a-2b4e-4c6d-8e0f-1a2b3c4d5e6f",
+      latestVersion: 1,
+    });
   });
 
   it("rejects a gate registration that names an ask id or omits the version with a 400 naming the field", async () => {
@@ -1159,11 +1177,23 @@ describe("Legion HTTP API", () => {
     const missingVersion = await json<{ error: string }>("/legion/v1/gates/register", {
       tree: root,
       issue: root,
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       ...architect,
     });
     expect(missingVersion.response.status).toBe(400);
     expect(missingVersion.body.error).toContain("version");
+
+    // The slug the architect typed into dispatch_request_approval, not the document id its
+    // result carries: no approval event would ever name it, so the daemon refuses the gate.
+    const slug = await json<{ error: string }>("/legion/v1/gates/register", {
+      tree: root,
+      issue: root,
+      artifactId: "spec",
+      version: 2,
+      ...architect,
+    });
+    expect(slug.response.status).toBe(400);
+    expect(slug.body.error).toContain("artifactId");
     expect(state.gates[root]).toBeUndefined();
   });
 
@@ -1192,13 +1222,13 @@ describe("Legion HTTP API", () => {
     const registered = await json("/legion/v1/gates/register", {
       tree: root,
       issue: root,
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       version: 2,
       ...architect,
     });
     expect(registered.response.status).toBe(200);
     expect(state.gates[root]).toEqual({
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       latestVersion: 2,
       approvedVersion: 2,
     });
@@ -1213,13 +1243,13 @@ describe("Legion HTTP API", () => {
     const again = await json("/legion/v1/gates/register", {
       tree: root,
       issue: root,
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       version: 2,
       ...architect,
     });
     expect(again.response.status).toBe(200);
     expect(state.gates[root]).toEqual({
-      artifactId: "art-1",
+      artifactId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
       latestVersion: 2,
       approvedVersion: 2,
     });
