@@ -36,6 +36,16 @@ describe("defaultRunner", () => {
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBeUndefined();
   });
+
+  it("does not report a timeout for a command a signal already terminated when the timer fired", async () => {
+    // The shell kills itself with SIGTERM at once (exit 143 by signal, no exit code); the
+    // backgrounded sleep keeps the pipes open past the budget exactly as above.
+    const result = await defaultRunner(["sh", "-c", "sleep 1 & kill -TERM $$"], {
+      timeoutMs: 200,
+    });
+    expect(result.exitCode).toBe(143);
+    expect(result.timedOut).toBeUndefined();
+  });
 });
 
 // =============================================================================
