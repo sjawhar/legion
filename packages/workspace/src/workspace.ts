@@ -177,8 +177,8 @@ async function ensureRepoClone(
 
 /** Creates the issue workspace on top of its bookmark `legion/<KEY>` when that bookmark resolves
  * to exactly one commit, or at `main` — creating the bookmark on the fresh working copy — when it
- * resolves to none. This is the one place provisioning creates or moves that bookmark. A workspace
- * that already exists gets no `jj bookmark` command at all (see `provisionIssueWorkspace`): after
+ * resolves to none. This is the one place provisioning creates that bookmark. A workspace that
+ * already exists gets no `jj bookmark` command at all (see `provisionIssueWorkspace`): after
  * a pull request merges and GitHub deletes its branch, the fetch drops the tracked local bookmark
  * that still matched it, and creating it again would put the issue's branch on whatever the
  * working copy holds (LEGION-28); a bookmark a worker left elsewhere stays there. The implementer's
@@ -346,12 +346,12 @@ export async function provisionIssueWorkspace(
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
   // matches exactly this pattern for a Dispatch key). `createWorkspace` alone touches it: it
   // creates the workspace on the bookmark's one commit, or at `main` creating the bookmark when
-  // none resolved, and stops before registering anything when the bookmark is conflicted. A
-  // workspace that already exists gets no bookmark command here — present or absent, the bookmark
-  // is left exactly as the fetch and the workers left it. The fetch may delete the bookmark
-  // together with its merged remote branch, but it never abandons the branch's commits or rewrites
-  // a workspace's working copy: `git.abandon-unreachable-commits` is `false` in the clone's
-  // per-repo jj settings before every fetch (LEGION-84).
+  // none resolved, and stops before registering anything when the bookmark is conflicted or
+  // unresolvable. A workspace that already exists gets no bookmark command here — present or
+  // absent, the bookmark is left exactly as the fetch and the workers left it. The fetch may
+  // delete the bookmark together with its merged remote branch, but it never abandons the branch's
+  // commits or rewrites a workspace's working copy: `git.abandon-unreachable-commits` is `false`
+  // in the clone's per-repo jj settings before every fetch (LEGION-84).
   const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);

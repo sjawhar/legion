@@ -172,6 +172,27 @@ function writeKeepUnreachableCommitsCommand(repoCloneDir: string): string[] {
     repoCloneDir,
   ];
 }
+/** The `jj workspace add` provisioning runs: the workspace's directory and name, the revision it is
+ * created at (a commit id when the bookmark resolved, `main` when nothing did), against the clone. */
+function workspaceAddCommand(
+  workspaceDir: string,
+  workspaceName: string,
+  revision: string,
+  repoCloneDir: string
+): string[] {
+  return [
+    "jj",
+    "workspace",
+    "add",
+    workspaceDir,
+    "--name",
+    workspaceName,
+    "--revision",
+    revision,
+    "-R",
+    repoCloneDir,
+  ];
+}
 
 const JJ_BINARIES = [
   { name: "local Sami JJ", command: ["jj"] },
@@ -295,18 +316,7 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ],
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -459,18 +469,7 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        commit,
-        "-R",
-        repoCloneDir,
-      ],
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -866,17 +865,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       // recorded operation), moves the bookmark there too, and the reconciliation conflicts it with
       // the `sibling-advance` move below — a jj behaviour, not a bookmark this code touched.
       await jj(["status"], { cwd: workspaceDir });
-      await jj([
-        "workspace",
-        "add",
-        siblingDir,
-        "--name",
-        "sibling",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ]);
+      await jj(workspaceAddCommand(siblingDir, "sibling", "main", repoCloneDir).slice(1));
       await jj(["new", "-m", "sibling advancement"], { cwd: siblingDir });
       await jj(["bookmark", "set", "sibling-advance"], { cwd: siblingDir });
       await jj(
@@ -1188,28 +1177,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const fetch = calls[2];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
-    const addAt = (revision: string) => [
-      "jj",
-      "workspace",
-      "add",
-      workspaceDir,
-      "--name",
-      "widgets-42",
-      "--revision",
-      revision,
-      "-R",
-      repoCloneDir,
-    ];
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAt(commit),
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAt(commit),
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -1262,28 +1239,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
-    const addAtMain = [
-      "jj",
-      "workspace",
-      "add",
-      workspaceDir,
-      "--name",
-      "widgets-42",
-      "--revision",
-      "main",
-      "-R",
-      repoCloneDir,
-    ];
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAtMain,
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAtMain,
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
