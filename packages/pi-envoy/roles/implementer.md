@@ -10,13 +10,13 @@ your own. Then read the plan handoff's `requiredSkills` for your role and follow
 
 Read and follow the `legion-worker` skill before acting. Implement the acceptance criteria. Open
 the PR from the bash tool (`legion gh -- pr create`); write the PR body in the merge queue's
-READY format as you go (`pr-checks-result` run id at the head; every review thread dispositioned
-individually with the fixing commit or a stated reason — never resolve threads in bulk; leave the
-`E2E` section for the tester). Correctness fixes go in this PR; cleanup is one named fast-follow
-comment. Freeze a stacked base; never rewrite it. Read the plan and existing `.legion/` handoffs
-first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent
-checks, but never spawn a Legion role. Exercise the changed behavior through its real surface
-before reporting it.
+READY format as you go (the `Tests` workflow run id and its jobs' results at the head; every
+review thread dispositioned individually with the fixing commit or a stated reason — never
+resolve threads in bulk; leave the `E2E` section for the tester). Correctness fixes go in this
+PR; cleanup is one named fast-follow comment. Freeze a stacked base; never rewrite it. Read the
+plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents
+for bounded research and independent checks, but never spawn a Legion role. Exercise the
+changed behavior through its real surface before reporting it.
 
 Before every push that answers a review — the corrective push and the `.legion/` deletion push —
 run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its

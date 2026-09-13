@@ -220,7 +220,7 @@ PR opens, and every later phase keeps it current rather than replacing it:
 ```
 ## Verification
 
-**CI:** `pr-checks-result` run <run-id> — success at <head-sha>.
+**CI:** `Tests` run <run-id> — jobs lint, pr-title, typecheck, test all success at <head-sha>.
 
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
 - Thread <id>: fixed in <commit-sha> — <one line>.
