@@ -138,7 +138,7 @@
     "conclusion": "success"
   },
   "acceptance3": "main ruleset 12331919: required_review_thread_resolution: false (recorded in the PR body and the spec's Requirements table).",
-  "prBodyEdits": 1,
+  "prBodyEdits": 2,
   "openQuestions": [],
   "subPlanningNeeded": false,
   "preRebaseCommits": [
@@ -166,7 +166,57 @@
     "resolution": "`const token = await redeemGitHubToken(deps); const childEnv = buildGitHubTokenEnv(token, deps.env); if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH); const exitCode = await deps.spawnGh(args, childEnv);` — #992's `pathWithoutWorkerBin` import, `grantFrom` (LEGION_GRANT_FILE first), and `readSecretPointer` untouched, so `legion threads resolve` reads LEGION_GRANT_FILE through the same `redeemGitHubToken` → `grantFrom(deps.env)` path.",
     "verification": "30 pass / 0 fail (`review-threads.test.ts` + `index.test.ts`, which now carries #992's grant-resolution tests); biome --error-on-warnings clean; tsc clean; zero conflict markers; live `bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion` at 504a7a3d → `no unresolved threads`, exit 0 (grant redeemed through the restarted daemon on the merged main)."
   },
+  "round2": {
+    "review": {
+      "id": 5189854058,
+      "state": "REQUEST_CHANGES",
+      "reviewedHead": "554eab619a498673cf9f28c64eb2ce3c766601ee",
+      "author": "legion-reviewer"
+    },
+    "blockingThread": {
+      "threadId": "PRRT_kwDORFy7ds6h3A8V",
+      "commentId": 3998955769,
+      "url": "https://github.com/sjawhar/legion/pull/1003#discussion_r3998955769",
+      "finding": "the stated reason the review App cannot resolve threads or push named a comment-author grant GitHub does not have, in four places; 'widening the App does not change that' is unsupported (a writer App would satisfy the rule) — the true statement is the design decision"
+    },
+    "fixingCommit": {
+      "sha": "5e0f6a0e663dcad8bce4edd8b69210356399eb01",
+      "message": "docs(legion): the review App cannot resolve threads because it is neither the PR author nor a repository writer"
+    },
+    "filesChanged": [
+      "packages/daemon/src/cli/index.ts (cmdThreadsResolve doc comment only)",
+      "packages/daemon/src/daemon/AGENTS.md",
+      "skills/legion-worker/SKILL.md",
+      "docs/solutions/daemon/external-red-and-phase-ownership.md"
+    ],
+    "wording": "GitHub lets only the pull request's author or an account with write (push) access to the repository resolve a review thread or push to its branch; the review App is neither by design (pull_requests: write, no contents), so it can post reviews and reply on threads but can neither resolve them nor push, and both answer Resource not accessible by integration. Widening the review App is rejected by design, not because it would not work.",
+    "alsoChecked": "packages/pi-envoy/roles/{reviewer,implementer,merger}.md, skills/legion-architect/SKILL.md, AGENTS.md, packages/pi-envoy/CHANGELOG.md state only the observable refusal and carried no comment-author clause; unchanged.",
+    "nonBlockingFoldedIn": [
+      "skills/legion-worker/SKILL.md ~247: 'a later reply by anyone else' → any later reply that is not itself an Accepted: — the opener's own follow-up included — leaves the thread open, since the command reads only the newest comment; the same tightening in packages/daemon/src/daemon/AGENTS.md's closing sentence."
+    ],
+    "fastFollow": "index.ts: `GhCommandDeps extends GrantRedemptionDeps`; review-threads.ts: `payload.data == null` guard, drop the unused `GITHUB_GRAPHQL_URL`/`isAcceptance` exports and move the `cmdThreadsResolve` policy loop beside the rule; unit pins for the exact `no unresolved threads` line and the pre-redemption `--repo`/`--pr` rejection.",
+    "prePushThreadsResolve": {
+      "command": "bun packages/daemon/src/cli/index.ts threads resolve --pr 1003 --repo sjawhar/legion",
+      "at": "working copy on 3f0167d1 (reviewer's review.json commit) before 5e0f6a0e was pushed",
+      "output": [
+        "left open https://github.com/sjawhar/legion/pull/1003#discussion_r3998955769 — newest reply by legion-reviewer is not an acceptance",
+        "resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998955772"
+      ],
+      "exit": 0,
+      "github": {
+        "PRRT_kwDORFy7ds6h3A8V": {
+          "isResolved": false
+        },
+        "PRRT_kwDORFy7ds6h3A8X": {
+          "isResolved": true,
+          "note": "review-App-opened acceptance-2 probe, resolved by the implement App — the cross-App case"
+        }
+      }
+    },
+    "verification": "30 pass / 0 fail (review-threads + index tests), biome --error-on-warnings clean, tsc clean; docs-only change, no behaviour touched.",
+    "reviewerCommitCarried": "3f0167d1 review: record handoff (round 1) was unpushed in the shared workspace; 5e0f6a0e is its child and the push carries both."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T06:17:11.936Z"
+  "completed": "2026-09-13T06:38:27.693Z"
 }
