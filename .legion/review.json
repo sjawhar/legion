@@ -1,20 +1,13 @@
 {
-  "round": 1,
-  "reviewedHead": "44675d2b809b4ae9c9ed9dd75965f895bfa3d5d3",
-  "branchTip": "d86dbde13312e62a2b7e1b0d5a83813a111559ce",
+  "round": 2,
+  "reviewedHead": "ccfa1291a68a76f485bd11974bcb17dafe4e2f7f",
+  "branchTip": "fcffedc9f95fab7873748443da521ab8748436b6",
   "review": {
-    "id": 5190947819,
-    "url": "https://github.com/sjawhar/legion/pull/1027#pullrequestreview-5190947819",
-    "event": "REQUEST_CHANGES"
+    "id": 5191160851,
+    "url": "https://github.com/sjawhar/legion/pull/1027#pullrequestreview-5191160851",
+    "event": "COMMENT"
   },
-  "verdict": "changes_requested",
-  "threads": {
-    "PRRT_kwDORFy7ds6h5OiH": "6160 finding 1 (blocking): closeTree pre-resurrect await already satisfied",
-    "PRRT_kwDORFy7ds6h5OiI": "6007 finding 2: drainSpawns after released save (dispose test)",
-    "PRRT_kwDORFy7ds6h5OiK": "6083 finding 2: drainSpawns after released save (confirmRootReady test)",
-    "PRRT_kwDORFy7ds6h5OiO": "4767 finding 3: tautological attemptsBeforeDispose > 0",
-    "PRRT_kwDORFy7ds6h5OiP": "5257 finding 3: tautological listPanesCalls >= 2"
-  },
+  "verdict": "clean",
   "githubFacts": {
     "checks": "lint, typecheck, test, pr-title all SUCCESS at d86dbde1",
     "threadsBefore": 0,
@@ -25,38 +18,6 @@
     "e2eAncestorOfTip": true
   },
   "acceptance1AtHead": "flushEventLoopUntil 0 matches; 19 await flushEventLoop( each under a // Negative wait: line; waitFor 1 caller; sha256 2b91200f4220a35f5450b73e5ff4c4bdace16f8573ceb548559234109846a3f5",
-  "findings": [
-    {
-      "n": 1,
-      "severity": "blocking",
-      "line": 6160,
-      "test": "closeTree landing during the pre-resurrect persist prevents the retry from resurrecting into a closed tree",
-      "issue": "saves.completed.reached(2) is already satisfied when awaited: closeTreeLocked persists unconditionally (processes.ts:1237, 1389), so saves.completed.count is 4 before saveGate.resolve(); the released save is never observed. Proven on a scratch copy: expect(saves.completed.count).toBe(1) before the await -> Received: 4.",
-      "fix": "const released = saves.completed.next() after closeTree returns and before saveGate.resolve(); await released; await processes.drainSpawns(); reword the comment. Validated on a scratch copy: 1 pass, count 5."
-    },
-    {
-      "n": 2,
-      "severity": "hardening-in-this-pr",
-      "lines": [
-        6007,
-        6083,
-        6160
-      ],
-      "issue": "windowCount === 1 cannot observe a wrongly-started resurrection: resurrect -> spawnRoot does real fs I/O before new-window, invisible within the one macrotask reached() defers; the old 2000-tick drain likely saw it.",
-      "fix": "await processes.drainSpawns() after each released-save await (resurrect sets this.resurrecting synchronously, 2071-2074; drainSpawns awaits it, 2258-2262)."
-    },
-    {
-      "n": 3,
-      "severity": "test-quality",
-      "lines": [
-        4766,
-        5257
-      ],
-      "issue": "tautological assertions under the new awaits: attemptsBeforeDispose > 0 after connects.reached(10) (variable otherwise unused); listPanesCalls >= 2 after runs(list-panes).completed.reached(2).",
-      "fix": "delete 4766-4767 and 5257; keep listPanesCalls (the fake branches on it)."
-    }
-  ],
-  "fastFollow": "wording pass, may ride in the corrective push: 19 Negative-wait markers repeat one 200+col sentence (site-specific <=100 col markers still satisfy the acceptance grep); marker at 4645 misdescribes the chain (re-arm real 0 ms yield, test still correct); synchronous continuation -> microtask-only at 4482-4484/5253-5254/5756-5757/5829-5830; flushEventLoop/waitFor docs overclaim every-positive-wait vs test-local gates; reissuablePanes doc tail; fixture nits (conditional sleep spread, payload.type narrowing, comments 531-532/577-578).",
   "thermo": {
     "head": "44675d2b",
     "deepReview": "1 blocking (= finding 1), 2 minor (finding 2 hardening; wording)",
@@ -64,8 +25,70 @@
   },
   "consideredNotRequired": "replacing the rearmed console.error gate at 12440-12480 with runs(list-panes).completed.next(): the plan dispositioned the gate; fails loud either way.",
   "verifiedClean": "every other converted await traced to its effect (launchWorker 2854; escalate 1804-1818 + releaseSlot 544; TmuxRuntime.stop 521-527; armRootRegistrationDeadline 1935; retireIdleWorker 1740 with microtask-only close tail); all 19 kept drains over synchronous declines; fixture wrappers behaviour-preserving; reached() deferral inert for the #981 sites; waitFor single caller bounded by the 5 s default timeout.",
-  "nextRound": "implementer lands findings 1-3 (test file only, no production file); tester re-runs the three pre-resurrect tests plus the two touched tests under load >= 60 and one full suite; reviewer re-reviews that head, answers each thread Accepted:/Still open:, then COMMENT if clean; .legion/ deletion push follows; APPROVE names that head by SHA.",
+  "nextRound": "implementer runs legion threads resolve --pr 1027 --repo sjawhar/legion (resolves the five Accepted: threads) and pushes the .legion/ deletion; reviewer confirms the new head differs from ccfa1291 only by that deletion and every thread shows isResolved true, then APPROVE names that head by SHA. No handoff write after this one: recreating .legion/ would change the approved head.",
+  "round1": {
+    "reviewedHead": "44675d2b809b4ae9c9ed9dd75965f895bfa3d5d3",
+    "review": {
+      "id": 5190947819,
+      "event": "REQUEST_CHANGES"
+    },
+    "findings": [
+      {
+        "n": 1,
+        "severity": "blocking",
+        "line": 6160,
+        "test": "closeTree landing during the pre-resurrect persist prevents the retry from resurrecting into a closed tree",
+        "issue": "saves.completed.reached(2) is already satisfied when awaited: closeTreeLocked persists unconditionally (processes.ts:1237, 1389), so saves.completed.count is 4 before saveGate.resolve(); the released save is never observed. Proven on a scratch copy: expect(saves.completed.count).toBe(1) before the await -> Received: 4.",
+        "fix": "const released = saves.completed.next() after closeTree returns and before saveGate.resolve(); await released; await processes.drainSpawns(); reword the comment. Validated on a scratch copy: 1 pass, count 5."
+      },
+      {
+        "n": 2,
+        "severity": "hardening-in-this-pr",
+        "lines": [
+          6007,
+          6083,
+          6160
+        ],
+        "issue": "windowCount === 1 cannot observe a wrongly-started resurrection: resurrect -> spawnRoot does real fs I/O before new-window, invisible within the one macrotask reached() defers; the old 2000-tick drain likely saw it.",
+        "fix": "await processes.drainSpawns() after each released-save await (resurrect sets this.resurrecting synchronously, 2071-2074; drainSpawns awaits it, 2258-2262)."
+      },
+      {
+        "n": 3,
+        "severity": "test-quality",
+        "lines": [
+          4766,
+          5257
+        ],
+        "issue": "tautological assertions under the new awaits: attemptsBeforeDispose > 0 after connects.reached(10) (variable otherwise unused); listPanesCalls >= 2 after runs(list-panes).completed.reached(2).",
+        "fix": "delete 4766-4767 and 5257; keep listPanesCalls (the fake branches on it)."
+      }
+    ],
+    "threads": {
+      "PRRT_kwDORFy7ds6h5OiH": "6160 finding 1 (blocking): closeTree pre-resurrect await already satisfied",
+      "PRRT_kwDORFy7ds6h5OiI": "6007 finding 2: drainSpawns after released save (dispose test)",
+      "PRRT_kwDORFy7ds6h5OiK": "6083 finding 2: drainSpawns after released save (confirmRootReady test)",
+      "PRRT_kwDORFy7ds6h5OiO": "4767 finding 3: tautological attemptsBeforeDispose > 0",
+      "PRRT_kwDORFy7ds6h5OiP": "5257 finding 3: tautological listPanesCalls >= 2"
+    },
+    "fastFollow": "wording pass, may ride in the corrective push: 19 Negative-wait markers repeat one 200+col sentence (site-specific <=100 col markers still satisfy the acceptance grep); marker at 4645 misdescribes the chain (re-arm real 0 ms yield, test still correct); synchronous continuation -> microtask-only at 4482-4484/5253-5254/5756-5757/5829-5830; flushEventLoop/waitFor docs overclaim every-positive-wait vs test-local gates; reissuablePanes doc tail; fixture nits (conditional sleep spread, payload.type narrowing, comments 531-532/577-578)."
+  },
+  "round2": {
+    "correctiveCommits": {
+      "f7c10278": "next()+drainSpawns() in the three pre-resurrect tests; two tautologies deleted",
+      "ccfa1291": "wording fast-follow + two behaviour-preserving manager() nits"
+    },
+    "githubFacts": {
+      "checks": "lint, typecheck, test, pr-title all SUCCESS at tip fcffedc9 (Tests run 34762835830 at ccfa1291)",
+      "threads": "5, each answered by the implementer in f7c10278; each now carries the reviewer's Accepted: reply (comment ids 4000013635, 4000013685, 4000013725, 4000013759, 4000013814) as its newest comment; isResolved false until the implementer's legion threads resolve",
+      "e2eHead": "ccfa1291 (tester round 2: 240/240 at load 120-131, full suite 1117/7/0, biome/tsc clean)"
+    },
+    "acceptance1AtHead": "flushEventLoopUntil 0; 19 drains each directly under a <=100-col // Negative wait: marker; waitFor 1 caller; 3 drainSpawns after released saves; sha256 cd64984d5dd736aa...",
+    "fixtureNitsVerified": "...(injectedSleep && {sleep}) spreads nothing for omitted or explicit-undefined sleep (boundedWait/TmuxRuntime still see undefined); published() key narrows to '?' for the same inputs as before; 12/12 consumer tests pass at head (sleeps: root-rearm; published: wd-died, root-launch-failed; idleWorkerFixture: idle-each; plus the five touched tests).",
+    "negativeControl": "tester mutation of treeStillUnconfirmed (disposed / readyConfirmedAt / closed-status) -> each pre-resurrect test fails first on expect(windowCount).toBe(1) Received 2 at head; the round-1 file's windowCount line was inert under the same mutations (downstream toMatchObject caught it). Accepted as the proof drainSpawns() restored the assertion's power.",
+    "thermo": "not re-run: this round changed only what the round-1 threads asked for plus wording",
+    "observation": "each of the five REST thread replies (POST /pulls/1027/comments with in_reply_to) fired an implicit empty-body 'commented' pr-review event (5 envoy pr-review notices with body ''); GitHub wraps a standalone reply in an implicit review. Worth knowing for the reviewer skill's one-review-per-round wake accounting; not a defect in this PR."
+  },
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T13:59:49.929Z"
+  "completed": "2026-09-13T15:32:05.351Z"
 }
