@@ -1,63 +1,93 @@
 {
-  "critical": 0,
-  "important": 0,
-  "minor": 5,
-  "verdict": "approved",
-  "reviewedHead": "5d895442375b7e930e59634254486f3d99e34d2f",
-  "codeHead": "3a9b01eb2d55",
+  "critical": 1,
+  "important": 1,
+  "minor": 1,
+  "verdict": "changes_requested",
+  "reviewedHead": "bf360849e07a9a427e2ffa005c614e5b9b68e886",
+  "codeHead": "143dd0d186ae",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
   "githubReview": {
-    "id": 5189502618,
-    "event": "COMMENT",
-    "url": "https://github.com/sjawhar/legion/pull/991#pullrequestreview-5189502618",
-    "approveOn": "the head that differs from 5d895442 by the .legion/ deletion alone, named by SHA"
+    "id": 5189613333,
+    "event": "REQUEST_CHANGES",
+    "url": "https://github.com/sjawhar/legion/pull/991#pullrequestreview-5189613333",
+    "threads": [
+      {
+        "path": "packages/daemon/src/daemon/processes.ts",
+        "line": 792,
+        "severity": "blocking"
+      },
+      {
+        "path": "packages/daemon/src/daemon/legion-state.ts",
+        "line": 461,
+        "severity": "should-fix"
+      },
+      {
+        "path": "packages/daemon/src/daemon/worker-admission.ts",
+        "line": 28,
+        "severity": "doc"
+      }
+    ]
   },
+  "rounds": [
+    {
+      "round": 1,
+      "reviewedHead": "5d895442375b7e930e59634254486f3d99e34d2f",
+      "codeHead": "3a9b01eb2d55",
+      "verdict": "clean (COMMENT while .legion/ present)",
+      "githubReview": 5189502618
+    },
+    {
+      "round": 2,
+      "reviewedHead": "bf360849e07a9a427e2ffa005c614e5b9b68e886",
+      "codeHead": "143dd0d186ae",
+      "verdict": "changes_requested",
+      "githubReview": 5189613333
+    }
+  ],
   "holdPoints": {
-    "1_oneWriter": "pass: only processes.ts:698 (assignment-gated) writes a new phase; /worker/started logs only; other phases[ writes are /phase/complete capture/restore/completed and closeTree delete (pre-existing)",
-    "2_pendingAssignmentThreading": "pass: typed end to end, no string remnant (tsc); migrateV24State classifies by payload in try/catch, passes objects and controller claims through; chain v25 contiguous (z.literal, newLegionState, loadState, migrations array); .v24.bak via generic path; main@origin still v24",
-    "3_resumeWorker": "pass: pre-check order assignment->drop then bystander->skip; architect exemption documented; lock-side guard first statement of deliverToWorker's mutateClaim callback; all three pendingAssignment write sites reachable only inside that callback and a concurrent spawnWorker takes the same per-token lock",
-    "4_publicSurface": "pass: spawnWorker(tree, issue, role, task: string) unchanged; api.ts and packages/contracts untouched; LEGION_DAEMON_API_VERSION=1 and pi-envoy daemonApiVersion=1 unchanged and correctly so (/state never exposed pendingAssignment or phases)",
-    "5_tests": "pass: mutations 1 and 2 reproduced (4 api.test.ts cases; 2 processes.test.ts cases); old-writer tests reworded not deleted; no log text pinned",
-    "6_docs": "pass: AGENTS.md three edits and SKILL.md one sentence match code and log lines; routeActive doc no longer names handleWorkerStarted",
-    "7_scope": "pass: index.ts untouched; index.test.ts only the forced pendingAssignment fixture line"
+    "samePredicate": "partial: isBystanderCatchup composes the shared isActivePhase (the driftable half) plus the architect literal; the literal composition is hand-written at three sites and drifted once in this PR -> shared isBystanderRole requested (thread legion-state.ts:461)",
+    "assignmentAndArchitectCatchupDelivered": "pass: isBystanderCatchup false for kind assignment and role architect; prompt/launch/ready branches unchanged past the guard; locked by the mirror halves and the sub-architect-at-ready test",
+    "dropConsumesEntryUnderLock": "pass: delete + queue.shift synchronous inside withAdmissionLock nested in drainWorkerQueue's mutateClaim; stale -> persist -> continue; no re-queue path without a new pendingAssignment except enqueueForRetryPending, whose promotion hits the first stale check",
+    "workerReadyConfirmsAndResetsLaunchFailures": "pass on the letter, FAIL on the consequence: the drop falls into the connect-only else branch which never seeds the pane's run state -> pane counted running forever, never idle-retired (thread processes.ts:792)",
+    "newTestsFailUnderGuardRemoval": "pass: mutation 5 -> both promotion tests fail (prompts / new-window|split-window); mutation 6 -> the ready drop test fails; reproduced independently",
+    "specV6Acceptance7": "implemented at both delivery points; 'instead of relaunching or prompting a finished worker' not yet honoured at ready because the relaunched pane stays resident and counted",
+    "fastFollowNone": "pass: PR body Fast-follow is none"
   },
   "verification": {
     "tsc": "bunx tsc --noEmit exit 0",
     "biome": "bunx biome check src/: 147 files clean",
-    "tests": "bun test legion-state api processes reducers index events catchup: 446 pass / 0 fail / 3 skip (LEGION_TMUX_LIVE-gated)",
-    "ci": "Tests run 34736410790 success at 5d895442 (typecheck, lint, test, pr-title)",
-    "threads": "0 open, 0 resolved; no prior reviews",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at 5d895442: no blocking findings"
+    "tests": "bun test legion-state api processes reducers index events catchup: 449 pass / 0 fail / 3 skip",
+    "ci": "Tests run 34738977216 success at bf360849; three runs green at 143dd0d1",
+    "repro": "throwaway test (deleted): tester booting with catchup, phases=implementer, workerCap 1 -> after workerReady: prompts [], runState unknown, getStateCalls 0, no idle-retire armed; spawnWorker(reviewer) -> queued",
+    "thermo": "deep-review: one blocking (the strand), one placement nit judged not a finding; code-quality: one should-fix (shared predicate), one doc word, four nits judged not findings"
   },
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/api/routes/workers.ts",
-      "description": "Bystander console.info also fires on every sub-architect catch-up relaunch; add role !== \"architect\" and reword the comment (Fast-follow)"
-    },
-    {
-      "severity": "minor",
+      "severity": "blocking",
       "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "\"the ONE writer\" wording overclaims: /phase/complete deletes/restores/marks completed; say \"the one place a new active phase is written\" (also handleWorkerStarted doc, routeActive doc, AGENTS.md) (Fast-follow)"
+      "description": "workerReady bystander drop: clientFor never calls getState and a never-prompted OMP emits no agent_end, so the pane stays runState unknown, counted by runningWorkerCount, never idle-retired; next spawn_worker queued behind it at small cap. Fix: retire the pane in the drop branch as retireIdleWorker does (recommended), or seed run state via getState with retire as the fallback; regression test must observe a subsequent spawnWorker admitted at cap 1; update AGENTS.md /worker/ready row and spawn_worker bullet; tester re-runs rig (g) at cap 1 with no intervening restart"
     },
     {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "resumeWorker doc: the root architect does reach this method via onUndeliverable and exits at the no-resumable-identity guard; state the real reason (Fast-follow)"
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
-      "description": "setRunStateSilently(\"idle\") is inert in the two booting-branch catch-up tests (Fast-follow)"
+      "severity": "should-fix",
+      "file": "packages/daemon/src/daemon/legion-state.ts",
+      "description": "Shared isBystanderRole(state, issue, role) so resumeWorker, isBystanderCatchup and handleWorkerStarted do not each hand-compose role !== architect && !isActivePhase"
     },
     {
       "severity": "minor",
       "file": "packages/daemon/src/daemon/worker-admission.ts",
-      "description": "Architect scope decision, not a spec-v5 defect: catch-up eligibility is checked at enqueue only; a catchup queued while its role was active is still delivered by promoteQueuedWorker/workerReady after the phase moves on (no phase write; plan concern #14 deferred it). Fix if wanted: the same predicate at the two delivery points plus two tests; needs a tester pass"
+      "description": "PromotionDecision doc: 'a session was never confirmed' should read 'no session was ever established' (readyConfirmedAt undefined returns stop, not stale)"
     }
   ],
-  "prBody": "CI, Thermo, and Fast-follow lines updated by the reviewer at 5d895442",
+  "judgedNotFindings": [
+    "bystander check placed after the cap check in promoteQueuedWorker (bounded by the next drain; consistent with the existing stale check)",
+    "activePhase accessor unifying isActivePhase/activePhaseLabel (YAGNI)",
+    "let pending mirroring in workerReady (style)",
+    "mirror halves of the new tests (redundant with existing assignment-delivery tests but behavioural)",
+    "invariant paragraph spelled out in three doc comments (accurate)"
+  ],
+  "prBody": "CI, Threads, Thermo lines updated by the reviewer at bf360849; Fast-follow remains none",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T04:15:11.763Z"
+  "completed": "2026-09-13T05:12:52.770Z"
 }
