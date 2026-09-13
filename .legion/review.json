@@ -1,0 +1,63 @@
+{
+  "critical": 0,
+  "important": 0,
+  "minor": 5,
+  "verdict": "approved",
+  "reviewedHead": "5d895442375b7e930e59634254486f3d99e34d2f",
+  "codeHead": "3a9b01eb2d55",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/991",
+  "githubReview": {
+    "id": 5189502618,
+    "event": "COMMENT",
+    "url": "https://github.com/sjawhar/legion/pull/991#pullrequestreview-5189502618",
+    "approveOn": "the head that differs from 5d895442 by the .legion/ deletion alone, named by SHA"
+  },
+  "holdPoints": {
+    "1_oneWriter": "pass: only processes.ts:698 (assignment-gated) writes a new phase; /worker/started logs only; other phases[ writes are /phase/complete capture/restore/completed and closeTree delete (pre-existing)",
+    "2_pendingAssignmentThreading": "pass: typed end to end, no string remnant (tsc); migrateV24State classifies by payload in try/catch, passes objects and controller claims through; chain v25 contiguous (z.literal, newLegionState, loadState, migrations array); .v24.bak via generic path; main@origin still v24",
+    "3_resumeWorker": "pass: pre-check order assignment->drop then bystander->skip; architect exemption documented; lock-side guard first statement of deliverToWorker's mutateClaim callback; all three pendingAssignment write sites reachable only inside that callback and a concurrent spawnWorker takes the same per-token lock",
+    "4_publicSurface": "pass: spawnWorker(tree, issue, role, task: string) unchanged; api.ts and packages/contracts untouched; LEGION_DAEMON_API_VERSION=1 and pi-envoy daemonApiVersion=1 unchanged and correctly so (/state never exposed pendingAssignment or phases)",
+    "5_tests": "pass: mutations 1 and 2 reproduced (4 api.test.ts cases; 2 processes.test.ts cases); old-writer tests reworded not deleted; no log text pinned",
+    "6_docs": "pass: AGENTS.md three edits and SKILL.md one sentence match code and log lines; routeActive doc no longer names handleWorkerStarted",
+    "7_scope": "pass: index.ts untouched; index.test.ts only the forced pendingAssignment fixture line"
+  },
+  "verification": {
+    "tsc": "bunx tsc --noEmit exit 0",
+    "biome": "bunx biome check src/: 147 files clean",
+    "tests": "bun test legion-state api processes reducers index events catchup: 446 pass / 0 fail / 3 skip (LEGION_TMUX_LIVE-gated)",
+    "ci": "Tests run 34736410790 success at 5d895442 (typecheck, lint, test, pr-title)",
+    "threads": "0 open, 0 resolved; no prior reviews",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at 5d895442: no blocking findings"
+  },
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/api/routes/workers.ts",
+      "description": "Bystander console.info also fires on every sub-architect catch-up relaunch; add role !== \"architect\" and reword the comment (Fast-follow)"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "\"the ONE writer\" wording overclaims: /phase/complete deletes/restores/marks completed; say \"the one place a new active phase is written\" (also handleWorkerStarted doc, routeActive doc, AGENTS.md) (Fast-follow)"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "resumeWorker doc: the root architect does reach this method via onUndeliverable and exits at the no-resumable-identity guard; state the real reason (Fast-follow)"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "description": "setRunStateSilently(\"idle\") is inert in the two booting-branch catch-up tests (Fast-follow)"
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/worker-admission.ts",
+      "description": "Architect scope decision, not a spec-v5 defect: catch-up eligibility is checked at enqueue only; a catchup queued while its role was active is still delivered by promoteQueuedWorker/workerReady after the phase moves on (no phase write; plan concern #14 deferred it). Fix if wanted: the same predicate at the two delivery points plus two tests; needs a tester pass"
+    }
+  ],
+  "prBody": "CI, Thermo, and Fast-follow lines updated by the reviewer at 5d895442",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T04:15:11.763Z"
+}
