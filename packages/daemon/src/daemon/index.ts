@@ -380,8 +380,8 @@ async function startDaemonLocked(
   // it needs no `api` reference (it only probes existing connections; it never mints a boot
   // token) — but a reconnect's own `get_state` response can still synchronously fire
   // `onIdle` -> `promoteWorkerQueue`, which is why that trigger (and `reconcileWorkerAdmission`)
-  // stay gated behind `processManager.enableLaunches()` below until `api` exists: nothing
-  // here is protected by call *ordering*, only by the gate.
+  // stay gated behind `processManager.enableLaunches()` — boot's launch hold, released only
+  // once the OMP probes pass below: nothing here is protected by call *ordering*, only by the gate.
   try {
     await processManager.reconnectWorkers();
   } catch (error) {

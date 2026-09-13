@@ -185,7 +185,8 @@ const DEFAULT_WORKER_IDLE_RETIRE_SECONDS = 600;
  * feature inverted for an operator who set a huge value to mean "never" — so a larger value is a
  * startup error that points at `0`, the real disable value. */
 const MAX_WORKER_IDLE_RETIRE_SECONDS = 2_147_483;
-const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
+/** Also the per-attempt budget `legion probe-image` uses (`IMAGE_PROBE_TIMEOUT_MS`). */
+export const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,

@@ -491,7 +491,9 @@ describe("legion probe-image", () => {
         })
       ).rejects.toEqual(
         expect.objectContaining({
-          message: expect.stringContaining("does not expose pi.agents"),
+          message: expect.stringContaining(
+            "OMP pi.agents probe never completed within its retry budget (6 attempts)"
+          ),
           code: 1,
         })
       );

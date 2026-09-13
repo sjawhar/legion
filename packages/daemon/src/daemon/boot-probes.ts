@@ -4,6 +4,7 @@ import path from "node:path";
 import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandResult, CommandRunner } from "../state/fetch";
+import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
 import { withOmpLaunchPrefix } from "./processes";
 
 /** The two probes `startDaemon` starts first and awaits only at its launch hold (state load,
@@ -45,9 +46,9 @@ export const DAEMON_PROBE_RETRY: ProbeRetryPolicy = {
 /** `legion probe-image`'s policy: the same backoff, bounded to six attempts (10+20+40+80+160 s,
  * about five minutes of waiting at worst) — an image build has no supervisor and must finish. */
 export const IMAGE_PROBE_RETRY: ProbeRetryPolicy = { ...DAEMON_PROBE_RETRY, maxAttempts: 6 };
-/** Per-attempt budget `legion probe-image` gives each probe (the daemon's default
- * `slow_command_timeout_seconds`). */
-export const IMAGE_PROBE_TIMEOUT_MS = 300_000;
+/** Per-attempt budget `legion probe-image` gives each probe: the daemon's default
+ * `slow_command_timeout_seconds`, so the image gate and a default-configured daemon agree. */
+export const IMAGE_PROBE_TIMEOUT_MS = DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS * 1000;
 
 export interface BootProbeOptions {
   readonly sleep: (ms: number) => Promise<void>;
@@ -95,14 +96,16 @@ function timedOutOutcome(
 }
 
 /** Runs `attempt` until it passes, fails definitively, or exhausts `policy.maxAttempts`; throws
- * `makeError(detail)` in the two failing cases. Each transient failure is logged with the delay
- * before the next try, so an operator watching the supervisor log sees the daemon waiting out
- * host load instead of a silent stall. A `signal` aborted during the backoff ends the loop with
- * `ProbeAbortedError` instead of a further attempt. */
+ * `makeError(detail, reason)` in the two failing cases — `"definitive"` for an answer no retry
+ * changes, `"exhausted"` when a bounded policy ran out of attempts while still transient, so the
+ * message can say the probe never completed rather than misreport what it never answered. Each
+ * transient failure is logged with the delay before the next try, so an operator watching the
+ * supervisor log sees the daemon waiting out host load instead of a silent stall. A `signal`
+ * aborted during the backoff ends the loop with `ProbeAbortedError` instead of a further attempt. */
 async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,
-  makeError: (detail: string) => Promise<Error>,
+  makeError: (detail: string, reason: "definitive" | "exhausted") => Promise<Error>,
   policy: ProbeRetryPolicy,
   sleep: (ms: number) => Promise<void>,
   signal: AbortSignal | undefined
@@ -111,8 +114,10 @@ async function retryBootProbe(
     if (signal?.aborted) throw new ProbeAbortedError(name);
     const outcome = await attempt();
     if (outcome.passed) return;
-    const exhausted = policy.maxAttempts !== undefined && i + 1 >= policy.maxAttempts;
-    if (outcome.definitive || exhausted) throw await makeError(outcome.detail);
+    if (outcome.definitive) throw await makeError(outcome.detail, "definitive");
+    if (policy.maxAttempts !== undefined && i + 1 >= policy.maxAttempts) {
+      throw await makeError(outcome.detail, "exhausted");
+    }
     const delay = Math.min(policy.initialDelayMs * 2 ** i, policy.maxDelayMs);
     const attemptLabel =
       policy.maxAttempts === undefined ? `${i + 1}` : `${i + 1}/${policy.maxAttempts}`;
@@ -167,9 +172,11 @@ export async function verifyOmpAgentsCapability(
           !output.includes(OMP_AGENTS_MISSING_MARKER);
         return { passed: false, definitive: !transient, detail };
       },
-      async (detail) =>
+      async (detail, reason) =>
         new Error(
-          `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+          reason === "exhausted"
+            ? `[legion] OMP pi.agents probe never completed within its retry budget (${options.retry.maxAttempts} attempts)${detail ? `: ${detail}` : ""}`
+            : `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
         ),
       options.retry,
       options.sleep,
@@ -302,7 +309,12 @@ export async function verifyLegionPluginLoaded(
         const transient = result.exitCode !== 0 && output.includes(LEGION_LOADED_MARKER);
         return { passed: false, definitive: !transient, detail: stderrTail };
       },
-      async (detail) => {
+      async (detail, reason) => {
+        if (reason === "exhausted") {
+          return new Error(
+            `[legion] pi-legion-envoy load probe never completed within its retry budget (${options.retry.maxAttempts} attempts) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+          );
+        }
         if (lastExitCode !== 0) {
           return new Error(
             `[legion] OMP launch probe failed (exit ${lastExitCode}) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
