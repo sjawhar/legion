@@ -2,14 +2,24 @@ import { z } from "zod";
 import { LEGION_ROLES } from "./legion-roles";
 
 /**
- * The version of the daemon HTTP API contract below, as spoken by the installed
+ * The version of the daemon/plugin contract, as spoken by the installed
  * `@sjawhar/pi-legion-envoy` plugin: the plugin's `package.json` carries the same number under
  * `legion.daemonApiVersion`, and the daemon refuses to start unless the installed plugin's number
- * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/index.ts). A plugin
- * built before a shape change validates every daemon response against the older strict schemas
- * and fails the controller/architect boot handshake silently, so the two sides are kept in
- * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
- * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
+ * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/boot-probes.ts). The
+ * number covers two things. The HTTP API shapes below: a plugin built before a shape change
+ * validates every daemon response against the older strict schemas and fails the
+ * controller/architect boot handshake silently. And the pane contract — every environment
+ * variable the daemon sets on a pane that the plugin reads or writes (`LEGION_GRANT_FILE`,
+ * `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `DISPATCH_TOKEN_FILE`,
+ * `DISPATCH_URL`, `LEGION_DAEMON_URL`, and the `LEGION_*` identity variables): a plugin that
+ * never writes the credential file the daemon names fails every worker the daemon spawns at its
+ * first `legion gh`/`jj git push`, after the work is done. Both skews are kept in lockstep the way
+ * `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change to a
+ * `LegionDaemonApi` request or response shape, OR to the pane contract, bumps this constant AND
+ * the plugin manifest's `legion.daemonApiVersion` in the same commit.
+ *
+ * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21);
+ * 2 — the credential file `LEGION_GRANT_FILE` (LEGION-54, bumped by LEGION-52).
  */
 export const LEGION_DAEMON_API_VERSION = 2;
 

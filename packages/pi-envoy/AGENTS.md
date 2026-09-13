@@ -15,6 +15,23 @@ subject instead of subscribing to a role subject itself. The agent pump replies 
 envelope, so the listener can turn a claimed-but-deaf holder into a `delivery_failed` exception after
 two seconds.
 
+## Daemon contract
+
+`package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
+speaks (currently 2). It covers the `LegionDaemonApi` HTTP request and response shapes the
+extension validates strictly (`@legion/contracts`), and the pane contract — every environment
+variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
+`LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `DISPATCH_TOKEN_FILE`, `DISPATCH_URL`,
+`LEGION_DAEMON_URL`, and the `LEGION_*` identity variables `classify.ts` reads. The daemon reads
+the installed manifest at boot (`verifyLegionPluginContract`,
+`packages/daemon/src/daemon/boot-probes.ts`) and refuses to start — before loading state,
+opening NATS, or serving its API — unless the field equals its `LEGION_DAEMON_API_VERSION`,
+naming the manifest path, the package version, and both numbers. A change to either surface bumps
+the field and the constant in the same commit (`src/legion/daemon-api-version.test.ts` pins them
+equal), and the deployment installs the release built from that commit before restarting the
+daemon. Contract 1 was the `runtime` locator discriminant (LEGION-21); 2 is the credential file
+(LEGION-54, bumped by LEGION-52).
+
 ## Native Dispatch tools
 
 The fourteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
