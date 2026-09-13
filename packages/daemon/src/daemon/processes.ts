@@ -82,6 +82,7 @@ export interface ProcessManagerDeps {
     stderr?: string;
     exitCode: number;
     timedOut?: CommandResult["timedOut"];
+    aborted?: CommandResult["aborted"];
   }>;
   natsPublish(subject: string, json: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
@@ -120,6 +121,10 @@ export interface ProcessManagerDeps {
   /** Invalidates a session's daemon-minted capability the moment its process is observed dead, so a stale credential file cannot keep minting grants until a respawn overwrites it. */
   revokeSessionCapability(sessionId: string): void;
   now(): number;
+  /** `<state_dir>/deployment-instructions.md`, materialized by `index.ts` at boot when
+   * `config.instructionsPath` is set — appended to every launched pane's system prompt as its
+   * last `--append-system-prompt "$(cat <this file>)"` fragment. Undefined: no fragment. */
+  deploymentInstructionsFile?: string;
 }
 
 const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
@@ -146,6 +151,25 @@ export function addressingFragment(
     `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
     "`-<role>` replaced."
   );
+}
+
+/** The ordered `--append-system-prompt` arguments every daemon-launched OMP process receives:
+ * the packaged role prompt, the addressing fragment (every root and phase worker; the controller
+ * has none), then the deployment instructions file when configured. Both file-backed fragments
+ * are `"$(cat <path>)"` expanded by the process's own shell — never inlined into the command
+ * (size and quoting). One builder for `issueInnerCommand` and `spawnController` alike, so the two
+ * launch sites cannot drift. */
+function systemPromptArguments(
+  promptPath: string,
+  addressingPrompt: string | undefined,
+  deploymentInstructionsFile: string | undefined
+): string {
+  const fragments = [`"$(cat ${shellPath(promptPath)})"`];
+  if (addressingPrompt !== undefined) fragments.push(shellPath(addressingPrompt));
+  if (deploymentInstructionsFile !== undefined) {
+    fragments.push(`"$(cat ${shellPath(deploymentInstructionsFile)})"`);
+  }
+  return fragments.map((fragment) => `--append-system-prompt ${fragment}`).join(" ");
 }
 
 /** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
@@ -2141,8 +2165,8 @@ export class ProcessManager {
   /** The OMP command every issue process — root architect and phase worker alike — runs inside
    * its shim: the configured launch prefix and invocation, `--resume` when a recorded session is
    * being resumed (a missing session file is a launch failure, see `computeResumeArgument`), RPC
-   * mode, the role's system prompt, and the addressing fragment. The prompt file is stat'ed
-   * first so a missing role prompt fails before any resume decision or spawn. */
+   * mode, and the system-prompt fragments from `systemPromptArguments`. The prompt file is
+   * stat'ed first so a missing role prompt fails before any resume decision or spawn. */
   private async issueInnerCommand(
     issue: IssueKey,
     promptPath: string,
@@ -2152,7 +2176,7 @@ export class ProcessManager {
   ): Promise<string> {
     await (this.deps.statPrompt ?? stat)(promptPath);
     const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
-    return `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})" --append-system-prompt ${shellPath(addressingPrompt)}`;
+    return `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc ${systemPromptArguments(promptPath, addressingPrompt, this.deps.deploymentInstructionsFile)}`;
   }
 
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the
@@ -2665,7 +2689,7 @@ export class ProcessManager {
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
     await (this.deps.statPrompt ?? stat)(promptPath);
     await this.writeOmpConfig(controllerDir);
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc --append-system-prompt "$(cat ${shellPath(promptPath)})"`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
     const token = controllerToken(this.deps.state.project);
     // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);

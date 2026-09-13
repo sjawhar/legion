@@ -531,21 +531,29 @@ type Route struct {
 }
 
 // IssueStatuses is the canonical Legion issue lifecycle.
-var IssueStatuses = map[string]struct{}{
-	"triage":       {},
-	"icebox":       {},
-	"backlog":      {},
-	"todo":         {},
-	"in_progress":  {},
-	"testing":      {},
-	"needs_review": {},
-	"retro":        {},
-	"done":         {},
+var IssueStatuses = []string{
+	"triage",
+	"icebox",
+	"backlog",
+	"todo",
+	"in_progress",
+	"testing",
+	"needs_review",
+	"retro",
+	"done",
 }
+
+var issueStatusSet = func() map[string]struct{} {
+	statuses := make(map[string]struct{}, len(IssueStatuses))
+	for _, status := range IssueStatuses {
+		statuses[status] = struct{}{}
+	}
+	return statuses
+}()
 
 // IsIssueStatus reports whether status belongs to the Legion lifecycle.
 func IsIssueStatus(status string) bool {
-	_, ok := IssueStatuses[status]
+	_, ok := issueStatusSet[status]
 	return ok
 }
 

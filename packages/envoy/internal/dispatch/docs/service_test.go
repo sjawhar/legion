@@ -1281,11 +1281,18 @@ func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {
 	}
 	t.Fatal("document room did not close after issue event")
 }
+
+// waitForRoomFailure returns once the room has failed. failRoom evicts the failed room from a
+// goroutine that also removes its state, so a poll that first runs after that eviction sees no
+// failure; the completed eviction of a room that was live is the same observation.
 func waitForRoomFailure(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if service.roomFailure(artifactID) != nil {
+			return
+		}
+		if _, resident := service.rooms.Load(artifactID); !resident && service.srv.GetDoc(artifactID) == nil {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -1352,4 +1359,53 @@ func loadDocumentVersion(ctx context.Context, database *store.Store, artifactID 
 		return model.Version{}, false, err
 	}
 	return version, true, nil
+}
+
+func TestTreeOfRefusesAnUnloadedDocument(t *testing.T) {
+	if _, err := treeOf(nil); !errors.Is(err, errDocUnloaded) {
+		t.Fatalf("treeOf(nil) error = %v, want errDocUnloaded", err)
+	}
+}
+
+// A room evicted after settleRoom's generation check but before it reads the live document
+// (an Evict whose timer Stop misses the timer that already fired) used to make the settle
+// dereference a nil document and crash the server. The settle now ends quietly and the next
+// write to the room settles on its own.
+func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	var evicted atomic.Int32
+	service.afterSettleWarm = func(room string) {
+		if room != artifactID || !evicted.CompareAndSwap(0, 1) {
+			return
+		}
+		if err := service.Evict(ctx, room); err != nil {
+			t.Errorf("evict mid-settle: %v", err)
+		}
+	}
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	deadline := time.Now().Add(3 * time.Second)
+	for evicted.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if evicted.Load() == 0 {
+		t.Fatal("settlement never reached the hook")
+	}
+	service.afterSettleWarm = nil
+	// The live edit was already persisted incrementally, so the reloaded text carries it; the
+	// room is not failed, so a new write still settles normally.
+	waitForNoLiveDocument(t, service, artifactID)
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "after\n" {
+		t.Fatalf("text after mid-settle eviction = %q (%v), want the persisted live text", got, err)
+	}
+	editLiveTree(t, service, artifactID, replaceRun("after", "later"))
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	var markdown string
+	if err := service.store.Pool.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, version.Number).Scan(&markdown); err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "later\n" {
+		t.Fatalf("version %d markdown = %q, want %q", version.Number, markdown, "later\n")
+	}
 }

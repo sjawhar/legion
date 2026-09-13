@@ -55,6 +55,13 @@ round, a question) can deliver a new prompt to this same session. Treat it as a
 continuation — re-read the current issue and your own prior handoff, since time has
 passed — never as a fresh identity.
 
+## Deployment instructions
+
+Deployment instructions, when present, are the operator's standing rules for this repository —
+required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
+the merge credential. They override this skill's defaults where they conflict; they never
+override a Sami ruling quoted here.
+
 ## Asking another role
 
 Reach any live role on this issue the same way you reach the architect: `envoy_publish` to
@@ -242,7 +249,23 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
 - The tester fills in the `E2E` section: the real surface a user reaches the criterion
   through, the exact command or run id, what was observed, the head SHA, and one negative
   control — a deliberately broken input and the refusal or failure it produced. A unit or
-  integration test is a regression lock, never proof of a criterion. Environment or
+  integration test is a regression lock, never proof of a criterion. The surface is
+  **production-like** — a devN stack, staging, or a local stack with real migrations, one that
+  has the resource the change touches — and the `E2E` line carries a **link** to that run,
+  screenshot, or e2e; the merge queue does not approve a user-facing change without it, and a
+  green unit suite is not it. Sami, 2026-09-13, verbatim: "They need to test everything in a
+  production-like environment before merging, and it is the agent that develops the feature
+  that is responsible for doing that. If there's anything blocking that, we need to fix it: if
+  it's infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's
+  skills, we need to fix the skills ... it should not require deploying to production to
+  realize your feature doesn't work." A code path whose first execution is after merge — a
+  deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
+  until the implementer has executed it against a devN stack; if no surface can reach it, the
+  tester names that missing surface as the blocker instead of passing the phase. Evidence for
+  the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on inspection
+  (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six deploy
+  slots died on code first executed after merge, including a production-only ECS bootstrap the
+  whole staging gate never ran. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
   re-pasted into the PR body each round.
@@ -266,6 +289,15 @@ Negative control: <deliberately broken input> → <refusal or failure observed>.
   `READY #<n> at <sha>` plus the PR body's gate facts to the merge queue's role
   (`notifications.role.pr-queue`) with `envoy_publish`. The merger never merges; the queue
   merges under its own authority.
+- **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
+  verbatim: "the agent that developed it should be responsible for testing in production."
+  The architect sends the implementer back once the merge lands; the implementer watches the
+  deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
+  drives the changed path in production through the user's own access path, and records the
+  observation on the PR and the issue before the architect signs off. A staging pass is not
+  this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
+  failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
+  implementer owns the fix and the next slot.
 
 ## Completion gate: handoff write, verification, and persistence
 

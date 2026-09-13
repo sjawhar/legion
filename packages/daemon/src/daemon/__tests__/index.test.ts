@@ -998,6 +998,89 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("refuses to boot on an unreadable instructions path before loading state, naming the resolved path", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const instructionsPath = path.join(stateDir, "ops", "deployment.md");
+    const daemonConfig = { ...config(stateDir), instructionsPath };
+    let loadedState = false;
+    let natsCreated = false;
+    let probed = false;
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...options.deps,
+            runner: async (command) => {
+              if (command[0] === "sh") probed = true;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            },
+            loadState: async () => {
+              loadedState = true;
+              return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+            },
+            createNatsTransport: async () => {
+              natsCreated = true;
+              throw new Error("NATS must not start after a failed instructions read");
+            },
+          },
+        })
+      ).rejects.toThrow(`instructions file ${instructionsPath} could not be read`);
+
+      expect(probed).toBeFalse();
+      expect(loadedState).toBeFalse();
+      expect(natsCreated).toBeFalse();
+      await expect(stat(path.join(stateDir, "deployment-instructions.md"))).rejects.toThrow();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("materializes the instructions file under state_dir at boot and appends it to the controller's launch command", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const instructionsPath = path.join(stateDir, "ops", "deployment.md");
+    await mkdir(path.dirname(instructionsPath), { recursive: true });
+    await writeFile(instructionsPath, "Required check: `pr-checks-result`.\n", "utf8");
+    const daemonConfig = { ...config(stateDir), instructionsPath };
+    const nats = new FakeNats();
+    const commands: string[][] = [];
+    const options = daemonTestDependencies(nats, [], () => {});
+    const innerRunner = options.deps?.runner;
+    if (!innerRunner) throw new Error("test dependencies are missing a runner");
+    let daemon: daemonIndex.DaemonHandle | undefined;
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          runner: async (command, runnerOptions) => {
+            commands.push(command);
+            return innerRunner(command, runnerOptions);
+          },
+        },
+      });
+      const materialized = path.join(stateDir, "deployment-instructions.md");
+      expect(await readFile(materialized, "utf8")).toBe(
+        "# Deployment instructions (acme/1)\n\nRequired check: `pr-checks-result`.\n"
+      );
+
+      nats.emit(
+        `notifications.envoy.exceptions.notifications.role.${controllerToken(daemonConfig.project)}`,
+        controllerException(daemonConfig.project)
+      );
+      await daemon.drain();
+      const controllerLaunch = commands.find(
+        (command) => command[0]?.endsWith("/tmux") && command[3] === "new-window"
+      );
+      if (!controllerLaunch) throw new Error("controller spawn did not open a tmux window");
+      expect(controllerLaunch.at(-1)).toEndWith(
+        ` --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)" --append-system-prompt "$(cat ${materialized})"`
+      );
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("forces a fresh anomaly resync every time a controller claims its role after a delivery_failed exception, never trusting the resync interval to have elapsed", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -1711,14 +1794,18 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("a boot failure while a probe attempt is still running aborts that attempt's runner call, so its OMP child is killed rather than left behind", async () => {
+  it("a boot failure while a probe attempt is still running aborts that attempt's runner call, so its OMP child is killed rather than left behind, and the chain ends without promising a retry", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     // Resolves once the first probe attempt is in flight (its runner call has started).
     const attemptStarted = Promise.withResolvers<void>();
     let attemptSignal: AbortSignal | undefined;
     let abortedWhileRunning = false;
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let probeAttempts = 0;
+    const logged: string[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    });
     try {
       await expect(
         startDaemon(daemonConfig, {
@@ -1726,10 +1813,15 @@ describe("startDaemon", () => {
             ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
             runner: async (command, options) => {
               if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+              probeAttempts += 1;
               attemptSignal = options?.signal;
               attemptStarted.resolve();
               // The real runner would be blocked on a hung OMP here; it returns only when its
-              // signal aborts (the kill), reporting the kill exactly as the budget would.
+              // signal aborts. This fixture reports the kill as the budget's (`timedOut`) — the
+              // race where the budget timer fired as the daemon gave up — because at the daemon
+              // level that is the one shape whose mishandling is observable: an attempt the
+              // runner reports as `aborted` is never logged even when misclassified (the chain's
+              // rejection is swallowed before the hold), so `boot-probes.test.ts` pins that case.
               await new Promise<void>((resolve) => {
                 if (options?.signal?.aborted) return resolve();
                 options?.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -1754,6 +1846,11 @@ describe("startDaemon", () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       expect(attemptSignal?.aborted).toBeTrue();
       expect(abortedWhileRunning).toBeTrue();
+      // The abandoned attempt is not a transient failure: nothing is logged as one, no retry is
+      // announced, and none runs — the start-up error above is the only thing to report.
+      expect(probeAttempts).toBe(1);
+      expect(logged).not.toContainEqual(expect.stringContaining("probe failed transiently"));
+      expect(logged).not.toContainEqual(expect.stringContaining("retrying in"));
     } finally {
       errorSpy.mockRestore();
       await rm(stateDir, { recursive: true, force: true });

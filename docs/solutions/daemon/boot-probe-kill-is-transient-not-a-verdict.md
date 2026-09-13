@@ -55,21 +55,31 @@ Two consequences a future caller must respect:
   timeout for a command that already exited when the timer fired", and the signal-terminated
   sibling — a child killed by a signal has `exitCode === null` and `signalCode` set).
 
-The runner also takes `signal?: AbortSignal` and kills the child when it aborts, reporting
-`timedOut` never a clean exit: a caller that gives up (a daemon whose boot failed elsewhere while
-a probe was still running) must not leave the child behind, because the kill timer dies with the
-caller's process. The tester observed `sleep 60` alive 45 s after the daemon had exited before
-this existed.
+The runner also takes `signal?: AbortSignal` and kills the child when it aborts: a caller that
+gives up (a daemon whose boot failed elsewhere while a probe was still running) must not leave
+the child behind, because the kill timer dies with the caller's process. The tester observed
+`sleep 60` alive 45 s after the daemon had exited before this existed. That kill is reported as
+`aborted: true`, never as `timedOut` — the first version reported both kills as a timeout, and
+the daemon then logged `probe failed transiently … command timed out after 300 s (ran 1.0 s);
+retrying in 10s` for an attempt it had abandoned and would never retry (LEGION-56, the
+fast-follow named in #980's approval). A kill the caller asked for says nothing about the
+command; at most one of the two markers is present, the first kill to land deciding which.
 
 ### 2. Callers classify the kill before any marker logic — but a printed negative wins
 
-`boot-probes.ts`'s `timedOutOutcome(result, stderrTail, negativeMarker)` runs before the
-marker checks: a kill with no answer is transient. The one exception is a probe that printed
-its negative marker (`LEGION_OMP_AGENTS=missing`, `LEGION_PLUGIN_LOADED=no`) and *then* hung
-past the budget: the answer is in, and it is definitive. The reviewer caught the first version
-of this, which retried a `missing` that happened to be followed by a hang. The rule:
+`boot-probes.ts`'s `killedOutcome(result, stderrTail, negativeMarker)` runs before the marker
+checks: an `aborted` kill ends the chain silently (no transient line, no retry, no diagnosis —
+the caller's own start-up error is what surfaces; `retryBootProbe` also ends silently when the
+signal has aborted by the time a *failed* attempt returns, whatever the failure was — a passed
+attempt still returns as passed, and the two-probe chain then stops at the next probe's loop-top
+check before anything is spawned), and a budget kill with
+no answer is transient. The one exception is a probe that printed its negative marker
+(`LEGION_OMP_AGENTS=missing`, `LEGION_PLUGIN_LOADED=no`) and *then* hung past the budget: the
+answer is in, and it is definitive. The reviewer caught the first version of this, which retried
+a `missing` that happened to be followed by a hang. The rule:
 
-- runner kill, no marker → transient (retry)
+- runner kill on the caller's abort → abandoned (silent end; the caller's error surfaces)
+- budget kill, no marker → transient (retry)
 - marker present + non-zero exit (OMP loaded the probe, then died under load) → transient
 - negative marker, whatever the exit → definitive
 - clean exit without the marker, or the launch command failing before OMP ran → definitive
@@ -100,10 +110,13 @@ and a default-configured daemon agree.
 ## What to reuse
 
 - Any runner with a kill timer must surface the kill as data (`timedOut` with limit and wall
-  time), guard it against an already-exited child, and take an abort signal; callers must never
-  collapse a kill into `Command failed (exit N)`.
-- A boot check spawning a subprocess has two failure classes; decide "did it answer?" before
-  "what did it answer?", and let a printed negative override a later kill.
+  time), guard it against an already-exited child, and take an abort signal whose kill it
+  reports separately (`aborted`) — a caller's own abandonment must never read as the command
+  running out of time; callers must never collapse either kill into `Command failed (exit N)`.
+- A boot check spawning a subprocess has three non-answers, not one: abandoned by its caller
+  (say nothing), killed by its budget (transient), answered negatively (definitive). Decide
+  "did the caller give up?" then "did it answer?" before "what did it answer?", and let a
+  printed negative override a later budget kill.
 - Under a supervisor, a transient failure is the daemon's to wait out; only a definitive one
   exits. Log every attempt with its delay so the operator sees waiting, not a stall.
 - A check that spawns nothing and cannot be load-sensitive (the plugin contract manifest read,

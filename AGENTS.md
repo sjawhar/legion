@@ -70,6 +70,7 @@ legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> -- <om
 | Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern                  |
 | Change Legion API      | `packages/daemon/src/daemon/api.ts`            | See @packages/daemon/src/daemon/AGENTS.md      |
 | Change daemon state    | `packages/daemon/src/daemon/legion-state.ts`   | See @packages/daemon/src/state/AGENTS.md       |
+| Deployment instructions (`legion.yaml` `instructions:`) | `packages/daemon/src/daemon/deployment-instructions.ts` | Operator markdown appended to every pane's system prompt; see @packages/daemon/src/daemon/AGENTS.md |
 | Add phase guidance     | `skills/legion-worker/SKILL.md`                | See @skills/AGENTS.md                          |
 | Change architect loop  | `skills/legion-architect/SKILL.md`             | See @skills/AGENTS.md                          |
 | Handoff ledger         | `.legion/` on issue branch                     | Committed phase output                          |
