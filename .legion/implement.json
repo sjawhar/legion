@@ -8,12 +8,13 @@
   ],
   "commits": {
     "daemon": "1dc60c16503e",
-    "docs": "ad8ed4d9944c"
+    "docs": "ad8ed4d9944c",
+    "reviewRound1": "0be9d772c8da"
   },
   "pr": {
     "number": 1017,
     "url": "https://github.com/sjawhar/legion/pull/1017",
-    "head": "ad8ed4d9944c5a9e594c232d09749c334d739b8d"
+    "head": "0be9d772c8da29bc23479aa51ba8b47f57b2ff77"
   },
   "trickyParts": [
     "secretsd identifies a tokenless caller by isatty(0) + readlink /proc/self/fd/0, so runSecretsGet spawns with stdio [inherit, pipe, pipe]; the config.test.ts human-tier test asserts the fake saw the test process's own fd 0 and the live boot's call log shows /dev/pts/100 (the pane's tty) for all four calls.",
@@ -36,7 +37,26 @@
     "typecheck": "packages/daemon bunx tsc --noEmit: exit 0",
     "liveBoot": "real `legion start` from tmux pane /dev/pts/100, scratch NATS, fake secrets on PATH: positive (human) -> both [legion] requesting lines then both listening lines, /legion/v1/state answered; negative (agent) -> exit 1 with the exact agent-tier refusal after one --no-request call. Quoted in PR #1017 body E2E section."
   },
+  "reviewRounds": [
+    {
+      "round": 1,
+      "review": "https://github.com/sjawhar/legion/pull/1017#pullrequestreview-5190487737",
+      "reviewedHead": "00f0458a21f6",
+      "commit": "0be9d772c8da",
+      "changed": [
+        "docs/deployment.md: rotation steps 5-7 reordered to store new keys (no revoke yet) -> restart daemon from launcher pane and confirm `legion gh -- auth status` from a fresh worker pane -> revoke old keys; step 7 states why in one sentence (the running daemon signs with the in-memory key until it restarts; revoking first breaks minting with no rollback if the restart fails). Matches spec version 9.",
+        "packages/daemon/src/daemon/AGENTS.md: `base64-decodes` rewrapped whole onto one line; following lines of the paragraph reflowed under 100 columns."
+      ],
+      "threads": {
+        "r3999454968": "blocking; replied 'Fixed in 0be9d772c8da'",
+        "r3999454969": "non-blocking; replied 'Fixed in 0be9d772c8da'"
+      },
+      "threadsResolve": "both `left open` (newest reply is the implementer's, not the reviewer's Accepted:) — expected before re-review",
+      "docsOnly": true,
+      "excluded": ".omp/config.yml (empty file OMP writes into the working copy) kept out of the commit via `jj split` on the two docs paths; the later .legion/ deletion commit must exclude it too."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T10:02:33.784Z"
+  "completed": "2026-09-13T11:20:47.691Z"
 }
