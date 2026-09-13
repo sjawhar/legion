@@ -144,7 +144,13 @@ async function ensureRepoClone(
       throw error;
     }
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    // Best-effort: a cleanup failure must never replace the clone's own error (a timeout, a
+    // rename collision) as the reason the launch failed. A leftover `.clone-*` sibling is inert.
+    try {
+      await rm(tempDir, { recursive: true, force: true });
+    } catch (error) {
+      console.error(`[legion] failed to remove temporary clone at ${tempDir}:`, error);
+    }
   }
 }
 
