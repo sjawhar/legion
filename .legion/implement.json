@@ -40,7 +40,8 @@
     "docs: LEGION_GRANT_FILE delivery - why the bash tool env was abandoned, what the pane carries",
     "docs: record the LEGION-54 pull request number",
     "docs: LEGION-54 ships as pi-envoy 1.17.4 (main released 1.17.3 first); the LEGION-32 observation note records its resolution",
-    "fix(daemon): strip inherited worker-bin from the daemon and pane PATH at the boundary; refuse a rig profile equal to the source profile"
+    "fix(daemon): strip inherited worker-bin from the daemon and pane PATH at the boundary; refuse a rig profile equal to the source profile",
+    "docs: LEGION-54 ships as pi-envoy 1.18.2 — main released 1.18.0 (#956) and 1.18.1 (#994/#995) first; fix(pi-envoy) over tag pi-legion-envoy-v1.18.1 is a patch bump"
   ],
   "deviations": [
     "Plan 1d named the pane-env method `credentialPaneEnvironment`; it is `credentialProcessEnvironment` because runtime.contract.test.ts ('ProcessManager's members carry no tmux vocabulary') forbids pane/window in ProcessManager identifiers. Same body, same call sites.",
@@ -81,10 +82,10 @@
     "rigRerun": "Both branch legs re-run at the rebased tree (rig-mode commit fb351195 = d61f711a's tree): /tmp/l54rig/runs/fixed-rpc-rebased-2026-09-13T02-56-52-261Z — 34 calls, 34 mints, 4 instances, 27/27 own-mint 0600, legion probes on calls 30/31/32/34 exit=0 with 200s, A-G PASS; /tmp/l54rig/runs/fixed-tui-rebased-2026-09-13T03-00-07-323Z — 9 calls, 9 mints, 2 instances, A-G PASS; negative control 403; acceptance-5 grep empty for 34+9 ids. The two before runs stand (released builds).",
     "rebasedUnit": "pi-envoy bun run test 159/159; daemon full bun test 986/991 on a loaded box, then processes.test.ts 214/214 x3 on an idle box; the rotating failures (retires an older generation's launch as stale / repeated dead-before-ready cycles / reconnectRoots re-arms / retires its own just-opened pane) are #980's timing-sensitive boot-watchdog tests and reproduce on a read-only export of main@origin under the same load (launchFailures count race, Expected 2 / Received 1). biome --error-on-warnings + tsc (daemon), lint/typecheck/build (pi-envoy) clean; contracts diff vs main empty."
   },
-  "deployment": "Operator installs @sjawhar/pi-legion-envoy@1.17.4 (release-bump from the fix(pi-envoy) title; the merger records the number the workflow actually publishes) into ~/.omp/profiles/legion/plugins, then immediately `legion restart sjawhar-legion` on merged main; live panes keep working via LEGION_GRANT fallback (no LEGION_GRANT_FILE in their env). Acceptance 7 is the sign-off's first fresh worker.",
+  "deployment": "Operator installs @sjawhar/pi-legion-envoy@1.18.2 (release-bump: fix(pi-envoy) title over tag pi-legion-envoy-v1.18.1 → 1.18.2, recomputed round 3; the merger records the number the workflow actually publishes) into ~/.omp/profiles/legion/plugins, then immediately `legion restart sjawhar-legion` on merged main; live panes keep working via LEGION_GRANT fallback (no LEGION_GRANT_FILE in their env). Acceptance 7 is the sign-off's first fresh worker.",
   "openQuestions": [],
   "subPlanningNeeded": false,
-  "head": "fa521041e866a2c23adee5264d944758b155713d (review round 2 fix; the round-2 handoff commit follows it)",
+  "head": "d507e6402cbf3f56edc758a2ba50906bb7a48353 (review round 3: rebased onto main@origin 195674ab + version docs; the round-3 handoff commit follows it)",
   "rebase": "Rebased once onto main@origin abaf08175c9b (chore: release pi-envoy v1.17.3) because GitHub reported the PR CONFLICTING/DIRTY. One textual conflict: the bun:test import line of packages/daemon/src/cli/__tests__/index.test.ts (main's #980 added spyOn, this branch added afterAll; both kept). Semantic merge checked by hand: installWorkerGhShim still runs in startDaemonLocked before the boot probes (index.ts:260 vs 285), and credentialProcessEnvironment + trackProcessSecrets survive at all three spawn sites in processes.ts. Main's #980/#983 daemon changes (boot probe retry, launch hold, per-claim reconnect) merged without further conflict.",
   "ci": "Dispatched for d61f711a: Tests run 34734634479 success (lint, typecheck, test); Legion Envoy and Contracts run 34734634480 success (pi-envoy job). PR mergeable=MERGEABLE, mergeStateStatus=BLOCKED (awaiting review). The daemon also published ci-green for d61f711a.",
   "reviewRound2": {
@@ -101,7 +102,36 @@
     "ci": "Dispatched for fa521041: Tests run 34737467249 success; Legion Envoy and Contracts run 34737467244 success; daemon published ci-green for fa521041.",
     "threads": "All ten answered in-thread with the commit SHA; not resolved by me — the reviewer resolves them."
   },
+  "reviewRound3": {
+    "trigger": "Tester round 2 (https://github.com/sjawhar/legion/pull/992#issuecomment-5651195604): passed both fixes and regression at 7c2dcb27; failed acceptance-8 'exact released version' (main released 1.18.0 via #956 at 04:16:54Z) and found the PR CONFLICTING (no pull_request runs for a conflicting head).",
+    "rebase": {
+      "onto": "main@origin 195674ab0592 (chore: release pi-envoy v1.18.1 [skip ci]); main gained #956 feat(daemon) pane system-prompt instructions, #990/#979/#989 skills+docs, #994, #995 fix(daemon) probe abort, #996 refactor(dispatch), and the 1.18.0/1.18.1 releases.",
+      "conflicts": [
+        "docs/solutions/legion/worker-pane-shell-gotchas.md intro paragraph: main (#956/LEGION-17) added an attribution sentence about the slow-push paragraph; this branch rewrote the 'Section 1's cause…' sentence. Resolved by keeping both: LEGION-17's sentence followed by the LEGION-54 fix sentence.",
+        "packages/daemon/src/daemon/AGENTS.md boot-probe paragraph: main (#995) appended the 'aborted attempt' sentence to the paragraph's tail; this branch (round 2) inserted the installWorkerGhShim ordering clause at its head. Resolved by taking main's paragraph and re-inserting the clause (string replace on the unchanged head sentence; asserted exactly one match)."
+      ],
+      "sweptCommit": "A never-pushed, undescribed working-copy commit holding only the daemon-provisioned empty .omp/config.yml was carried into the chain by the rebase; abandoned (jj abandon; never pushed, my own artifact). Reviewer's 4319ece9 and both tester handoffs remain in the chain.",
+      "semanticCheck": "credentialProcessEnvironment/trackProcessSecrets at all three spawn sites; installWorkerGhShim before the probes in startDaemonLocked; pathWithoutWorkerBin in resolveDaemonEnvironment; SKILL.md 'Four facts about gh' intact."
+    },
+    "version": {
+      "latestTagAtEdit": "pi-legion-envoy-v1.18.1 (commit e560b0ee; main head 195674ab is its release commit)",
+      "command": ".github/scripts/release-bump.sh 1.18.1 pi-legion-envoy-v1.18.1..<branch head> -- packages/pi-envoy packages/envoy-client packages/contracts packages/workspace skills",
+      "output": "1.18.2",
+      "note": "The pi-envoy release job runs the same script over ${PREV_TAG}..HEAD on main; inspection of recent squash merges (#983 20cbaf20, #995 74f7b107, #956 0c0bdd8e) shows the merge queue's squash body is its READY packet, not commit-subject bullets, so the feat(daemon) subject in this branch does not reach the classifier — the fix(pi-envoy) title alone yields a patch bump. If the merger's body ever carried a line starting 'feat…:' the workflow would publish 1.19.0 instead; the merger records the number actually published.",
+      "sitesUpdated": [
+        "docs/solutions/envoy/omp-tool-call-hook-rewrites-are-model-visible.md (2)",
+        "docs/solutions/legion/worker-pane-shell-gotchas.md (2)",
+        "docs/solutions/legion/grant-delivery-plugin-omp-contract.md (1)",
+        ".legion/implement.json deployment",
+        "PR body deployment step 1"
+      ],
+      "grep": "grep -rn '1\\.17\\.4\\|1\\.18\\.1' docs/solutions packages/pi-envoy/CHANGELOG.md packages/pi-envoy/scripts/grant-rig/README.md skills packages/daemon/src/daemon/AGENTS.md packages/pi-envoy/AGENTS.md → nothing"
+    },
+    "rigRerun": "Both legs at d507e640's tree, launched from a PATH carrying two worker-bin entries: fixed-rpc-r3 34/34 mints, 4 instances, 27/27 own-mint 0600, legion probes calls 30-34 exit=0 with 200s, probe worker-bin once, A-G PASS; fixed-tui-r3 9/9, 2 instances, A-G PASS; negative control 403; acceptance-5 grep empty for 34+9 ids. Dirs: /tmp/l54rig/runs/fixed-rpc-r3-2026-09-13T04-58-32-561Z, /tmp/l54rig/runs/fixed-tui-r3-2026-09-13T05-01-07-143Z.",
+    "tests": "daemon named files 92/92, processes.test.ts 216/216, pi-envoy legion.test.ts 54/54 and full 159/159; daemon full bun test 1000/1007 (the 4 fails are the #980 boot-watchdog/retire timing family, reproduced on main exports in rounds 1-2; the other 3 are the LEGION_TMUX_LIVE live-tmux tests from this pane); biome --error-on-warnings, tsc, pi-envoy lint/typecheck clean.",
+    "ci": "Dispatched for d507e640: Tests run 34739130921 success; Legion Envoy and Contracts run 34739130922 success; daemon published ci-green for d507e640. PR mergeable=MERGEABLE, mergeStateStatus=BLOCKED (review)."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T04:21:03.200Z"
+  "completed": "2026-09-13T05:04:47.088Z"
 }
