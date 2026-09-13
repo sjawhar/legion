@@ -680,7 +680,7 @@ main_with_real_port_check() {
 # shellcheck disable=SC2154 # daemon_port is a readonly of the sourced up.sh (source=/dev/null above)
 worker_stream_port="$((daemon_port + 1))"
 : >"$order_log"
-rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start" "${SMOKE_DIR}/nats-container"
+rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start" "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
 neighbour_status="$(set +e; (set -e; SMOKE_SS_BUSY_PORT="$worker_stream_port" main_with_real_port_check) >"$assertion_file" 2>&1; echo $?)"
 [[ "$neighbour_status" != 0 ]] || {
   printf 'expected main() to refuse when only the worker-stream port %s is occupied; output:\n%s\n' "$worker_stream_port" "$(<"$assertion_file")" >&2
@@ -694,10 +694,16 @@ neighbour_status="$(set +e; (set -e; SMOKE_SS_BUSY_PORT="$worker_stream_port" ma
   printf 'expected no process to start when the worker-stream port is occupied; order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1
 }
-# Acceptance 7: a refused start leaves no container record -- one naming a container that does
-# not exist would hide down.sh's legacy-name fallback and could overwrite a live rig's record.
+# Acceptance 7: a refused start leaves neither file down.sh keys on. A record naming a container
+# that does not exist would hide down.sh's legacy-name fallback and could overwrite a live rig's
+# record; legion.yaml without a record is the shape of a rig from before the record existed, for
+# which down.sh falls back to the shared legacy container name -- another tester's live rig.
 [[ ! -e "${SMOKE_DIR}/nats-container" ]] || {
   printf 'expected no nats-container record after the port check refused; found: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
+  exit 1
+}
+[[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
+  printf 'expected no legion.yaml after the port check refused; found:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
   exit 1
 }
 # The same neighbour occupied by this rig's own recorded daemon is a re-run, not a collision: the
@@ -718,9 +724,9 @@ rm -f "${SMOKE_DIR}/daemon.pid" "${SMOKE_DIR}/daemon.start"
 printf 'PASS: refuses to start when only the daemon worker-stream port (LEGION_DAEMON_PORT + 1) is occupied, unless by this rig'"'"'s own recorded daemon\n'
 
 # Acceptance 7, the other refusal point: ensure_nats itself refuses (the derived container exists
-# but is mapped to another port, or the NATS port is held by something else). The record must
-# not exist afterwards either -- it is written only once ensure_nats has returned.
-rm -f "${SMOKE_DIR}/nats-container"
+# but is mapped to another port, or the NATS port is held by something else). Neither the record
+# nor legion.yaml may exist afterwards -- both are written only once ensure_nats has returned.
+rm -f "${SMOKE_DIR}/nats-container" "${SMOKE_DIR}/legion.yaml" "${SMOKE_DIR}/deployment-instructions.md"
 : >"$order_log"
 # `fail` exits the subshell itself, so no `set -e` here: the inline `cd .../packages/envoy` before
 # ensure_nats has no real repo root under this harness and must stay non-fatal, as in every other
@@ -739,8 +745,12 @@ nats_refusal_status="$(set +e; (ensure_nats() { fail "NATS container $1 is not m
   printf 'expected no nats-container record after ensure_nats refused; found: %s\n' "$(<"${SMOKE_DIR}/nats-container")" >&2
   exit 1
 }
+[[ ! -e "${SMOKE_DIR}/legion.yaml" ]] || {
+  printf 'expected no legion.yaml after ensure_nats refused; found:\n%s\n' "$(<"${SMOKE_DIR}/legion.yaml")" >&2
+  exit 1
+}
 [[ ! -s "$order_log" || "$(<"$order_log")" != *'start_process:'* ]] || {
   printf 'expected no process to start when ensure_nats refused; order log:\n%s\n' "$(<"$order_log")" >&2
   exit 1
 }
-printf 'PASS: a start refused by the port check or by ensure_nats leaves no nats-container record\n'
+printf 'PASS: a start refused by the port check or by ensure_nats leaves neither a nats-container record nor a legion.yaml\n'

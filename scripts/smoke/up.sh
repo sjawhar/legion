@@ -635,16 +635,19 @@ main() {
   # leaves it at that default), so that port must be free as well. The same live-PID exception
   # covers a re-run against this rig's own daemon.
   assert_port_free 'Legion daemon worker stream' "$((daemon_port + 1))" "${smoke_dir}/daemon.pid"
-  write_daemon_config
   (
     cd "${repo_root}/packages/envoy"
     go build -o out/envoy-listener ./cmd/listener
   )
 
   ensure_nats "$nats_name"
-  # Written only once the container is running: down.sh removes exactly the container named here
-  # (so teardown needs no SMOKE_PROJECT), and a refused start must not leave a record naming a
-  # container that does not exist -- that would hide the legacy-name fallback from down.sh.
+  # Both files down.sh keys on are written here, together, only once the container is running:
+  # legion.yaml proves this directory started a rig, and the record names the container down.sh
+  # removes (so teardown needs no SMOKE_PROJECT). Nothing that can refuse the rig runs after this
+  # point. A refused start must leave neither -- legion.yaml alone is the shape of a rig from
+  # before the record existed, for which down.sh falls back to the shared legacy container name.
+  # The daemon reads legion.yaml at its start below; the listener does not.
+  write_daemon_config
   printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
 
   start_process listener env \
