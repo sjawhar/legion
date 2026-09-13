@@ -14,7 +14,7 @@
     "packages/envoy/internal/dispatch/model/model.go"
   ],
   "pullRequest": "https://github.com/sjawhar/legion/pull/1088",
-  "headSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
+  "headSha": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
   "proof": [
     {
       "criterion": "2. At 390px wide no control other than the title sits alone on a row; Close, Subscribers and the GitHub link share rows with their neighbours; the GitHub link shows the pull request's number and title, never a raw address; with two labels, a priority, a GitHub link, one subscriber and one open ask the header card is under 300px tall at 390x844.",
@@ -55,15 +55,23 @@
       "observed": "h1 width head/main: 1024 820/388, 1200 606/564, 1230 636/594, 1260 666/624, 1265 671/629, 1271 677/635, 1279 685/643, 1280 384/384, 1536 640/640; half the card content: 475/563/578/593/596/599/603/251/379; clipped: false at every width on the head. At 1024 the title takes its own row (state row and details line beneath); at 1200-1279 the state controls share the title row and the details line wraps beneath, as on main. Certified numbers unchanged: 238px at 390x844 with the fixture, 134px at 1280 with a one-line title, 160px at 1280 and 134px at 1536 with the fixture, document scrollWidth equal to clientWidth with eight 30-character labels at 1280 and 390, badge in view at 390/1280/1536 (x 37/357/357); the reviewer's short-line widths are 430/606/685 at 1024/1200/1279 (were 430/210/289; main 388/168/247).",
       "headSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
       "negativeControl": "With the old block classes restored (flex-1 min-w-[12rem]) and the bundle rebuilt, the extended regression test fails: title clipped at 1265px without the GitHub link (the h1 measured 85-104px at 1260-1279 on that build). The busy line with the GitHub link never squeezed on either build because the link makes the line too wide to share the row, which is why the test checks the line without the link first."
+    },
+    {
+      "criterion": "Review round two, blocking thread r4004858060: the first click after a title edit reaches the control under the pointer at 768-1279 (the header must not re-lay out on the blur), while the certified numbers and the busy-line title widths hold.",
+      "surface": "Local VITE_DISPATCH_E2E=1 build of 51830078 served by the real Go Dispatch server (e2e/run-server.sh, header identity alice) with an isolated Postgres 16 container and the fake Envoy listener, Chromium through the packages/dispatch Playwright harness; main measured by swapping main@origin 7238fdd8's IssueHeader.tsx and GitHubLink.tsx into the same build.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium issue.e2e.ts -g \"ends a title edit\" (the new regression lock) plus a throwaway proof spec (removed) that pressed Close out of an open title editor with page.mouse.down()/up() and measured the header on both builds; screenshot dispatch://LEGION-62/artifact/implemented4-title-edit-click-1024-png",
+      "observed": "Click: Close at (316,135) while editing stays at (316,135) after the mousedown and the issue closes on the first press at 1024, 1200 and 1279 (before: it jumped to (884,83)/(665,83)/(744,83) and the status stayed triage). Certified numbers unchanged: header 238px at 390x844 with the fixture, 134px at 1280 with a one-line title, 160px at 1280 and 134px at 1536 with the fixture, document scrollWidth equal to clientWidth with eight 30-character labels at 1280 and 390, badge in view at 390/1280/1536 (x 37/357/357). Busy-line title widths head/main, unclipped: 1024 820/388, 1200 996/564, 1265 1061/629, 1279 1075/643, 1280 384/384, 1536 640/640. Header heights head/main — busy line with the GitHub link: one-line title 176/124 at 1200 (state box 382 + details line 738 no longer fit on one row) and 124/124 at 1279; two-line title 190/136 at 1200 and 138/136 at 1279 (main clamps the title there; the head shows it in full). Busy line without the link: one-line 124/124 at 1200, 124/84 at 1279 (main: 62px title); two-line 138/136 and 138/84. Bare issue: one-line 124/72 at both, two-line 138/84 at both.",
+      "headSha": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+      "negativeControl": "With the reviewed head 91b18e62's IssueHeader.tsx (basis-full only while editing) swapped in and the bundle rebuilt, the regression lock fails at its first step at 1024 (the pin never reports aria-pressed=true after the press) and the probe logs Close jumping on mousedown with the status unchanged."
     }
   ],
   "verification": {
-    "unit": "cd packages/dispatch && bun test web/src: 891 pass, 0 fail.",
+    "unit": "cd packages/dispatch && bun test web/src: 890 pass, 0 fail.",
     "lint": "bunx biome check web/src e2e: clean.",
     "typecheck": "bunx tsc --noEmit in packages/dispatch: clean.",
-    "e2e_touched": "bunx playwright test --project=chromium --project=iphone issue.e2e.ts labels.e2e.ts on the VITE_DISPATCH_E2E=1 build of 91b18e62: 19 passed, 3 skipped (the viewport tests skip on iphone by design).",
-    "e2e_full": "Full Playwright suite on the same build: chromium 103 passed, 6 skipped, 5 failed; iphone 102 passed, 7 skipped, 5 failed. All ten failures are LEGION-142 EACCES on fixed /tmp/<name>.png screenshot paths owned by another user of this box (agents, ask-blocks x2, inbox, polish). No fixed /tmp path was added.",
-    "go": "Not re-run: no Go file changed since 79f4d50c (CI runs it on every push)."
+    "go": "DISPATCH_TEST_DATABASE_URL=<isolated pg> go test ./internal/dispatch/api -count=1: ok (150s); the two envoy-go failures the tester saw in CI at e0326ca3 (TestMarkAnchorVerifiesBrowserMark, TestSettleRetriesTransientVersionWriteFailure) pass here and touch nothing this PR changed.",
+    "e2e_touched": "bunx playwright test --project=chromium --project=iphone issue.e2e.ts labels.e2e.ts on the VITE_DISPATCH_E2E=1 build of 51830078: 20 passed, 4 skipped (the viewport tests skip on iphone by design).",
+    "e2e_full": "Full Playwright suite on the same build: chromium 104 passed, 6 skipped, 5 failed; iphone 102 passed, 8 skipped, 5 failed. All ten failures are LEGION-142 EACCES on fixed /tmp/<name>.png screenshot paths owned by another user of this box (agents, ask-blocks x2, inbox, polish). No fixed /tmp path was added."
   },
   "trickyParts": [
     "Below 1280px styles.css forces every input and select to font-size 1rem (the iOS focus-zoom guard), so Tailwind text sizes cannot shrink the status and priority pills on a phone; the native priority select was 128px because of its 'Priority —' option plus the dropdown arrow. It is now appearance-none (text-only, like the status pill) with the unset label 'Priority', which leaves 14px of slack for Close on the 316px phone row even with this box's wide DejaVu Sans fallback font.",
@@ -72,7 +80,8 @@
     "Harness gotcha: packages/dispatch's unit suite (classes-in-build-css.test.ts) rebuilds web/dist WITHOUT VITE_DISPATCH_E2E=1. Running the e2e suite against that production build fails live.e2e.ts (two stream connections on load, a cold reconnect) — rebuild with the flag before any e2e run after bun test.",
     "The whose-turn badge leads the details line at every width (one DOM position) instead of trailing it with ml-auto: at 1280 with the sidebar and margin open the line is 502px and cannot hold every detail, so a trailing badge would be scrolled out of view.",
     "A React inline callback ref (ref={(node) => node?.focus()}) is re-invoked on every render, so using it to autofocus the route input re-stole focus from the title editor on each header re-render (issue-writes.test.tsx caught it). The route input is focused once by an effect keyed on routeEditing; the title input keeps the inline pattern because it is the only field that uses it.",
-    "The header title block must be sized by its text (flex-auto), not flex-1 with a minimum: flex line-breaking uses the hypothetical size, so a basis-0 block with min-w-[12rem] told the browser the title was 192px wide and the state controls and details line shared its row whenever they fit beside 192px, leaving the title 70-104px just below the fit threshold (1260-1279 with badge + one label + Route + Subscribers; main squeezes the same way at 1279). With flex-auto the block asks for its full text width, so the neighbours share the row only when they fit beside the whole title and otherwise wrap beneath it; alone on a row it still shrinks to the row (min-w-0) and the h1 clamps to two lines. While editing, the block is basis-full so the input (whose intrinsic width is ~20 characters) does not pull the state controls onto its row."
+    "The header title slot must have exactly one flex-basis in view and edit mode. Round three gave it flex-auto in view and basis-full while editing: the row re-laid out on the blur a mousedown on any other control causes, the mouseup landed on a different element, and Chromium delivered the click to the common ancestor — the first click after a title edit did nothing at 768-1279 (Close jumped from (316,135) to (884,83) at 1024). It is now basis-full 2xl:basis-auto in both modes (the architect's call): below 2xl the title always owns its row and the state controls and details line share the row beneath it; from 2xl it is content-sized with grow, exactly main's flex: 1 1 auto. The cost is one extra row where main fit title, state and details on one row (a bare issue at 1200-1279: 124px vs 72), and a third row where the state box and a long details line no longer fit together (busy line with the GitHub link at 1200: 176 vs 124).",
+    "A TanStack query error lands through notifyManager (setTimeout 0), so a unit test that asserts the degraded render right after waitFor(toHaveBeenCalledWith) can run while the query is still pending — where the pre-fix code rendered the same thing. Wait on queryClient.getQueryState(key).status === \"error\" (renderIssuePage takes the QueryClient) before asserting."
   ],
   "deviations": [
     "The architect's push instruction said 'jj bookmark set legion/LEGION-62 -r @'; the bookmark was set to @- instead, because @ is the daemon-provisioned working-copy commit holding only .omp/config.yml with no description, which jj refuses to push. The branch tip is the last described commit, 79f4d50c.",
@@ -80,7 +89,7 @@
     "gh pr create had to run from /tmp: inside the workspace it fails with 'not a git repository: /home/ubuntu/.../worktrees/legion-62' (the colocated worktree's gitdir points at another user's home)."
   ],
   "openQuestions": [],
-  "previousHeadSha": "590a125129d3cd7b8813b604610b2da378b23c08",
+  "previousHeadSha": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
   "reviewRound": {
     "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
     "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
@@ -109,7 +118,25 @@
     "fixedIn": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
     "measurements": "Busy line (whose-turn badge, one label, Route, Subscribers, GitHub link), 40-character title, h1 width head/main (half the card content in brackets): 1024 820/388 [475]; 1200 606/564 [563]; 1230 636/594 [578]; 1260 666/624 [593]; 1265 671/629 [596]; 1271 677/635 [599]; 1279 685/643 [603]; 1280 384/384 [251]; 1536 640/640 [379]. Without the GitHub link (the tester's line) head is identical; main drops to 62px clipped at 1279. Nothing clipped on the head at any width."
   },
+  "reviewRound2": {
+    "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5197298840",
+    "reviewedHead": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
+    "answeredIn": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+    "threads": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858060",
+        "reply": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004986234",
+        "answer": "Blocking: the title slot is basis-full 2xl:basis-auto in both modes (option 1, architect's call); the first click after a title edit now lands (Close stays at (316,135) on mousedown and closes the issue at 1024/1200/1279). Regression lock in issue.e2e.ts presses the pin and Close with mouse.down/up out of an open title editor at 1024 and 1279; red on 91b18e62. Code comment and packages/dispatch/AGENTS.md state the shipped rule."
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858068",
+        "reply": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004986401",
+        "answer": "Should-fix: the GitHubLink unit test renders with its own QueryClient and waits for the github-link-checks query to reach status error before asserting within the link; 5/5 red with 79f4d50c's GitHubLink swapped in, green on the fix."
+      }
+    ],
+    "threadsResolve": "legion threads resolve --pr 1088 --repo sjawhar/legion before the push: resolved r4004180109, r4004180117, r4004180121 (the round-one threads, each carrying the reviewer's Accepted reply); left open r4004858060 and r4004858068 (newest reply by legion-implementer is not an acceptance); exit 0."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T11:21:02.948Z"
+  "completed": "2026-09-14T12:13:43.173Z"
 }
