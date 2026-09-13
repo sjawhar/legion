@@ -23,15 +23,22 @@ symptoms:
 
 ## Context
 
-Legion runs every role but the reviewer as the implement App (`legion-implementer[bot]`); only the
-reviewer runs as the review App (`legion-reviewer[bot]`) — `appRoleForLegionRole` in
-`packages/daemon/src/daemon/api/github.ts`. LEGION-34's acceptance 2 was "a thread the **reviewer**
-opened and accepted ends resolved by the implementer's `legion threads resolve`". The implementer and
-the tester both run as the implement App, so every thread either of them opens is an
-implement-App-opened thread: their live runs (sjawhar/legion#1003, E2E steps 1–4) proved the
-mechanism — read, accept-rule, one `resolveReviewThread` per thread, `isResolved` flipping on
-GitHub — but on the wrong identity. The one case the feature exists for (the review App opens, the
-implement App closes) cannot be produced by any phase but the review phase.
+At the time (before LEGION-42, #1021) Legion ran every role but the reviewer as the implement
+App (`legion-implementer[bot]`) and only the reviewer as the review App (`legion-reviewer[bot]`):
+the credential path's `appRoleForLegionRole` then lived in `api/github.ts` and disagreed with the
+catch-up path's table. Since LEGION-42 one exhaustive table in
+`packages/daemon/src/daemon/github-apps.ts` decides — planner, tester, reviewer, and architects
+act as the review App; implementer and merger as the implement App
+(`one-role-keyed-table-decides-which-github-app-acts.md`). LEGION-34's acceptance 2 was "a thread
+the **reviewer** opened and accepted ends resolved by the implementer's `legion threads resolve`".
+Under the old mapping the implementer and the tester both ran as the implement App, so every
+thread either of them opened was an implement-App-opened thread: their live runs
+(sjawhar/legion#1003, E2E steps 1–4) proved the mechanism — read, accept-rule, one
+`resolveReviewThread` per thread, `isResolved` flipping on GitHub — but on the wrong identity. The
+one case the feature exists for (the review App opens, the implement App closes) could not be
+produced by any phase but the review phase. Today the tester also acts as the review App, so a
+tester-opened thread *is* a review-App thread — but the principle stands for any criterion of the
+shape below, and a thread the reviewer opens in its own round is still the truthful probe.
 
 ## The pattern
 

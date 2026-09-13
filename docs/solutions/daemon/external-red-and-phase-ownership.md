@@ -19,7 +19,7 @@ related_issues:
 symptoms:
   - "`pr-blocked` wakes on every push to a PR whose failing check is external and expected"
   - "`legion handoff complete` → 409 `Phase for <KEY> is no longer owned by this worker` for the worker the architect just prompted"
-  - "the review App cannot push its handoff commit or resolve review threads (`Resource not accessible by integration`)"
+  - "the review App cannot push its handoff commit (`remote: Repository not found.`) or resolve review threads (`Resource not accessible by integration`)"
 ---
 
 # A By-Design Red PR Exhausts fixAttempts, and worker/started Stole the Active Phase (fixed in LEGION-37)
@@ -86,9 +86,12 @@ the architect over Envoy with the work already pushed; do not retry in a loop.
 The `legion-reviewer` GitHub App holds `pull_requests: write` and no `contents` permission, and
 GitHub lets only the pull request's author or an account with write (push) access to the repository
 resolve a review thread or push to its branch. The review App is neither by design, so
-`resolveReviewThread` from it returns `Resource not accessible by integration`, and so does its
-push. Widening the review App is rejected by design, not because it would not work. So in every
-round:
+`resolveReviewThread` from it returns `Resource not accessible by integration`, and its `git push`
+is refused with `remote: Repository not found.` (GitHub hides the repository from a token without
+`contents` over git; the REST text appears only on API writes). Since LEGION-42 (#1021) the
+planner, tester, and architects act as the review App too, so the same applies to their handoff
+commits (`../legion/one-role-keyed-table-decides-which-github-app-acts.md`). Widening the review
+App is rejected by design, not because it would not work. So in every round:
 
 - the reviewer's `.legion/review.json` commit exists only in the shared workspace until the
   implementer's next push carries it (check `jj log` that it is an ancestor before building on it);
