@@ -362,16 +362,22 @@ export class ProcessManager {
   }
 
   /** Replays every resurrection and controller launch that `resurrect`/`ensureController`
-   * held while `launchesEnabled` was false. A held tree that stopped being active meanwhile
-   * (parked, lingering, closed, or launch-failed during the hold) is skipped: the request was
-   * made against a state that no longer holds. Each replay's failure is logged and does not stop
-   * the others; call once, right after `enableLaunches()` and the boot reconciles. */
+   * held while `launchesEnabled` was false. A held tree is replayed while it is `active` or
+   * `dead` — `dead` is the state a resurrection exists to recover from (a root that survived the
+   * restart and exited during the hold reports it through `POST /process/exit`, which sets it).
+   * One that became `lingering`, `closed`, or `queued` meanwhile (parked by a human, closed, or
+   * demoted by boot admission) is skipped: the request was made against a state that no longer
+   * holds. Each replay's failure is logged and does not stop the others; call once, right after
+   * `enableLaunches()` and the boot reconciles. */
   async replayHeldRecoveries(): Promise<void> {
     const trees = [...this.heldResurrects];
     this.heldResurrects.clear();
     for (const tree of trees) {
-      if (this.deps.state.trees[tree]?.status !== "active") {
-        console.error(`[legion] held resurrection of ${tree} dropped: tree is no longer active`);
+      const status = this.deps.state.trees[tree]?.status;
+      if (status !== "active" && status !== "dead") {
+        console.error(
+          `[legion] held resurrection of ${tree} dropped: tree is ${status ?? "gone"}, not active`
+        );
         continue;
       }
       try {
