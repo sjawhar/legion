@@ -1,0 +1,69 @@
+{
+  "summary": "A phase worker whose prompts are acknowledged but never start a turn is now retired and relaunched at most MAX_PROMPT_RETIRES (2) times per role, then ends in exactly one worker-died {issue, role} to the tree's architect; before, it cycled retire -> relaunch -> three swallowed prompts -> retire forever with no verdict.",
+  "spec": "dispatch://LEGION-93/spec (version with the standing-order amendments: log line `retiring after 3 prompts with no turn started; relaunch cycle <k> (bound 2)`, smoke acceptance 5 withdrawn)",
+  "plan": ".legion/plan.json — Tasks 1, 2, 3, 5 done; Task 4 (scripts/smoke/swallow-prompts.ts + README) and Task 6 (rig run) dropped per Sami's standing order of 2026-09-13 19:00Z relayed by the architect",
+  "filesChanged": [
+    "packages/daemon/src/daemon/legion-state.ts — WorkerRoleClaim.promptRetires?: number (interface + zod optional; no state version bump)",
+    "packages/daemon/src/daemon/worker-admission.ts — MAX_PROMPT_RETIRES = 2, PromptRetireVerdict, retireDeadClaim(token, locator, verdict) dep, recordPromptFailure decides/logs/returns the verdict (the one decision point), queueUnstartedPrompt skips worker-queued on a died verdict",
+    "packages/daemon/src/daemon/processes.ts — retirePromptFailedClaim (markWorkerDeadLocked, then on died removeFromQueue + publishWorkerDied unless isTreeGone), constructor wiring, commitPromptDelivery deletes promptRetires, launchWorker's freshClaim carries promptRetires",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts — swallowedRelaunchFixture + two LEGION-93 tests (acceptance 1+3, acceptance 2); the two LEGION-60 retire tests updated to the new accounting and the retire line",
+    "packages/daemon/src/daemon/AGENTS.md — /worker/ready row, /worker/spawn row, worker-admission.ts Files row, delivery bullet",
+    "skills/legion-architect/SKILL.md — worker-died row names the no-turn cause and the re-spawn-is-the-retry rule"
+  ],
+  "commits": [
+    "7d2da882 daemon: bound the no-turn retire cycle in one worker-died (LEGION-93)",
+    "320e8b5f daemon: a started turn clears promptRetires (LEGION-93)",
+    "913714d3 docs(daemon): the no-turn retire cycle is bounded and ends in worker-died (LEGION-93)",
+    "87844f7d test(daemon): await the relaunch's worker-started in the LEGION-93 fixture; biome formatting"
+  ],
+  "tdd": [
+    "Acceptance 1 test RED on the base (bea296aa): `expect(relaunchedClaim.promptRetires).toBe(1)` received undefined; with the counter assertions stripped (throwaway copy) the base relaunched a second time (two `respawning LEGION-42` lines) and published zero worker-died. GREEN after Task 1: 1 pass, one `respawning` line.",
+    "Acceptance 2 test RED before Task 2: `expect(delivered.promptRetires).toBeUndefined()` received 1. GREEN after adding `delete claim.promptRetires` to commitPromptDelivery."
+  ],
+  "gates": [
+    "cd packages/daemon && bunx biome check --error-on-warnings src/ -> Checked 152 files. No fixes applied. exit 0",
+    "cd packages/daemon && bunx tsc --noEmit -> exit 0 (TypeScript 5.9.3)",
+    "bun test packages/daemon -> 1251 pass, 10 skip, 0 fail, 1261 tests across 60 files (run three times: 30.7 s, 29.9 s, 30.0 s); processes.test.ts alone 278 pass x3 concurrently"
+  ],
+  "proof": [
+    {
+      "criterion": "Acceptance 1 (+3): the relaunched worker's third swallowed prompt publishes exactly one worker-died {issue, role} to the architect topic and never relaunches again; each retirement logs the token, the prompt-failure count, and the cycle against the bound.",
+      "surface": "The daemon's own unit/integration suite (bun test packages/daemon) driving ProcessManager + WorkerAdmission with the in-memory fake shim client and fake tmux — the only surface Sami's standing order of 2026-09-13 19:00Z (\"Please shutdown the goddamn legion smoke\") leaves: no smoke rig, scratch daemon, NATS container, or tmux server was started. CI on the pull request (lint, typecheck, test) repeats it.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-93\"",
+      "observed": "2 pass, 0 fail (5 consecutive runs; 278/278 in the whole file, three concurrent runs; 1251 pass in the full daemon suite, three runs). First pane retired after three swallowed prompts with the line `[legion] legion-omp-LEGION-42-tester: retiring after 3 prompts with no turn started; relaunch cycle 1 (bound 2)`, relaunched once with --resume=<session file> (one split-window), promptRetires 1 carried onto the generation-2 claim; /worker/ready's prompt swallowed (worker-queued); two more swallowed prompts; terminal retirement logs `... relaunch cycle 2 (bound 2)`: publications exactly [worker-started, worker-queued, worker-died] on the architect topic, terminal claim {no locator, pendingAssignment kept, promptRetires 2, promptFailures 0, resumeSessionFile set, launchFailures absent}, queue empty, no second split-window after 50 event-loop ticks and after a further reconcileWorkerAdmission sweep.",
+      "headSha": "87844f7d359e9d26120797143d203586bda29fa6",
+      "negativeControl": "The same test on the base bea296aa (plan commit, before the fix) fails: `expect(relaunchedClaim.promptRetires).toBe(1)` received undefined; with the counter assertions stripped (throwaway copy of the file) the base printed two `respawning LEGION-42` lines (a second relaunch) and `expect(died).toHaveLength(1)` received length 0.",
+      "headShaNote": "The head the proofs were taken at is the tip before the handoff commit; that commit adds only .legion/implement.json."
+    },
+    {
+      "criterion": "Acceptance 2: a relaunched worker whose first prompt starts a turn resets the carried count, and a later single failure does not escalate.",
+      "surface": "The daemon's own unit/integration suite (bun test packages/daemon) driving ProcessManager + WorkerAdmission with the in-memory fake shim client and fake tmux — the only surface Sami's standing order of 2026-09-13 19:00Z (\"Please shutdown the goddamn legion smoke\") leaves: no smoke rig, scratch daemon, NATS container, or tmux server was started. CI on the pull request (lint, typecheck, test) repeats it.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"clears promptRetires\"",
+      "observed": "1 pass, 0 fail. After the fixture's relaunch (promptRetires 1), the relaunched worker's ready-time prompt starts a turn: pendingAssignment cleared, promptFailures 0, promptRetires deleted, phases[LEGION-42] = tester; then one swallowed spawn_worker prompt answers `queued`, counts promptFailures 1 with promptRetires still absent, locator kept, no worker-died, and only the fixture's `relaunch cycle 1 (bound 2)` line was ever logged.",
+      "headSha": "87844f7d359e9d26120797143d203586bda29fa6",
+      "negativeControl": "Before Task 2's one-line change (`delete claim.promptRetires` in commitPromptDelivery) the same test failed: `expect(delivered.promptRetires).toBeUndefined()` received 1."
+    },
+    {
+      "criterion": "Acceptance 4: daemon AGENTS.md states the bound and that a no-turn worker terminates in worker-died.",
+      "surface": "The pull request diff of packages/daemon/src/daemon/AGENTS.md (rows for /worker/ready, /worker/spawn, the worker-admission.ts Files row, and the prompt-delivery bullet) and skills/legion-architect/SKILL.md (the worker-died row).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --from da7158dc --to 87844f7d359e --stat packages/daemon/src/daemon/AGENTS.md skills/legion-architect/SKILL.md",
+      "observed": "AGENTS.md | 8 ++++---- (4 lines rewritten, still 321 lines: the four bullets stay single lines) and SKILL.md | 2 +- ; the delivery bullet now reads `At MAX_LAUNCH_FAILURES the worker is retired ... That cycle is bounded (LEGION-93): at MAX_PROMPT_RETIRES (2, judged >=) the retirement is terminal ... exactly one worker-died {issue, role} reaches the tree's architect`.",
+      "headSha": "87844f7d359e9d26120797143d203586bda29fa6",
+      "negativeControl": "grep -c MAX_PROMPT_RETIRES packages/daemon/src/daemon/AGENTS.md on the base da7158dc prints 0; on the tip it prints 2."
+    }
+  ],
+  "trickyParts": [
+    "The relaunch does real filesystem work, so the fixture must await the relaunch's own worker-started publish (a resolver inside the fake publishRole) rather than a setImmediate tick budget: the first full-suite run failed one LEGION-93 test because flushEventLoopUntil's 5000 ticks ran out before launchWorker wrote the fresh claim, so /worker/ready saw generation 1. Same pattern the ready-time relaunch tests at the bottom of the LEGION-60 block already use.",
+    "Verdict ordering: retireDeadClaim (the stop) runs before promptRetires/promptFailures are written and before removeFromQueue, so a StopFailed leaves locator, counters, and queue entry untouched; the close handler's markWorkerDead then finds the locator already cleared (no second retirement) and its promoteWorkerQueue finds no queue entry (no relaunch).",
+    "Log wording follows the spec amendment (`3 prompts with no turn started`, `(bound 2)`), not the plan's literal strings, because promptFailures also counts refused prompts (LEGION-60)."
+  ],
+  "deviations": [
+    "Plan Task 4 (scripts/smoke/swallow-prompts.ts and the scripts/smoke/README.md section) and Task 6 (the smoke-rig run) were not done: Sami's standing order of 2026-09-13 19:00Z (\"Please shutdown the goddamn legion smoke...\"), relayed by the architect, forbids starting any rig; acceptance 5 is withdrawn in the spec and pre-merge proof is the unit/integration suite plus CI.",
+    "One extra commit beyond the plan's three: the fixture hardening + biome formatting (87844f7d), kept separate rather than squashed into 7d2da882 so no already-created commit was rewritten."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-14T06:44:12.308Z"
+}
