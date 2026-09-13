@@ -13,25 +13,22 @@ export const issueStatuses = [
 ] as const;
 
 export type IssueStatus = (typeof issueStatuses)[number];
+export const openIssueStatuses = issueStatuses.filter((status) => status !== "done");
 
-export function isHumanSettableStatus(status: IssueStatus): boolean {
-  return (
-    status === "triage" ||
-    status === "icebox" ||
-    status === "backlog" ||
-    status === "todo" ||
-    status === "done"
-  );
-}
+const statusLabels: Record<IssueStatus, string> = {
+  triage: "Triage",
+  icebox: "Icebox",
+  backlog: "Backlog",
+  todo: "Todo",
+  in_progress: "In progress",
+  testing: "Testing",
+  needs_review: "Needs review",
+  retro: "Retro",
+  done: "Done",
+};
 
-const humanSettableOpenStatuses = issueStatuses.filter(
-  (status) => status !== "done" && isHumanSettableStatus(status)
-);
-
-export function selectableStatusesFor(status: string): readonly string[] {
-  return humanSettableOpenStatuses.includes(status as IssueStatus)
-    ? humanSettableOpenStatuses
-    : [...humanSettableOpenStatuses, status];
+export function statusLabel(status: IssueStatus): string {
+  return statusLabels[status];
 }
 
 export interface BoardColumn {

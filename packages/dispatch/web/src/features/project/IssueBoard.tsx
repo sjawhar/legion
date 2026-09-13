@@ -3,7 +3,6 @@ import {
   closestCorners,
   DndContext,
   type DragEndEvent,
-  type DragStartEvent,
   KeyboardSensor,
   PointerSensor,
   pointerWithin,
@@ -34,7 +33,6 @@ import {
   linkHoverText,
   linkText,
   secondaryButtonBorder,
-  secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedBg,
@@ -49,22 +47,10 @@ import {
   type BoardColumn,
   groupIssuesByStatus,
   type IssueStatus,
-  isHumanSettableStatus,
   issueStatuses,
   rankInputForInsertion,
+  statusLabel,
 } from "./board-model";
-
-const statusLabels: Record<IssueStatus, string> = {
-  triage: "Triage",
-  icebox: "Icebox",
-  backlog: "Backlog",
-  todo: "Todo",
-  in_progress: "In progress",
-  testing: "Testing",
-  needs_review: "Needs review",
-  retro: "Retro",
-  done: "Done",
-};
 
 const boardCollisionDetection: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
@@ -93,7 +79,7 @@ function moveIssue(
   return { issues: columns.flatMap((column) => column.issues), rank };
 }
 
-function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean }): ReactNode {
+function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
   const {
     attributes,
     isDragging,
@@ -102,7 +88,7 @@ function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean
     setNodeRef,
     transform,
     transition,
-  } = useSortable({ disabled, id: issue.key });
+  } = useSortable({ id: issue.key });
   const style: CSSProperties = {
     transform:
       transform === null ? undefined : `translate3d(${transform.x}px, ${transform.y}px, 0)`,
@@ -126,8 +112,7 @@ function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean
         </Link>
         <button
           aria-label={`Reorder ${issue.key}`}
-          className={`min-h-11 shrink-0 rounded-lg border px-3 text-xs font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
-          disabled={disabled}
+          className={`min-h-11 shrink-0 rounded-lg border px-3 text-xs font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           ref={setActivatorNodeRef}
           type="button"
           {...attributes}
@@ -140,7 +125,7 @@ function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean
         <span
           className={`rounded-full px-2 py-1 text-xs font-medium ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
         >
-          {statusLabels[issue.status as IssueStatus] ?? issue.status}
+          {statusLabel(issue.status as IssueStatus)}
         </span>
         <PriorityBadge priority={issue.priority} />
         {(issue.labels ?? []).map((label) => (
@@ -165,29 +150,13 @@ function IssueCard({ issue, disabled }: { issue: IssueSummary; disabled: boolean
   );
 }
 
-function BoardColumnView({
-  activeStatus,
-  column,
-}: {
-  activeStatus: IssueStatus | undefined;
-  column: BoardColumn;
-}): ReactNode {
-  const humanSettable = isHumanSettableStatus(column.status);
-  const dropDisabled =
-    activeStatus !== undefined && activeStatus !== column.status && !humanSettable;
+function BoardColumnView({ column }: { column: BoardColumn }): ReactNode {
   const { isOver, setNodeRef } = useDroppable({
     id: `status:${column.status}`,
   });
 
-  const daemonReason = `Only the Legion daemon can move issues to ${statusLabels[column.status]}.`;
-
   return (
-    <section
-      aria-label={statusLabels[column.status]}
-      className="w-72 shrink-0"
-      data-drop-disabled={dropDisabled ? "true" : undefined}
-      ref={setNodeRef}
-    >
+    <section aria-label={statusLabel(column.status)} className="w-72 shrink-0" ref={setNodeRef}>
       <header
         className={`min-h-[52px] rounded-xl border px-3 py-2 ${borderDefault} ${surfaceMutedBg} ${
           isOver ? cardHoverBorder : ""
@@ -195,27 +164,9 @@ function BoardColumnView({
         data-testid="board-column-header"
       >
         <div
-          className={`grid grid-cols-[minmax(0,1fr)_1rem_auto] items-center gap-2 text-sm font-semibold ${textPrimaryOnSurface}`}
+          className={`flex items-center justify-between gap-2 text-sm font-semibold ${textPrimaryOnSurface}`}
         >
-          <span>{statusLabels[column.status]}</span>
-          <span className={`flex h-4 w-4 items-center justify-center ${textSecondaryOnSurface}`}>
-            {humanSettable ? null : (
-              <svg
-                aria-description={daemonReason}
-                aria-label="Daemon controlled"
-                className="h-4 w-4"
-                fill="none"
-                role="img"
-                stroke="currentColor"
-                strokeWidth="1.75"
-                viewBox="0 0 20 20"
-              >
-                <title>{daemonReason}</title>
-                <rect height="8" rx="1.5" width="12" x="4" y="9" />
-                <path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9" />
-              </svg>
-            )}
-          </span>
+          <span>{statusLabel(column.status)}</span>
           <span
             className={`rounded-full px-2 py-1 text-xs ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
           >
@@ -230,7 +181,7 @@ function BoardColumnView({
         >
           <div className="mt-3 space-y-3">
             {column.issues.map((issue) => (
-              <IssueCard disabled={dropDisabled} issue={issue} key={issue.key} />
+              <IssueCard issue={issue} key={issue.key} />
             ))}
           </div>
         </SortableContext>
@@ -241,7 +192,6 @@ function BoardColumnView({
 
 export function IssueBoard({ project }: { project: string }): ReactNode {
   const queryClient = useQueryClient();
-  const [activeStatus, setActiveStatus] = useState<IssueStatus>();
   const [error, setError] = useState<string>();
   const issues = useQuery({
     queryKey: ["issues", "project", project],
@@ -252,14 +202,7 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
-  const onDragStart = ({ active }: DragStartEvent) => {
-    const issue = issues.data?.find((candidate) => candidate.key === active.id);
-    if (issue !== undefined && issueStatuses.includes(issue.status as IssueStatus)) {
-      setActiveStatus(issue.status as IssueStatus);
-    }
-  };
   const onDragEnd = async ({ active, over }: DragEndEvent) => {
-    setActiveStatus(undefined);
     if (over === null || issues.data === undefined) {
       return;
     }
@@ -271,16 +214,7 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
     if (activeKey === overKey && activeIssue?.status === targetStatus) {
       return;
     }
-    if (
-      activeIssue === undefined ||
-      !issueStatuses.includes(targetStatus as IssueStatus) ||
-      (activeIssue.status !== targetStatus && !isHumanSettableStatus(targetStatus as IssueStatus))
-    ) {
-      if (issueStatuses.includes(targetStatus as IssueStatus)) {
-        setError(
-          `Only the Legion daemon can move issues to ${statusLabels[targetStatus as IssueStatus]}.`
-        );
-      }
+    if (activeIssue === undefined || !issueStatuses.includes(targetStatus as IssueStatus)) {
       return;
     }
     const moved = moveIssue(issues.data, activeKey, targetStatus as IssueStatus, overKey);
@@ -322,15 +256,13 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
       )}
       <DndContext
         collisionDetection={boardCollisionDetection}
-        onDragCancel={() => setActiveStatus(undefined)}
         onDragEnd={onDragEnd}
-        onDragStart={onDragStart}
         sensors={sensors}
       >
         <div className="overflow-x-auto pb-3" data-testid="board-scroll-container">
           <div className="flex w-max items-start gap-4">
             {groupIssuesByStatus(issues.data ?? []).map((column) => (
-              <BoardColumnView activeStatus={activeStatus} column={column} key={column.status} />
+              <BoardColumnView column={column} key={column.status} />
             ))}
           </div>
         </div>

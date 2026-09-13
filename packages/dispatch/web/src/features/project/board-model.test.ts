@@ -1,12 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { IssueSummary } from "../../api/types";
-import {
-  groupIssuesByStatus,
-  isHumanSettableStatus,
-  rankInputForInsertion,
-  selectableStatusesFor,
-} from "./board-model";
+import { groupIssuesByStatus, rankInputForInsertion } from "./board-model";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -68,23 +63,4 @@ test("derives before and after keys from the final insertion position", () => {
   expect(rankInputForInsertion(issues, 0)).toEqual({ before: "CORE-1" });
   expect(rankInputForInsertion(issues, 1)).toEqual({ after: "CORE-1", before: "CORE-2" });
   expect(rankInputForInsertion(issues, 3)).toEqual({ after: "CORE-3" });
-});
-
-test("identifies lifecycle columns a human can set", () => {
-  expect(isHumanSettableStatus("todo")).toBe(true);
-  expect(isHumanSettableStatus("done")).toBe(true);
-  expect(isHumanSettableStatus("in_progress")).toBe(false);
-  expect(isHumanSettableStatus("testing")).toBe(false);
-});
-
-test("offers only human destinations and the current lifecycle status", () => {
-  expect(selectableStatusesFor("todo")).toEqual(["triage", "icebox", "backlog", "todo"]);
-  expect(selectableStatusesFor("in_progress")).toEqual([
-    "triage",
-    "icebox",
-    "backlog",
-    "todo",
-    "in_progress",
-  ]);
-  expect(selectableStatusesFor("done")).toEqual(["triage", "icebox", "backlog", "todo", "done"]);
 });
