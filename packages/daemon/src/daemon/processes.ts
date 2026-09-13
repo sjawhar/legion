@@ -63,7 +63,11 @@ import {
   pruneSecretFiles,
   secretFilePath,
 } from "./secrets";
-import { MAX_LAUNCH_FAILURES, WorkerAdmission } from "./worker-admission";
+import {
+  MAX_LAUNCH_FAILURES,
+  type PromptRetireVerdict,
+  WorkerAdmission,
+} from "./worker-admission";
 import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
@@ -413,8 +417,10 @@ export class ProcessManager {
    * `retireWorkerLocator` (for a caller — `launchWorker`, `markWorkerDeadLocked` — already running
    * inside that same section, where re-acquiring it would deadlock). `markWorkerDeadLocked` is
    * itself reached two ways: directly by `markWorkerDead` (a boot-time reconnect failure or a
-   * runtime socket close), or via `WorkerAdmissionDeps.retireDeadClaim` (the prompt-failure
-   * circuit breaker retiring a persistently-broken but still-queued worker).
+   * runtime socket close), or via `WorkerAdmissionDeps.retireDeadClaim` →
+   * `retirePromptFailedClaim` (the prompt-failure circuit breaker retiring a persistently-broken
+   * but still-queued worker, relaunching it or — at `MAX_PROMPT_RETIRES` — ending the role in
+   * `worker-died`).
    */
   constructor(private readonly deps: ProcessManagerDeps) {
     this.runtime = deps.runtime;
@@ -437,7 +443,8 @@ export class ProcessManager {
         this.trackLaunch(treeKey, () => this.launchWorker(treeKey, issue, role, claim, pending)),
       promptExistingWorker: (client, token, issue, role, sessionId, pending) =>
         this.promptExistingWorker(client, token, issue, role, sessionId, pending),
-      retireDeadClaim: (token, locator) => this.markWorkerDeadLocked(token, locator),
+      retireDeadClaim: (token, locator, verdict) =>
+        this.retirePromptFailedClaim(token, locator, verdict),
       onAdmissionEvent: deps.onAdmissionEvent,
       rootForIssue: (issue) => this.rootForIssue(issue),
     });
@@ -1296,7 +1303,8 @@ export class ProcessManager {
   /** The inner logic behind a worker's socket being confirmed dead -- a boot-time reconnect
    * probe failed, or a live connection's own `client.closed` handler tried and failed its one
    * reconnect attempt, or the prompt-failure circuit breaker retired a persistently-broken
-   * worker (see `WorkerAdmissionDeps.retireDeadClaim`) -- so its locator is retired and cleared:
+   * worker (`retirePromptFailedClaim`, behind `WorkerAdmissionDeps.retireDeadClaim`) -- so its
+   * locator is retired and cleared:
    * retires whatever process it may still be running, then clears the locator -- moving its
    * `ompSessionFile` to `resumeSessionFile` so the eventual respawn/promotion still resumes the
    * same agent -- leaving `pendingAssignment` so it still delivers the queued task. Assumes the
@@ -1316,6 +1324,32 @@ export class ProcessManager {
     delete current.locator;
     if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
     await this.persist();
+  }
+
+  /** `WorkerAdmissionDeps.retireDeadClaim`: the prompt-failure circuit breaker's retirement, inside
+   * the caller's role lock. `"relaunch"` is exactly `markWorkerDeadLocked` (graceful shutdown with
+   * kill-pane fallback, locator cleared, `ompSessionFile` carried into `resumeSessionFile`,
+   * `pendingAssignment` kept, persisted): the task stays queued and the next drain relaunches it
+   * cold with `--resume`. `"died"` is the same retirement and then the terminal shape: the role's
+   * promotion-queue entry removed (after the stop, so a `StopFailed` never strands a live pane with
+   * no queue entry to retry it) and `worker-died {issue, role}` published once to the tree's
+   * architect — unless the tree is gone or closing (`isTreeGone`, mirroring
+   * `retireUnconfirmedBoot`'s guard: the close path owns that claim). `pendingAssignment` stays on
+   * the claim, `promptRetires` stays at the bound, so the architect's next `spawn_worker` is one cold
+   * launch, `MAX_LAUNCH_FAILURES` prompts, and `worker-died` again. Counters are the caller's. */
+  private async retirePromptFailedClaim(
+    token: string,
+    locator: Locator,
+    verdict: PromptRetireVerdict
+  ): Promise<void> {
+    const claim = this.deps.state.roles[token];
+    const retry = claim && "issue" in claim ? this.deriveRetryContext(token, claim.issue) : undefined;
+    await this.markWorkerDeadLocked(token, locator);
+    if (verdict !== "died") return;
+    await this.workerAdmission.removeFromQueue(token);
+    if (retry && !this.isTreeGone(retry.treeKey, retry.issue)) {
+      this.publishWorkerDied(retry.treeKey, retry.issue, retry.role);
+    }
   }
 
   /** Acquires this token's `roleLaunchQueue` critical section (see `markWorkerDeadLocked` for
@@ -3297,6 +3331,10 @@ export class ProcessManager {
         // `/worker/ready`. `/worker/started`'s own registration success clears it — that is the
         // recovery signal for launch accounting, not merely respawning.
         launchFailures: claim?.launchFailures ?? 0,
+        // Carried over like `launchFailures`: this relaunch IS a prompt-retire cycle; dropping it
+        // here would make `MAX_PROMPT_RETIRES` unreachable (LEGION-93). Deleted only by a started
+        // turn (`commitPromptDelivery`).
+        ...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {}),
         generation,
         pendingAssignment: pending,
         bootTokenHash: secretHash(bootToken).toString("hex"),

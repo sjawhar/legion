@@ -149,6 +149,12 @@ export interface WorkerRoleClaim {
    * worker is considered persistently broken: its locator is retired and cleared so the
    * still-queued assignment falls through to the launch path's own threshold on the next drain. */
   promptFailures?: number;
+  /** Retirements this claim has taken for prompt failures (`recordPromptFailure` at
+   * `MAX_LAUNCH_FAILURES`) — relaunch cycles of a live worker that acknowledges prompts but never
+   * starts a turn. Carried onto the relaunched claim by `launchWorker`, never reset by a relaunch or
+   * an architect's `spawn_worker`; deleted only once a prompt's turn is observed to start
+   * (`commitPromptDelivery`). At `MAX_PROMPT_RETIRES` the retirement is terminal: `worker-died`. */
+  promptRetires?: number;
   bootTokenHash?: string;
   /** The dead worker's last OMP session file, preserved when its locator is cleared (retired or
    * found dead on reconnect) so a later promoted/resumed launch still resumes the same agent via
@@ -408,6 +414,7 @@ const WorkerRoleClaimSchema = z
     pendingAssignment: PendingAssignmentSchema.optional(),
     launchFailures: z.number().int().nonnegative().optional(),
     promptFailures: z.number().int().nonnegative().optional(),
+    promptRetires: z.number().int().nonnegative().optional(),
     bootTokenHash: z.string().optional(),
     resumeSessionFile: z.string().optional(),
     expectedSessionId: z.string().optional(),
