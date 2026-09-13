@@ -53,6 +53,9 @@ if kill -0 "$bridge_pid" 2>/dev/null; then
 fi
 bridge_pid=""
 
+# The rig's identity for teardown is the directory's legion.yaml (up.sh's write_daemon_config
+# writes it for every rig), never SMOKE_PROJECT -- so these cases export no SMOKE_PROJECT at all.
+printf 'project: omp\n' >"${smoke_dir}/legion.yaml"
 tmux_log="${temporary_dir}/tmux.log"
 cat >"${fake_bin}/tmux" <<EOF
 #!/usr/bin/env bash
@@ -65,7 +68,7 @@ esac
 EOF
 chmod +x "${fake_bin}/tmux"
 
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" bash "$down_script" >"$output_file" 2>&1
 [[ ! -e "$tmux_log" && "$(<"$output_file")" == *'refusing to kill unowned tmux session'* ]] || {
   cat "$output_file" >&2
   exit 1
@@ -82,7 +85,7 @@ esac
 EOF
 chmod +x "${fake_bin}/tmux"
 
-PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_PROJECT="omp" bash "$down_script" >"$output_file" 2>&1
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" bash "$down_script" >"$output_file" 2>&1
 # The kill must land on the daemon's private socket -- the default server never hosts a Legion
 # session, so a bare `tmux kill-session` would find nothing (or worse, an operator's own session).
 [[ "$(<"$tmux_log")" == *'-L legion-omp kill-session -t legion-omp'* ]] || {
@@ -158,6 +161,7 @@ grep -Fxq 'api -X DELETE repos/example-org/legion-smoke/hooks/7' "$gh_log" || {
 # plus the pre-LEGION-41 fixed name as existing, so anything down.sh touched is on the log.
 nats_smoke_dir="${temporary_dir}/smoke-nats"
 mkdir -p "$nats_smoke_dir"
+printf 'project: sjawhar/16\n' >"${nats_smoke_dir}/legion.yaml"
 docker_log="${temporary_dir}/docker.log"
 cat >"${fake_bin}/docker" <<EOF
 #!/usr/bin/env bash
@@ -220,7 +224,63 @@ fi
   exit 1
 }
 
+# Acceptance 6 (LEGION-41): down.sh acts only on a directory that started a rig. On 2026-09-13 a
+# teardown run from a throwaway SMOKE_DIR with SMOKE_PROJECT=sjawhar/16 killed another tester's
+# live rig, because the tmux stop keyed on the environment alone (and the @legion_owner marker is
+# set by that rig's own daemon, so it cannot tell whose teardown this is). The fake tmux below
+# presents a live, correctly-owned session for whatever socket it is asked about; the fake docker
+# reports the fixed-name container as present.
+no_rig_dir="${temporary_dir}/never-started-a-rig"
+mkdir -p "$no_rig_dir"
+cat >"${fake_bin}/tmux" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${tmux_log}"
+socket=""
+if [[ "\$1" == "-L" ]]; then socket="\$2"; shift 2; fi
+case "\$1" in
+  has-session) exit 0 ;;
+  show-option) printf '%s\n' "\$socket" ;;
+esac
+EOF
+chmod +x "${fake_bin}/tmux"
+: >"$tmux_log"
+: >"$docker_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$no_rig_dir" SMOKE_PROJECT="sjawhar/16" bash "$down_script" >"$output_file" 2>&1
+if grep -q 'kill-session' "$tmux_log"; then
+  printf 'down.sh must not kill any tmux session for a directory without legion.yaml; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+fi
+if grep -q '^rm -f ' "$docker_log"; then
+  printf 'down.sh must not remove any container for a directory without legion.yaml; docker log:\n%s\n' "$(<"$docker_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"${no_rig_dir} has no legion.yaml: this directory never started a rig"* && "$(<"$output_file")" == *'RIG DOWN'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
+# The directory's legion.yaml names the rig; an exported SMOKE_PROJECT naming another project is
+# warned about and ignored -- the directory's project is the one stopped.
+disagree_dir="${temporary_dir}/env-disagrees"
+mkdir -p "$disagree_dir"
+printf 'project: sjawhar/16\n' >"${disagree_dir}/legion.yaml"
+: >"$tmux_log"
+PATH="${fake_bin}:${PATH}" SMOKE_DIR="$disagree_dir" SMOKE_PROJECT="sjawhar/99" bash "$down_script" >"$output_file" 2>&1
+grep -Fxq -- '-L legion-sjawhar16 kill-session -t legion-sjawhar16' "$tmux_log" || {
+  printf 'expected down.sh to kill the legion.yaml project'"'"'s session legion-sjawhar16; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+}
+if grep -q 'sjawhar99' "$tmux_log"; then
+  printf 'down.sh must never address the session named by SMOKE_PROJECT; tmux log:\n%s\n' "$(<"$tmux_log")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"warning: SMOKE_PROJECT=sjawhar/99 disagrees with ${disagree_dir}/legion.yaml (project: sjawhar/16); tearing down sjawhar/16"* && "$(<"$output_file")" == *'STOPPED tmux session legion-sjawhar16 on private socket legion-sjawhar16'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+
 printf 'PASS: only kills tmux sessions carrying the Legion ownership marker\n'
 printf 'PASS: stops the Envoy bridge with a start-time-validated PID record\n'
 printf 'PASS: forward-mode teardown kills the recorded forwarder process group and deletes its hook record\n'
 printf 'PASS: removes only the NATS container recorded for this rig, falls back to legion-smoke-nats only without a record, and refuses a malformed record\n'
+printf 'PASS: tears down only the rig the directory'"'"'s legion.yaml names -- a directory without one stops no tmux server and removes no container, and a disagreeing SMOKE_PROJECT is warned about and ignored\n'

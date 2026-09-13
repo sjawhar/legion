@@ -629,13 +629,11 @@ main() {
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
   printf '%s\n' "$design_gate" >"${smoke_dir}/design-gate"
   printf '%s\n' "$dispatch_ingress" >"${smoke_dir}/dispatch-ingress"
-  # down.sh removes exactly the container named here, so teardown needs no SMOKE_PROJECT.
-  printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
-  # The daemon also binds worker_stream_port, which defaults to port + 1 (the generated legion.yaml
-  # leaves it at that default), so two rigs on adjacent daemon ports kill the first one at boot.
-  # The same live-PID exception covers a re-run against this rig's own daemon.
+  # The daemon binds worker_stream_port too, which defaults to port + 1 (the generated legion.yaml
+  # leaves it at that default), so that port must be free as well. The same live-PID exception
+  # covers a re-run against this rig's own daemon.
   assert_port_free 'Legion daemon worker stream' "$((daemon_port + 1))" "${smoke_dir}/daemon.pid"
   write_daemon_config
   (
@@ -644,6 +642,10 @@ main() {
   )
 
   ensure_nats "$nats_name"
+  # Written only once the container is running: down.sh removes exactly the container named here
+  # (so teardown needs no SMOKE_PROJECT), and a refused start must not leave a record naming a
+  # container that does not exist -- that would hide the legacy-name fallback from down.sh.
+  printf '%s\n' "$nats_name" >"${smoke_dir}/nats-container"
 
   start_process listener env \
     PORT="$listener_port" \
