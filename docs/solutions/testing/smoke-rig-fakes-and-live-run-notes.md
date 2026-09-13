@@ -53,8 +53,9 @@ surfaced things the next person touching the rig should not rediscover.
 - **Scrub every inspected variable from the harness's own environment.** The harness may run
   inside a Legion worker pane, which legitimately carries `LEGION_BOOT_TOKEN(_FILE)`; the
   "clean" `sleep` must `env -u` all three families or checkpoint 13 fails on the harness itself.
-- A checkpoint that needs no Dispatch call must not call `require_dispatch_token`; document
-  "run it bare" in the README next to the `secrets DISPATCH_TOKEN --` invocation.
+- A checkpoint that needs no Dispatch call must not resolve `DISPATCH_TOKEN`: resolution lives
+  inside `dispatch_request` (shared `dispatch-config.sh`, LEGION-40), so checkpoint 13 runs with
+  neither variable set and the README says so next to the `checkpoints.sh` invocation.
 - `down.test.sh`'s fakes gain `if [[ "$1" == "-L" ]]; then shift 2; fi` as their first line and
   the harness asserts the kill landed as `-L legion-omp kill-session -t legion-omp`.
 
@@ -74,9 +75,11 @@ they are kept here as history with the fix named, so nobody re-applies the worka
   moving the one pin in `packages/daemon/src/daemon/omp-pin.ts` to a release with the fix, and by
   #957 making `up.sh` verify that pin through `mise where` in preflight.* `LEGION_OMP_PATH` is
   now only an explicit override for a non-release build; do not export it for a normal run.
-- **`DISPATCH_TOKEN` is not a secretsd key on this box**; the documented source is
-  `~/.config/opencode/envoy.json` `dispatch.token`. Inject it into the subprocess environment;
-  never print it. Filed as LEGION-40.
+- **`DISPATCH_TOKEN` is not a secretsd key on this box**; the source is
+  `~/.config/opencode/envoy.json` `.dispatch.token`. *Fixed by LEGION-40:* `up.sh` and
+  `checkpoints.sh` read `.dispatch.serverUrl` / `.dispatch.token` from that file when
+  `DISPATCH_URL` / `DISPATCH_TOKEN` are unset (`scripts/smoke/dispatch-config.sh`), and the
+  README's command blocks no longer name a `secrets DISPATCH_TOKEN` key. Never print the value.
 - **`up.sh ensure_root_issue` 409'd (`POSSIBLE_DUPLICATE`)** against prior smoke roots. *Fixed in
   #957:* the request carries `force: true`; a disposable near-duplicate per run is the rig's
   intent. No by-hand creation is needed.
