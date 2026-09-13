@@ -54,6 +54,7 @@ function startCiPump(state: LegionState) {
     onException: async () => {},
     onLinger: async () => {},
     onAdmit: () => {},
+    onDequeue: async () => {},
     onProbe: async () => {},
   });
   return { nats, published, pump };
@@ -130,6 +131,7 @@ it("routes an approved PR's settled checks and ready signal to the tree's archit
     onException: async () => {},
     onLinger: async () => {},
     onAdmit: () => {},
+    onDequeue: async () => {},
     onProbe: async () => {},
   });
 
