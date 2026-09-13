@@ -601,50 +601,55 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(existsSync(path.join(repoCloneDir, ".jj", "partial"))).toBeFalse();
   });
 
-  test("a failed clone whose temporary directory cannot be removed still reports the clone failure, logging the cleanup failure", async () => {
-    const stateDir = await temporaryDirectory();
-    const issue = "WIDGETS-42";
-    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    let lockedDir: string | undefined;
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
-    let logged: string[];
-    try {
-      await expect(
-        provisionIssueWorkspace(issue, {
-          extensionPackage,
-          stateDir,
-          repo: "acme/widgets",
-          provisioningToken: async () => "installation-token",
-          credentialHelper,
-          commandTimeoutMs,
-          run: async (cmd) => {
-            if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
-              const target = cmd[4];
-              if (!target) throw new Error("clone is missing its destination");
-              // The killed clone left an unreadable subtree behind: `rm` of the temp dir fails.
-              lockedDir = path.join(target, "locked");
-              await mkdir(path.join(lockedDir, "inner"), { recursive: true });
-              await writeFile(path.join(lockedDir, "inner", "f"), "x", "utf8");
-              await chmod(lockedDir, 0o000);
-              return {
-                exitCode: 143,
-                stdout: "",
-                stderr: "",
-                timedOut: { limitMs: 300_000, elapsedMs: 300_400 },
-              };
-            }
-            return { exitCode: 0, stdout: "", stderr: "" };
-          },
-        })
-      ).rejects.toThrow("Command timed out after 300 s (ran 300.4 s): jj git clone");
-      logged = errorSpy.mock.calls.map((call) => String(call[0]));
-    } finally {
-      errorSpy.mockRestore();
-      if (lockedDir) await chmod(lockedDir, 0o755);
+  // The cleanup failure is made real with an unreadable (mode 000) directory inside the clone,
+  // which root ignores — as root the test would pass for the wrong reason, so it is skipped.
+  test.skipIf(process.getuid?.() === 0)(
+    "a failed clone whose temporary directory cannot be removed still reports the clone failure, logging the cleanup failure",
+    async () => {
+      const stateDir = await temporaryDirectory();
+      const issue = "WIDGETS-42";
+      const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+      let lockedDir: string | undefined;
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      let logged: string[];
+      try {
+        await expect(
+          provisionIssueWorkspace(issue, {
+            extensionPackage,
+            stateDir,
+            repo: "acme/widgets",
+            provisioningToken: async () => "installation-token",
+            credentialHelper,
+            commandTimeoutMs,
+            run: async (cmd) => {
+              if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
+                const target = cmd[4];
+                if (!target) throw new Error("clone is missing its destination");
+                // The killed clone left an unreadable subtree behind: `rm` of the temp dir fails.
+                lockedDir = path.join(target, "locked");
+                await mkdir(path.join(lockedDir, "inner"), { recursive: true });
+                await writeFile(path.join(lockedDir, "inner", "f"), "x", "utf8");
+                await chmod(lockedDir, 0o000);
+                return {
+                  exitCode: 143,
+                  stdout: "",
+                  stderr: "",
+                  timedOut: { limitMs: 300_000, elapsedMs: 300_400 },
+                };
+              }
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+          })
+        ).rejects.toThrow("Command timed out after 300 s (ran 300.4 s): jj git clone");
+        logged = errorSpy.mock.calls.map((call) => String(call[0]));
+      } finally {
+        errorSpy.mockRestore();
+        if (lockedDir) await chmod(lockedDir, 0o755);
+      }
+      expect(existsSync(repoCloneDir)).toBeFalse();
+      expect(logged).toContainEqual(expect.stringContaining("failed to remove temporary clone"));
     }
-    expect(existsSync(repoCloneDir)).toBeFalse();
-    expect(logged).toContainEqual(expect.stringContaining("failed to remove temporary clone"));
-  });
+  );
 
   test("removes an incomplete clone that has no .jj and clones again, logging it", async () => {
     const stateDir = await temporaryDirectory();
