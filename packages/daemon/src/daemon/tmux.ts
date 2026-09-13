@@ -50,8 +50,9 @@ function targetAbsent(stderr: string | undefined): boolean {
   return NO_SERVER_STDERR.test(stderr ?? "") || (stderr ?? "").startsWith("no such session");
 }
 
-/** The failure detail for an error message: tmux's stderr only, never stdout — for
- * `show-environment` stdout is the value dump, and no value may reach a log or error string. */
+/** The failure detail for every error message this module throws: tmux's stderr only, trimmed,
+ * omitted when empty — never stdout. For `show-environment` stdout is the value dump, and for the
+ * `-P -F` reports it is whatever a broken tmux printed; no value may reach a log or error string. */
 function failure(result: { stderr?: string }): string {
   const detail = result.stderr?.trim();
   return detail ? `: ${detail}` : "";
@@ -155,7 +156,7 @@ async function markOwner(
       await server.run(argv(server, "kill-window", "-t", target));
     }
     throw new Error(
-      `tmux ${scope} ownership marker failed (exit ${marker.exitCode}): ${marker.stdout}`
+      `tmux ${scope} ownership marker failed (exit ${marker.exitCode})${failure(marker)}`
     );
   }
 }
@@ -170,21 +171,26 @@ interface PaneReport {
  * Parses a `-P -F` report from `new-window` (`"#{window_id} #{pane_id} #{pane_pid}"`, three
  * tokens) or `split-window` (`"#{pane_id} #{pane_pid}"`, two tokens) — the only difference is
  * whether a window id leads the line. Throws on any malformed/missing token so a launch failure
- * is loud rather than silently persisting a garbage locator.
+ * is loud rather than silently persisting a garbage locator; the message names the command and
+ * carries tmux's stderr, never the malformed report itself.
  */
-function parsePaneReport(stdout: string, context: string, expectWindow: boolean): PaneReport {
-  const tokens = stdout.trim().split(/\s+/);
+function parsePaneReport(
+  result: { stdout: string; stderr?: string },
+  context: string,
+  expectWindow: boolean
+): PaneReport {
+  const tokens = result.stdout.trim().split(/\s+/);
   const windowId = expectWindow ? tokens.shift() : undefined;
   if (expectWindow && (!windowId || !/^@\d+$/.test(windowId))) {
-    throw new Error(`${context} did not report a window id: ${stdout}`);
+    throw new Error(`${context} did not report a window id${failure(result)}`);
   }
   const [paneId, pidToken] = tokens;
   if (!paneId || !/^%\d+$/.test(paneId)) {
-    throw new Error(`${context} did not report a pane id: ${stdout}`);
+    throw new Error(`${context} did not report a pane id${failure(result)}`);
   }
   const pid = Number(pidToken);
   if (!Number.isSafeInteger(pid) || pid <= 0) {
-    throw new Error(`${context} did not report a pane pid: ${stdout}`);
+    throw new Error(`${context} did not report a pane pid${failure(result)}`);
   }
   return { windowId, paneId, pid };
 }
@@ -224,7 +230,7 @@ export async function openWindow(
       )
     );
     if (create.exitCode !== 0) {
-      throw new Error(`tmux new-session failed (exit ${create.exitCode}): ${create.stdout}`);
+      throw new Error(`tmux new-session failed (exit ${create.exitCode})${failure(create)}`);
     }
     await markOwner(server, session, owner, "session");
   }
@@ -248,15 +254,15 @@ export async function openWindow(
     );
     if (cleanup.exitCode !== 0) {
       throw new Error(
-        `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode}): ${cleanup.stdout}`
+        `tmux bootstrap window cleanup failed (exit ${cleanup.exitCode})${failure(cleanup)}`
       );
     }
   }
   if (result.exitCode !== 0) {
-    throw new Error(`tmux new-window failed (exit ${result.exitCode}): ${result.stdout}`);
+    throw new Error(`tmux new-window failed (exit ${result.exitCode})${failure(result)}`);
   }
-  const { windowId, paneId, pid } = parsePaneReport(result.stdout, "tmux new-window", true);
-  if (!windowId) throw new Error(`tmux new-window did not report a window id: ${result.stdout}`);
+  const { windowId, paneId, pid } = parsePaneReport(result, "tmux new-window", true);
+  if (!windowId) throw new Error(`tmux new-window did not report a window id${failure(result)}`);
   await markOwner(server, windowId, owner, "window");
   return { windowId, paneId, pid };
 }
@@ -281,9 +287,9 @@ export async function splitWindow(
     )
   );
   if (split.exitCode !== 0) {
-    throw new Error(`tmux split-window failed (exit ${split.exitCode}): ${split.stdout}`);
+    throw new Error(`tmux split-window failed (exit ${split.exitCode})${failure(split)}`);
   }
-  const { paneId, pid } = parsePaneReport(split.stdout, "tmux split-window", false);
+  const { paneId, pid } = parsePaneReport(split, "tmux split-window", false);
   await server.run(argv(server, "select-layout", "-t", windowId, "tiled"));
   return { paneId, pid };
 }

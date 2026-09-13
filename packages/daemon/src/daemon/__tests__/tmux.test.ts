@@ -323,4 +323,24 @@ describe("openWindow", () => {
       false
     );
   });
+
+  it("names the command and carries stderr only when the -P -F report is malformed — never the report itself", async () => {
+    const fake: TmuxServer = {
+      socket: "legion-omp",
+      run: async (cmd) => {
+        if (cmd[3] === "new-window") {
+          return { stdout: "GH_TOKEN=leaked-value\n", stderr: "unexpected output", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    let message = "";
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp").catch(
+      (error: Error) => {
+        message = error.message;
+      }
+    );
+    expect(message).toBe("tmux new-window did not report a window id: unexpected output");
+    expect(message).not.toContain("leaked-value");
+  });
 });
