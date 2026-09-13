@@ -555,6 +555,14 @@ export interface BlockRepairedEventPayload {
   readonly version: number;
   readonly disturbed_by: Actor;
 }
+
+/** A browser-authored ask block is malformed and awaits repair. */
+export interface BlockInvalidEventPayload {
+  readonly block_id: string;
+  readonly version: number;
+  readonly reason: string;
+  readonly disturbed_by: Actor;
+}
 export interface ChildStatusEventPayload {
   readonly child_key: string;
   readonly from: string;
@@ -639,6 +647,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "block.repaired";
       readonly payload: BlockRepairedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "block.invalid";
+      readonly payload: BlockInvalidEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "comment.created";

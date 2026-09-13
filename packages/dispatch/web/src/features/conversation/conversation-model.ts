@@ -155,6 +155,8 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
     case "block.repaired":
       return `repaired server-owned state on block ${event.payload.block_id}`;
+    case "block.invalid":
+      return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
   }
 }
 

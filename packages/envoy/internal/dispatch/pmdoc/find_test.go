@@ -42,6 +42,98 @@ func TestFindQuoteDisambiguatesByOccurrenceAndNearest(t *testing.T) {
 	}
 }
 
+func TestFindQuoteStripsInlineMarkdownFromQuote(t *testing.T) {
+	tests := []struct {
+		name     string
+		markdown string
+		quote    string
+		want     Range
+	}{
+		{
+			name:     "inline code",
+			markdown: "Use `config` with care.\n",
+			quote:    "Use `config`",
+			want:     Range{From: 1, To: 11},
+		},
+		{
+			name:     "strong emphasis",
+			markdown: "A **bold** statement.\n",
+			quote:    "**bold**",
+			want:     Range{From: 3, To: 7},
+		},
+		{
+			name:     "underscore emphasis",
+			markdown: "A __quiet__ statement.\n",
+			quote:    "__quiet__",
+			want:     Range{From: 3, To: 8},
+		},
+		{
+			name:     "link",
+			markdown: "Read [the guide](https://example.com).\n",
+			quote:    "Read [the guide](https://example.com)",
+			want:     Range{From: 1, To: 15},
+		},
+		{
+			name:     "autolink",
+			markdown: "See <https://example.com>.\n",
+			quote:    "See <https://example.com>",
+			want:     Range{From: 1, To: 24},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := FindQuote(doc, test.quote, nil, nil)
+			if err != nil {
+				t.Fatalf("FindQuote(%q) = %v", test.quote, err)
+			}
+			if got != test.want {
+				t.Fatalf("FindQuote(%q) = %v, want %v", test.quote, got, test.want)
+			}
+		})
+	}
+}
+
+func TestFindQuoteDoesNotStripLiteralMarkdownCharacters(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		quote    string
+	}{
+		{name: "intraword underscore", markdown: "snakecase\n", quote: "snake_case"},
+		{name: "URL underscore", markdown: "https://x/ab\n", quote: "https://x/a_b"},
+		{name: "code block", markdown: "```text\ncode\n```\n", quote: "`code`"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FindQuote(doc, test.quote, nil, nil); !errors.Is(err, ErrTargetNotFound) {
+				t.Fatalf("FindQuote(%q) = %v, want ErrTargetNotFound", test.quote, err)
+			}
+		})
+	}
+}
+
+func TestFindQuoteMissNamesNearestBlock(t *testing.T) {
+	doc, err := Parse("Closest rendered block.\n\nA distant block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FindQuote(doc, "Closest unmatched quote", nil, nil)
+	if !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("FindQuote miss = %v, want ErrTargetNotFound", err)
+	}
+	const want = `pmdoc: target not found; nearest block: "Closest rendered block."`
+	if err.Error() != want {
+		t.Fatalf("FindQuote miss = %q, want %q", err, want)
+	}
+}
+
 func TestFindHeadingMatchesTitleAcrossLevels(t *testing.T) {
 	doc, err := Parse("# A\n\ntext\n\n## A\n\n# B\n")
 	if err != nil {

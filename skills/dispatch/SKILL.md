@@ -243,9 +243,10 @@ type EditOp = {
 };
 ```
 
-Target `replace` and `delete` by the document's plain text: inline-code and link text match without Markdown syntax, and a table-cell
-anchor is its cell text. Quote code-block contents without their Markdown fences. A quote must stay within one textblock; split changes
-that span separate blocks into separate operations.
+Target `replace`, `delete`, and quote insert anchors by a block's text as rendered: write inline
+code without backticks, bold without asterisks, and link text without link syntax. A table-cell
+anchor is its cell text. Quote code-block contents without their Markdown fences. A quote must stay
+within one textblock; split changes that span separate blocks into separate operations.
 
 `replace` requires `find` and `with`; `delete` requires `find`; `insert` requires `markdown` and exactly one of `after` or `before`. An
 insert anchor is a quote, `"start"`, `"end"`, or `"heading:Title"`. Ordinary inserts create a sibling block before or after the quote or
@@ -285,6 +286,11 @@ Should we ship the migration?
 - Hold: Wait for another review.
 :::
 ```
+
+When a human answers a decision written as an ask block, the answer lives on that ask. Use
+`dispatch_resolve_ask` when the decision is resolved without a human response, or preserve the
+human's answer; never rewrite the question into its answer or blank its options. An edit that leaves
+an ask block without a question or with a blank option is rejected with `INVALID_ASK_BLOCK`.
 
 ## Comments and suggestions
 

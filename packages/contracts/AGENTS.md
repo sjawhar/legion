@@ -40,7 +40,8 @@ the native Dispatch tool suite:
   host validates a call so tool-level cross-field validation also applies.
 - `dispatch_doc_edit` supports `replace`, `delete`, `insert`, and `retype`. `retype` names a
   stable block id, a server-declared type, and optional client-owned attributes. Ask lifecycle
-  payloads include nullable `block_id`; `block.repaired` records a server-owned attribute repair.
+  payloads include nullable `block_id`; `block.repaired` restores server-owned attributes and
+  `block.invalid` records a malformed browser-authored ask block.
 - Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;
   new quotes use their lowest complete containing block, while quotes across top-level siblings
   remain unpinned. Clients must preserve the field.

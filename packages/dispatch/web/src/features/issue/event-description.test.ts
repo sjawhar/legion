@@ -72,3 +72,25 @@ test("eventDescription labels an edited comment", () => {
 test("eventDescription labels an edited ask with its new question", () => {
   expect(eventDescription(editedAskEvent())).toBe("Ask edited: Publish?");
 });
+
+test("eventDescription labels a malformed decision", () => {
+  const event: Extract<Event, { type: "block.invalid" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-09-13T17:00:00Z",
+    id: 3,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      block_id: "ask-block",
+      version: 3,
+      reason: 'ask block "ask-block" has an option without a label',
+      disturbed_by: { id: "session-1", kind: "session" },
+    },
+    seq: 3,
+    type: "block.invalid",
+  };
+
+  expect(eventDescription(event)).toBe(
+    'marked decision ask-block malformed: ask block "ask-block" has an option without a label'
+  );
+});

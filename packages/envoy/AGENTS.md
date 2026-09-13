@@ -63,6 +63,8 @@ type or attribute, or requiring a new attribute requires a document migration an
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
+An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
+attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 

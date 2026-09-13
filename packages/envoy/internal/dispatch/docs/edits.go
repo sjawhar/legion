@@ -24,6 +24,17 @@ func invalidOp(field string) error {
 	return &ErrInvalidOp{Field: field}
 }
 
+// ErrQuoteNotFound explains how document edit quotes are matched.
+type ErrQuoteNotFound struct {
+	Nearest string
+}
+
+func (e *ErrQuoteNotFound) Error() string {
+	return fmt.Sprintf("quote not found; quotes match the block text as rendered (no markdown markers); nearest block: %q", e.Nearest)
+}
+
+func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
+
 // applyOperations applies each operation to its predecessor's tree so a
 // following operation resolves the structure created by the preceding one.
 func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
@@ -131,7 +142,7 @@ func invalidMarkdownOp(field string, err error) error {
 }
 
 func findEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range, error) {
-	r, err := pmdoc.FindQuote(tree, quote, occurrence, nil)
+	r, err := resolveEditQuote(tree, quote, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, err
 	}
@@ -139,6 +150,18 @@ func findEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range
 		return pmdoc.Range{}, pmdoc.ErrTargetSpansBlocks
 	}
 	return r, nil
+}
+
+func resolveEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range, error) {
+	r, err := pmdoc.FindQuote(tree, quote, occurrence, nil)
+	if err == nil {
+		return r, nil
+	}
+	var missing *pmdoc.ErrQuoteNotFound
+	if errors.As(err, &missing) {
+		return pmdoc.Range{}, &ErrQuoteNotFound{Nearest: missing.Nearest}
+	}
+	return pmdoc.Range{}, err
 }
 
 func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range, bool, error) {
@@ -156,7 +179,7 @@ func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range
 		r, err := pmdoc.FindHeading(tree, title, occurrence)
 		return r, false, err
 	}
-	r, err := pmdoc.FindQuote(tree, anchor, occurrence, nil)
+	r, err := resolveEditQuote(tree, anchor, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, true, err
 	}

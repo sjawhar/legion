@@ -36,6 +36,7 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.answered": true,
   "ask.resolved": true,
   "block.repaired": true,
+  "block.invalid": true,
   "comment.created": true,
   "comment.resolved": true,
   "comment.reopened": true,
@@ -233,7 +234,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     appendAskDetailKeys(keys, event);
     return keys;
   }
-  if (event.type === "block.repaired") {
+  if (event.type === "block.repaired" || event.type === "block.invalid") {
     keys.push(["asks", event.issue_key], ["projects"]);
     return keys;
   }

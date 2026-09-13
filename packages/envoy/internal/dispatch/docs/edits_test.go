@@ -328,3 +328,19 @@ func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
+	tree, err := parseInput("Use `config` with care.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{{
+		Op:   "replace",
+		Find: "Use `missing`",
+		With: "updated",
+	}})
+	const want = `operation 0: quote not found; quotes match the block text as rendered (no markdown markers); nearest block: "Use config with care."`
+	if err == nil || err.Error() != want {
+		t.Fatalf("rendered quote error = %q, want %q", err, want)
+	}
+}

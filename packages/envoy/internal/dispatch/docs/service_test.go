@@ -155,6 +155,140 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	}
 }
 
+func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 10 * time.Millisecond
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+	service.settleRoom(artifactID, 0)
+
+	var askID string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select id::text from asks where block_artifact_id = $1 and block_id = 'ask-block'
+	`, artifactID).Scan(&askID); err != nil {
+		t.Fatalf("load indexed ask: %v", err)
+	}
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = nil
+		return tree
+	})
+	state := service.room(artifactID)
+	state.mu.Lock()
+	malformedGeneration := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, malformedGeneration)
+
+	state.mu.Lock()
+	failures := state.settleFailures
+	state.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("malformed ask scheduled %d settlement retries, want none", failures)
+	}
+	waitForDocumentVersion(t, service.store, artifactID, 3)
+	const reason = `ask block "ask-block" has an option without a label`
+	if got := liveTree(t, service, artifactID).Children[0].Attrs["invalid"]; got != reason {
+		t.Fatalf("malformed ask invalid = %#v, want %q", got, reason)
+	}
+	var malformedMarkdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select markdown from artifact_versions where artifact_id = $1 and number = 3
+	`, artifactID).Scan(&malformedMarkdown); err != nil {
+		t.Fatalf("load malformed version: %v", err)
+	}
+	if strings.Contains(malformedMarkdown, ` invalid=`) {
+		t.Fatalf("malformed version leaks server state: %q", malformedMarkdown)
+	}
+	var questionDuringInvalid string
+	var optionsDuringInvalidJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select question, options from asks where id = $1
+	`, askID).Scan(&questionDuringInvalid, &optionsDuringInvalidJSON); err != nil {
+		t.Fatalf("load ask during malformed block: %v", err)
+	}
+	var optionsDuringInvalid []model.AskOption
+	if err := json.Unmarshal(optionsDuringInvalidJSON, &optionsDuringInvalid); err != nil {
+		t.Fatalf("decode ask during malformed block: %v", err)
+	}
+	if questionDuringInvalid != "Should we ship?" || len(optionsDuringInvalid) != 2 ||
+		optionsDuringInvalid[0] != (model.AskOption{Label: "Ship", Description: "Release it"}) ||
+		optionsDuringInvalid[1] != (model.AskOption{Label: "Hold", Description: "Wait for review"}) {
+		t.Fatalf("ask changed during malformed block: question=%q options=%#v", questionDuringInvalid, optionsDuringInvalid)
+	}
+	var eventBlockID, eventVersion, eventReason string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload->>'block_id', payload->>'version', payload->>'reason'
+		from events where type = 'block.invalid' order by id desc limit 1
+	`).Scan(&eventBlockID, &eventVersion, &eventReason); err != nil {
+		t.Fatalf("load malformed-block event: %v", err)
+	}
+	if eventBlockID != "ask-block" || eventVersion != "3" || eventReason != reason {
+		t.Fatalf("malformed-block event = block=%q version=%q reason=%q", eventBlockID, eventVersion, eventReason)
+	}
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[0].Children[0].Text = "Should we release after review?"
+		tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{
+			Type: "text",
+			Text: "Release: Ship after review",
+		}}
+		return tree
+	})
+	state.mu.Lock()
+	repairedGeneration := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, repairedGeneration)
+	waitForDocumentVersion(t, service.store, artifactID, 4)
+	if _, exists := liveTree(t, service, artifactID).Children[0].Attrs["invalid"]; exists {
+		t.Fatal("repaired ask still has an invalid attribute")
+	}
+	var question string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select question, options from asks where id = $1
+	`, askID).Scan(&question, &optionsJSON); err != nil {
+		t.Fatalf("load repaired ask: %v", err)
+	}
+	var options []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &options); err != nil {
+		t.Fatalf("decode repaired options: %v", err)
+	}
+	if question != "Should we release after review?" || len(options) != 2 ||
+		options[0] != (model.AskOption{Label: "Release", Description: "Ship after review"}) ||
+		options[1] != (model.AskOption{Label: "Hold", Description: "Wait for review"}) {
+		t.Fatalf("repaired ask = question=%q options=%#v", question, options)
+	}
+	var edits int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from events where type = 'ask.edited' and payload->>'id' = $1
+	`, askID).Scan(&edits); err != nil {
+		t.Fatalf("count repaired ask edits: %v", err)
+	}
+	if edits != 1 {
+		t.Fatalf("repaired ask edit events = %d, want one", edits)
+	}
+}
+
+func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n## Not an option\n:::\n")
+	service.settleRoom(artifactID, 0)
+
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+	const reason = `ask block "ask-heading" has unsupported body node "heading"`
+	if got := liveTree(t, service, artifactID).Children[0].Attrs["invalid"]; got != reason {
+		t.Fatalf("unsupported ask body invalid = %#v, want %q", got, reason)
+	}
+	var asks int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from asks where block_artifact_id = $1 and block_id = 'ask-heading'
+	`, artifactID).Scan(&asks); err != nil {
+		t.Fatalf("count unsupported ask rows: %v", err)
+	}
+	if asks != 0 {
+		t.Fatalf("unsupported ask rows = %d, want none", asks)
+	}
+}
+
 func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
