@@ -15,11 +15,17 @@ tags:
   - update-stale
   - workspace-add
   - workspace-forget
+  - workspace-list
+  - abandon
+  - worktree-prune
+  - workspace-removal
 date: 2026-09-13
 status: active
 module: packages/workspace
 related_issues:
   - "sjawhar/legion#1023"
+  - "LEGION-104"
+  - "sjawhar/legion#1087"
 ---
 
 # jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, three ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot
@@ -141,7 +147,14 @@ empty `JJ_CONFIG` file and `XDG_CONFIG_HOME` pointed at an empty directory.
 ## Removing a workspace: the abandon set, the forget, and the order (LEGION-104)
 
 Verified 2026-09-14 on both binaries (`/tmp/legion-104-jjfacts.sh`, `/tmp/legion-104-crashshape.sh`
-during planning and again during implementation), identical unless noted:
+during planning and again during implementation), identical unless noted. These are the facts
+`removeIssueWorkspace` (`packages/workspace/src/workspace.ts`) rests on; when the daemon runs it,
+and the two guards that decide whether it runs at all, are in
+`docs/solutions/daemon/a-close-fence-awaited-downstream-must-clear-before-the-close-hands-on-its-slot.md`.
+None of them is visible to a fake command runner (it returns whatever exit code the test scripts
+and leaves no side effect), which is why the three removal tests in `workspace.test.ts` and the
+`/tmp` driver ran both binaries for real
+(`docs/solutions/testing/jj-only-driver-with-mains-file-as-negative-control-is-the-proof-shape-without-the-rig.md`).
 
 - `jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone`
   lists exactly workspace `a`'s own commits, newest first: its working copy and every ancestor no
