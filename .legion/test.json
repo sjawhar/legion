@@ -97,7 +97,14 @@
     ".legion/plan.json is not on this branch (commit 2389be42 'plan: record handoff' sits on 4d516a1f and was not carried through the implementer's rebase); read it from that commit."
   ],
   "prBody": "E2E + CI lines refreshed at a875b003 with the tester's two run directories and verdict blocks; the implementer's before-run tables kept.",
+  "prArtifacts": {
+    "handoffCommit": "4f8062881a362277c8c8efab6f408fd73b2c82cb (test: record handoff; PR head after push)",
+    "comment": "https://github.com/sjawhar/legion/pull/992#issuecomment-5650784622 (verdict table, Legion footer session 01a098be-8b78-7000-84ce-8fd88bf807ff phase test)",
+    "prBody": "CI line and E2E (tester) section rewritten for a875b003; implementer's E2E kept in a <details> block; tester tables appended (62845 chars)",
+    "commitStatus": "legion/tester success on 4f806288, id 54062111203, target_url = the comment",
+    "checkRun": "POST repos/sjawhar/legion/check-runs as the tester role's App token -> 403 'Resource not accessible by integration': the tester App lacks checks:write, so the bare `tester` check-run that docs/solutions/github/branch-protection-required-checks.md expects from the reviewer App cannot be published from this role; the commit status above is the substitute."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T03:27:47.948Z"
+  "completed": "2026-09-13T03:31:39.571Z"
 }
