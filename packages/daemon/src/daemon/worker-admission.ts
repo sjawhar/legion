@@ -1,6 +1,12 @@
 import type { SpawnWorkerResponse } from "@legion/contracts";
 import { type IssueKey, type LegionRole, parseRoleToken } from "@legion/contracts";
-import type { LegionState, WorkerRoleClaim } from "./legion-state";
+import {
+  activePhaseLabel,
+  isBystanderCatchup,
+  type LegionState,
+  type PendingAssignment,
+  type WorkerRoleClaim,
+} from "./legion-state";
 import { StopFailed, TreeClosingError } from "./process-errors";
 import type { WorkerRpcClient } from "./worker-rpc";
 
@@ -18,8 +24,9 @@ export const MAX_LAUNCH_FAILURES = 3;
  * (see `promoteQueuedWorker`'s handling below), so a failed prompt never strands the
  * assignment. `"stop"` covers both "still at cap" and a queued locator-carrying claim whose
  * client is alive but not currently idle (mid-prompt or genuinely busy) — neither is stale, so
- * neither drops the entry; only `"stale"` does that (the client is gone, or a session was never
- * confirmed). */
+ * neither drops the entry; only `"stale"` does that: the client is gone, no session was ever
+ * established, or the entry is a bystander's catch-up (`isBystanderCatchup`), which is cleared
+ * from the claim as it is dropped so neither delivery branch ever runs for it. */
 type PromotionDecision =
   | { kind: "retry" }
   | { kind: "stop" }
@@ -31,7 +38,7 @@ type PromotionDecision =
       issue: IssueKey;
       role: LegionRole;
       sessionId: string;
-      task: string;
+      pending: PendingAssignment;
     }
   | {
       kind: "launch";
@@ -39,7 +46,7 @@ type PromotionDecision =
       treeKey: IssueKey;
       issue: IssueKey;
       role: LegionRole;
-      task: string;
+      pending: PendingAssignment;
     };
 
 /** Everything `WorkerAdmission` reads or triggers on the owning `ProcessManager` — durable state,
@@ -62,7 +69,7 @@ export interface WorkerAdmissionDeps {
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
-    task: string
+    pending: PendingAssignment
   ): Promise<void>;
   promptExistingWorker(
     client: WorkerRpcClient,
@@ -70,7 +77,7 @@ export interface WorkerAdmissionDeps {
     issue: IssueKey,
     role: LegionRole,
     sessionId: string,
-    task: string,
+    pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void>;
   /** Retires a persistently-broken worker's pane and clears its locator — assumes the caller
@@ -220,7 +227,7 @@ export class WorkerAdmission {
   /**
    * Pure in-memory mutation (called only from inside `admissionLock`'s critical section — no
    * I/O here; the caller does `saveState`/publish after the lock releases) for a worker with no
-   * live pane to reuse: records the task on the existing claim (mutated in place, never
+   * live pane to reuse: records the pending prompt on the existing claim (mutated in place, never
    * replaced, so `agentId`/`generation`/`launchFailures` survive) and appends its token to the
    * FIFO running-worker queue. Any existing locator is cleared, moving its `ompSessionFile` to
    * `resumeSessionFile` so the eventual promoted launch still resumes the same agent;
@@ -233,11 +240,11 @@ export class WorkerAdmission {
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
-    task: string
+    pending: PendingAssignment
   ): void {
     const target: WorkerRoleClaim = claim ?? { issue, role };
     const resumeSessionFile = target.locator?.ompSessionFile ?? target.resumeSessionFile;
-    target.pendingAssignment = task;
+    target.pendingAssignment = pending;
     delete target.locator;
     if (resumeSessionFile) target.resumeSessionFile = resumeSessionFile;
     else delete target.resumeSessionFile;
@@ -253,8 +260,12 @@ export class WorkerAdmission {
    * is not retired, its pane is not touched — since `promoteQueuedWorker`'s `"prompt"` branch
    * only needs to `prompt()` it in place once a slot frees up, never relaunch it.
    */
-  private enqueueIdleWorker(token: string, claim: WorkerRoleClaim, task: string): void {
-    claim.pendingAssignment = task;
+  private enqueueIdleWorker(
+    token: string,
+    claim: WorkerRoleClaim,
+    pending: PendingAssignment
+  ): void {
+    claim.pendingAssignment = pending;
     const queue = this.deps.state.workerAdmission.queue;
     if (!queue.includes(token)) queue.push(token);
   }
@@ -277,11 +288,11 @@ export class WorkerAdmission {
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
-    task: string
+    pending: PendingAssignment
   ): Promise<SpawnWorkerResponse> {
     const admitted = await this.withAdmissionLock(async () => {
       if (!this.workerPromotionEnabled || this.runningWorkerCount() >= this.deps.config.workerCap) {
-        this.enqueueClaimForLaunch(token, issue, role, claim, task);
+        this.enqueueClaimForLaunch(token, issue, role, claim, pending);
         return false;
       }
       this.launching.add(token);
@@ -293,7 +304,7 @@ export class WorkerAdmission {
       return { status: "queued", roleToken: token };
     }
     try {
-      await this.deps.launchWorker(treeKey, issue, role, claim, task);
+      await this.deps.launchWorker(treeKey, issue, role, claim, pending);
     } finally {
       this.launching.delete(token);
       this.deps.onAdmissionEvent?.(token, "reservation-released");
@@ -357,7 +368,7 @@ export class WorkerAdmission {
     role: LegionRole,
     claim: WorkerRoleClaim,
     sessionId: string,
-    task: string,
+    pending: PendingAssignment,
     client: WorkerRpcClient
   ): Promise<{ kind: "queued" } | { kind: "resumed" }> {
     const shouldPrompt = await this.withAdmissionLock(async () => {
@@ -366,7 +377,7 @@ export class WorkerAdmission {
         !this.workerPromotionEnabled ||
         this.runningWorkerCount() >= this.deps.config.workerCap
       ) {
-        this.enqueueIdleWorker(token, claim, task);
+        this.enqueueIdleWorker(token, claim, pending);
         return false;
       }
       this.reserve(token);
@@ -378,7 +389,7 @@ export class WorkerAdmission {
       return { kind: "queued" };
     }
     try {
-      await this.deps.promptExistingWorker(client, token, issue, role, sessionId, task);
+      await this.deps.promptExistingWorker(client, token, issue, role, sessionId, pending);
     } finally {
       this.release(token);
       this.deps.onAdmissionEvent?.(token, "reservation-released");
@@ -499,6 +510,18 @@ export class WorkerAdmission {
         queue.shift();
         return { kind: "stale" };
       }
+      if (isBystanderCatchup(this.deps.state, parsed.issue, parsed.role, claim.pendingAssignment)) {
+        // The phase moved on while this catch-up waited for a slot: whether the worker is a live
+        // idle pane or a retired claim, delivering it would only prompt or relaunch a finished
+        // worker with nothing to do. Dropped and drained like any other consumed entry; the
+        // architect's next spawn_worker is what resumes a finished worker.
+        console.info(
+          `[legion] dropping queued catch-up for ${token}: ${parsed.issue}'s active phase is ${activePhaseLabel(this.deps.state, parsed.issue)}; only spawn_worker resumes a finished worker`
+        );
+        delete claim.pendingAssignment;
+        queue.shift();
+        return { kind: "stale" };
+      }
       if (claim.locator !== undefined) {
         const client = this.deps.getWorkerClient(token);
         if (!client || !claim.sessionId) {
@@ -537,7 +560,7 @@ export class WorkerAdmission {
           issue: parsed.issue,
           role: parsed.role,
           sessionId: claim.sessionId,
-          task: claim.pendingAssignment,
+          pending: claim.pendingAssignment,
         };
       }
       this.launching.add(token);
@@ -547,7 +570,7 @@ export class WorkerAdmission {
         treeKey,
         issue: parsed.issue,
         role: parsed.role,
-        task: claim.pendingAssignment,
+        pending: claim.pendingAssignment,
       };
     });
 
@@ -566,7 +589,7 @@ export class WorkerAdmission {
           decision.issue,
           decision.role,
           decision.sessionId,
-          decision.task
+          decision.pending
         );
       } catch (error) {
         console.error(`[legion] failed to prompt queued worker ${token}:`, error);
@@ -622,7 +645,7 @@ export class WorkerAdmission {
         decision.issue,
         decision.role,
         decision.claim,
-        decision.task
+        decision.pending
       );
       this.deps.publishArchitect(decision.treeKey, {
         type: "worker-started",

@@ -409,9 +409,13 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
 
 /**
  * Routes an event about `issue` to whichever role the shared routing table
- * names: the issue's active phase worker (`state.phases[issue]`, written by
- * `handleWorkerStarted` confirming a fresh boot and `promptExistingWorker`
- * resuming an already-live one), or the tree's architect when no phase is
+ * names: the issue's active phase worker (`state.phases[issue]` -- the one
+ * place a new active phase is written is `promptExistingWorker` delivering
+ * an architect assignment, `kind: "assignment"`: a task prompted into a live
+ * worker, or delivered from `pendingAssignment` at `/worker/ready`; a bare
+ * registration, a reconnect, or a daemon catch-up never writes it, and
+ * `handlePhaseComplete` only deletes, restores, or marks it completed), or
+ * the tree's architect when no phase is
  * active — which includes a phase whose worker already reported completion
  * (`phase.completed` set by `handlePhaseComplete` when no architect was live
  * to receive it) as well as no phase at all. A closed tree instead wakes the

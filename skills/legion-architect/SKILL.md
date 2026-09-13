@@ -18,7 +18,11 @@ separate coordinator to finish necessary work.
   Message a known phase worker with `envoy_publish` to `notifications.role.` followed by
   its encoded role token (the token `spawn_worker` returned for it); re-assign it by
   calling `spawn_worker` again on the same existing role, which resumes the same process
-  instead of starting a fresh one. Phase workers escalate lifecycle, scope, and
+  instead of starting a fresh one. Phases on one issue are strictly sequential -- one role
+  is the issue's active phase at a time, and calling `spawn_worker` for a different role
+  while a phase is active supersedes that phase: the superseded worker's
+  `legion handoff complete` is then refused, so finish (or deliberately abandon) one role
+  before assigning the next. Phase workers escalate lifecycle, scope, and
   cross-phase matters the same way: `envoy_publish` to your own encoded token. Any role
   may use `dispatch_ask` directly for a standalone human question; replies return to the
   asking session.

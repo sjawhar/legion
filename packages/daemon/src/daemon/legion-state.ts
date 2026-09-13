@@ -120,6 +120,15 @@ export interface PrState {
   blockedAttempts?: number;
 }
 
+/** A prompt queued on a worker claim for delivery once the worker is ready or admitted.
+ * `assignment` is an architect's `spawn_worker` task: the one delivery that makes its role the
+ * issue's active phase (`state.phases[issue]`). `catchup` is the daemon's own `catchup-worker`
+ * recovery prompt (`resumeWorker`), which never changes the phase. */
+export interface PendingAssignment {
+  kind: "assignment" | "catchup";
+  task: string;
+}
+
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
@@ -130,7 +139,7 @@ export interface WorkerRoleClaim {
   agentId?: string;
   locator?: Locator;
   generation?: number;
-  pendingAssignment?: string;
+  pendingAssignment?: PendingAssignment;
   launchFailures?: number;
   /** Consecutive `prompt()` rejections against this claim's already-live socket (reset to 0 on
    * a successful prompt) — the queued idle-resume path's own failure counter, mirroring
@@ -170,7 +179,7 @@ export interface ControllerPendingNotice {
 }
 
 export interface LegionState {
-  version: 25;
+  version: 26;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -304,6 +313,9 @@ const PrStateSchema = z
     blockedAttempts: z.number().int().nonnegative().optional(),
   })
   .strict();
+const PendingAssignmentSchema = z
+  .object({ kind: z.enum(["assignment", "catchup"]), task: z.string() })
+  .strict();
 const WorkerRoleClaimSchema = z
   .object({
     issue: IssueKeySchema,
@@ -313,7 +325,7 @@ const WorkerRoleClaimSchema = z
     agentId: z.string().optional(),
     locator: LocatorSchema.optional(),
     generation: z.number().int().nonnegative().optional(),
-    pendingAssignment: z.string().optional(),
+    pendingAssignment: PendingAssignmentSchema.optional(),
     launchFailures: z.number().int().nonnegative().optional(),
     promptFailures: z.number().int().nonnegative().optional(),
     bootTokenHash: z.string().optional(),
@@ -366,7 +378,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(25),
+    version: z.literal(26),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -426,7 +438,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 25,
+    version: 26,
     project,
     issues: {},
     trees: {},
@@ -442,6 +454,50 @@ export function newLegionState(project: string, cap: number): LegionState {
     gates: {},
     pendingStatusWrites: {},
   };
+}
+
+/** True when `role` is `issue`'s active phase: the phase the architect most recently assigned,
+ * not yet completed. A `completed` record is a finished phase awaiting replay to the architect,
+ * so its role is no longer active. */
+export function isActivePhase(state: LegionState, issue: IssueKey, role: string): boolean {
+  const phase = state.phases[issue];
+  return phase !== undefined && !phase.completed && phase.phase === role;
+}
+
+/** The role `issue`'s active phase names, for log lines: `none` when no phase is active (absent,
+ * or completed and awaiting replay to the architect). */
+export function activePhaseLabel(state: LegionState, issue: IssueKey): string {
+  const phase = state.phases[issue];
+  return phase !== undefined && !phase.completed ? phase.phase : "none";
+}
+
+/** True when `role` is a phase worker on `issue` that is not its active phase -- a bystander: a
+ * finished (or superseded) worker whose next task comes only from the architect's `spawn_worker`.
+ * The one definition every bystander judgement uses (`resumeWorker`'s decision whether to queue a
+ * catch-up, `isBystanderCatchup` at delivery, `handleWorkerStarted`'s registration log), so the
+ * sub-architect rationale lives here once: an architect (`role === "architect"` on a child issue)
+ * is never a bystander, because it is never its child's active phase -- once it has spawned a
+ * planner, `phases[child]` names that phase worker -- yet it parks for the life of its subtree and
+ * a catch-up is its only recovery path. The root architect never holds a phase either; its
+ * recovery is `resurrect`, and the one of these paths it does enter (`resumeWorker`, via the
+ * durable lane's `onUndeliverable`) exits at the no-resumable-identity guard before this judgement
+ * is made. */
+export function isBystanderRole(state: LegionState, issue: IssueKey, role: string): boolean {
+  return role !== "architect" && !isActivePhase(state, issue, role);
+}
+
+/** True when `pending` is the daemon's own catch-up queued for a bystander role (`isBystanderRole`),
+ * judged at delivery time (a queued promotion or `/worker/ready`), not only when `resumeWorker`
+ * decides whether to queue one: the phase can move on while the catch-up waits behind the cap or
+ * a boot. Such a catch-up is dropped rather than prompted or relaunched; only the architect's
+ * next `spawn_worker` resumes a finished worker. */
+export function isBystanderCatchup(
+  state: LegionState,
+  issue: IssueKey,
+  role: string,
+  pending: PendingAssignment | undefined
+): boolean {
+  return pending?.kind === "catchup" && isBystanderRole(state, issue, role);
 }
 
 function migrateV5State(state: unknown): unknown {
@@ -898,6 +954,38 @@ function migrateV24State(state: unknown): unknown {
   return { ...state, version: 25 };
 }
 
+/** v25 -> v26: `WorkerRoleClaim.pendingAssignment` becomes `{ kind, task }`; each persisted
+ * bare string is classified by its payload -- JSON whose `type` is `catchup-worker` is a
+ * `catchup`, anything else (an architect's free-text task, or text that is not JSON) is an
+ * `assignment`. Sits after the LEGION-33 v24 -> v25 bump above: a deployed daemon already
+ * persists version 25 under that meaning, so this step must be the one that takes it to 26. */
+function migrateV25State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 25) return state;
+  const { roles, ...rest } = state;
+  const classify = (task: string): { kind: "assignment" | "catchup"; task: string } => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(task);
+    } catch {
+      return { kind: "assignment", task };
+    }
+    return {
+      kind: recordValue(parsed) && parsed.type === "catchup-worker" ? "catchup" : "assignment",
+      task,
+    };
+  };
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) =>
+          recordValue(claim) && "issue" in claim && typeof claim.pendingAssignment === "string"
+            ? [key, { ...claim, pendingAssignment: classify(claim.pendingAssignment) }]
+            : [key, claim]
+        )
+      )
+    : roles;
+  return { ...rest, version: 26, roles: migratedRoles };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -936,13 +1024,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV22State,
     migrateV23State,
     migrateV24State,
+    migrateV25State,
   ];
   const state = migrations.reduce((current, migrate) => migrate(current), source as unknown);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 25) {
+  if (version !== 26) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

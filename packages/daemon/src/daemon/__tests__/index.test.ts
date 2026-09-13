@@ -455,7 +455,7 @@ describe("startDaemon", () => {
     state.roles[testerToken] = {
       issue,
       role: "tester",
-      pendingAssignment: "verify #41",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
       resumeSessionFile,
     };
     state.workerAdmission.queue.push(testerToken);

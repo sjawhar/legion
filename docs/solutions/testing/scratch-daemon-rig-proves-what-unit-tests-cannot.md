@@ -70,9 +70,10 @@ further window.
 
 ## Why this and not a bigger unit test
 
-- The leak was an *ordering across real events* (`agent_end` → expiry → another role's
-  `/worker/started`), not a state. The unit fixture that reproduces it is five lines once you know
-  the ordering; the rig is how you learn the ordering exists.
+- The leak was an *ordering across real events* (`agent_end` → expiry → another role's phase
+  write — at the time its `/worker/started`; since LEGION-37, #991, the delivery of the
+  architect's assignment for it), not a state. The unit fixture that reproduces it is five lines
+  once you know the ordering; the rig is how you learn the ordering exists.
 - `pgrep`/`ps` counts and the daemon's own log lines are the user-observable surface the criterion
   names. A passing `processes.test.ts` is a regression lock, not proof of a criterion — the
   legion-worker skill says so, and this issue is the case for it.
@@ -107,3 +108,9 @@ further window.
   resident until the sweep; tear the rig down with `kill-server` rather than waiting.
 - The rig's daemon is `legion start` in a pane the tester owns; never `legion restart <live team>`
   from a worker pane — that binds a new live daemon to the pane that ran it.
+- `GET /legion/v1/state` is redacted (`api/state.ts`) and carries no `phases` at all, so a proof
+  about the active phase — who holds `phases[<KEY>]` before and after a relaunch, a catch-up, a
+  `spawn_worker` — must read the rig daemon's `state.json` on disk (poll it; the daemon writes it
+  atomically, and every phase write persists before the route responds). `/state` is fine for
+  `roles`/`trees`/`admission`; it is the wrong instrument for `phases` (LEGION-37's tester,
+  six rounds).

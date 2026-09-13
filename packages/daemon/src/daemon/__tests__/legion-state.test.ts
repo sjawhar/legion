@@ -104,9 +104,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v25 state with a valid project and admission capacity", () => {
+  it("initializes empty v26 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 25,
+      version: 26,
       project: "omp",
       issues: {},
       trees: {},
@@ -474,7 +474,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, v24, and v25", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, v24, v25, and v26", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -488,7 +488,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(25);
+    expect(migrated.version).toBe(26);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -577,7 +577,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v25), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v26), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -606,7 +606,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(25);
+    expect(migrated.version).toBe(26);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -636,10 +636,12 @@ describe("legion state", () => {
       },
       [unconfirmedToken]: {
         // No sessionId at all: /worker/started never registered this generation, so it was
-        // never confirmed under either the old or new meaning and must stay untouched.
+        // never confirmed under either the old or new meaning and must stay untouched. Its
+        // pending assignment is written to the v19 file as the bare string that era persisted;
+        // the v25 -> v26 migration classifies it into this object form.
         issue,
         role: "tester",
-        pendingAssignment: "verify #41",
+        pendingAssignment: { kind: "assignment", task: "verify #41" },
       },
       [alreadyConfirmedToken]: {
         // Already carries readyConfirmedAt (persisted by an already-patched daemon): never
@@ -655,14 +657,16 @@ describe("legion state", () => {
         sessionId: "ses_controller",
       },
     };
-    await writeFile(file, JSON.stringify({ ...current, version: 19 }), "utf8");
+    const v19State = JSON.parse(JSON.stringify({ ...current, version: 19 }));
+    v19State.roles[unconfirmedToken].pendingAssignment = "verify #41";
+    await writeFile(file, JSON.stringify(v19State), "utf8");
 
     const migrationTimestamp = 1_726_000_000_000;
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(25);
+      expect(migrated.version).toBe(26);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -730,7 +734,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(25);
+      expect(migrated.version).toBe(26);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -798,13 +802,147 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(25);
+    expect(migrated.version).toBe(26);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
     expect(claim && "issue" in claim ? claim.locator?.runtime : undefined).toBe("tmux");
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v23.bak`, "utf8")).toBe(raw);
+  });
+
+  it("migrates v25 state to v26 by classifying each persisted pendingAssignment string by its payload", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const implementerToken = roleToken(initialState.project, issue, "implementer");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const reviewerToken = roleToken(initialState.project, issue, "reviewer");
+    const catchupTask = JSON.stringify({ type: "catchup-worker", unhandled: [] });
+    current.roles = {
+      [implementerToken]: {
+        issue,
+        role: "implementer",
+        generation: 1,
+        pendingAssignment: { kind: "assignment", task: "implement #43" },
+      },
+      [testerToken]: {
+        issue,
+        role: "tester",
+        sessionId: "ses_tester",
+        generation: 2,
+        pendingAssignment: { kind: "catchup", task: catchupTask },
+      },
+      [reviewerToken]: {
+        issue,
+        role: "reviewer",
+        sessionId: "ses_reviewer",
+        readyConfirmedAt: 1_700_000_000_000,
+      },
+      [controllerToken(initialState.project)]: {
+        role: "controller",
+        sessionId: "ses_controller",
+      },
+    };
+    // The v25 file, exactly as a daemon on main's LEGION-33 bump persists it: the same state,
+    // every pending assignment a bare task string.
+    const v25State = JSON.parse(JSON.stringify({ ...current, version: 25 }));
+    v25State.roles[implementerToken].pendingAssignment = "implement #43";
+    v25State.roles[testerToken].pendingAssignment = catchupTask;
+    const raw = JSON.stringify(v25State);
+    await writeFile(file, raw, "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(26);
+    expect(migrated.roles[implementerToken]).toEqual({
+      ...current.roles[implementerToken],
+      pendingAssignment: { kind: "assignment", task: "implement #43" },
+    });
+    expect(migrated.roles[testerToken]).toEqual({
+      ...current.roles[testerToken],
+      pendingAssignment: { kind: "catchup", task: catchupTask },
+    });
+    expect(migrated.roles[reviewerToken]).toEqual(current.roles[reviewerToken]);
+    expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
+      current.roles[controllerToken(initialState.project)]
+    );
+    expect(migrated).toEqual(current);
+    expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
+  });
+
+  it("composes the LEGION-33 v24 -> v25 bump with the v25 -> v26 classification: a v24 file with bare-string pendingAssignments migrates through both to v26 objects", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-through-v26-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const implementerToken = roleToken(initialState.project, issue, "implementer");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const catchupTask = JSON.stringify({ type: "catchup-worker", unhandled: [] });
+    current.roles = {
+      [implementerToken]: {
+        issue,
+        role: "implementer",
+        generation: 1,
+        pendingAssignment: { kind: "assignment", task: "implement #43" },
+      },
+      [testerToken]: {
+        issue,
+        role: "tester",
+        sessionId: "ses_tester",
+        generation: 2,
+        pendingAssignment: { kind: "catchup", task: catchupTask },
+      },
+    };
+    // A file the pre-LEGION-33 daemon wrote: version 24, bare-string pending assignments.
+    const v24State = JSON.parse(JSON.stringify({ ...current, version: 24 }));
+    v24State.roles[implementerToken].pendingAssignment = "implement #43";
+    v24State.roles[testerToken].pendingAssignment = catchupTask;
+    const raw = JSON.stringify(v24State);
+    await writeFile(file, raw, "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(26);
+    expect(migrated).toEqual(current);
+    expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
+  });
+
+  it("classifies a v25 pendingAssignment that is not JSON, or JSON of another type, as an architect assignment", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-freetext-"));
+    const file = path.join(tempDir, "state.json");
+    const current = newLegionState(initialState.project, initialState.cap);
+    const plannerToken = roleToken(initialState.project, issue, "planner");
+    const architectToken = roleToken(initialState.project, issue, "architect");
+    const otherJson = JSON.stringify({ type: "review-round", round: 2 });
+    current.roles = {
+      [plannerToken]: {
+        issue,
+        role: "planner",
+        pendingAssignment: { kind: "assignment", task: '{"not json' },
+      },
+      [architectToken]: {
+        issue,
+        role: "architect",
+        pendingAssignment: { kind: "assignment", task: otherJson },
+      },
+    };
+    const v25State = JSON.parse(JSON.stringify({ ...current, version: 25 }));
+    v25State.roles[plannerToken].pendingAssignment = '{"not json';
+    v25State.roles[architectToken].pendingAssignment = otherJson;
+    await writeFile(file, JSON.stringify(v25State), "utf8");
+
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
+  it("rejects a v26 worker claim whose pendingAssignment is still a bare string", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v26-string-assignment-"));
+    const file = path.join(tempDir, "state.json");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const raw = JSON.parse(JSON.stringify(stateWithTree()));
+    raw.roles[testerToken] = { issue, role: "tester", pendingAssignment: "verify #41" };
+    await writeFile(file, JSON.stringify(raw), "utf8");
+
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
 
   it("round-trips a kubernetes locator and rejects one missing a required field", async () => {
@@ -875,7 +1013,7 @@ describe("legion state", () => {
     const migrated = await loadState(file, initialState);
 
     expect(migrated).toEqual(current);
-    expect(migrated.version).toBe(25);
+    expect(migrated.version).toBe(26);
     expect(Object.keys(migrated.prs[prKey] ?? {})).toEqual(Object.keys(current.prs[prKey] ?? {}));
     expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
   });
@@ -905,12 +1043,12 @@ describe("legion state", () => {
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
 
-  it("rejects a v25 locator that carries no runtime discriminant", async () => {
-    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v25-untagged-"));
+  it("rejects a v26 locator that carries no runtime discriminant", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v26-untagged-"));
     const file = path.join(tempDir, "state.json");
-    const v25State = JSON.parse(JSON.stringify(stateWithTree()));
-    delete v25State.trees[issue].locator.runtime;
-    await writeFile(file, JSON.stringify(v25State), "utf8");
+    const v26State = JSON.parse(JSON.stringify(stateWithTree()));
+    delete v26State.trees[issue].locator.runtime;
+    await writeFile(file, JSON.stringify(v26State), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });

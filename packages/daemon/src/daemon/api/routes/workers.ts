@@ -7,7 +7,13 @@ import {
   roleTopic,
 } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
-import type { IssueStatus, LegionState, WorkerRoleClaim } from "../../legion-state";
+import {
+  activePhaseLabel,
+  type IssueStatus,
+  isBystanderRole,
+  type LegionState,
+  type WorkerRoleClaim,
+} from "../../legion-state";
 import { sameProcess } from "../../runtime";
 import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
@@ -117,6 +123,14 @@ export async function handleWorkerSession(
   );
 }
 
+/** Registers a booted worker's session: records its capability, locator (with the OMP session
+ * file), and claim, and mints its session secret. Never writes the issue's active phase
+ * (`state.phases[issue]`): the one place a new active phase is written is the delivery of an
+ * architect assignment (`promptExistingWorker` with `kind: "assignment"` -- a task prompted into
+ * a live worker, or delivered from the claim's `pendingAssignment` at `/worker/ready`;
+ * `/phase/complete` only deletes, restores, or marks the record completed), so a relaunch of a
+ * worker whose phase already finished registers as a bystander and the newer phase keeps its
+ * completion route and its wakes. */
 export async function handleWorkerStarted(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -196,7 +210,6 @@ export async function handleWorkerStarted(
     // in-memory claim exactly as durable as what was ever written to disk, and a retry with the
     // same {bootToken, sessionId} starting where the first attempt did.
     const priorClaim = current;
-    const priorPhase = ctx.deps.state.phases[issue];
     const nextClaim: WorkerRoleClaim = {
       ...current,
       sessionId,
@@ -210,14 +223,24 @@ export async function handleWorkerStarted(
     // confirmation still escalates to `worker-died` at the threshold instead of resetting every
     // generation.
     ctx.deps.state.roles[token] = nextClaim;
-    ctx.deps.state.phases[issue] = { phase: role, sessionId };
     try {
       await ctx.save();
     } catch (error) {
       ctx.deps.state.roles[token] = priorClaim;
-      if (priorPhase === undefined) delete ctx.deps.state.phases[issue];
-      else ctx.deps.state.phases[issue] = priorPhase;
       throw error;
+    }
+    // A fresh spawn or a resume carrying the architect's task is the normal path: its
+    // assignment makes it the active phase at ready. A bystander role (`isBystanderRole`: a
+    // phase worker that is not the active phase; an architect never is one) registering with
+    // anything else -- a finished worker relaunched by the daemon's own recovery, or a
+    // reconnect -- gets one line saying so.
+    if (
+      isBystanderRole(ctx.deps.state, issue, role) &&
+      nextClaim.pendingAssignment?.kind !== "assignment"
+    ) {
+      console.info(
+        `[legion] ${token} registered session ${sessionId} while ${issue}'s active phase is ${activePhaseLabel(ctx.deps.state, issue)}; the phase changes only when an architect assignment is delivered`
+      );
     }
 
     // Only after the durable state is persisted do we consume the boot token and mint the
