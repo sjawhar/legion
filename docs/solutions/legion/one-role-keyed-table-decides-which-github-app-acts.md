@@ -76,7 +76,9 @@ Three properties make this hold:
    `modeToRole`, and `WORKER_MODE`.
 3. **No second entry point survives.** The last implicit `"implement"` default — the unused
    `GitHubService.gh(command, appRole = "implement")` — was deleted with the `runner` plumbing
-   that existed only for it (`LegionApiDeps.runner`, `RouteContext.runner`, `defaultRunner`).
+   that existed only for it (`LegionApiDeps.runner`, `RouteContext.runner`, and `api.ts`'s
+   `deps.runner ?? defaultRunner` fallback; `defaultRunner` itself stays exported from
+   `state/fetch.ts` for the CLI and the daemon's own command runner).
 
 The daemon's own GitHub uses are deliberately **not** role-keyed and are written as the implement
 App literal, named as such in `packages/daemon/src/daemon/AGENTS.md` (GitHub Apps): workspace
@@ -95,8 +97,11 @@ one App can do nothing. Two independent gates enforce it, and the order matters:
 
 - **Config load** (`loadGitHubApps`, `config.ts`): a `github_apps` section missing either role
   throws `github_apps.<role> is required`; `resolveDaemonConfig` throws `github_apps is required`
-  for a missing section or a CLI override missing a role. The presence check runs **before** any
-  role's key is resolved, so a missing App is refused before a `private_key_command` or
+  when neither the file nor a CLI override supplies the section at all, and
+  `github_apps.<role> is required` when a CLI override supplies it without both roles (the file
+  path never reaches that second check — the loader already refused). The presence check runs
+  **before** any role's key is resolved, so a missing App is refused before a
+  `private_key_command` or
   `secrets` call could execute — and `legion start --check-config` (`resolveSecrets: false`)
   reports it without running anything. Before LEGION-42 the loader `continue`d past an absent
   role and an absent section resolved to `{}`, so `--check-config` printed `Config OK` for a file
@@ -107,7 +112,7 @@ one App can do nothing. Two independent gates enforce it, and the order matters:
   startup with `TokenManager`'s error instead of 500ing on that role's first `legion gh`.
 
 `GitHubAppsConfig` stays `Partial<Record<GitHubAppRole, …>>` on purpose: `TokenManager`'s unit
-tests build one-App managers, and five test fixtures construct a `DaemonConfig` with
+tests build one-App managers, and six test fixtures construct a `DaemonConfig` with
 `githubApps: {}` because they never reach GitHub. The invariant lives in the two loaders that
 every production path goes through; a fixture that bypasses them and then reaches
 `TokenManager.getToken` fails loudly with `role_not_configured: <role>`, never silently.

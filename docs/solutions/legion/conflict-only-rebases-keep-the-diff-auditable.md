@@ -115,8 +115,8 @@ LEGION-42 (#1021) met a case GitHub's mergeability check cannot see. The branch 
 contract**: `loadGitHubApps` began refusing a `legion.yaml` without both GitHub Apps. Between
 the reviewer's read and the corrective push, `main` took #1016, which added `config.test.ts` and
 `cli/__tests__` cases that build a config with only the implement App — legal on `main`, refused
-by the branch. No line overlapped, so GitHub said `MERGEABLE`; the merge commit CI runs is
-`main` + branch, and its `test` job failed on those four cases with `github_apps is required` /
+by the branch. No line overlapped, so GitHub said `MERGEABLE`; but the merge commit CI runs —
+`main` + branch — failed its `test` job on those four cases with `github_apps is required` /
 `github_apps.review is required`.
 
 How to tell it apart from a CI refresh or a flake, in order:

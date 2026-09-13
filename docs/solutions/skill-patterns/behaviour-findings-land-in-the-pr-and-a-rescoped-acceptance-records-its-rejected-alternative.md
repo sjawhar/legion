@@ -92,17 +92,18 @@ What made this cheap and durable:
    proceeded on the line as re-scoped.
 3. **The rejected option is written where the next reader looks.** A spec's *Rejected* section is
    the record that keeps "just grant the permission" from being re-proposed by the next tester who
-   meets the same 403; `one-role-keyed-table-decides-which-github-app-acts.md` repeats it beside
-   the permission table for the same reason.
+   meets the same 403; `../legion/one-role-keyed-table-decides-which-github-app-acts.md` repeats
+   it beside the permission table for the same reason.
 4. **The PR body's acceptance list follows the spec version.** Each re-scope bumped the version
    (v2 → v3 → v4 → v5) and the body header said which one it satisfies, so tester and reviewer
-- `plan-ruling-that-changes-a-user-decision-goes-back-to-the-user.md` — the case where a
-  re-scope is *not* the architect's to make.
+   read the same lines the architect wrote, and a round is judged against the version it was
+   run under rather than whichever wording the reader remembers.
+
 ## Related
 
 - `../legion/fast-follow-pr-mechanics-and-queue-registration.md` — what happens to the
   Fast-follow line *after* the parent merges; this document is about what may go on it.
-- `a-plan-ruling-that-changes-a-user-approved-requirement-goes-back-to-the-user.md` — the case
-  where a re-scope is *not* the architect's to make.
+- `plan-ruling-that-changes-a-user-decision-goes-back-to-the-user.md` — the case where a
+  re-scope is *not* the architect's to make.
 - `../legion/one-role-keyed-table-decides-which-github-app-acts.md` — the change these rounds
   shaped.
