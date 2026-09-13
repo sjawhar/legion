@@ -13,7 +13,10 @@ import {
 import {
   commandFailure,
   issueWorkspaceDir,
+  type ProvisionIssueWorkspaceDeps,
   provisionIssueWorkspace,
+  type RemoveIssueWorkspaceResult,
+  removeIssueWorkspace,
   type WorkspaceSpec,
 } from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
@@ -1805,6 +1808,10 @@ export class ProcessManager {
       );
     }
 
+    // Every process under the tree is stopped (or this call has thrown above): the workspaces of
+    // the finished issues go now, before the record turns `closed` — see `removeTreeWorkspaces`.
+    await this.removeTreeWorkspaces(treeKey, tree);
+
     tree.status = "closed";
     delete tree.lingerUntil;
     const rootStatus = this.deps.state.issues[treeKey]?.status;
@@ -1877,7 +1884,31 @@ export class ProcessManager {
     return locators.filter((locator): locator is Locator => locator !== undefined);
   }
 
+  /** Awaits every in-flight `closeTree` for `issue` or an ancestor of it before a root launch
+   * provisions its workspace: that close may be removing exactly this directory
+   * (`removeTreeWorkspaces`). A root re-admitted while its previous tree still closes (a human
+   * moves a finished issue back to `todo` within the close's stop window) and a child re-admitted
+   * as its own root while its parent's tree closes both wait here; the close itself removes
+   * nothing for a record that is no longer `lingering`. A failed close is its own caller's to log
+   * — the launch proceeds either way, exactly as it does today. Phase-worker launches need no
+   * wait: `launchWorker` refuses a closing tree outright (`TreeClosingError`). */
+  private async awaitClosingTrees(issue: IssueKey): Promise<void> {
+    const seen = new Set<IssueKey>();
+    for (
+      let current: IssueKey | undefined = issue;
+      current !== undefined && !seen.has(current);
+      current = this.deps.state.issues[current]?.parent
+    ) {
+      seen.add(current);
+      const closing = this.closingTrees.get(current);
+      if (!closing) continue;
+      console.error(`[legion] launch of ${issue} waits for the close of tree ${current} to finish`);
+      await closing.catch(() => {});
+    }
+  }
+
   async spawnRoot(issue: IssueKey, resume = false, resumeSessionFile?: string): Promise<void> {
+    await this.awaitClosingTrees(issue);
     const tree = this.ensureTree(issue);
     const priorGeneration = tree.generation;
     const priorLocator = tree.locator;
@@ -2984,6 +3015,17 @@ export class ProcessManager {
     return `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc ${systemPromptArguments(promptPath, addressingPrompt, this.deps.deploymentInstructionsFile)}`;
   }
 
+  /** The `run` every workspace-package command goes through: the daemon's runner, with `stderr`
+   * normalised to a string the package's `commandFailure` can print. Typed as the package's own
+   * `run` so both `provisionIssueWorkspace` and `removeIssueWorkspace` accept it unchanged. */
+  private readonly workspaceCommandRunner: ProvisionIssueWorkspaceDeps["run"] = async (
+    command,
+    options
+  ) => {
+    const result = await this.deps.run(command, options);
+    return { ...result, stderr: result.stderr ?? "" };
+  };
+
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the
    * root architect and every phase worker alike. */
   private async provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
@@ -2995,11 +3037,79 @@ export class ProcessManager {
       provisioningToken: async () => await this.deps.provisioningToken(owner),
       credentialHelper: this.deps.credentialHelper,
       commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
-      run: async (command, options) => {
-        const result = await this.deps.run(command, options);
-        return { ...result, stderr: result.stderr ?? "" };
-      },
+      run: this.workspaceCommandRunner,
     });
+  }
+
+  /** Removes `issue`'s jj workspace from the shared clone (`removeIssueWorkspace`), under the same
+   * runner and slow-command budget as `provisionWorkspace`. Only `removeTreeWorkspaces` calls it. */
+  private async removeWorkspace(issue: IssueKey): Promise<RemoveIssueWorkspaceResult> {
+    return removeIssueWorkspace(issue, {
+      repo: this.deps.config.repo,
+      stateDir: this.deps.config.stateDir,
+      commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
+      run: this.workspaceCommandRunner,
+    });
+  }
+
+  /** The workspaces a closing tree leaves behind (LEGION-104): once every process under the tree
+   * is stopped, the root's workspace goes unless the root is parked (`backlog`/`icebox`), and each
+   * descendant's goes when that issue is `done`; everything else is kept and named. Runs only
+   * while the tree record is still `lingering`: `admit` reuses the record mid-close for a root a
+   * human moved back to `todo` (it sets `active` and `startRoot`s it — `spawnRoot` then waits on
+   * this close, `awaitClosingTrees`), and deleting the directory that root is about to provision
+   * into would be the one thing worse than leaving it. Each issue is re-checked at its turn: a
+   * child that got its own tree record meanwhile (re-admitted as a root while this tree closed)
+   * belongs to that tree now. A removal that fails is logged once with the issue, the directory,
+   * and the error, and the close goes on — the leftover is today's state, and the next
+   * provisioning of that issue repairs whichever half state it finds (`createWorkspace`). Nothing
+   * retries. Sits before `tree.status = "closed"` so a crash mid-removal leaves the tree
+   * `lingering` for the sweep to re-run the close and the idempotent removal. */
+  private async removeTreeWorkspaces(treeKey: IssueKey, tree: TreeState): Promise<void> {
+    if (tree.status !== "lingering") {
+      console.error(
+        `[legion] kept every workspace of tree ${treeKey} at its close: the tree record is "${tree.status}", not lingering (re-admitted while closing)`
+      );
+      return;
+    }
+    const issues = [
+      treeKey,
+      ...(Object.keys(this.deps.state.issues) as IssueKey[]).filter(
+        (issue) => issue !== treeKey && this.rootForIssue(issue) === treeKey
+      ),
+    ];
+    for (const issue of issues) {
+      const dir = issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue);
+      const owner = this.rootForIssue(issue);
+      if (issue !== treeKey && owner !== treeKey) {
+        console.error(
+          `[legion] kept the workspace of ${issue} (${dir}) at the close of tree ${treeKey}: it now belongs to tree ${owner}`
+        );
+        continue;
+      }
+      const status = this.deps.state.issues[issue]?.status;
+      const kept =
+        issue === treeKey ? status === "backlog" || status === "icebox" : status !== "done";
+      if (kept) {
+        console.error(
+          `[legion] kept the workspace of ${issue} (${dir}) at the close of tree ${treeKey}: Dispatch status "${status}"`
+        );
+        continue;
+      }
+      try {
+        const result = await this.removeWorkspace(issue);
+        if (result.removed) {
+          console.error(
+            `[legion] removed the workspace of ${issue} (${dir}) at the close of tree ${treeKey}: abandoned ${result.abandoned.length} commit(s) nothing else reached`
+          );
+        }
+      } catch (error) {
+        console.error(
+          `[legion] failed to remove the workspace of ${issue} (${dir}) at the close of tree ${treeKey}:`,
+          error
+        );
+      }
+    }
   }
 
   private async spawnTree(

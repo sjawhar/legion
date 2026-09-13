@@ -3971,6 +3971,308 @@ describe("ProcessManager", () => {
     expect(revokedSessions).toContain("ses_implementer");
   });
 
+  it("removes the workspaces of a done root and its done child when the tree closes, keeps an unfinished child's, and logs each decision once", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "done",
+      children: [child, grandchild],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Done child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
+    state.issues[grandchild] = {
+      key: grandchild,
+      title: "Unfinished child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    tree(state);
+    state.trees[root].status = "lingering";
+    const clone = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
+    await mkdir(path.join(clone, ".jj"), { recursive: true });
+    const dirs = Object.fromEntries(
+      [root, child, grandchild].map((key) => [
+        key,
+        path.join(stateDir, "workspaces", "sjawhar", "legion", key.toLowerCase()),
+      ])
+    ) as Record<IssueKey, string>;
+    for (const dir of Object.values(dirs)) await mkdir(dir, { recursive: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "list") {
+          return { stdout: "default\nlegion-42\nlegion-43\nlegion-44\n", exitCode: 0 };
+        }
+        if (command[0] === "jj" && command[1] === "log") {
+          return { stdout: "aaaa\nbbbb\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    let lines: string[];
+    try {
+      await processes.closeTree(root);
+    } finally {
+      lines = errors.mock.calls.map((call) => String(call[0]));
+      errors.mockRestore();
+    }
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    const forgotten = commands
+      .filter((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "forget")
+      .map((c) => c[3]);
+    expect(forgotten).toEqual(["legion-42", "legion-43"]);
+    expect(commands).toContainEqual([
+      "jj",
+      "abandon",
+      "-r",
+      "aaaa | bbbb",
+      "--ignore-working-copy",
+      "-R",
+      clone,
+    ]);
+    // Every removal command runs after the last stop: the tree's processes are gone first.
+    const lastTmux = commands.map((c) => c[0]).lastIndexOf("tmux");
+    const firstJj = commands.findIndex((c) => c[0] === "jj");
+    expect(firstJj).toBeGreaterThan(lastTmux);
+    expect(existsSync(dirs[root])).toBeFalse();
+    expect(existsSync(dirs[child])).toBeFalse();
+    expect(existsSync(dirs[grandchild])).toBeTrue();
+    expect(lines).toContain(
+      `[legion] removed the workspace of ${root} (${dirs[root]}) at the close of tree ${root}: abandoned 2 commit(s) nothing else reached`
+    );
+    expect(lines).toContain(
+      `[legion] removed the workspace of ${child} (${dirs[child]}) at the close of tree ${root}: abandoned 2 commit(s) nothing else reached`
+    );
+    expect(lines).toContain(
+      `[legion] kept the workspace of ${grandchild} (${dirs[grandchild]}) at the close of tree ${root}: Dispatch status "in_progress"`
+    );
+    expect(lines.filter((line) => line.includes("workspace of")).length).toBe(3);
+  });
+
+  it("keeps a parked root's workspace at close — backlog or icebox — running no jj command and logging the status", async () => {
+    for (const status of ["backlog", "icebox"] as const) {
+      const stateDir = await temporaryDir();
+      const state = newLegionState("omp", 1);
+      state.issues[root] = { key: root, title: "Parked root", status, children: [] };
+      tree(state);
+      state.trees[root].status = "lingering";
+      await mkdir(path.join(stateDir, "repos", "github.com", "sjawhar", "legion", ".jj"), {
+        recursive: true,
+      });
+      const dir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+      await mkdir(dir, { recursive: true });
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const commands: string[][] = [];
+      const { manager: processes, state: managedState } = manager(state, {
+        config: config(stateDir),
+        run: async (command) => {
+          commands.push(command);
+          if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+          return { stdout: "", exitCode: 0 };
+        },
+      });
+
+      let lines: string[];
+      try {
+        await processes.closeTree(root);
+      } finally {
+        lines = errors.mock.calls.map((call) => String(call[0]));
+        errors.mockRestore();
+      }
+
+      expect(managedState.trees[root]?.status, status).toBe("closed");
+      expect(
+        commands.filter((c) => c[0] === "jj" || c[0] === "git"),
+        status
+      ).toEqual([]);
+      expect(existsSync(dir), status).toBeTrue();
+      expect(lines, status).toContain(
+        `[legion] kept the workspace of ${root} (${dir}) at the close of tree ${root}: Dispatch status "${status}"`
+      );
+    }
+  });
+
+  it("logs a failed workspace removal once, naming the issue, the directory, and the error, and still closes the tree", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    const clone = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
+    await mkdir(path.join(clone, ".jj"), { recursive: true });
+    const dir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(dir, { recursive: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "list") {
+          return { stdout: "default\nlegion-42\n", exitCode: 0 };
+        }
+        if (command[0] === "jj" && command[1] === "log") return { stdout: "aaaa\n", exitCode: 0 };
+        if (command[0] === "jj" && command[1] === "abandon") {
+          return { stdout: "", stderr: "Error: Revision `aaaa` doesn't exist", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    let logged: Array<readonly unknown[]>;
+    try {
+      await processes.closeTree(root);
+    } finally {
+      logged = errors.mock.calls;
+      errors.mockRestore();
+    }
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    // The directory went first (the spec's order); the forget and prune never ran.
+    expect(existsSync(dir)).toBeFalse();
+    expect(
+      commands.some((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "forget")
+    ).toBeFalse();
+    const failures = logged.filter((call) =>
+      String(call[0]).startsWith(
+        `[legion] failed to remove the workspace of ${root} (${dir}) at the close of tree ${root}:`
+      )
+    );
+    expect(failures).toHaveLength(1);
+    expect(String(failures[0]?.[1])).toContain("Revision `aaaa` doesn't exist");
+  });
+
+  it("runs no workspace removal at linger start; only the close removes", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    tree(state);
+    state.admission.active.push(root);
+    await mkdir(path.join(stateDir, "repos", "github.com", "sjawhar", "legion", ".jj"), {
+      recursive: true,
+    });
+    const dir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(dir, { recursive: true });
+    const commands: string[][] = [];
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await processes.beginLinger(root);
+
+    expect(managedState.trees[root]?.status).toBe("lingering");
+    expect(commands.filter((c) => c[0] === "jj" || c[0] === "git")).toEqual([]);
+    expect(existsSync(dir)).toBeTrue();
+  });
+
+  it("provisions a root admitted while its previous tree is still closing only after that close has finished, and that close removes nothing", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    // A human moved the finished root back to `todo`: the reducer's `admit` lands mid-close.
+    state.issues[root] = { key: root, title: "Reopened root", status: "todo", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    const clone = path.join(stateDir, "repos", "github.com", "sjawhar", "legion");
+    await mkdir(path.join(clone, ".jj"), { recursive: true });
+    const dir = path.join(stateDir, "workspaces", "sjawhar", "legion", "legion-42");
+    await mkdir(dir, { recursive: true });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The root never confirms its graceful shutdown: the stop arms its timeout sleep (the event
+    // the test awaits — the close is now blocked inside `awaitShutdown`) and the sleep resolves
+    // only when the test says.
+    const stopArmed = Promise.withResolvers<void>();
+    const stopGate = Promise.withResolvers<void>();
+    const stuckRootClient = fakeWorkerRpcClient();
+    stuckRootClient.shutdown = () => {};
+    let closeSettled = false;
+    const jjAfterClose: boolean[] = [];
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      sleep: () => {
+        stopArmed.resolve();
+        return stopGate.promise;
+      },
+      connectWorkerRpc: async () => stuckRootClient,
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "jj") jjAfterClose.push(closeSettled);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@43 %9 12345\n", exitCode: 0 };
+        }
+        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "list") {
+          return { stdout: "default\nlegion-42\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    const closePromise = processes.closeTree(root);
+    // Registered before `admit`, so this reaction runs before `spawnRoot`'s own on the same promise.
+    void closePromise.then(() => {
+      closeSettled = true;
+    });
+    let lines: string[];
+    try {
+      await stopArmed.promise;
+
+      expect(processes.admit(root)).toBe("spawned");
+      // Negative wait: `admit`'s `startRoot` reaches `spawnRoot` → `awaitClosingTrees`, which
+      // logs the wait line and parks on the in-flight close by microtask hops alone — no file
+      // write and no injected `run` before it parks, so a tick budget is the whole event.
+      await flushEventLoop(50);
+      // The reopened root's spawn is waiting on the close: no provisioning command yet.
+      expect(commands.filter((c) => c[0] === "jj")).toEqual([]);
+      expect(errors.mock.calls.map((call) => String(call[0]))).toContain(
+        `[legion] launch of ${root} waits for the close of tree ${root} to finish`
+      );
+
+      stopGate.resolve();
+      await closePromise;
+      await processes.drainSpawns();
+    } finally {
+      lines = errors.mock.calls.map((call) => String(call[0]));
+      errors.mockRestore();
+    }
+
+    // The close removed nothing: `admit` had re-activated the record.
+    expect(
+      commands.some((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "forget")
+    ).toBeFalse();
+    expect(commands.some((c) => c[0] === "jj" && c[1] === "abandon")).toBeFalse();
+    expect(existsSync(dir)).toBeTrue();
+    expect(lines).toContain(
+      `[legion] kept every workspace of tree ${root} at its close: the tree record is "active", not lingering (re-admitted while closing)`
+    );
+    // Provisioning ran (`update-stale` on the surviving directory) and every jj command of it came
+    // after the close had settled.
+    expect(
+      commands.some((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "update-stale")
+    ).toBeTrue();
+    expect(jjAfterClose.length).toBeGreaterThan(0);
+    expect(jjAfterClose.every(Boolean)).toBeTrue();
+  });
+
   it("requests control directives on the sanitized tree generation topic", async () => {
     const state = newLegionState("omp", 1);
     tree(state, root, 3);
