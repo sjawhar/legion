@@ -100,6 +100,9 @@ jobs:
       - name: Typecheck envoy plugin
         run: bun run typecheck
         working-directory: packages/envoy-plugin
+      - name: Test envoy plugin
+        run: bun run test
+        working-directory: packages/envoy-plugin
       - name: Pack envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/envoy-plugin
