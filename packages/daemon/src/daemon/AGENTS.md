@@ -26,7 +26,7 @@ The localhost-only Legion API lives in `api.ts`.
 | File | Responsibility |
 | --- | --- |
 | `index.ts` | Boots state, core-NATS intake, process manager, API, resync, linger expiry, and signal persistence. |
-| `config.ts` | Validates file and environment lifecycle configuration, including the runtime selection: `runtime` (`tmux` \| `kubernetes`, default `tmux`; `kubernetes` refuses startup until LEGION-24), `daemon_url` (default `http://127.0.0.1:<port>` under tmux, where any other value is refused as an inherited outer pane's `LEGION_DAEMON_URL`; required under kubernetes; what every spawned process receives as `LEGION_DAEMON_URL`), and `bind` (`127.0.0.1` unless `runtime: kubernetes`). `LEGION_DAEMON_URL` (like `LEGION_STATE_DIR`) is both a config env key and a per-pane variable, so a daemon started from inside a Legion pane would inherit the outer daemon's URL; under `runtime: tmux` the daemon refuses any `daemon_url` other than its own `http://127.0.0.1:<port>` (`daemon_url must be http://127.0.0.1:<port> when runtime is tmux (got <value>; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`), so an inherited value is a boot refusal, never a silent misroute — set `daemon_url` to that loopback value in the file (the smoke rig does) or unset the variable. |
+| `config.ts` | Validates file and environment lifecycle configuration. `github_apps` is required with both `implement` and `review` (`loadGitHubApps`; a missing section or role is `github_apps[.<role>] is required`, thrown before any private-key command or `secrets` call runs, so `legion start --check-config` reports it without executing anything), and `startDaemonLocked` then proves each key mints a token. Also the runtime selection: `runtime` (`tmux` \| `kubernetes`, default `tmux`; `kubernetes` refuses startup until LEGION-24), `daemon_url` (default `http://127.0.0.1:<port>` under tmux, where any other value is refused as an inherited outer pane's `LEGION_DAEMON_URL`; required under kubernetes; what every spawned process receives as `LEGION_DAEMON_URL`), and `bind` (`127.0.0.1` unless `runtime: kubernetes`). `LEGION_DAEMON_URL` (like `LEGION_STATE_DIR`) is both a config env key and a per-pane variable, so a daemon started from inside a Legion pane would inherit the outer daemon's URL; under `runtime: tmux` the daemon refuses any `daemon_url` other than its own `http://127.0.0.1:<port>` (`daemon_url must be http://127.0.0.1:<port> when runtime is tmux (got <value>; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`), so an inherited value is a boot refusal, never a silent misroute — set `daemon_url` to that loopback value in the file (the smoke rig does) or unset the variable. |
 | `events.ts` | Routes raw webhook envelopes through pure reducers and executes effects (`publish`, `controller`, `probe`, `linger`, `admit`, `dequeue` (`ProcessManager.dequeue`: a waiting issue that left the line loses its queue entry and `queued` tree record inside the same transaction), and `log` — one `console.warn("[legion] …")` line, the one effect that cannot fail); the core-NATS role lanes propagate a publish failure straight to the caller (nothing is held for redelivery — a missed wake is recovered by resuming the worker/controller with a state-derived catch-up, never a replay), while the durable JetStream lane dispatches every effect and saves before acking, going fatal (not nak) on any failure past the reducer. A 404 no-holder recovery (`onUndeliverable`) runs only after that save commits, best-effort, so the durable transaction stays a single state mutation. A second durable consumer reads the whole `notifications.dispatch.issue.>` topic — it carries every Dispatch event regardless of `notify` (the human-wake flag, which the daemon ignores) — decoding and validating each inner Event (`id`/`seq`/`notify`/`issue_key`/`type`/payload, and a subject/payload key match) before any reducer runs, so a malformed message is poison (termed and logged, never fatal) rather than a reducer failure. The reducers (`reducers.ts`) never parse a raw GitHub webhook body: every GitHub-sourced payload they read is Envoy's normalized flat shape (`kind: "pr" \| "review" \| "comment" \| "push"`, string-valued fields — see `githubPayload` in `packages/envoy/internal/contracts/normalize.go`). |
 | `processes.ts` | `ProcessManager`: admission, boot child-tree adoption (`adoptOwnerlessChildTrees`, the LEGION-57 repair), the boot sweep of stale admission-queue entries (`reconcileAdmission`, before demote/promote) and the `dequeue` executor, root/worker/controller spawning, worker exception recovery, resurrection, linger, orphan reconciliation, and idle-worker retirement (`armIdleRetire`/`retireIdleWorker`) — every runtime operation (spawn, probe, connect, stop, sweep) goes through the injected `Runtime`; it never reads a runtime-specific locator field or branches on `locator.runtime`. |
 | `runtime.ts` | The runtime boundary: `Runtime`, `SpawnSpec`, the `Locator` union (`TmuxLocator` \| kubernetes `K8sLocator`), and the helpers both sides share (`sameProcess`, `locatorHandles`, `awaitShutdown`, `boundedWait`, `probeWorker`). `ProcessManager` holds one injected `Runtime` and never reads a runtime-specific locator field. |
@@ -80,20 +80,24 @@ Legion acts on GitHub through two GitHub Apps, chosen per Legion role by `appRol
 compile until it is placed): the `planner`, `tester`, `reviewer`, and root and sub-`architect`
 roles run as the **review** App (`github_apps.review` in `legion.yaml`; `legion-reviewer[bot]`),
 and the `implementer` and `merger` run as the **implement** App (`github_apps.implement`;
-`legion-implementer[bot]`). Both Apps are required: `startDaemonLocked` leases one token from each
-(`getToken("implement", …)` then `getToken("review", …)`) before state is loaded, so a
-`legion.yaml` missing either refuses startup with `role_not_configured: <app>` instead of 500ing
-on that role's first `legion gh`. Every credential a pane redeems by role — `/legion/v1/gh-token`
-behind `legion gh` and `legion threads resolve`, `/legion/v1/git-credential` behind `jj git push`,
-the git identity lease minted at `/worker/started`, and the worker catch-up's own GitHub reads
-(`workerCatchup`) — goes through that one function, so the App a command acts as is the App of
-the role that runs it, never a choice the command makes. The exception is not role-keyed at all:
-the workspace-provisioning credential (`/legion/v1/provisioning-credential`, `credentials.ts`;
-the architect capability redeems it to clone and fetch the shared repository) is the implement
-App explicitly, as are the daemon's own CI reads (`createCiStatusFetcher`) — daemon-owned uses,
-not a role acting. Consequently only the implementer and merger can push the issue branch: the
-review App holds no `contents` permission, so a planner's, tester's, reviewer's, or architect's
-handoff commit stays in the shared workspace and reaches GitHub on the implementer's next push.
+`legion-implementer[bot]`). Both Apps are required, twice over: `loadGitHubApps` (`config.ts`)
+refuses a `legion.yaml` whose `github_apps` lacks either role (`github_apps.<role> is required`,
+before any private-key command runs, so `legion start --check-config` catches it), and
+`startDaemonLocked` leases one token from each (`getToken("implement", …)` then
+`getToken("review", …)`) before state is loaded, so a key that cannot mint refuses startup with
+the `TokenManager` error instead of 500ing on that role's first `legion gh`. Every credential a
+pane redeems by role — `/legion/v1/gh-token` behind `legion gh` and `legion threads resolve`,
+`/legion/v1/git-credential` behind `jj git push`, the git identity lease minted at
+`/worker/started`, and the worker catch-up's own GitHub reads (`workerCatchup`) — goes through
+that one function, so the App a command acts as is the App of the role that runs it, never a
+choice the command makes. The daemon's own uses are not role-keyed at all and are the implement
+App explicitly: workspace provisioning (`ProcessManager`'s `provisioningToken`, `index.ts`, the
+clone/fetch of the shared repository; and `/legion/v1/provisioning-credential`, `credentials.ts`,
+the same token handed to the architect capability), the CI reads (`createCiStatusFetcher`), and
+the first of the two boot leases above. Consequently only the implementer and merger can push the
+issue branch: the review App holds no `contents` permission, so a planner's, tester's, reviewer's,
+or architect's handoff commit stays in the shared workspace and reaches GitHub on the
+implementer's next push.
 
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it

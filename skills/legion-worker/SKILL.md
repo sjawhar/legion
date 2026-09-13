@@ -443,10 +443,9 @@ cd -- "$LEGION_WORKSPACE" && \
 **Only the implementer pushes the issue branch.** It acts as the code-writing App
 (`legion-implementer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
 the one App with `contents` permission (the merger acts as the same App but pushes nothing: it
-verifies and publishes READY). If you are the implementer and the issue bookmark exists locally,
-advance it and push it with the provisioned credential helper. `--bookmark` also publishes the
-locally provisioned bookmark on its first push — a bookmark not yet tracking a remote one is
-tracked automatically:
+verifies and publishes READY). If you are the implementer, advance the issue bookmark and push it
+with the provisioned credential helper. `--bookmark` also publishes the locally provisioned
+bookmark on its first push — a bookmark not yet tracking a remote one is tracked automatically:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
