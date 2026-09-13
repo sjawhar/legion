@@ -314,9 +314,9 @@ type AskEdit struct {
 	At       string          `json:"at"`
 }
 
-// AskLastReply is the newest comment in an ask's thread, carried on inbox rows so
-// a human can see who spoke last: a human reply on an open ask means the asker
-// owes the next turn.
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
+// on the issue detail's open asks so a human can see who spoke last: a human reply
+// on an open ask means the asker owes the next turn.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
