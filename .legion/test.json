@@ -1,11 +1,11 @@
 {
-  "passed": 10,
+  "passed": 11,
   "failed": 0,
   "failures": [],
-  "head": "143dd0d186ae1a8f0ff5948deb91dbe11eece923",
+  "head": "115c55fd64e1bea77b7a23f80d13fa751363ed2a",
   "pullRequest": "https://github.com/sjawhar/legion/pull/991",
-  "proof": "dispatch://LEGION-37/artifact/tester-proof-round2-md",
-  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round2-tar-gz",
+  "proof": "dispatch://LEGION-37/artifact/tester-proof-round3-md",
+  "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round3-tar-gz",
   "rounds": [
     {
       "passed": 9,
@@ -142,6 +142,60 @@
         "Shared-name hazard for concurrent rigs: scripts/smoke/{up,down}.sh assume one legion-smoke-nats container per box; a second rig must not run down.sh while another rig's container is live."
       ],
       "round": 2
+    },
+    {
+      "round": 3,
+      "head": "115c55fd64e1bea77b7a23f80d13fa751363ed2a",
+      "baseHead": "143dd0d186ae1a8f0ff5948deb91dbe11eece923",
+      "scope": "delta 11748444..115c55fd: workerReady's bystander drop now retires the relaunched pane (retireWorkerLocator, locator cleared, ompSessionFile -> resumeSessionFile, ready confirmed, launchFailures reset, persisted) inside the same critical section; shared isBystanderRole predicate; one doc word",
+      "specVersion": 6,
+      "passed": 1,
+      "failed": 0,
+      "failures": [],
+      "proof": "dispatch://LEGION-37/artifact/tester-proof-round3-md",
+      "evidence": "dispatch://LEGION-37/artifact/tester-evidence-round3-tar-gz",
+      "acceptance": [
+        {
+          "criterion": "7 (delivery-time, reviewer's CHANGES_REQUESTED): a relaunched pane whose only queued prompt is a bystander's catch-up is retired at /worker/ready exactly as retireIdleWorker retires a finished worker, so it never holds a workerCap slot at runState unknown; an assignment in the same position is still delivered",
+          "verdict": "pass",
+          "evidence": "Unit: processes.test.ts 'retires a relaunched worker at worker/ready when its only queued prompt is a bystander's catch-up, freeing its cap slot, while an assignment in the same position is delivered' (fails under mutation 6 and under mutation 7's bare pending-clear, first at expect(shutdownCalls).toEqual(['tester'])). Rig at 115c55fd, cap 2: active implementer killed + exception -> --resume relaunch booting with {kind: catchup}; spawn_worker planner into the idle-live planner moved the phase; spawn_worker tester queued; the implementer's ready -> 'dropping queued catch-up ... at ready and retiring the relaunched pane', pane gone from tmux list-panes on a clean 'Session exit recorded' (no kill-pane fallback), locator cleared, resumeSessionFile = the same session file, readyConfirmedAt set, launchFailures cleared, no prompt, phases unchanged; the queued tester promoted into the freed slot with no restart; spawn_worker implementer -> omp --resume=<same session file>, delivered. Control at cap 1: relaunch still active -> catch-up delivered, pane stayed, queued planner promoted at its idle. Repeated once more timed against the sweep clock (retire 05:35:39.2 -> promotion 05:36:12.5)."
+        }
+      ],
+      "findings": [
+        {
+          "severity": "low",
+          "file": "packages/daemon/src/daemon/processes.ts",
+          "description": "The ready-time retire branch frees the slot in state but never calls promoteWorkerQueue(), and because clientFor was never called for the relaunched pane there is no cached client whose close reaches onWorkerClientClosed -> markWorkerDead -> promoteWorkerQueue() (the path that gives retireIdleWorker an immediate drain, processes.ts:862). A spawn already queued behind the cap is promoted only by the next 60 s linger sweep's reconcileWorkerAdmission() (index.ts:708): measured 5.3 s and 33.3 s after the retire, both landing on the :12-:13 sweep tick of startedAt 05:31:12.317, with the other slot-holder still mid-task both times. Bounded (<= 60 s), no starvation, no acceptance line sets a latency; the reviewer's ask (no pane held at runState unknown) is met. A one-line promoteWorkerQueue() after the branch's persist would make it immediate; architect's call whether it lands here or as a fast-follow."
+        }
+      ],
+      "regression": "The delta's code hunks are the workerReady branch, isBystanderRole (identical expression) and resumeWorker's use of it; promptExistingWorker, handleWorkerStarted's phase behaviour, the migration and promoteQueuedWorker are untouched. Mutations 1-6 fail the same tests as in round 2. Round-3 rig re-exercised Acceptance 1 (bystander registration log for both relaunches), 2, 3, and both halves of 7 (control: catch-up delivered to the still-active role).",
+      "unit": {
+        "tsc": "bunx tsc --noEmit exit 0",
+        "biome": "bunx biome check src/: 147 files, no fixes, exit 0",
+        "tests": "bun test legion-state api processes reducers index: 408 pass / 0 fail / 3 skip (411 tests, 5 files)",
+        "mutations": [
+          "1 restore phases write in handleWorkerStarted -> 4 api.test.ts cases fail",
+          "2 promptExistingWorker writes phases for every kind -> 2 sub-architect cases fail",
+          "3 resumeWorker bystander skip disabled -> 'skips the catch-up for a finished phase worker ...' fails",
+          "4 deliverToWorker lock-side guard disabled -> 'drops a catch-up inside the role lock ...' fails",
+          "5 isBystanderCatchup disabled at promoteQueuedWorker -> both promotion tests fail",
+          "6 isBystanderCatchup disabled at workerReady -> 'retires a relaunched worker at worker/ready ...' fails",
+          "7 ready-time retire replaced by a bare pending-clear -> 'retires a relaunched worker at worker/ready ...' fails (shutdown frame, locator, resumeSessionFile, cap-1 spawned)"
+        ]
+      },
+      "rig": {
+        "surface": "same isolation (SMOKE_PROJECT sjawhar/370, /tmp/legion37-tester-rig3, NATS 14370 as legion37-tester3-nats, listener 19170, daemon 19470/19471, LEGSMOKE-90/91, production OMP invocation, real omp --mode rpc workers); v25 seed; cap 1 for the control, one restart to cap 2 before the reproduction (none during it)",
+        "deviation": "up.sh/down.sh hard-code the NATS container name legion-smoke-nats, in use by other agents' rigs; up-manual.sh/down-manual.sh replay the identical sequence with the container named legion37-tester3-nats (as in round 2)",
+        "scenarios": {
+          "control": "cap 1: relaunch stays the active phase (a queued spawn_worker planner writes no phase) -> catch-up delivered at ready, pane stays; planner promoted at the implementer's idle",
+          "reproduction": "cap 2: bystander relaunch retired at ready (pane closed cleanly, locator cleared, resumeSessionFile kept, readyConfirmedAt set, launchFailures cleared); queued tester promoted 5.3 s later (sweep tick); spawn_worker implementer -> --resume of the same session file",
+          "measurement2": "same, retire timed mid-interval: promoted 33.3 s later on the next sweep tick, other slot-holder still busy"
+        }
+      },
+      "observations": [
+        "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
+        "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction."
+      ]
     }
   ],
   "observations": [
@@ -152,9 +206,18 @@
     "Tester-side trap (not a code finding): with the profile's pi-legion-envoy 1.17.0 text-injected LEGION_GRANT preamble, a model that repeats the injected preamble in its own later commands shadows the fresh grant with a stale one and every `legion gh`/credential call 403s ('Unable to redeem LEGION_GRANT'); the fix is to emit commands without the preamble.",
     "No LEGION-39 negotiate_protocol timeout on any of the three --resume relaunches this round (ready 9-14 s after launch).",
     "runningWorkerCount does not count an idle-live pane; a rig fills a single slot with a fresh spawn's ~10 s boot to make a relaunch queue.",
-    "Shared-name hazard for concurrent rigs: scripts/smoke/{up,down}.sh assume one legion-smoke-nats container per box; a second rig must not run down.sh while another rig's container is live."
+    "Shared-name hazard for concurrent rigs: scripts/smoke/{up,down}.sh assume one legion-smoke-nats container per box; a second rig must not run down.sh while another rig's container is live.",
+    "The production daemon (13370) was down for a few minutes around 05:33 UTC (operator restart); this session's bash grant hook blocked meanwhile and the rig was driven from the kernel; no effect on the rig or its evidence.",
+    "Reviewer's literal sequence at cap 1 cannot produce a bystander relaunch: a spawn_worker that queues writes no phase; the phase moves only when an assignment is delivered, which needs a slot -- hence cap 2 for the reproduction."
+  ],
+  "findings": [
+    {
+      "severity": "low",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "The ready-time retire branch frees the slot in state but never calls promoteWorkerQueue(), and because clientFor was never called for the relaunched pane there is no cached client whose close reaches onWorkerClientClosed -> markWorkerDead -> promoteWorkerQueue() (the path that gives retireIdleWorker an immediate drain, processes.ts:862). A spawn already queued behind the cap is promoted only by the next 60 s linger sweep's reconcileWorkerAdmission() (index.ts:708): measured 5.3 s and 33.3 s after the retire, both landing on the :12-:13 sweep tick of startedAt 05:31:12.317, with the other slot-holder still mid-task both times. Bounded (<= 60 s), no starvation, no acceptance line sets a latency; the reviewer's ask (no pane held at runState unknown) is met. A one-line promoteWorkerQueue() after the branch's persist would make it immediate; architect's call whether it lands here or as a fast-follow."
+    }
   ],
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T04:53:33.398Z"
+  "completed": "2026-09-13T05:40:57.309Z"
 }
