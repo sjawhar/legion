@@ -1009,3 +1009,22 @@ if grep -q '^SMOKE_UPSTREAM_NATS=' "$relay_argv"; then
   exit 1
 fi
 printf 'PASS: isolated mode starts the issue relay for the recorded root only after the root issue exists, waits for it before RIG READY, and never starts the envoy bridge\n'
+
+# The relay's Dispatch endpoint is the one resolve_dispatch_config assigned in main(), the same
+# value the daemon's env block receives: with nothing exported, both come from envoy.json (the
+# harness-owned XDG_CONFIG_HOME file the LEGION-40 cases above use), never from a second lookup.
+: >"$order_log"
+rm -f "${SMOKE_DIR}"/start_process.*.argv "${SMOKE_DIR}/root-issue"
+if ! (unset DISPATCH_URL DISPATCH_TOKEN; XDG_CONFIG_HOME="$xdg_file_dir" SMOKE_WEBHOOK_MODE=isolated main) >"$main_output_file" 2>&1; then
+  printf 'expected up.sh main() to succeed in isolated mode with Dispatch config from envoy.json; output:\n%s\n' "$(<"$main_output_file")" >&2
+  exit 1
+fi
+for argv_file in "${SMOKE_DIR}/start_process.daemon.argv" "${SMOKE_DIR}/start_process.issue-relay.argv"; do
+  for expected_line in 'DISPATCH_URL=http://file.test' 'DISPATCH_TOKEN=file-token'; do
+    grep -Fxq "$expected_line" "$argv_file" || {
+      printf 'expected %s to carry %s (resolved from envoy.json); argv:\n%s\n' "$argv_file" "$expected_line" "$(<"$argv_file")" >&2
+      exit 1
+    }
+  done
+done
+printf 'PASS: the isolated relay receives the Dispatch URL and token resolve_dispatch_config resolved from envoy.json, exactly as the daemon does\n'

@@ -798,6 +798,9 @@ main() {
   # a rerun reuses a live relay (start_process's REUSED path) because ensure_root_issue reuses
   # the same recorded root.
   ensure_root_issue
+  # The relay's inputs are the rig's own: the per-rig NATS URL every other rig process uses, and
+  # the Dispatch URL/token resolve_dispatch_config assigned above (shell variables, never
+  # exported), passed on purpose exactly as the daemon's env block passes them.
   if [[ "$webhook_mode" == "isolated" ]]; then
     start_process issue-relay env \
       SMOKE_ROOT_ISSUE="$(<"${smoke_dir}/root-issue")" \
