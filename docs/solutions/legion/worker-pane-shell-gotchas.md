@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, a bash tool `jq` that is jaq, not the jq your script runs, the pane's JJ_* attribution overlay failing a jj-identity test that CI passes, and a workspace `.git` pointer `gh` follows to a path that no longer exists"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, a phase completion refused with 409 after a respawn, a pane `legion` that is the deployed build, not your branch, and a bash tool `jq` that is jaq, not the jq your script runs"
 category: legion
 tags:
   - legion
@@ -44,8 +44,6 @@ related_issues:
   - "sjawhar/legion#1015"
   - "LEGION-40"
   - "sjawhar/legion#1011"
-  - "LEGION-109"
-  - "sjawhar/legion#1083"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -65,8 +63,6 @@ symptoms:
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
   - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
-  - "legion.test.ts 'binds a booted worker's jj identity to LEGION_WORKSPACE': expected 'Legion Worker', received 'legion-implementer[bot]' — in the pane only"
-  - "legion gh -- pr create: failed to run git: fatal: not a git repository: /home/ubuntu/.local/state/legion/…/.git/worktrees/<workspace>"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -82,7 +78,7 @@ and confirmed each as written (the architect filed the §1 harness fix as LEGION
 from LEGION-34 (sjawhar/legion#1003), whose implementer hit §1 again on a pane running the fixed plugin — by copying
 the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace;
 §14 is from LEGION-40 (sjawhar/legion#1011), whose plan, harness comments, and shipped header comment all named the
-wrong `jq`; §15 and the §12 addendum are from LEGION-109 (sjawhar/legion#1083).
+wrong `jq`.
 None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
 delivery fixed for good by LEGION-54 (pi-envoy 1.20.1): the workarounds are recorded only so a worker still running
@@ -374,14 +370,6 @@ commit time from the latest tag with the release workflow's own script —
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
 branch's commit subjects, so only the PR title's conventional-commit type classifies the bump.
 
-**Addendum from LEGION-109 (sjawhar/legion#1083):** even the "compute it at commit time" rule left the number wrong
-by the time anyone read it — the spec said 1.24.3, the plan corrected it to 1.27.3, and the tag when the PR opened a
-few hours later was already `pi-legion-envoy-v1.28.0`, so the PR named 1.28.1. A spec or plan should not name the number at all:
-write "the patch release above the latest `pi-legion-envoy-v*` tag at merge time" and let the implementer put the
-real tag into the PR body's Release paragraph after the merge lands (`git/matching-refs/tags/pi-legion-envoy-v`
-through `legion gh -- api`, `sort -V`). The number is a fact about the merge commit, and nothing before the merge
-knows it.
-
 **"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
 that it "reverted" LEGION-11's `reconnectWorkers`-after-`api` fix and "deleted" its regression test. It had diffed the
 branch head against `main@origin`, which by then carried LEGION-11 on top of the branch's base; the branch's own delta
@@ -490,38 +478,3 @@ turns jq's `null` (which `-r` would print as the literal `null`, the production 
   record which engine each result came from.
 - Do not write "the `jq` on PATH is jaq" into a script comment or a plan premise. `type -P jq` from a child bash is the
   fact to quote; the tool shell's builtin is a fact about your session, not about the box.
-
-## 15. Two facts about this box's panes, from LEGION-109 (sjawhar/legion#1083)
-
-**The pane's jj attribution overlay fails one pi-envoy test that CI passes.** The extension exports `JJ_CONFIG`
-(the `omp-attribution-<session-id>.toml` overlay that adds the `Omp-Session:` trailer) and, on this deployment,
-`JJ_USER` and `JJ_EMAIL` for the role's bot identity. `packages/pi-envoy/extensions/legion.test.ts` "binds a booted
-worker's jj identity to LEGION_WORKSPACE" creates a scratch jj repo and asserts `jj config get user.name` is
-`Legion Worker`; jj's environment variables outrank the repo config, so in a pane it reads `legion-implementer[bot]`
-and the suite shows `177 pass, 1 fail`. CI has none of those variables and the test passes. Confirm before spending a
-cycle on it: `env -u JJ_CONFIG -u JJ_USER -u JJ_EMAIL bun test extensions/legion.test.ts -t "binds a booted worker's
-jj identity"` → `1 pass`. Run the full suite the same way when you quote its count in a handoff, and say so. This is
-§2's rule again — the pane's env is not CI's — for a variable family §2 did not name; the test itself should take the
-`env` seam (`bootWorker` already builds one) rather than inherit the process env, which is a fast-follow for whoever
-next touches that suite.
-
-**`gh` follows the workspace's `.git` pointer, and on this box it points at a path that no longer exists.** Every
-issue workspace is a colocated jj workspace whose `.git` is a file:
-`gitdir: /home/ubuntu/.local/state/legion/sjawhar-legion/repos/github.com/sjawhar/legion/.git/worktrees/legion-109`.
-The box's home is now `/home/legion`; `jj -R "$LEGION_WORKSPACE"` reads its own store
-(`jj git root` → `/home/legion/.local/state/…/.git`) and is unaffected, but `gh` resolves the repository from the
-cwd's `.git` before it reads `--repo`, so `cd "$LEGION_WORKSPACE" && legion gh -- pr create --repo … --head …`
-fails with `failed to run git: fatal: not a git repository: /home/ubuntu/…/.git/worktrees/legion-109`, exit 1, and
-the PR is not created. `pr view`, `pr edit`, `pr checks`, `api` with `--repo` work from the workspace because they do
-not probe git. Open the PR from a directory with no `.git` above it, with every coordinate explicit:
-
-```bash
-cd -- "$LEGION_WORKSPACE" && cd /tmp && legion gh -- pr create --repo sjawhar/legion --base main \
-  --head legion/<KEY> --title "…" --body-file /tmp/<KEY>-pr-body.md
-```
-
-(The leading `cd -- "$LEGION_WORKSPACE"` keeps the command inside the shape the extension's bash gate expects; the
-`cd /tmp` is what dodges the probe.) Do not "fix" the pointer: the `.git` file belongs to the shared clone's
-worktree bookkeeping, not to your issue, and rewriting it is the kind of shared-repository mutation
-[shared-main-repo-hazards-for-concurrent-issue-workspaces](shared-main-repo-hazards-for-concurrent-issue-workspaces.md)
-exists to warn about. File it, as LEGION-109's retro message does.

@@ -51,7 +51,7 @@ sjawhar/legion#1083 carry five things, and a reviewer verified each against GitH
    injected, next message acknowledged normally.
 4. **The release the merge cuts**, as "the patch release above the latest `pi-legion-envoy-v*`
    tag" with the tag observed at PR open and a promise to write the real one after the merge
-   (see `worker-pane-shell-gotchas` §12 for why any fixed number is wrong by the time it is read).
+   (see [pane-jj-overlay-stale-workspace-git-pointer-and-a-release-number-nobody-knows-yet](pane-jj-overlay-stale-workspace-git-pointer-and-a-release-number-nobody-knows-yet.md) §3 for why any fixed number is wrong by the time it is read).
 5. **The operator's post-deploy proof, by command** — `packages/pi-envoy/scripts/smoke-delivery.sh`
    against the installed plugin, its first line `plugin version: <v>` naming the release and its
    last `PASS:`; then the parent issue's production hour (LEGION-101 acceptance 4: `envoy_inbox`
@@ -76,4 +76,5 @@ reviewer had one text to check against instead of each deciding what "withdrawn"
 - [scratch-daemon-rig-proves-what-unit-tests-cannot](../testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md)
   and [proof-rig-loads-the-production-plugin-tree](../testing/proof-rig-loads-the-production-plugin-tree.md)
   — the surfaces this deployment used before the order and will use again when it is lifted.
-- [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §12 — the release number.
+- [pane-jj-overlay-stale-workspace-git-pointer-and-a-release-number-nobody-knows-yet](pane-jj-overlay-stale-workspace-git-pointer-and-a-release-number-nobody-knows-yet.md) §3
+  and [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §12 — the release number.
