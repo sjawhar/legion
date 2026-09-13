@@ -83,7 +83,11 @@ Two bash facts to keep in mind when writing the probe itself:
   `x="$(cmd)"` on separate lines wherever the failure must stop the script.
 
 Rule: a "this stops before doing X" probe asserts that X's own unmistakable output did not
-happen, not only that something failed afterwards.
+happen, not only that something failed afterwards. And the subshell form is not only for
+negative probes: a success-path `if ! main …` has `-e` suppressed too, so a failure anywhere
+inside `main` still ends in `RIG READY` and a green case (LEGION-71 — the harness's three
+success-path calls now use the same form; details in
+`harness-that-sources-a-copy-pins-its-root-fails-closed-on-success-and-proves-absence-with-a-call-log.md`).
 
 ## 3. A group-kill fixture needs a second process
 
@@ -167,3 +171,6 @@ add-checkpoint-8, restore-the-mode-guess) each named their own case.
   TypeScript tests; the prefix-chain and contract-not-cadence corollaries.
 - `docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md`: the rig's fake `tmux`, real
   processes for `/proc` checks, and the whole-log assertion rule.
+- `docs/solutions/testing/harness-that-sources-a-copy-pins-its-root-fails-closed-on-success-and-proves-absence-with-a-call-log.md`:
+  the sourced-copy harness's own traps (root pinned to the harness, fail-closed success path,
+  call-log proof of "never calls X", existence guard on an absence-over-glob check).

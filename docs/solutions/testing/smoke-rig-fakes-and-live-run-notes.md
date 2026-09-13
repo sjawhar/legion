@@ -72,9 +72,10 @@ surfaced things the next person touching the rig should not rediscover.
   directory. LEGION-40 made the scratch a `mktemp -d` and `cp`s `dispatch-config.sh` into it before
   sourcing; the red run before that wiring was `resolve_dispatch_config: command not found`.
   `checkpoints.test.sh` never needed this because it runs `bash checkpoints.sh <n>` in place. (The
-  same copy is why `repo_root` resolves to `/` there and `bun` still finds
-  `//packages/daemon/src/daemon/omp-pin.ts` — Bun resolves that relative to the cwd; `source //…`
-  would not.)
+  same copy made `repo_root` resolve to `/` there, which only worked from the repository root
+  because `bun` resolves `//packages/…/omp-pin.ts` against the cwd; LEGION-71 pins `repo_root` to
+  the harness's `project_root` in the same `sed`, so the harness runs from any directory — see
+  `harness-that-sources-a-copy-pins-its-root-fails-closed-on-success-and-proves-absence-with-a-call-log.md`.)
 - **A harness that proves a default must clear the variable the README tells operators to export.**
   `resolve_webhook_mode`'s two default cases ran bare and inherited `SMOKE_WEBHOOK_MODE` from the
   caller's shell, so `SMOKE_WEBHOOK_MODE=envoy bash scripts/smoke/up.test.sh` — the shell an

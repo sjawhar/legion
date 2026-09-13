@@ -86,13 +86,16 @@ resolve_webhook_mode() {
 
 # Verifies the OMP build every daemon-spawned pane runs (controller, roots, workers) before
 # anything starts. LEGION_OMP_PATH is an explicit operator override for a non-release build:
-# an absolute executable path, exported to the daemon only (main's start_process env block).
-# Otherwise the daemon resolves `omp_pin` itself with `mise where` and never installs, so the
-# same lookup runs here in preflight: a pin that is not installed stops the rig now, naming the
-# exact `mise install` command, instead of after NATS and the listener are already up. There is
-# no default path and no guess.
+# an absolute executable path; the daemon's start_process env block in main() is the only place
+# up.sh names it explicitly (the operator's own export reaches every child process as any
+# exported variable does). Otherwise the daemon resolves `omp_pin` itself with `mise where` and
+# never installs, so the same lookup runs here in preflight, before NATS and the listener are
+# already up: a pin that is not installed stops the rig now, naming the exact `mise install`
+# command; any other `mise where` failure stops on mise's own message, without that remedy.
+# There is no default path and no guess.
 resolve_omp_path() {
-  local install_dir
+  local install_dir mise_stderr mise_said
+  local mise_status=0
 
   if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
     # The daemon's environment.ts rejects a relative LEGION_OMP_PATH at startup; stop here instead.
@@ -101,8 +104,18 @@ resolve_omp_path() {
     printf '%s\n' "$LEGION_OMP_PATH"
     return
   fi
-  install_dir="$(mise where "$omp_pin" 2>/dev/null)" ||
-    fail "OMP pin ${omp_pin} is not installed (mise where failed); run: mise install ${omp_pin}"
+  # mise's own stderr reaches the operator whatever the exit (a rate-limit WARN on success
+  # included); a failure is classified on that text afterwards.
+  mise_stderr="$(mktemp)"
+  install_dir="$(mise where "$omp_pin" 2>"$mise_stderr")" || mise_status=$?
+  cat "$mise_stderr" >&2
+  mise_said="$(<"$mise_stderr")"
+  rm -f "$mise_stderr"
+  if ((mise_status != 0)); then
+    [[ "$mise_said" != *'not installed'* ]] ||
+      fail "OMP pin ${omp_pin} is not installed (mise where failed); run: mise install ${omp_pin}"
+    fail "mise where ${omp_pin} failed; mise's own message is above"
+  fi
   [[ -f "${install_dir}/bin/omp" && -x "${install_dir}/bin/omp" ]] ||
     fail "OMP pin ${omp_pin} is installed at ${install_dir} but ${install_dir}/bin/omp is missing or not executable; run: mise install ${omp_pin}"
   printf '%s\n' "${install_dir}/bin/omp"
@@ -622,6 +635,7 @@ main() {
   require_command setsid
   local webhook_mode
   local omp_path
+  local omp_source
   local design_gate
   local dispatch_ingress
   local nats_name
@@ -642,7 +656,12 @@ main() {
   nats_name="$(nats_container_name)"
   webhook_mode="$(resolve_webhook_mode)"
   omp_path="$(resolve_omp_path)"
-  printf 'GREEN OMP build: %s\n' "$omp_path"
+  if [[ -n "${LEGION_OMP_PATH:-}" ]]; then
+    omp_source="LEGION_OMP_PATH override"
+  else
+    omp_source="mise where ${omp_pin}"
+  fi
+  printf 'GREEN OMP build: %s (%s)\n' "$omp_path" "$omp_source"
   design_gate="$(resolve_design_gate)"
   dispatch_ingress="$(resolve_dispatch_ingress)"
 
@@ -706,9 +725,9 @@ main() {
   fi
 
   # legion.yaml keeps `omp_invocation: mise x <pin> -- omp` (the loader requires that form) and the
-  # daemon resolves the pin itself with `mise where`. Only an explicit operator override travels to
-  # the daemon, as LEGION_OMP_PATH in this env block and nowhere else; environment.ts honours it
-  # over the pin, so every pane the daemon spawns runs the build resolve_omp_path verified.
+  # daemon resolves the pin itself with `mise where`. An explicit operator override is named here,
+  # in the daemon's env block — the only place up.sh sets LEGION_OMP_PATH explicitly; environment.ts
+  # honours it over the pin, so every pane the daemon spawns runs the build resolve_omp_path verified.
   local -a daemon_env=(
     ENVOY_NATS_URL="$nats_url"
     ENVOY_URL="http://127.0.0.1:${listener_port}"

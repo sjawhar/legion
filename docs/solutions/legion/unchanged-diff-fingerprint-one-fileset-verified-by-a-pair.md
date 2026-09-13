@@ -86,10 +86,14 @@ The rule is the rule: a different fingerprint is a round, not a confirmation, ev
 delta is prose. What the implementer owes the other roles in that case is attribution — run the
 fingerprint per file (split the `--git` output on `diff --git` and hash each file's lines) and
 name the files and the sentences that differ in the rebase comment, so the tester and reviewer
-can scope their round to those files instead of re-verifying everything. In LEGION-59 round 4
-was already a corrective round, so nothing was lost; on a post-approval rebase this is the
-difference between a confirmation and a full re-review, and the merged-prose case is common on
-a fast `main` that edits the same skills.
+can scope their round to those files instead of re-verifying everything. When one file owned the
+conflict, the cheaper attribution is the same command with that file added to the exclusion:
+`'~(.legion | docs/solutions | scripts/smoke/up.test.sh)'` — equal hashes before and after prove
+every other file's added/removed lines are byte-identical, and the conflict hunk is the whole
+delta (LEGION-71, #1029: `5e997e33… → 15311147…` with the file, `96889707…` both sides without
+it). In LEGION-59 round 4 was already a corrective round, so nothing was lost; on a
+post-approval rebase this is the difference between a confirmation and a full re-review, and the
+merged-prose case is common on a fast `main` that edits the same skills.
 
 ## 3. Procedure that survived four rounds and two rebases
 
