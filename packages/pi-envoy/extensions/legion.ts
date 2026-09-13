@@ -284,14 +284,24 @@ function jjLogRewriteInvocation(command: string): string | undefined {
   return undefined;
 }
 
-/** What a phase worker's `bash` call would run against the shared operation log, or undefined.
- * (Step 5 widens this to `eval` code and `hub` input.) */
+/** What a phase worker's tool call would run against the shared operation log, or undefined. A
+ * `bash` command is tokenised; `eval` code and a `hub` call's `application`, `args`, and `text`
+ * (a process start's program and arguments, and stdin sent to a supervised process) are held to
+ * the plain-text rule, since each runs a shell from the pane exactly as `bash` does. */
 function jjLogRewriteAttempt(toolCall: ToolCallEvent): string | undefined {
   const { toolName, input } = toolCall;
-  if (toolName === "bash" && typeof input.command === "string") {
-    return jjLogRewriteInvocation(input.command);
+  if (toolName === "bash") {
+    return typeof input.command === "string" ? jjLogRewriteInvocation(input.command) : undefined;
   }
-  return undefined;
+  let text: string;
+  if (toolName === "eval" && typeof input.code === "string") text = input.code;
+  else if (toolName === "hub") {
+    text = [input.application, ...(Array.isArray(input.args) ? input.args : []), input.text]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ");
+  } else return undefined;
+  const mention = jjLogRewriteMention(text);
+  return mention === undefined ? undefined : `${toolName}: jj ${mention}`;
 }
 
 // Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,

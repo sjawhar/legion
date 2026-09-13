@@ -2000,6 +2000,68 @@ describe("Legion OMP extension", () => {
       ).resolves.toBeUndefined();
     }
   });
+  test("refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "tester",
+      workspace,
+      sessionId: "ses_tester_jj_eval_hub",
+    });
+    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      {
+        toolName: "eval",
+        input: { language: "py", code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])' },
+      },
+      { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
+      // An argv literal separates the words with `", "`; the rule allows any non-word run.
+      { toolName: "eval", input: { language: "py", code: 'run(["jj", "op", "restore", op_id])' } },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "x", application: "jj", args: ["-R", "/ws", "undo"] },
+      },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "x", application: "bash", args: ["-c", "jj op restore 1"] },
+      },
+      { toolName: "hub", input: { op: "send", name: "shell", text: "jj undo" } },
+    ];
+    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      {
+        toolName: "eval",
+        input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
+      },
+      { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
+      { toolName: "hub", input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] } },
+      { toolName: "hub", input: { op: "logs", name: "web" } },
+      { toolName: "hub", input: {} },
+    ];
+    const allowedByMistake: string[] = [];
+    for (const [index, call] of refused.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-jj-text-${index}` }, context);
+      const blocked =
+        typeof result === "object" && result !== null && "block" in result && result.block === true;
+      if (!blocked) allowedByMistake.push(JSON.stringify(call));
+    }
+    expect(allowedByMistake).toEqual([]);
+    const refusedByMistake: string[] = [];
+    for (const [index, call] of allowed.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-jj-text-ok-${index}` }, context);
+      if (result !== undefined) refusedByMistake.push(JSON.stringify(call));
+    }
+    expect(refusedByMistake).toEqual([]);
+    // Same message shape as the bash refusal, naming the tool and the words it found.
+    const named = await toolCall(
+      {
+        toolName: "hub",
+        toolCallId: "call-jj-text-named",
+        input: { op: "start", name: "x", application: "jj", args: ["undo"] },
+      },
+      context
+    );
+    for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
+      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
+    }
+  });
   test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
