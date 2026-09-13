@@ -1,0 +1,83 @@
+{
+  "summary": "LEGION-75 at PR https://github.com/sjawhar/legion/pull/1035, head 7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c (code commit d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866): changes requested. One correctness class stands: not every failure path of `push-main` goes through `fail_outstanding`, so a red run can still hide the successful publish the spec forbids hiding — `git fetch origin main` failing (the tester's finding; reproduced, exit 128, no ::error::, no job summary) and a modify/delete conflict on the manifest (main deleted it; passes the exact-match gate, `git show HEAD:$manifest` dies, exit 128, rebase left in progress, working-tree manifest truncated to 0 bytes; reproduced), plus the jq / git add / rebase --continue lines in the same block. Everything else verified correct: exact conflict rule (Case 2b aborts), GIT_EDITOR=true load-bearing, HEAD:$manifest rewrite changes only the version (pi_envoy's .omp.extensions rewrite is restored before `tag`), three release.yaml call sites match their jobs' tag dirs, identical-version race ends exit 0, dead-script deletion has no live caller. Review posted as legion-reviewer[bot] in one submission with six inline threads: https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117.",
+  "verdict": "changes_requested",
+  "critical": 2,
+  "important": 0,
+  "minor": 4,
+  "review": {
+    "url": "https://github.com/sjawhar/legion/pull/1035#pullrequestreview-5191040117",
+    "id": 5191040117,
+    "state": "CHANGES_REQUESTED",
+    "commitId": "7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c",
+    "codeCommit": "d5fd3ed8cfd01beffb0fd7bc8ec7f7c101dfa866",
+    "author": "legion-reviewer[bot]",
+    "threadsOpened": 6
+  },
+  "keyFindings": [
+    {
+      "severity": "blocking",
+      "file": ".github/scripts/release-push.sh:80",
+      "description": "`git fetch origin main` failing exits 128 under set -e with no ::error:: and no job summary; route through fail_outstanding (`|| fail_outstanding \"Fetching main from origin failed on attempt $attempt.\"`) and add a test case with origin pointed at a nonexistent path asserting non-zero exit, the ::error:: sentence, and the summary file."
+    },
+    {
+      "severity": "blocking",
+      "file": ".github/scripts/release-push.sh:97",
+      "description": "Modify/delete conflict (main deleted the manifest) lists exactly $manifest under --diff-filter=U, passes the gate, then `git show HEAD:$manifest` dies: exit 128, no fail_outstanding, .git/rebase-merge left behind, manifest truncated to 0 bytes by the redirect. Tighten the resolvable shape to `[ \"$conflicted\" != \"$manifest\" ] || ! git cat-file -e \"HEAD:$manifest\"`, write jq output via temp file + mv, and guard lines 97-99 (or wrap 80-99) so any non-zero exit routes through fail_outstanding; add a modify/delete test case."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/release-push.sh:28",
+      "description": "Header's 'Every failure here says…' becomes true once the two blocking threads land; otherwise narrow the sentence."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/release-push.sh:87",
+      "description": "`git rebase --abort || true` prints `fatal: No rebase in progress?` before the real ::error:: when the rebase failed before starting; 2>/dev/null or abort only when rebase-merge exists. Cosmetic."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/release-push.test.sh:12",
+      "description": "Test inherits the developer's global/system git config (commit.gpgsign=true fails the seed commit); export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 for hermeticity. CI unaffected."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/release-push.test.sh:89",
+      "description": "Case 1 does not assert that main's other manifest edits survive the resolution (a REBASE_HEAD: regression would still pass); have clone a's bump set another key and assert it on origin/main."
+    }
+  ],
+  "testerFindingDecision": "Blocking. Spec requirement 3 ('a red run must not hide a successful publish') is categorical, the script header (lines 28-31) promises it for every failure, the fix is one `|| fail_outstanding` plus a deterministic test, and 'pre-existing' does not carry it: a transient fetch failure against github.com is exactly the red run an operator has to decode.",
+  "declined": "thermonuclear-code-quality's proposal to replace the rebase with `git reset --hard FETCH_HEAD` + re-commit: the spec's Rejected section already rules it out (cannot tell a real divergence from a clean run). Not a finding.",
+  "verifiedAgainstGitHub": {
+    "checksAtHead": "7a612252: lint, pr-title, typecheck, test all success (Tests runs 34762712783 and 34762738235)",
+    "threadsBeforeReview": 0,
+    "e2e": "PR body E2E names release-push.sh push-main against a real bare git origin, the commands, a negative control, head a20cf9b8 (ancestor of 7a612252)",
+    "prState": {
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "headRefOid": "7a612252f49e8b0f8d1266f3312b9d08ab5c0d9c"
+    },
+    "rebase": "none (not CONFLICTING)"
+  },
+  "verifiedByHand": [
+    ".github/scripts/release-push.test.sh at head: Results: 22 passed, 0 failed, exit 0 (git 2.43.0, jaq 2.3.0)",
+    "unreachable origin (remote set-url to nonexistent path): EXIT=128, no ::error::, no summary file",
+    "identical bump already on main: clean rebase drops the empty commit, `Everything up-to-date`, exit 0, no rebase left (reachable in production because release.yaml:358 skips npm publish for an existing version)",
+    "modify/delete conflict (clone a `git rm -r packages/pkg` + push; b bumps): CONFLICT (modify/delete) → `Resolving the … version-line conflict` → `fatal: path … exists on disk, but not in 'HEAD'`, EXIT=128, no summary, .git/rebase-merge present, manifest 0 bytes",
+    "release.yaml: cli tag/push packages/daemon (131/152), envoy_plugin packages/envoy-plugin (250/273), pi_envoy packages/pi-envoy (375/398); each `id: version` writes version=; manifests written with the same `jq '.version = $v'`; pi_envoy's .omp.extensions rewrite restored at 365-370 before tag; fetch-depth: 0 on all three checkouts",
+    "verify-envoy-release-workflow.sh: targeted .github/workflows/release-envoy-and-plugin.yaml which does not exist; only references are .legion handoff prose, docs/superpowers/plans/2026-04-12-fix-ci-docker-build-gating.md and docs/solutions/envoy/multi-layer-service-consolidation.md (historical)"
+  ],
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 7a612252: deep found one Major (modify/delete bypass, confirmed by hand) and four Minors; quality found no blockers, the same bypass class, and cosmetic fast-follows; its structural simplification declined per the spec's Rejected section. Thermo line for the PR body is in the review; the implementer should carry it into its single body edit (LEGION-90).",
+  "fastFollow": "script/test cosmetics, batched: trailing blank line at EOF in both scripts; ${conflicted//$'\\n'/ } instead of printf|tr; push_main's set +e/set -e toggle → rc=0; out=$(…) || rc=$?; the three inline $([ \"$rc\" != 0 ] && echo true || echo false) copies; Case 2/2b regexes pin punctuation rather than path tokens.",
+  "nextRound": "Implementer: fix the two blocking threads (fetch through fail_outstanding; modify/delete gate + temp-file write + guards on 97-99), add the two test cases (unreachable origin; modify/delete), optionally the Minors, run release-push.test.sh, one PR body edit carrying Threads + Thermo, `legion threads resolve` before the push. Tester re-runs. Reviewer answers each thread with Accepted:/Still open: and reviews the new head.",
+  "skillsFollowed": [
+    "legion-worker",
+    "verification-before-completion"
+  ],
+  "noProjectWideRuns": "No formatter, biome, tsc, or bun test run; only release-push.test.sh, mktemp scratch git experiments, legion gh reads/one POST, and the two thermo agents.",
+  "incident": "The LEGION daemon was unreachable (127.0.0.1:13370 connection refused, no daemon process) for a few minutes at ~14:38Z; every bash call failed at the grant hook. A port watcher saw it return (new pid 355468); nothing was posted during the gap.",
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:43:52.913Z"
+}
