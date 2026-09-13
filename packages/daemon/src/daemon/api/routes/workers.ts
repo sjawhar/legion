@@ -27,17 +27,25 @@ import {
   validateContractResponse,
 } from "../http";
 
+/** An issue's status as this daemon knows it: a lifecycle write of its own that has not landed on
+ * Dispatch yet (`pendingStatusWrites`, recorded when the PATCH failed and retried by resync) wins
+ * over the last status Dispatch echoed back through the durable lane, so a Dispatch outage
+ * between two daemon-owned transitions never makes the second one read a stale status. */
+function knownIssueStatus(state: LegionState, issue: IssueKey): IssueStatus | undefined {
+  return state.pendingStatusWrites[issue]?.status ?? state.issues[issue]?.status;
+}
+
 /** The status the daemon PATCHes off a phase's own completion, keyed by the role that just
  * finished. `planner`/`merger` completions never PATCH a status here: planning still reads as
  * `in_progress`, and a merge's `done` transition happens on `closeTree` instead. An implementer
  * completion advances `in_progress` → `testing` and nothing else: the same role also completes
  * the `.legion/` deletion push, a conflict-forced rebase, and retro, none of which is a test
- * round — from any other status (or an issue whose status this daemon has not yet observed
- * through the Dispatch lane) it writes nothing, so `retro` is never followed by `testing`. A
- * reviewer completion checks the review verdict the `review` reducer already recorded on the
- * issue's PR (`state.prs[...].reviewDecision`, which records changes requested from any commit
- * and an approval only at the PR's current head): changes requested returns the issue to
- * `in_progress` for a corrective implementer instead of advancing to `retro`. */
+ * round — from any other known status (or an issue whose status this daemon has not yet
+ * observed) it writes nothing, so `retro` is never followed by `testing`. A reviewer completion
+ * checks the review verdict the `review` reducer already recorded on the issue's PR
+ * (`state.prs[...].reviewDecision`, which records changes requested from any commit and an
+ * approval only at the PR's current head): changes requested returns the issue to `in_progress`
+ * for a corrective implementer instead of advancing to `retro`. */
 function phaseCompleteStatus(
   state: LegionState,
   issue: IssueKey,
@@ -45,7 +53,7 @@ function phaseCompleteStatus(
 ): IssueStatus | undefined {
   switch (role) {
     case "implementer":
-      return state.issues[issue]?.status === "in_progress" ? "testing" : undefined;
+      return knownIssueStatus(state, issue) === "in_progress" ? "testing" : undefined;
     case "tester":
       return "needs_review";
     case "reviewer":
@@ -57,6 +65,33 @@ function phaseCompleteStatus(
     default:
       return undefined;
   }
+}
+
+/** The status the daemon PATCHes when the architect spawns a phase worker — the two moments an
+ * issue enters `in_progress` other than its tree's admission (`spawnTree` writes it for the root
+ * only). The first worker on a child released at `todo` starts its work; a corrective implementer
+ * spawned while the issue's PR carries `reviewDecision: "changes_requested"` (a Legion reviewer's
+ * round or a human's review after approval) returns it from wherever the review left it. Every
+ * other spawn writes nothing, so a `.legion/` deletion push or a retro under an approved review
+ * never moves the status, and the implementer's completion guard above sees the status this
+ * write put there. */
+function spawnStatus(
+  state: LegionState,
+  issue: IssueKey,
+  role: LegionRole
+): IssueStatus | undefined {
+  const current = knownIssueStatus(state, issue);
+  if (current === "todo") return "in_progress";
+  if (
+    role === "implementer" &&
+    current !== "in_progress" &&
+    Object.values(state.prs).some(
+      (pr) => pr.key === issue && pr.reviewDecision === "changes_requested"
+    )
+  ) {
+    return "in_progress";
+  }
+  return undefined;
 }
 
 export async function handleWorkerSession(
@@ -423,5 +458,13 @@ export async function handleSpawnWorker(
   }
   const task = requiredString(body, "task");
   const result = await ctx.deps.processManager.spawnWorker(tree, issue, role, task);
+  // Written after the process manager accepted the spawn (a refused one moves nothing) and before
+  // the result is returned, whether it was spawned, resumed, or queued: the worker's phase has
+  // started from the architect's point of view either way.
+  const nextStatus = spawnStatus(ctx.deps.state, issue, role);
+  if (nextStatus) {
+    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, nextStatus);
+    await ctx.save();
+  }
   return Response.json(validateContractResponse(LegionDaemonApi.SpawnWorker.response, result));
 }
