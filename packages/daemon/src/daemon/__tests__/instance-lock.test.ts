@@ -27,6 +27,21 @@ describe("acquireInstanceLock", () => {
     }
   });
 
+  /** Reads `child`'s stdout up to its first newline; a child that exits first is the error. */
+  async function firstLine(
+    child: { stdout: ReadableStream<Uint8Array>; exited: Promise<number> },
+    role: string
+  ): Promise<string> {
+    const reader = child.stdout.getReader();
+    let text = "";
+    while (!text.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`${role} exited before reporting (exit ${await child.exited})`);
+      text += new TextDecoder().decode(value);
+    }
+    return text.slice(0, text.indexOf("\n")).trim();
+  }
+
   /** Starts the fixture holding the lock on `stateDir` and returns once it reports "locked". */
   async function spawnHolder(
     stateDir: string,
@@ -38,14 +53,7 @@ describe("acquireInstanceLock", () => {
       stderr: "inherit",
     });
     children.push(child);
-    const reader = child.stdout.getReader();
-    let text = "";
-    while (!text.includes("\n")) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error(`lock holder exited before locking (exit ${await child.exited})`);
-      text += new TextDecoder().decode(value);
-    }
-    expect(text.trim()).toBe("locked");
+    expect(await firstLine(child, "lock holder")).toBe("locked");
     return child;
   }
 
@@ -224,8 +232,14 @@ describe("acquireInstanceLock", () => {
         /flags:\s+(\d+)/.exec(readFileSync(`/proc/self/fdinfo/${held[0]}`, "utf8")) ?? [];
       expect(Number.parseInt(flagsOctal, 8) & 0o2000000).not.toBe(0);
     }
-    const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    // vfork window: Bun.spawn returns before the child's exec has closed its inherited descriptors,
+    // and flock is per open file description — `sh` printing proves its exec completed.
+    const child = Bun.spawn(["sh", "-c", "echo ready; exec sleep 30"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
     children.push(child);
+    expect(await firstLine(child, "spawned child")).toBe("ready");
     await lock.release();
 
     // An inherited descriptor would keep the kernel lock held while `sleep` lives.
