@@ -1,0 +1,38 @@
+{
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "reviewedHead": "a826d2bace546537bd1f68f39369a53cd6bdcf8b",
+  "review": {
+    "id": 5191794385,
+    "state": "CHANGES_REQUESTED",
+    "url": "https://github.com/sjawhar/legion/pull/1055#pullrequestreview-5191794385"
+  },
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "scripts/smoke/checkpoints.sh",
+      "line": 224,
+      "description": "smoke_pr: gh pr list --limit 100 has no truncation guard; a 100-entry list with exactly one legion/<KEY> entry is picked silently (reproduced with a fake gh), and the 0-case remedy misleads when the candidate is older than the newest 100. Fix: fail when 100 are listed (mirror pr_commits) or paginate with gh api --paginate repos/<repo>/pulls?state=all; add a 100-entry PR_LIST_OUTPUT harness case; name the window in the comment and README paragraph."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/smoke/checkpoints.sh",
+      "line": 245,
+      "description": "errexit is not inherited into $(...): a failing gh inside pr_commits or smoke_pr continues on an empty string and the CHECKPOINT line names a condition that did not happen (502 on the commits endpoint -> 'PR #7 has no commits (0 listed)'; 401 on pr list -> 'has  legion/<KEY> pull requests: ;'). Never a false OK. Fix: '|| fail \"gh api ... failed\"' on the line-245 substitution and '|| fail \"gh pr list ... failed\"' on line 224; pr_reviews needs nothing (pipefail is inherited)."
+    }
+  ],
+  "fastFollow": "scripts/smoke checkpoint wording and duplication cleanup: hoist the login-membership jq def shared by commit_faults and checkpoint 7's deletion check; README row 5 overclaims that the trailer names the committing pane's session (only the UUID shape is asserted); README rows 7/8 list SMOKE_PR as required while the paragraph says discovery applies to 5, 7, 8; pr_commits' 'nothing was checked' is false from checkpoint 7; no negative case for 'SMOKE_PR must be a pull request number' or 'SMOKE_REVIEWER_LOGIN is required' on checkpoint 5.",
+  "verification": {
+    "ci": "Tests run 34772516713 at a826d2ba: lint, pr-title, typecheck, test all success (gh run view)",
+    "threads": "0 review threads, 0 prior reviews (gh api graphql)",
+    "e2e": "checkpoints 5 and 7 re-run from this head through worker-bin/gh against #1035: CHECKPOINT 5 OK (12 commits, legion-implementer[bot] committed 9), CHECKPOINT 7 OK (deletion 7097b62b by legion-implementer[bot]); negative controls: #1011 cp5 fails naming cbab905d (no trailer); #1007 cp7 OK with approvals on review page 2; SMOKE_PR unset names 54 candidates",
+    "harness": "bash scripts/smoke/checkpoints.test.sh: 43 PASS, exit 0; shellcheck -x clean; acceptance-1 grep prints nothing",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at a826d2ba: no Blocker/Major; the two Minors above (both reproduced by the reviewer), rest wording/duplication"
+  },
+  "nextRound": "Re-review after the corrective push: answer both threads with Accepted:/Still open:, tester must re-run behavioural testing first. When clean, COMMENT and report; APPROVE only the head that removes .legion/ alone.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T18:50:50.181Z"
+}
