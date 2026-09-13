@@ -1,5 +1,5 @@
 {
-  "headSha": "785d1b1d881b45c9f0e97448f5dcb769c5dbdb2e",
+  "headSha": "52fcae689ef3fc0a6ab3539c10d6ac8964eac1b2",
   "pr": 1030,
   "prUrl": "https://github.com/sjawhar/legion/pull/1030",
   "verdict": "pass",
@@ -63,11 +63,31 @@
     "Log shape, not a contract violation: each not-started prompt is exactly one console.error call (`[legion] failed to prompt queued worker <token>:` + the Error), but Bun renders the Error object with a 6-line source excerpt and stack, so the daemon log shows ~15 lines per failure; the same is true of the pre-existing refused-prompt path. Logging error.message for PromptNotStarted would keep it to one line — a wording/noise fast-follow candidate for the reviewer, nothing to fix for correctness.",
     "The index.test.ts boot-redrive case passes against the pre-change production code as well; it is a regression pin of the existing reconnect+drain path (acceptance 4 needed no new code per the plan), not evidence of new behaviour. The rig negative control exercised that boot redrive for real.",
     "The daemon log carries no timestamps; the rig timeline above comes from a 2 s state.json poller (evidence/state-timeline.jsonl) and the OMP transcripts' own timestamps.",
-    "Bound-only positive path: a healthy worker's agent_start follows the acknowledgement within milliseconds, so the rig positive path shows the commit at the moment the turn started but cannot by itself distinguish commit-on-ack from commit-on-start; the negative control and the unit/e2e red-green runs are what prove the new ordering."
+    "Bound-only positive path: a healthy worker's agent_start follows the acknowledgement within milliseconds, so the rig positive path shows the commit at the moment the turn started but cannot by itself distinguish commit-on-ack from commit-on-start; the negative control and the unit/e2e red-green runs are what prove the new ordering.",
+    "Rebase re-check 785d1b1d881b -> 52fcae689ef3: fingerprint changed (three scripts/smoke paths only, main #1010 mechanism adopted), packages/daemon/src unchanged; bare gates + up/down.test.sh only, no rig round, per the SKILL rule and the architect's instruction."
   ],
   "documentationFeedback": "AGENTS.md rows 19/20 and bullets 65/68 and the SKILL.md worker-queued row match the observed behaviour exactly, including the observation strings (`get_state: isStreaming=false`) and the retire-at-three/--resume path.",
   "negativeControlSummary": "Ack-only OMP stand-in behind a real legion worker-shim: three acknowledged prompts, no turn, three logged PromptNotStarted failures, pane retired at the third, real worker relaunched with --resume and ran the queued task.",
+  "rebase": {
+    "reason": "Conflict-forced rebase by the implementer onto main a7c01347fd69 (#1010 rewrote scripts/smoke/up.sh and down.sh NATS-name handling); bare-gate re-check per skills/legion-worker/SKILL.md, no full rig round.",
+    "testedHeadBefore": "785d1b1d881b45c9f0e97448f5dcb769c5dbdb2e",
+    "testedHeadAfter": "52fcae689ef3fc0a6ab3539c10d6ac8964eac1b2",
+    "codeTestTip": "167754ae9e25",
+    "fingerprintBefore": "74b8e70ca6ef96b455dadd2e137da89082e14f22121ba325bb84729532693e7a",
+    "fingerprintAfter": "6935415038171bd6cb9bab52858bc24bec352432b9fa4526728069f99d5d4015",
+    "verdictFingerprint": "changed",
+    "independentCheck": "PR change-set (diff from fork_point(main@origin|head) to head, --git --context 0, minus @@/index lines, excluding .legion and docs/solutions) compared per path at both heads: 22 paths; 19 byte-identical per-path hunks; exactly 3 differ — scripts/smoke/README.md, scripts/smoke/down.sh (no longer in the change-set: main #1010 per-rig legion-smoke-nats-<slug> supersedes SMOKE_NATS_NAME, dropped), scripts/smoke/up.sh (SMOKE_NATS_NAME dropped, SMOKE_WORKER_CAP kept). packages/daemon/src: 17 change-set paths, all byte-identical, 0 differing. Tip-to-tip `jj diff --from 785d1b1d --to 52fcae68 -- packages/daemon/src` names 4 files (cli/__tests__/index.test.ts, daemon/AGENTS.md, daemon/__tests__/config.test.ts, daemon/config.ts) and its sha256 equals that of main c8faafecc6a7 -> a7c01347fd69 restricted to the same tree — i.e. exactly main's own movement, nothing from this PR. GitHub: headRefOid 52fcae689ef3fc0a6ab3539c10d6ac8964eac1b2, mergeable MERGEABLE, mergeStateStatus BLOCKED (review pending); daemon ci-green notice received for that SHA.",
+    "bareGates": {
+      "daemonSuite": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test: 1205 pass, 0 fail, 64 files, 61.44 s (the three real-prompt-delivery e2e cases pass; +6 tests vs 785d1b1d are main's)",
+      "daemonTsc": "bunx tsc --noEmit: exit 0",
+      "daemonBiome": "bunx biome check src/: Checked 162 files, no fixes, exit 0",
+      "piEnvoy": "cd packages/pi-envoy && bunx tsc --noEmit: exit 0; bun test src/legion: 16 pass, 0 fail",
+      "smokeScripts": "bash scripts/smoke/up.test.sh: 24 PASS, 0 FAIL (covers the rebased up.sh: per-project NATS name / machine id, SMOKE_WORKER_CAP path); bash scripts/smoke/down.test.sh: 6 PASS, 0 FAIL (covers the rebased down.sh)",
+      "logs": "/tmp/legion60-test/evidence/rebase.gate.*.log, rebase.daemon-src-diff.txt, rebase.all-paths-diff.txt, rebase.prdiff.785d1b1d881b.txt, rebase.prdiff.52fcae689ef3.txt, rebase.pr-view.json"
+    },
+    "rigEvidenceStillApplies": "The smoke-rig positive path and ack-only negative control recorded under `rig` were run at 785d1b1d881b; every packages/daemon/src path this PR changes carries a byte-identical hunk at 52fcae689ef3 and the tree's tip-to-tip delta is exactly main's, so the daemon under test is unchanged and that evidence stands. The only changed paths are the smoke rig scripts, whose own test suites (up.test.sh / down.test.sh) pass at the new head; the rig recipe now selects a second rig by SMOKE_PROJECT (legion-smoke-nats-<slug>) instead of SMOKE_NATS_NAME."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T13:33:06.466Z"
+  "completed": "2026-09-13T14:06:46.790Z"
 }
