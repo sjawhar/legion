@@ -253,6 +253,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	var invalidAskBlock *docs.ErrInvalidAskBlock
+	if errors.As(err, &invalidAskBlock) {
+		writeError(w, "INVALID_ASK_BLOCK", http.StatusBadRequest, invalidAskBlock.Error())
+		return
+	}
 	var invalidOp *docs.ErrInvalidOp
 	if errors.As(err, &invalidOp) {
 		writeError(w, "INVALID_OP", http.StatusBadRequest, invalidOp.Error())

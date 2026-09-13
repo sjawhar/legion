@@ -409,6 +409,28 @@ test("anchored comments, replies and system events are activity lines described 
   );
 });
 
+test("describes a malformed decision block", () => {
+  const event: Extract<Event, { type: "block.invalid" }> = {
+    actor: session,
+    created_at: "2026-09-13T17:00:00Z",
+    id: 9,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      block_id: "ask-block",
+      version: 3,
+      reason: 'ask block "ask-block" has an option without a label',
+      disturbed_by: session,
+    },
+    seq: 9,
+    type: "block.invalid",
+  };
+
+  expect(activityDescription(event)).toBe(
+    'marked decision ask-block malformed: ask block "ask-block" has an option without a label'
+  );
+});
+
 test("describes a status change out of Done as reopening the issue", () => {
   const closed = {
     ...message(1, "2026-09-10T10:00:00Z"),

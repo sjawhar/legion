@@ -297,6 +297,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits, including retyping an identified paragraph into a schema-declared typed block. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
+      "For replace, delete, and quote insert anchors, find text exactly as rendered: omit Markdown markers such as backticks or asterisks. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

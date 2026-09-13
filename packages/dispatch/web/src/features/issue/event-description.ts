@@ -58,6 +58,8 @@ export function eventDescription(event: Event): string {
       return `Unsubscribed ${event.payload.session_id}`;
     case "block.repaired":
       return `Repaired block ${event.payload.block_id}`;
+    case "block.invalid":
+      return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
   }
   return event satisfies never;
 }

@@ -337,6 +337,14 @@ type BlockRepairedEventPayload struct {
 	DisturbedBy Actor  `json:"disturbed_by"`
 }
 
+// BlockInvalidEventPayload records an ask block that browser editing left malformed.
+type BlockInvalidEventPayload struct {
+	BlockID     string `json:"block_id"`
+	Version     int    `json:"version"`
+	Reason      string `json:"reason"`
+	DisturbedBy Actor  `json:"disturbed_by"`
+}
+
 // AskOption is an answer choice.
 type AskOption struct {
 	Label       string `json:"label"`

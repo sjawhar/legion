@@ -161,3 +161,100 @@ func TestDocumentRetypeRejectsUnknownTypeAndInvalidAttributes(t *testing.T) {
 		})
 	}
 }
+
+func TestDocumentEditRejectsInvalidAskBlockAtomically(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Reject malformed ask edit", "Context\n")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops": []map[string]string{{
+			"after":    "end",
+			"markdown": ":::ask{#agent-ask urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n",
+			"op":       "insert",
+		}},
+	})
+	if created.Code != http.StatusOK {
+		t.Fatalf("create typed ask block: status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	var askID, question string
+	var optionsJSON []byte
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		err := database.Pool.QueryRow(context.Background(), `
+			select id::text, question, options from asks
+			where block_artifact_id = $1 and block_id = 'agent-ask'
+		`, issue.PrimaryArtifactID).Scan(&askID, &question, &optionsJSON)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if askID == "" {
+		t.Fatal("typed ask block did not settle")
+	}
+	var versionsBefore int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, issue.PrimaryArtifactID).Scan(&versionsBefore); err != nil {
+		t.Fatalf("count versions before rejected edit: %v", err)
+	}
+
+	rejected := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "replace", "find": "Ship", "with": ""}},
+	})
+	const reason = `ask block "agent-ask" has an option without a label`
+	errorBody := decodeBody[struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}](t, rejected)
+	if rejected.Code != http.StatusBadRequest || errorBody.Code != "INVALID_ASK_BLOCK" || errorBody.Error != reason {
+		t.Fatalf("reject malformed ask edit: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	var versionsAfter int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, issue.PrimaryArtifactID).Scan(&versionsAfter); err != nil {
+		t.Fatalf("count versions after rejected edit: %v", err)
+	}
+	if versionsAfter != versionsBefore {
+		t.Fatalf("versions after rejected edit = %d, want %d", versionsAfter, versionsBefore)
+	}
+	var questionAfter string
+	var optionsAfter []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select question, options from asks where id = $1
+	`, askID).Scan(&questionAfter, &optionsAfter); err != nil {
+		t.Fatalf("load ask after rejected edit: %v", err)
+	}
+	if questionAfter != question || string(optionsAfter) != string(optionsJSON) {
+		t.Fatalf("ask changed after rejected edit: question=%q options=%s", questionAfter, optionsAfter)
+	}
+}
+
+func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Rendered quote miss", "Use `config` with care.\n")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops": []map[string]string{{
+			"op":   "replace",
+			"find": "Use `missing`",
+			"with": "updated",
+		}},
+	})
+	errorBody := decodeBody[struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}](t, response)
+	const want = `operation 0: quote not found; quotes match the block text as rendered (no markdown markers); nearest block: "Use config with care."`
+	if response.Code != http.StatusNotFound || errorBody.Code != "TARGET_NOT_FOUND" || errorBody.Error != want {
+		t.Fatalf("rendered quote miss: status=%d code=%q error=%q", response.Code, errorBody.Code, errorBody.Error)
+	}
+}

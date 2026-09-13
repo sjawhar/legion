@@ -29,6 +29,15 @@ type settlementReconciliation struct {
 	events  []model.Event
 }
 
+// ErrInvalidAskBlock rejects an agent edit that would leave an indexed ask malformed.
+type ErrInvalidAskBlock struct {
+	Reason error
+}
+
+func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
+
+func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
+
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -38,7 +47,7 @@ func (s *Service) reconcileAskBlocks(
 	actor model.Actor,
 	version int,
 ) (settlementReconciliation, error) {
-	blocks, err := collectAskBlocks(tree)
+	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
@@ -48,6 +57,24 @@ func (s *Service) reconcileAskBlocks(
 	}
 
 	reconciled := settlementReconciliation{}
+	for _, invalid := range invalidBlocks {
+		delete(rows, invalid.id)
+		if setAskInvalidAttribute(invalid.node, invalid.reason.Error()) {
+			reconciled.changed = true
+			reconciled.events = append(reconciled.events, documentAskEvent(
+				owner,
+				artifactID,
+				"block.invalid",
+				actor,
+				model.BlockInvalidEventPayload{
+					BlockID:     invalid.id,
+					Version:     version,
+					Reason:      invalid.reason.Error(),
+					DisturbedBy: actor,
+				},
+			))
+		}
+	}
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
@@ -153,31 +180,50 @@ func (s *Service) reconcileAskBlocks(
 	return reconciled, nil
 }
 
+type invalidAskBlock struct {
+	node   *pmdoc.Node
+	id     string
+	reason error
+}
+
 func collectAskBlocks(tree *pmdoc.Node) ([]askBlock, error) {
+	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
+	if err != nil {
+		return nil, err
+	}
+	if len(invalidBlocks) > 0 {
+		return nil, invalidBlocks[0].reason
+	}
+	return blocks, nil
+}
+
+func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {
 	blocks := []askBlock{}
+	invalidBlocks := []invalidAskBlock{}
 	seen := map[string]struct{}{}
 	var collectErr error
 	walkTree(tree, func(node *pmdoc.Node) bool {
 		if node.Type != "ask" {
 			return true
 		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if _, duplicate := seen[id]; duplicate {
+			collectErr = fmt.Errorf("duplicate ask block id %q", id)
+			return false
+		}
+		seen[id] = struct{}{}
 		block, err := parseAskBlock(node)
 		if err != nil {
-			collectErr = err
-			return false
+			invalidBlocks = append(invalidBlocks, invalidAskBlock{node: node, id: id, reason: err})
+			return true
 		}
-		if _, duplicate := seen[block.id]; duplicate {
-			collectErr = fmt.Errorf("duplicate ask block id %q", block.id)
-			return false
-		}
-		seen[block.id] = struct{}{}
 		blocks = append(blocks, block)
 		return true
 	})
 	if collectErr != nil {
-		return nil, collectErr
+		return nil, nil, collectErr
 	}
-	return blocks, nil
+	return blocks, invalidBlocks, nil
 }
 
 func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
@@ -395,7 +441,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 		}
 	}
 	changed := false
-	for _, name := range []string{"state", "answered_by", "answered_at", "selected", "answer"} {
+	for _, name := range []string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"} {
 		want, present := desired[name]
 		got, exists := node.Attrs[name]
 		if present {
@@ -450,6 +496,13 @@ func askStringItems(value any) ([]string, bool) {
 	}
 }
 
+func setAskInvalidAttribute(node *pmdoc.Node, reason string) bool {
+	if current, present := node.Attrs["invalid"]; present && current == reason {
+		return false
+	}
+	node.Attrs["invalid"] = reason
+	return true
+}
 func documentAskEvent(owner artifactOwner, artifactID, eventType string, actor model.Actor, payload any) model.Event {
 	event := model.Event{IssueKey: owner.IssueKey, Type: eventType, Actor: actor, Payload: payload}
 	if owner.IssueKey == nil {

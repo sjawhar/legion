@@ -378,6 +378,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			return false, err
 		}
 		pmdoc.EnsureBlockIDs(next)
+		if _, err := collectAskBlocks(next); err != nil {
+			return false, &ErrInvalidAskBlock{Reason: err}
+		}
 		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
@@ -389,6 +392,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return true, nil
 	})
 	if err != nil {
+		var quoteNotFound *ErrQuoteNotFound
+		if errors.As(err, &quoteNotFound) {
+			return 0, err
+		}
 		return 0, fmt.Errorf("apply live document operations: %w", err)
 	}
 	return len(ops), nil

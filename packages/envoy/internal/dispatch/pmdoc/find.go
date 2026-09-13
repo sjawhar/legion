@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/reearth/ygo/crdt"
 )
@@ -18,6 +19,18 @@ type Range struct {
 
 var ErrTargetNotFound = errors.New("pmdoc: target not found")
 var ErrTargetSpansBlocks = errors.New("pmdoc: target spans textblocks")
+
+// ErrQuoteNotFound reports a quote miss with the closest rendered textblock.
+// It unwraps ErrTargetNotFound so callers can preserve their existing miss handling.
+type ErrQuoteNotFound struct {
+	Nearest string
+}
+
+func (e *ErrQuoteNotFound) Error() string {
+	return fmt.Sprintf("%s; nearest block: %q", ErrTargetNotFound, e.Nearest)
+}
+
+func (e *ErrQuoteNotFound) Unwrap() error { return ErrTargetNotFound }
 
 // Candidate gives one matching range and enough surrounding document text to
 // disambiguate it.
@@ -49,7 +62,10 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 		matches = normalizedQuoteMatches(text, quote)
 	}
 	if len(matches) == 0 {
-		return Range{}, ErrTargetNotFound
+		matches = markdownQuoteMatches(text, quote)
+	}
+	if len(matches) == 0 {
+		return Range{}, quoteNotFound(doc, quote)
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
@@ -148,14 +164,25 @@ func Size(doc *Node) int {
 	return nodeSize(doc)
 }
 
+type inlineMarkup uint8
+
+const (
+	inlineMarkupCode inlineMarkup = 1 << iota
+	inlineMarkupStrong
+	inlineMarkupEmphasis
+	inlineMarkupLink
+)
+
 type flattenedText struct {
 	value     string
 	positions []int
+	marks     []inlineMarkup
 }
 
 func buildFlattenedText(doc *Node) flattenedText {
 	var out strings.Builder
 	var positions []int
+	var marks []inlineMarkup
 	lastEnd := -1
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
@@ -164,7 +191,9 @@ func buildFlattenedText(doc *Node) flattenedText {
 		if lastEnd >= 0 && lastEnd != pos {
 			out.WriteByte(' ')
 			positions = append(positions, lastEnd)
+			marks = append(marks, 0)
 		}
+		markup := nodeInlineMarkup(node)
 		for _, char := range node.Text {
 			out.WriteRune(char)
 			width := 1
@@ -173,13 +202,31 @@ func buildFlattenedText(doc *Node) flattenedText {
 			}
 			for offset := range width {
 				positions = append(positions, pos+offset)
+				marks = append(marks, markup)
 			}
 			pos += width
 		}
 		lastEnd = end
 		return true
 	})
-	return flattenedText{value: out.String(), positions: positions}
+	return flattenedText{value: out.String(), positions: positions, marks: marks}
+}
+
+func nodeInlineMarkup(node *Node) inlineMarkup {
+	var markup inlineMarkup
+	for _, mark := range node.Marks {
+		switch mark.Type {
+		case "inlineCode":
+			markup |= inlineMarkupCode
+		case "strong":
+			markup |= inlineMarkupStrong
+		case "emphasis":
+			markup |= inlineMarkupEmphasis
+		case "link":
+			markup |= inlineMarkupLink
+		}
+	}
+	return markup
 }
 
 type quoteMatch struct {
@@ -231,6 +278,149 @@ func normalizedQuoteMatches(text flattenedText, quote string) []quoteMatch {
 		})
 	}
 	return matches
+}
+
+func markdownQuoteMatches(text flattenedText, quote string) []quoteMatch {
+	rendered, marked := renderedMarkdownQuote(quote)
+	if !marked {
+		return nil
+	}
+	return normalizedMarkdownQuoteMatches(text, rendered)
+}
+
+func renderedMarkdownQuote(quote string) (flattenedText, bool) {
+	parsed, err := Parse(quote)
+	if err != nil {
+		return flattenedText{}, false
+	}
+	rendered := buildFlattenedText(parsed)
+	if rendered.value == quote || !hasInlineMarkup(rendered.marks) {
+		return flattenedText{}, false
+	}
+	return rendered, true
+}
+
+func hasInlineMarkup(marks []inlineMarkup) bool {
+	for _, markup := range marks {
+		if markup != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedMarkdownQuoteMatches(text, quote flattenedText) []quoteMatch {
+	normalizedText, textSpans := normalizedRanges(text.value)
+	normalizedQuote, quoteSpans := normalizedRanges(quote.value)
+	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
+		return nil
+	}
+
+	needle := []rune(normalizedQuote)
+	var matches []quoteMatch
+	for _, offset := range findAllRunes([]rune(normalizedText), needle) {
+		if !matchingInlineMarkup(text, quote, textSpans[offset:offset+len(needle)], quoteSpans) {
+			continue
+		}
+		from := textSpans[offset].from
+		to := textSpans[offset+len(needle)-1].to
+		matches = append(matches, quoteMatch{
+			Range: Range{
+				From: text.positions[from],
+				To:   text.positions[to-1] + 1,
+			},
+			textFrom: from,
+			textTo:   to,
+		})
+	}
+	return matches
+}
+
+func matchingInlineMarkup(text, quote flattenedText, textSpans, quoteSpans []range16) bool {
+	for index, quoteSpan := range quoteSpans {
+		required := markupInRange(quote.marks, quoteSpan)
+		if required == 0 {
+			continue
+		}
+		if markupInRange(text.marks, textSpans[index])&required != required {
+			return false
+		}
+	}
+	return true
+}
+
+func markupInRange(marks []inlineMarkup, span range16) inlineMarkup {
+	var markup inlineMarkup
+	for index := span.from; index < span.to; index++ {
+		markup |= marks[index]
+	}
+	return markup
+}
+
+func quoteNotFound(doc *Node, quote string) error {
+	if rendered, marked := renderedMarkdownQuote(quote); marked {
+		quote = rendered.value
+	}
+	return &ErrQuoteNotFound{Nearest: nearestBlock(doc, quote)}
+}
+
+func nearestBlock(doc *Node, quote string) string {
+	bestPrefix := -1
+	nearest := ""
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if !isTextblock(node.Type) {
+			return true
+		}
+		candidate := textContent(node)
+		prefix := commonPrefixLength(quote, candidate)
+		if prefix > bestPrefix {
+			bestPrefix = prefix
+			nearest = candidate
+		}
+		return true
+	})
+	return firstRunes(nearest, 80)
+}
+
+func textContent(node *Node) string {
+	if node.Type == "text" {
+		return node.Text
+	}
+	if node.Type == "hardbreak" {
+		return "\n"
+	}
+	var out strings.Builder
+	for _, child := range node.Children {
+		out.WriteString(textContent(child))
+	}
+	return out.String()
+}
+
+func commonPrefixLength(left, right string) int {
+	prefix := 0
+	rightOffset := 0
+	for _, leftRune := range left {
+		if rightOffset == len(right) {
+			return prefix
+		}
+		rightRune, width := utf8.DecodeRuneInString(right[rightOffset:])
+		if leftRune != rightRune {
+			return prefix
+		}
+		rightOffset += width
+		prefix++
+	}
+	return prefix
+}
+
+func firstRunes(value string, count int) string {
+	for index := range value {
+		if count == 0 {
+			return value[:index]
+		}
+		count--
+	}
+	return value
 }
 
 func findAllUnits(haystack, needle []uint16) []int {

@@ -294,6 +294,9 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 	})
 	for _, name := range names {
 		definition := typ.Attributes[name]
+		if name == "invalid" && definition.Server {
+			continue
+		}
 		value, present := n.Attrs[name]
 		if !present || (value == nil && definition.Default == nil) {
 			if definition.Default == nil {

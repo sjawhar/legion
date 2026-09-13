@@ -141,6 +141,29 @@ test("accepts an artifact-owned ask edit event", () => {
   });
 });
 
+test("models an invalid ask block event", () => {
+  const event: DispatchEvent = {
+    id: 73,
+    issue_key: "DOC-1",
+    seq: 5,
+    type: "block.invalid",
+    actor: { kind: "session", id: "session-1" },
+    notify: false,
+    created_at: "2026-09-13T16:30:00Z",
+    payload: {
+      block_id: "ask-block",
+      version: 3,
+      reason: 'ask block "ask-block" has an option without a label',
+      disturbed_by: { kind: "session", id: "session-1" },
+    },
+  };
+
+  expect(DispatchEventSchema.safeParse(event)).toMatchObject({
+    data: { type: "block.invalid" },
+    success: true,
+  });
+});
+
 test("rejects edit history on non-edit ask events", () => {
   expect(
     AskEventPayloadSchema.safeParse({
