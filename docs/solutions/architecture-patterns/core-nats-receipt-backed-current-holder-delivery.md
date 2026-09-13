@@ -32,7 +32,7 @@ The Envoy role lane needs a different contract: a role message is live-only and 
 
 Make the listener the sole core-NATS subscriber for a role lane. At delivery time, it reads the current role holder from the authoritative registry, verifies the holder's session registration is fresh, then sends the original envelope to that holder's direct agent subject with NATS request-reply.
 
-The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout, a missing receiver, or a receiver that fails before replying is `delivery_failed`; publish the original envelope on the exception lane. An absent role claim is instead `no_holder`.
+The agent-subject receiver sends its reply only after it has accepted the envelope for steering injection. The listener treats that response as the delivery receipt. A two-second request timeout from a registered, live receiver is `receipt_timeout` (LEGION-108: the receiver has the envelope and has not acknowledged it — a slow holder, not a lost message); a missing receiver, a stale registration, or a request that could not be sent is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.
 
 Session registry and KV checks remain valuable gates, but they must not be promoted into proof of active delivery. They establish that a route was recently registered; the receipt establishes that a live receiver accepted this specific message.
 
@@ -104,7 +104,7 @@ if (reply !== "" && subject === agentSubject(sessionID)) {
 }
 ```
 
-This makes a fresh-but-deaf holder and a stopped holder observable as `delivery_failed`, while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy.
+This makes a fresh-but-deaf holder and a stopped holder observable as `receipt_timeout` (fresh but deaf) and `delivery_failed` (stopped), while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy.
 
 ## Related
 

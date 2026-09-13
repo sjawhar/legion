@@ -87,9 +87,9 @@ canonical markdown.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
-- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject. The agent pump returns an empty receipt after accepting the envelope; no receipt within two seconds is `delivery_failed` and emits an exception. Do not add durable role consumers or retry transit for role messages.
+- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject. The agent pump returns an empty receipt after accepting the envelope. No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process); `delivery_failed` is a claim whose message was never forwarded (holder lookup failed, holder stale, or the forward request errored); `no_holder` is no claim at all. Every reason emits an exception and clears the attempt cache; the dedupe cache records a forward only when its receipt arrived, so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped. Do not add durable role consumers or retry transit for role messages.
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception.
-- A failed control delivery emits `notifications.envoy.exceptions.<original-topic>`. Its payload preserves `original_topic`, `event_id`, `reason`, `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. An API publish to an unheld role is rejected synchronously with 404 instead.
+- A failed control delivery emits `notifications.envoy.exceptions.<original-topic>`. Its payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind `readinessGate` (`internal/webhook/{github,slack,ghostwispr}.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 ## Security
@@ -110,7 +110,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 | Endpoint | Method | Contract |
 | --- | --- | --- |
 | `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID. |
-| `/v1/messages/publish` | POST | Publishes a non-agent topic. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. |
+| `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — and an empty string is absent; without either the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`, or 404 when no holder is live. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
 | `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events. |
@@ -122,11 +122,11 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 | `/v1/sessions/<session_id>` | DELETE | Removes a live session registration. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
-`expects_reply`, and `expires_at`; empty optional fields are omitted. `urgency` is `low`,
-`med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`. Every
-`/v1` 4xx/5xx response, including the startup readiness gate, is JSON:
-`{"error":"<message>","expected":["field"]}`. `expected` appears when the caller must
-provide a field.
+`expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
+fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
+`none`, `optional`, or `required`. Every `/v1` 4xx/5xx response, including the startup
+readiness gate, is JSON: `{"error":"<message>","expected":["field"]}`. `expected` appears
+when the caller must provide a field.
 
 ## Targeted Dispatch messages
 
