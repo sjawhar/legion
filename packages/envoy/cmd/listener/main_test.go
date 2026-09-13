@@ -631,7 +631,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 }
 
-func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
+func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -668,7 +668,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","source":"agent"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
 	publishHandler(&state).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -677,7 +677,23 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
 		t.Fatalf("decode published envelope: %v", err)
 	}
-	assertDeliveryException(t, exceptionProbe, published, "delivery_failed")
+	exception := assertDeliveryException(t, exceptionProbe, published, "receipt_timeout")
+	t.Logf("captured exception envelope payload: %s", exception.Payload)
+	if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("one publish produced a second exception (or probe failed): %v", err)
+	}
+	logs := harness.logs.String()
+	line := ""
+	for _, candidate := range strings.Split(logs, "\n") {
+		if strings.Contains(candidate, `"msg":"listener role receipt timed out"`) {
+			line = candidate
+			break
+		}
+	}
+	if line == "" || !strings.Contains(line, `"delivery_status":"receipt_timeout"`) || !strings.Contains(line, `"event_id":"`+published.EventID+`"`) {
+		t.Fatalf("listener log does not name receipt_timeout for %s:\n%s", published.EventID, logs)
+	}
+	t.Logf("listener log line: %s", line)
 }
 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
