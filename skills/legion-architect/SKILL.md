@@ -116,7 +116,12 @@ the same two values. The document id is never the slug or file name you passed i
 `spec.md`): the daemon recognizes the document's approval events by that id, and both the
 `legion` tool and the daemon refuse a value that is not a UUID. Calling
 `dispatch_request_approval` again while a request is open returns the same open request, so it
-is safe to repeat.
+is safe to repeat. If its text instead reads "spec.md (document id <UUID>) is already approved at
+version <N>" — a human approved from the document header before you asked — still call
+`register_gate` with that id and version: the daemon reads the approval from Dispatch as it
+registers, opens the gate, and delivers `design-approved` at once. The same read covers a human
+who answers the question between your `dispatch_request_approval` and `register_gate` calls, so
+an approval is never lost to timing; you never approve anything yourself.
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
 `design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of

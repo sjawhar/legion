@@ -116,7 +116,9 @@ or the controller moves `triage`/`icebox`/`backlog`/`todo` from the Dispatch das
 is a human approving the root issue's spec document at a version in Dispatch: the architect
 requests it with `dispatch_request_approval` and registers the document id and version with the
 daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its
-current version. A later spec version closes the gate until someone approves the new version, and
+current version — or at registration itself, when Dispatch already shows the human approved that
+version before the architect registered (the daemon reads the approval; it never writes one). A
+later spec version closes the gate until someone approves the new version, and
 a `changes_requested` review closes it with the reviewer's reason. `gates.design: off` is the only
 way past the gate without a human review — Legion has no operator approve command; with `off` the
 root architect is told so in its system prompt and adds no approval step. Whether a human must

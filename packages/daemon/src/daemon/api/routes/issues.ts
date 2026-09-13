@@ -1,4 +1,4 @@
-import { type IssueKey, LegionDaemonApi, roleTopic } from "@legion/contracts";
+import { type IssueDetails, type IssueKey, LegionDaemonApi, roleTopic } from "@legion/contracts";
 import { writeStatus } from "../../dispatch-client";
 import {
   type DesignGate,
@@ -13,6 +13,7 @@ import {
   HttpError,
   issueKey,
   optionalStrings,
+  requiredNumber,
   requiredString,
   validateContractResponse,
 } from "../http";
@@ -65,12 +66,13 @@ export async function handleIssueStatus(
   return Response.json(validateContractResponse(LegionDaemonApi.IssueStatus.response, {}));
 }
 
-/** Publishes the `design-approved` wake for a gate the daemon satisfied itself (`gates.design:
- * off`), to exactly the role the reducer's `artifact.approved` path would have chosen
- * (`routeActive`: the issue's active phase worker if any, else its tree's architect).
- * Best-effort: the state already carries the approval, so a resumed architect's catch-up shows
- * it; a 404 no-holder is silent, anything else is logged. Shared by the register route and the
- * boot fixup. */
+/** Publishes the `design-approved` wake for a gate the daemon opened without an `artifact.approved`
+ * event of its own to reduce — the `gates.design: off` self-approval, and a registration that
+ * found the document already approved on Dispatch (`seedGateFromDispatch`) — to exactly the role
+ * the reducer's `artifact.approved` path would have chosen (`routeActive`: the issue's active
+ * phase worker if any, else its tree's architect). Best-effort: the state already carries the
+ * approval, so a resumed architect's catch-up shows it; a 404 no-holder is silent, anything else
+ * is logged. Shared by the register route and the boot fixup. */
 export async function publishDesignApproved(
   state: LegionState,
   issue: IssueKey,
@@ -83,26 +85,74 @@ export async function publishDesignApproved(
     } catch (error) {
       if (!(error instanceof EnvoyPublishError) || error.status !== 404) {
         console.error(
-          `[legion] design gate is off but the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${error instanceof Error ? error.message : String(error)}`
+          `[legion] the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
   }
 }
 
+/** A registration that would leave the gate closed asks Dispatch whether a human already approved
+ * the document. The daemon ignores an `artifact.approved` for a document no gate names yet, and
+ * Dispatch never re-emits it (`dispatch_request_approval` on an approved document answers
+ * "already approved" and opens nothing), so an approval that landed before this call — from the
+ * document header while the architect was still writing, or from the Inbox between the request
+ * and this call — would otherwise park the architect forever. One `getIssue` read (the same read
+ * `specArtifactResolver` uses for the migration) seeds the gate from the document's `approval`:
+ * `approved` at the latest version records that version and opens the gate; `stale` records the
+ * older approved version, so the gate stays closed until the current version is approved; every
+ * other state records no approval. Dispatch's `latest_version` raises `latestVersion` in every
+ * case — a version the architect did not see is still the current one. Humans still write every
+ * approval; this only reads what one already wrote. A failed read is a 502 recording nothing, so
+ * the architect's `register_gate` retries rather than registering a gate that silently cannot
+ * open; a document the issue does not carry is a 404 naming both. */
+async function seedGateFromDispatch(
+  ctx: RouteContext,
+  issue: IssueKey,
+  gate: DesignGate
+): Promise<void> {
+  let details: IssueDetails;
+  try {
+    details = await ctx.deps.dispatchClient.getIssue(issue);
+  } catch (error) {
+    throw new HttpError(
+      502,
+      `Dispatch read of ${issue} failed; retry register_gate: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const document = details.artifacts.find((artifact) => artifact.id === gate.artifactId);
+  if (!document) {
+    throw new HttpError(404, `${gate.artifactId} is not a document of ${issue}`);
+  }
+  const approval = document.approval;
+  if (!approval) return;
+  gate.latestVersion = Math.max(gate.latestVersion, approval.latest_version);
+  if (
+    approval.version !== undefined &&
+    (approval.state === "stale" ||
+      (approval.state === "approved" && approval.version === approval.latest_version))
+  ) {
+    gate.approvedVersion = approval.version;
+  }
+}
+
 /** Registers the design gate's document: the architect requests approval of its root spec with
- * `dispatch_request_approval`, then records the returned document id (`artifactId`) and version
- * here so the `artifact.approved`/`artifact.changes_requested`/`artifact.version` reducers know
- * which document is the gate and which version is current. Re-registering the same document
- * keeps any approval already recorded and only raises `latestVersion`; registering a different
- * document replaces the gate wholesale, since an approval pins one document's version and cannot
- * carry to another.
+ * `dispatch_request_approval`, then records the returned document id (`artifactId`, normalized
+ * to lowercase — Dispatch emits its UUIDs lowercase and the reducers match them with `===`) and
+ * version here so the `artifact.approved`/`artifact.changes_requested`/`artifact.version`
+ * reducers know which document is the gate and which version is current. Re-registering the
+ * same document keeps any approval already recorded and only raises `latestVersion`; registering
+ * a different document replaces the gate wholesale, since an approval pins one document's version
+ * and cannot carry to another.
  *
- * With `gates.design: off` the daemon satisfies the gate itself: a gate that is not open after
- * this write is approved at its `latestVersion` and the same `design-approved` wake a human
- * approval would produce is published, so an architect that registered anyway proceeds without
- * anyone clicking. The publish is best-effort: state is already approved, so a resumed
- * architect's catch-up shows it. */
+ * A gate that would be closed after this write is opened without waiting for an event in two
+ * cases, each publishing the same `design-approved` wake a human approval would produce (the
+ * publish is best-effort: state is already approved, so a resumed architect's catch-up shows it):
+ * with `gates.design: off` the daemon approves the gate at its `latestVersion` itself, so an
+ * architect that registered anyway proceeds without anyone clicking; otherwise the daemon reads
+ * the document's approval from Dispatch (`seedGateFromDispatch`) and opens the gate when a human
+ * already approved the current version. The contract (`LegionDaemonApi.GatesRegister.request`,
+ * validated before this handler) already rejects a non-positive or non-integer `version`. */
 export async function handleGatesRegister(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -113,11 +163,8 @@ export async function handleGatesRegister(
   if (!treeContains(ctx.deps.state, tree, issue)) {
     throw new HttpError(403, "Issue is outside tree");
   }
-  const artifactId = requiredString(body, "artifactId");
-  const version = body.version;
-  if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) {
-    throw new HttpError(400, "Expected positive integer version");
-  }
+  const artifactId = requiredString(body, "artifactId").toLowerCase();
+  const version = requiredNumber(body, "version");
   const prior = ctx.deps.state.gates[issue];
   const gate: DesignGate =
     prior && prior.artifactId === artifactId
@@ -129,11 +176,18 @@ export async function handleGatesRegister(
             : { approvedVersion: prior.approvedVersion }),
         }
       : { artifactId, latestVersion: version };
-  const gateOffApproves = ctx.config.gates.design === "off" && !designGateOpen(gate);
-  if (gateOffApproves) gate.approvedVersion = gate.latestVersion;
+  let opened = false;
+  if (!designGateOpen(gate)) {
+    if (ctx.config.gates.design === "off") {
+      gate.approvedVersion = gate.latestVersion;
+    } else {
+      await seedGateFromDispatch(ctx, issue, gate);
+    }
+    opened = designGateOpen(gate);
+  }
   ctx.deps.state.gates[issue] = gate;
   await ctx.save();
-  if (gateOffApproves) {
+  if (opened) {
     await publishDesignApproved(ctx.deps.state, issue, ctx.deps.envoyPublish);
   }
   return Response.json(validateContractResponse(LegionDaemonApi.GatesRegister.response, {}));
