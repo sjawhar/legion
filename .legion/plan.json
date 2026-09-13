@@ -1,0 +1,566 @@
+{
+  "taskCount": 9,
+  "independentTasks": 2,
+  "routingHints": {
+    "complexity": "medium",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks in order 0-8. Tasks 1-4 are one behaviour commit (environment.ts + consumers + tests); Task 5 docs and Task 6 smoke are their own commits and can be written while the Task 6 rig run is in progress; Task 7 is a separable commit the architect may cut. Skip formatters/linters/project-wide tests until the end (biome + tsc + `bun test packages/daemon` once before pushing). The tester repeats Task 6's environ command on a rig pane and adds the negative control (a production pane on the old daemon showing 2).",
+  "requiredSkills": {
+    "implement": [
+      "using-secrets"
+    ],
+    "test": [
+      "using-secrets"
+    ],
+    "review": []
+  },
+  "learningsInjected": [
+    "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
+    "docs/solutions/testing/fresh-state-dir-boot-beside-a-busy-rig.md",
+    "docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
+    "docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md"
+  ],
+  "spec": "dispatch_doc_read LEGION-74 (spec v2): acceptance 1-7, Requirements, Design, Errors, Testing, Rejected. The plan argues from it; read both.",
+  "goal": "Every Legion pane (root architect, phase worker, controller), the private tmux server that hosts them, both start-up OMP probes, and every daemon child that runs through createDaemonRunner inherit an explicit allow-list of the daemon's environment plus the complete `mise env` output - never the two GitHub App private keys, provider keys, Dispatch/Envoy secrets, or anything else the daemon alone should hold. The daemon still reads the keys for its own token minting.",
+  "designSummary": {
+    "oneChange": "`resolveDaemonEnvironment` (environment.ts) builds `paneEnv` with `paneEnvironment(daemonEnv, miseEnv)`: pick(PANE_ENV_ALLOW_LIST) from the daemon's environment, lay the whole `mise env --json` output over it, drop credential-shaped names (`isSecretLikeName`). `paneEnv` is already what `createDaemonRunner` gives every jj/git/gh/tmux/probe command, what the private tmux server is forked with, and therefore what every pane inherits beneath its explicit `-e` pairs - so `processes.ts`, `runtime-tmux.ts`, and `boot-probes.ts` need no code change (verified: processes.ts only consumes `processPath`; runtime-tmux.ts:200-211 adds `-e` pairs; boot-probes.ts:167-176 passes no env; fetch.ts:81-83 hands `options.env` to Bun.spawn verbatim).",
+    "threeEnvironmentClasses": {
+      "paneEnv (allow-list + mise, credential-shaped names dropped)": "every pane, the tmux server, both probes, jj/git/gh/tmux children of the runner, and the base of every gh child spawned for a GitHub App role (Task 2 threads it in place of process.env).",
+      "per-pane -e overlay (unchanged)": "processes.ts root/worker/controller env builders (LEGION_TREE/ISSUE/ROLE/WORKSPACE|ROOT_WORKSPACE/GENERATION/DAEMON_URL/PROJECT/STATE_DIR/CREDENTIAL_HELPER/CONTROL_SUBJECT/MAX_RECURSION_DEPTH/CONTROLLER, ENVOY_NATS_URL, ENVOY_URL, GIT_CONFIG_COUNT=0, GIT_TERMINAL_PROMPT=0, PATH, DISPATCH_URL, DISPATCH_TOKEN_FILE, and #992's credentialProcessEnvironment: worker-bin-first PATH, GH_CONFIG_DIR, empty GH_TOKEN/GITHUB_TOKEN/GH_HOST, LEGION_GRANT_FILE) plus runtime-tmux.ts's `<SECRET>_FILE` pointer.",
+      "daemon-internal (process.env, keys allowed)": "config.ts executePrivateKeyCommand (the one child that exists to read the App keys) and index/hotspots.ts's `jj log`. Nothing model-driven."
+    },
+    "stripFunctionFate": "`stripDispatchEnv`/`PANE_SECRET_ENV_KEYS` are deleted. The spec's 'defensive second pass' is `isSecretLikeName` inside `paneEnvironment` and in github-app-env.ts's scrub; it is never the primary mechanism.",
+    "supersedes992": "#992 (merged 06:04Z) added LEGION_GRANT/LEGION_GRANT_FILE to the strip-list; under the allow-list no LEGION_* value is inherited at all, so those entries disappear with the list. #992's pathWithoutWorkerBin, installWorkerGhShim, and credentialProcessEnvironment are untouched."
+  },
+  "allowList": {
+    "count": 45,
+    "groups": [
+      {
+        "group": "identity, locale, terminal",
+        "names": [
+          "HOME",
+          "USER",
+          "LOGNAME",
+          "SHELL",
+          "TERM",
+          "TZ",
+          "LANG",
+          "LANGUAGE",
+          "LC_ADDRESS",
+          "LC_ALL",
+          "LC_COLLATE",
+          "LC_CTYPE",
+          "LC_IDENTIFICATION",
+          "LC_MEASUREMENT",
+          "LC_MESSAGES",
+          "LC_MONETARY",
+          "LC_NAME",
+          "LC_NUMERIC",
+          "LC_PAPER",
+          "LC_TELEPHONE",
+          "LC_TIME"
+        ],
+        "readers": "HOME: OMP DirResolver (~/.omp), jj/git/gh user config, the `secrets` client ('HOME must be set to an absolute path' in its binary), envoy-client dispatch-config.ts:116. USER/LOGNAME: git/jj identity fallbacks. SHELL: tmux runs each pane's shell-command through `default-shell`, which tmux seeds from the server's $SHELL (production server: /bin/bash) - dropping it would switch panes to /bin/sh. TERM: named by acceptance 1; tmux also sets it per pane. LANG/LANGUAGE/LC_*: locale for every tool; LANG/LC_* are set on the production daemon."
+      },
+      {
+        "group": "directories",
+        "names": [
+          "TMPDIR",
+          "TMUX_TMPDIR",
+          "XDG_CACHE_HOME",
+          "XDG_CONFIG_HOME",
+          "XDG_DATA_HOME",
+          "XDG_RUNTIME_DIR",
+          "XDG_STATE_HOME"
+        ],
+        "readers": "TMPDIR: Bun os.tmpdir() in OMP and the legion CLI. TMUX_TMPDIR: where `tmux -L legion-<project>` looks for its socket (production daemon: /home/ubuntu/.tmux/sockets) - the daemon's own tmux commands run under paneEnv, so dropping it would make a restarted daemon look for the server under /tmp/tmux-<uid> and treat every live pane as gone. XDG_DATA_HOME/XDG_STATE_HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME: OMP's DirResolver (`$XDG_DATA_HOME/omp` root), paths.ts:27-28, github-app-env.ts:10-11 (`legion gh` in a pane computes GH_CONFIG_DIR from XDG_STATE_HOME), and the smoke rig sets XDG_DATA_HOME/XDG_STATE_HOME on the daemon expecting panes to see the same scratch roots. XDG_RUNTIME_DIR: secretsd extension resolveRuntimeDir (secretsd.ts:109) and the `secrets` client's socket lookup."
+      },
+      {
+        "group": "OMP profile",
+        "names": [
+          "OMP_PROFILE",
+          "PI_PROFILE"
+        ],
+        "readers": "OMP DirResolver profile root; boot-probes.ts:275-279 relies on the probe and the spawned panes resolving the same plugin root. Production sets OMP_PROFILE=legion both on the daemon and in omp_launch_prefix (`env OMP_PROFILE=legion secrets ... --`)."
+      },
+      {
+        "group": "mise",
+        "names": [
+          "MISE_CACHE_DIR",
+          "MISE_CONFIG_DIR",
+          "MISE_DATA_DIR",
+          "MISE_STATE_DIR"
+        ],
+        "readers": "mise, for the daemon's own bootstrap `mise env --json` / `mise where <pin>` (now run under the allow-listed environment) and for the mise shims panes execute (`secrets`, `bun` are ~/.mise/shims/* -> mise). Verified 2026-09-13: `env -i HOME PATH mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-203541` resolves to ~/.local/share/mise/installs/... while with MISE_DATA_DIR=$HOME/.mise (what ~/.dotfiles/.bashrc:36 exports and the production daemon carries) it resolves to ~/.mise/installs/... - a different binary. docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md records the same trap."
+      },
+      {
+        "group": "secretsd socket override",
+        "names": [
+          "SECRETSD_SOCK"
+        ],
+        "readers": "the `secrets` client and the secretsd OMP extension (`SECRETSD_SOCK`, else `$XDG_RUNTIME_DIR/secretsd.sock`, else /run/user/<uid>/secretsd.sock). A socket path, never a credential. NOT SECRETSD_SESSION_TOKEN_FILE - see excluded."
+      },
+      {
+        "group": "outbound network policy",
+        "names": [
+          "HTTP_PROXY",
+          "HTTPS_PROXY",
+          "NO_PROXY",
+          "http_proxy",
+          "https_proxy",
+          "no_proxy",
+          "SSL_CERT_DIR",
+          "SSL_CERT_FILE",
+          "NODE_EXTRA_CA_CERTS"
+        ],
+        "readers": "OMP/Bun (provider HTTP), gh, git, jj git push. None is set on this box; a deployment behind a proxy or a private CA would otherwise lose every provider and GitHub call silently."
+      },
+      {
+        "group": "PATH",
+        "names": [
+          "PATH"
+        ],
+        "readers": "the daemon's PATH is the input `mise env --json` extends; mise's PATH then replaces it in paneEnv (`resolveDaemonEnvironment` prepends <state_dir>/bin and strips worker-bin entries exactly as on main today)."
+      }
+    ],
+    "names": [
+      "HOME",
+      "USER",
+      "LOGNAME",
+      "SHELL",
+      "TERM",
+      "TZ",
+      "LANG",
+      "LANGUAGE",
+      "LC_ADDRESS",
+      "LC_ALL",
+      "LC_COLLATE",
+      "LC_CTYPE",
+      "LC_IDENTIFICATION",
+      "LC_MEASUREMENT",
+      "LC_MESSAGES",
+      "LC_MONETARY",
+      "LC_NAME",
+      "LC_NUMERIC",
+      "LC_PAPER",
+      "LC_TELEPHONE",
+      "LC_TIME",
+      "TMPDIR",
+      "TMUX_TMPDIR",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_RUNTIME_DIR",
+      "XDG_STATE_HOME",
+      "OMP_PROFILE",
+      "PI_PROFILE",
+      "MISE_CACHE_DIR",
+      "MISE_CONFIG_DIR",
+      "MISE_DATA_DIR",
+      "MISE_STATE_DIR",
+      "SECRETSD_SOCK",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+      "NODE_EXTRA_CA_CERTS",
+      "PATH"
+    ],
+    "rule": "One name per line, grouped, each group's comment names the process that reads it. No prefix or wildcard entry. A pane that needs a variable not on the list is a bug in the list; the two start-up probes run under the same environment, so a variable OMP itself needs fails the boot loudly (spec Errors row) rather than the first pane."
+  },
+  "excluded": [
+    {
+      "names": [
+        "GH_AGENT_APP_PRIVATE_KEY_B64",
+        "GH_REVIEW_APP_PRIVATE_KEY_B64"
+      ],
+      "why": "the two App private keys; read only by config.ts executePrivateKeyCommand (daemon-internal). Present today on the production private tmux server (pid 2023008) and on every pane (e.g. worker pane 3193050) - names verified 2026-09-13, values never printed."
+    },
+    {
+      "names": [
+        "ENVOY_NATS_URL",
+        "ENVOY_URL"
+      ],
+      "why": "daemon config inputs; every pane already receives them explicitly from config as -e pairs (processes.ts root/worker/controller env builders). Inheritance would only mask a config bug."
+    },
+    {
+      "names": [
+        "ENVOY_GITHUB_WEBHOOK_SECRET",
+        "ENVOY_TAILSCALE_OAUTH_CLIENT_ID",
+        "ENVOY_TAILSCALE_OAUTH_CLIENT_KEY",
+        "ENVOY_TOKEN",
+        "ENVOY_API_TOKEN"
+      ],
+      "why": "listener/daemon-side secrets; no pane process needs them (ENVOY_TOKEN is read by envoy-client transport.ts:218 but is not set on this deployment; if a deployment ever needs it in panes it becomes an explicit per-pane export from config, never inheritance)."
+    },
+    {
+      "names": [
+        "DISPATCH_TOKEN",
+        "DISPATCH_TOKEN_FILE",
+        "DISPATCH_URL",
+        "DISPATCH_MCP_URL"
+      ],
+      "why": "the bearer is startup config; panes get DISPATCH_URL + DISPATCH_TOKEN_FILE as explicit -e pairs (processes.ts) - unchanged."
+    },
+    {
+      "names": [
+        "LEGION_* (every name: LEGION_TREE, LEGION_ISSUE, LEGION_ROLE, LEGION_WORKSPACE, LEGION_ROOT_WORKSPACE, LEGION_GENERATION, LEGION_DAEMON_URL, LEGION_PROJECT, LEGION_STATE_DIR, LEGION_CREDENTIAL_HELPER, LEGION_CONTROL_SUBJECT, LEGION_MAX_RECURSION_DEPTH, LEGION_CONTROLLER, LEGION_BOOT_TOKEN(_FILE), LEGION_CONTROLLER_SECRET(_FILE), LEGION_GRANT(_FILE), LEGION_OMP_PATH, LEGION_*_PATH, LEGION_DAEMON_PORT, ...)"
+      ],
+      "why": "per-pane values are set explicitly by processes.ts (-e pairs) and runtime-tmux.ts (*_FILE pointers); the rest are daemon config. A daemon started from inside a Legion pane inherits the outer pane's whole family - exactly the leak environment.ts's comment and #992 describe; the allow-list ends it wholesale, which supersedes #992's LEGION_GRANT/LEGION_GRANT_FILE strip entries."
+    },
+    {
+      "names": [
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_1M_CONTEXT",
+        "ANTHROPIC_*",
+        "OPENAI_*",
+        "GOOGLE_*",
+        "AWS_*"
+      ],
+      "why": "provider credentials reach a pane only through omp_launch_prefix (`secrets ... -- omp`), resolved inside the pane; the daemon's own copies are the operator session's. Verified 2026-09-13 that `env -i HOME=$HOME PATH=$PATH USER=$USER secrets ANTHROPIC_API_KEY -- sh -c '...'` injects the key with no tty and no session token, so probes and panes need nothing else from the daemon env for the prefix to work."
+    },
+    {
+      "names": [
+        "SECRETSD_SESSION_TOKEN_FILE"
+      ],
+      "why": "the operator OMP session's broker identity (its human-tier grants). Inheriting it binds every pane to the operator's secretsd session. Not needed: agent-tier keys resolve without it (verified above)."
+    },
+    {
+      "names": [
+        "OMP_SESSION_ID"
+      ],
+      "why": "the operator session's id (LEGION-43); a pane's OMP must not believe it is that session's child."
+    },
+    {
+      "names": [
+        "TMUX",
+        "TMUX_PANE"
+      ],
+      "why": "the operator's outer tmux. The private server sets its own per pane; envoy-client dispatch-cwd.ts:134 targets `switch-client -t $TMUX_PANE`, so an inherited operator pane id is a mis-target. Same exclusion as packages/pi-envoy/scripts/grant-rig/run.ts:189."
+    },
+    {
+      "names": [
+        "JJ_CONFIG"
+      ],
+      "why": "on the production daemon it is `~/.config/jj/config.toml:~/.dotfiles/.jjconfig.toml:~/.cache/omp/jj/omp-attribution-<operator session>.toml` - the operator session's attribution overlay. jj finds the first two at its default user paths without JJ_CONFIG (verified: `env -i HOME PATH jj config path --user` -> ~/.jjconfig.toml (symlink to .dotfiles/.jjconfig.toml) and ~/.config/jj/config.toml); pi-envoy jj-attribution.ts appends the pane's own overlay either way."
+    },
+    {
+      "names": [
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_AUTHOR_*",
+        "GIT_COMMITTER_*"
+      ],
+      "why": "the operator shell's gh-app routing gitconfig; panes set GIT_CONFIG_COUNT=0 explicitly and get identity from the workspace's jj config and per-call buildRoleEnv."
+    },
+    {
+      "names": [
+        "SSH_AUTH_SOCK",
+        "SSH_CLIENT",
+        "SSH_CONNECTION",
+        "SSH_TTY"
+      ],
+      "why": "the operator's SSH agent and session; repos are https with the Legion credential helper. Inheriting SSH_AUTH_SOCK hands panes the operator's SSH keys."
+    },
+    {
+      "names": [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_HOST",
+        "GH_CONFIG_DIR"
+      ],
+      "why": "set per pane by processes.ts credentialProcessEnvironment (#992: empty GH_TOKEN/GITHUB_TOKEN/GH_HOST, GH_CONFIG_DIR=<state_dir>/gh); never inherited."
+    },
+    {
+      "names": [
+        "MISE_SHELL",
+        "__MISE_DIFF",
+        "__MISE_EXE",
+        "__MISE_ORIG_PATH",
+        "__MISE_SESSION"
+      ],
+      "why": "mise shell-activation state of the operator shell; meaningless to a child and confusing to `mise env`."
+    },
+    {
+      "names": [
+        "everything else on the production daemon (MNEMOPI_*, CLAUDE_*, npm_*, NPM_CONFIG_PREFIX, NODE, STARSHIP_*, LS_COLORS, LESS*, BROWSER, AWSCLI_*, DBUS_SESSION_BUS_ADDRESS, PULSE_SERVER, PCSCLITE_CSOCK_NAME, DOCKER_BUILDKIT, DEBUGINFOD_URLS, NCURSES_NO_UTF8_ACS, OPENCODE_GITHUB_REPO, XDG_DATA_DIRS, SHLVL, OLDPWD, PWD, _)"
+      ],
+      "why": "operator-shell state. Pane OMP configuration belongs to the legion profile (OMP_PROFILE=legion), not to the operator's session tuning. GOBIN/GOROOT/CARGO_HOME/RUSTUP_* still arrive when `mise env --json` emits them (it does on this box: AGENT_EVAL_VERSION, CARGO_HOME, GOBIN, GOROOT, PATH, RUSTUP_HOME, RUSTUP_TOOLCHAIN)."
+    }
+  ],
+  "secretLikeNamePattern": {
+    "regex": "/(?:_SECRET|_TOKEN|_GRANT|_API_KEY|_PASSWORD)(?:_FILE)?$|PRIVATE_KEY/",
+    "matches": [
+      "DISPATCH_TOKEN",
+      "DISPATCH_TOKEN_FILE",
+      "LEGION_BOOT_TOKEN_FILE",
+      "LEGION_CONTROLLER_SECRET",
+      "LEGION_GRANT",
+      "LEGION_GRANT_FILE",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "GH_AGENT_APP_PRIVATE_KEY_B64",
+      "ENVOY_GITHUB_WEBHOOK_SECRET",
+      "DB_PASSWORD"
+    ],
+    "doesNotMatch": [
+      "PATH",
+      "HOME",
+      "TMUX_TMPDIR",
+      "OMP_PROFILE",
+      "SECRETSD_SOCK",
+      "MISE_DATA_DIR",
+      "TOKENIZER",
+      "DISPATCH_URL"
+    ]
+  },
+  "evidenceGathered": [
+    "Production private tmux server pid 2023008 (`tmux -L legion-sjawharlegion new-session -d ...`, parent systemd) carries 94 variables incl. GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ENVOY_TAILSCALE_OAUTH_CLIENT_KEY, SECRETSD_SESSION_TOKEN_FILE, OMP_SESSION_ID, JJ_CONFIG (with the operator session's attribution overlay), GIT_CONFIG_COUNT=1 + KEY_0/VALUE_0, TMUX, TMUX_PANE, SSH_AUTH_SOCK, LEGION_OMP_PATH, MISE_DATA_DIR=~/.mise, TMUX_TMPDIR=~/.tmux/sockets, OMP_PROFILE=legion (names read from /proc; values never printed except the non-secret paths quoted). A live worker OMP pane (pid 3193050) carries every one of them plus the 14 `-e` pairs. The server env is frozen at fork time: the running daemon has since restarted with a different environment, which is why Task 7 exists.",
+    "`env -i HOME=$HOME PATH=$PATH USER=$USER secrets ANTHROPIC_API_KEY -- sh -c 'test -n \"$ANTHROPIC_API_KEY\" && echo present'` -> present, with no tty and no SECRETSD_SESSION_TOKEN_FILE: the launch prefix needs nothing from the daemon env beyond the allow-list.",
+    "`env -i HOME PATH mise where <omp pin>` -> ~/.local/share/mise/installs/... ; with MISE_DATA_DIR=$HOME/.mise -> ~/.mise/installs/... : MISE_DATA_DIR must be on the list.",
+    "`env -i HOME PATH jj config path --user` -> ~/.jjconfig.toml (-> .dotfiles/.jjconfig.toml) and ~/.config/jj/config.toml: jj needs no JJ_CONFIG here.",
+    "`mise env --json | jq keys` on this box: AGENT_EVAL_VERSION, CARGO_HOME, GOBIN, GOROOT, PATH, RUSTUP_HOME, RUSTUP_TOOLCHAIN.",
+    "secretsd agent-tier keys (`secrets list`): ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, ENVOY_GITHUB_WEBHOOK_SECRET. DISPATCH_TOKEN is not one (LEGION-40).",
+    "CI triggers: pr-and-main.yaml runs on pull_request and push:main only - a pre-PR rebase costs no CI run.",
+    "Pane-side env readers inventoried (PaneEnvReadsScout, agent://PaneEnvReadsScout): pi-envoy legion.ts/classify.ts/envoy.ts, envoy-client defaults/dispatch-config/dispatch-cwd/machine/transport, legion CLI (LEGION_DAEMON_URL/PORT, LEGION_GRANT(_FILE), XDG_STATE_HOME, LEGION_*_PATH), secretsd extension + client (XDG_RUNTIME_DIR, SECRETSD_SOCK, SECRETSD_SESSION_TOKEN_FILE, HOME), OMP binary strings (HOME, PATH, XDG_*, TMPDIR, OMP_PROFILE, PI_PROFILE, provider keys, proxies, SSL_CERT_*, NODE_EXTRA_CA_CERTS)."
+  ],
+  "tasks": [
+    {
+      "id": 0,
+      "title": "Start the implementation on main@origin (post-#992); no CI is spent",
+      "why": "This workspace was cut at 19b99c3c (#993). main@origin is 4 commits ahead: b3f5870a (#992, LEGION-54) + 3 release chores. #992 edits the exact blocks this change rewrites - `PANE_SECRET_ENV_KEYS` (adds LEGION_GRANT/LEGION_GRANT_FILE), the environment.ts header comment and `resolveDaemonEnvironment` (pathWithoutWorkerBin), environment.test.ts:157-225, and daemon AGENTS.md:111-141 - so a PR opened from 19b99c3c is CONFLICTING the moment it exists, and its rebase is then forced anyway. Rebasing the branch before the PR exists costs nothing: `.github/workflows/pr-and-main.yaml` runs on `pull_request` and `push: main` only (verified), so the CI-queue rationale of the no-rebase rule (deployment instructions, Sami 2026-09-11) does not apply to a branch with no PR. Doing it now also means the AGENTS.md rewrite documents the per-pane variables that exist on main (#992's LEGION_GRANT_FILE, GH_CONFIG_DIR, empty GH_TOKEN/GITHUB_TOKEN/GH_HOST). After the PR opens, the deployment rule applies unchanged: rebase only on CONFLICTING.",
+      "steps": [
+        "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" git fetch && jj -R \"$LEGION_WORKSPACE\" log -r 'main@origin | @ | @-' --no-graph -T 'commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"'",
+        "Move the branch (only the planner's `plan: record handoff` commit plus your empty working copy) onto main: `jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin`. Verify: `jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 4)'` shows main@origin as the parent of the plan commit; `jj -R \"$LEGION_WORKSPACE\" status` is clean apart from `.legion/plan.json` history.",
+        "Sanity-check the post-#992 anchors this plan cites: `grep -n 'LEGION_GRANT_FILE' packages/daemon/src/daemon/environment.ts` (2 hits in PANE_SECRET_ENV_KEYS) and `grep -n credentialProcessEnvironment packages/daemon/src/daemon/processes.ts`.",
+        "`bun install` (workspace root) if node_modules is missing; run only `bun test packages/daemon/src/daemon/__tests__/environment.test.ts` to confirm a green baseline (13 tests on main)."
+      ],
+      "acceptance": "`jj log` shows plan commit -> main@origin; `bun test environment.test.ts` green before any edit."
+    },
+    {
+      "id": 1,
+      "title": "environment.ts: replace the strip-list with `PANE_ENV_ALLOW_LIST` + `paneEnvironment()`; keep a pattern pass as the second line",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/environment.ts (main@origin lines 90-130: the PANE_SECRET_ENV_KEYS doc comment + array + stripDispatchEnv; 132-150 fullMiseEnvironment; 156-188 resolveOmpInvocation; 230-289 resolveDaemonEnvironment doc + body)"
+        ],
+        "test": [
+          "packages/daemon/src/daemon/__tests__/environment.test.ts"
+        ]
+      },
+      "interfaces": {
+        "produces": [
+          "export const PANE_ENV_ALLOW_LIST: readonly string[] - the 45 names in `allowList` below, grouped with a one-line reader comment per group.",
+          "export function isSecretLikeName(name: string): boolean - `/(?:_SECRET|_TOKEN|_GRANT|_API_KEY|_PASSWORD)(?:_FILE)?$|PRIVATE_KEY/`.test(name). The defensive second pass the spec's Design row asks for (spec: *_SECRET, *_TOKEN, *PRIVATE_KEY*), widened to the `_FILE` pointer twins and `_GRANT`/`_API_KEY`/`_PASSWORD` so the same predicate also serves github-app-env.ts's gh-child scrub (Task 2).",
+          "export function paneEnvironment(daemonEnv: NodeJS.ProcessEnv, miseEnv: FullMiseEnvironment): FullMiseEnvironment - `{ ...pick(daemonEnv, PANE_ENV_ALLOW_LIST), ...miseEnv }` with every `isSecretLikeName` key deleted; PATH always present (mise guarantees it, parseMiseEnvironment throws otherwise).",
+          "function allowedDaemonEnvironment(daemonEnv): NodeJS.ProcessEnv (module-private) - pick(PANE_ENV_ALLOW_LIST) + the same pass; the environment the two bootstrap mise calls run under.",
+          "`stripDispatchEnv` and `PANE_SECRET_ENV_KEYS` are DELETED (clean cutover; Tasks 2-3 migrate the three other importers). `DaemonEnvironment.paneEnv` keeps its name and type."
+        ],
+        "consumes": [
+          "pathWithoutWorkerBin from ./worker-bin (already imported on main)"
+        ]
+      },
+      "steps": [
+        "Write the failing tests first (replace the two strip-list tests at environment.test.ts:157-225 and :277-322; keep every other test, including #992's worker-bin test at :227-275):",
+        "TEST A (acceptance 1, the spec's scenario verbatim): `it(\"builds paneEnv from the allow-list: nothing else from the daemon's environment reaches a pane\")` - deps.env = { PATH: \"/narrow/bin\", HOME: \"/home/legion\", USER: \"legion\", LANG: \"en_US.UTF-8\", TERM: \"tmux-256color\", OMP_PROFILE: \"legion\", XDG_STATE_HOME: \"/scratch/xdg-state\", TMUX_TMPDIR: \"/home/legion/.tmux/sockets\", MISE_DATA_DIR: \"/home/legion/.mise\", GH_AGENT_APP_PRIVATE_KEY_B64: \"leaked-agent-key\", GH_REVIEW_APP_PRIVATE_KEY_B64: \"leaked-review-key\", ENVOY_GITHUB_WEBHOOK_SECRET: \"leaked-webhook-secret\", DISPATCH_TOKEN: \"leaked-bearer\", FOO_SECRET: \"leaked-canary\", ANTHROPIC_API_KEY: \"leaked-provider-key\", SECRETSD_SESSION_TOKEN_FILE: \"/run/user/1000/secretsd/operator\", LEGION_BOOT_TOKEN_FILE: \"/leaked/legion-omp-legion-6-implementer\", LEGION_GRANT_FILE: \"/leaked/legion-omp-legion-6-implementer-grant\", LEGION_DAEMON_URL: \"http://127.0.0.1:13370\", JJ_CONFIG: \"/home/legion/.config/jj/config.toml:/home/legion/.cache/omp/jj/omp-attribution-x.toml\", OMP_SESSION_ID: \"operator-session\", TMUX: \"/tmp/tmux-1000/default,1,0\", SSH_AUTH_SOCK: \"/tmp/ssh-x/agent.1\", MNEMOPI_VEC_WEIGHT: \"0.5\" }; mise stdout = { PATH: \"/full/bin:/usr/bin\", CARGO_HOME: \"/home/legion/.cargo\" }. Assert: paneEnv toEqual exactly { PATH: `${stateDir}/bin:/full/bin:/usr/bin`, HOME, USER, LANG, TERM, OMP_PROFILE, XDG_STATE_HOME, TMUX_TMPDIR, MISE_DATA_DIR, CARGO_HOME } (an exact `toEqual`, so 'nothing else' is what the test proves - not a not.toHaveProperty list). Then `createDaemonRunner(environment, capture)` -> run([\"tmux\",\"new-session\"]) and assert the captured `options.env` toEqual the same object (this is the environment the private tmux server is forked with).",
+        "TEST B: `it(\"gives the bootstrap mise env/mise where calls only the allow-listed daemon environment\")` - adapt :277-322: capture runner calls; assert `/tools/mise env --json` ran with env toEqual { PATH: \"/narrow/bin\", HOME: \"/home/legion\", MISE_DATA_DIR: ... } (exactly the allow-listed subset of deps.env, FOO_SECRET and the keys absent) and `/tools/mise where <pin>` ran with env toEqual environment.paneEnv.",
+        "TEST C: `it(\"drops a credential-shaped name even when mise emits it\")` - mise stdout { PATH: \"/full/bin:/usr/bin\", FOO_TOKEN: \"x\", BAR_SECRET: \"y\", BAZ_PRIVATE_KEY_B64: \"z\", QUX_TOKEN_FILE: \"/f\", KEEP_ME: \"1\" } -> paneEnv has KEEP_ME and PATH, none of the four. Plus a table test for `isSecretLikeName`: true for DISPATCH_TOKEN, DISPATCH_TOKEN_FILE, LEGION_BOOT_TOKEN_FILE, LEGION_CONTROLLER_SECRET, LEGION_GRANT, LEGION_GRANT_FILE, GH_TOKEN, GITHUB_TOKEN, ANTHROPIC_API_KEY, GH_AGENT_APP_PRIVATE_KEY_B64, DB_PASSWORD; false for PATH, HOME, TMUX_TMPDIR, OMP_PROFILE, SECRETSD_SOCK, TOKENIZER (suffix must be a segment: `_TOKEN` at end only), MISE_DATA_DIR.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/environment.test.ts` -> A, B, C fail (paneEnv still carries FOO_SECRET etc.).",
+        "Implement in environment.ts. Replace lines 90-130 (doc comment, PANE_SECRET_ENV_KEYS, stripDispatchEnv) with:\n```ts\n/** Every variable a pane process reads from the daemon's own environment: Oh My Pi and its plugins\n * (HOME, the XDG base dirs, OMP_PROFILE/PI_PROFILE), jj/git/gh, the `legion` CLI launcher, mise (the\n * shims panes execute), the configured `omp_launch_prefix` (`secrets` needs HOME and, optionally,\n * SECRETSD_SOCK/XDG_RUNTIME_DIR), tmux itself (TMUX_TMPDIR, SHELL), locale and proxy policy. Nothing\n * else the daemon was started with reaches a pane, the private tmux server that hosts every pane\n * (forked by the daemon's first `tmux -L legion-<project>` command under exactly this environment),\n * a start-up probe, or any other daemon child that runs through `createDaemonRunner`: the GitHub App\n * private keys, provider keys, Dispatch/Envoy secrets, the operator session's OMP_SESSION_ID,\n * JJ_CONFIG overlay, TMUX, SSH agent, and every LEGION_*/DISPATCH_* value (those are explicit\n * per-pane `-e` pairs in `processes.ts`/`runtime-tmux.ts`, never inherited). Add a name here only\n * with the process that reads it named in the group comment; never a prefix or wildcard. */\nexport const PANE_ENV_ALLOW_LIST: readonly string[] = [\n  // identity, locale, terminal (SHELL: tmux's default-shell for the pane's shell-command)\n  \"HOME\", \"USER\", \"LOGNAME\", \"SHELL\", \"TERM\", \"TZ\", \"LANG\", \"LANGUAGE\",\n  \"LC_ADDRESS\", \"LC_ALL\", \"LC_COLLATE\", \"LC_CTYPE\", \"LC_IDENTIFICATION\", \"LC_MEASUREMENT\",\n  \"LC_MESSAGES\", \"LC_MONETARY\", \"LC_NAME\", \"LC_NUMERIC\", \"LC_PAPER\", \"LC_TELEPHONE\", \"LC_TIME\",\n  // directories: temp, the tmux socket dir the daemon's own tmux commands use, XDG base dirs (OMP\n  // DirResolver, `legion gh`'s GH_CONFIG_DIR, the secretsd socket)\n  \"TMPDIR\", \"TMUX_TMPDIR\",\n  \"XDG_CACHE_HOME\", \"XDG_CONFIG_HOME\", \"XDG_DATA_HOME\", \"XDG_RUNTIME_DIR\", \"XDG_STATE_HOME\",\n  // OMP profile selection (DirResolver)\n  \"OMP_PROFILE\", \"PI_PROFILE\",\n  // mise: where the tool store lives, for `mise env`/`mise where` here and the shims panes run\n  \"MISE_CACHE_DIR\", \"MISE_CONFIG_DIR\", \"MISE_DATA_DIR\", \"MISE_STATE_DIR\",\n  // secretsd socket override honoured by the `secrets` client and the secretsd OMP extension\n  \"SECRETSD_SOCK\",\n  // outbound network policy honoured by OMP/Bun, gh, git, jj\n  \"HTTP_PROXY\", \"HTTPS_PROXY\", \"NO_PROXY\", \"http_proxy\", \"https_proxy\", \"no_proxy\",\n  \"SSL_CERT_DIR\", \"SSL_CERT_FILE\", \"NODE_EXTRA_CA_CERTS\",\n  // the PATH `mise env` extends; mise's own PATH replaces it in paneEnv\n  \"PATH\",\n];\n\n/** Second line of defence behind the allow-list: a credential-shaped name never reaches a child even\n * when an allowed source carries it (`mise env` output, or an allow-list entry added by mistake). Also\n * the scrub `github-app-env.ts` applies to a `gh` child's base environment. */\nconst SECRET_LIKE_NAME = /(?:_SECRET|_TOKEN|_GRANT|_API_KEY|_PASSWORD)(?:_FILE)?$|PRIVATE_KEY/;\nexport function isSecretLikeName(name: string): boolean {\n  return SECRET_LIKE_NAME.test(name);\n}\n\nfunction withoutSecretLikeNames(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {\n  const kept: NodeJS.ProcessEnv = {};\n  for (const [key, value] of Object.entries(env)) {\n    if (value !== undefined && !isSecretLikeName(key)) kept[key] = value;\n  }\n  return kept;\n}\n\n/** The allow-listed subset of the daemon's own environment: what the bootstrap `mise env`/`mise where`\n * calls run under, and the daemon-side half of `paneEnvironment`. */\nfunction allowedDaemonEnvironment(daemonEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {\n  const picked: NodeJS.ProcessEnv = {};\n  for (const key of PANE_ENV_ALLOW_LIST) {\n    const value = daemonEnv[key];\n    if (value !== undefined) picked[key] = value;\n  }\n  return withoutSecretLikeNames(picked);\n}\n\n/** The environment every pane, the private tmux server, both start-up probes, and every daemon child\n * run through `createDaemonRunner` inherit: the allow-listed daemon variables under the complete\n * `mise env --json` output (PATH and toolchain variables), minus any credential-shaped name. Per-pane\n * values (`LEGION_*`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, the `*_FILE` secret pointers, GH_*) are\n * NOT part of it - `processes.ts` and `runtime-tmux.ts` add them as explicit tmux `-e` pairs. */\nexport function paneEnvironment(\n  daemonEnv: NodeJS.ProcessEnv,\n  miseEnv: FullMiseEnvironment\n): FullMiseEnvironment {\n  return withoutSecretLikeNames({\n    ...allowedDaemonEnvironment(daemonEnv),\n    ...miseEnv,\n  }) as FullMiseEnvironment;\n}\n```",
+        "In `fullMiseEnvironment`: `run([mise, \"env\", \"--json\"], { env: allowedDaemonEnvironment(env) })` and return `paneEnvironment(env, parseMiseEnvironment(result.stdout))` (delete the `merged` spread and the strip call). In `resolveOmpInvocation`: `run([mise, \"where\", tool], { env })` (its `env` argument is already `paneEnv`, see resolveDaemonEnvironment:279-285). Rewrite the `resolveDaemonEnvironment` doc comment's last sentence ('Stripped here, at the daemon boundary, exactly like the inherited pane secrets (`stripDispatchEnv`)') to name the allow-list instead. Nothing else in `resolveDaemonEnvironment` changes (legionBinDir prefix + pathWithoutWorkerBin stay).",
+        "Run the file's tests: `bun test packages/daemon/src/daemon/__tests__/environment.test.ts` -> all green (A, B, C plus the untouched ones). `bunx tsc --noEmit` will now fail on the three remaining `stripDispatchEnv` importers - that is Tasks 2-3; do not stub it back."
+      ],
+      "commitHint": "part of the single daemon commit (Task 4 lists it)",
+      "acceptance": "Acceptance 1 (TEST A is the spec's scenario). The tmux server's environment is the same object (TEST A's createDaemonRunner assertion)."
+    },
+    {
+      "id": 2,
+      "title": "github-app-env.ts: gh children scrub credential-shaped names, and the daemon passes them `paneEnv` instead of `process.env`",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/github-app-env.ts (lines 3, 16-34)",
+          "packages/daemon/src/daemon/index.ts (main@origin :117-128 createCiStatusFetcher; :399 workerCatchup deps; :447 the fetcher call; :485-509 the LegionApiDeps object passed to startLegionApi)",
+          "packages/daemon/src/daemon/api.ts (LegionApiDeps interface; :202 `new GitHubService(...)`)",
+          "packages/daemon/src/daemon/api/github.ts (constructor + :43)",
+          "packages/daemon/src/daemon/catchup.ts (:64-68 WorkerCatchupDeps; :314)"
+        ],
+        "test": [
+          "packages/daemon/src/daemon/__tests__/github-apps.test.ts (:603-621)",
+          "packages/daemon/src/daemon/__tests__/index.test.ts (:307 createCiStatusFetcher call)",
+          "packages/daemon/src/daemon/__tests__/catchup.test.ts (:207, :283 WorkerCatchupDeps literals)",
+          "packages/daemon/src/daemon/__tests__/processes.test.ts (:380), processes.thermo-ops.test.ts (:77), real-deployment-instructions-e2e.test.ts (:154), real-shutdown-e2e.test.ts (:231 and its two apiDeps at :337/:489)",
+          "packages/daemon/src/daemon/__tests__/api.test.ts (:210 deps), api.thermo-auth.test.ts (:69), worker-stream-e2e.test.ts (:62)"
+        ]
+      },
+      "why": "Today `buildRoleEnv(token, identity, process.env)` is spread OVER `createDaemonRunner`'s paneEnv (`{...paneEnv, ...options.env}`), so every `gh` child the daemon spawns (resync CI reads, worker catch-up, the API's GitHubService) receives the daemon's whole environment including the App keys - the allow-list would be defeated for those children. gh needs the minted GH_TOKEN, GH_CONFIG_DIR and the GIT_* identity; its base must be `paneEnv`.",
+      "interfaces": {
+        "produces": [
+          "github-app-env.ts: `scrubGitHubCredentials(baseEnv)` drops a key when `SCRUBBED_ENV_KEYS.includes(key) || key.startsWith(SCRUBBED_ENV_PREFIX) || isSecretLikeName(key)`; no stripDispatchEnv import. `buildGitHubTokenEnv`/`buildRoleEnv` signatures unchanged.",
+          "index.ts: `createCiStatusFetcher(tokenManager, runner, baseEnv: NodeJS.ProcessEnv)` (third parameter REQUIRED, no default) - call site passes `environment.paneEnv`.",
+          "catchup.ts: `WorkerCatchupDeps.baseEnv: NodeJS.ProcessEnv` (required); :314 uses `deps.baseEnv`. index.ts:399 passes `baseEnv: environment.paneEnv`.",
+          "api.ts: `LegionApiDeps.baseEnv: NodeJS.ProcessEnv` (required); `new GitHubService(config.repo, deps.tokenManager, runner, deps.baseEnv)`; api/github.ts stores it and uses it at :43. index.ts passes `baseEnv: environment.paneEnv` in the deps object at :485-509."
+        ]
+      },
+      "steps": [
+        "Rewrite github-apps.test.ts:603-621 as `it(\"drops credential-shaped names from the base environment before adding the minted token\")`: baseEnv { PATH, HOME, DISPATCH_TOKEN, DISPATCH_TOKEN_FILE, LEGION_BOOT_TOKEN_FILE, LEGION_GRANT_FILE, GH_AGENT_APP_PRIVATE_KEY_B64, ANTHROPIC_API_KEY } -> result has PATH and HOME, `GH_TOKEN === \"ghs_token\"`, and none of the six credential names. Delete the old `DISPATCH_URL`/`DISPATCH_MCP_URL` undefined assertions (they pinned strip-list entries; a URL is not a credential and gh ignores it). Keep :536-601 unchanged.",
+        "Add to index.test.ts, next to :307: `it(\"the CI status fetcher spawns gh with the daemon's pane environment as its base, never process.env\")`: set `process.env.GH_AGENT_APP_PRIVATE_KEY_B64 = \"leaked\"` in a try/finally; `createCiStatusFetcher(tokenManager, runner, { PATH: \"/pane/bin\", HOME: \"/home/legion\" })`; assert every captured `options.env` has PATH \"/pane/bin\", GH_TOKEN set, and no GH_AGENT_APP_PRIVATE_KEY_B64.",
+        "Run `bun test packages/daemon/src/daemon/__tests__/github-apps.test.ts packages/daemon/src/daemon/__tests__/index.test.ts -t 'credential-shaped|pane environment as its base'` -> fail (compile error / leak present).",
+        "Implement: github-app-env.ts imports `isSecretLikeName` from ./environment; in `scrubGitHubCredentials` drop the `stripDispatchEnv` call and add the predicate to the filter; update its doc comment ('Drops every credential-shaped name (`isSecretLikeName`) - the Dispatch bearer and the `*_FILE` pointers a pane carries, the grant file pointer, provider keys, App keys - plus the gh-specific names below: a `gh`/git-identity child has no legitimate use for any of them, whether the base is the daemon's pane environment or the pane `legion gh` runs from.'). Thread `baseEnv` as described in interfaces; replace all three `process.env` reads (index.ts:125, catchup.ts:314, api/github.ts:43).",
+        "Fix every fixture the compiler names (`bunx tsc --noEmit -p packages/daemon`): WorkerCatchupDeps literals get `baseEnv: {}` (tests use fake runners; an empty base is honest there), LegionApiDeps objects get `baseEnv: {}`, index.test.ts:307 gets a third argument. Do NOT add a default parameter or `?? process.env` fallback anywhere - the type error is the cutover.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/github-apps.test.ts packages/daemon/src/daemon/__tests__/index.test.ts packages/daemon/src/daemon/__tests__/catchup.test.ts packages/daemon/src/daemon/__tests__/api.test.ts` -> green."
+      ],
+      "acceptance": "No daemon-spawned gh child receives a name outside paneEnv + {GH_TOKEN, GH_CONFIG_DIR, GIT_AUTHOR_*, GIT_COMMITTER_*}; existing github-apps tests still green (acceptance 4's unit half)."
+    },
+    {
+      "id": 3,
+      "title": "Daemon-internal children keep the daemon's own environment: config.ts private_key_command and the codebase-index jj",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/config.ts (:6 import, :538)",
+          "packages/daemon/src/index/hotspots.ts (:1, :22)"
+        ],
+        "test": [
+          "packages/daemon/src/daemon/__tests__/config.test.ts (:890-937 - delete)"
+        ]
+      },
+      "why": "Two spawns are the daemon acting for itself, not a pane or a pane-adjacent child. `executePrivateKeyCommand` (config.ts:530-545) runs the operator's own `private_key_command` and MUST see GH_AGENT_APP_PRIVATE_KEY_B64/GH_REVIEW_APP_PRIVATE_KEY_B64 (acceptance 4) - the credential-shaped pass cannot apply to it (it would strip the keys it exists to read), and the only thing the old strip bought there was hiding a pane-started daemon's inherited boot-token pointer from a trusted `sh -c` the operator wrote. `hotspots.ts`'s `jj log` runs wherever the codebase index runs. Both get the hosting process's environment as-is: `env: process.env` / drop the `env:` key (Bun.spawn inherits).",
+      "steps": [
+        "config.ts: delete the `stripDispatchEnv` import (:6); at :538 use `env: process.env`. Rewrite the sentence in the surrounding comment that mentions stripping (if any) to: 'Runs with the daemon's own environment on purpose: this child exists to read the App key the operator's launcher supplies; it is never a pane. Panes and every other child get the allow-listed `paneEnv` (`environment.ts`).'",
+        "hotspots.ts: delete the import (:1) and the `env:` line (:22) so the jj child inherits.",
+        "config.test.ts: delete the test at :890-937 ('strips every pane-secret key ... from a private_key_command child's environment') - it pins the removed strip; the contract it stood for (panes never see those names) is TEST A in Task 1. Keep every other config test.",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/config.test.ts packages/daemon/src/index/__tests__/hotspots.test.ts` -> green; `bunx tsc --noEmit -p packages/daemon` -> clean (no `stripDispatchEnv` symbol remains: `grep -rn stripDispatchEnv packages/ docs/ scripts/` prints only docs lines that Task 5 rewrites)."
+      ],
+      "acceptance": "Acceptance 4: `private_key_command` still reads the keys (existing github-apps/config tests; the smoke rig in Task 6 mints real tokens)."
+    },
+    {
+      "id": 4,
+      "title": "index.test.ts: both start-up probes run under paneEnv, never process.env (acceptance 2); then the single daemon commit",
+      "files": {
+        "test": [
+          "packages/daemon/src/daemon/__tests__/index.test.ts (add after the test at :1958-2019 'prepends the configured omp_launch_prefix to both startup capability probes')"
+        ]
+      },
+      "why": "boot-probes.ts:167-176 calls `runner([...], { timeoutMs, signal })` with no env; index.ts:257 builds that runner with `createDaemonRunner(environment, deps.runner)`, so the probes' env is exactly `paneEnv`. No code change is needed for acceptance 2 - the test pins that the probe path never reaches for `process.env` (the plausible regression: someone hands the probes `deps.runner` directly, or adds `{...process.env}` to their options).",
+      "steps": [
+        "Add `it(\"runs both startup probes under the resolved pane environment, never the daemon's process.env\")`: copy the :1958 test's shape; before `startDaemon` set `process.env.GH_AGENT_APP_PRIVATE_KEY_B64 = \"leaked-agent-key\"` and `process.env.GH_REVIEW_APP_PRIVATE_KEY_B64 = \"leaked-review-key\"` (save/restore in finally exactly like config.test.ts did at :901-935); runner: `async (command, options) => { if (command[0] === \"sh\") probeEnvs.push(options?.env); return {...available markers...}; }`. Assert `probeEnvs` has length 2 and each `toEqual(daemonEnvironment.paneEnv)` (the fixture at :277 is `{ PATH: \"/full/bin:/usr/bin\" }`; an exact equality proves nothing was merged in).",
+        "Run: `bun test packages/daemon/src/daemon/__tests__/index.test.ts -t 'resolved pane environment'` -> green on first run (the behaviour already holds); temporarily change boot-probes.ts:175 to `{ timeoutMs: options.timeoutMs, signal: options.signal, env: { ...process.env } }` and re-run -> the test fails naming GH_AGENT_APP_PRIVATE_KEY_B64; revert. That fail/pass pair is the evidence the test earns its place.",
+        "Run the daemon suite once for these files: `bun test packages/daemon/src/daemon/__tests__/environment.test.ts packages/daemon/src/daemon/__tests__/github-apps.test.ts packages/daemon/src/daemon/__tests__/config.test.ts packages/daemon/src/daemon/__tests__/index.test.ts packages/daemon/src/daemon/__tests__/catchup.test.ts packages/daemon/src/daemon/__tests__/api.test.ts` and `bunx tsc --noEmit -p packages/daemon` + `bunx biome check packages/daemon/src` -> clean.",
+        "Commit Tasks 1-4 together (one bisectable behaviour change): `jj -R \"$LEGION_WORKSPACE\" describe -m 'fix(daemon): panes, probes, and daemon children inherit an allow-listed environment, never the GitHub App keys (LEGION-74)' && jj -R \"$LEGION_WORKSPACE\" new`."
+      ],
+      "acceptance": "Acceptance 2."
+    },
+    {
+      "id": 5,
+      "title": "Docs: daemon AGENTS.md pane-environment paragraph states the allow-list rule and names the variables; tmux.ts comment; the two docs/solutions mentions",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/AGENTS.md (main@origin :111-123 - the `stripDispatchEnv` paragraph; :160-163 'inherits the runner's stripped paneEnv'; :152-159 'Upgrading a live box' note)",
+          "packages/daemon/src/daemon/tmux.ts (:9-10 doc comment 'inherits the runner's stripped paneEnv')",
+          "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md (:42-45 and the 'Rule for the next config key' paragraph :94-98)",
+          "docs/solutions/legion/worker-pane-shell-gotchas.md only if it names stripDispatchEnv (grep; on main@origin it does not)"
+        ]
+      },
+      "steps": [
+        "Replace AGENTS.md :111-123 with one paragraph (keep the DISPATCH_URL/DISPATCH_TOKEN_FILE sentences that precede it): 'A pane's environment is built from an allow-list, never by stripping known secrets from the daemon's own. `resolveDaemonEnvironment` (`environment.ts`, `PANE_ENV_ALLOW_LIST` + `paneEnvironment`) copies exactly these daemon variables - HOME, USER, LOGNAME, SHELL, TERM, TZ, LANG, LANGUAGE, the thirteen LC_* names, TMPDIR, TMUX_TMPDIR, XDG_CACHE_HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_RUNTIME_DIR, XDG_STATE_HOME, OMP_PROFILE, PI_PROFILE, MISE_CACHE_DIR, MISE_CONFIG_DIR, MISE_DATA_DIR, MISE_STATE_DIR, SECRETSD_SOCK, HTTP_PROXY/HTTPS_PROXY/NO_PROXY (both cases), SSL_CERT_DIR, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, and PATH (which `mise env` then replaces) - lays the complete `mise env --json` output over them, and drops any credential-shaped name (`isSecretLikeName`: `*_SECRET`, `*_TOKEN`, `*_GRANT`, `*_API_KEY`, `*_PASSWORD`, their `*_FILE` twins, and anything containing `PRIVATE_KEY`) as a second line of defence. That object is `paneEnv`: the environment of every command `createDaemonRunner` runs (jj, git, gh, tmux, both start-up probes), therefore of the private tmux server the first `tmux -L legion-<project>` command forks, therefore of every pane. On top of it a pane gets only the explicit `-e` pairs `processes.ts`/`runtime-tmux.ts` set (the LEGION_* family, ENVOY_NATS_URL/ENVOY_URL, GIT_CONFIG_COUNT=0, GIT_TERMINAL_PROMPT=0, DISPATCH_URL/DISPATCH_TOKEN_FILE, the credential pane environment below, and the `*_FILE` secret pointers). Nothing else the daemon was started with reaches a pane: not the GitHub App private keys (GH_AGENT_APP_PRIVATE_KEY_B64/GH_REVIEW_APP_PRIVATE_KEY_B64 - read only by `private_key_command`, the one child that runs under the daemon's own `process.env` on purpose, with the codebase index's `jj log`), not provider keys (they reach a pane only through `omp_launch_prefix`), not DISPATCH_TOKEN, ENVOY_* secrets, SECRETSD_SESSION_TOKEN_FILE, OMP_SESSION_ID, JJ_CONFIG, TMUX/TMUX_PANE, SSH_AUTH_SOCK, or an outer pane's LEGION_*. A `gh` child the daemon spawns for a GitHub App role (`buildRoleEnv`) starts from `paneEnv` too, minus GH_TOKEN/GITHUB_TOKEN/GH_HOST/GH_CONFIG_DIR/LEGION_GITHUB_APP_* and credential-shaped names, plus the minted GH_TOKEN, GH_CONFIG_DIR and GIT_* identity. A pane that needs a variable not on the list is a bug in the list (add the name with its reader in the group comment), never a wildcard; the daemon's own start-up probes run under the same environment, so a missing variable OMP itself needs fails the boot loudly instead of the first pane.'",
+        "AGENTS.md :160-163 and tmux.ts:9-10: 'inherits the runner's stripped `paneEnv`' -> 'inherits the runner's allow-listed `paneEnv`'.",
+        "AGENTS.md 'Upgrading a live box' note (:152-159 area, the sentence starting **Upgrading a live box from a default-socket daemon**): generalize - 'The private tmux server keeps the environment it was forked with for its whole life, across daemon restarts: a daemon upgrade that changes what panes may inherit (this allow-list, or any later change to it) takes effect for new panes only after the server is re-forked. Stop the daemon, `tmux -L legion-<project> kill-server` once (every pane dies; roots resurrect with `--resume` on the next resync probe and workers resume from their session files on the next `spawn_worker`), start the new daemon. At boot the daemon logs `[legion] private tmux server legion-<project> carries N environment variable(s) this daemon does not pass to panes (NAMES); every pane it hosts inherits them ...` when that has not been done (Task 7).' (If Task 7 is cut, drop the last sentence.)",
+        "config-env-keys-that-panes-also-carry.md :42-45: replace the `stripDispatchEnv` sentence with: 'DISPATCH_TOKEN and the LEGION_BOOT_TOKEN* family were once handled by a strip-list; since LEGION-74 the daemon builds every child and pane environment from an allow-list (`PANE_ENV_ALLOW_LIST`, `environment.ts`), so no LEGION_*/DISPATCH_* value is inherited at all. A URL still has to be checked.' In the 'Rule for the next config key' paragraph, replace 'strip it from children (a secret)' with 'nothing: a LEGION_* key is never inherited by a pane (allow-list) - the remaining hazards are' and keep the other two treatments.",
+        "Commit as its own docs commit: `docs(daemon): pane environment is an allow-list; name the variables and the tmux-server re-fork on upgrade (LEGION-74)` — or fold into the Task 4 commit if the reviewer would rather read one diff; either is fine, decide and move."
+      ],
+      "acceptance": "Acceptance 6."
+    },
+    {
+      "id": 6,
+      "title": "Smoke rig: checkpoint 13 covers the App keys and an operator-planted canary; then the production-like proof (acceptance 7)",
+      "files": {
+        "modify": [
+          "scripts/smoke/checkpoints.sh (:471-511 checkpoint_thirteen)",
+          "scripts/smoke/checkpoints.test.sh (:88-121 the checkpoint-13 harness; :191-199 the second clean run)",
+          "scripts/smoke/README.md (checkpoint 13 row :156; add a 'Pane-environment proof' subsection after 'Fail-closed OMP probe')"
+        ]
+      },
+      "steps": [
+        "checkpoints.sh: replace the fixed `for name in DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET` with an array: `local -a names=(DISPATCH_TOKEN LEGION_BOOT_TOKEN LEGION_CONTROLLER_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64); local -a canaries=(); read -r -a canaries <<<\"${SMOKE_CANARY_ENV:-}\"; names+=(\"${canaries[@]}\")` (the comment above the function: the two App keys are the daemon's own for token minting; SMOKE_CANARY_ENV is a space-separated list of names the operator planted in the daemon's environment to prove the allow-list drops what it does not name). Loop over `\"${names[@]}\"`; the failure text becomes `pid ${pid} environ carries ${name}=… (no Legion pane may carry it)`. Build the `show-environment -g` alternation from the same array: `local pattern; pattern=\"$(IFS='|'; printf '%s' \"${names[*]}\")\"; ... grep -m1 -E \"^(${pattern})=\"`. Success line: `CHECKPOINT 13 OK: %d processes on %s carry none of %s; default server hosts no %s` with the joined names.",
+        "checkpoints.test.sh: the two harness `sleep` processes must be scrubbed of every inspected name, including the ones this box's panes carry today: `env -u DISPATCH_TOKEN -u LEGION_BOOT_TOKEN -u LEGION_CONTROLLER_SECRET -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 -u FOO_SECRET sleep 300` for the clean one; the planted one adds `GH_AGENT_APP_PRIVATE_KEY_B64=leaked-into-a-pane FOO_SECRET=leaked-canary` (keep the existing DISPATCH_TOKEN plant). Add two assertions after :121: (a) running 13 against the planted pid with `SMOKE_CANARY_ENV=FOO_SECRET` fails and the output names `GH_AGENT_APP_PRIVATE_KEY_B64=` (fixed names are checked before canaries; a planted App key is caught even with no canary configured - run once without SMOKE_CANARY_ENV too); (b) a third `sleep` planted with only `FOO_SECRET=leaked-canary` passes without SMOKE_CANARY_ENV and fails with `SMOKE_CANARY_ENV=FOO_SECRET` naming `FOO_SECRET=`. Run `bash scripts/smoke/checkpoints.test.sh` -> every PASS line, including the new ones.",
+        "README.md: checkpoint 13 row -> 'The private tmux server and every recorded pane carry none of DISPATCH_TOKEN, LEGION_BOOT_TOKEN, LEGION_CONTROLLER_SECRET, GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, or any name in SMOKE_CANARY_ENV on argv or in environ; ...'. New subsection 'Pane-environment proof' with the recipe below (the exact commands, so the tester can repeat it).",
+        "Commit: `feat(smoke): checkpoint 13 covers the GitHub App keys and an operator-planted canary (LEGION-74)`.",
+        "THE PROOF RUN (acceptance 7; Sami 2026-09-13: it should not require deploying to production to realize your feature doesn't work). Preconditions, in order: (1) rig availability - `ss -ltn | grep -E ':(19370|19371|19020|14222) '` and `docker ps --filter name=legion-smoke-nats --format '{{.Names}} {{.Status}}'`; on 2026-09-13 a sibling tree's rig held 19370/19371/19020/14222 at 06:33Z and had torn down by 06:40Z, so check at run time. Never run `down.sh` on someone else's rig. If the default ports are free, use them with `SMOKE_DIR=/tmp/legion74-rig SMOKE_PROJECT=sjawhar/74` and drop the port overrides from the command below; otherwise: up.sh REUSES an existing `legion-smoke-nats` when it is mapped to your NATS_PORT (ensure_nats, up.sh:378-393), so run beside it with `SMOKE_DIR=/tmp/legion74-rig LEGION_DAEMON_PORT=19470 ENVOY_PORT=19120 NATS_PORT=14222 SMOKE_PROJECT=sjawhar/74` (the daemon's worker stream binds 19471; the convention of earlier trees was /tmp/legion<N>-rig and sjawhar/<N>). If a sibling's bridge is also in envoy mode you share its NATS - acceptable for this proof, noted as LEGION-41. (2) `MISE_DATA_DIR=$HOME/.mise` must be exported in the shell that runs up.sh (mise where reads it; a stripped kernel shell reports the pin 'not installed'). (3) Run from an environment scrubbed of THIS pane's own LEGION_* family and outer tmux, as docs/solutions/daemon/config-env-keys-that-panes-also-carry.md requires - build it with `env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p') -u TMUX -u TMUX_PANE -u OMP_SESSION_ID ...`. (4) DISPATCH_TOKEN is not a secretsd key on this box (LEGION-40): read it from this pane's pointer, `DISPATCH_TOKEN=\"$(cat \"$DISPATCH_TOKEN_FILE\")\"`, inline in the same env invocation, never echoed. (5) The three App/listener secrets ARE agent-tier secretsd keys (`secrets list`: GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, ENVOY_GITHUB_WEBHOOK_SECRET) - inject with the `secrets` wrapper; no YubiKey touch. (6) Match production's launch prefix so panes load the real legion profile: `SMOKE_OMP_LAUNCH_PREFIX='env OMP_PROFILE=legion secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --'` (production legion.yaml's omp_launch_prefix, seen on every live worker's argv). (7) Plant the canary: `FOO_SECRET=canary-legion-74` in the daemon's environment - up.sh's `start_process daemon env ...` inherits the shell, so exporting it is enough - and export `SMOKE_CANARY_ENV=FOO_SECRET` for checkpoints.",
+        "Start command (one line, from `$LEGION_WORKSPACE` so the BRANCH daemon runs - up.sh uses `${repo_root}/packages/daemon/src/cli/index.ts`):\n```sh\ncd -- \"$LEGION_WORKSPACE\" && env $(env | sed -n 's/^\\(LEGION_[A-Z_]*\\)=.*/-u \\1/p') -u TMUX -u TMUX_PANE -u OMP_SESSION_ID \\\n  MISE_DATA_DIR=\"$HOME/.mise\" SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/74 SMOKE_WEBHOOK_MODE=envoy \\\n  SMOKE_DIR=/tmp/legion74-rig LEGION_DAEMON_PORT=19470 ENVOY_PORT=19120 NATS_PORT=14222 \\\n  SMOKE_OMP_LAUNCH_PREFIX='env OMP_PROFILE=legion secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --' \\\n  DISPATCH_URL=\"$DISPATCH_URL\" DISPATCH_TOKEN=\"$(cat \"$DISPATCH_TOKEN_FILE\")\" FOO_SECRET=canary-legion-74 SMOKE_CANARY_ENV=FOO_SECRET \\\n  secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \\\n  bash -c 'GITHUB_WEBHOOK_SECRET=\"$ENVOY_GITHUB_WEBHOOK_SECRET\" exec bash scripts/smoke/up.sh'\n```\n(Use SMOKE_WEBHOOK_MODE=envoy: it is the only mode in which Dispatch issue events reach the rig, so the controller triages the root issue up.sh creates, the root architect spawns, and its first child's planner is a real worker pane. `none` gives you only the controller pane.)",
+        "Evidence gathering (the rig runs in the background; do other work - Task 5 docs, the PR body - and poll): `curl -s http://127.0.0.1:19470/legion/v1/state | jq '{controller: .controllerLocator.tmuxPaneId, trees: [.trees[]?|.locator.tmuxPaneId], roles: [.roles[]?|{role,issue,pane:.locator.tmuxPaneId}]}'`. As each pane appears: `pid=$(tmux -L legion-sjawhar74 display-message -p -t <pane_id> '#{pane_pid}')` (or `tmux -L legion-sjawhar74 list-panes -a -F '#{window_name} #{pane_id} #{pane_pid}'`), then the spec's literal command: `tr '\\0' '\\n' < /proc/$pid/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET` -> `0` (grep exits 1 on zero matches; that is the expected exit). Also `tr '\\0' '\\n' < /proc/$pid/environ | cut -d= -f1 | sort` and paste the NAME list (never values) into the handoff so the reviewer sees the allow-listed set + the -e pairs and nothing else; and the same two commands on the server pid (`tmux -L legion-sjawhar74 display-message -p '#{pid}'`). 'Completes a turn': `tmux -L legion-sjawhar74 capture-pane -p -t <pane_id> | tail -40` showing model/tool output after the prompt, plus for the root `secrets DISPATCH_TOKEN` is not available, so run checkpoint 3 as `DISPATCH_TOKEN=\"$(cat \"$DISPATCH_TOKEN_FILE\")\" SMOKE_DIR=/tmp/legion74-rig ... bash scripts/smoke/checkpoints.sh 3` (spec artifact posted = the root completed turns). The worker pane is the planner of the root's first child (checkpoint 4/5 territory); wait for it, then repeat the environ command on it. Finally run the extended checkpoint 13 - `SMOKE_DIR=/tmp/legion74-rig SMOKE_PROJECT=sjawhar/74 SMOKE_CANARY_ENV=FOO_SECRET DISPATCH_URL=... bash scripts/smoke/checkpoints.sh 13` -> `CHECKPOINT 13 OK: N processes on legion-sjawhar74 carry none of ...`. Negative control for the tester's E2E line: the same environ command against the PRODUCTION worker pane you are running in (`tr '\\0' '\\n' < /proc/$PPID/environ | grep -c PRIVATE_KEY` -> 2 today) - the old daemon leaks, the branch daemon does not.",
+        "Quote in `.legion/implement.json` (`smokeProof` field): the start command, the daemon head SHA, each pane's role + pid + the `grep -c` output `0`, the server pid's `0`, the checkpoint 13 OK line, and the capture-pane excerpt proving a completed turn. Tear down YOUR rig only: `SMOKE_DIR=/tmp/legion74-rig SMOKE_REPO=sjawhar/legion-smoke SMOKE_PROJECT=sjawhar/74 bash scripts/smoke/down.sh` (down.sh stops the NATS container too - if you shared a sibling's `legion-smoke-nats`, stop the daemon/listener/bridge by their PID files under /tmp/legion74-rig instead and leave the container running; read down.sh before running it).",
+        "Fallback if no rig can run (NATS container held on another port, or the upstream NATS unreachable): the scratch-daemon recipe in docs/solutions/testing/fresh-state-dir-boot-beside-a-busy-rig.md with a real private tmux server - its controller pane is spawned through the same `preparePane` path as workers (runtime-tmux.ts:200-211) and gives the pane-level proof; state plainly in the handoff that the worker-pane run is still owed and message the architect."
+      ],
+      "acceptance": "Acceptance 7 (implementer's handoff quotes the command and its 0 output for a worker pane; the tester repeats it independently). Checkpoint 13 becomes the permanent rig lock for acceptance 3's shape."
+    },
+    {
+      "id": 7,
+      "title": "Boot-time audit: warn when the private tmux server was forked with variables this daemon no longer passes to panes",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/tmux.ts (new `globalEnvironmentNames(server)`)",
+          "packages/daemon/src/daemon/runtime.ts (Runtime interface: `inheritedEnvironmentNames(): Promise<string[]>`)",
+          "packages/daemon/src/daemon/runtime-tmux.ts (implementation)",
+          "packages/daemon/src/daemon/index.ts (call after `reconnectWorkers`, before the launch hold)"
+        ],
+        "test": [
+          "packages/daemon/src/daemon/__tests__/tmux.test.ts or runtime-tmux.test.ts (parse + no-server case)",
+          "packages/daemon/src/daemon/__tests__/index.test.ts (the warning line is logged with names only)"
+        ]
+      },
+      "why": "The private tmux server survives daemon restarts by design and keeps the environment it was forked with - the production server (pid 2023008, parent systemd) still carries LEGION_OMP_PATH and both App keys although the daemon has since been restarted with a different environment. So after this fix deploys, every pane spawned into the OLD server still inherits the keys until the operator re-forks it (Task 5's AGENTS.md note). Without a signal the deployment looks fixed and is not; acceptance 3 would fail on `/proc` alone. This is the daemon enforcing its own invariant across its normal restart path. Separable: its own commit; the architect may cut it - everything else stands without it.",
+      "steps": [
+        "tmux.ts: `export async function globalEnvironmentNames(server: TmuxServer): Promise<string[] | undefined>` runs `argv(server, \"show-environment\", \"-g\")`; on exit 0 return each line's name (`KEY=value` -> KEY; a leading `-KEY` marks an unset entry - skip it); when stderr matches `PANE_GONE_STDERR` (no server yet - a fresh boot) return undefined; any other non-zero exit throws with the stderr. Names only: never keep or log the values.",
+        "runtime.ts `Runtime`: add `inheritedEnvironmentNames(): Promise<string[] | undefined>`; runtime-tmux.ts implements it with the helper; the kubernetes stub (if one exists on main) returns undefined.",
+        "index.ts, right after `await processManager.reconnectWorkers()` (the point where the server is known live or absent, before `enableLaunches()`): `const inherited = await runtime.inheritedEnvironmentNames(); if (inherited) { const stale = inherited.filter((name) => !(name in environment.paneEnv)).sort(); if (stale.length > 0) console.warn(`[legion] private tmux server legion-${state.project} carries ${stale.length} environment variable(s) this daemon does not pass to panes (${stale.join(\", \")}); every pane it hosts inherits them - stop the daemon, run tmux -L legion-${state.project} kill-server, and start it again to re-fork the server`); }`. `TMUX`/`TMUX_PANE`/`PWD`/`SHLVL`/`_` are not in tmux's global environment table (tmux adds them per pane), so no exemption list is needed; if the live check shows tmux does add something of its own, exempt exactly that name with a comment saying which tmux version adds it.",
+        "Tests: (a) parse - stdout `PATH=/x\\nGH_AGENT_APP_PRIVATE_KEY_B64=abc\\n-UNSET_ME\\nHOME=/h\\n` -> [PATH, GH_AGENT_APP_PRIVATE_KEY_B64, HOME]; (b) `no server running on /tmp/tmux-1000/legion-acme` stderr -> undefined; (c) index.test.ts: a runner answering `show-environment -g` with `PATH=...\\nGH_AGENT_APP_PRIVATE_KEY_B64=...\\n` and a paneEnv fixture of { PATH } logs exactly one warn containing `GH_AGENT_APP_PRIVATE_KEY_B64` and not the value; with only allow-listed names, no warn.",
+        "Live check on this box, read-only: `tmux -L legion-sjawharlegion show-environment -g | cut -d= -f1 | sort` from your pane - confirm the two key names appear (names only) so the warning would fire on the production server today.",
+        "Commit: `feat(daemon): warn at boot when the private tmux server carries variables panes may not inherit (LEGION-74)`."
+      ],
+      "acceptance": "Supports acceptance 3: the daemon log names the stale server instead of a silent partial fix."
+    },
+    {
+      "id": 8,
+      "title": "Pull request, handoff, and the post-release steps (acceptance 3, 4, 5)",
+      "steps": [
+        "Push and open the PR per the legion-worker skill: `jj bookmark set legion/LEGION-74 && jj git push --bookmark legion/LEGION-74`; `legion gh -- pr create --title 'fix(daemon): panes, probes, and daemon children inherit an allow-listed environment, never the GitHub App keys (LEGION-74)' --body-file <file>`. Body: `Dispatch: LEGION-74`; Summary in plain words (the keys were readable by every pane; now a pane gets only a named list); the READY-format Verification block (CI / Threads / Thermo / E2E / Fast-follow: none / Chain: not stacked); a **Deployment (operator, in this order)** section: 1. `legion stop sjawhar-legion`; 2. `tmux -L legion-sjawharlegion kill-server` (the server keeps its fork-time environment across daemon restarts - the old one still carries both keys; every pane dies and comes back by `--resume`; pick a quiet moment); 3. start the daemon on the merged main through the same `secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- ...` launcher (the daemon still needs the keys for its own token minting); 4. the boot log must NOT show the `carries N environment variable(s)` warning (Task 7); 5. tell the implementer (this issue) so it runs the production check below. Tier for the merger's READY packet: T1 (deploy correctness / live credential exposure), stated with the reason.",
+        "`.legion/implement.json`: filesChanged, trickyParts (the #992 start point; gh children's base env; TMUX_TMPDIR/MISE_DATA_DIR/SHELL findings; the stale-server fact), `smokeProof` (Task 6 quotes), `deployment` (the operator steps above), `postRelease` (the checklist below, unticked). Commit `implement: record handoff`, push.",
+        "POST-RELEASE (acceptance 3 and 4; you are resumed for it): after the operator relaunches - (a) `pid=$(tmux -L legion-sjawharlegion display-message -p '#{pid}')` must differ from 2023008 and `tr '\\0' '\\n' < /proc/$pid/environ | grep -c PRIVATE_KEY` -> 0; (b) controller pane: `tmux -L legion-sjawharlegion list-panes -a -F '#{window_name} #{pane_id} #{pane_pid}' | awk '$1==\"controller\"'` -> `tr '\\0' '\\n' < /proc/<pid>/environ | grep -c PRIVATE_KEY` -> 0; (c) one worker pane spawned after the relaunch (`legion state` -> a role whose `readyConfirmedAt` is later than the relaunch) -> 0; (d) acceptance 4: from that fresh worker (ask its architect, or use your own next `legion gh` call once you are respawned): `legion gh -- api repos/sjawhar/legion --jq .full_name` -> `sjawhar/legion` with a 200 in the daemon log - a live grant minted from the keys the daemon alone holds. Quote (a)-(d) as a PR comment with the Legion footer (the spec says 'quoted in the pull request') and in a `dispatch_message` on LEGION-74.",
+        "ROTATION MESSAGE (acceptance 5; a plain `dispatch_message` to Sami on LEGION-74 - never an ask; deployment rule 2026-09-12): 'Both GitHub App private keys (implementer App 3202636, reviewer App 3202653) have been readable by every Legion pane since the deployment started; the fix is live and a fresh pane now shows neither. Current state: the keys are still the exposed ones. Desired state: new keys, old ones revoked. Proposed change: in GitHub (Settings -> Developer settings -> GitHub Apps -> app -> Private keys) generate a new key for each app, base64-encode each .pem (`base64 -w0 key.pem`), store them as the secretsd agent-tier keys GH_AGENT_APP_PRIVATE_KEY_B64 and GH_REVIEW_APP_PRIVATE_KEY_B64 (`secrets edit`), have the operator relaunch the daemon (its launcher already injects both through `secrets ... --`), then delete the old keys on the same GitHub pages. Options: rotate at the next relaunch (recommended - one restart, no extra pane churn) or rotate now (a second relaunch today). I will verify afterwards by minting a grant from a fresh worker (`legion gh` returning 200) and record it here.' Then, once the operator records the rotation on this issue, do that verification and record the result (no key material anywhere)."
+      ],
+      "acceptance": "Acceptance 3, 4, 5."
+    }
+  ],
+  "acceptanceMap": {
+    "1": "Task 1 TEST A (environment.test.ts, the spec's scenario) + Task 2 (gh children)",
+    "2": "Task 4 (index.test.ts probe env)",
+    "3": "Task 8 post-release check; Task 7 warning; Task 5 AGENTS.md re-fork note; Task 6 checkpoint 13 is the same shape on the rig",
+    "4": "Task 3 (private_key_command keeps process.env) + existing github-apps/config tests + Task 8 (d) live grant",
+    "5": "Task 8 rotation message + post-rotation grant check",
+    "6": "Task 5",
+    "7": "Task 6 proof run (implementer) repeated by the tester"
+  },
+  "concerns": [
+    "Start point: this workspace is at 19b99c3c, main@origin is #992 + release chores ahead, and #992 edits the exact hunks this change rewrites. Task 0 starts the branch on main@origin before any commit or PR exists (zero CI cost, verified against the workflow triggers) rather than opening a PR that GitHub reports CONFLICTING on arrival. Architect: this is my reading of the 2026-09-11 rule's rationale; say so if you want the letter followed instead (write against 19b99c3c, rebase when CONFLICTING).",
+    "Production is not fixed by the daemon restart alone: the private tmux server keeps its fork-time environment (it still has both keys today although the daemon has restarted since). The operator relaunch must `tmux -L legion-sjawharlegion kill-server` between stop and start - every live pane dies and resumes by design. Task 8's Deployment section, Task 5's AGENTS.md note, and Task 7's boot warning carry this; acceptance 3 fails without it.",
+    "Task 7 is scope the spec did not ask for (a ~40-line boot warning). It exists because the invariant is otherwise unenforced across the daemon's normal restart path. Separable commit; cut it by telling the implementer.",
+    "The `mise env --json` output is allowed wholesale (acceptance 1 says so). A mise.toml `[env]` entry the operator adds reaches panes unless its name is credential-shaped - by design; the daemon cannot know which operator toolchain variables OMP needs.",
+    "Excluding JJ_CONFIG, SSH_AUTH_SOCK, TMUX/TMUX_PANE, OMP_SESSION_ID, GIT_CONFIG_* and the operator's MNEMOPI_*/CLAUDE_* is a behaviour change for panes (they inherited them until now). Each is the operator session's state, not deployment config; jj/git/mise/tmux were verified to work without them on this box. If the rig run in Task 6 shows a pane that does not boot, the missing name goes on the list with its reader - never a wildcard.",
+    "The proof run needs the shared smoke rig (envoy mode: production NATS bridge + LEGSMOKE Dispatch project + sjawhar/legion-smoke) and real model turns for the root architect to reach a worker pane: budget 30-60 minutes of wall time and run it in the background while writing docs and the PR body. One rig per box at a time is the LEGION-41 limitation; up.sh reuses an existing legion-smoke-nats container on the same port.",
+    "Tests deleted, not re-pinned: config.test.ts:890 (private_key_command strip) and environment.test.ts:157/:277 (strip-list assertions, replaced by the exact-equality allow-list tests); github-apps.test.ts:603's DISPATCH_URL/DISPATCH_MCP_URL assertions (a URL is not a credential)."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T06:42:02.867Z"
+}
