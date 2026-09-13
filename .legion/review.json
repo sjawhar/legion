@@ -1,0 +1,29 @@
+{
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "reviewedHead": "873550aeea3cb0736b357199d66f06735b8caea9",
+  "reviewId": 5190437153,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1014#pullrequestreview-5190437153",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/workspace/src/workspace.test.ts:276",
+      "description": "The test does not pin which clone stays: a last-writer-wins mutant (loser rm's the landed clone and renames its own into place at workspace.ts:156) passes 5/5. Fix: write a `clone-origin` marker into each fake clone's .jj (after line 250) and assert `readFile(jjDir/clone-origin) === cloneTargets[0]` (after line 276); verified 10/10 pass vs real code, 5/5 fail vs mutant, suite 13/13. Thread: https://github.com/sjawhar/legion/pull/1014#discussion_r3999399598"
+    }
+  ],
+  "clean": [
+    "Scope: fork point 52c5e03e -> head changes exactly packages/workspace/src/workspace.test.ts (+90/-1) plus the two .legion handoffs; no product code, no daemon fixture",
+    "Interleaving forces the second caller through workspace.ts:156; negative control (branch unreachable -> ENOTEMPTY) reproduced independently 20/20 in a scratch copy",
+    "Determinism: no timers; fs.watch on the parent + re-check after arming; inotify rename probe 100/100 (Bun 1.3.14, Linux); new test 50/50 at head; suite 13/13. Watcher closed on success; error path rejects without close (informational: an unclosed FSWatcher does not keep bun test alive). macOS not run here; kqueue NOTE_WRITE on the directory fd should wake the callback (inference)",
+    "Assertions match the spec's Acceptance 3 list; conventions match the sibling test (temporaryDirectory/afterEach, LEGION_MAX_RECURSION_DEPTH, hoisted deps idiom); Promise.withResolvers is the repo's gate idiom",
+    "CI: Tests run 34750665922 all four jobs success at head, verified on GitHub; 0 prior reviews; 0 threads before this review",
+    "Tester evidence reads as the spec's Testing section requires (branch 50-loop 50/50; pre-merge run 47 reproduced; 18 .jj hits classified; workspace suite green). 8-lane parallel timer-test failures are outside this PR"
+  ],
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at 873550ae: no blocking findings; deep-review surfaced the provenance gap (re-verified by mutant); code-quality's proposal to drop whenPathExists rejected because the spec's Design mandates the second-clone-after-first-rename ordering",
+  "reReviewPlan": "Corrective push -> tester re-runs bun test packages/workspace -> re-review: answer the thread `Accepted: fixed in <sha> — ...`, fingerprint, one COMMENT review if clean while .legion/ remains, then APPROVE the .legion/-deletion head by SHA",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T10:43:04.274Z"
+}
