@@ -10,12 +10,15 @@ tags:
   - tmux
   - inherited-environment
   - smoke-rig
+  - LEGION_OMP_PATH
 date: 2026-09-12
 status: active
 module: packages/daemon
 related_issues:
   - "LEGION-21"
   - "sjawhar/legion#962"
+  - "LEGION-40"
+  - "sjawhar/legion#1011"
 ---
 
 # Config Env Keys the Daemon Also Exports to Its Panes
@@ -80,9 +83,9 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   -u LEGION_GENERATION -u LEGION_WORKSPACE -u LEGION_ROOT_WORKSPACE -u LEGION_PROJECT
   -u LEGION_GRANT -u LEGION_GRANT_FILE -u LEGION_BOOT_TOKEN_FILE -u LEGION_CREDENTIAL_HELPER
   -u LEGION_CONTROL_SUBJECT -u LEGION_MAX_RECURSION_DEPTH -u LEGION_CONTROLLER -u LEGION_OMP_PATH
-  -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST …`, with
-  `DISPATCH_URL`/`DISPATCH_TOKEN` re-supplied deliberately. The checkpoints script must run under
-  the same scrub (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
+  -u DISPATCH_URL -u DISPATCH_TOKEN -u DISPATCH_TOKEN_FILE -u TMUX -u GH_CONFIG_DIR -u GH_TOKEN
+  -u GITHUB_TOKEN -u GH_HOST …`. The checkpoints script must run under the same scrub
+  (`env -u LEGION_DAEMON_URL`), or it reads the outer daemon's state.
 - `LEGION_OMP_PATH` is in that list since LEGION-77: the dogfood daemon's private tmux server still
   carries `LEGION_OMP_PATH=…/omp-18.1.15-sami.9bff2014-rpcfix` (see
   `omp-pin-bump-behavioral-proof.md`, "One operator observation"), every pane inherits it, and a
@@ -91,6 +94,20 @@ the rig sets `state_dir` in the file and `LEGION_STATE_DIR` for the pane explici
   `pi.agents` probe fails **definitively** at the launch hold — after config loaded and the App keys
   resolved, before the listening lines — and `legion start` exits 1 with `Configured OMP invocation
   does not expose pi.agents`. Scrubbed, the daemon resolves the pinned mise release and boots.
+- The smoke rig honours the same inherited `LEGION_OMP_PATH` (LEGION-40): `scripts/smoke/up.sh`
+  treats it as the operator's explicit override of the pinned OMP, so inherited it silently changes
+  which OMP the rig runs. The first LEGION-40 run printed
+  `GREEN OMP build: …/omp-18.1.15-sami.9bff2014-rpcfix` (the pane's hand-built binary, not the pin),
+  reached `RIG READY`, and then its daemon died at the OMP probe on that binary's own loader
+  mismatch (`Failed to load pi_natives native addon … does not expose the … version sentinel`).
+  Nothing in the README's start block would produce that state in an operator's shell; the scrub
+  is what makes a pane run equal an operator run.
+- `DISPATCH_URL`/`DISPATCH_TOKEN`/`DISPATCH_TOKEN_FILE` are scrubbed, not re-supplied. Since
+  LEGION-40 the rig reads both values from `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/envoy.json`
+  when the variables are unset, which is what an operator's shell has; every pane carries
+  `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, so a run that leaves them would take the URL from the
+  pane and the token from the file — a fallback proof that passes for the wrong reason. Export the
+  pair only when the environment-wins path is the thing under test.
 - `PATH` needs no scrub. Since LEGION-54 a pane's `PATH` starts with `<state_dir>/worker-bin` for
   the pane's life (the `gh` shim that execs `legion gh`), and `mise env` keeps an inherited PATH
   head, so a daemon started from inside a pane would otherwise resolve its own `gh` to the shim
