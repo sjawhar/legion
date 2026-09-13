@@ -18,7 +18,11 @@ import {
   type LegionControlDirective,
   parseControlDirective,
 } from "../src/legion/control";
-import { createLegionDaemonClient, LegionDaemonApiError } from "../src/legion/daemon-client";
+import {
+  createLegionDaemonClient,
+  LegionDaemonApiError,
+  type LegionDaemonClient,
+} from "../src/legion/daemon-client";
 import { writeGrantFile } from "../src/legion/grant-file";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import { createLegionTool } from "../src/legion/tools";
@@ -365,33 +369,44 @@ export default function legionExtension(pi: PiApi): void {
   // environment, so the guard binds it exactly as it binds the worker that spawned it.
   let phaseWorkerPane: boolean | undefined;
 
-  const roleDaemon = () => {
-    return createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"), fetch, {
-      recoveryToken: (sessionId) => {
-        // A worker's boot token (read again from `LEGION_BOOT_TOKEN_FILE` here — the daemon keeps
-        // that file for as long as the pane's locator lives) is its recovery token exactly like
-        // the root's: it is single-use to redeem the initial capability, but the daemon accepts it
-        // again on /worker-session to reissue a secret it has since forgotten (e.g. after a daemon
-        // restart).
-        if (capability !== undefined && sessionId === capability.sessionID) {
-          return requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-        }
-        throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-      },
-      onRecovered: (sessionId, recovered) => {
-        if (capability === undefined || sessionId !== capability.sessionID) {
+  // One client for the session's whole life: its recovery record (the newest recovered secret
+  // and the recovery in flight) is what lets two requests refused together share one
+  // /worker-session round trip instead of racing each other's secret (LEGION-73). Every
+  // capability-bearing call — the legion tool, the bash grant hook, process/ready re-runs, the
+  // exit report — goes through this same instance.
+  let daemonClient: LegionDaemonClient | undefined;
+  const roleDaemon = (): LegionDaemonClient => {
+    daemonClient ??= createLegionDaemonClient(
+      requiredEnvironment(process.env, "LEGION_DAEMON_URL"),
+      fetch,
+      {
+        recoveryToken: (sessionId) => {
+          // A worker's boot token (read again from `LEGION_BOOT_TOKEN_FILE` here — the daemon keeps
+          // that file for as long as the pane's locator lives) is its recovery token exactly like
+          // the root's: it is single-use to redeem the initial capability, but the daemon accepts it
+          // again on /worker-session to reissue a secret it has since forgotten (e.g. after a daemon
+          // restart).
+          if (capability !== undefined && sessionId === capability.sessionID) {
+            return requiredSecret(process.env, "LEGION_BOOT_TOKEN");
+          }
           throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-        }
-        if (
-          recovered.tree !== capability.tree ||
-          recovered.issue !== capability.issue ||
-          recovered.role !== capability.role
-        ) {
-          throw new Error("Daemon recovered a capability for a different Legion role");
-        }
-        capability = { ...capability, secret: recovered.secret };
-      },
-    });
+        },
+        onRecovered: (sessionId, recovered) => {
+          if (capability === undefined || sessionId !== capability.sessionID) {
+            throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
+          }
+          if (
+            recovered.tree !== capability.tree ||
+            recovered.issue !== capability.issue ||
+            recovered.role !== capability.role
+          ) {
+            throw new Error("Daemon recovered a capability for a different Legion role");
+          }
+          capability = { ...capability, secret: recovered.secret };
+        },
+      }
+    );
+    return daemonClient;
   };
 
   /**

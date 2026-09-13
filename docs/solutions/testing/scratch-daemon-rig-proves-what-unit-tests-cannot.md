@@ -9,12 +9,16 @@ tags:
   - idle-retire
   - tester
   - negative-control
+  - control-run
+  - pi-envoy
 date: 2026-09-12
 status: active
 module: daemon
 related_issues:
   - "LEGION-30"
   - "sjawhar/legion#973"
+  - "LEGION-73"
+  - "sjawhar/legion#1032"
 ---
 
 # A scratch-daemon rig (own team, state dir, ports, tmux server, short window) proves a lifecycle change end to end when unit tests cannot
@@ -129,6 +133,54 @@ What it settled that nothing else could:
 When a criterion is phrased as "does not call", "never PATCHes", or "writes nothing", put the
 proxy in from the start and quote its complete log; a `GET` after the fact and a unit test's fake
 client are the regression lock, not the proof.
+
+## Proving a plugin-side race through a real architect pane
+
+LEGION-73 (PR #1032) fixed a race inside the pi-envoy plugin: two `legion` tool calls in one
+batch, right after a daemon restart, raced each other's session-secret recovery and one was
+refused 403. The daemon was unchanged, so the rig's variable was **which plugin build the
+architect pane loads** — a scratch OMP profile per build (`legion73pos` from the PR head,
+`legion73neg` from the parent commit `c8faafec`), each a copy of the live profile's
+`plugins/package.json` with `@sjawhar/pi-legion-envoy` pointed at a `file:` copy packed from that
+commit. Confirm the variable from the pane's own OMP log line
+`extension instance loaded … file:///…/pi-legion-envoy-<sha>/dist/legion.js`, never from the
+profile name. Four things about that proof carry over to any restart-triggered race:
+
+- **The racing action must be the first capability-bearing action after the event.** Every
+  bash call in a Legion pane mints a grant through the `tool_call` hook, and that `/grants`
+  request goes through the same recovering client — so a bash call before the batch (or a lone
+  `legion` call) recovers the secret first and the batch never races. `read`, Dispatch, and Envoy
+  tools never touch the daemon, but forbid them too: the prompt has to leave the model no step
+  before the batch, name the exact two calls, and say "in ONE assistant message, two tool_use
+  blocks". The transcript is the evidence: the first assistant message after the restart carries
+  both `tool_use` blocks and no tool call precedes it.
+- **A headless architect takes its prompt over the shim socket, not `send-keys`.** The root
+  architect is `omp --mode rpc` behind `legion worker-shim`; there is no TUI to type into. The
+  tester delivered the prompt as an RPC `prompt` frame with the daemon's own `connectWorkerRpc`
+  client on the pane's unix socket — the same frame the daemon uses to hand a worker its
+  assignment. (The plan had said `tmux send-keys`; it would have typed into nothing.)
+- **The control run on the parent commit is what proves the batch raced.** The model may
+  serialise two calls into two messages, or the restart may land such that no race is possible;
+  a head-only success proves nothing about the race. The same choreography with the parent's
+  plugin reproduced the incident's exact shape — batch A `POST /legion/v1/escalate failed with
+  403: {"error":"Invalid session secret"}`, batch B `{}`, only B reaching the controller — and
+  that reproduction is what gives the head run's two `{}` results their meaning. Repeat the
+  restart-and-prompt once before calling a non-reproducing control inconclusive; read the
+  transcript for a preceding tool call or serialised calls first.
+- **A negative control must be chosen to pass the nearer layer.** The plan's negative control —
+  a bogus escalation `kind` through the pane returns the daemon's `400 Unknown escalation kind` —
+  never reached the daemon: the plugin's own tool-argument schema refused it first
+  (`Validation failed for tool "legion": kind must be "re-file", "capacity", "cross-tree" …`).
+  That is a refusal, but of the wrong component. When the surface under test has its own
+  validation ahead of the one you mean to exercise, pick an input the nearer layer admits (here a
+  wrong secret → the daemon's `403 Invalid session secret`), or drive the far layer directly
+  (`curl` to the rig daemon got the 400) and say which layer produced each result. A negative
+  control that shows *a* refusal without naming the refusing layer proves less than it looks.
+
+`escalate` was the right probe for this rig: on a scratch team it only publishes a controller
+notice (`handleEscalate`), changes no issue status, and a distinct `context` per call makes each
+one's arrival at the controller's transcript countable. The pattern under test is in
+[credential-recovery-is-shared-per-credential-not-per-request](../envoy/credential-recovery-is-shared-per-credential-not-per-request.md).
 
 ## Gotchas met on the way
 
