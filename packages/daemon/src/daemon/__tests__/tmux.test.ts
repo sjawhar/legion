@@ -292,7 +292,9 @@ describe("environmentNames", () => {
     await environmentNames(silent, undefined).catch((error: Error) => {
       message = error.message;
     });
-    expect(message).toBe("tmux show-environment -s -g failed (exit 1)");
+    expect(message).toBe(
+      "tmux show-environment -s -g failed (exit 1): tmux printed nothing on stderr"
+    );
     expect(message).not.toContain("leaked-value");
   });
 });
@@ -438,5 +440,22 @@ describe("openWindow", () => {
     );
     expect(message).toBe("tmux new-window did not report a window id: unexpected output");
     expect(message).not.toContain("leaked-value");
+  });
+
+  it("says so when tmux printed nothing on stderr", async () => {
+    const fake: TmuxServer = {
+      socket: "legion-omp",
+      run: async (cmd) => {
+        if (cmd[3] === "new-window") return { stdout: "", stderr: "", exitCode: 1 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    let message = "";
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp").catch(
+      (error: Error) => {
+        message = error.message;
+      }
+    );
+    expect(message).toBe("tmux new-window failed (exit 1): tmux printed nothing on stderr");
   });
 });

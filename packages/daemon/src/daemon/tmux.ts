@@ -45,12 +45,14 @@ function targetAbsent(stderr: string | undefined): boolean {
   return NO_SERVER_STDERR.test(stderr ?? "") || (stderr ?? "").startsWith("no such session");
 }
 
-/** The failure detail for every error message this module throws: tmux's stderr only, trimmed,
- * omitted when empty — never stdout. For `show-environment` stdout is the value dump, and for the
- * `-P -F` reports it is whatever a broken tmux printed; no value may reach a log or error string. */
+/** The failure detail for every error message this module throws: tmux's stderr only, trimmed —
+ * never stdout. For `show-environment` stdout is the value dump, and for the `-P -F` reports it is
+ * whatever a broken tmux printed; no value may reach a log or error string. An empty stderr is
+ * said out loud (`: tmux printed nothing on stderr`) rather than omitted, so a message that ends in
+ * the exit code alone can never be mistaken for a dropped detail. */
 function failure(result: { stderr?: string }): string {
   const detail = result.stderr?.trim();
-  return detail ? `: ${detail}` : "";
+  return detail ? `: ${detail}` : ": tmux printed nothing on stderr";
 }
 
 /** The characters tmux's `-s` output escapes inside a value with a backslash (tmux 3.7c
