@@ -1,0 +1,42 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/__tests__/config.test.ts",
+    "packages/daemon/src/cli/__tests__/index.test.ts",
+    "docs/deployment.md",
+    "packages/daemon/src/daemon/AGENTS.md"
+  ],
+  "commits": {
+    "daemon": "1dc60c16503e",
+    "docs": "ad8ed4d9944c"
+  },
+  "pr": {
+    "number": 1017,
+    "url": "https://github.com/sjawhar/legion/pull/1017",
+    "head": "ad8ed4d9944c5a9e594c232d09749c334d739b8d"
+  },
+  "trickyParts": [
+    "secretsd identifies a tokenless caller by isatty(0) + readlink /proc/self/fd/0, so runSecretsGet spawns with stdio [inherit, pipe, pipe]; the config.test.ts human-tier test asserts the fake saw the test process's own fd 0 and the live boot's call log shows /dev/pts/100 (the pane's tty) for all four calls.",
+    "Only SECRETSD_SESSION_TOKEN_FILE is dropped from the secrets children's env, not all SECRETSD_*: SECRETSD_SOCK is the broker socket override (crates/proto/src/client.rs from_environment) and dropping it would break the client; the spec's parenthetical 'and any other SECRETSD_* session variable' has no other member today.",
+    "Bun's spawnSync returns result.error with code ENOENT for a missing executable (no synchronous throw), so the plan's straight-line error mapping stands.",
+    "Boot's tokenManager.getToken('implement', owner) needs a real App key before the listening lines, so the live boot's fake secrets fabricated only the tier status and delegated `--value` to the real binary (a tokenless agent-tier read works from any stdin); no PEM ever reached a log.",
+    "Live boot from a Legion pane must also scrub LEGION_OMP_PATH: the inherited value names the outer daemon's custom omp build (omp-18.1.15-sami.9bff2014-rpcfix) whose pi_natives addon is out of sync (`does not expose the version sentinel __piNativesV18_1_15`), so the OMP probe fails definitively at the launch hold; the pinned default (18.1.18-sami.20260912-104423) boots. Environment fact, not a code issue."
+  ],
+  "deviations": [
+    "Task 4 step 1's root `bunx tsc --noEmit` has no root tsconfig (prints tsc help); CI's typecheck job is `bunx tsc --noEmit` in packages/daemon (pr-and-main.yaml:56), which passed.",
+    "Test fixture: the fake secrets script cats its status/value/stderr from files instead of embedding them in shell quotes (the plan's inline form broke on the single quotes in `secret 'GH_NOPE' not found`).",
+    "Runbook step 4 and the PR body use the architect's quiet check (`secrets get <KEY> --no-request` printing \"tier\":\"human\",\"grant\":false) instead of `secrets <KEY> -- true`, with the reason stated; 'do not tap it' removed.",
+    "Biome formatting of the three touched TS files was squashed into the daemon commit (line wraps only)."
+  ],
+  "openQuestions": [],
+  "subPlanningNeeded": false,
+  "verification": {
+    "unit": "packages/daemon: bun test src/daemon/__tests__/config.test.ts src/cli/__tests__/index.test.ts -> 92 pass, 0 fail (9 new config tests, 1 new cli test, 1 pinned message updated)",
+    "lint": "bunx biome check --error-on-warnings on the 3 touched TS files: clean",
+    "typecheck": "packages/daemon bunx tsc --noEmit: exit 0",
+    "liveBoot": "real `legion start` from tmux pane /dev/pts/100, scratch NATS, fake secrets on PATH: positive (human) -> both [legion] requesting lines then both listening lines, /legion/v1/state answered; negative (agent) -> exit 1 with the exact agent-tier refusal after one --no-request call. Quoted in PR #1017 body E2E section."
+  },
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T10:02:33.784Z"
+}
