@@ -138,6 +138,41 @@ developer box supplies identity from `~/.config/jj`; a GitHub runner has no jj c
 binaries take `JJ_USER` and `JJ_EMAIL` from the environment. Reproduce the runner locally with an
 empty `JJ_CONFIG` file and `XDG_CONFIG_HOME` pointed at an empty directory.
 
+## Removing a workspace: the abandon set, the forget, and the order (LEGION-104)
+
+Verified 2026-09-14 on both binaries (`/tmp/legion-104-jjfacts.sh`, `/tmp/legion-104-crashshape.sh`
+during planning and again during implementation), identical unless noted:
+
+- `jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone`
+  lists exactly workspace `a`'s own commits, newest first: its working copy and every ancestor no
+  bookmark, remote bookmark, tag, or other workspace's working copy reaches. `::main` is subtracted
+  (so the root commit never appears), a commit under a surviving bookmark is not listed, a commit
+  another workspace is stacked on is not listed. Exit 0 and no lines for an empty set.
+- `jj abandon -r '<id> | <id>' --ignore-working-copy -R clone` of another workspace's working-copy
+  commit (its directory already deleted) prints `Abandoned N commits` and gives that workspace a new
+  empty working-copy commit, visible as `a@` in every other workspace's log. `-r` is an alias of the
+  positional `[REVSETS]...`; a `|` union is one revset. `jj abandon -r 'none()'` prints
+  `No revisions to abandon.` and exits 0.
+- `jj workspace forget a --ignore-working-copy -R clone` then hides that empty commit;
+  `jj workspace list -T 'name ++ "\n"'` (the template exists on both) no longer names `a`.
+  Forgetting a name jj does not know: `Warning: No such workspace: a` / `Nothing changed.`, exit 0.
+  `jj log -r 'a@'` for an unregistered name: `Error: Workspace \`a\` doesn't have a working-copy
+  commit`, exit 1 — check registration before asking for `a@`.
+- On 0.45.1 a colocated clone's `jj workspace add` creates a git worktree
+  (`git --git-dir=clone/.git worktree list` names it, `prunable` once the directory is gone) and
+  `git worktree prune` removes it after the forget; on **0.44.0** no git worktree is created and
+  the prune is a no-op, exit 0.
+- Order: delete the directory, then forget. Directory gone but still registered:
+  `jj workspace add … --name a` says `Error: Workspace named 'a' already exists` (exit 1) —
+  `createWorkspace`'s `already (registered|exists)` branch forgets, prunes, and adds again.
+  Registration gone but directory present: `jj workspace update-stale` inside it says
+  `Error: Nothing checked out in this workspace` (exit 1; 0.45.1 also
+  `Removed Git worktree for …`) — the failure the wrong order would give every later provisioning.
+- Until LEGION-84 lands, a fetch that deletes a merged branch's bookmark also abandons the branch's
+  commits; `jj config set --repo git.abandon-unreachable-commits false -R clone` (both binaries;
+  the file is `~/.config/jj/repos/<config-id>/config.toml`) is how a test keeps them so that the
+  removal, not the fetch, is what makes them leave another workspace's log.
+
 ## Construction recipes (for re-verifying on a new pin)
 
 ```sh
@@ -155,6 +190,12 @@ OP=$(jj -R clone op log --no-graph -T 'id.short() ++ "\n"' --limit 1)
 (cd w1 && jj new -m "w1 work" && jj bookmark set legion/X -r @)
 (cd w2 && jj --at-op "$OP" bookmark set legion/X -r @ --allow-backwards)   # two moves from one op;
 jj -R clone bookmark list legion/X                              # the next command reconciles → (conflicted)
+jj -R clone config set --repo git.abandon-unreachable-commits false   # LEGION-84's world
+jj -R clone workspace add a --name a --revision main; jj -R clone workspace add b --name b --revision main
+(cd a && jj bookmark set legion/A -r @ && echo hi > f && jj new -m "a work 2")
+jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone
+rm -rf a; jj abandon -r '<the ids, | -joined>' --ignore-working-copy -R clone; jj workspace forget a --ignore-working-copy -R clone
+git --git-dir=clone/.git worktree prune; (cd b && jj log -r 'all()')
 ```
 
 Run the three read forms after each step; compare with the table. The test file's `realJjRig`
