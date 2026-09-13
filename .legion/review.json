@@ -1,0 +1,86 @@
+{
+  "verdict": "approved",
+  "githubReview": {
+    "id": 5190276420,
+    "url": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5190276420",
+    "state": "COMMENTED",
+    "commitId": "2d61ef5b817b492399d2de0f0c4ff27630d76fba",
+    "codeHead": "7154712f09ed24aed6f969bbaafdee5b37121462",
+    "why": "COMMENT, not APPROVE, only because the head still carries .legion/ (legion-worker rule). No blocking finding: I would deploy this to the LEGION daemon. APPROVE follows by SHA on the head that differs from 2d61ef5b817b by the .legion/ deletion alone."
+  },
+  "critical": 0,
+  "important": 0,
+  "minor": 9,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/runtime-tmux.ts:273",
+      "description": "TMUX_OWN_GLOBALS[name] is a prototype-chain lookup: a table entry named constructor/toString/hasOwnProperty/valueOf/__proto__ is never unset. Object.hasOwn or a Set."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/runtime-tmux.ts:271",
+      "description": "Session table is read before update-environment is emptied; an attach in that ms window survives until the next boot. Disable first."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/tmux.ts:58",
+      "description": "show-environment error interpolates stdout (the value dump) when stderr is empty; no observed tmux 3.7c failure mode does that, but use stderr only, as fullMiseEnvironment does."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/tmux.ts:194",
+      "description": "new-session and set-option update-environment '' are two client invocations; chain them (\\;) so AGENTS.md's 'before anything can attach' is literally true."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/tmux.ts:32",
+      "description": "ENVIRONMENT_ENTRY charset [A-Za-z0-9_%] silently skips legal names with - . / : (dashed bash functions, npm //registry:_authToken). Production table: 93/93 parsed, none skipped. Widen or document."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/environment.ts:161",
+      "description": "isSecretLikeName (second line of defence) misses *_KEY that is not _API_KEY (ENVOY_TAILSCALE_OAUTH_CLIENT_KEY is in the production daemon env), *_CREDENTIALS, *_PASSWD, *_PAT, lowercase. Allow-list keeps paneEnv clean regardless; scrubGitHubCredentials in a pane relies on it alone."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/index/hotspots.ts:19",
+      "description": "jj child now inherits full process.env, but CodebaseIndexManager has no daemon caller (dead code). Delete the module or pass a minimal env; drop the AGENTS.md:167 'with the codebase index's jj log' clause."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/AGENTS.md:257",
+      "description": "'no kill-server is needed' is true for inheritance only. The running server process keeps its fork-time environ (/proc/2023008/environ on production still carries both App key names, readable by any same-uid process), as do pre-upgrade panes. Add: only kill-server or the key rotation (acceptance 5) revokes already-handed-out material. Same sentence for the PR body's Deployment step 2."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md:104",
+      "description": "Garbled rule sentence; split in two."
+    }
+  ],
+  "spec": "dispatch_doc_read LEGION-74 v6; acceptance 1, 2, 4, 6, 7, 8 judged in scope; 3 and 5 post-release; secretsd agent-tier readability, LEGION-76 new-session race, tmux.conf set-environment -g on a fresh server out of scope per the assignment.",
+  "verifiedAgainstGitHub": {
+    "ci": "Tests green at 7154712f09ed (34746510981/34746510454) and at 2d61ef5b817b (34748113143/34748080059); ec196bad red run was #991's fixture vs the merge commit (pre-rebase).",
+    "threads": "0 before this review; 9 opened by it, all non-blocking, none resolved yet (the implementer resolves after Accepted: replies).",
+    "e2e": "PR body E2E and .legion/test.json agree: rig sjawhar/740 (stale hand-forked server, 133 names scrubbed), sjawhar/741 (daemon-forked, no scrub line, CHECKPOINT 13 OK), every pane/omp child grep -c -> 0; negative control production legion-37 %159 -> 2."
+  },
+  "thermo": {
+    "deep": "code paths sound; rated the 'no kill-server' doc claim blocking because /proc/<old server pid>/environ still carries the keys — downgraded by me to a deployment/doc note: same-uid /proc readability is the class the spec's Rejected section and the re-filed secretsd item accept, and acceptance 5 (rotation) is the revocation; the scrub was the spec's explicit choice over kill-server.",
+    "quality": "non-blocking only: paneEnvironment naming (returns the pre-PATH intermediate), resolveOmpInvocation taking two env positionals, undefined as the global-table sentinel, two suites pinning the exact -u write order, AGENTS.md enumerating all 45 names verbatim (drift risk), garbled docs sentence."
+  },
+  "ownReview": {
+    "allowList": "45 names, all identity/locale/dirs/profile/mise/proxy-CA/PATH; none credential-shaped; operator-private ones are same-uid-derivable paths. mise env --json runs under allowedDaemonEnvironment(env) so a mise template cannot read a daemon secret; merged object re-filtered, so mise output cannot reintroduce one. mise on this box emits AGENT_EVAL_VERSION CARGO_HOME GOBIN GOROOT PATH RUSTUP_HOME RUSTUP_TOOLCHAIN; regex drops none.",
+    "boundary": "Every spawn/Bun.spawn/spawnSync/runner call in packages/daemon/src audited: only config.ts:538 private_key_command gets process.env (on purpose); CI fetcher, GitHubService, catch-up use buildRoleEnv(.., paneEnv); createDaemonRunner spreads paneEnv under options.env; boot-probes pass no env; cli/* spawns are pane-side; hotspots.ts is dead.",
+    "scrub": "Every argv is tmux -L legion-<project>; socket == session; TMUX not in paneEnv and -L overrides it — cannot reach the operator's default server. set-environment -u edits the table only; running panes untouched (exec-time copy). Log is names only. Failures throw into the await-probes try -> stop() -> startDaemon rejects. Verified live on tmux 3.7c on a scratch -L server (killed after): NO_SERVER_STDERR matches both no-server shapes; 'no such session: X' matches startsWith; -u on a missing name and on BASH_FUNC_x%% exit 0; set-option -t S update-environment '' empties the session option; fresh session table = -NAME markers only; tmux writes exactly PWD/SHLVL. Ran the parser against the production server's tables (names only): 93 global names parsed, 0 skipped, 3 BASH_FUNC__aws%% continuation lines none of which looks like NAME=, -DISPATCH_TOKEN/-GH_*_PRIVATE_KEY_B64 markers skipped; session table SSH_AUTH_SOCK SSH_CONNECTION; update-environment unset (inherits default). This boot on production removes 66 global names + 2 session names and keeps AGENT_EVAL_VERSION CARGO_HOME GOBIN GOROOT HOME LANG LC_* MISE_DATA_DIR OMP_PROFILE PATH PWD RUSTUP_* SHELL SHLVL TERM TMUX_TMPDIR USER XDG_RUNTIME_DIR. Ordering: index.ts:697 after await probes, before enableLaunches (:722); nothing above the hold forks a server.",
+    "ompInvocationSplit": "LEGION_OMP_PATH read from the daemon env via configuredPath(env, 'omp'); mise where under paneEnv; environment.test.ts covers both (LEGION_OMP_PATH honoured; mise where env toEqual(paneEnv)).",
+    "tests": "Acceptance-1 test is the spec's scenario with exact toEqual on paneEnv and on the tmux new-session runner env — fails on any strip-list or wildcard. Both probes toEqual(paneEnv). Scrub tests: -u only for disallowed names, markers/function bodies skipped, no-server/no-session -> nothing, names-only log. Deleted config.test.ts strip test defended a behaviour reversed by design; nothing undefended (the private_key_command child is the operator's own key reader; a wrong env there fails boot loudly).",
+    "docs": "AGENTS.md states the allow-list rule, names all 45 variables (count matches code), covers both tables + update-environment, says a plain restart suffices; the kill-server clause needs the precision noted above. docs/solutions edits accurate bar one garbled sentence."
+  },
+  "deploymentNote": "Production omp_launch_prefix already supplies OMP_PROFILE=legion and the three provider keys via secrets, so panes lose nothing they need. They do lose operator-shell extras they inherited by accident (ANTHROPIC_1M_CONTEXT, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, CLAUDE_CONFIG_DIR, MNEMOPI_*_WEIGHT, OPENCODE_GITHUB_REPO, BROWSER, MISE_SHELL, __MISE_*, npm_*): the pinned OMP build reads none of ANTHROPIC_1M_CONTEXT/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS/OPENCODE_GITHUB_REPO; MNEMOPI_* and CLAUDE_CONFIG_DIR are read somewhere in the install — if wanted in panes they belong in omp_launch_prefix's env step, not the allow-list. The server process pid 2023008 and pre-upgrade panes keep the old key material until kill-server; rotation (acceptance 5) is the revocation.",
+  "prBodyEdits": "Thermo line updated by me at 09:12Z (PATCH /pulls/1007). Still needed from the implementer, no commit required: Deployment step 2 sentence on the server process environ / kill-server / rotation; Fast-follow line naming the nine nits.",
+  "nextForArchitect": "Send the implementer back to push the .legion/ deletion (and make the two PR-body edits). I then review that head and APPROVE it by SHA. Nothing in the nine threads requires a code change before approval; each is answered Accepted: not a defect — fast-follow unless the implementer prefers to fix in the fast-follow PR.",
+  "reviewerSession": "01a099ec-baf9-7000-b397-e5b21462ed3b",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T09:15:31.668Z"
+}
