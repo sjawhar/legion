@@ -215,7 +215,7 @@ function workerEnvironment(launch: WorkerLaunch): Record<string, string> {
 function launchArgv(launch: WorkerLaunch, mode: "rpc" | "tui"): string[] {
   const omp = mode === "rpc" ? [launch.omp, "--mode", "rpc"] : [launch.omp];
   return launch.useSecrets
-    ? ["secrets", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", ...omp]
+    ? ["secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", ...omp]
     : omp;
 }
 

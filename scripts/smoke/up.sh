@@ -264,7 +264,7 @@ app_installation_token() {
 write_daemon_config() {
   # `-` (not `:-`) so an explicitly empty SMOKE_OMP_LAUNCH_PREFIX ("disable the prefix") is
   # preserved as empty rather than falling back to the default — only truly unset uses it.
-  local omp_launch_prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}"
+  local omp_launch_prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets GEMINI_API_KEY OPENAI_API_KEY --}"
   local omp_launch_prefix_yaml
   if [[ -z "$omp_launch_prefix" ]]; then
     omp_launch_prefix_yaml="omp_launch_prefix: []"

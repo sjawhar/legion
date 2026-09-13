@@ -23,7 +23,7 @@ Forwarding is a user-only GitHub CLI feature, so `forward` needs a user-authenti
 | `SMOKE_UPSTREAM_NATS` | Production NATS source for `envoy` mode. | `nats://envoy-nats.tailb86685.ts.net:4222` |
 | `LEGION_IMPLEMENT_APP_ID` | Numeric implementation App ID. | `3202636` |
 | `LEGION_REVIEW_APP_ID` | Numeric reviewer App ID. | `3202653` |
-| `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` |
+| `SMOKE_OMP_LAUNCH_PREFIX` | Whitespace-separated argv prefix written into the generated config's `omp_launch_prefix`, so daemon-spawned panes get provider credentials from `secretsd` instead of the daemon's own environment (see the "OMP invocation" section below). Set to an empty string to disable. | `secrets GEMINI_API_KEY OPENAI_API_KEY --` |
 
 `LEGSMOKE` must already exist on the server named by `DISPATCH_URL` before starting the rig (project creation is human-only); it is not configurable. `up.sh` creates this exercise's own root Dispatch issue inside that shared project (or reuses one already recorded under `SMOKE_DIR` from an earlier run of the same rig) and records its key at `${SMOKE_DIR}/root-issue`; checkpoints read that file (or `SMOKE_ROOT_ISSUE`, if set) rather than guessing which of the shared project's parentless issues belongs to this run.
 
@@ -75,7 +75,7 @@ The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi
 Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path when a tool cannot be discovered. `omp_invocation` must use the `mise x <tool> -- omp` form; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
 The generated configuration also sets `omp_launch_prefix` from `SMOKE_OMP_LAUNCH_PREFIX`
-(default `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --`): the daemon prepends this
+(default `secrets GEMINI_API_KEY OPENAI_API_KEY --`): the daemon prepends this
 argv to every OMP invocation it builds — root, worker, and controller panes, and the two startup
 capability probes above — so provider credentials come from `secretsd` inside the pane process
 rather than the daemon's own environment (a daemon-spawned architect otherwise has no Anthropic

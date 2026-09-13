@@ -59,9 +59,11 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 | `LEGION_STATE_DIR`, `LEGION_WORKSPACE` | `$RIG/state`, `$RIG/ws` |
 | `PATH` | `$RIG/state/bin` first |
 
-The launch argv is the daemon's own prefix, `secrets ANTHROPIC_API_KEY GEMINI_API_KEY
-OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the headless leg (`--no-secrets` drops the
-prefix when the keys are already in the environment).
+The launch argv is the daemon's own prefix, `secrets GEMINI_API_KEY OPENAI_API_KEY --
+<omp>`, plus `--mode rpc` for the headless leg (`--no-secrets` drops the prefix when the
+keys are already in the environment). No Anthropic key: the default omp profile routes
+the anthropic provider through the Hawk model gateway on the operator's own login
+(`~/.dotfiles/omp/models.yml`), so a static key in the environment would only shadow it.
 
 ## Which Oh My Pi binary
 
