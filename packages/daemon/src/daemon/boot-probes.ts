@@ -234,14 +234,16 @@ function legionPluginManifestPath(): string {
  * manifest's `legion.daemonApiVersion` must equal `LEGION_DAEMON_API_VERSION`
  * (`@legion/contracts`). The number covers two surfaces — the `LegionDaemonApi` HTTP request and
  * response shapes (2 was introduced by LEGION-20 for `stateGate`/`GatesRegister`), and the pane
- * contract (the environment variables the daemon sets on a pane that the plugin reads or writes:
- * `LEGION_GRANT_FILE` and its siblings, covered by 2 from LEGION-52); the full bump rule and the
- * contract history live in the constant's doc comment. A plugin from before an HTTP shape change
- * (or after a later one) validates every daemon response against the strict schemas it bundles
- * and fails the controller/architect boot handshake — `daemon.state()` rejects on the first
- * unknown field — with nothing in the daemon's own logs to say why; a plugin from before a pane
- * contract change never writes the credential file the daemon names, and every worker fails at
- * its first `legion gh`/`jj git push` after the work is done. This makes either skew a loud boot
+ * contract (every environment variable the daemon sets on a pane that the plugin reads or
+ * writes — the full list, the bump rule, and the contract history live in the constant's doc
+ * comment; covered by 2 from LEGION-52). A plugin from before an HTTP shape change (or after a
+ * later one) validates every daemon response against the strict schemas it bundles and fails the
+ * controller/architect boot handshake — `daemon.state()` rejects on the first unknown field —
+ * with nothing in the daemon's own logs to say why; a plugin from before a pane contract change
+ * never writes the credential file the daemon names, and every worker fails at its first
+ * `legion gh`/`jj git push` after the work is done, with `grantFrom`'s `LEGION_GRANT_FILE names
+ * <path>, which could not be read: ENOENT …: the pi-envoy extension in this pane did not write it
+ * — the installed plugin predates LEGION-54` (cli/index.ts). This makes either skew a loud boot
  * failure instead. Read on every boot: a missing or unreadable manifest, or one without the
  * field, is a refusal, never a fallback (the load probe below would report such a plugin as
  * merely "not loaded", sending the operator to `omp plugin list` when the fix is a reinstall).

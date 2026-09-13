@@ -21,18 +21,25 @@ two seconds.
 speaks (currently 2). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
-`LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `DISPATCH_TOKEN_FILE`, `DISPATCH_URL`,
-`LEGION_DAEMON_URL`, and the `LEGION_*` identity variables `classify.ts` reads. The daemon reads
-the installed manifest at boot (`verifyLegionPluginContract`,
-`packages/daemon/src/daemon/boot-probes.ts`) and refuses to start — before loading state,
-opening NATS, or serving its API — unless the field equals its `LEGION_DAEMON_API_VERSION`,
-naming the manifest path, the package version, and both numbers. A change to either surface bumps
-the field and the constant in the same commit (`src/legion/daemon-api-version.test.ts` pins them
-equal), and the deployment installs the release built from that commit before restarting the
-daemon. Contract 1 was the `runtime` locator discriminant (LEGION-21). Contract 2 was introduced
-by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from LEGION-52, also
-covers the pane contract including the credential file (`LEGION_GRANT_FILE`, LEGION-54); release
-1.23.0 is the first to declare 2.
+`LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
+`LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`, and
+the `LEGION_*` identity variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/
+`LEGION_WORKSPACE`/`LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
+`extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
+file is the one the extension writes). The same list, the bump rule, and the contract history are
+in the doc comment on `LEGION_DAEMON_API_VERSION` (`packages/contracts/src/legion-daemon-api.ts`)
+and in `packages/daemon/src/daemon/AGENTS.md`. The daemon reads the installed manifest at boot
+(`verifyLegionPluginContract`, `packages/daemon/src/daemon/boot-probes.ts`) and refuses to start
+— before loading state, opening NATS, or serving its API — unless the field equals its
+`LEGION_DAEMON_API_VERSION`, naming the manifest path, the package version, and both numbers. A
+change to either surface bumps the field and the constant in the same commit
+(`src/legion/daemon-api-version.test.ts` pins them equal), and the deployment installs the
+release built from that commit before restarting the daemon. Contract 1 was the `runtime` locator
+discriminant (LEGION-21). Contract 2 was introduced by LEGION-20 (PR #975) for the `stateGate` and
+`GatesRegister` shapes and, from LEGION-52, also covers the pane contract including the credential
+file (`LEGION_GRANT_FILE`, LEGION-54); release 1.23.0 is the first to declare 2. Releases 1.14.0
+through 1.22.2 declare 1 and are refused as `speaks daemon API contract 1`; releases before 1.14.0
+have no field and are refused as `contract none`.
 
 ## Native Dispatch tools
 
