@@ -1,0 +1,76 @@
+{
+  "summary": "LEGION-71 test phase at code head 55a042fff733 (pull request sjawhar/legion#1029): all six spec Acceptance lines PASS on independent reproduction from /tmp with the real mise on this box and six scratch negative controls, each failing the harness at the assertion that guards it; the diff touches only the four scripts/smoke/ files plus .legion/, shellcheck's finding set is identical to the base, and the code head's Tests run is green. One finding for the architect: the pull request is now CONFLICTING against main (mergeStateStatus DIRTY) because #1011 (LEGION-40) merged at 2026-09-13T12:44:09Z as 9a6708feb9cd; a read-only git merge-tree of main@origin with 55a042fff733 conflicts in scripts/smoke/up.test.sh only (README.md, checkpoints.test.sh, up.sh auto-merge), which is the plan's #1011 rebase hot spot (the source_dir restructure of up.test.sh lines 7-23). The implementer owes the conflict-forced rebase; the resolution changes up.test.sh's diff, so by the legion-worker fingerprint rule this will be a full test round, not bare gates.",
+  "verdict": "PASS on 55a042fff733; rebase due (CONFLICTING since #1011 merged) before review can approve a head.",
+  "passed": 6,
+  "failed": 0,
+  "failures": [],
+  "headTested": "55a042fff733 (code head; branch head 3d57264a94ce carries .legion/implement.json and differs from it only by that file)",
+  "acceptance": {
+    "1 mise stderr passthrough": {
+      "verdict": "PASS",
+      "harness": "up.test.sh case `a mise failure other than not-installed stops preflight on mise's own message, without the mise install remedy` PASS (fake mise SMOKE_MISE_CONFIG_ERROR); the not-installed case also asserts the `mise ERROR <pin> not installed` line reached the output.",
+      "realMiseConfigError": "mise 2026.8.10 linux-x64. `printf 'not toml [[[\\n' >/tmp/legion71-bad-mise.toml && bash -c 'source <(sed \"\\$d\" scripts/smoke/up.sh); unset LEGION_OMP_PATH; MISE_CONFIG_FILE=/tmp/legion71-bad-mise.toml resolve_omp_path'` -> exit=1; stderr: `Error loading settings file: TOML parse error at line 1, column 5` (twice, with the caret block), `mise::config::parse_error`, `× Invalid TOML in config file: /tmp/legion71-bad-mise.toml` (with the miette frame), then `error: mise where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423 failed; mise's own message is above`; `grep -c 'mise install'` = 0.",
+      "realMiseNotInstalled": "`SMOKE_OMP_PIN=github:sjawhar/oh-my-pi@0.0.0-nonexistent bash -c 'source <(sed \"\\$d\" scripts/smoke/up.sh); unset LEGION_OMP_PATH; resolve_omp_path'` -> exit=1; stderr: `mise WARN  GitHub rate limit exceeded. Resets at 2026-09-13 12:59:02 +00:00`, `mise ERROR github:sjawhar/oh-my-pi@0.0.0-nonexistent not installed`, `mise ERROR Version: 2026.8.10 linux-x64 (2026-08-20)`, `mise ERROR Run with --verbose or MISE_VERBOSE=1 for more information`, `error: OMP pin github:sjawhar/oh-my-pi@0.0.0-nonexistent is not installed (mise where failed); run: mise install github:sjawhar/oh-my-pi@0.0.0-nonexistent`; `grep -c 'mise install'` = 1.",
+      "realMiseSuccess": "installed pin, no override -> exit=0, stdout `/home/ubuntu/.mise/installs/github-sjawhar-oh-my-pi/18.1.18-sami.20260912-104423/bin/omp`, stderr empty. With TMPDIR set to a fresh empty directory, all three paths (success, config error, not installed) leave it empty afterwards: `leftover-in-TMPDIR=0`.",
+      "negativeControls": "scratch up.sh with `2>\"$mise_stderr\"` -> `2>/dev/null`: harness exit 1 after 1 PASS; the not-installed passthrough assertion (up.test.sh:266) fails and cats an output carrying only `error: mise where <pin> failed; mise's own message is above` (classification lost with the text). Scratch up.sh with `*'not installed'*` -> `*` (remedy unconditional): exit 1 after 2 PASS at `expected mise's own message and no mise install remedy; output: mise ERROR Invalid TOML in config file: /etc/mise/config.toml / error: OMP pin … is not installed (mise where failed); run: mise install …`."
+    },
+    "2 harness runs from /tmp, (set -e; …) form": {
+      "verdict": "PASS",
+      "upTest": "`cd /tmp && bash \"$LEGION_WORKSPACE/scripts/smoke/up.test.sh\"` -> exit=0, `grep -c '^PASS:'` = 17, non-PASS lines = 0.",
+      "checkpointsTest": "`cd /tmp && bash \"$LEGION_WORKSPACE/scripts/smoke/checkpoints.test.sh\"` -> exit=0, 22 PASS, non-PASS lines = 0.",
+      "downTest": "`cd /tmp && bash \"$LEGION_WORKSPACE/scripts/smoke/down.test.sh\"` -> exit=0, 3 PASS, non-PASS lines = 0.",
+      "prerequisite": "`bun install --frozen-lockfile` in the workspace: `Checked 598 installs across 696 packages (no changes)`, exit 0.",
+      "negativeControl": "scratch up.test.sh (project_root pinned to the workspace, up_script the workspace's up.sh) with the fake go heredoc `exit 0` -> `exit 1`: exit 1 after 11 PASS at `expected up.sh main() to succeed on the installed pin (exit 1); output: GREEN OMP build: …/mise-install/bin/omp (mise where <pin>)`. The unmutated scratch harness pinned the same way: exit 0, 17 PASS — the pinning itself changes nothing."
+    },
+    "3 fake-mise call log; empty-glob guard": {
+      "verdict": "PASS",
+      "callLog": "fake mise logs `$*` to SMOKE_MISE_CALL_LOG as its first statement (up.test.sh:215); the override case asserts `! -s \"$mise_call_log\"` after a valid LEGION_OMP_PATH resolution (up.test.sh:235); the pin case asserts the log equals `where <pin>` (up.test.sh:245). Negative control: scratch up.sh with `mise where \"$omp_pin\" >/dev/null 2>&1 || true` inserted at the top of the override branch -> exit 1 after 1 PASS at `a valid LEGION_OMP_PATH must not invoke mise; calls:` / `where github:sjawhar/oh-my-pi@18.1.18-sami.20260912-104423`.",
+      "emptyGlobGuard": "up.test.sh:536-541 requires start_process.{listener,daemon,envoy-bridge}.argv to exist before the `grep -l '^LEGION_OMP_PATH='` check, whose `2>/dev/null` is gone. Negative control: scratch up.test.sh with the start_process stub's argv write (`printf '%s\\n' \"${@:2}\" >\"${SMOKE_DIR}/start_process.${1}.argv\"`) deleted -> exit 1 after 11 PASS at `fixture error: main() recorded no start_process argv for listener`."
+    },
+    "4 checkpoints precedence; scratch dir hygiene": {
+      "verdict": "PASS",
+      "precedenceCase": "checkpoints.test.sh PASS line `the recorded webhook-mode file outranks an exported SMOKE_WEBHOOK_MODE in both directions` (recorded none + exported envoy -> exit 3 SKIPPED-BLOCKED; recorded envoy + exported none -> exit 1 `SMOKE_ROOT_ISSUE is unset`, no SKIPPED-BLOCKED). checkpoints.sh itself is not in the diff.",
+      "negativeControl": "scratch checkpoints.sh with stored_webhook_mode's two branches swapped (SMOKE_WEBHOOK_MODE first, the file second), scratch checkpoints.test.sh pointed at it -> exit 1 after 14 PASS at `expected the recorded none mode to outrank the exported envoy; got 1:` / `CHECKPOINT 1 FAILED: SMOKE_ROOT_ISSUE is unset and …/bare-smoke/root-issue is missing or empty …`.",
+      "hygiene": "`grep -n 'rm -rf' scripts/smoke/checkpoints.test.sh` -> `14:trap 'rm -rf \"$temporary_dir\"' EXIT` and `123:trap 'kill \"$clean_pid\" \"$planted_pid\" 2>/dev/null; rm -rf \"$temporary_dir\"' EXIT` only; `473:bare_smoke_dir=\"${temporary_dir}/bare-smoke\"`; no `bare_temporary_dir` remains."
+    },
+    "5 wording": {
+      "verdict": "PASS",
+      "onlyPlace": "up.sh:87-88 `the daemon's start_process env block in main() is the only place up.sh names it explicitly`; up.sh:679 `in the daemon's env block — the only place up.sh sets LEGION_OMP_PATH explicitly`; README.md:78 `the daemon's environment block is the only place \\`up.sh\\` names \\`LEGION_OMP_PATH\\` explicitly`; up.test.sh:573 message `up.sh names LEGION_OMP_PATH explicitly in the daemon env block only; argv files carrying it:`.",
+      "usesNotFallsBack": "README.md:126 `uses an exported \\`SMOKE_WEBHOOK_MODE\\` (\\`envoy\\`, \\`forward\\`, or \\`none\\`) when there is no record`. The only remaining `falls back` in the four files is README.md:85, about model fallback under a missing provider key — pre-existing and unrelated.",
+      "greenLine": "up.sh:622-627 prints `GREEN OMP build: <path> (LEGION_OMP_PATH override)` or `(mise where <pin>)`; README.md:78 documents both forms; both harness success cases assert the full labelled line.",
+      "noPrNumbers": "`grep -n '#[0-9]' scripts/smoke/up.sh scripts/smoke/up.test.sh scripts/smoke/checkpoints.test.sh scripts/smoke/README.md` -> no output, exit 1 (the diff removes `pre-#941` x2 and `before #971` from up.test.sh)."
+    },
+    "6 lands after #1011/#1010/#1026; T4 at open": {
+      "verdict": "PASS on the description; rebase now due",
+      "description": "`legion gh -- pr view 1029 --json title,body,mergeable,mergeStateStatus,headRefOid,statusCheckRollup`: body names `LEGION-40 (#1011…)`, `LEGION-41 (#1010…)`, `LEGION-61 (#1026…)` under **Lands after**, `rebases onto each as it lands — only when GitHub reports it CONFLICTING (Sami, 2026-09-11 …)`, `**Tier:** T4 (other / tech debt); registered with the merge queue as T4 at open`, `**Fast-follow:** none.`, `**Chain:** not stacked.`, `Dispatch: LEGION-71`.",
+      "mergeable": "mergeable=CONFLICTING, mergeStateStatus=DIRTY, headRefOid=3d57264a94ce4cb4250bf15cfd15947802a6ab53, state=OPEN, base=main.",
+      "predecessors": "#1011 MERGED at 2026-09-13T12:44:09Z (mergeCommit 9a6708feb9cd9ab0f2af4868c3f2f83854f0339c); #1010 OPEN MERGEABLE; #1026 OPEN CONFLICTING.",
+      "conflictFiles": "read-only `git merge-tree --write-tree --name-only <main@origin 9a6708feb9cd> 55a042fff733` on the shared store: `CONFLICT (content): Merge conflict in scripts/smoke/up.test.sh`; README.md, checkpoints.test.sh, up.sh auto-merge. Matches plan.rebaseHotSpots[0] (#1011 rewrites up.test.sh lines 7-23: source_file -> source_dir, copies dispatch-config.sh beside it)."
+    }
+  },
+  "noBehaviourChange": {
+    "filesInDiff": "`jj diff --from 'fork_point(main@origin | 55a042fff733)' --to 55a042fff733 --summary` (fork point 5db1957059f4): A .legion/plan.json, M scripts/smoke/README.md, M scripts/smoke/checkpoints.test.sh, M scripts/smoke/up.sh, M scripts/smoke/up.test.sh — nothing else. --stat: 4 files changed, 149 insertions(+), 58 deletions(-).",
+    "shellcheck": "shellcheck 0.11.0. `-S warning` on up.sh, up.test.sh, checkpoints.test.sh at head: only `scripts/smoke/up.sh line 22 … SC2155 (warning)`; identical at the base 5db1957059f4. At default severity the finding sets (code, count) at base and head are identical: 1x SC2086 note, 1x SC2155 warning; `diff` of the two sets is empty.",
+    "ci": "`gh api repos/sjawhar/legion/commits/55a042fff733/check-runs`: test, typecheck, lint, pr-title all status=completed conclusion=success (runs 34756988633, 34757003847, 34757072539). Branch head 3d57264a94ce rollup: run 34757100781, all four SUCCESS."
+  },
+  "observations": [
+    "FINDING FOR THE ARCHITECT: pull request #1029 is CONFLICTING against main since #1011 (LEGION-40) merged at 12:44:09Z; conflict in scripts/smoke/up.test.sh only. The implementer owes the conflict-forced rebase (`jj rebase -s 'roots(main@origin..@)' -d main@origin`, plan.rebaseHotSpots[0]: put the repo_root pin into #1011's `sed '$d' \"$up_script\" >\"${source_dir}/up.sh\"` and read the fixture grep from `${source_dir}/up.sh`), then the fingerprint comment. Since the resolution edits up.test.sh, the fingerprint at 55a042fff733 and at the new head will differ -> a full test round from me, not bare gates.",
+    "#1026 (LEGION-61) is itself CONFLICTING; #1010 (LEGION-41) is MERGEABLE. Both still open; this PR lands after both, so at least one more conflict-forced rebase is likely once they merge (plan.rebaseHotSpots[1..2] name the lines).",
+    "The PR body's E2E section was replaced with the tester's own evidence (this run), including the failing-go negative control and the five further scratch controls; the CI, Threads, Thermo, Fast-follow and Chain lines were left as the implementer wrote them.",
+    "Every mutation for the negative controls lived under /tmp/legion71-ctl (script: /tmp/legion71-ctl/run-controls.sh; log: /tmp/legion71-ctl/controls.log); `jj diff --from 55a042fff733 --to @ -- scripts/` was empty after the runs — the pushed head was not edited.",
+    "The branch's diff from main@origin (not the fork point) shows ~40 files because main moved (#1011 and others); the fork point 5db1957059f4 is the right base for the four-files claim, and the legion-worker fingerprint recipe uses fork_point for the same reason.",
+    "Working copy carries an untracked, empty .omp/config.yml the extension provisions; not committed."
+  ],
+  "documentationFeedback": "README.md:78 and :126 read correctly for an operator; no change requested. The one leftover `falls back` (README.md:85) is about model fallback, not the webhook mode, and is outside this batch.",
+  "environment": "Linux 7.0.0-1011-aws x64; bash harnesses run from /tmp; mise 2026.8.10 linux-x64 (2026-08-20); shellcheck 0.11.0; bun 1.3.14; jj workspace at $LEGION_WORKSPACE, fork point 5db1957059f4.",
+  "learningsInjected": [
+    "docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md",
+    "docs/solutions/legion/worker-pane-shell-gotchas.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/legion/worker-pane-shell-gotchas.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T12:57:19.162Z"
+}
