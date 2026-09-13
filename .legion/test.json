@@ -1,0 +1,38 @@
+{
+  "passed": 8,
+  "failed": 0,
+  "failures": [],
+  "headSha": "85b6e098fed88d918f7e60cd46e46e65e8679944",
+  "codeHeadSha": "7924c7f1256fab1802aada6f6375c0a2fadf471f",
+  "spec": "dispatch://LEGION-57/spec v4",
+  "report": "dispatch://LEGION-57/artifact/tester-report-md",
+  "verdicts": {
+    "1": "PASS: reducers.test.ts child-todo-under-live-root test is red on main's reducers.ts, green on the branch; rig child LEGSMOKE-2 at todo left trees=[LEGSMOKE-1], queue=[]",
+    "2": "PASS: orphan test (no parent tree, lingering, closed) red on main, green on branch; probes: grandchild under active root owned, grandchild under lingering child tree is an orphan naming the child tree, grandchild under queued child tree owned, parentless todo admits with no log",
+    "3": "PASS: processes.test.ts spawn + shadowing tests (both also pass on main: regression locks, the bug is in the reducer); rig sub-architect pane env LEGION_TREE=LEGSMOKE-1 LEGION_ISSUE=LEGSMOKE-2 LEGION_ROLE=architect, claim with locator @3/%4, role held on rig listener",
+    "4": "PASS: index.test.ts boot case + reducers.test.ts own-tree linger red on main, green on branch; probes: dead child tree left alone, queued child+grandchild both removed, active-with-locator and orphan left alone, closed child with queued legacy tree lingers nothing; rig: removed-at-boot log line, persisted trees/queue repaired, no Dispatch write",
+    "5": "PASS with observation: one child-adopted per removed child in the unit test and on the rig (12:31:44Z, 17 s after boot); on the rig it was routed by routeActive to the root's active planner, not the architect; deployment parents LEGION-19/LEGION-12 have no active phase so their architects get it",
+    "6": "PASS: PR diff of packages/daemon/src/daemon/AGENTS.md and skills/legion-architect/SKILL.md carries the admission invariant, /worker/spawn and /phase/complete notes, Release-admits-nothing paragraph, child-adopted and child-status rows",
+    "7": "PASS: api.test.ts writes-once / writes-again-after-human-todo / testing-advance red on main, green on branch; probes: planner spawn on child at todo writes nothing, root architect spawn is 400 with no write; rig Dispatch LEGSMOKE-2 todo 12:28:45Z -> in_progress 12:28:50Z on the sub-architect spawn",
+    "8": "PASS: CHECKPOINT 4 OK: released child LEGSMOKE-2 has no tree or admission entry of its own; its architect runs as a worker pane of LEGSMOKE-1 and Dispatch reports it in_progress; checkpoints 1-3 OK; negative controls: checkpoint 4 before any child -> FAILED naming the missing claim (exit 1); checkpoints.test.sh 23 PASS incl. the two LEGION-57 negatives"
+  },
+  "redGreen": "branch tests vs main's six source files in a scratch copy: 7 fail (new tests for lines 1,2,4,5,7) / 443 pass; at head 450 pass, 3 skip, 0 fail",
+  "rig": {
+    "mode": "SMOKE_WEBHOOK_MODE=none SMOKE_DISPATCH_INGRESS=rig (scratch Dispatch built from this checkout publishing into the rig NATS); deviation from the requested envoy mode because a sibling envoy-mode rig (LEGION-60) was live against the shared LEGSMOKE project and the daemon filters Dispatch events only by project prefix",
+    "smokeDir": "/tmp/legion57-smoke",
+    "rootIssue": "LEGSMOKE-1 (scratch Dispatch)",
+    "child": "LEGSMOKE-2",
+    "tornDown": true
+  },
+  "observations": [
+    "child-adopted (boot repair and the reducer's existing issue.created wake) is routed via routeActive, which prefers the root's active phase worker over its architect; observed on the rig going to the planner at 12:28:29Z and 12:31:44Z; only an architect can act on it; deployment parents have no active phase so unaffected; architect's call whether to publish straight to the architect token",
+    "LEGION-39 flake seen once: sub-architect worker/ready assignment delivery timed out on the 5 s shim connect under load ~126 on 32 cores; the boot watchdog retired and respawned it with --resume",
+    "pre-existing doc nit: state.phases[LEGSMOKE-2].phase = architect after the sub-architect's assignment, while daemon AGENTS.md says an architect is never phases[issue].phase",
+    "checkpoint 4's single-issue fallback labels a decomposed tree '(single-issue tree)' when a phase worker runs on the root and a released child has no sub-architect yet; the no-child-tree assertion still runs unconditionally",
+    "processes.test.ts's two new tests also pass on main: regression locks for the spawn path, not bug catchers (the bug is in the reducer, covered by reducers.test.ts)"
+  ],
+  "documentationFeedback": "Docs match the spec. Consider correcting the AGENTS.md idle-retire sentence that an architect is never phases[issue].phase (a sub-architect is, once its assignment is delivered).",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-13T12:45:45.904Z"
+}
