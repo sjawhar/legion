@@ -2,18 +2,24 @@
   "pr": {
     "number": 1007,
     "url": "https://github.com/sjawhar/legion/pull/1007",
-    "codeHead": "a7fc38173755a59bffc59214a91e08f6f0c21efa",
+    "codeHead": "6340d6eb79fd1f867c9aefab1ec7f9fc5f609418",
     "reviewRoundFix": "02b5257192e78f9af8bbee5f3b0c8fdf8f10856e",
     "reviewRoundDocs": "96248aad7046022e0184bafd4fcd3a4603c1612c",
     "handoffHead": "the `implement: record handoff` commit pushed after CI went green at the code head",
     "base": "main@origin d042dc77f689 (post-#1029; rebased a fourth time when GitHub reported CONFLICTING; fingerprint 2888e52c… unchanged, posted at https://github.com/sjawhar/legion/pull/1007#issuecomment-5654045173)",
-    "ci": "run 34764249511 — lint, pr-title, typecheck, test all pass at code head a7fc38173755 (https://github.com/sjawhar/legion/actions/runs/34764249511)",
+    "ci": "run 34768265270 — lint, pr-title, typecheck, test all pass at code head 6340d6eb79fd (https://github.com/sjawhar/legion/actions/runs/34768265270); previous code head a7fc38173755 passed run 34764249511",
     "tier": "T1 (live credential exposure / deploy correctness)",
     "cleanupRound": "ef9116b6a64c",
     "reviewRound2Fix": "0bee94f8ecdc",
-    "reviewRound3Fix": "a7fc38173755a59bffc59214a91e08f6f0c21efa"
+    "reviewRound3Fix": "a7fc38173755a59bffc59214a91e08f6f0c21efa",
+    "reviewRound4Fix": "6340d6eb79fd1f867c9aefab1ec7f9fc5f609418"
   },
   "commits": [
+    {
+      "sha": "6340d6eb79fd",
+      "title": "fix(daemon): the show-environment -s scanner decides marker or entry by structure, never by the `unset ` prefix (LEGION-74)",
+      "tasks": "review round 4 residual (no thread): marker rule by structure; parser tests for the `unset X` entry and the `;`-less marker"
+    },
     {
       "sha": "a7fc38173755",
       "title": "fix(daemon): scrub the tmux environment tables from a whole-text `show-environment -s` parse",
@@ -124,16 +130,15 @@
     "[smoke] scripts/smoke/checkpoints.sh (checkpoint 13: fixed names + SMOKE_CANARY_ENV)",
     "[smoke] scripts/smoke/checkpoints.test.sh (planted App key, canary-only pid, SMOKE_CANARY_ENV gating)",
     "[smoke] scripts/smoke/README.md (row 13; 'Pane-environment proof' recipe incl. the hand-forked stale server and its two consequences)",
-    "[tests] tmux.test.ts (environmentNames -g/-t argv + parsing incl. -NAME markers, bash-function continuation lines, %% names, fresh-session marker-only table, 'no such session' -> undefined; unsetEnvironment both tables; disableEnvironmentUpdates argv; openWindow sets the option after new-session and before new-window, never on an existing session)",
     "[tests] runtime-tmux.test.ts (both tables: -u only for disallowed names, -t <session> forms, option set on an existing session; fresh server -> option only; no server -> nothing; server without the session -> global only)",
     "[tests] runtime.contract.test.ts + processes.test.ts (exact spawn argv now includes set-option -t legion-omp update-environment '' between new-session and the owner marker)",
     "[tests] processes.test.ts:4072 (#991's workerCatchup fixture gets baseEnv: {} — the semantic conflict that made the merge commit fail typecheck)",
     "[review round 02b5257192e7] tmux.ts (ENVIRONMENT_ENTRY widened; failure() stderr-only; disableEnvironmentUpdates → boolean; disableEnvironmentUpdatesArgs; openWindow chains new-session ; set-option; PANE_GONE_STDERR built on NO_SERVER_STDERR), runtime-tmux.ts (Object.hasOwn exemptions; disable before read; no server → return), environment.ts (isSecretLikeName widened, case-insensitive), src/index/ deleted (6 modules, 5 tests), tests: tmux.test.ts, runtime-tmux.test.ts, environment.test.ts, runtime.contract.test.ts, processes.test.ts",
     "[review round 96248aad7046] daemon AGENTS.md (predicate list; codebase-index clause dropped; retention sentence; ordering/chaining/own-property notes), docs/solutions/daemon/config-env-keys-that-panes-also-carry.md (rule split), docs/solutions/daemon/codebase-index-file-placement.md (removal note)",
-    "[daemon] packages/daemon/src/daemon/tmux.ts (round 3: parseShellEnvironment + environmentNames over `show-environment -s`; environmentCandidates/environmentHas deleted; unsetEnvironment escapes a trailing `;`; tableName)",
     "[daemon] packages/daemon/src/daemon/runtime-tmux.ts (round 3: scrubServerEnvironment names from the parser only; post-scrub re-list and invariants)",
     "[daemon] packages/daemon/src/daemon/AGENTS.md (round 3: runSecretsGet env clause; two key-reader children; scrub paragraph for -s, `\\;`, invariants)",
-    "[tests] tmux.test.ts / runtime-tmux.test.ts / index.test.ts (round 3: -s fakes that apply -u, reviewer's cases, invariants, blanket runners answer tmux with an empty table)"
+    "[daemon] packages/daemon/src/daemon/tmux.ts (round 3: parseShellEnvironment + environmentNames over `show-environment -s`; environmentCandidates/environmentHas deleted; unsetEnvironment escapes a trailing `;`; tableName. round 4: marker-vs-entry decided by structure)",
+    "[tests] tmux.test.ts / runtime-tmux.test.ts / index.test.ts (round 3: -s fakes that apply -u, reviewer's cases, invariants, blanket runners answer tmux with an empty table; round 4: `unset X` entry and malformed-marker cases)"
   ],
   "verification": {
     "unit": "Review round 2, at code head 0bee94f8ecdc (rebased onto post-#1017 main): bun test packages/daemon 1188 pass / 7 skip / 0 fail; bunx tsc --noEmit clean; biome check --error-on-warnings src/ clean; bash scripts/smoke/checkpoints.test.sh 23 PASS (#1017 added cases). CI run 34756544036 all green.",
@@ -312,7 +317,19 @@
     "threadsResolve": "left open ×3 — newest reply by legion-implementer is not an acceptance (awaiting the reviewer's Accepted:).",
     "deploymentNote": "PR body Deployment step 2 now says the rotation that would revoke already-handed-out material is deferred to the Kubernetes cutover under LEGION-19 (Sami 2026-09-13: 'Wait for Kubernetes'); no rotation step in this PR."
   },
+  "reviewRound4": {
+    "review": "https://github.com/sjawhar/legion/pull/1007#pullrequestreview-5191216456 (COMMENTED, no blocking finding at a7fc38173755; round 3's three threads Accepted:, resolved by `legion threads resolve`: r3999261560, r3999802780, r3999802783)",
+    "residual": {
+      "finding": "parseShellEnvironment's marker branch tested `startsWith(\"unset \")` before looking for `=` and skipped to the next `;\\n`: (a) a set entry literally named `unset X` (`unset X=\"v\"; export unset X;`, settable via set-environment or a crafted envp, never by a shell) was consumed as a marker — silently kept in the server, in neither kept nor dropped; (b) a marker line missing its `;` (`unset GONE\\n`) swallowed the entry after it.",
+      "became": "Marker or entry is decided by structure: the line from the cursor to its newline is a marker only when it starts `unset `, contains no `=` (a set entry always has `NAME=\"` on its first line), ends with `;`, has a non-empty NAME, and is followed by a newline; an `unset `-prefixed line without `=` that fails any of those is `malformed unset marker at byte N` (content-free); every other line must parse as a set entry or fail as before. tmux.ts doc comment states the rule.",
+      "commit": "6340d6eb79fd",
+      "tests": "tmux.test.ts: `unset X=\"v\"; export unset X;` → [\"unset X\"]; a marker, an `unset X` entry with a multi-line value whose first line ends in `;`, and a plain entry → [\"unset X\", \"A\"]; `unset GONE\\nA=\"leaked-value\"; export A;` → malformed unset marker at byte 0, message free of `leaked` and `GONE`; `unset X;` (no newline), `unset ;`, `unset X` each throw the same at byte 0.",
+      "realTmux": "scratch 3.7c server (killed after): `set-environment -g 'unset X' 'v;'` prints `unset X=\"v;\"; export unset X;` and the real parser names `unset X`; 159 entry lines → 159 names."
+    },
+    "gates": "tsc 0, biome --error-on-warnings 0, bun test packages/daemon 1200 pass / 7 skip / 0 fail; CI run 34768265270 green; PR MERGEABLE; no rig run (parser-only, per the architect).",
+    "notPushed": ".legion/ deletion — follows the tester's gates round as its own spawn."
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T15:02:23.223Z"
+  "completed": "2026-09-13T16:22:06.242Z"
 }
