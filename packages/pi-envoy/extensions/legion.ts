@@ -166,6 +166,134 @@ function isSingleLegionCommand(command: unknown): boolean {
   return trimmed.split(/\s+/, 1)[0] === "legion";
 }
 
+// Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
+// operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
+// every tree at once (LEGION-45: one worker's `jj undo` rewrote nine of another tree's commits).
+// The tool_call hook refuses them in every phase-worker pane. `restore`/`revert` are operation-log
+// commands only under `op`/`operation`; `jj restore <paths>` is file-level and stays allowed.
+const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
+const JJ_OP_WORDS = ["op", "operation"];
+const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
+const JJ_MENTION = /\bjj\b/;
+// Any non-word run between `op` and `restore`, so `"op", "restore"` in an argv literal counts.
+const JJ_LOG_REWRITE_MENTION = /\b(?:undo|abandon)\b|\b(?:op|operation)\b\W+(?:restore|revert)\b/;
+
+/** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`
+ * code, a `hub` process start, a quoted shell word, and a `bash` command with unbalanced quoting:
+ * the blocked words `text` mentions together with `jj` (e.g. `undo`, `op restore`), or undefined. */
+function jjLogRewriteMention(text: string): string | undefined {
+  if (!JJ_MENTION.test(text)) return undefined;
+  const match = JJ_LOG_REWRITE_MENTION.exec(text);
+  return match === null ? undefined : match[0].replace(/\W+/g, " ");
+}
+
+interface ShellWord {
+  readonly text: string;
+  /** False when every character came from inside quotes or a backslash escape (`"undo"`), so a
+   * quoted message word is never taken for a subcommand; `un"do"` and `un\do` are still bare. */
+  readonly bare: boolean;
+}
+
+/** Splits a shell command into simple commands (at `;`, `&`, `|`, newline, `(`, `)`, and
+ * backtick) of words, honouring single quotes, double quotes, and backslash escapes. A word's
+ * text is its unquoted value. Undefined on an unterminated quote: the caller then applies the
+ * plain-text rule to the whole command, never allows it. Not a shell parser -- no expansions, no
+ * heredoc awareness -- and every gap errs toward refusing (a heredoc body is read as commands). */
+function splitShellCommands(command: string): ShellWord[][] | undefined {
+  const commands: ShellWord[][] = [];
+  let words: ShellWord[] = [];
+  let text = "";
+  let unquotedChars = 0;
+  let inWord = false;
+  let quote: '"' | "'" | undefined;
+  const endWord = (): void => {
+    if (inWord) words.push({ text, bare: unquotedChars > 0 });
+    text = "";
+    unquotedChars = 0;
+    inWord = false;
+  };
+  const endCommand = (): void => {
+    endWord();
+    if (words.length > 0) commands.push(words);
+    words = [];
+  };
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command.charAt(i);
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else if (quote === '"' && char === "\\" && i + 1 < command.length) {
+        i += 1;
+        text += command.charAt(i);
+      } else text += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      inWord = true;
+    } else if (char === "\\") {
+      if (i + 1 < command.length) {
+        i += 1;
+        text += command.charAt(i);
+        inWord = true;
+      }
+    } else if (char === " " || char === "\t") {
+      endWord();
+    } else if (";&|\n()`".includes(char)) {
+      endCommand();
+    } else {
+      text += char;
+      unquotedChars += 1;
+      inWord = true;
+    }
+  }
+  if (quote !== undefined) return undefined;
+  endCommand();
+  return commands;
+}
+
+/** The first thing in a `bash` command that would rewrite the shared jj operation log, named for
+ * the refusal, or undefined. Each simple command is judged on the whole argument list after its
+ * first bare `jj` (or `.../jj`) word -- never only the first word after it -- so `jj -R <path> undo`,
+ * `jj --at-op <id> op restore <id>`, and `jj operation restore` count, in any position of a
+ * pipeline or `&&` chain; a bare `undo`/`abandon` counts even as an unquoted message word, and
+ * `restore`/`revert` count only beside a bare `op`/`operation`. Every quoted word is held to the
+ * plain-text rule too (`sh -c "jj undo"`), and so is the whole command when it does not tokenise. */
+function jjLogRewriteInvocation(command: string): string | undefined {
+  const commands = splitShellCommands(command);
+  if (commands === undefined) {
+    return jjLogRewriteMention(command) === undefined ? undefined : command.trim();
+  }
+  for (const words of commands) {
+    const quoted = words.find((word) => !word.bare && jjLogRewriteMention(word.text) !== undefined);
+    if (quoted !== undefined) return quoted.text;
+    const jj = words.findIndex(
+      (word) => word.bare && (word.text === "jj" || word.text.endsWith("/jj"))
+    );
+    if (jj === -1) continue;
+    const args = words.slice(jj + 1).flatMap((word) => (word.bare ? [word.text] : []));
+    const rewritesLog =
+      args.some((arg) => JJ_LOG_REWRITE_WORDS.includes(arg)) ||
+      (args.some((arg) => JJ_OP_WORDS.includes(arg)) &&
+        args.some((arg) => JJ_OP_LOG_REWRITE_WORDS.includes(arg)));
+    if (rewritesLog)
+      return words
+        .slice(jj)
+        .map((word) => word.text)
+        .join(" ");
+  }
+  return undefined;
+}
+
+/** What a phase worker's `bash` call would run against the shared operation log, or undefined.
+ * (Step 5 widens this to `eval` code and `hub` input.) */
+function jjLogRewriteAttempt(toolCall: ToolCallEvent): string | undefined {
+  const { toolName, input } = toolCall;
+  if (toolName === "bash" && typeof input.command === "string") {
+    return jjLogRewriteInvocation(input.command);
+  }
+  return undefined;
+}
+
 // Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
 // verifyLegionPluginLoaded) to prove this extension actually loaded from an
 // ambient installed-plugin discovery -- not just that a manifest file exists,
@@ -643,6 +771,20 @@ export default function legionExtension(pi: PiApi): void {
         MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
       ) {
         return { block: true, reason: "the merger only verifies and reports" };
+      }
+      // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
+      // one clone). Refused before it runs and before any grant is minted for it.
+      const jjAttempt = jjLogRewriteAttempt(toolCall);
+      if (jjAttempt !== undefined) {
+        return {
+          block: true,
+          reason:
+            `refused \`${jjAttempt}\`: jj undo, jj abandon, and jj op restore/revert/abandon/undo ` +
+            "rewrite the jj operation log, which every Legion issue workspace shares (each is a jj " +
+            "workspace of one clone), so they rewrite other trees' commits too. Recover forward with " +
+            "a new commit or `jj restore <paths>` of files; anything else, stop and send the owning " +
+            'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
+        };
       }
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")

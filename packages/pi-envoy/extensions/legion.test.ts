@@ -1774,6 +1774,78 @@ describe("Legion OMP extension", () => {
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
   });
+  test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_jj_log",
+      requests,
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-jj-log", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    const mints = (): number =>
+      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mintsBefore = mints();
+    // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,
+    // unquoted-message-word, and unterminated-quote (plain-text fallback) cases.
+    const refused = [
+      "jj undo",
+      'jj -R "$LEGION_WORKSPACE" undo',
+      "cd ws && jj undo",
+      "jj op restore 63461aba",
+      "jj op abandon",
+      "jj op revert",
+      "jj abandon",
+      "jj --repository p undo",
+      "jj operation restore 63461aba",
+      "jj op undo",
+      "jj op log -n 1 | head -1 | xargs jj op restore",
+      "jj --at-op 805478f4 op restore 805478f4",
+      "jj describe -m undo this",
+      "sh -c 'jj -R ws undo'",
+      "(cd ws && jj abandon)",
+      "cd ws\njj -R . undo",
+      "env JJ_CONFIG=/x /usr/local/bin/jj undo",
+      'jj un"do"',
+      "jj -R \"$LEGION_WORKSPACE\" describe -m 'undo",
+    ];
+    const allowedByMistake: string[] = [];
+    for (const command of refused) {
+      const result = await toolCall(
+        { toolName: "bash", toolCallId: `call-jj-log-${command}`, input: { command } },
+        context
+      );
+      const blocked =
+        typeof result === "object" && result !== null && "block" in result && result.block === true;
+      if (!blocked) allowedByMistake.push(command);
+    }
+    expect(allowedByMistake).toEqual([]);
+    // A refused command never mints a grant: nothing ran, so nothing ran under one.
+    expect(mints()).toBe(mintsBefore);
+    // The refusal names the command, says the log is shared by every issue workspace, and gives
+    // the recovery rule (new commit, or jj restore of files; otherwise the architect).
+    const result = await toolCall(
+      {
+        toolName: "bash",
+        toolCallId: "call-jj-log-named",
+        input: { command: 'jj -R "$LEGION_WORKSPACE" undo' },
+      },
+      context
+    );
+    for (const phrase of [
+      "jj -R $LEGION_WORKSPACE undo",
+      "every Legion issue workspace shares",
+      "new commit",
+      "jj restore <paths>",
+      "architect",
+    ]) {
+      expect(result).toEqual({ block: true, reason: expect.stringContaining(phrase) });
+    }
+  });
   test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
