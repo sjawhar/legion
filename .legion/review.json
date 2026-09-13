@@ -1,0 +1,36 @@
+{
+  "summary": "Clean round. Reviewed PR #1086 at head 232dc82f0f546e237d91a274ec014265a789d7e9: no correctness findings, zero review threads, both E2E lines present and grounded (implementer at 8c7a1d1f, tester at 232dc82f), CI green at the head with the new Test envoy plugin step between Typecheck and Pack, the diff from the fork point is exactly the two spec files plus .legion/, and every one of the fourteen required-argument lists matches the contract. Submitted one COMMENT review (5195839937) at that head because it still carries .legion/; the only remaining work is the implementer's .legion/ deletion push, which I then approve by SHA.",
+  "verdict": "approved",
+  "reviewEvent": "COMMENT",
+  "reviewId": 5195839937,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1086#pullrequestreview-5195839937",
+  "reviewedHead": "232dc82f0f546e237d91a274ec014265a789d7e9",
+  "approvalPending": "APPROVE is reserved for the head that differs from 232dc82f by the .legion/ deletion alone; the implementer pushes it, I confirm the diff and approve it by SHA. No thread to resolve: none were opened.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": {
+    "ci": "Legion Envoy and Contracts run 34824035311 at 232dc82f: conclusion success; job envoy-plugin 103911954625 steps 5 Lint envoy plugin, 6 Typecheck envoy plugin, 7 Test envoy plugin, 8 Pack envoy plugin all success in that order; step 7 log shows `$ bun test`, `bun test v1.4.2`, dispatch-tools.test.ts (pass). Tests run 34824035300 lint/typecheck/test pass; PR Title pass; six path-filtered jobs skipped. mergeable MERGEABLE, no rebase.",
+    "threads": "reviewThreads.totalCount 0 over GraphQL before and after my review (comments[] was empty).",
+    "e2e": "Both lines present in the PR body: implementer at 8c7a1d1f (direct parent of the head) and tester at 232dc82f, each with surface (root Bun runner with Dispatch variables scrubbed; the PR's own Actions run for acceptance 3), command, observation, and a negative control that failed naming the tampered entry.",
+    "diff": "jj diff --from 'fork_point(main@origin | 232dc82f)' --to 232dc82f --summary: M .github/workflows/envoy-and-contracts.yaml, M packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts, A .legion/plan.json, A .legion/implement.json. Fork point a197cdc0. No production code.",
+    "requiredArguments": "All 14 map entries equal the non-.optional() fields of the matching dispatchToolSpecs entry in packages/contracts/src/dispatch-tools.ts, in declaration order: dispatch_issue [project,title]; dispatch_ask [question]; dispatch_edit_ask [ask]; dispatch_resolve_ask [ask,kind,reason]; dispatch_comment [body]; dispatch_suggest [quote,replace_with]; dispatch_message [issue,body]; dispatch_doc_edit [ops]; dispatch_doc_read []; dispatch_request_approval []; dispatch_artifact [name]; dispatch_read []; dispatch_search [query]; dispatch_open_asks []. Map typed Record<string, readonly string[]>, not exhaustive. server.ts:176 registers via for..of dispatchToolSpecs so name order matches; no other dispatch_-prefixed tool in the plugin.",
+    "workflow": "Step matches sibling Test contracts step shape and key order, sits between Typecheck and Pack, gated by the plugin path filter (packages/envoy-plugin/**), no continue-on-error.",
+    "local": "At the workspace tip (test file identical to head): env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test packages/envoy-plugin/src/__tests__/dispatch-tools.test.ts -> 1 pass, 0 fail, 32 expect() calls; bun run lint -> Checked 14 files, No fixes applied; bun run typecheck -> exit 0."
+  },
+  "thermo": {
+    "head": "232dc82f0f546e237d91a274ec014265a789d7e9",
+    "substitution": "task(agent=\"thermonuclear-deep-review\") and task(agent=\"thermonuclear-code-quality\") both failed preflight: Unknown agent; available scout, reviewer, security-reviewer, task, sonic. Root cause: ~/.omp/profiles/legion/agent/agents (and hooks, prompts) are symlinks into /home/ubuntu/.dotfiles, unreadable by the legion user (Permission denied; /home/ubuntu is ubuntu:ubuntu 750). Filed LEGION-151. The identical two briefs ran on the built-in reviewer agent.",
+    "deepReview": "No blocking findings, confidence 0.95: all 14 required lists match in order; names assertion sound; map covers 14/14; toBeDefined precedes registered.args; finally block byte-identical to pre-change; CI step correctly shaped and gated.",
+    "codeQuality": "No blocking findings, confidence 0.93: Record<string, T> annotated-const is the repo idiom; Biome conventions met; step shape identical to Test contracts / Test Claude Envoy plugin; no Build contracts prerequisite needed (@legion/contracts exports bun -> ./src/index.ts). One wording-only note carried as the Fast-follow."
+  },
+  "fastFollow": "A one-line comment above requiredArguments in dispatch-tools.test.ts recording that the map is hand-maintained on purpose (deriving it from dispatchToolSpecs would test the adapter against itself; the spec rejected that). Lands in a later plugin PR, not this one.",
+  "followUpsFiled": [
+    "LEGION-151: Legion panes cannot load the profile's agents (thermonuclear pair included) because the profile's agents/hooks/prompts folders link into /home/ubuntu, unreadable by the legion user."
+  ],
+  "nextStep": "Architect sends the implementer back to push exactly the .legion/ deletion on top of 232dc82f; the reviewer re-reads the PR head, confirms it differs from 232dc82f by that deletion alone (no threads to check), and approves it by SHA with legion gh -- pr review --approve.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T09:03:03.707Z"
+}
