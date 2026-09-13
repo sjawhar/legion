@@ -34,9 +34,12 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 — the build must carry the `session.storage` setting the [Session store](#session-store) depends on, proven by
 starting it with a nonsense `OMP_SESSION_STORAGE` and requiring the refusal; an older build accepts the value
 and fails the probe — through `legion probe-image`, so a build whose OMP or plugin is broken, or whose OMP
-would silently keep a `sql` deployment's sessions on files, fails instead of publishing. The in-cluster
-daemon (LEGION-25, planned) is to run `legion probe-image` in a one-shot pod against the configured digest.
-To run it yourself: `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
+would silently keep a `sql` deployment's sessions on files, fails instead of publishing. Its success line is
+`probe-image: OK (<omp path>) session-storage=probed`: the token (`SESSION_STORAGE_PROBE_MARK` in
+`boot-probes.ts`) is what tells this command's output from an older image's bare `probe-image: OK`, which
+checked nothing about the setting. The in-cluster daemon (LEGION-25, planned) is to run `legion probe-image`
+in a one-shot pod against the configured digest. To run it yourself:
+`docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
 ### Pin by digest, never by tag
 
@@ -149,11 +152,12 @@ string the session would have had as a file, `content` is the JSONL transcript.
 ### Resume
 
 `omp --resume=<row path>` — the value is exactly the session path the extension reports to the daemon at
-`/worker/started` as `ompSessionFile` (the field the second child's `ompSessionRef` carries unchanged), and
-in Postgres it is the row's `path` key: `<sessions root>/<encoded cwd>/<timestamp>_<session id>.jsonl`. The
-key embeds the home-relative sessions root, so the resuming pod must carry the same two `OMP_SESSION_*`
-variables and the same `HOME` (and `OMP_PROFILE`) as the pod that wrote it. Nothing else changes: the
-daemon already relaunches a dead worker with `--resume=<recorded session file>`.
+`/worker/started` as `ompSessionFile`, and in Postgres it is the row's `path` key:
+`<sessions root>/<encoded cwd>/<timestamp>_<session id>.jsonl`. The second child keeps that `ompSessionFile`
+field and carries the row path in it unchanged — no rename, no wire or contract change. The key embeds the
+home-relative sessions root, so the resuming pod must carry the same two `OMP_SESSION_*` variables and the
+same `HOME` (and `OMP_PROFILE`) as the pod that wrote it. Nothing else changes: the daemon already relaunches
+a dead worker with `--resume=<recorded session file>`.
 
 ### Refusals
 
@@ -167,7 +171,7 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 | the named file is blank after trimming                            | `… names <path>, which is empty`                                                                                                                                                       |
 | the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)` — the driver's error, never the connection string                     |
 | any other `OMP_SESSION_STORAGE` value                             | `OMP_SESSION_STORAGE is "<value>"; expected "file" or "sql"`                                                                                                                           |
-| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`; see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)) fails on such a build, so `legion probe-image` refuses to publish the worker image, and the second child runs the same probe at daemon start whenever `session_store: postgres` is on |
+| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`) runs inside the worker image through `legion probe-image` (see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), fails on such a build so the image never publishes, and on a passing image prints `session-storage=probed` on the command's OK line; under `session_store: postgres` the daemon requires that token in the probe pod's output — it never probes a host OMP for it |
 
 ### What stays on the pod's disk
 
@@ -180,4 +184,4 @@ repository. A pod that dies loses those local files as it does today — the con
 `@sjawhar/pi-legion-envoy` recognises a `task` subagent inside a Legion worker without looking for the
 parent's transcript on disk: the extension records which session it bootstrapped in the process, and a later
 session start in the same process with a different transcript path is a subagent (`packages/pi-envoy/AGENTS.md`).
-Nothing in the extension reads the two variables; the pin bump is the only Legion-side change this needs.
+Nothing in the extension reads the two variables, and it needs no other change for SQL storage.

@@ -773,18 +773,26 @@ describe("legion probe-image", () => {
     expect(ran).toBe(false);
   });
 
-  it("runs the daemon's three launch probes against LEGION_OMP_PATH with no launch prefix", async () => {
+  it("runs the daemon's three launch probes against LEGION_OMP_PATH with no launch prefix and marks the success line", async () => {
     const commands: string[][] = [];
-    await cmdProbeImage(
-      undefined,
-      deps(
-        async (command) => {
-          commands.push(command);
-          return passing(command);
-        },
-        { LEGION_OMP_PATH: "/opt/omp/bin/omp" }
-      )
-    );
+    const lines: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    try {
+      await cmdProbeImage(
+        undefined,
+        deps(
+          async (command) => {
+            commands.push(command);
+            return passing(command);
+          },
+          { LEGION_OMP_PATH: "/opt/omp/bin/omp" }
+        )
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
     expect(commands).toHaveLength(3);
     expect(commands[0]?.[2]).toStartWith(
       'exec /opt/omp/bin/omp models --no-extensions --extension "$1" --json'
@@ -793,6 +801,9 @@ describe("legion probe-image", () => {
     expect(commands[2]?.[2]).toBe(
       "export OMP_SESSION_STORAGE=legion-launch-probe PI_TIMING=x; exec /opt/omp/bin/omp --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
     );
+    // The token a daemon accepting this image for a sql session store requires in the probe
+    // pod's output: an older image's command prints a bare `probe-image: OK`.
+    expect(lines).toEqual(["probe-image: OK (/opt/omp/bin/omp) session-storage=probed"]);
   });
 
   it("refuses an image whose OMP starts on a nonsense OMP_SESSION_STORAGE: the build predates the setting", async () => {

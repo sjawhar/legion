@@ -13,6 +13,7 @@ import { defineCommand, runMain } from "citty";
 import {
   IMAGE_PROBE_RETRY,
   IMAGE_PROBE_TIMEOUT_MS,
+  SESSION_STORAGE_PROBE_MARK,
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
   verifySessionStorageSetting,
@@ -356,9 +357,11 @@ export async function cmdHandoffComplete(
 /** The three launch probes (boot-probes.ts) against one OMP executable, with no launch prefix — an
  * image carries no `secrets` wrapper: the daemon's two boot probes, then the session-storage
  * probe, which the image runs unconditionally so no worker image publishes on a build that would
- * silently keep a `sql` deployment's sessions on files. The worker image build runs this as its
- * last step; a failure is the daemon's own probe message, exit 1, so a broken image never
- * publishes. The retry is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no
+ * silently keep a `sql` deployment's sessions on files. The success line carries
+ * `SESSION_STORAGE_PROBE_MARK` so a reader of the output can tell this command ran that probe
+ * from an older image's bare `probe-image: OK`. The worker image build runs this as its last
+ * step; a failure is the daemon's own probe message, exit 1, so a broken image never publishes.
+ * The retry is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no
  * supervisor and must finish. */
 export async function cmdProbeImage(
   omp: string | undefined,
@@ -382,7 +385,7 @@ export async function cmdProbeImage(
   } catch (error) {
     throw new CliError(error instanceof Error ? error.message : String(error));
   }
-  console.log(`probe-image: OK (${ompPath})`);
+  console.log(`probe-image: OK (${ompPath}) ${SESSION_STORAGE_PROBE_MARK}`);
 }
 
 async function readStdin(): Promise<string> {

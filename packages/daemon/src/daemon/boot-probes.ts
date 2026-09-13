@@ -383,6 +383,12 @@ export async function verifyLegionPluginLoaded(
  * variable); one that predates the setting never reads the variable and starts normally. */
 export const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
 const SESSION_STORAGE_PROBE_VALUE = "legion-launch-probe";
+/** The token `legion probe-image` prints on its success line once `verifySessionStorageSetting`
+ * has passed: `probe-image: OK (<omp path>) session-storage=probed`. An image built before this
+ * probe existed prints a bare `probe-image: OK` having checked nothing about the setting, so a
+ * daemon that accepts an image for a `sql` session store requires this token in the probe pod's
+ * output — importing this constant, never retyping it — rather than probing a host build. */
+export const SESSION_STORAGE_PROBE_MARK = "session-storage=probed";
 
 /**
  * Proves the OMP build that actually runs carries the `session.storage` setting, so a deployment
