@@ -42,7 +42,7 @@ import {
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { selectableStatusesFor } from "../project/board-model";
+import { openIssueStatuses, statusLabel } from "../project/board-model";
 import { buildIssuePath } from "../refs/routes";
 import { GitHubLink } from "./GitHubLink";
 import { IssueLabels } from "./IssueLabels";
@@ -50,6 +50,7 @@ import { SubscribedAgents } from "./SubscribedAgents";
 import { useIssueDrafts } from "./useIssueDrafts";
 
 const priorityPills = [badgeBlocking, badgeHigh, badgeMed, badgeLow] as const;
+const closedIssueStatuses = [...openIssueStatuses, "done"] as const;
 
 export function IssueHeader({
   documentArtifact,
@@ -115,7 +116,7 @@ export function IssueHeader({
   const drafts = useIssueDrafts(issue, updateIssue);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
-  const selectableStatuses = selectableStatusesFor(issue.status);
+  const selectableStatuses = isClosed ? closedIssueStatuses : openIssueStatuses;
   const openAsks = issue.open_asks.filter((ask) => ask.state === "open");
   const waitingForHuman = waitingOnYou(openAsks);
   const waitingOnAgents = openAsks.length - waitingForHuman.length;
@@ -287,7 +288,7 @@ export function IssueHeader({
             >
               {selectableStatuses.map((status) => (
                 <option key={status} value={status}>
-                  {status}
+                  {statusLabel(status)}
                 </option>
               ))}
             </select>

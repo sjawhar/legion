@@ -8,12 +8,13 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project board persists reordering, lets humans close and reopen, and explains daemon-owned columns", async ({
+test("project board persists reordering and lets humans move cards through every status", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const first = await createIssue({ project: "CORE", title: "First card" });
-  await createIssue({ project: "CORE", title: "Second card" });
+  await patchIssue(first.key, { status: "todo" });
+  const second = await createIssue({ project: "CORE", title: "Second card" });
   const third = await createIssue({ project: "CORE", title: "Third card" });
 
   const context = await asUser(browser, "alice");
@@ -25,14 +26,10 @@ test("project board persists reordering, lets humans close and reopen, and expla
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
     const triage = page.getByRole("region", { name: "Triage" });
-    await expect(triage.getByRole("article")).toHaveText([
-      /First card/,
-      /Second card/,
-      /Third card/,
-    ]);
+    await expect(triage.getByRole("article")).toHaveText([/Second card/, /Third card/]);
 
     const handle = page.getByRole("button", { name: `Reorder ${third.key}` });
-    const target = triage.getByRole("article", { name: `${first.key} First card` });
+    const target = triage.getByRole("article", { name: `${second.key} Second card` });
     const sourceBox = await handle.boundingBox();
     const targetBox = await target.boundingBox();
     if (sourceBox === null || targetBox === null) {
@@ -50,54 +47,48 @@ test("project board persists reordering, lets humans close and reopen, and expla
     await page.mouse.up();
     expect((await reorderPatch).status()).toBe(200);
 
-    await expect(triage.getByRole("article")).toHaveText([
-      /Third card/,
-      /First card/,
-      /Second card/,
-    ]);
+    await expect(triage.getByRole("article")).toHaveText([/Third card/, /Second card/]);
 
     await page.reload();
-    await expect(triage.getByRole("article")).toHaveText([
-      /Third card/,
-      /First card/,
-      /Second card/,
-    ]);
+    await expect(triage.getByRole("article")).toHaveText([/Third card/, /Second card/]);
     await page.getByRole("button", { name: "List" }).click();
     await expect(
       page.getByRole("list", { name: "triage issues" }).getByRole("listitem")
-    ).toHaveText([/Third card/, /First card/, /Second card/]);
+    ).toHaveText([/Third card/, /Second card/]);
 
     await page.getByRole("button", { name: "Board" }).click();
-    const daemonColumn = page.getByRole("region", { name: "In progress" });
-    const daemonLock = daemonColumn.getByRole("img", { name: "Daemon controlled" });
-    await expect(daemonLock).toHaveAttribute(
-      "aria-description",
-      "Only the Legion daemon can move issues to In progress."
+    const todoColumn = page.getByRole("region", { name: "Todo" });
+    const inProgressColumn = page.getByRole("region", { name: "In progress" });
+    const todoHandle = page.getByRole("button", { name: `Reorder ${first.key}` });
+    await todoHandle.scrollIntoViewIfNeeded();
+    const todoBox = await todoHandle.boundingBox();
+    if (todoBox === null) {
+      throw new Error("Todo board card is not visible for status drag");
+    }
+    const movePatch = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        new URL(response.url()).pathname === `/api/v1/issues/${first.key}`
     );
-    const firstHandle = page.getByRole("button", { name: `Reorder ${first.key}` });
-    const firstBox = await firstHandle.boundingBox();
-    if (firstBox === null) {
-      throw new Error("board card is not visible for refused status drag");
-    }
-    await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
+    await page.mouse.move(todoBox.x + todoBox.width / 2, todoBox.y + todoBox.height / 2);
     await page.mouse.down();
-    await page.mouse.move(firstBox.x + firstBox.width / 2 + 10, firstBox.y + firstBox.height / 2, {
-      steps: 2,
-    });
-    await expect(daemonColumn).toHaveAttribute("data-drop-disabled", "true");
-    await daemonColumn.scrollIntoViewIfNeeded();
-    const daemonBox = await daemonColumn.boundingBox();
-    if (daemonBox === null) {
-      throw new Error("board column is not visible for refused status drag");
+    await page.mouse.move(todoBox.x + todoBox.width / 2 + 10, todoBox.y + todoBox.height / 2);
+    await inProgressColumn.scrollIntoViewIfNeeded();
+    const inProgressBox = await inProgressColumn.boundingBox();
+    if (inProgressBox === null) {
+      throw new Error("In progress board column is not visible for status drag");
     }
-    await page.mouse.move(daemonBox.x + daemonBox.width / 2, daemonBox.y + daemonBox.height / 2, {
-      steps: 24,
-    });
+    await page.mouse.move(
+      inProgressBox.x + inProgressBox.width / 2,
+      inProgressBox.y + inProgressBox.height / 2,
+      { steps: 24 }
+    );
     await page.mouse.up();
-    await expect(page.getByRole("alert")).toBeVisible();
-    await expect(triage).toContainText("First card");
-    await expect(daemonColumn).not.toContainText("First card");
-
+    expect((await movePatch).status()).toBe(200);
+    await expect(todoColumn).not.toContainText("First card");
+    await expect(inProgressColumn).toContainText("First card");
+    await page.reload();
+    await expect(inProgressColumn).toContainText("First card");
     if (testInfo.project.name === "chromium") {
       const thirdHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
       await thirdHandle.scrollIntoViewIfNeeded();

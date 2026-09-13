@@ -1266,24 +1266,34 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   }
 });
 
-test("IssuePage offers only human status destinations and the current daemon status", async () => {
-  const restore = stubIssuePage({ ...issue, status: "in_progress" });
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({ ...issue, status: "backlog" });
+test("IssuePage lets a human move a Todo issue to In progress", async () => {
+  const restore = stubIssuePage(issue);
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+    ...issue,
+    status: "in_progress",
+  });
   const view = renderIssuePage("/issues/CORE-1/conversation");
 
   try {
     const status = (await screen.findByLabelText("Status")) as HTMLSelectElement;
-    expect(status.value).toBe("in_progress");
-    expect([...status.options].map((option) => option.value)).toEqual([
-      "triage",
-      "icebox",
-      "backlog",
-      "todo",
-      "in_progress",
+    expect(status.value).toBe("todo");
+    expect(
+      [...status.options].map((option) => ({ text: option.text, value: option.value }))
+    ).toEqual([
+      { text: "Triage", value: "triage" },
+      { text: "Icebox", value: "icebox" },
+      { text: "Backlog", value: "backlog" },
+      { text: "Todo", value: "todo" },
+      { text: "In progress", value: "in_progress" },
+      { text: "Testing", value: "testing" },
+      { text: "Needs review", value: "needs_review" },
+      { text: "Retro", value: "retro" },
     ]);
 
-    fireEvent.change(status, { target: { value: "backlog" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "backlog" }));
+    fireEvent.change(status, { target: { value: "in_progress" } });
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+    );
   } finally {
     view.unmount();
     patchIssue.mockRestore();
