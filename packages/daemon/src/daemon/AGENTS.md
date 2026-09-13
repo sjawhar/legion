@@ -273,25 +273,32 @@ default `update-environment` from every attaching client: an operator's
 `DISPLAY`, … in, and every pane opened afterwards inherits the operator's SSH agent. Every boot
 therefore, once the probes pass and before the launch hold releases
 (`TmuxRuntime.scrubServerEnvironment`): reads the global table (`show-environment -g`, names only —
-`environmentNames` in `tmux.ts`; a name is everything up to a line's first `=`, and it skips the
-`-NAME` unset markers a fresh session table consists of and a bash function body's continuation
-lines), empties the session's `update-environment` option (`set-option -t legion-<project>
-update-environment ''`, `disableEnvironmentUpdates`) *before* reading the session table
-(`show-environment -t legion-<project>`) so an attach landing in between cannot slip a copy in
-behind the read, and `set-environment -u`s from each table every name that is not a key of
-`paneEnv` (`PWD` and `SHLVL`, which tmux itself writes into the global table at server start, are
-the only exemptions — checked as own properties, so a table entry named `constructor` is removed
-like any other), logging one line with the de-duplicated names: `[legion] removed <n> variable(s)
-from the private tmux server environment that panes may not inherit: <NAME1>, <NAME2>, …` — names,
-never values (a tmux failure's message carries stderr only, never `show-environment`'s stdout).
-`openWindow` creates the session and empties its `update-environment` in one tmux invocation
-(`new-session … \; set-option -t <session> update-environment ''`), so no attach can ever copy a
-client's environment into it. A server this daemon forked itself carries exactly `paneEnv` in its
-global table and only markers in its session table, so it logs nothing; a variable the operator's
-`tmux.conf` `set-environment -g`s (TPM's `TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any
-other. A tmux failure reading or writing either table is as fatal as a failed probe; no server on
-the daemon's socket, or a server without the daemon's session, is not (nothing to scrub or
-configure — `openWindow` creates both with the option set). A plain daemon restart is therefore
+`environmentCandidates` in `tmux.ts`; a candidate is everything up to a line's first `=`, and it
+skips the `-NAME` unset markers a fresh session table consists of and a bash function body's
+continuation lines), empties the session's `update-environment` option (`set-option -t
+legion-<project> update-environment ''`, `disableEnvironmentUpdates`) *before* reading the session
+table (`show-environment -t legion-<project>`) so an attach landing in between cannot slip a copy
+in behind the read, and, for each candidate that is not a key of `paneEnv` (`PWD` and `SHLVL`,
+which tmux itself writes into the global table at server start, are the only exemptions — checked
+as own properties, so a table entry named `constructor` is removed like any other), first confirms
+it is an entry of the table (`environmentHas`: `show-environment <table> <name>` exits 0 when it
+is and 1 with `unknown variable: <name>` when it is not — the daemon reads only the exit code and
+stderr, never that command's stdout, which is the value) and only then `set-environment -u`s it and
+records it: a continuation line of a multi-line value — the `=`-padded last base64 line of a PEM
+block — looks exactly like `NAME=` in the dump, and a value fragment must never reach the log, so
+an unconfirmed candidate is dropped silently and the count stays exact. One line is logged with the
+de-duplicated names: `[legion] removed <n> variable(s) from the private tmux server environment
+that panes may not inherit: <NAME1>, <NAME2>, …` — names, never values (a tmux failure's message
+carries stderr only, never `show-environment`'s stdout). `openWindow` creates the session and
+empties its `update-environment` in one tmux invocation (`new-session … \; set-option -t <session>
+update-environment ''`), so no attach can ever copy a client's environment into it. A server this
+daemon forked itself carries exactly `paneEnv` in its global table and only markers in its session
+table, so it logs nothing; a variable the operator's `tmux.conf` `set-environment -g`s (TPM's
+`TMUX_PLUGIN_MANAGER_PATH`) is removed and named like any other. A tmux failure reading, probing,
+or writing either table is as fatal as a failed probe. No server on the daemon's socket is not
+(nothing to scrub: `openWindow` forks one under `paneEnv` with the option set); a server without
+the daemon's session still has its global table scrubbed, and only the session step is skipped
+(`openWindow` creates the session with the option set). A plain daemon restart is therefore
 enough for *inheritance*: a pane opened after it gets nothing the allow-list does not pass, from
 either table, and no `kill-server` is needed for that. It does not revoke what was already handed
 out: the running server process and every pre-upgrade pane keep their fork-time environment —

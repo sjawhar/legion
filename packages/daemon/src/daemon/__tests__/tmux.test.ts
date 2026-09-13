@@ -5,7 +5,8 @@
 import { describe, expect, it } from "bun:test";
 import {
   disableEnvironmentUpdates,
-  environmentNames,
+  environmentCandidates,
+  environmentHas,
   lookupPane,
   openWindow,
   type TmuxServer,
@@ -94,7 +95,7 @@ describe("lookupPane", () => {
   });
 });
 
-describe("environmentNames", () => {
+describe("environmentCandidates", () => {
   it("lists each global entry's name over the private server, skipping unset markers and value continuation lines", async () => {
     // `BASH_FUNC__aws%%` is a bash exported function: its body continues over lines that start
     // with a space or `}` and may themselves contain `=` — never a new entry. A name is everything
@@ -116,7 +117,9 @@ describe("environmentNames", () => {
       "",
     ].join("\n");
     const commands: string[][] = [];
-    expect(await environmentNames(server({ stdout, exitCode: 0 }, commands), undefined)).toEqual([
+    expect(
+      await environmentCandidates(server({ stdout, exitCode: 0 }, commands), undefined)
+    ).toEqual([
       "BASH_FUNC__aws%%",
       "BASH_FUNC_git-fixup%%",
       "GH_AGENT_APP_PRIVATE_KEY_B64",
@@ -136,7 +139,7 @@ describe("environmentNames", () => {
       "-DISPLAY\n-KRB5CCNAME\n-MSYSTEM\n-SSH_AGENT_PID\n-SSH_ASKPASS\n-SSH_AUTH_SOCK\n-SSH_CONNECTION\n-WAYLAND_DISPLAY\n-WINDOWID\n-XAUTHORITY\n-XDG_CURRENT_DESKTOP\n-XDG_SESSION_DESKTOP\n-XDG_SESSION_TYPE\n";
     const commands: string[][] = [];
     expect(
-      await environmentNames(server({ stdout: fresh, exitCode: 0 }, commands), {
+      await environmentCandidates(server({ stdout: fresh, exitCode: 0 }, commands), {
         session: "legion-omp",
       })
     ).toEqual([]);
@@ -147,7 +150,9 @@ describe("environmentNames", () => {
     const attached =
       "-DISPLAY\nSSH_ASKPASS=/usr/bin/false\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\nSSH_CONNECTION=100.100.92.97 57158 100.113.243.90 22\n-WAYLAND_DISPLAY\n";
     expect(
-      await environmentNames(server({ stdout: attached, exitCode: 0 }), { session: "legion-omp" })
+      await environmentCandidates(server({ stdout: attached, exitCode: 0 }), {
+        session: "legion-omp",
+      })
     ).toEqual(["SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_CONNECTION"]);
   });
 
@@ -160,7 +165,7 @@ describe("environmentNames", () => {
         exitCode: 1,
       }),
     };
-    expect(await environmentNames(gone, undefined)).toBeUndefined();
+    expect(await environmentCandidates(gone, undefined)).toBeUndefined();
     const neverCreated: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({
@@ -169,12 +174,12 @@ describe("environmentNames", () => {
         exitCode: 1,
       }),
     };
-    expect(await environmentNames(neverCreated, undefined)).toBeUndefined();
+    expect(await environmentCandidates(neverCreated, undefined)).toBeUndefined();
     const noSession: TmuxServer = {
       socket: "legion-omp",
       run: async () => ({ stdout: "", stderr: "no such session: legion-omp", exitCode: 1 }),
     };
-    expect(await environmentNames(noSession, { session: "legion-omp" })).toBeUndefined();
+    expect(await environmentCandidates(noSession, { session: "legion-omp" })).toBeUndefined();
   });
 
   it("throws on any other failure, carrying tmux's stderr and never its stdout (the value dump)", async () => {
@@ -186,10 +191,10 @@ describe("environmentNames", () => {
         exitCode: 1,
       }),
     };
-    await expect(environmentNames(broken, undefined)).rejects.toThrow(
+    await expect(environmentCandidates(broken, undefined)).rejects.toThrow(
       "tmux show-environment -g failed (exit 1): server version is too old"
     );
-    await expect(environmentNames(broken, { session: "legion-omp" })).rejects.toThrow(
+    await expect(environmentCandidates(broken, { session: "legion-omp" })).rejects.toThrow(
       "tmux show-environment -t legion-omp failed (exit 1): server version is too old"
     );
     const silent: TmuxServer = {
@@ -201,11 +206,63 @@ describe("environmentNames", () => {
       }),
     };
     let message = "";
-    await environmentNames(silent, undefined).catch((error: Error) => {
+    await environmentCandidates(silent, undefined).catch((error: Error) => {
       message = error.message;
     });
     expect(message).toBe("tmux show-environment -g failed (exit 1)");
     expect(message).not.toContain("leaked-value");
+  });
+});
+
+describe("environmentHas", () => {
+  it("confirms a candidate against the table with show-environment <table> <name>, reading only the exit code", async () => {
+    const commands: string[][] = [];
+    // stdout is the value: present or not, it is never read.
+    const present = server({ stdout: "FOO_SECRET=leaked-value\n", exitCode: 0 }, commands);
+    expect(await environmentHas(present, undefined, "FOO_SECRET")).toBe(true);
+    expect(await environmentHas(present, { session: "legion-omp" }, "SSH_AUTH_SOCK")).toBe(true);
+    expect(commands).toEqual([
+      ["tmux", "-L", "legion-omp", "show-environment", "-g", "FOO_SECRET"],
+      ["tmux", "-L", "legion-omp", "show-environment", "-t", "legion-omp", "SSH_AUTH_SOCK"],
+    ]);
+  });
+
+  it("classifies `unknown variable: <name>` as absent — a value fragment the dump parser mistook for a name", async () => {
+    const absent: TmuxServer = {
+      socket: "legion-omp",
+      run: async (cmd) => ({
+        stdout: "",
+        stderr: `unknown variable: ${cmd.at(-1)}`,
+        exitCode: 1,
+      }),
+    };
+    expect(await environmentHas(absent, undefined, "ZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw")).toBe(false);
+    expect(await environmentHas(absent, { session: "legion-omp" }, "QUJD")).toBe(false);
+  });
+
+  it("throws on any other refusal, carrying stderr only", async () => {
+    const broken: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({
+        stdout: "FOO=leaked-value\n",
+        stderr: "server version is too old",
+        exitCode: 1,
+      }),
+    };
+    let message = "";
+    await environmentHas(broken, undefined, "FOO").catch((error: Error) => {
+      message = error.message;
+    });
+    expect(message).toBe("tmux show-environment -g FOO failed (exit 1): server version is too old");
+    expect(message).not.toContain("leaked-value");
+    // `unknown variable` for a *different* name is not this name's absence.
+    const other: TmuxServer = {
+      socket: "legion-omp",
+      run: async () => ({ stdout: "", stderr: "unknown variable: BAR", exitCode: 1 }),
+    };
+    await expect(environmentHas(other, undefined, "FOO")).rejects.toThrow(
+      "tmux show-environment -g FOO failed (exit 1): unknown variable: BAR"
+    );
   });
 });
 

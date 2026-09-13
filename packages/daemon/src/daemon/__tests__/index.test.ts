@@ -2199,12 +2199,26 @@ describe("startDaemon", () => {
             }
             if (command[0] === "/tools/tmux") tmuxCommands.push(command.slice(3));
             if (command[0] === "/tools/tmux" && command[3] === "show-environment") {
-              // The global table an earlier daemon forked the server with, and the session table
-              // an operator attach filled through tmux's default update-environment.
+              // The global table an earlier daemon forked the server with (a PEM-shaped value whose
+              // padded last line looks like `NAME=`), and the session table an operator attach
+              // filled through tmux's default update-environment. A per-name probe answers exit 0
+              // for a real entry and `unknown variable` for anything else, like tmux 3.7c.
+              const probed = command[4] === "-g" ? command[5] : command[6];
+              if (probed !== undefined) {
+                const entries = [
+                  "GH_AGENT_APP_PRIVATE_KEY_B64",
+                  "GH_REVIEW_APP_PRIVATE_KEY_B64",
+                  "RAW_FAKE_PEM",
+                  "SSH_AUTH_SOCK",
+                ];
+                return entries.includes(probed)
+                  ? { stdout: `${probed}=never-read`, stderr: "", exitCode: 0 }
+                  : { stdout: "", stderr: `unknown variable: ${probed}`, exitCode: 1 };
+              }
               return {
                 stdout:
                   command[4] === "-g"
-                    ? "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-agent-key\nGH_REVIEW_APP_PRIVATE_KEY_B64=leaked-review-key\nPATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
+                    ? "GH_AGENT_APP_PRIVATE_KEY_B64=leaked-agent-key\nGH_REVIEW_APP_PRIVATE_KEY_B64=leaked-review-key\nRAW_FAKE_PEM=-----BEGIN FAKE KEY-----\nZmFrZS1rZXktYnl0ZXMtbm90LXJlYWw=\n-----END FAKE KEY-----\nPATH=/full/bin:/usr/bin\nPWD=/srv\nSHLVL=0\n"
                     : "-DISPLAY\nSSH_AUTH_SOCK=/tmp/ssh-x/agent.1\n-XAUTHORITY\n",
                 stderr: "",
                 exitCode: 0,
@@ -2246,13 +2260,15 @@ describe("startDaemon", () => {
       ).toEqual([
         ["set-environment", "-g", "-u", "GH_AGENT_APP_PRIVATE_KEY_B64"],
         ["set-environment", "-g", "-u", "GH_REVIEW_APP_PRIVATE_KEY_B64"],
+        ["set-environment", "-g", "-u", "RAW_FAKE_PEM"],
         ["set-option", "-t", "legion-acme1", "update-environment", ""],
         ["set-environment", "-t", "legion-acme1", "-u", "SSH_AUTH_SOCK"],
       ]);
       expect(warnings).toEqual([
-        "[legion] removed 3 variable(s) from the private tmux server environment that panes may not inherit: GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, SSH_AUTH_SOCK",
+        "[legion] removed 4 variable(s) from the private tmux server environment that panes may not inherit: GH_AGENT_APP_PRIVATE_KEY_B64, GH_REVIEW_APP_PRIVATE_KEY_B64, RAW_FAKE_PEM, SSH_AUTH_SOCK",
       ]);
       expect(warnings.join("\n")).not.toContain("leaked-");
+      expect(warnings.join("\n")).not.toContain("ZmFr");
     } finally {
       warnSpy.mockRestore();
       await daemon?.stop();

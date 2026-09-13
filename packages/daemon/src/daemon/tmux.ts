@@ -30,8 +30,12 @@ function argv(server: TmuxServer, ...rest: string[]): string[] {
  * `//registry.npmjs.org/:_authToken`) — a name this parser skipped would be a name the scrub
  * silently left in the server. Skipped on purpose: `-NAME` (tmux's marker for a variable it unsets
  * in new panes; it reaches none, and a name starting with `-` cannot be told apart from the marker
- * in this format), and a value's continuation lines — a bash exported function body, whose lines
- * start with a space or `}` — which are never a new entry even when they contain `=`. */
+ * in this format), and a value's continuation lines that start with a space or `}` (a bash exported
+ * function body). tmux prints a value's embedded newlines literally when the client's locale is
+ * UTF-8 (`paneEnv` carries the daemon's `LANG`) and vis-encodes them as `_` in the C locale, so a
+ * continuation line of some other multi-line value — the `=`-padded last base64 line of a PEM
+ * block — is indistinguishable from an entry in this format; what this yields are *candidates*:
+ * `environmentHas` confirms each against the table before it is unset or logged. */
 const ENVIRONMENT_ENTRY = /^([^\s=}-][^=]*)=/;
 
 /** A pane inherits two tmux environment tables beneath its own `-e` pairs: the server's global
@@ -58,11 +62,12 @@ function failure(result: { stderr?: string }): string {
   return detail ? `: ${detail}` : "";
 }
 
-/** The variable names in one of the server's environment tables (see `EnvironmentTable`), or
- * `undefined` when there is nothing to read: no server is running on this socket, or the named
- * session does not exist yet. Names only: the values are never kept. Any other failure throws with
- * tmux's stderr. */
-export async function environmentNames(
+/** The candidate variable names in one of the server's environment tables (see
+ * `EnvironmentTable`), or `undefined` when there is nothing to read: no server is running on this
+ * socket, or the named session does not exist yet. Names only: the values are never kept. A
+ * candidate may be a fragment of a multi-line value (see `ENVIRONMENT_ENTRY`); `environmentHas`
+ * tells them apart. Any other failure throws with tmux's stderr. */
+export async function environmentCandidates(
   server: TmuxServer,
   table: EnvironmentTable
 ): Promise<string[] | undefined> {
@@ -80,6 +85,25 @@ export async function environmentNames(
     if (entry?.[1]) names.push(entry[1]);
   }
   return names;
+}
+
+/** Whether `name` is an entry of the table: `show-environment <table> <name>` exits 0 when it is
+ * (including a `-NAME` unset marker, which the parser never yields) and 1 with
+ * `unknown variable: <name>` when it is not — a value fragment the parser mistook for a name. Its
+ * stdout is the value and is never read: only the exit code and stderr decide. Any other refusal
+ * throws with tmux's stderr, like the rest of the scrub. */
+export async function environmentHas(
+  server: TmuxServer,
+  table: EnvironmentTable,
+  name: string
+): Promise<boolean> {
+  const flags = tableFlags(table);
+  const result = await server.run(argv(server, "show-environment", ...flags, name));
+  if (result.exitCode === 0) return true;
+  if ((result.stderr ?? "").trim() === `unknown variable: ${name}`) return false;
+  throw new Error(
+    `tmux show-environment ${flags.join(" ")} ${name} failed (exit ${result.exitCode})${failure(result)}`
+  );
 }
 
 /** Removes `name` from one of the server's environment tables (`-u`: the entry is gone, not merely
