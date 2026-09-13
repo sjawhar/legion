@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Phase workers, the root architect, and the controller pane now receive their one-time grant through a 0600 file named by `LEGION_GRANT_FILE`, written by the extension before each bash command and read first by `legion credential`, `legion gh`, and `legion handoff complete`; the bash tool's `env` argument is no longer used (the `secretsd` plugin's bash replacement discarded it, so 1.17.1 failed with `LEGION_GRANT is missing`). The static `GH_CONFIG_DIR`, worker-bin `PATH`, and cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` now come from the daemon's pane environment (LEGION-54).
 - Phase workers now receive their one-time `LEGION_GRANT` through the bash tool's per-command environment instead of prepended command text, so `legion gh`, `legion handoff complete`, and `jj git push` no longer fail with 403 as a session goes on (LEGION-12).
 - Envoy roles now survive `omp --resume` — including after stale-session cleanup — and follow `/fork`, `/branch`, or other transcript-carrying switches to the new session id until released.
 - Legion agents now refresh their Envoy registration before claiming a role, so claims made after registration expiry are accepted.

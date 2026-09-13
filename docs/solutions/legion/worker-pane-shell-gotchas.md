@@ -1,5 +1,5 @@
 ---
-title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12) and the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, and a phase completion refused with 409 after a respawn"
+title: "Worker-pane shell gotchas: the credential line the model imitated (fixed in LEGION-12), the env delivery that secretsd's bash tool dropped (LEGION_GRANT is missing on 1.17.1–1.17.2, fixed in LEGION-54), the credential's 60-second lifetime, env-dependent tests in the daemon suite, jj split's bookmark placement, the box's hanging git credential helper, a role topic with no Envoy holder, a bash-bridge outage, a daemon outage blocking every bash call, a pane OMP_SESSION_ID that is not yours, and a phase completion refused with 409 after a respawn"
 category: legion
 tags:
   - legion
@@ -22,6 +22,8 @@ related_issues:
   - "sjawhar/legion#953"
   - "LEGION-12"
   - "sjawhar/legion#974"
+  - "LEGION-52"
+  - "LEGION-54"
   - "LEGION-16"
   - "LEGION-14"
   - "sjawhar/legion#952"
@@ -37,6 +39,7 @@ symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
   - "the same 403 on the FIRST grant of a call, after a slow jj command ran ahead of the push"
+  - "legion gh / jj git push / legion handoff complete: LEGION_GRANT is missing on every call (pi-envoy 1.17.1-1.17.2 under the secretsd plugin)"
   - "bun test from the repository root: hundreds of 'document is not defined' and ECONNREFUSED failures outside the changed package"
   - "Refusing to move bookmark backwards or sideways: legion/<KEY> after jj split"
   - "rig daemon's first jj git clone killed at the 30 s runner timeout; launchFailures 1; tree queued"
@@ -60,9 +63,10 @@ from LEGION-29; the §2 environment-argument paragraph and §10 are from LEGION-
 LEGION-12's own retro and is filed as LEGION-37; the slow-push paragraph in §1 is from LEGION-17 (sjawhar/legion#956),
 whose implementer, on a pane still running the pre-LEGION-12 plugin, hit §1, §3, §8, §9, and §11 across five rounds
 and confirmed each as written (the architect filed the §1 harness fix as LEGION-52). None was part of
-the scope of the issue whose workers hit it. Section 1's cause was found and fixed by LEGION-12 (pull request #974): its
-workarounds are recorded only so a worker still running the old plugin recognizes them, and must not be used on the
-fixed one. §2's check-config leak was fixed by LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
+the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
+delivery fixed for good by LEGION-54 (pi-envoy 1.17.3): the workarounds are recorded only so a worker still running
+the 1.17.0 plugin recognizes them, and must not be used on the fixed one. §2's check-config leak was fixed by
+LEGION-13. §7 is filed as LEGION-29; until it is fixed, that section is
 the workaround.
 
 ## 1. Credential lines multiplying in a bash call: the model was copying its own transcript (fixed in LEGION-12)
@@ -111,35 +115,38 @@ command is at fault; wait for the load to fall and re-run the single push. Do no
 loop that redeems a fresh grant per attempt only works because each attempt is a new bash call, and that is the
 model re-issuing the command, not a script.
 
-**The fix (the first pi-envoy release after 1.16.0 — the post-merge task fills in the exact version; LEGION-12, pull
-request #974).** The grant now travels in the bash tool's per-command `env` (the `env` argument every Oh My Pi bash
-call accepts), together with the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, and the
-shim-first `PATH`. The command text is never touched, so nothing credential-shaped is written back into the transcript
-for the model to copy. The hook's keys are spread last, so even a model that imitates a previous call's `env` object
-cannot displace the grant minted for the current call. Oh My Pi applies that `env` to the one command only; nothing
-enters the persistent shell. The flip side: with per-command delivery, **no variable a worker sets in one bash call
-survives into the next** — not the six the hook sets (`LEGION_GRANT`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
-`GH_CONFIG_DIR`, `PATH`) and not an unrelated one of your own; the LEGION-12 tester proved both on the rig. Under text
-delivery an `export` in one call did carry into the next, and some workers leaned on that. The operator decided this
-is the host's contract, not something to work around: set what a command needs in that command, or put it in the
-call's own `env`.
+**The fix (pi-envoy 1.17.3; LEGION-54, after LEGION-12's pull request #974).** Before each of your bash commands
+runs, the hook mints the grant and writes it to the file `$LEGION_GRANT_FILE` names — a 0600 file under
+`<state_dir>/secrets/`, written to a temp name and renamed into place — and `legion credential`, `legion gh`, and
+`legion handoff complete` read that file first (`LEGION_GRANT` is only a manual fallback when the pointer is unset).
+The command text is never touched, so nothing credential-shaped is written back into the transcript for the model to
+copy; nor is the bash tool's `env` argument: LEGION-12's release (1.17.1) delivered the grant there, and it failed on
+the first real worker because the `secretsd` plugin replaces the bash tool with Oh My Pi's legacy `{command, timeout}`
+shim, which drops `env` — every `legion …` command answered `LEGION_GRANT is missing` until the profile was pinned
+back to 1.17.0 (LEGION-52). A bash tool's fields belong to whichever plugin installed it; the file does not. The
+static settings — the cleared `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST`, the isolated `GH_CONFIG_DIR`, the shim-first
+`PATH` — are on the pane's environment from the daemon at spawn, for the pane's life. One sentence of history: on
+1.17.1 (env delivery) nothing set in one bash call survived into the next; on file delivery the persistent shell
+behaves as a shell does.
 
 **On a fixed plugin, do not use the old workarounds.** Three were recorded for the old plugin: the `export()` shell
 function that kept only the first credential per call (LEGION-9, kept at `/tmp/legion9-grant-trap.sh` on the rig), the
 `pickgrant` probe that tried every seen grant against the daemon (LEGION-22), and pinning the first block's id inline
 as `LEGION_GRANT=<that-uuid> legion gh -- …` (LEGION-18). On the fixed plugin all three are obsolete: there is no
 credential text left for them to read, and redefining `export` in the persistent shell only obscures later failures.
-Recognize them by their names and delete them. On a pane still running the old plugin, the LEGION-18 form is the
-simplest and needs no shell function: when a call 403s, read the *first* credential line the hook prepended to that
-call and name that id explicitly on the next command — an explicit assignment on the command line outranks every
-prepended `export`, and an unredeemed grant stays valid for its 60 seconds.
+Recognize them by their names and delete them. The grant file itself is never to be read, printed, or copied by hand:
+`legion` reads it, and a model that echoes it into a command has put a credential into its own transcript. On a pane
+still running the 1.17.0 plugin, the LEGION-18 form is the simplest and needs no shell function: when a call 403s,
+read the *first* credential line the hook prepended to that call and name that id explicitly on the next command —
+an explicit assignment on the command line outranks every prepended `export`, and an unredeemed grant stays valid
+for its 60 seconds.
 
-**One caveat.** A worker session resumed from a transcript recorded before the fix still shows the model its own
-old credential blocks and may keep writing them for a while, and so may a model that re-runs an earlier command
-verbatim from its transcript. Such a line is text the shell executes, so for that one call it overrides the grant the
-hook put in `env`, and `legion …` still 403s — the fix removes the seed, it cannot rewrite what the model already
-sees. Command text starts at `cd -- "$LEGION_WORKSPACE" && …`; never begin it with a credential block. The imitations
-stop once the old examples age out of context; a fresh session never sees one.
+**One caveat.** A worker session resumed from a transcript recorded under the 1.17.0 plugin still shows the model its
+own old credential blocks and may keep writing them for a while, and so may a model that re-runs an earlier command
+verbatim from its transcript. With `LEGION_GRANT_FILE` set on the pane, `legion` ignores that shell variable, so the
+line is harmless text — but it is still a credential-shaped line in the transcript. Command text starts at
+`cd -- "$LEGION_WORKSPACE" && …`; never begin it with a credential block. The imitations stop once the old examples
+age out of context; a fresh session never sees one.
 
 **Verify a grant without side effects** (still true): `printf 'protocol=https\nhost=github.com\n' | legion credential get`
 inside the same bash call — a `username=…` line is good, `403` is stale.
@@ -259,7 +266,8 @@ subprocess.run(["jj", "-R", ws, "split", "-m", "…", "<path>"], cwd=ws, env=env
 With that `env`, file edits and `jj split` commits behave exactly as from the pane: `JJ_CONFIG` is present, so every
 commit still carries the `Omp-Session:` trailer and the role's bot author (verified on #953's four text commits, all
 made this way). What the kernel cannot do is redeem a grant — `legion gh`, `jj git push`, and `legion handoff complete`
-need the per-call `LEGION_GRANT` the bash hook injects — so queue those until the bridge returns.
+need the grant the bash hook writes to `$LEGION_GRANT_FILE` before each command — so queue those until the bridge
+returns.
 
 ## 9. While the daemon's API is down, every bash tool call fails before your command runs
 

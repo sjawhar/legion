@@ -146,13 +146,16 @@ capability it needs; invoke GitHub through the credential helper:
 legion gh -- <gh args…>
 ```
 
-Three facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`packages/pi-envoy/src/legion/gh-shim.ts`) that execs `legion gh -- "$@"`, so `gh …` and
-`legion gh -- …` are the same call, and each call redeems a fresh token from your session's
-grant — identity is supplied per call, never stored. Never run `gh auth login` or
-`gh auth setup-git`; there is no login state to create. The shim refuses `pr merge` (and a raw
-`gh api …/merge`): no worker role merges a pull request — the merge queue does, under its own
-authority.
+Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
+(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts`)
+that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
+redeems a fresh token from your session's grant — identity is supplied per call, never stored.
+Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
+refuses `pr merge` (and a raw `gh api …/merge`): no worker role merges a pull request — the merge
+queue does, under its own authority. The credential reaches `legion` through the file
+`$LEGION_GRANT_FILE` names, written before each of your bash commands by the extension; never
+`cat`, `echo`, copy, or `export` it — `legion credential`, `legion gh`, `jj git push`, and
+`legion handoff complete` read it themselves.
 
 ## GitHub PR comment attribution
 

@@ -40,7 +40,8 @@ The localhost-only Legion API lives in `api.ts`.
 | `dispatch-client.ts` | Thin HTTP client for Dispatch's native-tool API (`listIssues`/`getIssue`/`setStatus`) and `writeStatus`, the one helper every daemon-owned lifecycle status write goes through — a PATCH failure is logged and recorded on `state.pendingStatusWrites` for `resync.ts` to retry, never thrown back at the caller. |
 | `worker-rpc.ts` | Minimal OMP RPC protocol v2 client (`negotiate_protocol`/`prompt`/`get_state`/`shutdown`) over a worker's `legion worker-shim` stream rather than a spawned process's stdio: `connectWorkerRpc` dials the tmux runtime's unix socket, and `createWorkerRpcClient` wraps any already-open Bun socket (the TCP stream a `--connect` shim dialed into `worker-stream-listener.ts`) — transports bind the static `workerRpcSocketHandlers` table and the client attaches through `socket.data.handlers`. Reads are framed by `line-reader.ts` (a streaming `TextDecoder`, so a UTF-8 character split across two reads survives), the read-side twin of `socket-writer.ts`. |
 | `tmux.ts` | Pure tmux command construction/parsing (open/split a window, probe pane liveness and pid, kill a window or a single pane, list a session's unknown owned windows and its unrecorded worker-shim panes) over an injected `run` callback, every argv prefixed `tmux -L legion-<project>` (`TmuxServer`) — no daemon state. |
-| `secrets.ts` | `<state_dir>/secrets` primitives: 0700 directory, 0600 files, and the listing prune `index.ts` runs at boot; `ProcessManager.persist()` prunes the files it wrote itself without listing. |
+| `secrets.ts` | `<state_dir>/secrets` primitives: 0700 directory, 0600 files, `grantSecretName` (`<role token>-grant`, the file the extension writes and the daemon names/prunes), and the listing prune `index.ts` runs at boot; `ProcessManager.persist()` prunes the files it wrote itself without listing. |
+| `worker-bin.ts` | Installs `<state_dir>/worker-bin/gh` at daemon startup (0700 script in a 0700 dir; strips its own dir from PATH and execs `legion gh -- "$@"`) — first on every pane's PATH, never the daemon's; `bun worker-bin.ts <state_dir>` installs it for a rig. `pathWithoutWorkerBin` is the same strip for `legion gh` itself: the `gh` it spawns must never resolve back to the shim (which would re-enter `legion gh` under a child env whose `LEGION_GRANT_FILE` is already scrubbed). |
 | `worker-stream-listener.ts` | TCP listener for reverse-dialed `legion worker-shim --connect` streams, bound with the API on `worker_stream_port`. Each connection's first line must be `{"type":"hello","bootToken"}`; the token is resolved through the same lookup `/worker/started` uses (`CapabilityService.resolveWorkerClaim`: the in-memory mint record, then the claim's persisted `bootTokenHash`), the daemon answers `{"type":"hello_ack"}`, and the socket becomes a `WorkerRpcClient` keyed by claim token (`registrations`; `awaitRegistration(claimToken, timeoutMs)` is what a runtime's `connect` awaits instead of dialing). An unknown, stale-generation, already-bound, or malformed hello — or a connection that has not completed its hello within `worker_rpc_timeout_seconds` of opening (`hello timeout`) — is closed and logged `worker-stream: rejected hello (<reason>)` with no state change. |
 | `deployment-instructions.ts` | `<state_dir>/deployment-instructions.md`: reads the operator's `instructions` file once at boot, refuses a missing/unreadable/blank one naming the resolved path, and writes `# Deployment instructions (<project>)` + content for every pane to `$(cat)`. |
 
@@ -114,10 +115,26 @@ too). Neither variable is exported when `dispatch_url` is unset; those panes fal
 `envoy.json` dispatch config. The daemon never emits the retired `DISPATCH_MCP_URL` alias and strips
 it — with `DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `DISPATCH_URL`, and the per-pane secret family
 `LEGION_BOOT_TOKEN`/`LEGION_BOOT_TOKEN_FILE`/`LEGION_CONTROLLER_SECRET`/
-`LEGION_CONTROLLER_SECRET_FILE` — from every child process it spawns, pane or otherwise
-(`stripDispatchEnv`): a daemon started from inside a Legion pane inherits that pane's boot secret,
-and the private tmux server it forks would otherwise hand it to every pane that does not override
-it.
+`LEGION_CONTROLLER_SECRET_FILE`/`LEGION_GRANT`/`LEGION_GRANT_FILE` — from every child process it
+spawns, pane or otherwise (`stripDispatchEnv`): a daemon started from inside a Legion pane inherits
+that pane's boot secret, and the private tmux server it forks would otherwise hand it to every pane
+that does not override it.
+
+Every root, worker, and controller pane also carries the credential pane environment
+(`ProcessManager.credentialProcessEnvironment`) for its whole life — never per command:
+`LEGION_GRANT_FILE=<state_dir>/secrets/<role token>-grant` (`grantSecretName`), the 0600 file the
+pi-envoy extension writes each bash command's freshly minted grant to before the command runs and
+`legion credential`/`legion gh`/`legion handoff complete` read ahead of `LEGION_GRANT` — the daemon
+never writes it, only names it here and prunes it with the pane's boot-token file when the locator
+clears (`trackProcessSecrets`; the boot prune seeds the name from the live locator, so a grant file
+written later in the pane's life is still reaped); `GH_CONFIG_DIR=<state_dir>/gh`; `PATH` with
+`<state_dir>/worker-bin` first exactly once (`worker-bin.ts` installs the `gh` shim there at
+startup, before any pane can launch; `processPath` is the daemon's own resolved PATH and never
+contains it, so the daemon's own `gh` never resolves to the shim — which is why the prefix is added
+in `ProcessManager`, not `resolveDaemonEnvironment`); and `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` set
+empty (rendered `-e KEY=`), so no ambient token or host shadows the per-call one `legion gh`
+redeems. Nothing about the credential rides the bash tool's arguments — a plugin that replaces the
+bash tool (the `secretsd` plugin's legacy shim drops `env`, LEGION-52) has no effect (LEGION-54).
 
 No secret is ever a tmux `-e KEY=VALUE` value (a transient tmux client's argv is world-readable via
 `/proc/<pid>/cmdline`). Boot tokens and the controller secret travel the same way as the Dispatch
