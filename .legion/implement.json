@@ -2,7 +2,7 @@
   "summary": "Provisioning now reads the clone's per-repo `git.abandon-unreachable-commits` setting between the clone step and the fetch and writes it to `false` only when the read does not already say so (clone → read → write if needed → fetch), so the fetch that deletes a merged branch's bookmark no longer abandons the branch's commits under a live issue workspace or rewrites its working copy. Fail-first on both jj binaries; the #1023 fast-follow and the docs landed in the same PR (#1080).",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1080",
   "branch": "legion/LEGION-84",
-  "headSha": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+  "headSha": "4f1635531609",
   "commits": [
     {
       "changeId": "zvrtpnvo",
@@ -18,6 +18,11 @@
       "changeId": "owqurnxk",
       "commit": "b30a301eed3d",
       "subject": "docs(daemon): record the post-merge workspace contract and where jj keeps a repo's settings (LEGION-84)"
+    },
+    {
+      "changeId": "zvlzrlyy",
+      "commit": "4f1635531609",
+      "subject": "test(workspace): pin the LEGION-84 config read and write in the identity tests instead of excluding subcommands (LEGION-84)"
     }
   ],
   "filesChanged": [
@@ -45,7 +50,7 @@
       "criterion": "A worker resumed after its issue's pull request merged and its branch was deleted finds its workspace not stale, every file still on disk, its pushed commits still beneath the working copy, and the bookmark gone (spec Requirements row 1; acceptance 2).",
       "surface": "The real jj binaries the daemon and every pane run — jj 0.45.1-sami.20260910 (this box) and stock jj 0.44.0 (CI) — driving `provisionIssueWorkspace` from this branch against a real scratch remote, colocated clone, and issue workspace under /tmp: push legion/WIDGETS-42, delete the remote branch (`git branch -D`, what GitHub does at merge), provision again. The live-daemon resume was NOT run: Sami withdrew the smoke rig on 2026-09-13; no scratch daemon, tmux server, or NATS was started.",
       "command": "cd packages/workspace && bun /tmp/legion-84-e2e.ts 045 fix ; bun /tmp/legion-84-e2e.ts 044 fix (driver text in the PR description context; scratch left at /tmp/legion-84-e2e-045-fix and /tmp/legion-84-e2e-044-fix)",
-      "observed": "Both binaries: `jj status` in the workspace exit 0 (`A .omp/config.yml`, `A feature.txt`, @ = the pushed commit); feature.txt on disk: true; pushed commit still beneath @: true; `jj bookmark list legion/WIDGETS-42` empty; `jj config get git.abandon-unreachable-commits` prints `false` with -R <clone> and from inside the workspace; provisioning #1 ran `config get | config set | git fetch`, provisioning #2 ran `update-stale | config get | git fetch` (no write). `jj op log --op-diff` of the fetch shows only `Changed local bookmarks` (legion/WIDGETS-42: + (absent) / - <pushed>) and `Changed remote bookmarks` (legion/WIDGETS-42@origin: + untracked (absent) / - tracked <pushed>) — no `Changed commits`, no `Changed working copy`. 0.45.1 pushed commit 5c81894a4f42…, 0.44.0 facd22bdd3ad…; both op-diffs quoted verbatim in the PR body. Taken at 7b0a7d6439f9 before the rebase; the production files' diffs are byte-identical at b30a301eed3d (rebase re-check), so the evidence stands for this head.",
+      "observed": "Both binaries: `jj status` in the workspace exit 0 (`A .omp/config.yml`, `A feature.txt`, @ = the pushed commit); feature.txt on disk: true; pushed commit still beneath @: true; `jj bookmark list legion/WIDGETS-42` empty; `jj config get git.abandon-unreachable-commits` prints `false` with -R <clone> and from inside the workspace; provisioning #1 ran `config get | config set | git fetch`, provisioning #2 ran `update-stale | config get | git fetch` (no write). `jj op log --op-diff` of the fetch shows only `Changed local bookmarks` (legion/WIDGETS-42: + (absent) / - <pushed>) and `Changed remote bookmarks` (legion/WIDGETS-42@origin: + untracked (absent) / - tracked <pushed>) — no `Changed commits`, no `Changed working copy`. 0.45.1 pushed commit 5c81894a4f42…, 0.44.0 facd22bdd3ad…; both op-diffs quoted verbatim in the PR body. Taken at 7b0a7d6439f9 before the rebase; the production files' diffs are byte-identical at b30a301eed3d (rebase re-check), so the evidence stands for this head. Corrective round 4f163553 changes tests only; workspace.ts is byte-identical (restored after the mutation check), so the driver evidence stands.",
       "headSha": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
       "negativeControl": "The same driver with main's workspace.ts (main@origin cc88ed01db4f, which includes LEGION-44 and predates this fix) copied to /tmp/legion-84-old-workspace.ts: on both binaries `jj status` exit 1 `Error: The working copy is stale (not updated since operation 1e8cd1674ecf / 00af1f65d2d6).`, pushed commit still beneath @: false, `config get` prints `true`, and the fetch's op-diff additionally shows `Changed commits` (+ <new empty> / - <pushed> (hidden)) and `Changed working copy widgets-42@`. Scope control: `env HOME=/tmp/legion-84-e2e-<binary>-fix/foreign-home jj config get git.abandon-unreachable-commits -R <clone>` prints `true` with `Warning: Per-repo config not found. Generating an empty one.` on both binaries — the setting lives in the user's config directory, not the clone."
     }
@@ -95,7 +100,17 @@
     "fingerprintAfter": "50e2b6e028b91aedd3c23baa2d763bd640d14c8dcd342dbbcd6ebfcb6ebe605a",
     "verdict": "changed — by exactly the four test edits, folded into the fix commit; per-file fingerprints of workspace.ts (e8b5e4a806f95205…), processes.test.ts (0b7c4ec902729055…), and AGENTS.md (5b714bb6060ae5d6…) are identical before and after, so the production diff is unchanged. PR comment: https://github.com/sjawhar/legion/pull/1080#issuecomment-5660025992"
   },
+  "correctiveRounds": [
+    {
+      "review": "5194909786 REQUEST_CHANGES at b30a301eed3d by legion-reviewer; one blocking thread PRRT_kwDORFy7ds6iBMR9 at packages/workspace/src/workspace.test.ts:752 (and its twin at :806)",
+      "finding": "The two LEGION-44 identity tests (`removes a repository-scoped jj identity from the shared clone, logging each key`, `treats a stale identity another provisioning removed first as already gone`) excluded every `jj config set` from their pinned call list, so an identity write inside removeRepoScopedIdentity's removal branch passed where main caught it; reviewer mutation-verified.",
+      "fix": "zvlzrlyy 4f1635531609, test-only, one commit: both tests pin the complete `jj config` list — readKeepUnreachableCommitsCommand(repoCloneDir), writeKeepUnreachableCommitsCommand(repoCloneDir), then LEGION-44's probes/unsets unchanged — and the subcommand exclusion is gone from the file. The rebase comment's sentence `still proves LEGION-44's property while tolerating the guarded read/write` was inaccurate as written; the corrected claim is that the tests pin the LEGION-84 commands, not tolerate them.",
+      "verification": "Mutation reproduced at 4f163553: `await run(deps, [\"jj\", \"config\", \"set\", \"--repo\", key, '\"mutant\"', \"-R\", repoCloneDir])` after each successful unset in removeRepoScopedIdentity → `removes a repository-scoped jj identity…` fails (the other two identity tests never reach that branch: their fakes fail or skip the unset); workspace.ts restored with `jj restore`. Real code: packages/workspace 25 pass / 0 fail on both binaries, biome and tsc clean.",
+      "threadReply": "https://github.com/sjawhar/legion/pull/1080#discussion_r4003064312 (comment 4003064312) — fix, SHA, and mutation result; awaiting the reviewer's `Accepted:`.",
+      "sequence": "Architect (Envoy 777e2b84): push before the reviewer's `Accepted:` because the retired reviewer cannot see a workspace-only commit; `legion threads resolve` and the Threads line to 0 unresolved happen in the next resume together with the .legion/ deletion push if the re-review is clean. The push carries the tester's 85ff1006 (.legion/test.json) and the reviewer's 62d0c0fb (.legion/review.json) beneath the fix, untouched."
+    }
+  ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-14T06:39:35.630Z"
+  "completed": "2026-09-14T07:54:12.146Z"
 }
