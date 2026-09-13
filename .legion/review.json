@@ -1,60 +1,50 @@
 {
+  "summary": "Round 5 at code head 350fc534 (PR head e84aa7ae): the round-4 fixes are verified clean (B6 watchdog guard, escalate-log truth, handleException single try/catch + orphan row, AGENTS.md wording, ensureController flake); both thermo passes report no blocking findings. REQUEST_CHANGES on one item outside the round-4 delta: main a0d0f33f landed #991 (LEGION-37), whose migrateV25State takes state v26 with a pendingAssignment rewrite; this branch's migrateV25State also claims v26 and its claim schema still types pendingAssignment as a string. GitHub reports the PR CONFLICTING; the deployed state.json is already v26 under #991's meaning. Rebase onto a0d0f33f, keep #991's step verbatim, renumber the pane-identity bump to migrateV26State -> v27 (version literal, z.literal, newLegionState, the !== guard, the chain, legion-state.test.ts rows and .bak names, PR body), and re-check the processes.ts/AGENTS.md overlap. Tester re-verifies the rebased head, then I review it and, if clean, COMMENT and later APPROVE the deletion-only head by SHA.",
   "verdict": "changes_requested",
-  "round": 4,
-  "critical": 1,
-  "important": 0,
-  "minor": 3,
-  "reviewedHead": "df6a77061b78d42616abbba7e0a6f3e4804f8601",
-  "mergeBase": "0f744bc8811e (branch on main 419a0590 per GitHub)",
-  "pr": "https://github.com/sjawhar/legion/pull/981",
-  "review": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5189888847",
-  "previousReviews": [
-    "5188293250",
-    "5188762941",
-    "5189671202"
-  ],
-  "verified": {
-    "ci": "df6a7706 run 34743086332 SUCCESS (pr-title/lint/typecheck/test); MERGEABLE, mergeStateStatus BLOCKED (review required); prior heads cc2e3020 (34742913998) and 0c6f3c18 (34742420479) green.",
-    "round3Threads": "All three satisfied against the code: B5 r3998846681 (escalateOrRetryUnconfirmedRoot try/catch + re-arm, regression test discriminating), r3998846683 (handleException catches + logs naming the role token on both branches; docs consistent; two rows in b32a3a36), r3998846684 (recordedLocators sameProcess dedupe; contract row with a spread copy). The App cannot resolve threads (re-confirmed) -- the implementer resolves them with the next push.",
-    "fastFollow": "Every round-3 fast-follow item landed (kill fixture branches, #{pane_id}-only branches, bare exit-1 fakes, panePid( in docs, ${treeKey}, wording pins, stop message via describePaneVerdict, isOmpPane EACCES row, AGENTS.md probe-throw clause moved to the process-failure-recovery bullet). #957 boot-retire test seeds a verified identity and passes for the reason named.",
-    "migration": "migrateV25State mirrors migrateV24State (#993) as a pure bump appended to the chain; v24 file -> 26 with .v24.bak and v25 file -> 26 with .v25.bak both pass; deployed state.json is v25 so the live upgrade takes exactly the v25->v26 row.",
-    "localRuns": "tsc clean; processes 243 pass/3 gated; runtime.contract 67; watchdog 9; tmux 8; legion-state 41; index 34; proc-stat 4; LEGION_E2E=1 LEGION_TMUX_LIVE=1 real-shutdown + deployment-instructions e2e 5 pass. Named rows (B5 regression, both handleException rows, sameProcess dedupe row, watchdog stop-unconfirmed re-arm row, EACCES cmdline row, migration rows, #957 boot-retire) all pass.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at df6a7706 (ThermoDeep4, ThermoQuality4): neither blocking on its own; both independently found and reproduced B6; I reproduced it a third time (/tmp/legion27-review/r4/dispose-leak.test.ts: events after cancelAll = ['probe','retire:2'])."
+  "review": {
+    "id": 5190120227,
+    "url": "https://github.com/sjawhar/legion/pull/981#pullrequestreview-5190120227",
+    "state": "CHANGES_REQUESTED",
+    "commit": "e84aa7ae0298de24f960a6a5de1001b945c23d85",
+    "code_head": "350fc5349c59",
+    "round": 5
   },
-  "hotLoopAnswer": "None. Resync (600 s; probe effects only from resync, never the durable lane -> resync failed + reschedule, never fatal); registration deadline (workerBootTimeout x intervals; a probe throw at the deadline re-arms WITHOUT touching launchFailures; only the mixed case -- deadline probe finds the pane gone, resurrection's re-probe fails -- counts +1 per cycle, legitimate and matching the pre-PR per-cycle count); watchdog (one interval per failed retirement; launchFailures increments only after retireWorkerLocator resolves); linger sweep (60 s); handleException log-only. Acceptable at those intervals.",
-  "keyFindings": [
+  "blocking": [
     {
-      "severity": "blocking",
-      "file": "packages/daemon/src/daemon/worker-boot-watchdog.ts",
-      "line": 285,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985495",
-      "description": "B6. retire() deletes the armed entry before awaiting retireUnconfirmedBoot; a cancelAll() (daemon dispose) or same-token cancel landing during that await cannot flip `cancelled`. When the retirement then rejects, the catch correctly declines to re-insert (!this.disposed) but returns false and watch() continues while(!cancelled): another full interval with real timers (controller.signal never aborted), probeAlive (list-panes), and a second retireUnconfirmedBoot -> mutateClaim -> persist() after the daemon's final save; same for a superseded watch (this.armed.has(token)). Pre-round-3 the loop always returned after the retire. Contradicts cancelAll()'s contract ('no background timer may outlive the watchdog'). Reproduced three times. Production exposure bounded (every cancelAll() path is followed by process exit before the 120 s interval) but a reproduced defect in code this PR adds, in the lifecycle-hygiene class the PR is about. Fix: `if (cancelled || this.disposed || this.armed.has(token)) return true;` before the re-insert; one sibling test row asserting no probe/retire after cancelAll()."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 1744,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985496",
-      "description": "Land with B6: comment (and AGENTS.md:52) says the resurrection can fail on 'its own re-probe and stop ... nothing was cleared'; removeTreeProcess swallows the StopFailed and clears the locator in finally, so only the re-probe and spawnRoot propagate -- drop 'and stop'/'or stop'. The re-arm log line announces a re-arm the following treeStillUnconfirmed may decline (spawnRoot throw already re-queued/launch-failed the tree)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
-      "line": 6011,
-      "thread": "https://github.com/sjawhar/legion/pull/981#discussion_r3998985497",
-      "description": "Land with B6: `publications toEqual([])` cannot catch a reclaim-architect being sent (controlDirective goes through natsRequest -> controlRequests). Assert controlRequests is []."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 2046,
-      "description": "Land with B6: handleException's `throw new Error('No Legion tree records issue')` and resumeWorker's outer workerCatchup await still reject silently on the exception lane while the new doc says every failure is logged; one outer try/catch after `parsed` covers both and drops the logFailure closure."
+      "id": "B7",
+      "path": "packages/daemon/src/daemon/legion-state.ts",
+      "line": 915,
+      "finding": "State version collision with #991 (fcd4bb85, LEGION-37, on main a0d0f33f): two different v26 schemas under one number; PR CONFLICTING/DIRTY; deployed state.json already v26 under #991's meaning.",
+      "fix": "Rebase onto a0d0f33f; keep #991's v25->v26 verbatim; renumber this branch's bump to migrateV26State -> v27 across legion-state.ts, legion-state.test.ts (v24/v25/v26 files -> 27; .v24/.v25/.v26.bak), PR body and any AGENTS.md mention; re-check processes.ts/AGENTS.md overlap with #991's pendingAssignment hunks."
     }
   ],
-  "fastFollow": "Watchdog re-arm test tail cannot fail once retire:2 was seen (spin more microtasks, assert events unchanged); the two exhausted-branch sites duplicate `if (await retire()) return; await yieldToEventLoop();`; retire()'s doc names ProcessStopFailed but the catch is unconditional; the two handleException rows could be one it.each; legion-state.test.ts:929 title says 'v24 to v25' while asserting 26. Working-copy note: the jj working copy holds a provisioning .omp/config.yml (child of df6a7706, not in the PR) -- must not ride along on the deletion push.",
-  "smokeRigNote": "Artifact assessed in round 3 (honest incl. Not-proven); PR body explains its v24->v25 wording vs the composed v25->v26 bump after #993.",
-  "nextRound": "On the B6 fix head (+ test row, + the three land-with items if taken) after the tester's pass: COMMENT stating clean and the SHA; then the implementer pushes the .legion/ deletion and I APPROVE that deletion-only head by SHA.",
+  "satisfied_threads": {
+    "round4": [
+      "r3998985495 (B6)",
+      "r3998985496",
+      "r3998985497"
+    ],
+    "note": "Verified against the code at 350fc534; the review App cannot resolve threads (resolveReviewThread forbidden) -- implementer resolves them on the rebase push, or the architect via `legion threads resolve` once #1003 is deployed."
+  },
+  "land_with_rebase": [
+    "worker-boot-watchdog.ts:273-276,288 -- retire() doc overclaims that a same-token cancel mid-await is caught; log text wrong for the disposed/superseded branches. Suggest 'cancelled, disposed, or superseded meanwhile; not re-armed'.",
+    "processes.ts:1764 -- second escalate log's parenthetical enumerates only queued/launch-failed/newer generation; log the observed status/generation instead."
+  ],
+  "fast_follow": [
+    "B6 row: 'retire' filter assertion implied by the slice assertion; timers.activeCount()===0 inert under the fake sleep.",
+    "Re-arm row: the cancel(token,1)+spin+unchanged tail is inert.",
+    "handleException it.each: token thunks around constants; conditional `if (state.trees[root])` assertion."
+  ],
+  "verification": {
+    "tsc": "clean",
+    "suites": "worker-boot-watchdog 10; processes 244 pass/3 gated; runtime.contract 67; legion-state 41; index 34; tmux 8; proc-stat 4; e2e (LEGION_E2E=1 LEGION_TMUX_LIVE=1) 5",
+    "named": "B6 fail-first row, re-arm row, three handleException rows, remediated ensureController test -- pass; my round-4 dispose-mid-retire repro passes against the fix",
+    "ci": "34744461214/34744517358 (350fc534) and 34745609710 (e84aa7ae) green",
+    "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 350fc534: no blocking findings",
+    "main_state": "main a0d0f33f; branch base 0f744bc8; #991 changed processes.ts, legion-state.ts, AGENTS.md, worker-admission.ts, api/routes/workers.ts, reducers.ts and tests"
+  },
+  "next": "Implementer rebases and renumbers; tester re-verifies the migration chain at the rebased head (v26-under-#991 fixture loads; v24/v25/v26 files -> 27); reviewer reviews the rebased head, COMMENTs clean if so, then APPROVEs the .legion/-deletion head by SHA.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T06:50:42.419Z"
+  "completed": "2026-09-13T07:52:52.365Z"
 }
