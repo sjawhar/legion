@@ -149,7 +149,7 @@ jobs:
           fi
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main
+        run: .github/scripts/release-push.sh push-main packages/daemon "${{ steps.version.outputs.version }}"
 
   worker_image:
     needs: [changes, cli]
@@ -270,7 +270,7 @@ jobs:
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main
+        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "${{ steps.version.outputs.version }}"
 
   pi_envoy:
     needs: [changes, envoy_plugin]
@@ -395,4 +395,4 @@ jobs:
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main
+        run: .github/scripts/release-push.sh push-main packages/pi-envoy "${{ steps.version.outputs.version }}"

@@ -63,6 +63,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Test release scripts
+        run: .github/scripts/release-push.test.sh
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
