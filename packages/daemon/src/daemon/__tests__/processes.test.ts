@@ -6499,6 +6499,104 @@ describe("ProcessManager", () => {
     expect(state.trees[root]).toMatchObject({ generation: 2 });
   });
 
+  it("handleException logs once, naming the role token, and clears nothing when the root architect's liveness probe cannot complete", async () => {
+    // The core-NATS exception lane has no redelivery: a `handleException` that rejected would
+    // sink into the event pump's in-memory failures with no log at all. A probe the runtime
+    // could not complete (a `list-panes` that proves nothing about the pane) must therefore
+    // resolve here -- logged, nothing cleared, nothing launched -- and leave the retry to the
+    // resync backstop or the next exception.
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    const seededLocator = state.trees[root].locator;
+    const token = roleToken("omp", root, "architect");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const {
+      manager: processes,
+      commands,
+      publications,
+    } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return { stdout: "", stderr: "tmux: server not responding", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.handleException(exception(token));
+
+      const logged = errorLog.mock.calls.filter(([message]) => String(message).includes(token));
+      expect(logged).toHaveLength(1);
+      expect(String(logged[0]?.[1])).toContain(
+        "cannot verify pane %0: list-panes -t %0 exited 1: tmux: server not responding"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+    expect(state.trees[root].locator).toBe(seededLocator);
+    expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(
+      commands.filter((command) => command[3] === "new-window" || command[3] === "kill-pane")
+    ).toEqual([]);
+    // Neither the reclaim redelivery nor a controller escalation went out.
+    expect(publications).toEqual([]);
+  });
+
+  it("handleException logs once, naming the controller token, and clears nothing when the controller's liveness probe cannot complete", async () => {
+    const state = newLegionState("omp", 1);
+    state.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@controller",
+      tmuxPaneId: "%1",
+      socketPath: "/state/workers/controller.sock",
+      ...paneIdentity(),
+    };
+    const seededLocator = state.controllerLocator;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const {
+      manager: processes,
+      commands,
+      publications,
+    } = manager(state, {
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          return { stdout: "", stderr: "tmux: server not responding", exitCode: 1 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.handleException(
+        exception(controllerToken("omp"), {
+          topic: "notifications.github.sjawhar.legion.issue.42.comment",
+          payload: "{}",
+          eventId: "evt-controller",
+        })
+      );
+
+      const logged = errorLog.mock.calls.filter(([message]) =>
+        String(message).includes(controllerToken("omp"))
+      );
+      expect(logged).toHaveLength(1);
+      expect(String(logged[0]?.[1])).toContain(
+        "cannot verify pane %1: list-panes -t %1 exited 1: tmux: server not responding"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+    expect(state.controllerLocator).toBe(seededLocator);
+    expect(
+      commands.filter((command) => command[3] === "new-window" || command[3] === "kill-pane")
+    ).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
   it("connects a worker-shim client to the root architect's socket when its tree becomes ready", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
