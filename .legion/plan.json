@@ -1,0 +1,283 @@
+{
+  "taskCount": 6,
+  "independentTasks": 2,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks in order 1 -> 2 -> 3 -> 4 -> 5 -> 6 (task 4 may run before 2/3; task 5 needs both). Test first in every task. Do not run formatters or the repository-wide suite; the gates are the two commands under `gates`.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff write/commit/push, PR body in READY format with `Dispatch: LEGION-108`, no rebase without CONFLICTING; test-driven-development: each task below starts with a failing Go test."
+    ],
+    "test": [
+      "legion-worker: the E2E line names the real surface (`go test -v` on the listener package with a Docker NATS testcontainer) plus the negative control (both keys -> 400); verification-before-completion: quote the `-v` output, never a summary of it. No rig of any kind: spec v2 line 5 is withdrawn by Sami's 2026-09-13 standing order."
+    ],
+    "review": [
+      "legion-worker: one review per round via `legion gh -- api .../reviews`, threads answered `Accepted:`/`Still open:`; envoy: check the three exception reasons and the `dedupe_key` rule against the parent contract (dispatch://LEGION-101/spec, Design) — it is fixed with LEGION-107 and LEGION-109 and not renegotiable."
+    ]
+  },
+  "concerns": [
+    "Spec v2 withdraws acceptance line 5 (no smoke rigs, scratch daemons, throwaway NATS containers, scratch tmux servers; e2e-local.sh included). The architect's assignment asked for a rig plan; the spec is the record, so this plan has no rig. The evidence the rig would have produced — the listener log line naming receipt_timeout and the captured exception envelope — comes from `go test -v` (the receipt_timeout test t.Logf's both) and is quoted on the PR.",
+    "No Go toolchain on this box (`which go` empty, `mise ls go` empty; go.mod says `go 1.26.1`, CI uses setup-go with go-version-file). The plan runs the gates through `mise x go@1.26 -- go ...`, which installs Go into mise's box-wide tool store (~/.local/share/mise/installs/go), not into ~/.omp/profiles/legion or legion.yaml. The operator rule forbids `mise install` against the live profile; this is a compiler in the tool store, but the architect should get the operator's OK. If refused, CI (`envoy-go` job in .github/workflows/envoy-and-contracts.yaml) is the only gate and the implementer says so in its handoff.",
+    "The listener package tests start a `nats:2.10` Docker testcontainer (`sharedListenerTestNATSURI`, main_test.go:35). The spec's Design sentence 'with no NATS container started' is inaccurate for the existing suite; this is `go test`, the same thing CI runs, not a rig. Docker 29.7.2 is present and the legion user is in the docker group. If it fails locally with a credential-helper error, docs/solutions/testing/testcontainers-go-resolves-all-docker-credhelpers.md is the fix.",
+    "Files beyond the assignment's list, each forced by an acceptance line: packages/envoy/internal/logging/logging.go gains NewWithWriter (line 1 asserts the log line; the logger hardcodes os.Stderr); cmd/listener/delivery.go's config gains a `forwardRole` func field wired in cmd/listener/main.go (line 2's 'publish fails' branch cannot be reached through the concrete *bus.Client — a closed connection or oversize payload also kills the exception publish); docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md says a two-second timeout is delivery_failed, which this change makes false.",
+    "Not touched on purpose: skills/envoy/SKILL.md ('Legion exception lane') names two reasons. Any `skills/**` change cuts a pi-envoy plugin release (release.yaml path filter), which would collide with LEGION-109's plugin release. Fold the one-sentence update into LEGION-109's PR or a fast-follow.",
+    "Metrics: the receipt_timeout outcome records `delivery_status=\"receipt_timeout\"` on messages_delivered (new additive label value; nothing enumerates the values — checked cmd/listener/main.go, deploy/, internal/metrics/). Slow holders stop counting as `failed`, which is the point.",
+    "`validateMessageBody` is shared by /v1/messages/send, so a send body carrying both dedupe_key and idempotency_key now also answers 400 naming both; the send handler's code and its dedupe key (`agent.<target>.<idempotency|id>`) are unchanged and a lone dedupe_key on send is ignored as before. Nothing publishes to send with dedupe_key today (LEGION-107 uses publish)."
+  ],
+  "summary": "Two Go changes in packages/envoy/cmd/listener. (1) roleTopicDelivery: when the forward to a registered, live holder returns nats.ErrTimeout, the exception reason is receipt_timeout (log 'listener role receipt timed out'); every other forward error stays delivery_failed; both clear the attempt cache. (2) POST /v1/messages/publish accepts dedupe_key, used verbatim as the envelope dedupe key, mutually exclusive with idempotency_key (400 naming both). Proof is the listener package's Go tests (Docker NATS testcontainer) plus CI; no rig.",
+  "spec": {
+    "issue": "dispatch://LEGION-108/spec",
+    "version": 3,
+    "parentContract": "dispatch://LEGION-101/spec, section Design — shared with LEGION-107 (daemon) and LEGION-109 (plugin), not renegotiable"
+  },
+  "contract": {
+    "exceptionReasons": {
+      "no_holder": "no role claim at all (unchanged)",
+      "delivery_failed": "a claim exists but the message was not forwarded: holder lookup failed, expired-claim cleanup failed, holder stale/not live, or the forward request itself errored with anything other than nats.ErrTimeout (unchanged meaning)",
+      "receipt_timeout": "NEW: forwarded to a registered, live holder; no empty receipt inside roleReceiptTimeout (2s); RequestCoreTo returned nats.ErrTimeout"
+    },
+    "exceptionPayloadUnchanged": "deliveryExceptionPayload keeps original_topic, event_id, reason, payload_summary, payload, dedupe_key, source, source_session; the exception envelope's source_event_id is the original event_id.",
+    "attemptCache": "clearAttempt: true for delivery_failed and receipt_timeout; recordDedupe only on a delivered forward — so a re-publish with the same dedupe_key after receipt_timeout is forwarded again, after a delivered forward it is a dedupe skip.",
+    "publishDedupeKey": "body.dedupe_key non-empty -> envelope.dedupe_key = body.dedupe_key verbatim (no trimming; contracts.Envelope.Validate already 400s a whitespace-only key as 'dedupe_key is required'); empty string -> absent; idempotency_key alone -> 'publish.' + idempotency_key (unchanged); neither -> 'publish.' + id.New() (unchanged); both -> 400 {error: 'dedupe_key and idempotency_key are mutually exclusive', expected: ['dedupe_key','idempotency_key']}, nothing published.",
+    "logLine": "listener role receipt timed out — slog.LevelWarn via logger.DeliveryLog with delivery_status 'receipt_timeout', attrs session_id/topic/event_id, plus slog.String('timeout', roleReceiptTimeout.String()). Warn, not Error: a live holder that is slow is not a failure.",
+    "notChanged": "packages/contracts, internal/contracts/generated.go (reasons are not enumerated anywhere — checked), the send handler's code, roleReceiptTimeout, the exceptions-topic shape."
+  },
+  "prerequisites": {
+    "goToolchain": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go version   # first run downloads Go 1.26.x into ~/.local/share/mise/installs/go; go.mod's `go 1.26.1` directive is satisfied by any 1.26.x",
+    "docker": "docker version --format '{{.Server.Version}}'   # 29.7.2 on this box; the listener tests pull nats:2.10 through testcontainers-go",
+    "ifGoIsRefused": "Report to the architect and rely on CI's envoy-go job; write that in .legion/implement.json."
+  },
+  "gates": {
+    "vet": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go vet ./...",
+    "test": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/... ./internal/logging/ -count=1",
+    "build": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go build ./cmd/listener",
+    "evidenceForThePR": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout|TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed|TestPublishHandler_DedupeKeySelection|TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey|TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly|TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException|TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder'   # quote the t.Logf lines (listener log line + exception payload) in the PR's E2E section",
+    "doNotRun": "gofmt/biome/formatters; `go test ./...` (whole module, needs Postgres for internal/dispatch); `bun test`; any rig."
+  },
+  "files": [
+    {
+      "path": "packages/envoy/internal/logging/logging.go",
+      "change": "New(machineID) delegates to new NewWithWriter(machineID, io.Writer); behaviour of New unchanged (stderr)."
+    },
+    {
+      "path": "packages/envoy/cmd/listener/delivery.go",
+      "change": "listenerDeliveryHandlerConfig gains `forwardRole func(subject string, item contracts.Envelope, timeout time.Duration) error`; roleTopicDelivery calls cfg.forwardRole and adds the errors.Is(err, nats.ErrTimeout) branch -> receipt_timeout."
+    },
+    {
+      "path": "packages/envoy/cmd/listener/main.go",
+      "change": "deliveryConfig sets `forwardRole: client.RequestCoreTo,` (line ~631)."
+    },
+    {
+      "path": "packages/envoy/cmd/listener/api.go",
+      "change": "messageBody.DedupeKey `json:\"dedupe_key\"`; validateMessageBody returns (string, []string) and rejects both keys; both callers spread fields; publishHandler selects the dedupe key (verbatim / idempotency / minted)."
+    },
+    {
+      "path": "packages/envoy/cmd/listener/main_test.go",
+      "change": "harness gains `logs *lockedBuffer` and `config listenerDeliveryHandlerConfig`; assertDeliveryException returns the exception envelope; deaf-holder test renamed and asserting receipt_timeout + log line + exactly one exception; new forward-publish-error test; new same-dedupe_key re-publish test."
+    },
+    {
+      "path": "packages/envoy/cmd/listener/api_test.go",
+      "change": "TestPublishHandler_DedupeKeySelection (table: explicit / empty / idempotency / neither, response and wire envelope agree) and TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey (400 naming both, nothing published)."
+    },
+    {
+      "path": "packages/envoy/AGENTS.md",
+      "change": "role-lane bullet (line 90), exception bullet (line 92), publish row of the Listener API table (line 113), optional-fields paragraph (line 124) name the three reasons and dedupe_key."
+    },
+    {
+      "path": "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+      "change": "lines 35 and 107: the two-second timeout from a live holder is receipt_timeout; delivery_failed keeps the never-forwarded cases."
+    }
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Test seams: injectable role forward and capturable logger (no behaviour change)",
+      "acceptance": "enables 1 and 2",
+      "files": [
+        "packages/envoy/internal/logging/logging.go",
+        "packages/envoy/cmd/listener/delivery.go",
+        "packages/envoy/cmd/listener/main.go",
+        "packages/envoy/cmd/listener/main_test.go"
+      ],
+      "steps": [
+        "logging.go: add `\"io\"` to imports. Replace New's body with `return NewWithWriter(machineID, os.Stderr)` and add:\n// NewWithWriter is New writing to w instead of stderr, so a test can read the lines back.\nfunc NewWithWriter(machineID string, w io.Writer) *Logger {\n\thandler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})\n\treturn &Logger{machineID: machineID, logger: slog.New(handler)}\n}",
+        "delivery.go, listenerDeliveryHandlerConfig (line 36): add after `client`:\n\t// forwardRole delivers a role-lane envelope to the holder's agent subject and\n\t// waits for its empty receipt. main.go wires client.RequestCoreTo. A\n\t// nats.ErrTimeout from it means the holder never answered inside timeout;\n\t// any other error means the forward never reached the holder.\n\tforwardRole func(subject string, item contracts.Envelope, timeout time.Duration) error\nIn roleTopicDelivery line 365 replace `cfg.client.RequestCoreTo(` with `cfg.forwardRole(`.",
+        "main.go deliveryConfig (line 631): add `forwardRole: client.RequestCoreTo,` after `client: client,`.",
+        "main_test.go: add `\"bytes\"` to imports. Add near the harness:\ntype lockedBuffer struct {\n\tmu  sync.Mutex\n\tbuf bytes.Buffer\n}\n\nfunc (b *lockedBuffer) Write(p []byte) (int, error) {\n\tb.mu.Lock()\n\tdefer b.mu.Unlock()\n\treturn b.buf.Write(p)\n}\n\nfunc (b *lockedBuffer) String() string {\n\tb.mu.Lock()\n\tdefer b.mu.Unlock()\n\treturn b.buf.String()\n}\nlistenerDeliveryHarness gains `logs *lockedBuffer` and `config listenerDeliveryHandlerConfig`. In newListenerDeliveryHarness: `logs := &lockedBuffer{}`; deliveryConfig gets `forwardRole: client.RequestCoreTo,` and `logger: logging.NewWithWriter(\"test\", logs),`; `t.Cleanup(func() { if t.Failed() { t.Logf(\"listener log:\\n%s\", logs.String()) } })`; return the two new fields.",
+        "Change assertDeliveryException's signature to `func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) contracts.Envelope` and `return exception` at its end (existing callers ignore the value; Go permits that for a statement call).",
+        "Run gates.vet and gates.test: every existing test passes unchanged (this task changes no behaviour; the deaf-holder test still expects delivery_failed here).",
+        "Commit: cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"listener: inject the role forward and log writer for tests\" packages/envoy/internal/logging/logging.go packages/envoy/cmd/listener/delivery.go packages/envoy/cmd/listener/main.go packages/envoy/cmd/listener/main_test.go"
+      ]
+    },
+    {
+      "id": 2,
+      "title": "receipt_timeout for a live holder that never acknowledges",
+      "acceptance": "1",
+      "files": [
+        "packages/envoy/cmd/listener/main_test.go",
+        "packages/envoy/cmd/listener/delivery.go"
+      ],
+      "test": {
+        "file": "packages/envoy/cmd/listener/main_test.go",
+        "name": "TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout",
+        "surface": "publishHandler over HTTP -> real NATS (testcontainer) -> coreNATSDeliveryHandler -> real RequestCoreTo against a registered holder with no subscriber on its agent subject"
+      },
+      "steps": [
+        "Rename TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed (main_test.go:633) to TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout. Give the publish a payload so preservation is meaningful: body `{\"topic\":\"`+roleTopic+`\",\"message\":\"deaf role event\",\"payload\":\"{\\\"type\\\":\\\"worker-queued\\\"}\",\"source\":\"agent\"}`. Replace the final assertion with:\nexception := assertDeliveryException(t, exceptionProbe, published, \"receipt_timeout\")\nt.Logf(\"captured exception envelope payload: %s\", exception.Payload)\nif _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {\n\tt.Fatalf(\"one publish produced a second exception (or probe failed): %v\", err)\n}\nlogs := harness.logs.String()\nline := \"\"\nfor _, candidate := range strings.Split(logs, \"\\n\") {\n\tif strings.Contains(candidate, `\"msg\":\"listener role receipt timed out\"`) {\n\t\tline = candidate\n\t\tbreak\n\t}\n}\nif line == \"\" || !strings.Contains(line, `\"delivery_status\":\"receipt_timeout\"`) || !strings.Contains(line, `\"event_id\":\"`+published.EventID+`\"`) {\n\tt.Fatalf(\"listener log does not name receipt_timeout for %s:\\n%s\", published.EventID, logs)\n}\nt.Logf(\"listener log line: %s\", line)",
+        "Run: mise x go@1.26 -- go test ./cmd/listener/ -run TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout -count=1 -v — expected FAIL: `exception reason = \"delivery_failed\", want \"receipt_timeout\"`.",
+        "delivery.go roleTopicDelivery: replace the forward-error block (lines 365-377) with:\nif err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {\n\tif errors.Is(err, nats.ErrTimeout) {\n\t\tapplyDeliveryOutcome(cfg, item, deliveryOutcome{\n\t\t\tsessionID:    sessionID,\n\t\t\tmetricStatus: \"receipt_timeout\",\n\t\t\tlog: func(logger *logging.Logger) {\n\t\t\t\tlogger.DeliveryLog(slog.LevelWarn, \"listener role receipt timed out\", sessionID, item.Topic, item.EventID, \"receipt_timeout\", slog.String(\"timeout\", roleReceiptTimeout.String()))\n\t\t\t},\n\t\t\texceptionReason: \"receipt_timeout\",\n\t\t\tclearAttempt:    true,\n\t\t})\n\t\tmessage.finalize(false)\n\t\treturn\n\t}\n\tapplyDeliveryOutcome(cfg, item, deliveryOutcome{\n\t\tsessionID:    sessionID,\n\t\tmetricStatus: \"failed\",\n\t\tlog: func(logger *logging.Logger) {\n\t\t\tlogger.DeliveryLog(slog.LevelError, \"listener role forward failed\", sessionID, item.Topic, item.EventID, \"failed\", slog.String(\"error\", err.Error()))\n\t\t},\n\t\texceptionReason: \"delivery_failed\",\n\t\tclearAttempt:    true,\n\t})\n\tmessage.finalize(false)\n\treturn\n}\nUpdate the doc comment above roleTopicDelivery (line 278): after 'a failed forward is reported via a delivery exception instead of a NAK' add 'A forward the live holder did not acknowledge inside roleReceiptTimeout is receipt_timeout; a forward that never reached it is delivery_failed; no claim is no_holder.'",
+        "Run the same -run command: PASS, with the two t.Logf lines visible under -v (this is the evidence the tester quotes on the PR).",
+        "Commit: jj -R \"$LEGION_WORKSPACE\" split -m \"listener: a late receipt from a live role holder is receipt_timeout, not delivery_failed (LEGION-108)\" packages/envoy/cmd/listener/delivery.go packages/envoy/cmd/listener/main_test.go"
+      ]
+    },
+    {
+      "id": 3,
+      "title": "delivery_failed and no_holder keep their meaning",
+      "acceptance": "2",
+      "files": [
+        "packages/envoy/cmd/listener/main_test.go"
+      ],
+      "test": {
+        "file": "packages/envoy/cmd/listener/main_test.go",
+        "name": "TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed",
+        "regressionLocksAlreadyPresent": [
+          "TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException (stale holder -> delivery_failed, main_test.go:2055)",
+          "TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder (no claim -> no_holder, :2021)",
+          "TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder (:2085)"
+        ]
+      },
+      "steps": [
+        "Add to main_test.go (after TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException):\nfunc TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *testing.T) {\n\tharness := newListenerDeliveryHarness(t, nil)\n\tconst role = \"forward-publish-error\"\n\tif err := harness.sessions.Put(\"ses_unreachable\", session.SessionEntry{MachineID: \"test-machine\", SelfSubscribed: true}); err != nil {\n\t\tt.Fatalf(\"register holder: %v\", err)\n\t}\n\tif _, err := harness.registry.SetRole(\"ses_unreachable\", \"test-machine\", role, false); err != nil {\n\t\tt.Fatalf(\"claim role: %v\", err)\n\t}\n\tvar forwards atomic.Int32\n\tcfg := harness.config\n\tcfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {\n\t\tforwards.Add(1)\n\t\treturn errors.New(\"nats: connection closed\")\n\t}\n\thandler := coreNATSDeliveryHandler(cfg)\n\titem := listenerTestEnvelope(contracts.RoleTopicPrefix+role, \"forward-publish-error\")\n\titem.Payload = `{\"type\":\"worker-queued\"}`\n\tdata := marshalListenerEnvelope(t, item)\n\tprobe, err := harness.client.Conn.SubscribeSync(\"notifications.envoy.exceptions.\" + item.Topic)\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe exception probe: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = probe.Unsubscribe() })\n\n\thandler(&natsgo.Msg{Data: data})\n\tassertDeliveryException(t, probe, item, \"delivery_failed\")\n\thandler(&natsgo.Msg{Data: data})\n\tassertDeliveryException(t, probe, item, \"delivery_failed\")\n\n\tif got := forwards.Load(); got != 2 {\n\t\tt.Fatalf(\"forward attempts = %d, want 2: a failed forward must clear the attempt cache\", got)\n\t}\n\tif logs := harness.logs.String(); strings.Contains(logs, \"receipt_timeout\") || !strings.Contains(logs, `\"msg\":\"listener role forward failed\"`) {\n\t\tt.Fatalf(\"a forward publish error must log as a failed forward, never as a receipt timeout:\\n%s\", logs)\n\t}\n}",
+        "Run: mise x go@1.26 -- go test ./cmd/listener/ -count=1 -run 'RoleForwardPublishError|ExpiredRoleDropsClaim|RoleReleasedByReplacement|EmitsExceptionForControlTopicWithNoHolder' — all PASS (this task adds the lock for the non-timeout branch; the three existing tests are the stale-holder and no-claim locks and need no change). Negative check worth doing once: temporarily make the receipt_timeout branch unconditional and watch this test fail with `exception reason = \"receipt_timeout\", want \"delivery_failed\"`, then restore.",
+        "Commit: jj -R \"$LEGION_WORKSPACE\" split -m \"listener test: a forward publish error stays delivery_failed\" packages/envoy/cmd/listener/main_test.go"
+      ]
+    },
+    {
+      "id": 4,
+      "title": "POST /v1/messages/publish accepts an explicit dedupe_key",
+      "acceptance": "3",
+      "files": [
+        "packages/envoy/cmd/listener/api_test.go",
+        "packages/envoy/cmd/listener/api.go"
+      ],
+      "test": {
+        "file": "packages/envoy/cmd/listener/api_test.go",
+        "names": [
+          "TestPublishHandler_DedupeKeySelection",
+          "TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey"
+        ],
+        "surface": "publishHandler over httptest + the envelope observed on the wire from a core subscription on the topic"
+      },
+      "steps": [
+        "Add to api_test.go (after TestPublishHandlerPreservesAllOptionalMessageFields):\nfunc TestPublishHandler_DedupeKeySelection(t *testing.T) {\n\tclient := setupPublishTestClient(t)\n\tvar state atomic.Pointer[listenerDeps]\n\tstate.Store(&listenerDeps{client: client})\n\tconst topic = \"notifications.github.example-org.example-repo.dedupe-key\"\n\tprobe, err := client.Conn.SubscribeSync(topic)\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe topic probe: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = probe.Unsubscribe() })\n\tif err := client.Conn.Flush(); err != nil {\n\t\tt.Fatalf(\"flush: %v\", err)\n\t}\n\tminted := func(key string) bool { return strings.HasPrefix(key, \"publish.\") && len(key) > len(\"publish.\") }\n\tcases := []struct {\n\t\tname string\n\t\tbody string\n\t\twant func(key string) bool\n\t}{\n\t\t{\"explicit dedupe_key is used verbatim\", `{\"topic\":\"` + topic + `\",\"message\":\"hello\",\"dedupe_key\":\"publish.abc\"}`, func(key string) bool { return key == \"publish.abc\" }},\n\t\t{\"empty dedupe_key is absent\", `{\"topic\":\"` + topic + `\",\"message\":\"hello\",\"dedupe_key\":\"\"}`, minted},\n\t\t{\"idempotency_key keeps the publish prefix\", `{\"topic\":\"` + topic + `\",\"message\":\"hello\",\"idempotency_key\":\"k1\"}`, func(key string) bool { return key == \"publish.k1\" }},\n\t\t{\"neither mints a key\", `{\"topic\":\"` + topic + `\",\"message\":\"hello\"}`, minted},\n\t}\n\tfor _, tc := range cases {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\trecorder := httptest.NewRecorder()\n\t\t\tpublishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, \"/v1/messages/publish\", strings.NewReader(tc.body)))\n\t\t\tif recorder.Code != http.StatusOK {\n\t\t\t\tt.Fatalf(\"status = %d, want 200; body = %s\", recorder.Code, recorder.Body.String())\n\t\t\t}\n\t\t\tvar response contracts.Envelope\n\t\t\tif err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {\n\t\t\t\tt.Fatalf(\"decode response: %v\", err)\n\t\t\t}\n\t\t\tif !tc.want(response.DedupeKey) {\n\t\t\t\tt.Fatalf(\"response dedupe_key = %q\", response.DedupeKey)\n\t\t\t}\n\t\t\tmessage, err := probe.NextMsg(5 * time.Second)\n\t\t\tif err != nil {\n\t\t\t\tt.Fatalf(\"read published envelope: %v\", err)\n\t\t\t}\n\t\t\tvar wire contracts.Envelope\n\t\t\tif err := json.Unmarshal(message.Data, &wire); err != nil {\n\t\t\t\tt.Fatalf(\"decode wire envelope: %v\", err)\n\t\t\t}\n\t\t\tif wire.DedupeKey != response.DedupeKey || wire.EventID != response.EventID {\n\t\t\t\tt.Fatalf(\"wire envelope dedupe_key %q event %q; response %q %q\", wire.DedupeKey, wire.EventID, response.DedupeKey, response.EventID)\n\t\t\t}\n\t\t})\n\t}\n}\n\nfunc TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {\n\tclient := setupPublishTestClient(t)\n\tvar state atomic.Pointer[listenerDeps]\n\tstate.Store(&listenerDeps{client: client})\n\tconst topic = \"notifications.github.example-org.example-repo.dedupe-key-conflict\"\n\tprobe, err := client.Conn.SubscribeSync(topic)\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe topic probe: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = probe.Unsubscribe() })\n\tif err := client.Conn.Flush(); err != nil {\n\t\tt.Fatalf(\"flush: %v\", err)\n\t}\n\trecorder := httptest.NewRecorder()\n\tpublishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, \"/v1/messages/publish\", strings.NewReader(`{\"topic\":\"`+topic+`\",\"message\":\"hello\",\"dedupe_key\":\"publish.abc\",\"idempotency_key\":\"k1\"}`)))\n\tif recorder.Code != http.StatusBadRequest {\n\t\tt.Fatalf(\"status = %d, want 400; body = %s\", recorder.Code, recorder.Body.String())\n\t}\n\tt.Logf(\"both keys: %s\", recorder.Body.String())\n\tif body := recorder.Body.String(); body != \"{\\\"error\\\":\\\"dedupe_key and idempotency_key are mutually exclusive\\\",\\\"expected\\\":[\\\"dedupe_key\\\",\\\"idempotency_key\\\"]}\\n\" {\n\t\tt.Fatalf(\"body = %q\", body)\n\t}\n\tif _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {\n\t\tt.Fatalf(\"a rejected publish must publish nothing: %v\", err)\n\t}\n}\n(api_test.go already imports errors, nats, contracts, httptest, strings, time — verify; add any missing.)",
+        "Run: mise x go@1.26 -- go test ./cmd/listener/ -count=1 -run 'DedupeKey' — expected FAIL: 'explicit dedupe_key is used verbatim' gets a minted `publish.<id>`; the conflict test gets 200.",
+        "api.go messageBody (line 38): add `DedupeKey string `json:\"dedupe_key\"`` after IdempotencyKey. validateMessageBody (line 82): change the signature to `func validateMessageBody(body messageBody) (string, []string)`; the three existing returns become `[]string{field.name}`, `[]string{\"urgency\"}`, `[]string{\"expects_reply\"}`; before the final `return \"\", nil` add:\nif body.DedupeKey != \"\" && body.IdempotencyKey != \"\" {\n\treturn \"dedupe_key and idempotency_key are mutually exclusive\", []string{\"dedupe_key\", \"idempotency_key\"}\n}\nsendHandler (line 228) and publishHandler (line 315): `if message, fields := validateMessageBody(...); message != \"\" { writeJSONError(w, http.StatusBadRequest, message, fields...); return }`. publishHandler (lines 319-322) becomes:\ndedupeKey := \"publish.\" + id.New()\nswitch {\ncase request.DedupeKey != \"\":\n\tdedupeKey = request.DedupeKey\ncase request.IdempotencyKey != \"\":\n\tdedupeKey = \"publish.\" + request.IdempotencyKey\n}\nUpdate publishHandler's doc comment: 'An explicit dedupe_key is used verbatim (a re-send a receiver's own dedupe recognises); it is mutually exclusive with idempotency_key.' The send handler body is otherwise untouched.",
+        "Run: go vet ./... (catches any validateMessageBody caller left on the old signature), then the -run 'DedupeKey' command: PASS. Also run -run 'TestMessageHandlersReject|TestPublishHandler' to confirm the existing validation tables still pass.",
+        "Commit: jj -R \"$LEGION_WORKSPACE\" split -m \"listener api: publish accepts an explicit dedupe_key, exclusive with idempotency_key (LEGION-108)\" packages/envoy/cmd/listener/api.go packages/envoy/cmd/listener/api_test.go"
+      ]
+    },
+    {
+      "id": 5,
+      "title": "A re-publish with the same dedupe_key is forwarded after receipt_timeout and skipped after delivery",
+      "acceptance": "4",
+      "files": [
+        "packages/envoy/cmd/listener/main_test.go"
+      ],
+      "dependsOn": [
+        2,
+        4
+      ],
+      "test": {
+        "file": "packages/envoy/cmd/listener/main_test.go",
+        "name": "TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly",
+        "surface": "three real publishes through publishHandler with dedupe_key 'publish.resend-1' against a holder whose agent-subject responder first swallows, then acknowledges; the role lane is the real coreNATSDeliveryHandler on the testcontainer"
+      },
+      "steps": [
+        "Add to main_test.go after TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout:\nfunc TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t *testing.T) {\n\tharness := newListenerDeliveryHarness(t, nil)\n\tconst role = \"slow-holder\"\n\troleTopic := contracts.RoleTopicPrefix + role\n\tif err := harness.sessions.Put(\"ses_slow\", session.SessionEntry{MachineID: \"test-machine\", SelfSubscribed: true}); err != nil {\n\t\tt.Fatalf(\"register slow holder: %v\", err)\n\t}\n\tif _, err := harness.registry.SetRole(\"ses_slow\", \"test-machine\", role, false); err != nil {\n\t\tt.Fatalf(\"claim role: %v\", err)\n\t}\n\tvar acknowledge atomic.Bool\n\tforwards := make(chan contracts.Envelope, 8)\n\tresponder, err := harness.client.Conn.Subscribe(contracts.AgentSubject(\"ses_slow\"), func(message *natsgo.Msg) {\n\t\tvar forwarded contracts.Envelope\n\t\tif err := json.Unmarshal(message.Data, &forwarded); err == nil {\n\t\t\tforwards <- forwarded\n\t\t}\n\t\tif acknowledge.Load() && message.Reply != \"\" {\n\t\t\t_ = message.Respond(nil)\n\t\t}\n\t})\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe holder responder: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = responder.Unsubscribe() })\n\tcoreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+\">\", harness.coreHandler)\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe role arbiter: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = coreSubscription.Unsubscribe() })\n\texceptionProbe, err := harness.client.Conn.SubscribeSync(\"notifications.envoy.exceptions.\" + roleTopic)\n\tif err != nil {\n\t\tt.Fatalf(\"subscribe exception lane: %v\", err)\n\t}\n\tt.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })\n\tif err := harness.client.Conn.Flush(); err != nil {\n\t\tt.Fatalf(\"flush subscriptions: %v\", err)\n\t}\n\tvar state atomic.Pointer[listenerDeps]\n\tstate.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})\n\tpublish := func(what string) contracts.Envelope {\n\t\tt.Helper()\n\t\trecorder := httptest.NewRecorder()\n\t\tpublishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, \"/v1/messages/publish\", strings.NewReader(`{\"topic\":\"`+roleTopic+`\",\"message\":\"re-sent role event\",\"payload\":\"{\\\"type\\\":\\\"worker-queued\\\"}\",\"source\":\"agent\",\"dedupe_key\":\"publish.resend-1\"}`)))\n\t\tif recorder.Code != http.StatusOK {\n\t\t\tt.Fatalf(\"%s: status = %d, body = %s\", what, recorder.Code, recorder.Body.String())\n\t\t}\n\t\tvar published contracts.Envelope\n\t\tif err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {\n\t\t\tt.Fatalf(\"%s: decode: %v\", what, err)\n\t\t}\n\t\tif published.DedupeKey != \"publish.resend-1\" {\n\t\t\tt.Fatalf(\"%s: dedupe_key = %q, want publish.resend-1\", what, published.DedupeKey)\n\t\t}\n\t\treturn published\n\t}\n\texpectForward := func(what string, want contracts.Envelope) {\n\t\tt.Helper()\n\t\tselect {\n\t\tcase forwarded := <-forwards:\n\t\t\tif forwarded.EventID != want.EventID || forwarded.DedupeKey != roleForwardDedupePrefix+\"publish.resend-1\" {\n\t\t\t\tt.Fatalf(\"%s: holder received event %q dedupe %q, want %q with the forward prefix\", what, forwarded.EventID, forwarded.DedupeKey, want.EventID)\n\t\t\t}\n\t\tcase <-time.After(5 * time.Second):\n\t\t\tt.Fatalf(\"%s: holder received no forward\", what)\n\t\t}\n\t}\n\texpectNoException := func(what string) {\n\t\tt.Helper()\n\t\tif _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {\n\t\t\tt.Fatalf(\"%s: unexpected exception (or probe failed): %v\", what, err)\n\t\t}\n\t}\n\n\t// 1. The holder swallows the forward: receipt_timeout, attempt cache cleared.\n\tfirst := publish(\"first publish\")\n\texpectForward(\"first publish\", first)\n\tassertDeliveryException(t, exceptionProbe, first, \"receipt_timeout\")\n\n\t// 2. Same dedupe_key after the timeout: forwarded again; the holder now acknowledges.\n\tacknowledge.Store(true)\n\tsecond := publish(\"re-publish after receipt_timeout\")\n\texpectForward(\"re-publish after receipt_timeout\", second)\n\texpectNoException(\"re-publish after receipt_timeout\")\n\n\t// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded, no exception.\n\tpublish(\"re-publish after delivery\")\n\tselect {\n\tcase forwarded := <-forwards:\n\t\tt.Fatalf(\"re-publish after delivery: holder received %q; the listener must skip a delivered dedupe_key\", forwarded.EventID)\n\tcase <-time.After(250 * time.Millisecond):\n\t}\n\texpectNoException(\"re-publish after delivery\")\n\tif !strings.Contains(harness.logs.String(), `\"msg\":\"listener role dedupe skip\"`) {\n\t\tt.Fatalf(\"expected a dedupe skip log line:\\n%s\", harness.logs.String())\n\t}\n}",
+        "Run: mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run ExplicitDedupeKeyForwardsAgain — PASS once tasks 2 and 4 are in (before task 4 it fails on `dedupe_key = \"publish.<id>\"`; before task 2 on the reason). Takes ~2.5s (one real receipt timeout).",
+        "Commit: jj -R \"$LEGION_WORKSPACE\" split -m \"listener test: same dedupe_key is forwarded again after receipt_timeout and skipped after delivery\" packages/envoy/cmd/listener/main_test.go"
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Docs: three reasons and the dedupe_key field",
+      "acceptance": "6",
+      "files": [
+        "packages/envoy/AGENTS.md",
+        "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+      ],
+      "steps": [
+        "packages/envoy/AGENTS.md line 90: replace 'no receipt within two seconds is `delivery_failed` and emits an exception.' with 'No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process); `delivery_failed` is a claim whose message was never forwarded (holder lookup failed, holder stale, or the forward request errored); `no_holder` is no claim at all. Every reason emits an exception and clears the attempt cache; the dedupe cache records a forward only when its receipt arrived, so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped.'",
+        "packages/envoy/AGENTS.md line 92: after '`reason`' insert ' (one of `no_holder`, `delivery_failed`, `receipt_timeout`)'.",
+        "packages/envoy/AGENTS.md line 113 (publish row): replace the Contract cell with 'Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — and an empty string is absent; without either the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`.'",
+        "packages/envoy/AGENTS.md line 124: change the first sentence to '`send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional fields are omitted.'",
+        "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md line 35: replace 'A two-second request timeout, a missing receiver, or a receiver that fails before replying is `delivery_failed`; publish the original envelope on the exception lane. An absent role claim is instead `no_holder`.' with 'A two-second request timeout from a registered, live receiver is `receipt_timeout` (LEGION-108: the receiver has the envelope and has not acknowledged it — a slow holder, not a lost message); a missing receiver, a stale registration, or a request that could not be sent is `delivery_failed`; an absent role claim is `no_holder`. Every reason publishes the original envelope on the exception lane.' Line 107: replace 'observable as `delivery_failed`' with 'observable as `receipt_timeout` (fresh but deaf) and `delivery_failed` (stopped)'.",
+        "Read both files once more against the code (reasons, field names, the 400 shape). Commit: jj -R \"$LEGION_WORKSPACE\" split -m \"docs(envoy): role-lane reasons no_holder/delivery_failed/receipt_timeout and publish dedupe_key\" packages/envoy/AGENTS.md docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+      ]
+    }
+  ],
+  "acceptanceProof": [
+    {
+      "line": 1,
+      "surface": "go test: TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout (real publishHandler, real NATS testcontainer, real RequestCoreTo against a deaf registered holder)",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout",
+      "observe": "PASS; the two t.Logf lines: `listener log line: {...\"msg\":\"listener role receipt timed out\"...\"delivery_status\":\"receipt_timeout\"...}` and `captured exception envelope payload: {\"original_topic\":...,\"reason\":\"receipt_timeout\",\"payload\":\"{\\\"type\\\":\\\"worker-queued\\\"}\",\"dedupe_key\":\"publish....\"}` — quote both on the PR."
+    },
+    {
+      "line": 2,
+      "surface": "go test: TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed (injected forward error), TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException (stale holder), TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder and TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder (no claim)",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'RoleForwardPublishError|ExpiredRoleDropsClaim|RoleReleasedByReplacement|EmitsExceptionForControlTopicWithNoHolder'",
+      "observe": "all PASS"
+    },
+    {
+      "line": 3,
+      "surface": "go test: TestPublishHandler_DedupeKeySelection and TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey (httptest handler + wire envelope)",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run 'DedupeKey'",
+      "observe": "PASS; the t.Logf `both keys: {\"error\":\"dedupe_key and idempotency_key are mutually exclusive\",\"expected\":[\"dedupe_key\",\"idempotency_key\"]}` is the negative control for the PR's E2E section."
+    },
+    {
+      "line": 4,
+      "surface": "go test: TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && mise x go@1.26 -- go test ./cmd/listener/ -count=1 -v -run ExplicitDedupeKeyForwardsAgain",
+      "observe": "PASS (three publishes: forwarded + receipt_timeout, forwarded + delivered, dedupe skip)"
+    },
+    {
+      "line": 5,
+      "surface": "WITHDRAWN by spec v2 (Sami, 2026-09-13: no smoke rigs, scratch daemons, throwaway NATS containers, scratch tmux servers). No rig is planned or run. The PR quotes the line-1 and line-3 `-v` output instead; the end-to-end proof is the parent's production hour (dispatch://LEGION-101/spec acceptance 4) after the operator deploys the listener.",
+      "command": "none",
+      "observe": "The tester's E2E line says: surface = listener package Go tests on a Docker NATS testcontainer at head <sha>; negative control = both keys -> 400."
+    },
+    {
+      "line": 6,
+      "surface": "reviewer reads packages/envoy/AGENTS.md lines 90, 92, 113, 124 and the learning doc against the code",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff -r <docs commit> --stat",
+      "observe": "the three reasons and dedupe_key named exactly as the code spells them"
+    }
+  ],
+  "prBody": {
+    "title": "listener: receipt_timeout for a late role receipt; publish accepts dedupe_key (LEGION-108)",
+    "mustContain": "Dispatch: LEGION-108",
+    "e2eLine": "**E2E:** listener package Go tests on a Docker `nats:2.10` testcontainer — ran `mise x go@1.26 -- go test ./cmd/listener/... ./internal/logging/ -count=1` in packages/envoy at head <sha>; quoted: the `listener role receipt timed out` log line and the captured `reason:\"receipt_timeout\"` exception payload from `-v`. Negative control: publish with both `dedupe_key` and `idempotency_key` -> 400 `expected: [dedupe_key, idempotency_key]`, nothing published. No rig (spec v2 line 5 withdrawn).",
+    "fastFollow": "skills/envoy/SKILL.md 'Legion exception lane' still names two reasons; a skills/** change cuts a pi-envoy release, so it lands with LEGION-109's plugin PR."
+  },
+  "outOfScope": [
+    "packages/contracts and internal/contracts/generated.go (reasons are plain strings; no gen:go).",
+    "roleReceiptTimeout stays 2s (spec: New since we talked).",
+    "The daemon's handling of receipt_timeout and the re-send ledger (LEGION-107); the plugin's early receipt (LEGION-109).",
+    "skills/envoy/SKILL.md (release side effect, see concerns).",
+    "Any rig, scratch daemon, scratch NATS, or e2e-local.sh run."
+  ],
+  "learningsInjected": [
+    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md",
+    "docs/solutions/testing/testcontainers-go-resolves-all-docker-credhelpers.md",
+    "docs/solutions/legion/long-lived-branch-mechanics-jj-new-and-merge-not-rebase.md"
+  ],
+  "learningsHelpful": [
+    "docs/solutions/architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-14T05:54:26.186Z"
+}
