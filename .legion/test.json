@@ -1,0 +1,71 @@
+{
+  "summary": "Verified LEGION-93 on PR #1082 at the live head 8101429bf944 (matches the implementer's report): acceptance 1-4 hold, acceptance 5 is withdrawn by Sami's standing order. The two LEGION-93 tests pass and assert the terminal shape the spec names (exactly one worker-died {issue, role} on the architect topic, no second relaunch, both retire lines by string equality); the full daemon suite, biome, and tsc are clean; CI is green at the head including the LEGION_E2E=1 real-pane suite; the PR is MERGEABLE, not CONFLICTING. No smoke rig, scratch daemon, tmux server, or NATS container was started.",
+  "spec": "dispatch://LEGION-93/spec (version 6) — acceptance 5 withdrawn; pre-merge proof is the unit/integration suite plus CI on the pull request",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1082",
+  "headSha": "8101429bf944d2571194964ef62a9161a89d2798",
+  "headVerified": "legion gh -- pr view 1082 --json headRefOid -> 8101429bf944d2571194964ef62a9161a89d2798; jj log legion/LEGION-93@origin after jj git fetch -> 8101429bf944 (implementer reported 8101429b: matches). Fork point from main@origin: da7158dc06af; PR diff is 9 files (legion-state.ts, worker-admission.ts, processes.ts, processes.test.ts, real-prompt-delivery-e2e.test.ts, daemon AGENTS.md, skills/legion-architect/SKILL.md, .legion/plan.json, .legion/implement.json).",
+  "passed": 4,
+  "failed": 0,
+  "failures": [],
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's three proof commands independently at 8101429bf944 (the implementer's were taken at 87844f7d359e; the daemon source is identical between the two, the later commits touch only the e2e test and .legion/implement.json — confirmed with jj diff --from 87844f7d359e --to 8101429bf944 --stat naming only those files): bun test processes.test.ts -t \"LEGION-93\" -> 2 pass, 0 fail; -t \"clears promptRetires\" -> 1 pass, 0 fail; jj diff --stat of AGENTS.md and SKILL.md matches the described rows and the bound wording is present at the head (MAX_PROMPT_RETIRES: 0 occurrences at da7158dc, 2 in AGENTS.md and 1 in SKILL.md at the head). Its gates re-ran clean (below). Its negative control (RED at bea296aa) is consistent with the base code read from the diff: recordPromptFailure retired with no verdict and freshClaim carried only launchFailures, so worker-died was unreachable from the prompt path."
+  },
+  "proof": [
+    {
+      "criterion": "Acceptance 1 + 3: the relaunched worker's third swallowed prompt publishes exactly one worker-died {issue, role} to the tree's architect topic and is never relaunched again; each retirement logs the token, the prompt-failure count, and the relaunch cycle against the bound.",
+      "surface": "The daemon's unit/integration suite (ProcessManager + WorkerAdmission with the fake shim client and fake tmux) plus the pull request's CI, which also runs the LEGION_E2E=1 real tmux pane + worker-shim suite. The only surface Sami's standing order of 2026-09-13 19:00Z leaves.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-93\"",
+      "observed": "2 pass, 0 fail, 52 expect() calls; stdout shows exactly one `[legion] respawning LEGION-42 by resuming OMP session .../tester-session.jsonl` line per test (one relaunch). Read the test body (processes.test.ts 12645-12724): asserts publications.filter(worker-died).length === 1 and its subject is roleTopic(architect token); the publication type sequence is exactly [worker-started, worker-queued, worker-died] (no second worker-started, no worker-queued for the terminal failure); splitWindows() === 1 after 50 event-loop ticks and again after a further reconcileWorkerAdmission (no second relaunch); terminal claim: locator undefined, pendingAssignment kept, promptRetires 2, promptFailures 0, resumeSessionFile kept, launchFailures undefined, workerAdmission.queue [], phases[root] undefined; relaunched.prompts has three entries; errorLines contain exactly one line === `[legion] legion-omp-LEGION-42-tester: retiring after 3 prompts with no turn started; relaunch cycle 1 (bound 2)` and exactly one === `... relaunch cycle 2 (bound 2)` (retireLine helper at 12370 is the spec's exact wording).",
+      "headSha": "8101429bf944d2571194964ef62a9161a89d2798",
+      "negativeControl": "Reasoned from the diff, as directed (no base checkout run, no rig): at da7158dc recordPromptFailure was `if (failures >= MAX_LAUNCH_FAILURES && claim.locator) await retireDeadClaim(token, locator)` with retireDeadClaim = markWorkerDeadLocked — no verdict, no counter, no queue removal, no publish — and launchWorker's freshClaim carried only `launchFailures: claim?.launchFailures ?? 0`, so a relaunch restarted the prompt count at zero and publishWorkerDied was reachable only from the launch-failure paths; the test's expect(died).toHaveLength(1) and splitWindows() === 1 cannot hold there. Consistent with the implementer's RED record at bea296aa: `expect(relaunchedClaim.promptRetires).toBe(1)` received undefined; with counter assertions stripped, two `respawning LEGION-42` lines and `expect(died).toHaveLength(1)` received length 0."
+    },
+    {
+      "criterion": "Acceptance 2: a relaunched worker whose first prompt starts a turn resets the carried count, and a later single failure does not escalate.",
+      "surface": "Same suite.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"clears promptRetires\"",
+      "observed": "1 pass, 0 fail, 19 expect() calls. Read the test body (12726-12767): after the fixture's relaunch promptRetires === 1; the relaunched worker's ready-time prompt starts a turn -> pendingAssignment undefined, promptFailures 0, promptRetires undefined, phases[root] = {tester, ses_tester}; then one swallowed spawn_worker prompt answers {status: queued}, promptFailures 1, promptRetires still undefined, locator kept, task queued, zero worker-died, exactly one cycle-1 retire line and zero cycle-2 lines.",
+      "headSha": "8101429bf944d2571194964ef62a9161a89d2798",
+      "negativeControl": "Implementer's RED record before `delete claim.promptRetires` was added to commitPromptDelivery: `expect(delivered.promptRetires).toBeUndefined()` received 1. From the diff: that delete is the only place promptRetires is cleared (processes.ts 1044); the only other write is `claim.promptRetires = retires` in recordPromptFailure (worker-admission.ts 476)."
+    },
+    {
+      "criterion": "Acceptance 4: daemon AGENTS.md states the bound and that a no-turn worker terminates in worker-died; the architect skill's worker-died row names the no-turn cause.",
+      "surface": "The pull request diff (jj diff --from da7158dc06af --to 8101429bf944 --git packages/daemon/src/daemon/AGENTS.md skills/legion-architect/SKILL.md) and the files at the head.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" file show -r 8101429bf944 packages/daemon/src/daemon/AGENTS.md | sed -n '/That cycle is bounded/p'",
+      "observed": "Delivery bullet reads `That cycle is bounded (LEGION-93): at MAX_PROMPT_RETIRES (2, judged >=) the retirement is terminal — the role's queue entry is removed, pendingAssignment stays on the claim, no worker-queued is published for that failure, and exactly one worker-died {issue, role} reaches the tree's architect (publishWorkerDied, skipped only when the tree is gone or closing ...) — so a worker that keeps acknowledging prompts and starting nothing ends in the same verdict a boot that never confirms does, instead of relaunching forever. Both counters are cleared only by a started turn ... never by a relaunch or an architect's spawn_worker`; the /worker/spawn row, /worker/ready row, and worker-admission.ts Files row are updated; file stays 321 lines. SKILL.md worker-died row: `Two causes, one verdict: ... or the worker booted and acknowledged every prompt without ever starting a turn through MAX_PROMPT_RETIRES retire-and-relaunch cycles (LEGION-93) ... Your next spawn_worker for the role is the retry`.",
+      "headSha": "8101429bf944d2571194964ef62a9161a89d2798",
+      "negativeControl": "MAX_PROMPT_RETIRES occurrence count: daemon AGENTS.md 0 at da7158dc vs 2 at 8101429b; skills/legion-architect/SKILL.md 0 vs 1."
+    }
+  ],
+  "gates": [
+    "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon -> 1251 pass, 10 skip, 0 fail, 5738 expect() calls, 1261 tests across 60 files [29.87s], exit 0 (the 10 skips are the LEGION_E2E=1 suites, not run on this box by the standing order; CI ran them)",
+    "cd -- \"$LEGION_WORKSPACE/packages/daemon\" && bunx biome check --error-on-warnings src/ -> Checked 152 files in 410ms. No fixes applied. exit 0",
+    "cd -- \"$LEGION_WORKSPACE/packages/daemon\" && bunx tsc --noEmit -> exit 0"
+  ],
+  "ci": {
+    "head": "8101429bf944d2571194964ef62a9161a89d2798",
+    "tests": "Tests run 34816041545 (https://github.com/sjawhar/legion/actions/runs/34816041545): headSha 8101429bf944, conclusion success; jobs lint, typecheck, test all success. The test job ran with LEGION_E2E: 1 -> Test daemon 1272 pass, 0 fail across 60 files; real-prompt-delivery-e2e.test.ts three (pass) lines including `keeps the assignment queued and counts each acknowledgement no turn follows, retiring the real pane at the third and relaunching cold` [3183 ms], the case the implementer updated to assert promptRetires 1, the cycle-1 retire line, and no worker-died on a real tmux pane + worker-shim.",
+    "prTitle": "PR Title run 34816348846: headSha 8101429bf944, success (the PR body's Verification section names an earlier PR Title run id, 34816041529; the pr-title workflow reruns on title/body edits — cosmetic).",
+    "mergeability": "legion gh -- pr view 1082 --json mergeable,mergeStateStatus -> MERGEABLE / BLOCKED (awaiting review). Not CONFLICTING; no rebase performed."
+  },
+  "diffScopedChecks": [
+    "MAX_PROMPT_RETIRES is read by code only inside recordPromptFailure (worker-admission.ts 474 verdict, 479 log line); every other occurrence is a comment.",
+    "retirePromptFailedClaim has exactly one caller: the retireDeadClaim dep wiring in the ProcessManager constructor (processes.ts 435-436).",
+    "retirePromptFailedClaim: deriveRetryContext, then await markWorkerDeadLocked (the stop), then on `died` removeFromQueue, then publishWorkerDied unless isTreeGone — removeFromQueue runs after the stop (processes.ts 1326-1340).",
+    "recordPromptFailure writes promptRetires/promptFailures only after retireDeadClaim resolved, so a StopFailed leaves locator and both counters untouched (worker-admission.ts 475-477).",
+    "Both recordPromptFailure call sites (queueUnstartedPrompt 512; promoteQueuedWorker catch 799) run outside withAdmissionLock and inside the role lock only, so removeFromQueue's withAdmissionLock cannot deadlock.",
+    "`delete claim.promptRetires` appears once, in commitPromptDelivery (processes.ts 1044).",
+    "launchWorker's freshClaim spreads `...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {})` beside launchFailures (processes.ts 3322).",
+    "queueUnstartedPrompt publishes worker-queued only when the verdict is not `died` (worker-admission.ts 514-516).",
+    "Unchanged: packages/daemon/src/daemon/api/state.ts, LEGION_DAEMON_API_VERSION (2 at base and head), state version (28 at base and head; no version lines in the legion-state.ts diff), docs/plans/, scripts/smoke/ (jj diff --summary over those paths prints nothing)."
+  ],
+  "observations": [
+    "The e2e test change (89dcb800) is exercised only in CI (LEGION_E2E=1); locally it is one of the 10 skips. CI's run at the head is its proof, as the implementer recorded.",
+    "An empty, untracked-by-intent file .omp/config.yml (0 bytes, created 2026-09-14T07:10:20Z — the tester pane's OMP start) sits in this workspace's working copy and is snapshotted by jj (`A .omp/config.yml`). It is not in any pushed commit and is excluded from the test handoff commit by the path-scoped split; whoever pushes next (the implementer's .legion/ deletion) should keep it out of the commit or delete it.",
+    "Acceptance 5 (smoke rig) is withdrawn in spec v6 and was not attempted: no rig, scratch daemon, tmux server, or NATS container was started by this phase."
+  ],
+  "documentationFeedback": "None required. The AGENTS.md delivery bullet and the architect skill row match the code's wording and constants.",
+  "schemaVersion": 1,
+  "phase": "test",
+  "completed": "2026-09-14T07:19:06.553Z"
+}
