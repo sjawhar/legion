@@ -54,6 +54,18 @@ export interface BootProbeOptions {
   /** Per-attempt runner budget (`slow_command_timeout_seconds` in ms). */
   readonly timeoutMs: number;
   readonly retry: ProbeRetryPolicy;
+  /** Aborts a probe that is between attempts: a daemon whose boot failed for another reason
+   * (state load, NATS, the API bind) cancels its pending backoff and must not spawn another OMP
+   * afterwards. Checked after every sleep; the probe then rejects with `ProbeAbortedError`. */
+  readonly signal?: AbortSignal;
+}
+
+/** The probe chain was cancelled by the daemon's own teardown while waiting to retry. */
+export class ProbeAbortedError extends Error {
+  constructor(name: string) {
+    super(`[legion] ${name} probe abandoned: the daemon stopped while it was waiting to retry`);
+    this.name = "ProbeAbortedError";
+  }
 }
 
 interface ProbeOutcome {
@@ -85,15 +97,18 @@ function timedOutOutcome(
 /** Runs `attempt` until it passes, fails definitively, or exhausts `policy.maxAttempts`; throws
  * `makeError(detail)` in the two failing cases. Each transient failure is logged with the delay
  * before the next try, so an operator watching the supervisor log sees the daemon waiting out
- * host load instead of a silent stall. */
+ * host load instead of a silent stall. A `signal` aborted during the backoff ends the loop with
+ * `ProbeAbortedError` instead of a further attempt. */
 async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,
   makeError: (detail: string) => Promise<Error>,
   policy: ProbeRetryPolicy,
-  sleep: (ms: number) => Promise<void>
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal | undefined
 ): Promise<void> {
   for (let i = 0; ; i++) {
+    if (signal?.aborted) throw new ProbeAbortedError(name);
     const outcome = await attempt();
     if (outcome.passed) return;
     const exhausted = policy.maxAttempts !== undefined && i + 1 >= policy.maxAttempts;
@@ -157,7 +172,8 @@ export async function verifyOmpAgentsCapability(
           `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
         ),
       options.retry,
-      options.sleep
+      options.sleep,
+      options.signal
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });
@@ -306,7 +322,8 @@ export async function verifyLegionPluginLoaded(
         );
       },
       options.retry,
-      options.sleep
+      options.sleep,
+      options.signal
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });

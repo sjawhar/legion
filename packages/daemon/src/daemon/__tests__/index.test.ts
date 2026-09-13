@@ -1658,6 +1658,59 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+  it("a boot failure before the hold cancels a probe still in its transient backoff: no further probe attempt runs", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    let probeAttempts = 0;
+    const sleepReleases: Array<() => void> = [];
+    // Resolves once the probe has failed its first attempt and entered its backoff.
+    const inBackoff = Promise.withResolvers<void>();
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
+            runner: async (command) => {
+              if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
+              probeAttempts += 1;
+              // Every probe attempt is killed at its budget: the chain is retrying transiently.
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: 143,
+                timedOut: { limitMs: 300_000, elapsedMs: 300_100 },
+              };
+            },
+            // The probe's backoff sleeps never resolve on their own: only the daemon's own
+            // cancellation can end them.
+            sleep: () =>
+              new Promise<void>((resolve) => {
+                sleepReleases.push(resolve);
+                inBackoff.resolve();
+              }),
+            loadState: async () => {
+              // Boot fails while attempt 1's backoff is pending — the window in which a leaked
+              // chain would later spawn attempt 2.
+              await inBackoff.promise;
+              throw new Error("state.json is corrupt");
+            },
+            saveState: async () => {},
+          },
+        })
+      ).rejects.toThrow("state.json is corrupt");
+
+      expect(probeAttempts).toBe(1);
+      expect(sleepReleases).toHaveLength(1);
+      // Even if the fake backoff now elapses, the aborted chain must not run another attempt.
+      for (const release of sleepReleases) release();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(probeAttempts).toBe(1);
+    } finally {
+      errorSpy.mockRestore();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig: DaemonConfig = {

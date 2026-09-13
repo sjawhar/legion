@@ -199,19 +199,42 @@ export async function startDaemon(
   // file. Released on clean shutdown (stop(), below) or on any startup
   // failure past this point.
   const instanceLock = await deps.acquireInstanceLock(config.stateDir);
+  // Cancels the boot probes' pending backoff when boot fails for any other reason before the
+  // launch hold awaits them (state load, NATS, the API bind): without it the chain would keep
+  // spawning OMP probes in the background of a daemon that has already given up.
+  const probeAbort = new AbortController();
   try {
-    return await startDaemonLocked(config, deps, owner, instanceLock);
+    return await startDaemonLocked(config, deps, owner, instanceLock, probeAbort);
   } catch (error) {
+    probeAbort.abort();
     await instanceLock.release();
     throw error;
   }
+}
+
+/** The injected `sleep`, cut short the moment `signal` aborts so a probe waiting out a long
+ * backoff notices the daemon's teardown at once instead of at the end of the wait. */
+function abortableSleep(
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal
+): (ms: number) => Promise<void> {
+  return (ms) =>
+    new Promise<void>((resolve) => {
+      const onAbort = () => resolve();
+      signal.addEventListener("abort", onAbort, { once: true });
+      void sleep(ms).then(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      });
+    });
 }
 
 async function startDaemonLocked(
   config: DaemonConfig,
   deps: DaemonDependencies,
   owner: string,
-  instanceLock: InstanceLock
+  instanceLock: InstanceLock,
+  probeAbort: AbortController
 ): Promise<DaemonHandle> {
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
@@ -236,9 +259,13 @@ async function startDaemonLocked(
   // keeps a definitive negative that lands before the hold from becoming an unhandled rejection;
   // the real handling is at the hold.
   const probeOptions = {
-    sleep: deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    sleep: abortableSleep(
+      deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+      probeAbort.signal
+    ),
     timeoutMs: config.slowCommandTimeoutSeconds * 1000,
     retry: DAEMON_PROBE_RETRY,
+    signal: probeAbort.signal,
   };
   const probes = (async () => {
     await verifyOmpAgentsCapability(
@@ -533,6 +560,7 @@ async function startDaemonLocked(
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    probeAbort.abort();
     if (resyncTimer !== undefined) deps.clearTimeout(resyncTimer);
     if (lingerTimer !== undefined) deps.clearInterval(lingerTimer);
     eventPump.stop();
