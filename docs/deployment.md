@@ -113,10 +113,14 @@ Rotation is pointless while panes can still read the keys, so the order is:
    still succeeds because the daemon mints the token.
 5. Rotate: in each GitHub App's settings, generate a new private key. Store each with
    `secrets edit-human <NAME>` under the same names (base64-encode the downloaded PEM first:
-   `base64 -w0 < key.pem | secrets edit-human <NAME>`).
-6. Revoke the old private keys in GitHub App settings.
-7. Restart the daemon from the launcher pane (the rewritten keys need a fresh grant: two taps).
-   Confirm a grant mints: `legion gh -- auth status` from a fresh worker pane.
+   `base64 -w0 < key.pem | secrets edit-human <NAME>`). Do not revoke anything yet.
+6. Restart the daemon from the launcher pane (the rewritten keys need a fresh grant: two taps).
+   Confirm a grant mints with the new keys: `legion gh -- auth status` from a fresh worker pane.
+7. Only now revoke the old private keys in GitHub App settings. The order matters because the
+   running daemon signs every installation-token request with the key it decoded at start-up and
+   holds in memory until it restarts — revoking first would break `legion gh`, the `jj git push`
+   credential, and identity leases in every pane until step 6 completes, with no rollback if that
+   restart fails (an untapped request, a bad base64 paste).
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key
 material).
