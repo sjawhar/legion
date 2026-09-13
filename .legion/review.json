@@ -1,18 +1,29 @@
 {
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "round": 2,
-  "reviewedHead": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
-  "reviewCommitId": "e0326ca317db283db3fdedbb3c5537fd8cd8f463",
-  "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5197298840",
-  "previousReview": {
-    "round": 1,
-    "url": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
-    "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
-    "commitId": "f86d2296c66225fbb516a00f7223f93aaa1a9562"
-  },
+  "important": 0,
+  "minor": 0,
+  "round": 3,
+  "reviewedHead": "518300780a53a5cacf4a68763cbaed3d4f5afae4",
+  "reviewCommitId": "2bf4e24ac989e8732890c2a3d46ea9b4d7406825",
+  "review": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5197835643",
+  "approvalScope": "Approval of the code at 51830078 only. .legion/ is still on the branch: the implementer must push exactly its deletion (after legion threads resolve --pr 1088 --repo sjawhar/legion); the reviewer then approves that head by SHA once it differs from 51830078 by the .legion/ deletion alone, CI is green on it, and every reviewer thread shows isResolved: true.",
+  "previousReviews": [
+    {
+      "round": 1,
+      "url": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5196465973",
+      "reviewedHead": "79f4d50cef6744d2821d472edec124c3e43e7552",
+      "commitId": "f86d2296c66225fbb516a00f7223f93aaa1a9562",
+      "verdict": "changes_requested"
+    },
+    {
+      "round": 2,
+      "url": "https://github.com/sjawhar/legion/pull/1088#pullrequestreview-5197298840",
+      "reviewedHead": "91b18e62dabf47706af17beda44135bbf3ee5ee9",
+      "commitId": "e0326ca317db283db3fdedbb3c5537fd8cd8f463",
+      "verdict": "changes_requested"
+    }
+  ],
   "pullRequest": {
     "number": 1088,
     "url": "https://github.com/sjawhar/legion/pull/1088"
@@ -20,62 +31,63 @@
   "threadDispositions": [
     {
       "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180109",
-      "opened": "round 1, IssueHeader.tsx rail `grow` squeezed the title",
-      "reply": "Accepted: fixed in 590a1251 (grow dropped; flex-auto block in 91b18e62 removes the 12rem hypothetical width)",
-      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004856746",
-      "isResolved": false,
-      "note": "the implementer resolves it with `legion threads resolve --pr 1088 --repo sjawhar/legion` before its next push"
+      "round": 1,
+      "reply": "Accepted: fixed in 590a1251",
+      "isResolved": true
     },
     {
       "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180117",
-      "opened": "round 1, GitHubLink discarded a loaded title when check-runs failed",
+      "round": 1,
       "reply": "Accepted: fixed in 590a1251",
-      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004856928",
-      "isResolved": false
+      "isResolved": true
     },
     {
       "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004180121",
-      "opened": "round 1, orphaned Route: caption while editing",
+      "round": 1,
       "reply": "Accepted: fixed in 590a1251",
-      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004857113",
-      "isResolved": false
+      "isResolved": true
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858060",
+      "round": 2,
+      "opened": "title slot basis differed between view and edit; first click after a title edit swallowed at 768-1279",
+      "reply": "Accepted: fixed in 51830078 — one declared basis in both modes (grow basis-full 2xl:basis-auto), lock red on 91b18e62, docs match",
+      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4005297516",
+      "isResolved": false,
+      "note": "resolved by the implementer's legion threads resolve on the deletion push"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858068",
+      "round": 2,
+      "opened": "GitHubLink partial-failure unit test could pass on pre-fix code",
+      "reply": "Accepted: fixed in 51830078 — waits for the checks query error state on its own QueryClient, asserts within(link)",
+      "replyUrl": "https://github.com/sjawhar/legion/pull/1088#discussion_r4005297854",
+      "isResolved": false,
+      "note": "resolved by the implementer's legion threads resolve on the deletion push"
     }
   ],
   "verifiedOnGitHub": {
-    "checks": "Run 34837706541 at code head 91b18e62: all jobs green, dispatch job e2e 215 passed / 13 skipped including the new issue.e2e.ts:453 title test. Run 34837764653 at tip e0326ca3: envoy-go FAILURE on TestMarkAnchorVerifiesBrowserMark and TestSettleRetriesTransientVersionWriteFailure — Go code byte-identical to 91b18e62 (jj diff --summary packages/envoy empty), so a flake; the next push re-runs it; the deletion-head approval requires it green.",
-    "threads": "3 round-one threads answered Accepted; 2 new threads opened this round (1 blocking, 1 should-fix).",
-    "e2e": "E2E (implementer) and E2E (tester) both at 91b18e62 in the PR body with surface, command, observation, negative control; tester verified the implementer's proof.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once on the f86d2296->91b18e62 diff. Deep: one should-fix (the swallowed click below) which the reviewer reproduced independently and judges blocking as a regression against main; Quality: no blocking, should-fix on the unit test's determinism and the 2xl doc wording; nits folded into the fast-follow line."
+    "checks": "Run 34842206841 at 51830078 and run 34842282738 at 2bf4e24a: every job green; dispatch job e2e 216 passed / 14 skipped including issue.e2e.ts:535 (the click lock) and the round-two title test; 13/13 required checks SUCCESS at the tip; the round-two envoy-go flake did not recur. Not CONFLICTING.",
+    "threads": "3 round-one threads resolved; 2 round-two threads answered Accepted this round, awaiting the implementer's legion threads resolve.",
+    "e2e": "E2E (implementer) and E2E (tester) both at 51830078 in the PR body with surface, command, observation, negative control; tester verified the implementer's proof on an independent build with main and a 91b18e62-classes bundle beside it (lock red on the reviewed head, unit test red 5/5 on 79f4d50c's GitHubLink.tsx).",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once on the e0326ca3->51830078 diff: nothing blocking from either; their should-fix items are test hardening (toBeEnabled before the raw press) and doc wording, folded into the fast-follow line and LEGION-157."
   },
-  "keyFindings": [
-    {
-      "severity": "important",
-      "blocking": true,
-      "file": "packages/dispatch/web/src/features/issue/IssueHeader.tsx",
-      "line": 203,
-      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858060",
-      "description": "The title block's flex-basis differs between view (flex-auto, content) and edit (basis-full) below 2xl, so at 768-1279 the row re-lays out on the blur that a mousedown on any header control causes; mouseup lands on a different element and Chromium delivers the click to the common ancestor — the click on Close / Status / Priority / Approve / pin / Edit labels / Route / Subscribers / GitHub link that ends a title edit is swallowed. Reproduced with the exact classes at 1024 (Close moves (269,100)->(950,48), click target DIV) and 1279; thermo reproduced at 1200 for Close, pin, Route; control with equal basis delivers the click. Main (flex-1 min-w-[12rem] in both modes) does not have this. Fix: same basis in both modes — either `basis-full 2xl:basis-auto` unconditionally (title alone below 2xl; header unchanged at >=~900px, +1 row at 768-~900 for short titles) or a grid mirror span so the input's hypothetical width equals the text. Not by making edit basis-full at 2xl too (would move the bug to >=1536). Comment and AGENTS.md line 12 must describe the shipped rule (today both claim 'always'/'whole row' from xl, false at 2xl in both modes). Regression lock: Playwright at 1200, open title editor, mouse.down/up on Close, expect PATCH status done."
-    },
-    {
-      "severity": "should-fix",
-      "blocking": false,
-      "file": "packages/dispatch/web/src/features/issue/IssuePage.test.tsx",
-      "line": 509,
-      "thread": "https://github.com/sjawhar/legion/pull/1088#discussion_r4004858068",
-      "description": "The new partial-failure unit test never waits for the check-runs query to reach status 'error' (the toHaveBeenCalledWith and the absent-pill waitFors pass immediately), so its title/state assertions can run while checks is pending — where the pre-fix `failed` logic also showed the title. Pass a QueryClient to renderIssuePage and waitFor getQueryState([github-link-checks, url, sha]).status === 'error', then assert within(link). Same push."
-    }
-  ],
-  "fastFollow": "One change: return focus to the Route trigger on Escape/Cancel/Save; one module-level focusOnMount ref callback for both inputs instead of useRef+useEffect beside an inline arrow ref; a single visible <label htmlFor=issue-route>Route:</label> instead of sr-only label + aria-hidden caption (exact getByLabelText('Route') calls take 'Route:'); drop the dead `reference === undefined &&` in GitHubLink unavailable; within(link).getByText('open') in the new unit test.",
+  "keyFindings": [],
   "confirmedSound": [
-    "flex-auto + min-w-0 title block: 40-char title one unclipped line beside the busy details line at 1024/1279; 140-char unbroken token alone on its row, break-words + line-clamp-2, page never widens at 390/768/1024/1536; approval row (chip + Approve + Request changes) wraps under the title or shares only when it fits; nothing overflows the card. 2xl behaviour unchanged from main.",
-    "GitHubLink: reference gated on its own error; failed check-runs drops only the pill; unavailable tooltip only for the reference's own token error; full matrix (loading/token error/other error/data x checks disabled/loading/error/data) checked.",
-    "Route form: caption moves with the form; focus lands in the input once via the routeEditing effect; issue-writes.test.tsx reorder mirrors browser behaviour (mousedown on the route button blurs the title editor).",
-    "New Playwright test asserts behaviour (scrollHeight>clientHeight on the line-clamp-2 h1; >= half the card); fails on the old classes per tester and thermo reasoning; screenshots via testInfo.outputPath (LEGION-142).",
-    "AGENTS.md sentence otherwise accurate (below md state row full-width; rail scrolls; GitHubLink text) except the 'from xl always' / 'input takes the whole row' clause, folded into the blocking thread."
+    "Single-basis title slot (grow basis-full 2xl:basis-auto in view and edit): with the exact classes in Chromium every control's rect is identical in both modes at 768/1024/1279/1536/1920 for short and 40-char titles, with and without a GitHub link — the blur a mousedown causes cannot move the control under the pointer. grow is inert below 2xl (basis 100%) and reproduces main's flex: 1 1 auto at 2xl.",
+    "No regression: 140-char unbroken token alone on its row with break-words + line-clamp-2, page never widens at 390/1024/1536; approval row wraps inside the state box; closed banner, route form under the rows, pin, subscribers, labels popover (portalled), whose-turn badge leading the rail all as before; phone fixture 216px at 390.",
+    "Playwright lock issue.e2e.ts:535 defends behaviour (pin aria-pressed flips, Reopen visible, API status done via real mouse.down/up) and is red on 91b18e62 for the right reason (the click is swallowed so the pin never toggles); an unchanged title blur sends no PATCH (useIssueDrafts.requestTitleSubmit returns at the equal-title branch), so Close is never disabled by the blur.",
+    "Unit test deterministic: own QueryClient, waits for getQueryState([github-link-checks, url, abcdef]).status === 'error' (key matches GitHubLink.tsx exactly), asserts within(link); the checks pill renders only on data && !isError so pending and error both render none.",
+    "AGENTS.md line 12 and the code comment state the shipped rule (title alone below 2xl, content-sized with grow from 2xl, one declared basis in both modes); the one imprecision — 'share the row beneath it' is unconditional where it should say 'when they fit' — is fast-follow wording."
   ],
-  "designNote": "Tester's note (40-char title takes its own row at 1024, header 176 vs main 136) accepted per the architect; not a finding. Fix option 1 above would make the title alone at all widths below 2xl, which keeps 124px at 1024-1279 for short titles and costs one row only at 768-~900.",
-  "nextSteps": "Implementer picks a fix that gives the title slot one flex-basis in both modes, updates the code comment and packages/dispatch/AGENTS.md line 12, adds the mouse.down/up regression lock, makes the unit test wait on the query error state, runs `legion threads resolve --pr 1088 --repo sjawhar/legion` (three Accepted threads), pushes; tester re-verifies; reviewer answers the two new threads. Then the implementer deletes .legion/ and the reviewer approves that head by SHA.",
+  "preExistingFiled": {
+    "issue": "LEGION-157",
+    "summary": "At >=1536 the slot is content-sized and the input's ~20ch intrinsic width differs from the heading's, so a long title (75 chars at 1536; 40 chars with approval buttons + GitHub link at 1920) still reflows the rows on blur and the first click is lost; at >=1280 a two-line heading (58px) vs one-line editor (30px) shifts the rows likewise. Main has identical classes and markup there; measured identical on main and this head. Out of this PR's scope; not gating."
+  },
+  "fastFollow": "One change or fold into LEGION-157: pressWhileEditingTitle awaits expect(control).toBeEnabled() before the raw mouse.down (pin disabled while its PUT is in flight; first aria-pressed assertion passes on the optimistic update) and adds 1280 to the probed widths; AGENTS.md line 12 + slot comment: 'share the row beneath it when they fit, otherwise the details line takes its own row and scrolls'; issue.e2e.ts comments at ~482 and ~499 still describe the deleted flex-auto rule; move the slot comment next to its className; round-two list stands (Route trigger focus return, one focusOnMount ref callback, single visible <label htmlFor=issue-route>Route:</label>, dead `reference === undefined &&` guard in GitHubLink).",
+  "designNote": "Accepted per the architect: title always on its own row below 2xl — a bare short-title issue is 124px at 768-1279 where main was 72px; a busy line with a GitHub link and a one-line title takes a third row at 1200 (176px vs 124). Documented in AGENTS.md; not a finding.",
+  "nextSteps": "Architect sends the implementer back to run legion threads resolve --pr 1088 --repo sjawhar/legion and push exactly the .legion/ deletion; the reviewer confirms the new head differs from 51830078 by that deletion alone, CI green, all five reviewer threads isResolved: true, and approves it by SHA with no handoff write; retro; merger.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-14T11:54:48.539Z"
+  "completed": "2026-09-14T12:48:53.659Z"
 }
