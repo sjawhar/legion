@@ -21,12 +21,35 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * Present only when the runner's own kill timer fired: the command did not
+   * exit within `limitMs`, so the runner sent it SIGTERM. `elapsedMs` is the
+   * wall time from spawn to exit, which includes any time a child kept the
+   * stdio pipes open after the kill. A caller must never report a kill as an
+   * ordinary `Command failed (exit N)`.
+   */
+  timedOut?: { limitMs: number; elapsedMs: number };
 }
 
 export interface CommandRunnerOptions {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * Budget after which the runner kills the command. The default of 30 s is
+   * sized for GitHub API reads; slow callers (boot probes, workspace
+   * provisioning) pass their own budget.
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Kills the command when aborted, exactly as the budget does: the caller is giving up on it
+   * (a daemon whose boot failed while a probe was still running) and must not leave the child
+   * behind — the kill timer alone dies with the caller's process. The result carries `timedOut`,
+   * never a clean exit.
+   */
+  readonly signal?: AbortSignal;
 }
+
+const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
 /**
  * Protocol for running external commands (dependency injection for testing).
@@ -45,6 +68,8 @@ export async function defaultRunner(
   cmd: string[],
   options?: CommandRunnerOptions
 ): Promise<CommandResult> {
+  const limitMs = options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const startedAt = performance.now();
   const proc = Bun.spawn(cmd, {
     cwd: options?.cwd,
     env: options?.env,
@@ -52,13 +77,24 @@ export async function defaultRunner(
     stderr: "pipe",
   });
 
-  const killTimeout = setTimeout(() => {
+  let killed = false;
+  const kill = () => {
+    // A child that has already exited — by exit code or by signal; its stdio pipes may still be
+    // held open by a grandchild the runner is draining — was not killed by us: reporting a
+    // timeout for it would send a probe that finished inside the timer's slack back into a retry
+    // it never needed.
+    if (proc.exitCode !== null || proc.signalCode !== null) return;
+    killed = true;
     try {
       proc.kill();
     } catch {
       // Process may have already exited
     }
-  }, 30_000); // 30s for gh api graphql
+  };
+  const killTimeout = setTimeout(kill, limitMs);
+  const signal = options?.signal;
+  if (signal?.aborted) kill();
+  else signal?.addEventListener("abort", kill, { once: true });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -66,7 +102,16 @@ export async function defaultRunner(
 
   const exitCode = await proc.exited;
   clearTimeout(killTimeout);
-  return { stdout, stderr, exitCode };
+  signal?.removeEventListener("abort", kill);
+  if (!killed) {
+    return { stdout, stderr, exitCode };
+  }
+  return {
+    stdout,
+    stderr,
+    exitCode,
+    timedOut: { limitMs, elapsedMs: performance.now() - startedAt },
+  };
 }
 
 // =============================================================================

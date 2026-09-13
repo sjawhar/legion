@@ -70,7 +70,7 @@ In `envoy` mode the bridge starts only after the local daemon is healthy, then s
 bun run packages/daemon/src/cli/index.ts start <owner>/<board-number> --config /path/to/legion.yaml
 ```
 
-The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp` and `repos: [$SMOKE_REPO]` (required by `config.ts` for credential routing, PR lookups, and workspace provisioning). Before accepting work, the daemon asks `mise env --json` for the complete tool environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and resolves that pinned OMP binary with `mise where`. Its tmux panes receive the resulting full `PATH` and execute the resolved OMP path directly. Startup probes that exact OMP executable for `pi.agents`; it refuses to start before opening NATS or its API if the probe or any required tool fails.
+The generated configuration uses `omp_invocation: mise x github:sjawhar/oh-my-pi@18.1.15-sami.20260908-220934 -- omp` and `repos: [$SMOKE_REPO]` (required by `config.ts` for credential routing, PR lookups, and workspace provisioning). Before accepting work, the daemon asks `mise env --json` for the complete tool environment, resolves absolute `jj`, `git`, `gh`, and `tmux` paths, and resolves that pinned OMP binary with `mise where`. Its tmux panes receive the resulting full `PATH` and execute the resolved OMP path directly. Startup still refuses before anything opens when a required tool is missing or the installed `pi-legion-envoy` speaks the wrong daemon API contract. The OMP `pi.agents` and plugin-load probes of that exact executable start at the same time but are awaited only at the launch hold: NATS and the API open while a probe that merely timed out under load is retried (10 s doubling to a 5 min cap, unbounded), and no pane opens until it passes; a definitive probe failure closes the API and NATS it had opened and exits 1 (see the fail-closed section below).
 
 Set `LEGION_MISE_PATH`, `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`, or `LEGION_OMP_PATH` to an absolute executable path when a tool cannot be discovered. `omp_invocation` must use the `mise x <tool> -- omp` form; set `LEGION_OMP_PATH` when selecting a direct OMP binary.
 
@@ -83,7 +83,7 @@ key and silently falls back to a different, possibly quota-exhausted model).
 
 ### Fail-closed OMP probe
 
-To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OMP_PATH` at an **absolute path** to an older OMP binary and run the rig with `LEGION_OMP_AGENTS=missing`. The daemon must refuse before state, NATS, or its API starts.
+To prove the daemon rejects an OMP runtime without `pi.agents`, point `LEGION_OMP_PATH` at an **absolute path** to an older OMP binary and run the rig with `LEGION_OMP_AGENTS=missing`. The daemon must refuse (exit 1) after closing the API and NATS it had already opened; a probe that merely times out is retried, not refused.
 
 Do not use `LEGION_OMP_INVOCATION=omp` as this negative test: the daemon rejects an unpinned invocation. Use the explicit `LEGION_OMP_PATH` override above.
 

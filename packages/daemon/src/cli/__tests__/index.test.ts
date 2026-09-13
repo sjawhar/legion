@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -426,5 +426,79 @@ describe("legion probe-image", () => {
         code: 1,
       })
     );
+  });
+
+  it.each([
+    ["pi.agents", "LEGION_OMP_AGENTS=missing\n", "does not expose pi.agents", 1],
+    ["plugin load", "LEGION_PLUGIN_LOADED=no\n", "is installed but not loaded by omp", 2],
+  ])("treats a %s probe that prints its negative marker and then hangs past the budget as definitive: no retry", async (_probe, stderr, message, expectedAttempts) => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    await expect(
+      cmdProbeImage("/opt/omp/bin/omp", {
+        env: {},
+        runner: async (command) => {
+          attempts += 1;
+          // In the plugin-load case the pi.agents probe (the `--no-extensions` one) passes first.
+          if (_probe === "plugin load" && command[2]?.includes("--no-extensions")) {
+            return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 0 };
+          }
+          // The negative marker is already on stderr when the runner's kill fires: the answer
+          // is in, and no retry can change it.
+          return {
+            stdout: "",
+            stderr,
+            exitCode: 143,
+            timedOut: { limitMs: 300_000, elapsedMs: 300_100 },
+          };
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        readPluginManifest: async () => "{}",
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({ message: expect.stringContaining(message), code: 1 })
+    );
+    expect(sleeps).toEqual([]);
+    expect(attempts).toBe(expectedAttempts);
+  });
+
+  it("gives up after the bounded retry when every probe attempt times out", async () => {
+    const sleeps: number[] = [];
+    let attempts = 0;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        cmdProbeImage("/opt/omp/bin/omp", {
+          env: {},
+          runner: async (command) => {
+            attempts += 1;
+            expect(command).toEqual(expect.arrayContaining(["sh", "-c"]));
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: 143,
+              timedOut: { limitMs: 300_000, elapsedMs: 300_100 },
+            };
+          },
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          readPluginManifest: async () => "{}",
+        })
+      ).rejects.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining(
+            "OMP pi.agents probe never completed within its retry budget (6 attempts)"
+          ),
+          code: 1,
+        })
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000]);
+    expect(attempts).toBe(6);
   });
 });

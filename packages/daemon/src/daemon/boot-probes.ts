@@ -3,26 +3,72 @@ import os from "node:os";
 import path from "node:path";
 import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
-import type { CommandRunner } from "../state/fetch";
+import type { CommandResult, CommandRunner } from "../state/fetch";
+import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
 import { withOmpLaunchPrefix } from "./processes";
 
-/** The two probes `startDaemon` runs before it owns state or serves the API, and that
- * `legion probe-image` runs inside the worker image (packages/daemon/docker/worker.Dockerfile's last
- * step): one module so the daemon and the image gate are the same code. */
+/** The two probes `startDaemon` starts first and awaits only at its launch hold (state load,
+ * NATS, the API bind, and the worker reconnect proceed while they run; no pane opens until they
+ * pass), and that `legion probe-image` runs inside the worker image
+ * (packages/daemon/docker/worker.Dockerfile's last step): one module so the daemon and the image
+ * gate are the same code. */
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
+const OMP_AGENTS_MISSING_MARKER = "LEGION_OMP_AGENTS=missing";
 const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
   process.stderr.write(pi.agents ? "LEGION_OMP_AGENTS=available\\n" : "LEGION_OMP_AGENTS=missing\\n");
 }
 `;
 
-/** Backoff between boot-probe attempts whose failure is transient: OMP reached the probe
- * extension (its marker is in the output) and then exited non-zero — it died under host load (a
- * contended `models.db`, a starved process), not because of what the probe asks. A non-zero exit
- * with no marker is the launch command failing before OMP (e.g. `secrets` denying a key) and stays
- * a definitive failure, as does a clean exit whose answer is negative. Twice on 2026-09-12 a disk storm turned one such
- * exit into a daemon exit, and the supervisor's 1 s relaunch then added an OMP spawn per second
- * to the load it was dying of. Bounded: after the last attempt the failure is fatal as before. */
-const PROBE_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000, 90_000, 180_000];
+/** Backoff between boot-probe attempts whose failure is transient. The delay after the i-th
+ * failure is `min(initialDelayMs * 2^i, maxDelayMs)`; `maxAttempts` bounds the total number of
+ * attempts, and its absence means the probe retries until it passes or fails definitively. */
+export interface ProbeRetryPolicy {
+  readonly initialDelayMs: number;
+  readonly maxDelayMs: number;
+  readonly maxAttempts?: number;
+}
+
+/** The daemon's policy: unbounded, 10 s doubling to a 5 min cap. A transient failure is OMP
+ * dying under host load (its marker printed, then a non-zero exit — a contended `models.db`, a
+ * starved process) or the runner killing a probe that could not finish within
+ * `slow_command_timeout_seconds`; neither says anything about the configured OMP. Twice on
+ * 2026-09-12 a disk storm turned one such failure into a daemon exit, and the supervisor's 1 s
+ * relaunch then added an OMP spawn per second to the load it was dying of — so the daemon waits
+ * the load out inside the process, however long it lasts, rather than handing the failure back
+ * to the supervisor loop. A non-zero exit with no marker (the launch command failing before
+ * OMP, e.g. `secrets` denying a key), the `missing` marker, or a clean exit without the marker
+ * is definitive: no retry changes it, and the daemon still refuses to serve. */
+export const DAEMON_PROBE_RETRY: ProbeRetryPolicy = {
+  initialDelayMs: 10_000,
+  maxDelayMs: 300_000,
+};
+
+/** `legion probe-image`'s policy: the same backoff, bounded to six attempts (10+20+40+80+160 s,
+ * about five minutes of waiting at worst) — an image build has no supervisor and must finish. */
+export const IMAGE_PROBE_RETRY: ProbeRetryPolicy = { ...DAEMON_PROBE_RETRY, maxAttempts: 6 };
+/** Per-attempt budget `legion probe-image` gives each probe: the daemon's default
+ * `slow_command_timeout_seconds`, so the image gate and a default-configured daemon agree. */
+export const IMAGE_PROBE_TIMEOUT_MS = DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS * 1000;
+
+export interface BootProbeOptions {
+  readonly sleep: (ms: number) => Promise<void>;
+  /** Per-attempt runner budget (`slow_command_timeout_seconds` in ms). */
+  readonly timeoutMs: number;
+  readonly retry: ProbeRetryPolicy;
+  /** Aborts the probe: a daemon whose boot failed for another reason (state load, NATS, the
+   * API bind) must neither spawn another OMP after its pending backoff nor leave an attempt's
+   * OMP child running behind it. Passed to every runner call (which kills the child on abort)
+   * and checked after every sleep; the probe then rejects with `ProbeAbortedError`. */
+  readonly signal?: AbortSignal;
+}
+
+/** The probe chain was cancelled by the daemon's own teardown while waiting to retry. */
+class ProbeAbortedError extends Error {
+  constructor(name: string) {
+    super(`[legion] ${name} probe abandoned: the daemon stopped while it was waiting to retry`);
+    this.name = "ProbeAbortedError";
+  }
+}
 
 interface ProbeOutcome {
   readonly passed: boolean;
@@ -31,23 +77,53 @@ interface ProbeOutcome {
   readonly detail: string;
 }
 
-/** Runs `attempt` until it passes, fails definitively, or exhausts `PROBE_RETRY_DELAYS_MS`;
- * throws `makeError(detail)` in the two failing cases. Each transient failure is logged with the
- * delay before the next try, so an operator watching the supervisor log sees the daemon waiting
- * out host load instead of a silent stall. */
+/** A runner kill is transient when the probe never got to answer — but a probe that printed its
+ * negative marker and only then hung past the budget has answered: that answer is definitive, so
+ * `negativeMarker` is classified first and the kill is reported only for a marker-less output. */
+function timedOutOutcome(
+  result: CommandResult,
+  stderrTail: string,
+  negativeMarker: string
+): ProbeOutcome | undefined {
+  if (result.timedOut === undefined) return undefined;
+  if (`${result.stderr}\n${result.stdout}`.includes(negativeMarker)) return undefined;
+  const { limitMs, elapsedMs } = result.timedOut;
+  const detail = `command timed out after ${limitMs / 1000} s (ran ${(elapsedMs / 1000).toFixed(1)} s)`;
+  return {
+    passed: false,
+    definitive: false,
+    detail: stderrTail ? `${detail}\n${stderrTail}` : detail,
+  };
+}
+
+/** Runs `attempt` until it passes, fails definitively, or exhausts `policy.maxAttempts`; throws
+ * `makeError(detail, reason)` in the two failing cases — `"definitive"` for an answer no retry
+ * changes, `"exhausted"` when a bounded policy ran out of attempts while still transient, so the
+ * message can say the probe never completed rather than misreport what it never answered. Each
+ * transient failure is logged with the delay before the next try, so an operator watching the
+ * supervisor log sees the daemon waiting out host load instead of a silent stall. A `signal`
+ * aborted during the backoff ends the loop with `ProbeAbortedError` instead of a further attempt. */
 async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,
-  makeError: (detail: string) => Promise<Error>,
-  sleep: (ms: number) => Promise<void>
+  makeError: (detail: string, reason: "definitive" | "exhausted") => Promise<Error>,
+  policy: ProbeRetryPolicy,
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal | undefined
 ): Promise<void> {
   for (let i = 0; ; i++) {
+    if (signal?.aborted) throw new ProbeAbortedError(name);
     const outcome = await attempt();
     if (outcome.passed) return;
-    const delay = PROBE_RETRY_DELAYS_MS[i];
-    if (outcome.definitive || delay === undefined) throw await makeError(outcome.detail);
+    if (outcome.definitive) throw await makeError(outcome.detail, "definitive");
+    if (policy.maxAttempts !== undefined && i + 1 >= policy.maxAttempts) {
+      throw await makeError(outcome.detail, "exhausted");
+    }
+    const delay = Math.min(policy.initialDelayMs * 2 ** i, policy.maxDelayMs);
+    const attemptLabel =
+      policy.maxAttempts === undefined ? `${i + 1}` : `${i + 1}/${policy.maxAttempts}`;
     console.error(
-      `[legion] ${name} probe failed transiently (attempt ${i + 1}/${PROBE_RETRY_DELAYS_MS.length + 1}); retrying in ${delay / 1000}s${outcome.detail ? `: ${outcome.detail}` : ""}`
+      `[legion] ${name} probe failed transiently (attempt ${attemptLabel}); retrying in ${delay / 1000}s${outcome.detail ? `: ${outcome.detail}` : ""}`
     );
     await sleep(delay);
   }
@@ -62,7 +138,7 @@ export async function verifyOmpAgentsCapability(
   ompInvocation: string,
   ompLaunchPrefix: readonly string[],
   runner: CommandRunner,
-  sleep: (ms: number) => Promise<void>
+  options: BootProbeOptions
 ): Promise<void> {
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-omp-probe-"));
   const probePath = path.join(probeDir, "probe.mjs");
@@ -71,15 +147,20 @@ export async function verifyOmpAgentsCapability(
     await retryBootProbe(
       "OMP pi.agents",
       async () => {
-        const result = await runner([
-          "sh",
-          "-c",
-          `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
-          "sh",
-          probePath,
-        ]);
+        const result = await runner(
+          [
+            "sh",
+            "-c",
+            `exec ${withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation)} models --no-extensions --extension "$1" --json >/dev/null`,
+            "sh",
+            probePath,
+          ],
+          { timeoutMs: options.timeoutMs, signal: options.signal }
+        );
         const output = `${result.stderr}\n${result.stdout}`;
         const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+        const timedOut = timedOutOutcome(result, detail, OMP_AGENTS_MISSING_MARKER);
+        if (timedOut) return timedOut;
         if (result.exitCode === 0 && output.includes(OMP_AGENTS_CAPABILITY_MARKER)) {
           return { passed: true, definitive: false, detail };
         }
@@ -89,14 +170,18 @@ export async function verifyOmpAgentsCapability(
         const transient =
           result.exitCode !== 0 &&
           output.includes(OMP_AGENTS_CAPABILITY_MARKER) &&
-          !output.includes("LEGION_OMP_AGENTS=missing");
+          !output.includes(OMP_AGENTS_MISSING_MARKER);
         return { passed: false, definitive: !transient, detail };
       },
-      async (detail) =>
+      async (detail, reason) =>
         new Error(
-          `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
+          reason === "exhausted"
+            ? `[legion] OMP pi.agents probe never completed within its retry budget (${options.retry.maxAttempts} attempts)${detail ? `: ${detail}` : ""}`
+            : `[legion] Configured OMP invocation does not expose pi.agents${detail ? `: ${detail}` : ""}`
         ),
-      sleep
+      options.retry,
+      options.sleep,
+      options.signal
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });
@@ -109,6 +194,7 @@ export async function verifyOmpAgentsCapability(
 // plugin is disabled (`omp plugin disable`) or unregistered, in which case OMP's
 // ambient discovery silently skips it and every spawned session is Legion-less.
 const LEGION_LOADED_MARKER = "LEGION_PLUGIN_LOADED=yes";
+const LEGION_NOT_LOADED_MARKER = "LEGION_PLUGIN_LOADED=no";
 /** Caps how much of a failed launch probe's stderr lands in the thrown error message — a
  * misbehaving launch prefix (e.g. a wrapper that dumps a stack trace) must not blow up the
  * daemon's own startup-failure log line; the tail is kept since that's where the actual error
@@ -186,7 +272,7 @@ export async function verifyLegionPluginLoaded(
   ompLaunchPrefix: readonly string[],
   runner: CommandRunner,
   readPluginManifest: (manifestPath: string) => Promise<string>,
-  sleep: (ms: number) => Promise<void>
+  options: BootProbeOptions
 ): Promise<void> {
   const probeDir = await mkdtemp(path.join(os.tmpdir(), "legion-plugin-probe-"));
   const probePath = path.join(probeDir, "probe.mjs");
@@ -194,21 +280,31 @@ export async function verifyLegionPluginLoaded(
   try {
     await writeFile(probePath, LEGION_LOAD_PROBE, "utf8");
     let lastExitCode = 0;
+    let answeredNotLoaded = false;
     await retryBootProbe(
       "pi-legion-envoy load",
       async () => {
-        const result = await runner([
-          "sh",
-          "-c",
-          `exec ${launchCommand} models --extension "$1" --json >/dev/null`,
-          "sh",
-          probePath,
-        ]);
+        const result = await runner(
+          [
+            "sh",
+            "-c",
+            `exec ${launchCommand} models --extension "$1" --json >/dev/null`,
+            "sh",
+            probePath,
+          ],
+          { timeoutMs: options.timeoutMs, signal: options.signal }
+        );
         lastExitCode = result.exitCode;
+        const stderrTail = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
+        const timedOut = timedOutOutcome(result, stderrTail, LEGION_NOT_LOADED_MARKER);
+        if (timedOut) return timedOut;
         const output = `${result.stderr}\n${result.stdout}`;
         if (result.exitCode === 0 && output.includes(LEGION_LOADED_MARKER)) {
           return { passed: true, definitive: false, detail: "" };
         }
+        // The probe answered "not loaded": that diagnosis stands whatever the exit code — a
+        // runner kill after the marker still exits non-zero, and must not read as a launch failure.
+        answeredNotLoaded = output.includes(LEGION_NOT_LOADED_MARKER);
         // Transient only when omp loaded the plugin (marker present) and then died under load. A
         // non-zero exit without the marker is the launch command (the configured
         // `omp_launch_prefix` plus the OMP invocation) failing before or inside omp — e.g.
@@ -216,14 +312,15 @@ export async function verifyLegionPluginLoaded(
         // plugin-disabled diagnosis would send the operator to `omp plugin list` when the fix is
         // the prefix/credential.
         const transient = result.exitCode !== 0 && output.includes(LEGION_LOADED_MARKER);
-        return {
-          passed: false,
-          definitive: !transient,
-          detail: result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH),
-        };
+        return { passed: false, definitive: !transient, detail: stderrTail };
       },
-      async (detail) => {
-        if (lastExitCode !== 0) {
+      async (detail, reason) => {
+        if (reason === "exhausted") {
+          return new Error(
+            `[legion] pi-legion-envoy load probe never completed within its retry budget (${options.retry.maxAttempts} attempts) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+          );
+        }
+        if (lastExitCode !== 0 && !answeredNotLoaded) {
           return new Error(
             `[legion] OMP launch probe failed (exit ${lastExitCode}) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
           );
@@ -241,7 +338,9 @@ export async function verifyLegionPluginLoaded(
           `[legion] pi-legion-envoy${pluginVersion ? ` ${pluginVersion}` : ""} is installed but not loaded by omp (disabled or unregistered); run omp plugin list`
         );
       },
-      sleep
+      options.retry,
+      options.sleep,
+      options.signal
     );
   } finally {
     await rm(probeDir, { recursive: true, force: true });

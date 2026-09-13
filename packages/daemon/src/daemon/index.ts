@@ -20,10 +20,12 @@ import { rootForIssue } from "./api/context";
 import { EnvoyPublishError } from "./api/http";
 import { GATE_OFF_APPROVAL, satisfyGateOff } from "./api/routes/issues";
 import {
+  DAEMON_PROBE_RETRY,
   verifyLegionPluginContract,
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
 } from "./boot-probes";
+import { createCancellableSleep } from "./cancellable-sleep";
 import { overseerCatchup } from "./catchup";
 import { type DaemonConfig, loadConfig } from "./config";
 import { createDispatchClient, type DispatchClient } from "./dispatch-client";
@@ -198,19 +200,53 @@ export async function startDaemon(
   // file. Released on clean shutdown (stop(), below) or on any startup
   // failure past this point.
   const instanceLock = await deps.acquireInstanceLock(config.stateDir);
+  // Cancels the boot probes' pending backoff when boot fails for any other reason before the
+  // launch hold awaits them (state load, NATS, the API bind): without it the chain would keep
+  // spawning OMP probes in the background of a daemon that has already given up.
+  const probeAbort = new AbortController();
   try {
-    return await startDaemonLocked(config, deps, owner, instanceLock);
+    return await startDaemonLocked(config, deps, owner, instanceLock, probeAbort);
   } catch (error) {
+    probeAbort.abort();
     await instanceLock.release();
     throw error;
   }
+}
+
+/** The probe backoff sleep, cut short the moment `signal` aborts so a probe waiting out a long
+ * backoff notices the daemon's teardown at once instead of at the end of the wait. Without an
+ * injected `sleep` it is `createCancellableSleep`, whose `cancel` clears the real timer — so a
+ * pre-hold boot failure leaves no pending timer keeping the process alive. An injected sleep
+ * (tests) is raced against the signal instead. Either way an already-aborted signal returns at
+ * once. */
+function abortableSleep(
+  injected: ((ms: number) => Promise<void>) | undefined,
+  signal: AbortSignal
+): (ms: number) => Promise<void> {
+  if (injected === undefined) {
+    const timer = createCancellableSleep();
+    signal.addEventListener("abort", () => timer.cancel(), { once: true });
+    return (ms) => (signal.aborted ? Promise.resolve() : timer.sleep(ms));
+  }
+  return (ms) =>
+    signal.aborted
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          const onAbort = () => resolve();
+          signal.addEventListener("abort", onAbort, { once: true });
+          void injected(ms).then(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+          });
+        });
 }
 
 async function startDaemonLocked(
   config: DaemonConfig,
   deps: DaemonDependencies,
   owner: string,
-  instanceLock: InstanceLock
+  instanceLock: InstanceLock,
+  probeAbort: AbortController
 ): Promise<DaemonHandle> {
   const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
     run: deps.runner,
@@ -223,22 +259,39 @@ async function startDaemonLocked(
   if (config.dispatchToken !== undefined) {
     await writeSecretFile(config.stateDir, DISPATCH_TOKEN_SECRET, config.dispatchToken);
   }
-  const probeSleep =
-    deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  await verifyOmpAgentsCapability(
-    environment.ompInvocation,
-    config.ompLaunchPrefix,
-    runner,
-    probeSleep
-  );
+  // The plugin contract check is a local manifest read — no OMP spawn, no runner — so host load
+  // cannot make it transient: a skewed plugin is a definitive refusal, made here before any state
+  // is loaded or NATS/the API opened, exactly as before. Only the two OMP probes below are
+  // load-sensitive and get the hold-and-retry treatment.
   await verifyLegionPluginContract(deps.readPluginManifest);
-  await verifyLegionPluginLoaded(
-    environment.ompInvocation,
-    config.ompLaunchPrefix,
-    runner,
-    deps.readPluginManifest,
-    probeSleep
-  );
+  // The two boot probes (boot-probes.ts) start here but are awaited only at the launch hold
+  // below, just before the first pane could open: state load, NATS, the API bind, and the worker
+  // reconnect all proceed while a probe is still retrying through host load, so an operator can
+  // read `/legion/v1/state` and the durable lane keeps acking meanwhile. The no-op `catch`
+  // keeps a definitive negative that lands before the hold from becoming an unhandled rejection;
+  // the real handling is at the hold.
+  const probeOptions = {
+    sleep: abortableSleep(deps.sleep, probeAbort.signal),
+    timeoutMs: config.slowCommandTimeoutSeconds * 1000,
+    retry: DAEMON_PROBE_RETRY,
+    signal: probeAbort.signal,
+  };
+  const probes = (async () => {
+    await verifyOmpAgentsCapability(
+      environment.ompInvocation,
+      config.ompLaunchPrefix,
+      runner,
+      probeOptions
+    );
+    await verifyLegionPluginLoaded(
+      environment.ompInvocation,
+      config.ompLaunchPrefix,
+      runner,
+      deps.readPluginManifest,
+      probeOptions
+    );
+  })();
+  probes.catch(() => {});
   await deps.tokenManager.getToken("implement", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
@@ -336,8 +389,8 @@ async function startDaemonLocked(
   // it needs no `api` reference (it only probes existing connections; it never mints a boot
   // token) — but a reconnect's own `get_state` response can still synchronously fire
   // `onIdle` -> `promoteWorkerQueue`, which is why that trigger (and `reconcileWorkerAdmission`)
-  // stay gated behind `processManager.enableWorkerPromotion()` below until `api` exists: nothing
-  // here is protected by call *ordering*, only by the gate.
+  // stay gated behind `processManager.enableLaunches()` — boot's launch hold, released only
+  // once the OMP probes pass below: nothing here is protected by call *ordering*, only by the gate.
   try {
     await processManager.reconnectWorkers();
   } catch (error) {
@@ -397,7 +450,9 @@ async function startDaemonLocked(
   // `/controller/ready` call drains these same notices through the ordinary path once it's
   // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
   // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
-  // boot depends on either finishing.
+  // boot depends on either finishing. Boot's launch hold is still on here, so `ensureController`
+  // records the request instead of opening a pane; `replayHeldRecoveries()` below the hold
+  // spawns it once the probes pass.
   if (state.controllerPendingNotices.length > 0) {
     if (state.roles[controllerToken(state.project)]) {
       void eventPump.drainControllerNotices().catch((error) => {
@@ -497,65 +552,9 @@ async function startDaemonLocked(
     throw error;
   }
 
-  // Awaited only now that `api` is assigned: the promotion cascade this can
-  // trigger calls back into `processManager`'s `mintBootToken`/
-  // `mintControllerCapability` closures, which read `api` by reference. `Bun.serve` above
-  // already has the port open and accepting connections by this point — the running-worker
-  // and tree-admission counts these two calls converge are correct *before* that happens
-  // (computed fresh from `state.roles`/`state.admission`, not accumulated), so an early real
-  // request arriving during this window is never over-admitted; it only serializes behind
-  // these calls on the same `admissionLock`, which can at most let it jump ahead of a queued
-  // tree/worker in FIFO order. `enableWorkerPromotion()` opens the gate `reconcileWorkerAdmission`
-  // (and every `onIdle`/`markWorkerDead`/`closeTree` trigger from this point on) requires —
-  // see `WorkerAdmission.workerPromotionEnabled`'s doc comment.
-  processManager.enableWorkerPromotion();
-  // Before `reconcileAdmission`'s own promotion cascade, which can take a while (spawning
-  // multiple queued roots): a restored active-with-a-locator-but-never-confirmed tree must have
-  // its registration deadline armed immediately, not only once that cascade finishes, or it sits
-  // unwatched for however long promotion takes. `reconnectRoots` is synchronous.
-  processManager.reconnectRoots();
-  await processManager.reconcileAdmission();
-  await processManager.reconcileWorkerAdmission();
-  const ready = nats.ready();
-
   let stopped = false;
   let resyncTimer: unknown;
-  const scheduleResync = (): void => {
-    resyncTimer = deps.setTimeout(async () => {
-      try {
-        await emitResync();
-      } catch (error) {
-        console.error(
-          `[legion] resync failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-      if (!stopped) scheduleResync();
-    }, config.resyncIntervalMs);
-  };
-  scheduleResync();
-
-  const lingerTimer = deps.setInterval(() => {
-    const now = deps.now();
-    for (const tree of Object.values(state.trees)) {
-      if (tree.status !== "lingering" || !tree.lingerUntil) continue;
-      if (Date.parse(tree.lingerUntil) <= now) {
-        void processManager.expireLinger(tree.root).catch((error) => {
-          console.error(`[legion] linger cleanup failed for ${tree.root}:`, error);
-        });
-      }
-    }
-    void processManager.reconcileOrphans().catch((error) => {
-      console.error("[legion] orphan reconciliation failed:", error);
-    });
-    // A below-threshold launch failure rotates its head to the tail (see
-    // `promoteQueuedWorker`) instead of blocking the queue, but nothing else retries a queue
-    // with zero live workers on its own — this periodic tick is that retry, mirroring how a
-    // worker-cap raise between restarts gets promoted via the same call at boot.
-    void processManager.reconcileWorkerAdmission().catch((error) => {
-      console.error(`[legion] worker admission reconciliation failed:`, error);
-    });
-  }, LINGER_SWEEP_INTERVAL_MS);
-
+  let lingerTimer: unknown;
   const drain = async () => {
     await eventPump.drain();
     // A spawn fired by `admit`'s promotion (never awaited at its call site)
@@ -565,12 +564,14 @@ async function startDaemonLocked(
     await processManager.drainSpawns();
     await saving;
   };
-
+  // `stop` is defined here, above the launch hold, because a definitive probe failure at the
+  // hold tears the daemon down through it: the timers it clears are still unset at that point.
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
+    probeAbort.abort();
     if (resyncTimer !== undefined) deps.clearTimeout(resyncTimer);
-    deps.clearInterval(lingerTimer);
+    if (lingerTimer !== undefined) deps.clearInterval(lingerTimer);
     eventPump.stop();
     processManager.dispose();
     let failure: unknown;
@@ -629,6 +630,86 @@ async function startDaemonLocked(
     }
     if (failure) throw failure;
   };
+
+  // THE LAUNCH HOLD. Everything above ran while the probes were still trying; nothing below may
+  // open a pane until they pass. A transient probe failure is retried inside `probes` for as
+  // long as it takes (unbounded, capped backoff — see `DAEMON_PROBE_RETRY`), the API answering
+  // and the durable lane acking throughout; a spawn asked for meanwhile queued through
+  // `ProcessManager`'s launch hold and is promoted below. A definitive negative (the wrong OMP,
+  // a launch prefix that fails before OMP) still refuses to serve: the daemon closes what it
+  // opened — event pump, API, worker stream, NATS, the instance lock — and `startDaemon` rejects
+  // with the probe's error, so `legion start` exits 1 exactly as before.
+  try {
+    await probes;
+  } catch (error) {
+    try {
+      await stop();
+    } catch (teardown) {
+      console.error("[legion] teardown after a failed boot probe failed:", teardown);
+    }
+    throw error;
+  }
+
+  // The probes passed: release the hold. The promotion cascades below call back into
+  // `processManager`'s `mintBootToken`/`mintControllerCapability` closures, which read `api` by
+  // reference — assigned long since. `Bun.serve` has been accepting requests throughout; the
+  // running-worker and tree-admission counts these calls converge are correct before that
+  // (computed fresh from `state.roles`/`state.admission`, not accumulated), so an early request
+  // was never over-admitted — it queued, and is promoted here in FIFO order. `enableLaunches()`
+  // releases the hold every pane-opening path (`admit`, `spawnWorker`, `resurrect`,
+  // `ensureController`, and every `onIdle`/`markWorkerDead`/`closeTree` promotion trigger from
+  // this point on) waited behind — see `ProcessManager.launchesEnabled` and
+  // `WorkerAdmission.workerPromotionEnabled`.
+  processManager.enableLaunches();
+  // Before `reconcileAdmission`'s own promotion cascade, which can take a while (spawning
+  // multiple queued roots): a restored active-with-a-locator-but-never-confirmed tree must have
+  // its registration deadline armed immediately, not only once that cascade finishes, or it sits
+  // unwatched for however long promotion takes. `reconnectRoots` is synchronous.
+  processManager.reconnectRoots();
+  await processManager.reconcileAdmission();
+  await processManager.reconcileWorkerAdmission();
+  // A resurrection or controller launch requested while the hold was on (the pending-notice
+  // `ensureController` above, an exception routed to a dead root, an API call from a live
+  // architect) runs now.
+  await processManager.replayHeldRecoveries();
+  const ready = nats.ready();
+
+  const scheduleResync = (): void => {
+    resyncTimer = deps.setTimeout(async () => {
+      try {
+        await emitResync();
+      } catch (error) {
+        console.error(
+          `[legion] resync failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      if (!stopped) scheduleResync();
+    }, config.resyncIntervalMs);
+  };
+  scheduleResync();
+
+  lingerTimer = deps.setInterval(() => {
+    const now = deps.now();
+    for (const tree of Object.values(state.trees)) {
+      if (tree.status !== "lingering" || !tree.lingerUntil) continue;
+      if (Date.parse(tree.lingerUntil) <= now) {
+        void processManager.expireLinger(tree.root).catch((error) => {
+          console.error(`[legion] linger cleanup failed for ${tree.root}:`, error);
+        });
+      }
+    }
+    void processManager.reconcileOrphans().catch((error) => {
+      console.error("[legion] orphan reconciliation failed:", error);
+    });
+    // A below-threshold launch failure rotates its head to the tail (see
+    // `promoteQueuedWorker`) instead of blocking the queue, but nothing else retries a queue
+    // with zero live workers on its own — this periodic tick is that retry, mirroring how a
+    // worker-cap raise between restarts gets promoted via the same call at boot.
+    void processManager.reconcileWorkerAdmission().catch((error) => {
+      console.error(`[legion] worker admission reconciliation failed:`, error);
+    });
+  }, LINGER_SWEEP_INTERVAL_MS);
+
   const stopForSignal = (): void => {
     void stop()
       .catch((error) => {
