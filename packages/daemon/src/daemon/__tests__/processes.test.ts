@@ -5251,6 +5251,107 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
   });
 
+  it("re-arms the same generation's registration deadline when the resurrection's own re-probe cannot complete, leaving the locator intact, and resurrects normally once it can", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.admission.active.push(root);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    // Deadline 1 (generation 1's, armed by the spawn) and deadline 2 (the re-arm under test)
+    // are each released by this test; the resurrected generation's own deadline stays pending.
+    const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const secondArm = Promise.withResolvers<void>();
+    let sleepCalls = 0;
+    // The `list-panes` answers, in order: the deadline's probe finds the pane gone; the
+    // resurrection's own re-probe hits a tmux client that could not list anything (the runner's
+    // timeout, a server not responding) -- a failure that proves nothing about the pane. Every
+    // later listing finds the pane gone again.
+    const listings: Array<{ stdout: string; stderr: string; exitCode: number }> = [
+      paneGone(),
+      { stdout: "", stderr: "tmux: server not responding", exitCode: 1 },
+    ];
+    const commands: string[][] = [];
+    let sessionExists = false;
+    const windows = windowCounter();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 2) secondArm.resolve();
+        const gate = gates[sleepCalls - 1];
+        if (gate) {
+          await gate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[3] === "new-window") {
+          windows.increment();
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
+        }
+        if (command[3] === "list-panes") return listings.shift() ?? paneGone();
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    try {
+      await processes.spawnRoot(root);
+      expect(sleepCalls).toBe(1);
+      const launched = managedState.trees[root]?.locator;
+      expect(launched).toMatchObject({ tmuxPaneId: "%1", panePid: 10001 });
+
+      // Deadline 1 elapses: probe dead, launch failure counted, resurrection started -- and its
+      // re-probe throws. The root must not be left unwatched: the same generation's deadline is
+      // armed again, and nothing about the tree was touched.
+      gates[0]?.resolve();
+      await secondArm.promise;
+      expect(managedState.trees[root]).toMatchObject({
+        generation: 1,
+        status: "active",
+        launchFailures: 1,
+      });
+      expect(managedState.trees[root]?.locator).toBe(launched);
+      expect(managedState.trees[root]?.readyConfirmedAt).toBeUndefined();
+      expect(windows.count).toBe(1);
+      expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
+      const logged = errors.mock.calls.filter(
+        ([message]) => typeof message === "string" && message.includes(root)
+      );
+      expect(logged).toHaveLength(1);
+      expect(String(logged[0]?.[1])).toContain("tmux: server not responding");
+
+      // Deadline 2 elapses with the fault cleared: the ordinary retry -- probe dead, second
+      // launch failure, resurrection onto a fresh pane whose own deadline is then armed.
+      gates[1]?.resolve();
+      await windows.reached(2);
+      await processes.drainSpawns();
+      expect(managedState.trees[root]).toMatchObject({
+        generation: 2,
+        status: "active",
+        launchFailures: 2,
+        locator: { tmuxPaneId: "%2", panePid: 10002 },
+      });
+      expect(sleepCalls).toBe(3);
+      expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("retires an alive-but-unconfirmed root pane and resurrects once when its registration deadline elapses, counting the retirement toward launchFailures", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

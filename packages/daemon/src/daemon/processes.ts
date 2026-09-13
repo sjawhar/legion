@@ -1824,7 +1824,26 @@ export class ProcessManager {
     // newer generation's spawn landing during this persist must still win over the retry, not
     // just a dispose/closeTree/beginLinger status change.
     if (!this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) return;
-    await onRetry();
+    try {
+      await onRetry();
+    } catch (error) {
+      // The retry is `resurrect`, whose own re-probe and stop can fail exactly as the probe that
+      // brought us here can (a `list-panes` that proves nothing about the pane): the runtime
+      // refused to fake a verdict, so nothing was cleared -- and the deadline was cancelled
+      // above. Left there, the root would sit active and unconfirmed with its locator intact
+      // until a restart: the resync backstop probes only confirmed roots. Re-arm this same
+      // generation's deadline, as `retireUnconfirmedRoot`'s stop-failure branch does, unless the
+      // throw was a spawn failure that already moved the tree on (`spawnRoot`'s own accounting
+      // queues or launch-fails it, so `treeStillUnconfirmed` declines) or a newer generation has
+      // since taken the tree over. Logged here, once; the deadline's own catch never sees it.
+      console.error(
+        `[legion] failed to resurrect an unconfirmed root for ${treeKey}; re-arming its registration deadline rather than leaving it unwatched:`,
+        error
+      );
+      if (this.treeStillUnconfirmed(this.deps.state.trees[treeKey], generation)) {
+        this.armRootRegistrationDeadline(treeKey, generation);
+      }
+    }
   }
 
   /**
