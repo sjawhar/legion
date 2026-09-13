@@ -318,7 +318,50 @@ describe("legion start --check-config", () => {
     expect(fs.existsSync(marker)).toBe(false);
   });
 
-  it("still rejects a github app with neither private_key nor private_key_command", async () => {
+  it("validates github_apps.<role>.private_key_secret without running secrets", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const fakeBin = path.join(dir, "bin");
+    fs.mkdirSync(fakeBin);
+    const marker = path.join(dir, "spawned");
+    fs.writeFileSync(path.join(fakeBin, "secrets"), `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, {
+      mode: 0o755,
+    });
+    const configPath = path.join(dir, "legion.yaml");
+    fs.writeFileSync(
+      configPath,
+      [
+        "project: acme/99",
+        "envoy_url: http://127.0.0.1:9020",
+        "dispatch_project: ACME",
+        "repos:",
+        "  - acme/widgets",
+        "nats_urls:",
+        "  - nats://one:4222",
+        "gates:",
+        "  design: off",
+        "github_apps:",
+        "  implement:",
+        '    app_id: "1"',
+        "    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64",
+      ].join("\n")
+    );
+    // The resolver spawns `secrets` from process.env.PATH (like private_key_command's `sh -c`),
+    // so the fake goes first on the real PATH; a spawn under --check-config would leave the marker.
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}${path.delimiter}${savedPath}`;
+    try {
+      await cmdCheckConfig(undefined, configPath, {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+      });
+    } finally {
+      process.env.PATH = savedPath;
+    }
+
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it("still rejects a github app with no private-key source, naming all three", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const configPath = path.join(dir, "legion.yaml");
     fs.writeFileSync(
@@ -340,7 +383,7 @@ describe("legion start --check-config", () => {
     );
 
     await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(
-      "github_apps.implement requires exactly one of private_key or private_key_command"
+      "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret"
     );
   });
 

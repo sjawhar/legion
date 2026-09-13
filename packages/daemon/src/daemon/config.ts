@@ -143,11 +143,12 @@ export interface LoadedConfigFile {
 
 export interface LoadConfigFileOptions {
   /**
-   * When false, github_apps.<role>.private_key_command is validated for
-   * presence but never executed — the private key becomes the placeholder
-   * "(not executed)". Used by `legion start --check-config` so a config
-   * validation pass never runs an arbitrary shell command from the file.
-   * Defaults to true (the daemon always resolves real secrets).
+   * When false, github_apps.<role>.private_key_command is validated for presence but never
+   * executed, and github_apps.<role>.private_key_secret is validated as a key name but `secrets`
+   * is never run — the private key becomes the placeholder "(not executed)". Used by
+   * `legion start --check-config` so a config validation pass never runs an arbitrary shell
+   * command from the file and never requests a secretsd grant (a YubiKey tap). Defaults to true
+   * (the daemon always resolves real secrets).
    */
   resolveSecrets?: boolean;
 }
@@ -244,12 +245,14 @@ const CONFIG_SCHEMA: ConfigSchema = {
       app_id: null,
       private_key: null,
       private_key_command: null,
+      private_key_secret: null,
       installations: { [CONFIG_ANY_KEY]: null },
     },
     review: {
       app_id: null,
       private_key: null,
       private_key_command: null,
+      private_key_secret: null,
       installations: { [CONFIG_ANY_KEY]: null },
     },
   },
@@ -532,6 +535,19 @@ function readStringRecord(value: unknown, field: string): Record<string, string>
   return parsed.data;
 }
 
+/** A `private_key_secret` value is one secretsd key name, handed to `secrets` as a single argv
+ * token — never through a shell. Whitespace means the operator pasted a command, not a name. */
+function readSecretName(value: unknown, field: string): string | undefined {
+  const name = readString(value, field);
+  // `""` is "not provided", exactly as `private_key: ""` and `private_key_command: ""` are; it
+  // falls through to the exactly-one rule in loadGitHubApps rather than a shape error.
+  if (name === undefined || name === "") return name;
+  if (/\s/.test(name)) {
+    throw new Error(`${field} must be a single secretsd key name (no whitespace)`);
+  }
+  return name;
+}
+
 function executePrivateKeyCommand(command: string, field: string): string {
   const result = spawnSync("sh", ["-c", command], {
     encoding: "utf8",
@@ -545,6 +561,78 @@ function executePrivateKeyCommand(command: string, field: string): string {
   const privateKey = result.stdout?.trim() ?? "";
   if (!privateKey) throw new Error(`${field} produced empty output`);
   return privateKey;
+}
+
+const SecretsStatusSchema = z.object({ key: z.string(), tier: z.string() }).passthrough();
+
+/** Runs one `secrets get …` for `name`. Two deliberate differences from
+ * `executePrivateKeyCommand`'s `sh -c` child: the child inherits the daemon's stdin — secretsd
+ * identifies a tokenless caller by `isatty(0)` plus `/proc/self/fd/0`, so a piped stdin would be
+ * refused as "neither a terminal tty nor a session token" — and `SECRETSD_SESSION_TOKEN_FILE` is
+ * dropped (only that one: `SECRETSD_SOCK` is the broker's socket path, not a session), so the
+ * request is always scoped to the launcher pane's terminal and the App key's grant never lands
+ * on an agent session the daemon happened to be started from. No daemon-imposed timeout:
+ * secretsd's own approval window is the failure, reported with the child's stderr. */
+function runSecretsGet(name: string, flag: "--no-request" | "--value", field: string): string {
+  const env = stripDispatchEnv(process.env);
+  delete env.SECRETSD_SESSION_TOKEN_FILE;
+  const args = ["get", name, flag];
+  const result = spawnSync("secrets", args, {
+    encoding: "utf8",
+    env,
+    stdio: ["inherit", "pipe", "pipe"],
+  });
+  if (result.error) {
+    if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`${field}: the secrets command is not on PATH, so ${name} cannot be read`);
+    }
+    throw new Error(`${field}: could not run secrets ${args.join(" ")}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const status = result.status === null ? "unknown" : String(result.status);
+    const stderr = result.stderr?.trim();
+    throw new Error(
+      `${field}: secrets ${args.join(" ")} failed (exit ${status})${stderr ? `: ${stderr}` : ""}`
+    );
+  }
+  return result.stdout ?? "";
+}
+
+/** `github_apps.<role>.private_key_secret`: the App's PEM, base64-encoded, held by secretsd under
+ * `name`. The tier check comes first and never costs a tap (`--no-request`); only a `human`-tier
+ * key is fetched, because an agent-tier key is readable by every Legion pane and the whole point
+ * of this source is that panes cannot read it (LEGION-77). The decoded value must be a PEM so a
+ * wrong key name that happens to exist fails here, not at the first JWT. Nothing in any error
+ * carries the value. */
+function resolvePrivateKeySecret(name: string, field: string): string {
+  const statusText = runSecretsGet(name, "--no-request", field);
+  const unparsable = new Error(
+    `${field}: secrets get ${name} --no-request printed an unparsable status (expected {"key","tier"})`
+  );
+  let status: z.infer<typeof SecretsStatusSchema>;
+  try {
+    status = SecretsStatusSchema.parse(JSON.parse(statusText.trim()));
+  } catch {
+    throw unparsable;
+  }
+  // A status for some other key is not a status for this one; one message, no new wording.
+  if (status.key !== name) throw unparsable;
+  if (status.tier !== "human") {
+    throw new Error(
+      `App private key ${name} is readable by agent-tier callers; move it to a daemon-only store`
+    );
+  }
+  console.warn(
+    `[legion] requesting ${name} from secretsd (human tier; a YubiKey tap may be needed)`
+  );
+  const encoded = runSecretsGet(name, "--value", field).trim();
+  const decoded = Buffer.from(encoded, "base64").toString("utf8").trim();
+  if (!decoded.startsWith("-----BEGIN")) {
+    throw new Error(
+      `${field}: ${name} did not decode to a PEM private key (expected base64 of a -----BEGIN block)`
+    );
+  }
+  return decoded;
 }
 
 function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConfig | undefined {
@@ -565,22 +653,30 @@ function loadGitHubApps(value: unknown, resolveSecrets: boolean): GitHubAppsConf
       parsedRole.data.private_key_command,
       `github_apps.${role}.private_key_command`
     );
+    const secretField = `github_apps.${role}.private_key_secret`;
+    const secretName = readSecretName(parsedRole.data.private_key_secret, secretField);
     const hasInlineKey = inlineKey !== undefined && inlineKey !== "";
     const hasCommand = command !== undefined && command !== "";
+    const hasSecret = secretName !== undefined && secretName !== "";
     if (appId === undefined || appId === "") {
       throw new Error(`github_apps.${role} is missing required fields: app_id`);
     }
-    if (hasInlineKey === hasCommand) {
+    if ([hasInlineKey, hasCommand, hasSecret].filter(Boolean).length !== 1) {
       throw new Error(
-        `github_apps.${role} requires exactly one of private_key or private_key_command`
+        `github_apps.${role} requires exactly one of private_key, private_key_command, or private_key_secret`
       );
     }
+    // The chain repeats the has* conditions on the values so tsc narrows `string | undefined`.
     let privateKey: string;
     if (inlineKey !== undefined && inlineKey !== "") {
       privateKey = inlineKey;
     } else if (command !== undefined && command !== "") {
       privateKey = resolveSecrets
         ? executePrivateKeyCommand(command, `github_apps.${role}.private_key_command`)
+        : "(not executed)";
+    } else if (secretName !== undefined && secretName !== "") {
+      privateKey = resolveSecrets
+        ? resolvePrivateKeySecret(secretName, secretField)
         : "(not executed)";
     } else {
       throw new Error(`github_apps.${role} requires a private key source`);
