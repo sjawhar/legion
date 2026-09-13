@@ -121,6 +121,24 @@ resolve_design_gate() {
   esac
 }
 
+# Where the rig's Dispatch issue events come from. `shared` (the default) is today's behaviour:
+# the daemon reads the shared Dispatch server over HTTP, and its issue events reach the rig NATS
+# only through the `envoy` webhook mode's production bridge — under `none` or `forward` no
+# Dispatch event arrives, so checkpoints.sh blocks the checkpoints that need one. `rig` says a
+# scratch Dispatch server (the armed-gate exercise in the README runs one built from this
+# checkout) publishes its outbox straight into the rig NATS, so those events arrive whatever the
+# webhook mode and checkpoints.sh must not block on the webhook mode alone.
+resolve_dispatch_ingress() {
+  case "${SMOKE_DISPATCH_INGRESS:-shared}" in
+    shared | rig)
+      printf '%s\n' "${SMOKE_DISPATCH_INGRESS:-shared}"
+      ;;
+    *)
+      fail "SMOKE_DISPATCH_INGRESS must be shared or rig"
+      ;;
+  esac
+}
+
 normalize_github_webhook_secret() {
   local original_secret="$GITHUB_WEBHOOK_SECRET"
 
@@ -569,6 +587,7 @@ main() {
   local webhook_mode
   local omp_path
   local design_gate
+  local dispatch_ingress
 
   require_env SMOKE_REPO
   require_env SMOKE_PROJECT
@@ -588,11 +607,13 @@ main() {
   omp_path="$(resolve_omp_path)"
   printf 'GREEN OMP build: %s\n' "$omp_path"
   design_gate="$(resolve_design_gate)"
+  dispatch_ingress="$(resolve_dispatch_ingress)"
 
   mkdir -p "$smoke_dir" "${smoke_dir}/daemon" \
     "${smoke_dir}/xdg-data" "${smoke_dir}/xdg-state/legion" "$gh_config_dir"
   printf '%s\n' "$webhook_mode" >"${smoke_dir}/webhook-mode"
   printf '%s\n' "$design_gate" >"${smoke_dir}/design-gate"
+  printf '%s\n' "$dispatch_ingress" >"${smoke_dir}/dispatch-ingress"
   assert_port_free 'Envoy listener' "$listener_port" "${smoke_dir}/listener.pid"
   assert_port_free 'Legion daemon' "$daemon_port" "${smoke_dir}/daemon.pid"
   write_daemon_config

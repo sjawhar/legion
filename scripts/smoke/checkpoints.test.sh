@@ -282,7 +282,7 @@ for blocked_checkpoint in 1 2 3 4 12; do
   else
     status=$?
   fi
-  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig'* ]] || {
     printf 'expected exit 3 and the Dispatch-ingress reason for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
     exit 1
   }
@@ -302,6 +302,69 @@ fi
   exit 1
 }
 printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\n'
+
+# The same none mode with the recorded Dispatch ingress `rig` (a scratch Dispatch publishes into
+# the rig NATS itself): the webhook mode no longer decides checkpoints 1-4 and 12. Checkpoint 1
+# passes the gate, says which record let it through, and reaches its own assertion — here it
+# passes on the same fixtures the envoy-mode case above uses. An explicitly recorded `shared` is
+# today's behaviour, blocked exactly as before; anything else on record is refused naming the two
+# values. The webhook-only checkpoints (5-7, 9-11) stay blocked under none whatever the ingress.
+printf 'rig\n' >"${smoke_dir}/dispatch-ingress"
+if ! PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  DISPATCH_URL="http://dispatch.test" \
+  DISPATCH_TOKEN="test-dispatch-token" \
+  FAKE_TMUX_PID="$clean_pid" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected rig ingress under none to let checkpoint 1 run its own assertion; got:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 1: SMOKE_WEBHOOK_MODE=none does not block this checkpoint; the recorded SMOKE_DISPATCH_INGRESS=rig says a scratch Dispatch publishes issue events into the rig NATS directly'*'CHECKPOINT 1 OK'* && "$(<"$output_file")" != *'SKIPPED-BLOCKED'* ]] || {
+  printf 'expected the rig-ingress notice followed by checkpoint 1 OK; got:\n%s\n' "$(<"$output_file")" >&2
+  exit 1
+}
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 5 >"$output_file" 2>&1; then
+  printf 'expected none mode to keep blocking the GitHub-fed checkpoint 5 under rig ingress\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 5 SKIPPED-BLOCKED: '*'requires live GitHub webhook ingress'* ]] || {
+  printf 'expected checkpoint 5 to stay blocked with the GitHub-ingress reason under rig ingress; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'shared\n' >"${smoke_dir}/dispatch-ingress"
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected shared ingress under none to block checkpoint 1\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: '* ]] || {
+  printf 'expected the shared-ingress block for checkpoint 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+printf 'sideways\n' >"${smoke_dir}/dispatch-ingress"
+if PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" DISPATCH_TOKEN="test-dispatch-token" \
+  bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  printf 'expected an unknown recorded Dispatch ingress to be refused\n' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 1 && "$(<"$output_file")" == *'CHECKPOINT 1 FAILED: recorded SMOKE_DISPATCH_INGRESS must be shared or rig'* ]] || {
+  printf 'expected the unknown-ingress refusal naming the two values; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
+  exit 1
+}
+rm -f "${smoke_dir}/dispatch-ingress"
+printf 'PASS: a recorded rig Dispatch ingress lets none mode reach checkpoint 1 (naming the record), shared stays blocked, an unknown record is refused\n'
 
 # Every GitHub-fed checkpoint under none: exit 3, the GitHub-ingress reason, and no Dispatch
 # request. The mode gate runs before each checkpoint's own require_env, so none of the SMOKE_*
@@ -379,7 +442,7 @@ for blocked_checkpoint in 1 2 3 4 12; do
   else
     status=$?
   fi
-  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy'* ]] || {
+  [[ "$status" == 3 && "$(<"$output_file")" == *"CHECKPOINT ${blocked_checkpoint} SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=forward with SMOKE_DISPATCH_INGRESS=shared: "*'requires Dispatch issue-event ingress'*'use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig'* ]] || {
     printf 'expected exit 3 and the Dispatch-ingress reason naming forward for checkpoint %s; got %s:\n%s\n' "$blocked_checkpoint" "$status" "$(<"$output_file")" >&2
     exit 1
   }
@@ -449,7 +512,7 @@ if PATH="${fake_bin}:${PATH}" \
 else
   status=$?
 fi
-[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none: '*'requires Dispatch issue-event ingress'* ]] || {
+[[ "$status" == 3 && "$(<"$output_file")" == *'CHECKPOINT 1 SKIPPED-BLOCKED: SMOKE_WEBHOOK_MODE=none with SMOKE_DISPATCH_INGRESS=shared: '*'requires Dispatch issue-event ingress'* ]] || {
   printf 'expected the exported none mode to gate checkpoint 1; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
   rm -rf "$bare_temporary_dir"
   exit 1

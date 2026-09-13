@@ -79,6 +79,20 @@ stored_design_gate() {
   fi
 }
 
+# Where the rig's Dispatch issue events come from, as `up.sh` recorded it (`SMOKE_DISPATCH_INGRESS`):
+# `shared` (the default) — events arrive only through the `envoy` webhook mode's bridge; `rig` — a
+# scratch Dispatch server publishes straight into the rig NATS, whatever the webhook mode. An
+# unrecorded rig (a scratch directory up.sh never populated) is `shared` unless the variable says
+# otherwise, so an old rig keeps today's gating.
+stored_dispatch_ingress() {
+  local ingress_file="${smoke_dir}/dispatch-ingress"
+  if [[ -r "$ingress_file" ]]; then
+    printf '%s\n' "$(<"$ingress_file")"
+  else
+    printf '%s\n' "${SMOKE_DISPATCH_INGRESS:-shared}"
+  fi
+}
+
 webhook_ingress_block_reason() {
   printf '%s\n' \
     'SMOKE_WEBHOOK_MODE=none: this checkpoint requires live GitHub webhook ingress; use SMOKE_WEBHOOK_MODE=envoy or forward'
@@ -86,12 +100,15 @@ webhook_ingress_block_reason() {
 
 # Checkpoints 1-4 and 12 read daemon state the root issue only reaches once the daemon has
 # ingested its Dispatch issue events (`state.issues`; resync.ts healStatusDrift and
-# reportRootAnomalies skip keys it never saw). Only up.sh's envoy-mode bridge relays those events
-# into the rig NATS: none mode has no feed at all, and forward mode (`gh webhook forward`) carries
-# GitHub events only -- up.sh creates the root issue over HTTP and the daemon never admits it -- so
-# under either recorded mode these are blocked, never reported as a false FAILED.
+# reportRootAnomalies skip keys it never saw). With the recorded Dispatch ingress `shared`, only
+# up.sh's envoy-mode bridge relays those events into the rig NATS: none mode has no feed at all,
+# and forward mode (`gh webhook forward`) carries GitHub events only -- up.sh creates the root
+# issue over HTTP and the daemon never admits it -- so under either recorded mode these are
+# blocked, never reported as a false FAILED. With `rig` ingress a scratch Dispatch publishes into
+# the rig NATS directly, so the webhook mode says nothing about these checkpoints and the block is
+# skipped (the dispatch below prints which record let it through).
 dispatch_ingress_block_reason() {
-  printf 'SMOKE_WEBHOOK_MODE=%s: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy\n' "$1"
+  printf 'SMOKE_WEBHOOK_MODE=%s with SMOKE_DISPATCH_INGRESS=shared: this checkpoint requires Dispatch issue-event ingress; no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue; use SMOKE_WEBHOOK_MODE=envoy, or SMOKE_DISPATCH_INGRESS=rig when a scratch Dispatch publishes into the rig NATS\n' "$1"
 }
 
 
@@ -662,11 +679,29 @@ command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tail >/dev/null 2>&1 || fail "tail is required"
 webhook_mode="$(stored_webhook_mode)"
 readonly webhook_mode
+dispatch_ingress="$(stored_dispatch_ingress)"
+readonly dispatch_ingress
+case "$dispatch_ingress" in
+  shared | rig) ;;
+  *)
+    fail "recorded SMOKE_DISPATCH_INGRESS must be shared or rig"
+    ;;
+esac
+# Whether the recorded webhook mode decides checkpoints 1-4 and 12: only when the rig's Dispatch
+# issue events have no other way in (`shared`). Under `rig` the scratch Dispatch publishes into
+# the rig NATS itself, so the same webhook mode blocks nothing for them.
+dispatch_ingress_gate() {
+  if [[ "$dispatch_ingress" == rig ]]; then
+    printf 'CHECKPOINT %s: SMOKE_WEBHOOK_MODE=%s does not block this checkpoint; the recorded SMOKE_DISPATCH_INGRESS=rig says a scratch Dispatch publishes issue events into the rig NATS directly\n' "$checkpoint" "$webhook_mode" >&2
+    return
+  fi
+  blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+}
 case "$webhook_mode" in
   none)
     case "$checkpoint" in
       1 | 2 | 3 | 4 | 12)
-        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        dispatch_ingress_gate
         ;;
       5 | 6 | 7 | 9 | 10 | 11)
         blocked "$(webhook_ingress_block_reason)"
@@ -676,7 +711,7 @@ case "$webhook_mode" in
   forward)
     case "$checkpoint" in
       1 | 2 | 3 | 4 | 12)
-        blocked "$(dispatch_ingress_block_reason "$webhook_mode")"
+        dispatch_ingress_gate
         ;;
     esac
     ;;
