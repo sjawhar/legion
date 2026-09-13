@@ -19,12 +19,19 @@ retrospective's durable output.
    approves that head.
 3. Run this retro: commit durable learnings to `docs/solutions/` and post the issue comment.
    Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
-4. The merger verifies the approved head, publishes `READY`, and pushes nothing; the merge queue
-   merges under the repository's own rules.
+4. The merger verifies the tip is the approved head plus commits that change only
+   `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
+   publishes `READY`, and pushes nothing; the merge queue merges under the repository's own
+   rules.
 5. After the merge lands, the implementer — not the reviewer, the merger, or the queue — verifies
    the change in production and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
    "the agent that developed it should be responsible for testing in production"). The
    architect's sign-off waits for that record.
+
+Retro's commit sits above the reviewer's approved head and the approval stands: a commit that
+changes only `docs/solutions/` does not void it, and the tree goes from retro to the merger —
+never back to the tester or reviewer. A conflict-forced rebase after retro moves these documents
+with the branch; retro does not re-run.
 
 Do not start retro before step 2, skip it because the change seems mechanical, or publish `READY`
 before step 3. The design gate is not a substitute for review and retro.
@@ -83,13 +90,16 @@ legion gh -- issue comment <issue-number> \
 ```
 
 The issue comment and `docs/solutions/` commit are the only retro outputs. Never write a
-handoff, phase artifact, local feedback log, or completion label.
+handoff, phase artifact, local feedback log, or completion label; `.legion/` was deleted before
+retro and nothing recreates it. Report completion with `legion handoff complete` alone (its
+summary: two sentences for the architect) — no `legion handoff write`.
 
 ## Completion check
 
 Before returning, verify all of the following:
 
-- The reviewer cleanup commit remains below the retro documentation commit.
+- The reviewer cleanup commit remains below the retro documentation commit, and the reviewer's
+  approval of that cleanup head stands: the merger accepts the approved head plus this commit.
 - The learning documents and issue comment both exist.
 - No `.legion` file was created or modified by retro.
 - The fresh-eyes analysis was considered alongside the implementer's context.
