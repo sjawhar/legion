@@ -2,25 +2,30 @@
   "pr": 1021,
   "prUrl": "https://github.com/sjawhar/legion/pull/1021",
   "branch": "legion/LEGION-42",
-  "codeHead": "4108e121b83f425a2131e5392bc649a0b4f1bb8f",
+  "codeHead": "224010923a947d7f2271f831da3733c7e50217bd",
   "commits": [
     "ab14cffd686f daemon: one role→GitHub App mapping; the tester acts as the review App (LEGION-42)",
-    "4108e121b83f skills: only the implementer and merger push the issue branch (LEGION-42)"
+    "4108e121b83f skills: only the implementer and merger push the issue branch (LEGION-42)",
+    "5ca0bc49ac0a daemon: prove both GitHub Apps at boot; drop the dead GitHubService.gh (LEGION-42)",
+    "224010923a94 skills: the completion gate names the implementer as the one pusher, once (LEGION-42)"
   ],
   "filesChanged": [
-    "packages/daemon/src/daemon/github-apps.ts",
+    "packages/daemon/src/cli/index.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "packages/daemon/src/daemon/__tests__/github-apps.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/api.ts",
     "packages/daemon/src/daemon/api/github.ts",
     "packages/daemon/src/daemon/api/routes/credentials.ts",
     "packages/daemon/src/daemon/api/routes/workers.ts",
     "packages/daemon/src/daemon/catchup.ts",
-    "packages/daemon/src/daemon/__tests__/github-apps.test.ts",
-    "packages/daemon/src/daemon/__tests__/api.test.ts",
-    "packages/daemon/src/daemon/AGENTS.md",
-    "packages/daemon/src/cli/index.ts",
-    "skills/legion-worker/SKILL.md",
-    "skills/AGENTS.md",
+    "packages/daemon/src/daemon/github-apps.ts",
+    "packages/daemon/src/daemon/index.ts",
     "packages/pi-envoy/roles/planner.md",
-    "packages/pi-envoy/roles/tester.md"
+    "packages/pi-envoy/roles/tester.md",
+    "skills/AGENTS.md",
+    "skills/legion-worker/SKILL.md"
   ],
   "trickyParts": [
     "The mapping is an exhaustive Record<LegionRole, GitHubAppRole> (architect/planner/tester/reviewer → review; implementer/merger → implement) so a new LegionRole fails to compile until placed; there is no runtime 'Unknown worker mode' path any more because every caller passes a validated LegionRole.",
@@ -36,7 +41,7 @@
   "verification": {
     "lint": "packages/daemon: bunx biome check src/ — Checked 159 files, no errors",
     "typecheck": "packages/daemon: bunx tsc --noEmit — clean",
-    "tests": "packages/daemon: bun test — 1115 pass, 7 skip, 0 fail (63 files)"
+    "tests": "packages/daemon: bun test — 1116 pass, 7 skip, 0 fail (63 files)"
   },
   "productionLikeProof": {
     "surface": "scratch Legion API daemon from this branch (startLegionApi + real TokenManager) on 127.0.0.1, real api.github.com, sandbox sjawhar/legion-smoke; secrets GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 --; no token printed",
@@ -69,9 +74,20 @@
   "notesForTester": [
     "Acceptance 3 (spec v3): a tester grant's check run and PR comment on the sandbox PR are legion-reviewer[bot]; do not post a commit status (the review App has no statuses permission by design).",
     "Acceptance 6: your handoff commit stays local — do not push; the implementer's next push carries it. A `jj git push` from your role is refused (`Repository not found` / `Resource not accessible by integration`) and that is expected.",
-    "Any git push from a pane goes through the pane's own grant via the gh shim credential helper; to test another identity's push, isolate git from the global config (GIT_CONFIG_GLOBAL=/dev/null) and supply the token via GIT_ASKPASS."
+    "Any git push from a pane goes through the pane's own grant via the gh shim credential helper; to test another identity's push, isolate git from the global config (GIT_CONFIG_GLOBAL=/dev/null) and supply the token via GIT_ASKPASS.",
+    "Round 2 acceptance (spec v4 Errors row): a daemon config with only the implement App must refuse `legion start` naming `role_not_configured: review` before state is loaded; with both Apps it starts. Unit lock: index.test.ts `refuses to start when only the implement App is configured…`. A real-surface check is `legion start --check-config`-style boot of a scratch legion.yaml with github_apps.review removed.",
+    "GitHubService.gh() is gone; nothing in packages/daemon ran gh through it (grep shows no callers before or after)."
   ],
+  "round": 2,
+  "specVersion": 4,
+  "correctiveRound": {
+    "reviewAnswered": "review 5190473685 (COMMENT at 9562b3a4); thread PRRT_kwDORFy7ds6h4RFG resolved by `legion threads resolve` before this push: resolved https://github.com/sjawhar/legion/pull/1021#discussion_r3999439110",
+    "bootProbe": "index.ts startDaemonLocked now leases getToken(\"implement\") then getToken(\"review\") before state load; a legion.yaml without github_apps.review refuses startup with `role_not_configured: review`. index.test.ts: new case asserts the refusal, that leases were [implement, review], that loadState never ran, and that the lock is released (a second start with both Apps succeeds); the resync test allows two boot leases.",
+    "deadCode": "GitHubService.gh() and its runner constructor argument deleted (api/github.ts); api.ts constructs GitHubService(config.repo, deps.tokenManager); buildRoleEnv/CommandRunner imports removed from api/github.ts.",
+    "docs": "daemon AGENTS.md: boot-ordering bullet names both leases; GitHub Apps section says both Apps are required and names the non-role-keyed exceptions (provisioning credential and the daemon CI reads are the implement App explicitly). SKILL.md: read-only rule names the implementer (not merger) as pushing; completion gate states who pushes once with the orphaned wrap repaired.",
+    "notTouched": "docs/solutions/** (retro), packages/pi-envoy/extensions/envoy.test.ts formatting (unrelated package), .legion/ (deletion at the reviewer direction later)"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-13T10:24:16.828Z"
+  "completed": "2026-09-13T12:02:13.569Z"
 }
