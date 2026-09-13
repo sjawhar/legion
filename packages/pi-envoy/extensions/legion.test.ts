@@ -114,26 +114,17 @@ const environmentKeys = [
   "LEGION_CONTROLLER_SECRET_FILE",
   "DISPATCH_TOKEN_FILE",
 ] as const;
-const originalEnvironment: Record<(typeof environmentKeys)[number], string | undefined> = {
-  ENVOY_NATS_URL: process.env.ENVOY_NATS_URL,
-  ENVOY_URL: process.env.ENVOY_URL,
-  LEGION_CONTROLLER: process.env.LEGION_CONTROLLER,
-  LEGION_CONTROLLER_SECRET: process.env.LEGION_CONTROLLER_SECRET,
-  LEGION_DAEMON_URL: process.env.LEGION_DAEMON_URL,
-  LEGION_GENERATION: process.env.LEGION_GENERATION,
-  LEGION_BOOT_TOKEN: process.env.LEGION_BOOT_TOKEN,
-  LEGION_TREE: process.env.LEGION_TREE,
-  LEGION_ROLE: process.env.LEGION_ROLE,
-  LEGION_ISSUE: process.env.LEGION_ISSUE,
-  LEGION_WORKSPACE: process.env.LEGION_WORKSPACE,
-  LEGION_STATE_DIR: process.env.LEGION_STATE_DIR,
-  HOME: process.env.HOME,
-  DISPATCH_URL: process.env.DISPATCH_URL,
-  DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
-  LEGION_BOOT_TOKEN_FILE: process.env.LEGION_BOOT_TOKEN_FILE,
-  LEGION_CONTROLLER_SECRET_FILE: process.env.LEGION_CONTROLLER_SECRET_FILE,
-  DISPATCH_TOKEN_FILE: process.env.DISPATCH_TOKEN_FILE,
-};
+// The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
+// reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
+// DISPATCH_URL, and friends are live — the suite would otherwise boot fixtures with the pane's
+// own boot token and see a different environment from CI.
+const baselineEnvironment: Record<(typeof environmentKeys)[number], string | undefined> =
+  Object.fromEntries(
+    environmentKeys.map((key) => [key, key === "HOME" ? process.env.HOME : undefined])
+  ) as Record<(typeof environmentKeys)[number], string | undefined>;
+for (const key of environmentKeys) {
+  if (key !== "HOME") delete process.env[key];
+}
 
 const temporaryPaths: string[] = [];
 
@@ -148,7 +139,7 @@ afterEach(async () => {
   natsConnections.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   for (const key of environmentKeys) {
-    const value = originalEnvironment[key];
+    const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -311,6 +302,30 @@ async function commandOutput(
   ]);
   if (exitCode !== 0) throw new Error(`${command.join(" ")} failed: ${stderr}`);
   return stdout.trim();
+}
+
+/** The bash input a worker's `tool_call` handler returned: the model's `command`, untouched,
+ * plus the `env` record the hook filled in. Throws when the handler blocked or left the input
+ * alone, so a test never asserts against `undefined`. */
+function rewrittenBashInput(result: unknown): {
+  readonly command: string;
+  readonly env: Record<string, unknown>;
+} {
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("input" in result) ||
+    typeof result.input !== "object" ||
+    result.input === null ||
+    !("command" in result.input) ||
+    typeof result.input.command !== "string" ||
+    !("env" in result.input) ||
+    typeof result.input.env !== "object" ||
+    result.input.env === null
+  ) {
+    throw new Error(`worker shell was not given a daemon grant: ${JSON.stringify(result)}`);
+  }
+  return { command: result.input.command, env: result.input.env as Record<string, unknown> };
 }
 
 /** Boots a phase-worker session and returns its tool_call handler bound to that session. */
@@ -1374,18 +1389,9 @@ describe("Legion OMP extension", () => {
       context
     );
 
-    if (
-      typeof result !== "object" ||
-      result === null ||
-      !("input" in result) ||
-      typeof result.input !== "object" ||
-      result.input === null ||
-      !("command" in result.input) ||
-      typeof result.input.command !== "string"
-    ) {
-      throw new Error("worker shell was not rewritten after recovering its secret");
-    }
-    expect(result.input.command.split("\n")[0]).toBe("export LEGION_GRANT='grant-recovered'");
+    const input = rewrittenBashInput(result);
+    expect(input.command).toBe("echo hi");
+    expect(input.env.LEGION_GRANT).toBe("grant-recovered");
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(2);
     expect(requests.find((request) => request.path === "/legion/v1/worker-session")).toEqual({
       path: "/legion/v1/worker-session",
@@ -1776,7 +1782,7 @@ describe("Legion OMP extension", () => {
       ).resolves.toEqual({ block: true, reason: blockedReason(role) });
     }
   });
-  test("rewrites a booted worker's bash calls with a fresh daemon grant and a PATH-scoped gh shim", async () => {
+  test("gives a booted worker's bash calls a fresh daemon grant and a PATH-scoped gh shim through the tool env", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
@@ -1795,27 +1801,15 @@ describe("Legion OMP extension", () => {
       },
     });
 
+    const command = "echo GH_TOKEN=$GH_TOKEN; echo CONFIG=$GH_CONFIG_DIR; which gh";
     const result = await toolCall(
-      {
-        toolName: "bash",
-        toolCallId: "call-1",
-        input: { command: "echo GH_TOKEN=$GH_TOKEN; echo CONFIG=$GH_CONFIG_DIR; which gh" },
-      },
+      { toolName: "bash", toolCallId: "call-1", input: { command } },
       context
     );
 
-    if (
-      typeof result !== "object" ||
-      result === null ||
-      !("input" in result) ||
-      typeof result.input !== "object" ||
-      result.input === null ||
-      !("command" in result.input) ||
-      typeof result.input.command !== "string"
-    ) {
-      throw new Error("worker shell was not rewritten with a daemon grant");
-    }
-    expect(result.input.command.split("\n")[0]).toBe("export LEGION_GRANT='grant-1'");
+    const input = rewrittenBashInput(result);
+    expect(input.command).toBe(command);
+    expect(input.env.LEGION_GRANT).toBe("grant-1");
     expect(requests.at(-1)).toEqual({
       path: "/legion/v1/grants",
       body: {
@@ -1829,11 +1823,15 @@ describe("Legion OMP extension", () => {
       'exec legion gh -- "$@"'
     );
 
-    const output = await commandOutput(["sh", "-c", result.input.command], workspace, {
+    // The contract the shell observes is unchanged from the command-text days — no ambient
+    // token, the isolated gh config dir, the shim first on PATH — only the channel moved: the
+    // bash tool applies `env` to this one command, exactly as `sh -c` with a merged env does.
+    const output = await commandOutput(["sh", "-c", input.command], workspace, {
       ...process.env,
       GH_TOKEN: "ambient-personal-token",
       GITHUB_TOKEN: "ambient-personal-token",
       GH_HOST: "ambient-host",
+      ...(input.env as Record<string, string>),
     });
     expect(output).toBe(
       [
@@ -1842,6 +1840,129 @@ describe("Legion OMP extension", () => {
         path.join(stateDir, "worker-bin", "gh"),
       ].join("\n")
     );
+  });
+  /**
+   * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
+   * last non-undefined result, mirroring the host's `emitToolCall`, which also never chains one
+   * handler's revised input into the next. Stacked handlers are therefore observable only by
+   * counting `/legion/v1/grants` requests, never by inspecting the returned input.
+   *
+   * The host writes a hook's revised input back into the assistant message, so anything the hook
+   * puts in `command` becomes model-visible text the model imitates on later calls with stale or
+   * made-up ids. The grant must ride the bash tool's per-command `env`, and the hook's keys must
+   * win over whatever the model already put there.
+   */
+  test("delivers the worker grant through the bash tool env and never through the model-visible command text", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    let minted = 0;
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      requests,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          minted++;
+          return Response.json({
+            grantId: `grant-${minted}`,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          });
+        }
+        return undefined;
+      },
+    });
+
+    // A model that imitated an earlier call's env: a stale grant, its own PATH, an unrelated key.
+    const command = `printf '%s' "$LEGION_GRANT"`;
+    const result = await toolCall(
+      {
+        toolName: "bash",
+        toolCallId: "call-env",
+        input: {
+          command,
+          env: { LEGION_GRANT: "stale-imitated-grant", PATH: "/model/path", KEEP: "model-value" },
+        },
+      },
+      context
+    );
+
+    const input = rewrittenBashInput(result);
+    const workerBin = path.join(stateDir, "worker-bin");
+    expect(input.command).toBe(command);
+    expect(input.env.LEGION_GRANT).toBe("grant-1");
+    // Based on the pane's PATH, never the model's, with the shim directory first.
+    expect(input.env.PATH).toBe(`${workerBin}${path.delimiter}${process.env.PATH}`);
+    expect(input.env.KEEP).toBe("model-value");
+    expect(input.env.GH_TOKEN).toBe("");
+    expect(input.env.GITHUB_TOKEN).toBe("");
+    expect(input.env.GH_HOST).toBe("");
+    expect(input.env.GH_CONFIG_DIR).toBe(path.join(stateDir, "gh"));
+    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
+
+    const output = await commandOutput(["sh", "-c", input.command], workspace, {
+      ...process.env,
+      GH_TOKEN: "ambient",
+      ...(input.env as Record<string, string>),
+    });
+    expect(output).toBe("grant-1");
+  });
+  test("is idempotent when the host or the model re-feeds a revised bash input for the same tool call", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-"));
+    temporaryPaths.push(stateDir);
+    process.env.LEGION_STATE_DIR = stateDir;
+    let minted = 0;
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      requests,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          minted++;
+          return Response.json({
+            grantId: `grant-${minted}`,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          });
+        }
+        return undefined;
+      },
+    });
+
+    const first = rewrittenBashInput(
+      await toolCall(
+        { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
+        context
+      )
+    );
+    // The same tool call again, carrying the first pass's already-revised input: the shape a
+    // host double-invocation with write-back would take, and the shape model imitation takes.
+    const second = rewrittenBashInput(
+      await toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-twice",
+          input: { command: first.command, env: first.env },
+        },
+        context
+      )
+    );
+
+    const workerBin = path.join(stateDir, "worker-bin");
+    expect(second.command).toBe("echo hi");
+    expect(second.env.LEGION_GRANT).toBe("grant-2");
+    expect(second.env.PATH).toBe(first.env.PATH);
+    expect(
+      String(second.env.PATH)
+        .split(path.delimiter)
+        .filter((entry) => entry === workerBin)
+    ).toHaveLength(1);
+    // One mint per invocation: the extension never caches a grant, and the host invokes the hook
+    // once per loop dispatch.
+    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(2);
   });
   test("blocks a booted worker's bash calls when the daemon refuses to mint a grant", async () => {
     const workspace = await createJjWorkspace();

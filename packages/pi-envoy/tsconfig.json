@@ -39,6 +39,7 @@
     "extensions/legion.ts",
     "extensions/legion.test.ts",
     "extensions/omp-host.d.ts",
+    "scripts/grant-rig/*.ts",
     "src/**/*.ts"
   ]
 }
