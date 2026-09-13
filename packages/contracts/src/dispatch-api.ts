@@ -260,6 +260,39 @@ export interface InboxDocument {
   readonly name: string;
 }
 
+export type OpenAskOwner =
+  | { readonly issue: Pick<Issue, "key" | "title"> }
+  | { readonly document: InboxDocument };
+
+export interface OpenAsk {
+  readonly id: string;
+  /** Relative Dispatch deep link to the ask's owner. */
+  readonly ref: string;
+  readonly question: string;
+  readonly kind: AskKind;
+  readonly urgency: AskUrgency;
+  readonly created_at: string;
+  readonly age_seconds: number;
+  readonly priority: 0 | 1 | 2 | 3 | null;
+  readonly owner: OpenAskOwner;
+  /** True when any human has replied, even if the agent spoke last. */
+  readonly human_replied: boolean;
+  readonly last_reply: AskLastReply | null;
+  /** Whose reply would move the currently open ask forward. */
+  readonly waiting_on: "human" | "agent";
+}
+
+export interface OpenAsksResponse {
+  readonly session_id: string;
+  readonly as_of: string;
+  /** An ask was opened by this session at or after the supplied server baseline. */
+  readonly opened_since: boolean;
+  readonly count: number;
+  readonly waiting_on_human: number;
+  readonly waiting_on_agent: number;
+  readonly asks: OpenAsk[];
+}
+
 export interface AskOption {
   readonly label: string;
   readonly description?: string;

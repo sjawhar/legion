@@ -8,6 +8,8 @@ export interface DispatchToolSpec {
     readonly check: (value: unknown) => boolean;
     readonly message: string;
   };
+  /** Tool has no extensible arguments; reject unknown keys in every host. */
+  readonly strict?: boolean;
 }
 
 /** Builds a host-owned schema and applies any tool-level cross-field validation. */
@@ -17,9 +19,11 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
   opts?: { readonly strict?: boolean }
 ): E {
   const shape = spec.arguments(z) as Record<string, E>;
+  const strict = opts?.strict ?? spec.strict;
+  const schemaOptions = strict === undefined ? undefined : { strict };
   return spec.validation === undefined
-    ? z.object(shape, opts)
-    : z.refineObject(shape, spec.validation.check, spec.validation.message, opts);
+    ? z.object(shape, schemaOptions)
+    : z.refineObject(shape, spec.validation.check, spec.validation.message, schemaOptions);
 }
 
 const ISSUE_REFERENCE =
@@ -426,5 +430,12 @@ export const dispatchToolSpecs = [
         .describe("Maximum results, 1-50; default 20.")
         .optional(),
     }),
+  },
+  {
+    name: "dispatch_open_asks",
+    description:
+      "List this session's active unanswered asks across issues and project documents, including age and whose reply is needed. Call before saying you are waiting for human input.",
+    arguments: () => ({}),
+    strict: true,
   },
 ] as const satisfies readonly DispatchToolSpec[];

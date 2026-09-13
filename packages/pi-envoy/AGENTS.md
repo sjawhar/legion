@@ -17,10 +17,11 @@ two seconds.
 
 ## Native Dispatch tools
 
-The thirteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+The fourteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
 `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
-`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, and `dispatch_search` — register only when the shared
-configuration resolves a URL and bearer token at load; the URL and token themselves are re-read
+`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, `dispatch_search`, and
+`dispatch_open_asks` — register only when the shared configuration resolves a URL and bearer token at load; the URL
+and token themselves are re-read
 on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`, or a changed
 `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file that has since
 broken fails the call with its own error rather than using the stale endpoint. Set
@@ -58,6 +59,12 @@ block through that tool or a `:::ask` directive, not as an issue-level `dispatch
 passes the host tool AbortSignal to every Dispatch execution; the shared client also imposes a
 60-second HTTP deadline.
 
+`before_agent_start` injects the complete `dispatch_open_asks` summary as agent-attributed context. After one
+human-initiated period ends without an active ask, `session_stop` gives one model-visible reminder; current typing,
+aborts, unavailable Dispatch, and the continuation itself never produce a second reminder. Legion controller, root
+architect, and phase-worker sessions mark their own transcript identity through the role-claim bridge and are exempt
+from automatic reminders, while retaining the tool and before-run summary.
+
 ## Where to look
 
 | Task | Location | Notes |
@@ -67,7 +74,7 @@ passes the host tool AbortSignal to every Dispatch execution; the shared client 
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the thirteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title and host AbortSignal to `executeDispatchTool`, and subscribe from a successful result's `details.topic`. |
+| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the fourteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, pass the live session id/title and host AbortSignal to `executeDispatchTool`, and subscribe only when a successful result includes `details.topic`. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon appends each as `--append-system-prompt`, followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last fragment |
 | Real end-to-end delivery smoke | `scripts/smoke-delivery.sh`, `scripts/smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 

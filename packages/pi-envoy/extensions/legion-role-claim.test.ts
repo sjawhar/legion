@@ -33,7 +33,11 @@ type Context = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
-  readonly ui: { readonly notify: (message: string, level: "warning") => void };
+  readonly ui: {
+    readonly notify: (message: string, level: "info" | "warning") => void;
+    readonly onTerminalInput: (handler: () => void) => () => void;
+    readonly getEditorText: () => string;
+  };
 };
 type Handler = (event: unknown, context: Context) => Promise<unknown>;
 const originalFetch = globalThis.fetch;
@@ -149,7 +153,11 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       ensureOnDisk: async () => undefined,
     },
     setInterval: (callback) => intervals.push(callback),
-    ui: { notify: () => undefined },
+    ui: {
+      notify: () => undefined,
+      onTerminalInput: () => () => undefined,
+      getEditorText: () => "",
+    },
   };
 
   // Legion initializes before Envoy — the opposite of load order in the

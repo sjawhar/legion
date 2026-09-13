@@ -55,6 +55,7 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
+  dispatch_open_asks: {},
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -97,6 +98,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_artifact",
       "dispatch_read",
       "dispatch_search",
+      "dispatch_open_asks",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -119,6 +121,13 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ query: "a" }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 51 }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
+  });
+
+  test("dispatch_open_asks accepts no arguments and rejects selectors", () => {
+    const schema = schemaFor("dispatch_open_asks");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
   test("dispatch_issue preserves force", () => {

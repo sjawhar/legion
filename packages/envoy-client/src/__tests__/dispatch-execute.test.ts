@@ -347,6 +347,180 @@ describe("executeDispatchTool", () => {
     expect(requests).toBe(0);
   });
 
+  test("dispatch_open_asks renders active asks by whose reply is due", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({
+        session_id: "session-1",
+        as_of: "2026-09-13T00:00:00Z",
+        opened_since: false,
+        count: 2,
+        waiting_on_human: 1,
+        waiting_on_agent: 1,
+        asks: [
+          {
+            id: "ask-1",
+            ref: "/issues/LEGION-1?ask=ask-1",
+            question: "Should we ship?",
+            kind: "question",
+            urgency: "high",
+            created_at: "2026-09-13T00:00:00Z",
+            age_seconds: 65,
+            priority: 0,
+            owner: { issue: { key: "LEGION-1", title: "Reminder" } },
+            human_replied: false,
+            last_reply: null,
+            waiting_on: "human",
+          },
+          {
+            id: "ask-2",
+            ref: "/projects/OPS/documents/runbook?ask=ask-2",
+            question: "Which region?",
+            kind: "question",
+            urgency: "med",
+            created_at: "2026-09-12T22:00:00Z",
+            age_seconds: 7_200,
+            priority: null,
+            owner: { document: { project: "OPS", slug: "runbook", name: "Runbook" } },
+            human_replied: true,
+            last_reply: {
+              author: { kind: "user", id: "alice" },
+              created_at: "2026-09-13T00:00:00Z",
+            },
+            waiting_on: "agent",
+          },
+        ],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_open_asks",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "2 unanswered asks you authored on active issues and project documents.",
+        "",
+        "Waiting on human (1):",
+        "- 1m 5s · P0 · LEGION-1: Reminder · Should we ship? · http://dispatch.test/issues/LEGION-1?ask=ask-1",
+        "",
+        "Waiting on agent (1):",
+        "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",
+      ].join("\n"),
+      details: {
+        session_id: "session-1",
+        as_of: "2026-09-13T00:00:00Z",
+        opened_since: false,
+        count: 2,
+        waiting_on_human: 1,
+        waiting_on_agent: 1,
+        asks: expect.any(Array),
+      },
+    });
+    expect(requests).toEqual(["/api/v1/asks/open?author_session=session-1"]);
+    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+  });
+
+  test("dispatch_open_asks reports its active-owner scope when no asks are open", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        session_id: "session-1",
+        as_of: "2026-09-13T00:00:00Z",
+        opened_since: false,
+        count: 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      });
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_open_asks",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).resolves.toEqual({
+      text: [
+        "There are no unanswered asks for this session.",
+        "Scope: active open asks you authored on open issues and project documents.",
+      ].join("\n"),
+      details: {
+        session_id: "session-1",
+        as_of: "2026-09-13T00:00:00Z",
+        opened_since: false,
+        count: 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      },
+    });
+  });
+
+  test("dispatch_open_asks rejects a missing host session before it reads Dispatch", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_open_asks",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: " ",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow("host session id is required");
+  });
+
+  test("dispatch_open_asks propagates Dispatch errors rather than treating them as no asks", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(
+        JSON.stringify({ code: "SERVICE_UNAVAILABLE", error: "Dispatch is unavailable" }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_open_asks",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      })
+    ).rejects.toMatchObject({
+      name: "DispatchServiceError",
+      code: "SERVICE_UNAVAILABLE",
+      status: 503,
+    });
+  });
+
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {
     const candidates = [
       {

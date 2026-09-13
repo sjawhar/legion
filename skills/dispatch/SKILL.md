@@ -136,6 +136,8 @@ An ask must be answerable from its own text and its anchor alone. Anchor a quest
 about a comment with `reply_to`; thread a follow-up on your own ask with `reply_to_ask`; cite anything else with a `dispatch://`
 reference (see [References](#references)). Never write "see above", "the message above", or "as attached".
 
+Before saying you are waiting for human input, call `dispatch_open_asks`. It lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply.
+
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
 your work waits on it, open a `dispatch_ask` with `kind: "action"` the moment you know, the

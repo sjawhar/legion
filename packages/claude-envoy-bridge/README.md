@@ -12,10 +12,10 @@ integration to deliver Envoy traffic into a live session, including idle session
   Envoy traffic.
 - `bin/envoy-send.ts` sends a direct message through Envoy's local Go listener HTTP API.
 - `.mcp.json` mounts one MCP server for every Claude session: `envoy`, whose tools are the shared
-  Envoy messaging contract plus the twelve native Dispatch tools: `dispatch_issue`,
+  Envoy messaging contract plus the fourteen native Dispatch tools: `dispatch_issue`,
   `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`, `dispatch_suggest`,
   `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_artifact`,
-  `dispatch_read`, and `dispatch_search`. The tools are offered only when `dispatch.enabled`
+  `dispatch_request_approval`, `dispatch_read`, `dispatch_search`, and `dispatch_open_asks`. The tools are offered only when `dispatch.enabled`
   resolves a server URL and bearer token in envoy.json or when `DISPATCH_URL` and
   `DISPATCH_TOKEN` provide them; with `dispatch.enabled: true` and no `dispatch.serverUrl`, the
   URL is `http://localhost:8766`. Each issue-scoped call fills the target repo from the session's

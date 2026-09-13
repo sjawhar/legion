@@ -5,6 +5,7 @@ import {
   agentSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
+  type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -19,7 +20,8 @@ import {
   type DispatchConfigResolution,
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
+import { executeDispatchTool, formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute";
+import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
   dispatchSubscriptionTopic,
   dispatchTopicLabel,
@@ -56,6 +58,104 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
  */
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
+const ASK_AWARENESS_ENTRY = "dispatch-ask-awareness";
+const LEGION_MANAGED_ENTRY = "legion-managed-session";
+const OPEN_ASKS_TIMEOUT_MS = 3_000;
+const OPEN_ASKS_REMINDER =
+  "You have no unanswered asks in Dispatch. If you are waiting for human input, open an ask. Otherwise ignore this reminder and continue with any remaining work. Do not reply just to acknowledge this reminder.";
+
+interface AskAwarenessState {
+  readonly session_id: string;
+  readonly period: number;
+  readonly baseline_as_of: string | null;
+  readonly checked: boolean;
+  readonly fired: boolean;
+  readonly saw_ask: boolean;
+}
+
+interface AskAwarenessEntry {
+  readonly type: "custom";
+  readonly customType: typeof ASK_AWARENESS_ENTRY;
+  readonly data: AskAwarenessState;
+}
+
+interface LegionManagedEntry {
+  readonly type: "custom";
+  readonly customType: typeof LEGION_MANAGED_ENTRY;
+  readonly data: { readonly session_id: string };
+}
+
+function isAskAwarenessEntry(entry: unknown): entry is AskAwarenessEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  if (!("type" in entry) || entry.type !== "custom") return false;
+  if (!("customType" in entry) || entry.customType !== ASK_AWARENESS_ENTRY) return false;
+  if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
+  const data = entry.data;
+  return (
+    "session_id" in data &&
+    typeof data.session_id === "string" &&
+    "period" in data &&
+    typeof data.period === "number" &&
+    "baseline_as_of" in data &&
+    (typeof data.baseline_as_of === "string" || data.baseline_as_of === null) &&
+    "checked" in data &&
+    typeof data.checked === "boolean" &&
+    "fired" in data &&
+    typeof data.fired === "boolean" &&
+    "saw_ask" in data &&
+    typeof data.saw_ask === "boolean"
+  );
+}
+
+function isLegionManagedEntry(entry: unknown): entry is LegionManagedEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  if (!("type" in entry) || entry.type !== "custom") return false;
+  if (!("customType" in entry) || entry.customType !== LEGION_MANAGED_ENTRY) return false;
+  if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
+  return "session_id" in entry.data && typeof entry.data.session_id === "string";
+}
+
+function emptyAskAwareness(sessionID: string): AskAwarenessState {
+  return {
+    session_id: sessionID,
+    period: 0,
+    baseline_as_of: null,
+    checked: false,
+    fired: false,
+    saw_ask: false,
+  };
+}
+
+function transcriptAskAwareness(
+  branch: readonly unknown[],
+  sessionID: string
+): AskAwarenessState | undefined {
+  let state: AskAwarenessState | undefined;
+  for (const entry of branch) {
+    if (isAskAwarenessEntry(entry) && entry.data.session_id === sessionID) state = entry.data;
+  }
+  return state;
+}
+
+function transcriptMarksLegionSession(branch: readonly unknown[], sessionID: string): boolean {
+  return branch.some(
+    (entry) => isLegionManagedEntry(entry) && entry.data.session_id === sessionID
+  );
+}
+
+function isHumanTurnInitiator(message: {
+  readonly role?: string;
+  readonly attribution?: "user" | "agent";
+  readonly customType?: string;
+}): boolean {
+  if (message.attribution !== "user") return false;
+  return (
+    message.role === "user" ||
+    (message.role === "custom" &&
+      (message.customType === "skill-prompt" || message.customType === "collab-prompt"))
+  );
+}
+
 interface RoleClaimEntry {
   readonly type: "custom";
   readonly customType: typeof ROLE_CLAIM_ENTRY;
@@ -76,6 +176,7 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
 }
 
 type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
+type LegionSessionMarker = (sessionID: string, context?: SessionContext) => void;
 
 /**
  * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —
@@ -87,22 +188,15 @@ export type RoleRegainReason = "reclaimed" | "reregistered";
 
 type LegionRoleRegained = (role: string, reason: RoleRegainReason) => Promise<void>;
 
-type LegionRoleClaimReady = {
-  readonly promise: Promise<LegionRoleClaim>;
-  readonly resolve: (claim: LegionRoleClaim | PromiseLike<LegionRoleClaim>) => void;
-};
+type LegionRoleClaimReady = { readonly promise: Promise<LegionRoleClaim>; resolve(value: LegionRoleClaim): void };
 
-type LegionRoleClaimBridge = {
-  claim: LegionRoleClaim | undefined;
+interface LegionRoleClaimBridge {
   readonly ready: LegionRoleClaimReady;
-  /**
-   * legion.ts's regain hook. One slot, like `claim`, but several legion.ts instances share a
-   * process: OMP re-binds every extension factory for each in-process `task` subagent. Only an
-   * instance that has established a Legion identity registers here, so the slot always holds
-   * the identity-bearing instance's listener.
-   */
-  regained: LegionRoleRegained | undefined;
-};
+  claim?: LegionRoleClaim;
+  regained?: LegionRoleRegained;
+  readonly managedSessions: Set<string>;
+  markManagedSession?: LegionSessionMarker;
+}
 
 interface GlobalLegionRoleClaimBridgeStore {
   [key: symbol]: LegionRoleClaimBridge | undefined;
@@ -114,17 +208,14 @@ interface GlobalLegionRoleClaimBridgeStore {
 const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
 
 function legionRoleClaimBridge(): LegionRoleClaimBridge {
-  const store = globalThis as typeof globalThis & GlobalLegionRoleClaimBridgeStore;
-  const bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
-  if (bridge) return bridge;
-
-  const createdBridge: LegionRoleClaimBridge = {
-    claim: undefined,
-    ready: Promise.withResolvers<LegionRoleClaim>(),
-    regained: undefined,
-  };
-  store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
-  return createdBridge;
+  const store = globalThis as unknown as GlobalLegionRoleClaimBridgeStore;
+  let bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
+  if (bridge === undefined) {
+    const ready = Promise.withResolvers<LegionRoleClaim>();
+    bridge = { ready, managedSessions: new Set() };
+    store[LEGION_ROLE_CLAIM_BRIDGE] = bridge;
+  }
+  return bridge;
 }
 
 export async function claimEnvoyRole(
@@ -133,7 +224,10 @@ export async function claimEnvoyRole(
   context?: SessionContext
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
-  await (bridge.claim ?? (await bridge.ready.promise))(sessionID, role, context);
+  bridge.managedSessions.add(sessionID);
+  bridge.markManagedSession?.(sessionID, context);
+  const claim = bridge.claim ?? (await bridge.ready.promise);
+  await claim(sessionID, role, context);
 }
 
 /**
@@ -166,6 +260,11 @@ function resolveSkillsDirectory(): string {
 }
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
+type ActiveDispatchConfig = DispatchConfigResolution & {
+  readonly url: string;
+  readonly token: string;
+};
+
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   const defaults = envoyDefaultsFromEnvironment(process.env);
@@ -177,13 +276,18 @@ export default function envoyExtension(pi: PiApi): void {
   // without /reload-plugins; a file that has since broken fails the call with
   // its own error instead of quietly using the stale endpoint.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
-  const currentDispatchConfig = (): DispatchConfigResolution => {
+  const activeDispatchConfig = (): ActiveDispatchConfig | null => {
     const fresh = resolveDispatchConfig(process.env, { cwd: process.cwd() });
     if (fresh.error !== null) throw new Error(`dispatch config: ${fresh.error}`);
-    if (!fresh.enabled || fresh.url === null || fresh.token === null) {
+    if (!fresh.enabled || fresh.url === null || fresh.token ===null) return null;
+    return fresh as ActiveDispatchConfig;
+  };
+  const currentDispatchConfig = (): ActiveDispatchConfig => {
+    const config = activeDispatchConfig();
+    if (config === null) {
       throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
     }
-    return fresh;
+    return config;
   };
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
@@ -200,6 +304,123 @@ export default function envoyExtension(pi: PiApi): void {
     from: string;
     summary: string;
   }[] = [];
+
+  let askAwareness = emptyAskAwareness("");
+  let candidateBaseline: { readonly sessionID: string; readonly asOf: string } | undefined;
+  let awarenessGeneration = 0;
+  let availabilityWarningPeriod: string | undefined;
+  let agentRunning = false;
+  let agentWillContinue = false;
+  let legionManagedSessionID = "";
+  let terminalInputUnsubscribe: (() => void) | undefined;
+
+  const persistAskAwareness = (state: AskAwarenessState): void => {
+    askAwareness = state;
+    pi.appendEntry(ASK_AWARENESS_ENTRY, state);
+  };
+
+  const warnAskAvailability = (context: SessionContext, error: unknown): void => {
+    const key = `${askAwareness.session_id}:${askAwareness.period}`;
+    if (availabilityWarningPeriod === key) return;
+    availabilityWarningPeriod = key;
+    context.ui.notify(
+      `envoy: Dispatch open-ask check unavailable (${messageFor(error)}); reminder skipped`,
+      "warning"
+    );
+  };
+
+  const queryOpenAsks = async (
+    requestedSessionID: string,
+    since?: string,
+    signal?: AbortSignal
+  ): Promise<OpenAsksResponse | null> => {
+    const config = activeDispatchConfig();
+    if (config === null) return null;
+    const deadline = AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS);
+    const requestSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    return new DispatchClient(config.url, config.token, fetch, requestSignal).openAsks(
+      requestedSessionID,
+      since
+    );
+  };
+
+  const setReminderBaseline = (requestedSessionID: string, period: number, asOf: string): void => {
+    candidateBaseline = { sessionID: requestedSessionID, asOf };
+    if (
+      askAwareness.session_id !== requestedSessionID ||
+      askAwareness.period !== period ||
+      askAwareness.checked ||
+      askAwareness.fired ||
+      askAwareness.baseline_as_of !== null
+    ) {
+      return;
+    }
+    persistAskAwareness({ ...askAwareness, baseline_as_of: asOf });
+  };
+
+  const refreshReminderBaseline = async (
+    requestedSessionID: string,
+    period: number,
+    context: SessionContext
+  ): Promise<void> => {
+    try {
+      const snapshot = await queryOpenAsks(requestedSessionID);
+      if (snapshot === null) return;
+      setReminderBaseline(requestedSessionID, period, snapshot.as_of);
+    } catch (error) {
+      warnAskAvailability(context, error);
+    }
+  };
+
+  const armAskReminder = async (
+    context: SessionContext,
+    refreshBaseline = false
+  ): Promise<void> => {
+    const id = context.sessionManager.getSessionId();
+    if (id === "" || activeDispatchConfig() === null) return;
+    awarenessGeneration++;
+    availabilityWarningPeriod = undefined;
+    const baseline =
+      !agentRunning &&
+      !refreshBaseline &&
+      candidateBaseline !== undefined &&
+      candidateBaseline.sessionID === id
+        ? candidateBaseline.asOf
+        : null;
+    const previousPeriod = askAwareness.session_id === id ? askAwareness.period : 0;
+    persistAskAwareness({
+      session_id: id,
+      period: previousPeriod + 1,
+      baseline_as_of: baseline,
+      checked: false,
+      fired: false,
+      saw_ask: false,
+    });
+    if (agentRunning || refreshBaseline) {
+      await refreshReminderBaseline(id, askAwareness.period, context);
+    }
+  };
+
+  const cancelPendingAskReminder = (): void => {
+    awarenessGeneration++;
+  };
+
+  const installTerminalInputCancellation = (context: SessionContext): void => {
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = context.ui.onTerminalInput(cancelPendingAskReminder);
+  };
+
+  const restoreLocalSessionState = (context: SessionContext): void => {
+    sessionDirectory = context.cwd;
+    sessionID = context.sessionManager.getSessionId();
+    activeSessionContext = context;
+    candidateBaseline = undefined;
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    askAwareness = transcriptAskAwareness(branch, sessionID) ?? emptyAskAwareness(sessionID);
+    const persistedLegionSession = transcriptMarksLegionSession(branch, sessionID);
+    const managed = persistedLegionSession || legionRoleClaimBridge().managedSessions.has(sessionID);
+    legionManagedSessionID = managed ? sessionID : "";
+  };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
   registerEnvoyMessageRenderer(pi);
@@ -254,6 +475,13 @@ export default function envoyExtension(pi: PiApi): void {
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
     if (!duplicate && !rendered.skip) {
+      if (rendered.dispatchActor?.kind === "user" && activeSessionContext !== undefined) {
+        try {
+          await armAskReminder(activeSessionContext, true);
+        } catch (error) {
+          warnAskAvailability(activeSessionContext, error);
+        }
+      }
       const envelope = rendered.envelope;
       if (envelope !== undefined) {
         inbox.unshift({
@@ -693,14 +921,14 @@ export default function envoyExtension(pi: PiApi): void {
 
   const establishSessionNow = async (
     context: SessionContext,
-    options: EstablishSessionOptions = {}
+    options: EstablishSessionOptions = {},
+    previousSessionID = sessionID
   ): Promise<void> => {
-    const previousSessionID = sessionID;
-    const previousTopic = sessionID === "" ? undefined : agentSubject(sessionID);
+    const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
     if (options.carryPreviousSessionRole === false) claimedRoleTopic = undefined;
-    sessionDirectory = context.cwd;
-    sessionID = context.sessionManager.getSessionId();
-    activeSessionContext = context;
+    restoreLocalSessionState(context);
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    const resumed = branch.length > 0;
     if (sessionID === "") {
       if (previousTopic !== undefined) closeIntentionally(previousTopic);
       ensureHeartbeat(context);
@@ -712,10 +940,6 @@ export default function envoyExtension(pi: PiApi): void {
     }
     await ensureConnection();
     await subscribe(currentTopic);
-    // A resumed session (non-empty branch — the host's documented resume
-    // signal) may hold registered interests from its previous life.
-    const branch = context.sessionManager.getBranch?.() ?? [];
-    const resumed = branch.length > 0;
     if (resumed) {
       await recoverRegisteredInterests();
     }
@@ -730,17 +954,27 @@ export default function envoyExtension(pi: PiApi): void {
 
   const establishSession = (
     context: SessionContext,
-    options: EstablishSessionOptions = {}
+    options: EstablishSessionOptions = {},
+    previousSessionID = sessionID
   ): Promise<void> => {
     const run = sessionEstablishment.then(
-      () => establishSessionNow(context, options),
-      () => establishSessionNow(context, options)
+      () => establishSessionNow(context, options, previousSessionID),
+      () => establishSessionNow(context, options, previousSessionID)
     );
     sessionEstablishment = run.catch(() => undefined);
     return run;
   };
 
   const bridge = legionRoleClaimBridge();
+  bridge.markManagedSession = (targetSessionID, context) => {
+    bridge.managedSessions.add(targetSessionID);
+    if (targetSessionID !== sessionID) return;
+    if (legionManagedSessionID === targetSessionID) return;
+    legionManagedSessionID = targetSessionID;
+    if (context !== undefined || activeSessionContext !== undefined) {
+      pi.appendEntry(LEGION_MANAGED_ENTRY, { session_id: targetSessionID });
+    }
+  };
   const claim: LegionRoleClaim = async (targetSessionID, role, callerContext) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -756,6 +990,9 @@ export default function envoyExtension(pi: PiApi): void {
   bridge.ready.resolve(claim);
 
   pi.on("session_start", async (_event, context) => {
+    installTerminalInputCancellation(context);
+    const previousSessionID = sessionID;
+    restoreLocalSessionState(context);
     if (dispatchConfig.error !== null) {
       context.ui.notify(`envoy: dispatch tool disabled — ${dispatchConfig.error}`, "warning");
     }
@@ -771,7 +1008,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     let established = false;
     const establish = async (): Promise<void> => {
-      await establishSession(context);
+      await establishSession(context, {}, previousSessionID);
       established = true;
     };
     try {
@@ -801,11 +1038,13 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
-    if (defaults.natsUrls.length === 0) return;
+    installTerminalInputCancellation(context);
     const previousID = sessionID;
+    restoreLocalSessionState(context);
+    if (defaults.natsUrls.length === 0) return;
     try {
       const carryPreviousSessionRole = reason !== "new" && reason !== "resume";
-      await establishSession(context, { carryPreviousSessionRole });
+      await establishSession(context, { carryPreviousSessionRole }, previousID);
     } catch (error) {
       // A switch during a network outage must degrade, not fail the handler;
       // the next switch or the NATS client's own reconnect re-establishes.
@@ -864,6 +1103,8 @@ export default function envoyExtension(pi: PiApi): void {
       ]);
     } finally {
       clearTimeout(timer);
+      terminalInputUnsubscribe?.();
+      terminalInputUnsubscribe = undefined;
       connection = undefined;
       activeSessionContext = undefined;
       subscriptions.clear();
@@ -913,7 +1154,126 @@ export default function envoyExtension(pi: PiApi): void {
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
+  pi.on("before_agent_start", async (_event, context) => {
+    const id = context.sessionManager.getSessionId();
+    if (id === "") return undefined;
+    try {
+      const snapshot = await queryOpenAsks(id);
+      if (snapshot === null) return undefined;
+      setReminderBaseline(id, askAwareness.session_id === id ? askAwareness.period : 0, snapshot.as_of);
+      return {
+        message: {
+          customType: "dispatch-open-asks",
+          content: `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, currentDispatchConfig().url)}`,
+          display: false,
+          attribution: "agent",
+        },
+      };
+    } catch (error) {
+      warnAskAvailability(context, error);
+      return {
+        message: {
+          customType: "dispatch-open-asks",
+          content: `Dispatch authored-ask summary unavailable: ${messageFor(error)}`,
+          display: false,
+          attribution: "agent",
+        },
+      };
+    }
+  });
+
+  pi.on("agent_start", async () => {
+    agentRunning = true;
+    agentWillContinue = false;
+  });
+
+  pi.on("agent_end", async (event) => {
+    agentRunning = false;
+    agentWillContinue = event.willContinue === true;
+  });
+
+  pi.on("input", async () => {
+    cancelPendingAskReminder();
+  });
+
+  pi.on("message_start", async (event, context) => {
+    if (!isHumanTurnInitiator(event.message)) return;
+    try {
+      await armAskReminder(context);
+    } catch (error) {
+      warnAskAvailability(context, error);
+    }
+  });
+
+  pi.on("session_stop", async (event, context) => {
+    if (
+      event.stop_hook_active ||
+      event.signal.aborted ||
+      shuttingDown ||
+      agentWillContinue ||
+      event.last_assistant_message?.role !== "assistant" ||
+      event.session_id !== sessionID ||
+      legionManagedSessionID === event.session_id ||
+      askAwareness.session_id !== event.session_id ||
+      askAwareness.period === 0 ||
+      askAwareness.checked ||
+      askAwareness.fired
+    ) {
+      return undefined;
+    }
+    const baseline = askAwareness.baseline_as_of;
+    if (baseline === null) return undefined;
+    if (context.ui.getEditorText().trim() !== "") return undefined;
+
+    const claimed = { ...askAwareness, checked: true };
+    const generation = awarenessGeneration;
+    persistAskAwareness(claimed);
+    let snapshot: OpenAsksResponse | null;
+    try {
+      snapshot = await queryOpenAsks(event.session_id, baseline, event.signal);
+    } catch (error) {
+      if (!event.signal.aborted && generation === awarenessGeneration) {
+        warnAskAvailability(context, error);
+      }
+      return undefined;
+    }
+    if (
+      snapshot === null ||
+      event.signal.aborted ||
+      generation !== awarenessGeneration ||
+      shuttingDown ||
+      agentWillContinue ||
+      context.sessionManager.getSessionId() !== event.session_id ||
+      sessionID !== event.session_id ||
+      legionManagedSessionID === event.session_id ||
+      context.ui.getEditorText().trim() !== "" ||
+      askAwareness.session_id !== claimed.session_id ||
+      askAwareness.period !== claimed.period ||
+      !askAwareness.checked
+    ) {
+      return undefined;
+    }
+    if (snapshot.count > 0 || snapshot.opened_since || askAwareness.saw_ask) {
+      return undefined;
+    }
+    persistAskAwareness({ ...askAwareness, fired: true });
+    return { continue: true, additionalContext: OPEN_ASKS_REMINDER };
+  });
+
   pi.on("tool_result", async (event) => {
+    if (
+      !event.isError &&
+      event.toolName === "dispatch_ask" &&
+      typeof event.details === "object" &&
+      event.details !== null &&
+      "ask" in event.details &&
+      typeof event.details.ask === "string" &&
+      askAwareness.session_id === sessionID &&
+      askAwareness.period > 0 &&
+      !askAwareness.saw_ask
+    ) {
+      persistAskAwareness({ ...askAwareness, saw_ask: true });
+    }
     if (event.isError) return;
     const topic = dispatchSubscriptionTopic(event.details);
     if (topic === null) return;

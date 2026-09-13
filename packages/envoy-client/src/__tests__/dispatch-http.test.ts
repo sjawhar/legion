@@ -80,6 +80,31 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("lists this session's open asks with an optional server baseline", async () => {
+    const body = {
+      session_id: "session-1",
+      as_of: "2026-09-13T00:00:00Z",
+      opened_since: false,
+      count: 0,
+      waiting_on_human: 0,
+      waiting_on_agent: 0,
+      asks: [],
+    };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.openAsks("session-1", "2026-09-12T00:00:00Z")).resolves.toEqual(body);
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]?.url).pathname + new URL(requests[0]?.url).search).toBe(
+      "/api/v1/asks/open?author_session=session-1&since=2026-09-12T00%3A00%3A00Z"
+    );
+    expect(requests[0]?.init).toMatchObject({
+      method: "GET",
+      headers: { Authorization: "Bearer secret", Accept: "application/json" },
+    });
+  });
+
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 11 }, () => jsonResponse({ ok: true }))

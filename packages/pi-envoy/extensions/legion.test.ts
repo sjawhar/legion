@@ -252,7 +252,11 @@ function sessionContext(
       ensureOnDisk,
     },
     setInterval: () => undefined,
-    ui: { notify: () => undefined },
+    ui: {
+      notify: () => undefined,
+      onTerminalInput: () => () => undefined,
+      getEditorText: () => "",
+    },
   };
 }
 

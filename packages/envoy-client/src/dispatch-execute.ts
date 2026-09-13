@@ -15,6 +15,8 @@ import type {
   IssueDetails,
   IssueReferences,
   MessageRead,
+  OpenAsk,
+  OpenAsksResponse,
   SearchResult,
 } from "@legion/contracts";
 import {
@@ -154,6 +156,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_edit_ask: true,
   dispatch_resolve_ask: true,
   dispatch_search: true,
+  dispatch_open_asks: true,
 };
 
 function canonicalExternalIssueRef(value: string): string {
@@ -612,6 +615,46 @@ function askSummary({ ask, replies }: AskRead): string {
   ].join("\n");
 }
 
+function openAskAge(ageSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(ageSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${seconds % 60 === 0 ? "" : ` ${seconds % 60}s`}`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h${minutes % 60 === 0 ? "" : ` ${minutes % 60}m`}`;
+  const days = Math.floor(hours / 24);
+  return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
+}
+
+function openAskOwner(ask: OpenAsk): string {
+  return "issue" in ask.owner
+    ? `${ask.owner.issue.key}: ${ask.owner.issue.title}`
+    : `${ask.owner.document.project} / ${ask.owner.document.name}`;
+}
+
+function openAskLine(ask: OpenAsk, baseUrl: string): string {
+  const priority = ask.priority === null ? "" : `P${ask.priority} · `;
+  return `- ${openAskAge(ask.age_seconds)} · ${priority}${openAskOwner(ask)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
+}
+
+export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: string): string {
+  const scope = "active open asks you authored on open issues and project documents";
+  if (response.count === 0) {
+    return ["There are no unanswered asks for this session.", `Scope: ${scope}.`].join("\n");
+  }
+  const waitingOnHuman = response.asks.filter((ask) => ask.waiting_on === "human");
+  const waitingOnAgent = response.asks.filter((ask) => ask.waiting_on === "agent");
+  return [
+    `${response.count} unanswered ${response.count === 1 ? "ask" : "asks"} you authored on active issues and project documents.`,
+    "",
+    `Waiting on human (${waitingOnHuman.length}):`,
+    ...waitingOnHuman.map((ask) => openAskLine(ask, baseUrl)),
+    "",
+    `Waiting on agent (${waitingOnAgent.length}):`,
+    ...waitingOnAgent.map((ask) => openAskLine(ask, baseUrl)),
+  ].join("\n");
+}
+
 function commentSummary({ comment, replies }: CommentRead): string {
   const root = [
     `${comment.id} · ${comment.author.kind} ${comment.author.id}`,
@@ -681,6 +724,14 @@ export async function executeDispatchTool(
   const configToken = input.config.token;
   if (!input.config.enabled || !configUrl || !configToken) {
     throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
+  }
+  if (input.tool === "dispatch_open_asks") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
+    toolSchema(input.tool).parse(input.args);
+    const client = new DispatchClient(configUrl, configToken, input.fetchImpl, input.signal);
+    const response = await client.openAsks(sessionId);
+    return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;

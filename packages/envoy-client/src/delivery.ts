@@ -121,6 +121,8 @@ export type RenderInboundResult = {
   readonly skip: boolean;
   readonly content: string;
   readonly envelope?: InboundEnvelope;
+  /** Actor of a Dispatch event that passed the wire schema. */
+  readonly dispatchActor?: DispatchEvent["actor"];
   readonly delivery?: DispatchDelivery;
   readonly rejectedDelivery?: DispatchDelivery;
   readonly malformedDelivery?: true;
@@ -335,6 +337,7 @@ export function renderInbound(
     envelope = { ...data, source: data.source ?? "unknown" };
   }
   let dispatchEvent: unknown;
+  let dispatchActor: DispatchEvent["actor"] | undefined;
   let dispatchIssue: string | undefined;
   let dispatchReply: string | undefined;
   let delivery: DispatchDelivery | undefined;
@@ -413,6 +416,7 @@ export function renderInbound(
           actor: frame.event.actor,
           payload: dispatchPayload(frame.event),
         };
+        dispatchActor = frame.event.actor;
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -507,6 +511,7 @@ export function renderInbound(
     skip: false,
     content: encode({ envoy: rendered }),
     envelope,
+    ...(dispatchActor === undefined ? {} : { dispatchActor }),
     ...(delivery === undefined ? {} : { delivery }),
     ...(rejectedDelivery === undefined ? {} : { rejectedDelivery }),
     ...(malformedDelivery ? { malformedDelivery: true as const } : {}),
