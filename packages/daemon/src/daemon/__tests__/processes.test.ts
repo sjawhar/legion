@@ -497,7 +497,7 @@ function manager(
    * counted when the test injected a `sleep`: under real timers nothing is observed, and a
    * `reached` on it fails loud on the test timeout. */
   sleeps(ms: number): EventCounter;
-  /** Every `deps.natsPublish` call keyed by the payload's `type` (`"?"` when absent), counted
+  /** Every `deps.publishRole` call keyed by the payload's `type` (`"?"` when absent), counted
    * after the injected fn (the test's override or the default `publications.push`) ran. */
   published(type: string): EventCounter;
 } {
@@ -576,9 +576,9 @@ function manager(
     revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),
     ...overrides,
   };
-  // Observed from outside the test's own fakes (`saveState`/`natsPublish`/`sleep`/`run` above),
+  // Observed from outside the test's own fakes (`saveState`/`publishRole`/`sleep`/`run` above),
   // which keep working unchanged. `saveState` and `run` are two-ended (`issued` before the
-  // injected fn, `completed` after it); `sleep` counts when armed and `natsPublish` after the fn.
+  // injected fn, `completed` after it); `sleep` counts when armed and `publishRole` after the fn.
   const injectedSleep = injected.sleep;
   const deps: Omit<ProcessManagerDeps, "runtime"> = {
     ...injected,
@@ -587,8 +587,8 @@ function manager(
       await injected.saveState();
       saves.completed.increment();
     },
-    natsPublish: (subject, json) => {
-      injected.natsPublish(subject, json);
+    publishRole: (topic, json) => {
+      injected.publishRole(topic, json);
       const payload: unknown = JSON.parse(json);
       const type =
         typeof payload === "object" && payload !== null && "type" in payload
@@ -12905,11 +12905,33 @@ describe("ProcessManager", () => {
     return { ...fixture, token, clock, client };
   }
 
-  /** Expires one prompt's turn-start bound: waits for `promptExistingWorker` to arm the 5 s wait on
-   * the manual clock, then fires it; the fake's `get_state` then answers "no stream". */
-  async function expireTurnStartWait(clock: ManualClock): Promise<void> {
-    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
-    expect(clock.fire(5_000)).toBeTrue();
+  /** The turn-start bound `awaitTurnStart` arms on the injected clock: `workerRpcTimeoutSeconds`
+   * (5) in ms, the one `sleep` these tests' manager makes besides a stop timeout. */
+  const TURN_START_BOUND_MS = 5_000;
+
+  /** Expires one prompt's turn-start bound. Call it right after the triggering call (before any
+   * await): `next()` captures the bound `promptExistingWorker` is about to arm on the manual clock
+   * -- however many earlier bounds this test already fired -- then fires it once armed; the fake's
+   * `get_state` then answers "no stream". */
+  async function expireTurnStartWait(
+    sleeps: (ms: number) => EventCounter,
+    clock: ManualClock
+  ): Promise<void> {
+    await sleeps(TURN_START_BOUND_MS).next();
+    expect(clock.fire(TURN_START_BOUND_MS)).toBeTrue();
+  }
+
+  /** Counts the fake's completed `prompt` calls (wrapped like `idleWorkerFixture`'s
+   * `client.shutdown`), for the tests whose event is "the worker was prompted (again)". */
+  function promptCounter(client: FakeWorkerRpcClient): EventCounter {
+    const prompted = eventCounter();
+    const prompt = client.prompt.bind(client);
+    client.prompt = async (message) => {
+      const receipt = await prompt(message);
+      prompted.increment();
+      return receipt;
+    };
+    return prompted;
   }
 
   function testerClaim(state: LegionState, token: string): WorkerRoleClaim {
@@ -12922,12 +12944,14 @@ describe("ProcessManager", () => {
   const workerQueuedJson = JSON.stringify({ type: "worker-queued", issue: root, role: "tester" });
 
   it("commits a queued idle-resume prompt only when the worker's turn starts, not on the shim's acknowledgement", async () => {
-    const { processes, managedState, publications, token, clock, client } =
+    const { processes, managedState, publications, token, clock, client, sleeps } =
       await queuedIdleWorkerFixture(2);
     client.turnStartsOnPrompt = false;
 
     const run = processes.reconcileWorkerAdmission();
-    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
+    // The prompt was acknowledged and `awaitTurnStart` armed its bound: the first (and only)
+    // turn-start sleep this test makes.
+    await sleeps(TURN_START_BOUND_MS).reached(1);
 
     // Acknowledged, no turn yet: nothing is committed.
     expect(client.prompts).toEqual(["verify #41"]);
@@ -12956,7 +12980,7 @@ describe("ProcessManager", () => {
   });
 
   it("keeps the assignment queued and counts a prompt failure when the acknowledged prompt starts no turn within the bound", async () => {
-    const { processes, managedState, publications, token, clock, client } =
+    const { processes, managedState, publications, token, clock, client, sleeps } =
       await queuedIdleWorkerFixture(2);
     client.turnStartsOnPrompt = false;
     const getStateCallsBefore = client.getStateCalls;
@@ -12964,7 +12988,7 @@ describe("ProcessManager", () => {
     let errorCalls: unknown[][] = [];
     try {
       const run = processes.reconcileWorkerAdmission();
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await run;
     } finally {
       errorCalls = errorLog.mock.calls.map((call) => [...call]);
@@ -12992,7 +13016,7 @@ describe("ProcessManager", () => {
   });
 
   it("commits a turn that starts after the bound as the same delivery and never prompts the task again", async () => {
-    const { processes, managedState, publications, token, clock, client } =
+    const { processes, managedState, publications, token, clock, client, sleeps, published } =
       await queuedIdleWorkerFixture(2);
     client.turnStartsOnPrompt = false;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -13000,13 +13024,16 @@ describe("ProcessManager", () => {
     let infoLines: string[] = [];
     try {
       const run = processes.reconcileWorkerAdmission();
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await run;
       expect(testerClaim(managedState, token).promptFailures).toBe(1);
 
       // The worker was merely slow: its agent_start arrives after the bound expired.
+      // `commitLateStart`'s terminal effect: the queue entry is removed and persisted, then
+      // `worker-started` is published -- the next publish of that type after the late start.
+      const committed = published("worker-started").next();
       client.emitRunState("running");
-      await flushEventLoopUntil(() => managedState.workerAdmission.queue.length === 0);
+      await committed;
     } finally {
       infoLines = infoLog.mock.calls.map((call) => String(call[0]));
       errorLog.mockRestore();
@@ -13030,13 +13057,13 @@ describe("ProcessManager", () => {
   });
 
   it("commits nothing on a late start when the queued task has been replaced meanwhile", async () => {
-    const { processes, managedState, publications, token, clock, client } =
+    const { processes, managedState, publications, token, clock, client, sleeps } =
       await queuedIdleWorkerFixture(2);
     client.turnStartsOnPrompt = false;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const run = processes.reconcileWorkerAdmission();
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await run;
     } finally {
       errorLog.mockRestore();
@@ -13045,6 +13072,7 @@ describe("ProcessManager", () => {
     // A newer assignment for the same role replaced the one whose receipt is still pending.
     testerClaim(managedState, token).pendingAssignment = { kind: "assignment", task: "other" };
     client.emitRunState("running");
+    // Negative wait: the late start reaches only commitLateStart's task-value check (replaced).
     await flushEventLoop(50);
 
     expect(managedState.workerAdmission.queue).toEqual([token]);
@@ -13057,15 +13085,18 @@ describe("ProcessManager", () => {
   });
 
   it("retires a worker whose acknowledged prompts start no turn three times, then relaunches the assignment cold with --resume", async () => {
-    const { processes, managedState, token, clock, client } = await queuedIdleWorkerFixture(1, {
-      run: async (command) => {
-        if (command[0] === "tmux" && command[3] === "split-window") {
-          return { stdout: "%301 23456\n", exitCode: 0 };
-        }
-        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
-        return { stdout: "", exitCode: 0 };
-      },
-    });
+    const { processes, managedState, token, clock, client, sleeps } = await queuedIdleWorkerFixture(
+      1,
+      {
+        run: async (command) => {
+          if (command[0] === "tmux" && command[3] === "split-window") {
+            return { stdout: "%301 23456\n", exitCode: 0 };
+          }
+          if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+          return { stdout: "", exitCode: 0 };
+        },
+      }
+    );
     client.turnStartsOnPrompt = false;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     let errorCalls = 0;
@@ -13075,7 +13106,7 @@ describe("ProcessManager", () => {
       // takes (markWorkerDeadLocked, via WorkerAdmissionDeps.retireDeadClaim).
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const run = processes.reconcileWorkerAdmission();
-        await expireTurnStartWait(clock);
+        await expireTurnStartWait(sleeps, clock);
         await run;
         expect(testerClaim(managedState, token).promptFailures).toBe(attempt + 1);
       }
@@ -13126,17 +13157,19 @@ describe("ProcessManager", () => {
     client.turnStartsOnPrompt = false;
     client.getStateImpl = async () => ({ data: { isStreaming: false } });
     const clock = manualSleep();
+    const prompted = promptCounter(client);
     const {
       manager: processes,
       state: managedState,
       commands,
       publications,
+      sleeps,
     } = manager(state, { connectWorkerRpc: async () => client, sleep: clock.sleep });
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     let errorLines: string[] = [];
     try {
       const result = processes.spawnWorker(root, root, "tester", "verify #55");
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       expect(await result).toEqual({ status: "queued", roleToken: token });
     } finally {
       errorLines = errorLog.mock.calls.map((call) => String(call[0]));
@@ -13159,7 +13192,8 @@ describe("ProcessManager", () => {
 
     // The next drain retries the queued task; this time the turn starts.
     const retry = processes.reconcileWorkerAdmission();
-    await flushEventLoopUntil(() => client.prompts.length === 2);
+    // The 2nd prompt (the retry) has been acknowledged; `awaitTurnStart` is racing its bound.
+    await prompted.reached(2);
     client.emitRunState("running");
     await retry;
 
@@ -13198,16 +13232,18 @@ describe("ProcessManager", () => {
       return { data: { isStreaming: false } };
     };
     const clock = manualSleep();
+    const prompted = promptCounter(client);
     const {
       manager: processes,
       state: managedState,
       publications,
+      sleeps,
     } = manager(state, { connectWorkerRpc: async () => client, sleep: clock.sleep });
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     let errorLines: string[] = [];
     try {
       const ready = processes.workerReady(root, "tester", "ses_tester", 1);
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await ready;
     } finally {
       errorLines = errorLog.mock.calls.map((call) => String(call[0]));
@@ -13233,7 +13269,8 @@ describe("ProcessManager", () => {
 
     // The next drain retries the queued task; this time the turn starts.
     const retry = processes.reconcileWorkerAdmission();
-    await flushEventLoopUntil(() => client.prompts.length === 2);
+    // The 2nd prompt (the retry) has been acknowledged; `awaitTurnStart` is racing its bound.
+    await prompted.reached(2);
     client.emitRunState("running");
     await retry;
 
@@ -13394,6 +13431,7 @@ describe("ProcessManager", () => {
     // handler's event, never a swallowed prompt — nothing is counted against `promptFailures`,
     // the entry stays queued, and the reconnected client's idle seed drives the next drain.
     const reconnected = fakeWorkerRpcClient();
+    const reconnectedPrompts = promptCounter(reconnected);
     reconnected.turnStartsOnPrompt = false;
     reconnected.getStateImpl = async () => {
       reconnected.emitRunState("idle");
@@ -13417,7 +13455,9 @@ describe("ProcessManager", () => {
     let errorLines: string[] = [];
     try {
       await processes.reconcileWorkerAdmission();
-      await flushEventLoopUntil(() => reconnected.prompts.length === 1);
+      // The retry's prompt on the reconnected socket has been acknowledged and is waiting on its
+      // own bound.
+      await reconnectedPrompts.reached(1);
     } finally {
       errorLines = errorLog.mock.calls.map((call) => String(call[0]));
       errorLog.mockRestore();
@@ -13438,7 +13478,7 @@ describe("ProcessManager", () => {
   });
 
   it("credits a turn that starts while the confirming get_state is failing, counting no prompt failure", async () => {
-    const { processes, managedState, publications, token, clock, client } =
+    const { processes, managedState, publications, token, clock, client, sleeps } =
       await queuedIdleWorkerFixture(2);
     client.turnStartsOnPrompt = false;
     client.getStateImpl = async () => {
@@ -13450,7 +13490,7 @@ describe("ProcessManager", () => {
     let errorCalls = 0;
     try {
       const run = processes.reconcileWorkerAdmission();
-      await expireTurnStartWait(clock);
+      await expireTurnStartWait(sleeps, clock);
       await run;
     } finally {
       errorCalls = errorLog.mock.calls.length;
