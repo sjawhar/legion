@@ -1,48 +1,63 @@
 {
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "verdictNote": "round clean at f055d9e2 (COMMENT review 5195292728, not APPROVE): the one thread is answered and carries the reviewer Accepted: reply; the APPROVE is head-pinned and waits for the .legion/ deletion push",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "reviewedHead": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
-  "prHeadAtReview": "2f8dc2d3d45506948b6394d24cf794f5be3c99f3 (implement: record handoff; adds only .legion/implement.json above b30a301e)",
-  "pullRequest": "https://github.com/sjawhar/legion/pull/1080",
-  "review": "https://github.com/sjawhar/legion/pull/1080#pullrequestreview-5194909786 (REQUEST_CHANGES, commit_id b30a301eed3d, one inline comment)",
+  "rounds": [
+    {
+      "reviewedHead": "b30a301eed3dcb98a6763a78cbb268ff9c2ccda2",
+      "review": "https://github.com/sjawhar/legion/pull/1080#pullrequestreview-5194909786",
+      "event": "REQUEST_CHANGES",
+      "finding": "Regression lock weakened: the identity tests (removes a repository-scoped jj identity…, treats a stale identity…) exclude every jj config set from their pinned list, so an identity write inside removeRepoScopedIdentity removal branch passes. Mutation-verified at b30a301e in a /tmp copy: a jj config set --repo user.name legion-bot -R <clone> after each successful unset passes all four identity/clone tests as written; with the explicit [read, write, probe, unset, …] pin the mutant fails the first identity test and the real code passes both. Test-only fix; production fingerprints unchanged."
+    },
+    {
+      "reviewedHead": "f055d9e2f193ce47139288cac48628797d230bae",
+      "review": "https://github.com/sjawhar/legion/pull/1080#pullrequestreview-5195292728",
+      "event": "COMMENT",
+      "fixCommit": "4f16355316097ee5b0df58d33c76d9da52830616 (test-only: both identity tests pin the complete jj config list with readKeepUnreachableCommitsCommand/writeKeepUnreachableCommitsCommand explicitly; subcommand exclusion removed)",
+      "verified": {
+        "diff": "b30a301e..f055d9e2 touches only packages/workspace/src/workspace.test.ts and .legion/; workspace.ts byte-identical (cmp) so production fingerprints unchanged, same round",
+        "mutation": "identity jj config set --repo user.name … after each successful unset in removeRepoScopedIdentity now fails `removes a repository-scoped jj identity…` against the f055d9e2 test file; real code passes the same tests",
+        "suites": "packages/workspace 25 pass / 0 fail (both binaries); biome --error-on-warnings and tsc --noEmit clean",
+        "ci": "Tests run 34820029438 (lint, typecheck, test) and PR Title 34820169073 green at f055d9e2"
+      }
+    }
+  ],
   "threads": [
     {
       "id": "PRRT_kwDORFy7ds6iBMR9",
       "url": "https://github.com/sjawhar/legion/pull/1080#discussion_r4002938312",
       "path": "packages/workspace/src/workspace.test.ts",
       "line": 752,
-      "state": "open",
-      "summary": "The two LEGION-44 identity tests filter jj config commands with cmd[2] !== get && cmd[2] !== set, which drops every jj config set from the check; main pinned the complete jj config list. Fix: pin readKeepUnreachableCommitsCommand + writeKeepUnreachableCommitsCommand explicitly ahead of the probe/unset entries in both tests (lines 750-753 and 804-807)."
+      "disposition": "Accepted: fixed in 4f16355316097ee5b0df58d33c76d9da52830616 (reply 4003265042, newest comment on the thread)",
+      "isResolvedAtHandoff": false,
+      "note": "resolution is the implementer's `legion threads resolve --pr 1080 --repo sjawhar/legion` before the .legion/ deletion push; reviewer verifies isResolved: true via gh api graphql before APPROVE"
     }
   ],
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/workspace/src/workspace.test.ts",
-      "description": "Regression lock weakened: the identity tests (removes a repository-scoped jj identity…, treats a stale identity…) exclude every jj config set from their pinned list, so an identity write inside removeRepoScopedIdentity removal branch passes. Mutation-verified at b30a301e in a /tmp copy: a jj config set --repo user.name legion-bot -R <clone> after each successful unset passes all four identity/clone tests as written; with the explicit [read, write, probe, unset, …] pin the mutant fails the first identity test and the real code passes both. Test-only fix; production fingerprints unchanged."
-    }
-  ],
-  "verified": {
-    "ci": "Tests run 34814232552 green (lint, typecheck, test) at b30a301e; run 34814398689 green at 2f8dc2d3; PR Title 34814232529 / 34815507519 green",
-    "threadsBefore": 0,
-    "e2e": "both lines present (implementer and tester), each with surface, command, observation, head b30a301e, negative control",
-    "rebase": "7b0a7d64 -> b30a301e: whole-branch fingerprints b416d82c… -> 50e2b6e0… reproduced; per-file fingerprints identical for workspace.ts e8b5e4a806f95205, processes.test.ts 0b7c4ec902729055, AGENTS.md 5b714bb6060ae5d6, and the solutions doc; only workspace.test.ts differs, by LEGION-44 main additions plus the four named edits",
-    "rigs": "read-only re-observation of /tmp/legion-84-e2e-{045,044}-{fix,control}: fix rigs plain jj status clean with A feature.txt, per-repo file [git] key = false, bookmark gone, op-diff bookmark sections only; control rigs stale at operations 1e8cd1674ecf / 00af1f65d2d6 with Changed commits pzqklnpz bb671a47 / lmnkpump 9fa02132 and tutqryoz cf406014 / nmsrtrrx 9f70bc12, matching the PR body",
-    "suites": "packages/workspace 25 pass / 0 fail (both binaries); processes.test.ts 281 pass / 3 skip / 0 fail; biome --error-on-warnings and tsc --noEmit clean in both packages",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at b30a301e (run as reviewer subagents with the thermo briefs; no agent of that name installed): no correctness finding in the production change; cleanup only (rig XDG_CONFIG_HOME isolation; clone test redundant set guards)",
-    "docs": "AGENTS.md Workspace clone bullet and the solutions-doc paragraph carry every Design item: guarded read-then-write before every fetch, Errors row, file location under the daemon user XDG_CONFIG_HOME, who reads it (HOME/XDG_CONFIG_HOME on PANE_ENV_ALLOW_LIST), post-merge contract, bookmark still deleted, LEGION-104",
-    "legion44Edits": "edit 1 (clone test never sets user.name/user.email) keeps the property, the exact command-list pin limits set to the one write; edit 4 (contract test appends identityProbeCommands) matches main; edits 2 and 3 are the finding"
+  "keyFindings": [],
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1080",
+  "firstRound": {
+    "verified": {
+      "ci": "Tests run 34814232552 green (lint, typecheck, test) at b30a301e; run 34814398689 green at 2f8dc2d3; PR Title 34814232529 / 34815507519 green",
+      "threadsBefore": 0,
+      "e2e": "both lines present (implementer and tester), each with surface, command, observation, head b30a301e, negative control",
+      "rebase": "7b0a7d64 -> b30a301e: whole-branch fingerprints b416d82c… -> 50e2b6e0… reproduced; per-file fingerprints identical for workspace.ts e8b5e4a806f95205, processes.test.ts 0b7c4ec902729055, AGENTS.md 5b714bb6060ae5d6, and the solutions doc; only workspace.test.ts differs, by LEGION-44 main additions plus the four named edits",
+      "rigs": "read-only re-observation of /tmp/legion-84-e2e-{045,044}-{fix,control}: fix rigs plain jj status clean with A feature.txt, per-repo file [git] key = false, bookmark gone, op-diff bookmark sections only; control rigs stale at operations 1e8cd1674ecf / 00af1f65d2d6 with Changed commits pzqklnpz bb671a47 / lmnkpump 9fa02132 and tutqryoz cf406014 / nmsrtrrx 9f70bc12, matching the PR body",
+      "suites": "packages/workspace 25 pass / 0 fail (both binaries); processes.test.ts 281 pass / 3 skip / 0 fail; biome --error-on-warnings and tsc --noEmit clean in both packages",
+      "thermo": "thermonuclear-deep-review + thermonuclear-code-quality at b30a301e (run as reviewer subagents with the thermo briefs; no agent of that name installed): no correctness finding in the production change; cleanup only (rig XDG_CONFIG_HOME isolation; clone test redundant set guards)",
+      "docs": "AGENTS.md Workspace clone bullet and the solutions-doc paragraph carry every Design item: guarded read-then-write before every fetch, Errors row, file location under the daemon user XDG_CONFIG_HOME, who reads it (HOME/XDG_CONFIG_HOME on PANE_ENV_ALLOW_LIST), post-merge contract, bookmark still deleted, LEGION-104",
+      "legion44Edits": "edit 1 (clone test never sets user.name/user.email) keeps the property, the exact command-list pin limits set to the one write; edit 4 (contract test appends identityProbeCommands) matches main; edits 2 and 3 are the finding"
+    },
+    "notFindings": [
+      "unsigned commits (box signing.behavior = drop)",
+      ".legion/ present at the reviewed head (deleted at the end of the round)",
+      "smoke rig not run (Sami withdrew it 2026-09-13)"
+    ]
   },
   "fastFollow": "one item, next PR on packages/workspace: isolate the real-jj rig jj config dir (XDG_CONFIG_HOME under the temp stateDir in withIdentity env) so rig runs stop leaving ~/.config/jj/repos/<config-id>/config.toml behind and the write pins stop depending on the developer jj config layer; collapse the clone test two user.name/user.email set guards into one exact pin [writeKeepUnreachableCommitsCommand]; name the Kubernetes runtime (LEGION-24) in the AGENTS.md scope sentence as the spec does",
-  "notFindings": [
-    "unsigned commits (box signing.behavior = drop)",
-    ".legion/ present at the reviewed head (deleted at the end of the round)",
-    "smoke rig not run (Sami withdrew it 2026-09-13)"
-  ],
-  "next": "implementer fixes the two filters (test-only, one commit), updates the PR body Thermo and Threads lines, runs legion threads resolve --pr 1080 --repo sjawhar/legion after the reviewer Accepted: reply, pushes; reviewer re-reviews that head in the same round (production fingerprints unchanged); when clean the implementer pushes the .legion/ deletion and the reviewer approves that head by SHA",
-  "scratch": "/tmp/legion-84-reviewer-mutation (copies of workspace.ts and workspace.test.ts with the fixed filters), /tmp/legion-84-reviewer/body.json; nothing deleted",
+  "next": "implementer runs legion threads resolve --pr 1080 --repo sjawhar/legion, pushes the .legion/ deletion as the next head (the tester 6b164ef2 and this review handoff ride that push, then are deleted with the rest of .legion/); reviewer confirms the new head differs from f055d9e2 by the .legion/ deletion alone and the thread shows isResolved: true, then APPROVE by SHA; then retro (docs/solutions only) and the merger",
+  "scratch": "/tmp/legion-84-reviewer-mutation (copies at f055d9e2), /tmp/legion-84-reviewer/{body,reply,comment-review}.json; nothing deleted",
   "learningsInjected": [
     "docs/solutions/testing/scratch-daemon-rig-proves-what-unit-tests-cannot.md",
     "docs/solutions/daemon/config-env-keys-that-panes-also-carry.md",
@@ -54,5 +69,5 @@
   ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-14T07:17:15.508Z"
+  "completed": "2026-09-14T08:06:55.138Z"
 }
