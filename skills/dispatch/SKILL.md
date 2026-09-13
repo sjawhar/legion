@@ -50,7 +50,7 @@ rest. Use these headings in this order.
 | Section | Required content | Form |
 | --- | --- | --- |
 | **Summary** | The problem, what changes for whom, and how we will know it worked — in plain words. | Three sentences at most. |
-| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite. Each is one plain question, two or three options with what each costs, and your recommendation with its reason — understandable without opening anything else. Every item is an anchored `dispatch_ask`; an answered item moves into Requirements with its provenance. If there is nothing to decide, write `None: this records what was agreed.` and do not ask for a review. | One decision per line. |
+| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite. Each is one plain question, two or three options with what each costs, and your recommendation with its reason — understandable without opening anything else. Each is a `dispatch_ask`; anchor it only when it concerns a document passage. An answered item moves into Requirements with its provenance. If there is nothing to decide, write `None: this records what was agreed.` and do not ask for a review. | One decision per line. |
 | **New since we talked** | Every design point the human did not settle in conversation, marked `inferred:` with the reasoning. Empty is fine. | One plain sentence per point. |
 | **Acceptance** | Each outcome names what a user will observe and the check that proves it (browser scenario, API call, or command). An outcome without a check is not acceptance. | Numbered lines. |
 | **Requirements** | What must hold, and where each came from: a quoted human sentence, or `inferred:` plus the reasoning. Readers treat inferred requirements as hypotheses. | `requirement \| where it comes from` table, or prose if the reader follows it more easily. |
@@ -132,9 +132,10 @@ containing block while retaining its quote as display text, so rewording the pas
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
 against their original document version if their quote disappears.
 
-An ask must be answerable from its own text and its anchor alone. Anchor a question about a document passage with `anchor`; thread one
-about a comment with `reply_to`; thread a follow-up on your own ask with `reply_to_ask`; cite anything else with a `dispatch://`
-reference (see [References](#references)). Never write "see above", "the message above", or "as attached".
+An ask must be answerable from its own text and its anchor alone. Anchor a question about a document
+passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; cite anything else
+with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
+message above", or "as attached".
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. It lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply.
 

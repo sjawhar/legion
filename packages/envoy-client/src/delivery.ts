@@ -10,6 +10,7 @@ import {
   DISPATCH_TOPIC_PREFIX,
   type InboundDispatchEvent as DispatchEvent,
   DispatchEventSchema,
+  DispatchTargetedMessagePayloadSchema,
   EnvelopeSchema,
   IssueEventPayloadSchema as IssuePayloadSchema,
   MessageDeliveryEventPayloadSchema as MessageDeliveryPayloadSchema,
@@ -77,17 +78,6 @@ export type DispatchDelivery = {
 const DispatchDeliveryRequestSchema = z.object({
   attempt: z.number().int().positive(),
   mode: z.enum(["btw", "aside", "steer"]),
-});
-
-const DispatchTargetedMessagePayloadSchema = z.object({
-  id: z.string(),
-  issue_key: z.string(),
-  author: z.object({ kind: z.string(), id: z.string() }),
-  body: z.string(),
-  target: z.string(),
-  in_reply_to: z.string().nullable(),
-  deliveries: z.array(z.unknown()),
-  created_at: z.string(),
 });
 
 const DispatchTargetedFrameSchema = z

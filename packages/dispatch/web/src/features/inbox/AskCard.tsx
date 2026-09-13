@@ -49,6 +49,7 @@ import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskOptionList } from "./AskOptionList";
 import { AskThread, type AskThreadQuery } from "./AskThread";
+import { answerAskInput } from "./answer-ask";
 import { formatAskAge } from "./ask-age";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
@@ -438,12 +439,8 @@ export function AskCard({
           : "Answer in your own words, or ask a question back";
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
-      const revision = { expected_edited_at: displayedAsk.edited_at };
-      if (isApproval || isAction || hasOptions) {
-        mutation.mutate(text === "" ? { selected, ...revision } : { selected, text, ...revision });
-        return;
-      }
-      mutation.mutate({ selected: [], text, ...revision });
+      const answerSelection = isApproval || isAction || hasOptions ? selected : [];
+      mutation.mutate(answerAskInput(displayedAsk, answerSelection, text));
     });
   };
 
@@ -472,7 +469,7 @@ export function AskCard({
       setQuestionChoice(true);
       return;
     }
-    sendAnswer(trimmedAnswer);
+    sendAnswer(answerText);
   };
   const sendClarification = () => {
     const text = answerText.trim();
@@ -666,7 +663,7 @@ export function AskCard({
             <button
               className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
               disabled={isSubmitting}
-              onClick={() => sendAnswer(trimmedAnswer)}
+              onClick={() => sendAnswer(answerText)}
               type="button"
             >
               Answer with it anyway

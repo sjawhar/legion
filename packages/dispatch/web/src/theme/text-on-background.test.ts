@@ -20,9 +20,9 @@ import type * as P from "./palette";
  * className counts too — the common case of a bg and text role on the same element), then
  * asserts that (foreground, background) swatch pair is registered in `classes.ts`'s
  * `CONTRAST_CHECKS`. `CONTRAST_CHECKS` is imported live, not hand-copied, so a check added there
- * is picked up automatically. Object-valued composites (`badgeMed`, `statusConnected`, ...) are
- * resolved too: a `badgeMed.text`/`badgeMed.bg` property access in a `className` is treated the
- * same as a plain identifier reference to a `"badgeMed.text"`/`"badgeMed.bg"` composite.
+ * is picked up automatically. Object-valued composites (such as `badgeMed` and `statusConnecting`)
+ * are resolved too: a `badgeMed.text`/`badgeMed.bg` property access in a `className` is treated
+ * the same as a plain identifier reference to a `"badgeMed.text"`/`"badgeMed.bg"` composite.
  *
  * Deliberately out of scope, and why:
  * - A text composite with no background-setting ancestor anywhere in its own file (e.g. a `<p>`

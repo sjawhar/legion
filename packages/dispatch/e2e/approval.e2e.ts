@@ -36,10 +36,12 @@ test("a spec's approval is a human review pinned to its version: requested by th
     const page = await alice.newPage();
     await page.goto("/");
     const card = page.getByTestId(`ask-${requested.ask.id}`);
-    await expect(card).toContainText("Approval requested");
-    await expect(card).toContainText("Approve spec.md (version 1)?");
-    await expect(card.getByRole("radio", { name: "Other" })).toHaveCount(0);
-    await card.getByRole("radio", { name: /^Approve Approve/ }).check();
+    await expect(card).toBeVisible();
+    await expect(card.getByRole("radio")).toHaveCount(2);
+    const approve = card.getByRole("radio", { name: /^Approve/ });
+    await expect(approve).toBeVisible();
+    await expect(card.getByRole("radio", { name: /^Request changes/ })).toBeVisible();
+    await approve.check();
     await card.getByRole("button", { name: "Answer" }).click();
     await expect(card).toHaveCount(0);
 

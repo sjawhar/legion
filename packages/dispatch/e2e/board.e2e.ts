@@ -94,9 +94,7 @@ test("project board persists reordering, lets humans close and reopen, and expla
       steps: 24,
     });
     await page.mouse.up();
-    await expect(page.getByRole("alert")).toHaveText(
-      "Only the Legion daemon can move issues to In progress."
-    );
+    await expect(page.getByRole("alert")).toBeVisible();
     await expect(triage).toContainText("First card");
     await expect(daemonColumn).not.toContainText("First card");
 

@@ -22,6 +22,7 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
 } from "../../theme/classes";
+import { answerAskInput } from "../inbox/answer-ask";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
@@ -348,12 +349,8 @@ export function ProofDocument({
       owner.kind === "issue" ? api.listIssueAsks(owner.key) : api.listArtifactAsks(artifact.id),
   });
   const answerBlockAsk = useMutation({
-    mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text?: string }) =>
-      api.answerAsk(ask.id, {
-        selected,
-        ...(text === undefined ? {} : { text }),
-        expected_edited_at: ask.edited_at,
-      }),
+    mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text: string }) =>
+      api.answerAsk(ask.id, answerAskInput(ask, selected, text)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });
@@ -419,8 +416,8 @@ export function ProofDocument({
     const selected = data
       .getAll("selected")
       .filter((value): value is string => typeof value === "string");
-    const text = String(data.get("answer") ?? "").trim();
-    answerBlockAsk.mutate({ ask, selected, ...(text === "" ? {} : { text }) });
+    const text = String(data.get("answer") ?? "");
+    answerBlockAsk.mutate({ ask, selected, text });
   };
   const openBlockAsks = (asksQuery.data ?? []).filter(
     (ask) =>
