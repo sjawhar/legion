@@ -1,0 +1,64 @@
+{
+  "summary": "Fork and Legion-side work are done; the pin bump and the tagged-build proofs wait on the operator's release cut. Fork: sjawhar/oh-my-pi branch feat/session-sql-storage, one commit 1fe988b7475185c0d6a6fb925ba6e1c25f3dde5c on the sami base e4dd2ec3b487 (upstream v18.1.19), pushed to origin; knives notch written, claim released; forbidden-term scan empty. Legion: isSubagentSession is storage-independent (process-wide record of the bootstrapped session), docs/kubernetes.md has the Session store section, pi-envoy AGENTS.md names the signal; committed as b16367e694cf on legion/LEGION-80 and pushed. Not done (tasks 8-9): OMP_FORK_PIN bump, daemon AGENTS.md pin sentence, proofs on the tagged build, the Legion PR — blocked on the operator opening the upstream PR and cutting a tagged sami release (asked once: envoy_send 25d2aa17e93d1b3426f55b910cf332a9 to the 'legion po' session 01a08330-a0bf-7000-af19-c1db6b53ce1e and dispatch://LEGION-80/message/e856f426-aa6e-4bd3-8101-20a484f900c6).",
+  "status": "partial: A-C complete; D (tasks 8-9) blocked on the fork release tag",
+  "blocker": {
+    "what": "A tagged sami release of sjawhar/oh-my-pi carrying feat/session-sql-storage (github:sjawhar/oh-my-pi@<tag>, linux-x64 asset), plus the upstream PR on can1357/oh-my-pi. A worker token can do neither.",
+    "askedWhere": [
+      "envoy_send 25d2aa17e93d1b3426f55b910cf332a9 → session 01a08330-a0bf-7000-af19-c1db6b53ce1e ('legion po', /home/ubuntu/legion) at 2026-09-13T16:3xZ with branch, tip, preflight facts, ready-to-paste PR title/body, and the release request",
+      "dispatch://LEGION-80/message/e856f426-aa6e-4bd3-8101-20a484f900c6"
+    ],
+    "stateAtHandoff": "newest fork release still v18.1.19-sami.20260913-044809; no PR from feat/session-sql-storage on can1357/oh-my-pi (legion gh -- pr list --head feat/session-sql-storage → []); no reply in envoy_inbox",
+    "resumeWith": "When the operator posts the tag: bump OMP_FORK_PIN in packages/daemon/src/daemon/omp-pin.ts; re-verify --append-system-prompt last-wins on the tag (packages/coding-agent/src/cli/flag-tables.ts: `result.appendSystemPrompt = value` — already confirmed at 1fe988b7 and sami@origin) and name the new pin in packages/daemon/src/daemon/AGENTS.md; `mise x github:sjawhar/oh-my-pi@<tag> -- omp --version` + `mise where`; run plan.json testPlan.commands (scrub LEGION_*/DISPATCH_*, OMP_PROFILE=legion, fresh postgres:16 on 127.0.0.1:55480); open the Legion PR from /tmp/l80-pr-body.md's shape (READY format, `Dispatch: LEGION-80`, fork PR link and tag, every output quoted in E2E)."
+  },
+  "fork": {
+    "repo": "sjawhar/oh-my-pi (knives-managed; upstream can1357/oh-my-pi)",
+    "branch": "feat/session-sql-storage",
+    "tip": "1fe988b7475185c0d6a6fb925ba6e1c25f3dde5c",
+    "base": "e4dd2ec3b487f216c569281e2cdb7ec476a81f2e (chore: bump version to 18.1.19; the sami release's shared base)",
+    "filesChanged": [
+      "packages/coding-agent/src/config/settings-schema.ts (session.storage enum file|sql default file; session.sql.dsnFile string; both hidden, env precedence comment)",
+      "packages/coding-agent/src/session/session-storage-config.ts (new: resolveSessionStorage({settings, env}), SessionStorageConfigError, SESSION_STORAGE_ENV, SESSION_SQL_DSN_FILE_ENV)",
+      "packages/coding-agent/src/session/session-storage.ts (defaultSessionStorage(), setDefaultSessionStorage())",
+      "packages/coding-agent/src/session/session-manager.ts, session-listing.ts, session-loader.ts, cli/gc-cli.ts, cli/session-picker.ts, modes/startup-composer.ts, modes/controllers/selector-controller.ts (every `new FileSessionStorage()` default → defaultSessionStorage(); 24 sites)",
+      "packages/coding-agent/src/main.ts (setDefaultSessionStorage(await resolveSessionStorage(...)) inside the session-resolution try; SessionStorageConfigError printed to stderr and exit 1 like SessionResolutionError)",
+      "packages/coding-agent/test/session/session-storage-config.test.ts (new, 8 tests)",
+      "packages/coding-agent/CHANGELOG.md (Unreleased/Added, one line)",
+      "docs/settings.md, docs/environment-variables.md, docs/session.md (mirrors beside auth.broker.*)"
+    ],
+    "verification": {
+      "unit": "bun test packages/coding-agent/test/session/session-storage-config.test.ts packages/coding-agent/test/session/sql-session-storage-manager.test.ts packages/coding-agent/test/session/sql-session-storage.test.ts → 33 pass, 0 fail (closed-port test included, ~11 ms)",
+      "check": "bun run check:ts → exit 0 (oxlint, oxfmt, tsgo on every workspace)",
+      "knivesAudit": "knives audit --no-github: feat/session-sql-storage tip 1fe988b7 = origin_tip, fork_only false, forbidden [] ",
+      "fromSourceSmoke": "bun packages/coding-agent/src/cli.ts at 1fe988b7 (OMP_PROFILE=legion, LEGION_*/DISPATCH_* scrubbed), throwaway postgres:16 on 127.0.0.1:55481: (1) -p 'Remember the code word PINEAPPLE. Reply with exactly OK.' with OMP_SESSION_STORAGE=sql → exit 0, one row path=/home/ubuntu/.omp/profiles/legion/agent/sessions/-tmp-legion-80-src/2026-09-13T16-56-00-984Z_01a09bb2-7cd8-7000-9a80-86e377f99b17.jsonl bytes=7273, assistant text \"OK\", no file session dir for the cwd; (2) --resume='<that path>' -p 'What was the code word? Reply with just the word.' → exit 0, assistant text \"PINEAPPLE\", row grew to 11594 bytes; (3) unset control -p 'Reply OK.' → a .jsonl appeared under ~/.omp/profiles/legion/agent/sessions/-tmp-legion-80-src/, row count unchanged at 1; (4) dsn-closed (postgres://…@127.0.0.1:1/postgres) → exit 1 `Error: OMP_SESSION_SQL_DSN_FILE names /tmp/legion-80-src/dsn-closed, but the session database could not be opened: Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)`; (5) blank → exit 1 `… names /tmp/legion-80-src/dsn-blank, which is empty`; (6) missing → exit 1 `… names /tmp/legion-80-src/does-not-exist, which could not be read: ENOENT: no such file or directory, open '/tmp/legion-80-src/does-not-exist'`; (7) OMP_SESSION_STORAGE=redis → exit 1 `Error: OMP_SESSION_STORAGE is \"redis\"; expected \"file\" or \"sql\"`. This is the source tree, not the tagged build; tasks 8-9 repeat it on the tag."
+    },
+    "sessionsRootUnderProfile": "/home/ubuntu/.omp/profiles/legion/agent/sessions/<encoded cwd>/<timestamp>_<session id>.jsonl (measured; resolves the plan's [INFERENCE] on the prefix)"
+  },
+  "filesChanged": [
+    "packages/pi-envoy/extensions/legion.ts",
+    "packages/pi-envoy/extensions/legion.test.ts",
+    "packages/pi-envoy/AGENTS.md",
+    "docs/kubernetes.md"
+  ],
+  "legionCommits": [
+    "b16367e694cf feat(pi-envoy): recognise a task subagent without a transcript on disk (LEGION-80) — pushed to legion/LEGION-80@origin"
+  ],
+  "legionVerification": "bun test packages/pi-envoy/extensions/legion.test.ts → 61 pass, 0 fail (red-green: the new test fails with the process-local check disabled); cd packages/pi-envoy && bun run typecheck → exit 0; biome check on the two files clean",
+  "trickyParts": [
+    "The fork's main.ts installs the storage inside the existing session-resolution try so SessionStorageConfigError shares SessionResolutionError's stderr+exit(1) path (hint printed only for SessionResolutionError).",
+    "omp gc is on-disk maintenance (fs.readdir/rename/gzip of the sessions tree, blobs, WAL); its listing goes through defaultSessionStorage() for a single seam but the gc command does not resolve session.storage — docs/session.md says so explicitly.",
+    "Bun.SQL does not connect in the constructor; the CREATE TABLE in SqlSessionStorage.create is the first round trip, so an unreachable database rejects there with PostgresError ERR_POSTGRES_CONNECTION_CLOSED 'Connection closed'; the resolver ends the client best-effort and wraps naming source+path, never the DSN.",
+    "The extension's process-local record lives on globalThis under Symbol.for('legion.pi-envoy.bootstrapped-session') because each task subagent's extension instance is a separate module instance; resetLegionBootstrappedSessionForTests() clears it in the suite's afterEach. The controller branch records getSessionFile() (isSubagentSession's ensureOnDisk already persisted it) so controller subagents are recognised under SQL too.",
+    "The pane's bash tool dropped twice ('Unable to connect') mid-phase; non-credentialed work ran via eval subprocesses, credentialed pushes waited for bash."
+  ],
+  "deviations": [
+    "Tasks 8-9 (pin bump, tagged-build proofs, Legion PR) are not done: the fork release does not exist yet. Recorded as the blocker above; the architect resumes me when the operator reports the tag.",
+    "The fork docs mirror went into docs/settings.md (env table + settings table), docs/environment-variables.md (new 'Session storage' subsection), and docs/session.md ('Selecting the storage'), not only where auth.broker.url appears.",
+    "The two existing fs-layout subagent tests were kept: they assert consumer-observable outcomes (no route, no claim, no exit, no gate) through the on-disk fallback that remains; only a mechanism-pinning test would have been deleted and none existed."
+  ],
+  "openQuestions": [],
+  "forTester": "Repeat plan.json testPlan.commands on the tagged build once OMP_FORK_PIN is bumped (not before — the current pin ignores the variables and writes files). Sessions root under the profile is ~/.omp/profiles/legion/agent/sessions/<encoded cwd>/; the -p run prints a plugin's 'No pending work…' line last, so read the assistant text from the row (`select content from omp_session_files`), not from tail.",
+  "forLegion81": "Pane/pod variables are OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE=<0600 file, one trimmed postgres:// URL>; resume takes --resume=<row path> = ompSessionFile unchanged; same HOME and OMP_PROFILE in the resuming pod; refuse to enable session_store: postgres on a pin older than the release carrying the setting (an older build ignores the variables and stays on files).",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T16:59:11.128Z"
+}
