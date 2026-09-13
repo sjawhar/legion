@@ -809,6 +809,69 @@ describe("TmuxRuntime", () => {
     );
   });
 
+  // A `/proc/<pid>/stat` read can fail for two very different reasons. ENOENT/ESRCH is evidence
+  // about the process (it exited); anything else -- EACCES, EIO, EMFILE -- is a fault of this
+  // host that says nothing about the pane, and reading it as a verdict would make every recorded
+  // pane fail verification at once: every root and the controller asked to exit and resurrected,
+  // every fresh spawn then failing the same way, with the real cause hidden. So the runtime
+  // never turns it into `not-recorded-process`; it propagates out of `probe` and `stop`, and no
+  // kill is issued on the way out.
+  it.each([
+    "EACCES",
+    "EIO",
+    "EMFILE",
+  ])("probe and stop propagate a %s from the /proc stat read instead of reading it as a verdict, and stop issues no kill", async (code) => {
+    let fault: (NodeJS.ErrnoException & { code: string }) | undefined;
+    let harness: TmuxHarness | undefined;
+    harness = await tmuxHarness({
+      readProcessStat: async (pid) => {
+        if (fault) throw fault;
+        if (!harness) throw new Error("harness not ready");
+        return harness.server.procStat(pid);
+      },
+    });
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
+    harness.server.commands.length = 0;
+
+    fault = Object.assign(new Error(`${code}: /proc/12345/stat`), { code });
+    await expect(harness.runtime.probe(locator)).rejects.toBe(fault);
+    await expect(harness.runtime.stop(locator, 50)).rejects.toBe(fault);
+    // Both attempts got as far as the pane's own pid (the stat read comes after it), and no
+    // further: the pane still runs its recorded pid, and nothing killed it.
+    expect(harness.server.commands).toEqual([...verifyArgv("%1"), ...verifyArgv("%1")]);
+    expect(harness.server.pane("%1").pid).toBe(12345);
+
+    // The fault clears: the same locator verifies again -- nothing about it was rewritten.
+    fault = undefined;
+    expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
+  });
+
+  it.each([
+    "ENOENT",
+    "ESRCH",
+  ])("probe reads a %s from the /proc stat read as the recorded process being gone, with both identities", async (code) => {
+    let fault: (NodeJS.ErrnoException & { code: string }) | undefined;
+    let harness: TmuxHarness | undefined;
+    harness = await tmuxHarness({
+      readProcessStat: async (pid) => {
+        if (fault) throw fault;
+        if (!harness) throw new Error("harness not ready");
+        return harness.server.procStat(pid);
+      },
+    });
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
+    if (locator.runtime !== "tmux") throw new Error("tmux locator");
+    fault = Object.assign(new Error(`${code}: /proc/12345/stat`), { code });
+    expect(await harness.runtime.probe(locator)).toEqual({
+      status: "dead",
+      reason: "not-recorded-process",
+      detail: expect.stringMatching(
+        new RegExp(`pid 12345.*recorded pid 12345 start ${locator.paneStartTicks}`)
+      ),
+    });
+  });
+
   it("graceful stop dials the socket without negotiating, sends shutdown, and kills the pane when the close never comes", async () => {
     const harness = await tmuxHarness({ neverCloses: true });
     const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));
