@@ -36,6 +36,18 @@ names and `legion` reads that file first. See
 asked LEGION-52 for is moot for grant delivery: nothing about the credential depends on which bash
 tool a plugin installs. The rest of this note stands as the record of the observation.
 
+**This incident is not a daemon/plugin contract skew, and it is not what a skew prints.** Daemon and
+plugin were at the same contract (both pre-credential-file); a contract number covering the pane
+contract would have been equal on both sides and the daemon would have started regardless. What
+LEGION-52 (#1018) landed instead is the rule that the contract number covers the pane contract from
+now on, and the record of what a real skew prints: `grantFrom`'s `LEGION_GRANT_FILE names <path>,
+which could not be read: ENOENT …: the installed plugin predates LEGION-54` (new daemon, old plugin —
+the direction the boot gate catches) and the plugin's `LEGION_GRANT_FILE is not set on this pane: the
+daemon that launched it predates this plugin` (old daemon, new plugin — which no daemon can gate).
+LEGION-52's first draft cited this note's incident as the skew example and quoted `LEGION_GRANT is
+missing`; the reviewer caught it. See `../daemon/plugin-daemon-api-contract-version-gate.md`, "The
+number covers the pane contract too".
+
 ## Where the delivery shape changed
 
 `@sjawhar/pi-legion-envoy`'s `tool_call` hook (`extensions/legion.ts`) mints a 60-second grant per

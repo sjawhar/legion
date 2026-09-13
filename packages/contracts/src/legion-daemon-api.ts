@@ -2,14 +2,34 @@ import { z } from "zod";
 import { LEGION_ROLES } from "./legion-roles";
 
 /**
- * The version of the daemon HTTP API contract below, as spoken by the installed
+ * The version of the daemon/plugin contract, as spoken by the installed
  * `@sjawhar/pi-legion-envoy` plugin: the plugin's `package.json` carries the same number under
  * `legion.daemonApiVersion`, and the daemon refuses to start unless the installed plugin's number
- * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/index.ts). A plugin
- * built before a shape change validates every daemon response against the older strict schemas
- * and fails the controller/architect boot handshake silently, so the two sides are kept in
+ * equals this one (`verifyLegionPluginContract`, packages/daemon/src/daemon/boot-probes.ts). The
+ * number covers two things. The HTTP API shapes below: a plugin built before a shape change
+ * validates every daemon response against the older strict schemas and fails the
+ * controller/architect boot handshake silently. And the pane contract — every environment
+ * variable the daemon sets on a pane that the plugin reads or writes: `LEGION_GRANT_FILE`,
+ * `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
+ * `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`, and
+ * the `LEGION_*` identity variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/
+ * `LEGION_GENERATION`/`LEGION_WORKSPACE`/`LEGION_STATE_DIR`/`LEGION_CONTROLLER` (set in
+ * `processes.ts`'s three pane environments and the runtime's `<NAME>_FILE` pointer; read in
+ * `extensions/legion.ts`, `src/legion/classify.ts`, and `@legion/envoy-client`). A plugin that
+ * never writes the credential file the daemon names fails every worker the daemon spawns at its
+ * first `legion gh`/`jj git push`, after the work is done, with the `legion` CLI's
+ * `LEGION_GRANT_FILE names <path>, which could not be read: ENOENT …: the pi-envoy extension in
+ * this pane did not write it — the installed plugin predates LEGION-54`. Both skews are kept in
  * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
- * to a `LegionDaemonApi` request or response shape bumps this constant AND the plugin manifest.
+ * to a `LegionDaemonApi` request or response shape, OR to the pane contract, bumps this constant
+ * AND the plugin manifest's `legion.daemonApiVersion` in the same commit.
+ *
+ * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21). 2 —
+ * introduced by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from
+ * LEGION-52, also covering the pane contract including the credential file (`LEGION_GRANT_FILE`,
+ * LEGION-54); plugin release 1.23.0 is the first to declare 2. Releases 1.14.0 through 1.22.2
+ * declare 1 and are refused as `speaks daemon API contract 1`; releases before 1.14.0 have no
+ * field and are refused as `contract none`.
  */
 export const LEGION_DAEMON_API_VERSION = 2;
 
