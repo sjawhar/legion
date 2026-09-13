@@ -1,0 +1,146 @@
+{
+  "spec": "dispatch://LEGION-78/spec version 2 (Acceptance 1-4, Design, Errors, Testing, Rejected)",
+  "planDocument": "dispatch://LEGION-78/artifact/plan-md (version 1) — the full plan: verified starting points, decisions D1-D9, steps, tester and reviewer notes",
+  "taskCount": 4,
+  "independentTasks": 3,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, one pull request. Steps 1-3 are independent (shim predicate + tests; retro/architect/worker skill text; the two refusal doc sentences); step 4 verifies once at the end. Two commits by reviewability: cli + docs sentences, then skills. Independent of LEGION-38 and LEGION-59; rebase only on a GitHub-reported conflict.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker — the phase contract, push procedure, READY-format PR body, and the gh-shim paragraph this change extends",
+      "dispatch — dispatch_message's shape (issue, body; 2,000-char cap) the retro template must match, and the spec sections that are the contract"
+    ],
+    "test": [
+      "legion-worker — the E2E section, the production-like-surface rule, and the negative-control requirement; the pane's `legion` runs the daemon checkout's CLI, so pre-merge proof runs the workspace entry with bun",
+      "dispatch — to read the spec's Acceptance checks the tester re-runs verbatim"
+    ],
+    "review": [
+      "legion-worker — one review per round, the thermo pass (this PR carries code), and the `.legion/` deletion approval flow"
+    ]
+  },
+  "decisions": {
+    "D1": "gh api write = effective method is not GET: explicit -X/--method value (also -XPOST, --method=POST; case-insensitive) when given, else POST when any of -f/--raw-field/-F/--field/--input is present, else GET — gh's own documented default. `--method GET … -f k=v` on an /issues path is a GET with query parameters and is forwarded (a read).",
+    "D2": "issue verb match mirrors isPrMergeInvocation: drop tokens starting with '-', find `issue`, refuse when any later positional is one of comment|create|edit|close|reopen|delete|pin|unpin|transfer|lock|unlock|develop (covers `gh issue --repo o/r comment 5`). Accepted over-refusal: a flag value equal to a verb (`gh issue list --search close`), a GitHub-issue read Legion never does.",
+    "D3": "/issues path match: with `api` positional, any positional matching /\\/issues(?:[/?]|$)/ and D1 non-GET. Covers repos/o/r/issues (create), …/issues/5, …/issues/5/comments, …/issues/comments/123, …/issues/5/labels, full URLs; not …/pulls/…, not graphql. Accepted over-refusals: (a) raw-API edit/delete of a PR conversation comment (…/issues/comments/<id>) — use `gh pr comment --edit-last`; (b) a non-GET call whose flag value contains /issues/ — the imprecision isPrMergeInvocation already accepts for /merge.",
+    "D4": "Message: `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <key>` with <key> = env.LEGION_ISSUE when set and non-empty, else the words `the Dispatch issue`. CliError, exit 1, stderr via runCli.",
+    "D5": "One `if` in cmdGh after the isPrMergeInvocation check, before redeemGitHubToken — no grant read, no daemon call. Predicate, verb set, body-flag list are module-private in index.ts beside isPrMergeInvocation; no new file.",
+    "D6": "Footer stays on the Dispatch message (spec). skills/legion-worker/SKILL.md lines 168-170 (`this footer is only for GitHub PR artifacts`) amended to name the retro's Dispatch message as the one Dispatch carrier — adjacent fix the change causes, not in the spec's Design table.",
+    "D7": "Frontmatter example: related_issues gets \"LEGION-123\" (the Dispatch issue) and \"owner/repo#456\" (the pull request), the shape recent docs/solutions entries use (e.g. docs/solutions/daemon/a-failed-list-panes-proves-nothing-about-the-pane.md lines 18-20).",
+    "D8": "Acceptance greps forbid `gh issue`, `gh -- issue`, `issue comment <` in skills/ + roles/ and `issue comment` in skills/legion-*/. The new legion-worker refusal sentence names verbs as the `issue` subcommand's comment, create, … and never spells `gh issue` or `issue comment`; root AGENTS.md uses the same phrasing. The dispatch skill's `floating issue comment` stays.",
+    "D9": "Deployment: <state_dir>/bin/legion re-execs bun <daemon checkout>/packages/daemon/src/cli/index.ts per call, so the refusal is live once that checkout carries the merge — no daemon restart; the architect raises the checkout update after merge. Pre-merge, the tester and implementer run the workspace entry: `cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts gh -- …`."
+  },
+  "tasks": [
+    {
+      "step": 1,
+      "title": "Shim predicate and tests (Acceptance 3)",
+      "files": [
+        "packages/daemon/src/cli/index.ts",
+        "packages/daemon/src/cli/__tests__/index.test.ts"
+      ],
+      "behaviour": [
+        "const GITHUB_ISSUE_WRITE_VERBS = new Set([comment, create, edit, close, reopen, delete, pin, unpin, transfer, lock, unlock, develop])",
+        "function ghApiMethod(args): string — D1 (explicit -X/--method incl. attached forms; body flags -f/-F exact or short-attached, --raw-field/--field/--input exact or =-attached; explicit ?? (body ? POST : GET))",
+        "function isGitHubIssueWriteInvocation(args): boolean — positional filter from isPrMergeInvocation; issue-verb rule (D2) OR api + /issues path + non-GET (D3)",
+        "cmdGh: after the merge check, throw new CliError(`Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || \"the Dispatch issue\"}`) (D4, D5)",
+        "Doc comment: why (LEGION-78 — LEGION-27's retro followed a stale template and posted to sjawhar/legion#27), what is refused, what is not (pr comment, pr review, api …/pulls/…, api graphql, issue view/list, any GET), the two accepted over-refusals (D3)"
+      ],
+      "tests": [
+        "refuses gh issue comment before any grant is redeemed — [issue, comment, 27, --repo, sjawhar/legion, --body, '## Retro Complete'], env {LEGION_GRANT, LEGION_ISSUE: LEGION-27} → message exactly `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on LEGION-27`, code 1, fetch and spawn never called",
+        "rejects the --repo bypass and names the issue generically without LEGION_ISSUE — [issue, --repo, acme/widgets, comment, 5], env {LEGION_GRANT} → message ends `on the Dispatch issue`, no fetch, no spawn",
+        "it.each over the twelve verbs — [issue, <verb>, 5] → refused, no fetch, no spawn",
+        "it.each over raw-API write forms — [api, -X, POST, repos/acme/widgets/issues/5/comments, -f, body=hi]; [api, repos/acme/widgets/issues, -f, title=x]; [api, repos/acme/widgets/issues/5/comments, --input, body.json]; [api, --method=PATCH, repos/acme/widgets/issues/5, -F, state=closed]; [api, -XDELETE, repos/acme/widgets/issues/comments/99]; [api, -X, PUT, https://api.github.com/repos/acme/widgets/issues/5/lock] → each refused, no fetch, no spawn",
+        "it.each over the untouched surface (modelled on the existing `allows a pr subcommand that merely mentions merge` test: grantFile + spawnArgs) — [pr, comment, 5, --body, 'Verification complete.', --repo, acme/widgets]; [pr, review, 5, --approve]; [api, --method, POST, repos/acme/widgets/pulls/5/reviews, --input, body.json]; [api, graphql, -f, query=mutation { resolveReviewThread(input: {threadId: \"x\"}) { thread { id } } }]; [issue, view, 5, --repo, acme/widgets, --json, title]; [issue, list, --state, open]; [api, repos/acme/widgets/issues/5/comments, --jq, length]; [api, --method, GET, repos/acme/widgets/issues, -f, state=open] → each resolves, token fetched, spawnArgs equals the input"
+      ],
+      "commands": [
+        "cd packages/daemon && bun test src/cli/__tests__/index.test.ts"
+      ]
+    },
+    {
+      "step": 2,
+      "title": "Retro template and every 'issue comment' phrase (Acceptance 1, 2)",
+      "files": [
+        "skills/legion-retro/SKILL.md",
+        "skills/legion-architect/SKILL.md",
+        "skills/legion-worker/SKILL.md"
+      ],
+      "behaviour": [
+        "legion-retro line 20: 'and post the issue comment.' → 'and post the retro message on the Dispatch issue.'",
+        "legion-retro lines 68-69 (D7): related_issues: - \"LEGION-123\"  # the Dispatch issue / - \"owner/repo#456\"  # the pull request",
+        "legion-retro lines 74-76: 'Then post an issue comment naming …. The comment must carry …' → 'Then post one Dispatch message on the issue — `issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub issue, and the `gh` shim refuses every GitHub-issue write — naming the documents and the one-to-three most useful takeaways. The message must carry this revived implementer's structured attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:'",
+        "legion-retro lines 78-90: bash block → ts block: dispatch_message({ issue: \"<KEY>\", body: `## Retro Complete\\n\\n**Learnings documented in:**\\n- docs/solutions/<path>.md\\n\\n**Key takeaways:**\\n- <reusable lesson>\\n\\n<!-- legion: {\"session\":\"<session-id>\",\"phase\":\"retro\"} -->` })",
+        "legion-retro line 92: 'The issue comment and `docs/solutions/` commit are the only retro outputs.' → 'The Dispatch message and the `docs/solutions/` commit are the only retro outputs.'",
+        "legion-retro line 103: 'The learning documents and issue comment both exist.' → 'The learning documents and the Dispatch message both exist.'",
+        "legion-architect line 189 task string → 'Run the legion-retro skill now. Capture durable learnings and post the retro message on the Dispatch issue with dispatch_message; do not create a .legion handoff file.'",
+        "legion-architect line 194: '`docs/solutions/` plus an issue comment;' → '`docs/solutions/` plus one `dispatch_message` on the issue;'",
+        "legion-worker lines 168-170 (D6): '…this footer is only for GitHub PR artifacts:' → '…this footer is for GitHub PR artifacts and for the retro's Dispatch message (`skills/legion-retro`):'"
+      ],
+      "tests": [
+        "grep -rn 'gh -- issue\\|gh issue\\|issue comment <' skills/ packages/pi-envoy/roles/ → nothing, exit 1",
+        "grep -rn 'issue comment' skills/legion-*/ packages/pi-envoy/roles/ → nothing, exit 1",
+        "grep -rn 'gh issue' skills/ packages/pi-envoy/roles/ → nothing, exit 1"
+      ],
+      "commands": []
+    },
+    {
+      "step": 3,
+      "title": "The two sentences documenting the refusal (Acceptance 3; spec Design row)",
+      "files": [
+        "AGENTS.md",
+        "skills/legion-worker/SKILL.md"
+      ],
+      "behaviour": [
+        "AGENTS.md line 48: `legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses `pr merge` and every GitHub-issue write — Legion issues live on Dispatch; the merge queue merges, not workers)`",
+        "legion-worker lines 153-155, after '…the merge queue does, under its own authority.': 'It also refuses every GitHub-issue write — the `issue` subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `unpin`, `transfer`, `lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation comments live on that path too, so edit them with `gh pr comment`) — printing `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`: Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`, `api …/pulls/…`, `api graphql`, and issue reads are unaffected.' (D8: no `gh issue`, no `issue comment`)",
+        "packages/daemon/src/daemon/AGENTS.md does not describe the shim's refusals today — nothing to add"
+      ],
+      "tests": [
+        "the three greps from step 2 still print nothing"
+      ],
+      "commands": []
+    },
+    {
+      "step": 4,
+      "title": "Verification, commits, pull request (once, at the end)",
+      "files": [
+        ".legion/implement.json"
+      ],
+      "behaviour": [
+        "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit && bun test",
+        "Paste the three grep outputs into the PR body (Acceptance 1 and 2 evidence)",
+        "Smoke through the real CLI entry from your own bash call (D9): cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts gh -- issue comment 1 --repo sjawhar/legion --body smoke; echo \"exit=$?\" → stderr names LEGION-78, exit=1. Positive control: bun packages/daemon/src/cli/index.ts gh -- pr view <this PR> --repo sjawhar/legion --json number forwards",
+        "Commits by reviewability: `cli: legion gh refuses every GitHub-issue write (LEGION-78)` (steps 1 + 3) and `skills: the retro post is a dispatch_message on the Dispatch issue (LEGION-78)` (step 2); bookmark legion/LEGION-78; PR body in the READY format with `Dispatch: LEGION-78`; this PR carries code, so thermo applies",
+        ".legion/implement.json: filesChanged, decisions honoured (D1-D9), grep outputs"
+      ],
+      "tests": [],
+      "commands": [
+        "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit && bun test"
+      ]
+    }
+  ],
+  "testerNotes": [
+    "Regression lock: cd packages/daemon && bun test src/cli/__tests__/index.test.ts at the PR head.",
+    "E2E (real, pre-merge) from your own bash call: cd -- \"$LEGION_WORKSPACE\" && bun packages/daemon/src/cli/index.ts gh -- issue comment <pr> --repo sjawhar/legion --body smoke; echo \"exit=$?\" → message naming LEGION-78 on stderr, exit=1. Prove nothing reached GitHub: `legion gh -- api repos/sjawhar/legion/issues/<pr>/comments --jq length` equal before and after (PR conversation comments live at that path; a GET, forwarded — run it through the workspace entry too as proof that a read on an /issues path passes). Positive control: `bun packages/daemon/src/cli/index.ts gh -- pr view <pr> --repo sjawhar/legion --json number` forwards. Negative control for the E2E line: the refused issue comment itself.",
+    "Say in the E2E line that a pane's `legion` runs the daemon checkout's CLI (<state_dir>/bin/legion re-execs bun <daemon checkout>/packages/daemon/src/cli/index.ts), so the pre-merge proof runs the workspace's entry over the identical code path; the deployed refusal appears once the daemon checkout carries the merge (D9), no restart needed.",
+    "Re-run the three greps at the head you name.",
+    "No rebase to refresh CI (Sami, 2026-09-11); rerun a single failed job with `legion gh -- run rerun <run-id> --failed`."
+  ],
+  "reviewerNotes": [
+    "Not docs-only: run the thermo pair once at the head.",
+    "Run the three greps yourself at the head (D8) rather than trusting the PR body.",
+    "The footer on a Dispatch message is the spec's decision (Acceptance 1); D6 keeps legion-worker consistent with it.",
+    "packages/daemon/src/cli/index.ts is the only code file: two functions, two constants, one if."
+  ],
+  "concerns": [
+    "Accepted over-refusals, all reads or by-design: `gh issue list --search <verb>` (D2); a non-GET raw call whose flag value contains /issues/ (D3b); editing a PR conversation comment by raw `gh api …/issues/comments/<id>` (D3a — use `gh pr comment --edit-last`).",
+    "`gh alias` could route around an argv check (GH_CONFIG_DIR is per deployment). Deliberately not addressed: the hazard is a stale template followed in good faith, not a worker evading the guard; the pr merge guard has the same property today.",
+    "Deployment (D9): the daemon checkout must carry the merge before panes refuse; the architect raises that step after merge. Until then the skill text alone protects — which is why the shim rule exists.",
+    "D6 amends one legion-worker sentence the spec's Design table does not list (the footer claim would otherwise contradict the retro template)."
+  ],
+  "afterMerge": "The implementer verifies in production once the daemon checkout carries the merge: `legion gh -- issue comment 1 --repo sjawhar/legion --body smoke` from a worker pane is refused with exit 1; record it on the PR and the issue.",
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-13T09:35:14.719Z"
+}
