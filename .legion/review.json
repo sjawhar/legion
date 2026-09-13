@@ -1,0 +1,46 @@
+{
+  "verdict": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "pr": {
+    "number": 1033,
+    "url": "https://github.com/sjawhar/legion/pull/1033",
+    "base": "main@origin a7c01347"
+  },
+  "supersedes": {
+    "pr": 1017,
+    "mergedAs": "c5be7944",
+    "reviews": [
+      "5190487737 CHANGES_REQUESTED@00f0458a",
+      "5190548110 COMMENT@e9cd302a",
+      "5190557815 APPROVED@a0a5020c"
+    ]
+  },
+  "reviewedHead": "4a58ed3545990901df7b9a3ff3a2233c949d9af6",
+  "docsHead": "7218f587fb21d969902288c5224693eaf67840c1",
+  "spec": "dispatch://LEGION-77/spec version 10, acceptance 6",
+  "review": {
+    "id": 5191035095,
+    "state": "COMMENTED",
+    "url": "https://github.com/sjawhar/legion/pull/1033#pullrequestreview-5191035095",
+    "author": "legion-reviewer[bot]",
+    "note": "COMMENT because the head still carries .legion/; APPROVE reserved for the deletion head, by SHA."
+  },
+  "threads": [],
+  "keyFindings": [],
+  "verified": {
+    "decisionSection": "Matches ask 5e3d2fa8 answer by sjawhar (Wait for Kubernetes; option text: keys stay reachable by every worker until the daemon runs in its own pod, no taps, no rotation until then): agent tier on this machine until LEGION-19 pod; no tier move or launcher change here; rotation at cutover (cluster secret store, daemon pod only, revoke after shared-box daemon stops); recorded on LEGION-74. Plain language, no paths.",
+    "openers": "L26 and L107 scope the human-tier store and the rotation list to a shared box that opts in; decision section L17-18 scopes the rest of the page. No instruction to this deployment's operator to move the keys remains. Intro edit L5-6 removes the contradiction with L11-12; no command/message/ordering fact changed.",
+    "messages": "All six quoted daemon messages match config.ts at head (identical to main) character for character after unwrapping; backticked command set identical to main; seven rotation steps untouched.",
+    "ci": "Tests run 34761999448 — lint, pr-title, typecheck, test all success at 4a58ed35.",
+    "scope": "jj diff --from main@origin --to 4a58ed35 --summary -> M docs/deployment.md, A .legion/implement.json, A .legion/test.json.",
+    "e2e": "Docs-only: surface is the diff; tester issuecomment-5653788404 at 72c053c0 (ancestor).",
+    "thermo": "Omitted per skill (docs-only PR)."
+  },
+  "remainingWork": "Only the .legion/ deletion: implementer pushes a commit deleting .legion/ and nothing else (keep the uncommitted .omp/config.yml out); reviewer approves that head by SHA once it differs from 4a58ed35 by the deletion alone. No threads to resolve.",
+  "fastFollow": "Wording only: add the human-tier-boundary opener to 'How the daemon launcher gets them'; rewrap docs/deployment.md L26-29 to remove the short 'Never in' line. The #1017 loader tidy stays open as its own follow-up.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:41:41.833Z"
+}
