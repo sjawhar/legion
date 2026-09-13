@@ -1,0 +1,72 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/__tests__/processes.test.ts"
+  ],
+  "pr": {
+    "number": 1027,
+    "url": "https://github.com/sjawhar/legion/pull/1027",
+    "branch": "legion/LEGION-15",
+    "implementationHead": "a8c2edb7ffc73f8582f297b42988804660f28113",
+    "base": "main@f5ab58dafa47"
+  },
+  "dispositions": {
+    "population": 53,
+    "converted": 33,
+    "keptNegativeDrains": 19,
+    "deleted": 1,
+    "helperDeleted": "flushEventLoopUntil",
+    "changedFromPlan": [
+      "sites 4507 and 4586 (boot-watchdog slow-boot and socket-alive tests): plan's conversion kept (await runs(\"list-panes\").completed.reached(3)) but startTime is captured BEFORE spawnWorker -- the watchdog's first poll sleep fires inside spawnWorker's tail, so the plan's '+3000 at the third probe' held only relative to arm time; converted 4507 failed its first run with Received: 2900 for the >= 3000 assertion. Assertions unchanged."
+    ]
+  },
+  "fixture": {
+    "eventCounter": "windowCounter renamed at its 8 call sites + definition; reached(n) resolves one onceEventLoop() after count >= n; next() = reached(count+1) captured now",
+    "CallObserver": "{issued, completed}",
+    "managerReturns": [
+      "saves",
+      "runs(verb)",
+      "sleeps(ms)",
+      "published(type)"
+    ],
+    "helpers": [
+      "registrationDeadlineMs(config)",
+      "waitFor(cond) -- real 5 ms poll, site 1508 only (no DI seam on TmuxRuntime.preparePane's writeSecretFile; architect ruled no production dep)"
+    ],
+    "passThrough": "workerCapFixture destructures/returns the four; idleWorkerFixture spreads ...harness"
+  },
+  "preFixEvidence": {
+    "result": "0 failures in 247 runs before any edit, test file byte-identical to main",
+    "runs": {
+      "site1508": "60/60, load 95.69->92.91",
+      "site4354": "60/60, load 92.98->99.01",
+      "site4430": "60/60, load 99.01->100.83",
+      "wholeFile": "60/60 (252 pass/255 tests each), load 98.70->106.48",
+      "fullSuite": "7/7 (1117 pass/1124 tests each), load 98.58->79.49"
+    },
+    "note": "machine load 79-110 on 32 cores; the spec's measured 3/30 failure was at load ~130. Load generator not started (load never below 60). Proceeded per the plan's pre-agreed 0/N path."
+  },
+  "verification": {
+    "acceptance1": "grep -n flushEventLoopUntil prints nothing; grep -n -B1 'flushEventLoop(' shows 19 calls each directly under a one-line '// Negative wait:' comment (20th match is the helper doc)",
+    "acceptance2": "23 run30 loops, all 30/30, load 98.52-110.40, every run reporting exactly the intended count (3 pass for the it.each); script /tmp/legion-15-run30-all.sh",
+    "acceptance3": "10/10 full bun test runs in packages/daemon, 1117 pass 0 fail 1124 tests each, load 97.15->100.39",
+    "lint": "bunx biome check src/ clean; bunx tsc --noEmit clean",
+    "logs": "/tmp/legion-15-<stem>-<n>.log and /tmp/legion-15-suite-<n>.log on this box"
+  },
+  "trickyParts": [
+    "reached() defers one macrotask (onceEventLoop) after the count is met so the awaited call's synchronous/microtask continuation (probe re-check, locator write, retirement's socket-close tail) has run before the test resumes; proven inert on the three #981-converted tests.",
+    "runs(verb).completed increments after the fixture's jj mkdir side effects and before the new-window stdout defaulting, so the code under test sees the result on its next microtask.",
+    "Blocked fakes (probeGate, saveGate) are awaited on .issued (completion would deadlock); the release is awaited on .completed.",
+    "sleeps(ms) is only observed when the test injected a sleep; the wrapper is spread conditionally so real-timer tests keep deps.sleep undefined.",
+    "Site 12268 gates on the re-arm log line via the console.error spy (Promise.withResolvers is the right shape for a log call, not an injected dep)."
+  ],
+  "deviations": [
+    "sites 4507/4586: startTime captured before spawnWorker (see dispositions.changedFromPlan)",
+    "Negative-wait comments are single long lines (biome does not wrap comments) so `grep -B1` shows the marker directly above every remaining flushEventLoop( call, as acceptance 1 is phrased",
+    "Two trailing comments in the 20_000-timeout tests and the reissuablePanes doc comment referenced flushEventLoopUntil; rewritten so the acceptance grep prints nothing"
+  ],
+  "openQuestions": [],
+  "testerGuidance": "Re-run /tmp/legion-15-run30-all.sh (23 loops, records load) and 10x `bun test` in packages/daemon at the final head with 1-minute load >= 60 (start the plan's supervised busy-loop only if /proc/loadavg is below 60). A converted test failing under load is a daemon ordering bug per the spec's Errors row -- report, do not re-widen. An instance-lock.test.ts two-winner failure is LEGION-35's race, not this pattern.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T11:34:20.532Z"
+}
