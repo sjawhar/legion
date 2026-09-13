@@ -90,9 +90,10 @@ function onceEventLoop(): Promise<void> {
  * injected fake, so a tick count IS the whole event (the fired deadline or clock reaches its
  * identity/role/disposed check by microtask hops and returns). Every positive wait awaits its
  * event through the fixture's observers (`saves`, `runs`, `sleeps`, `published`, an
- * `eventCounter`); a drain must never be the thing a test waits on for work that includes a
- * file write or an injected `run`, because its tick budget races that I/O under load. Each
- * caller carries a `// Negative wait:` line naming the decline it drains over. */
+ * `eventCounter`) or a gate the test's own fake resolves (`Promise.withResolvers`, settled from
+ * inside the fake at the event); a drain must never be the thing a test waits on for work that
+ * includes a file write or an injected `run`, because its tick budget races that I/O under
+ * load. Each caller carries a `// Negative wait:` line naming the decline it drains over. */
 async function flushEventLoop(ticks = 2_000): Promise<void> {
   for (let tick = 0; tick < ticks; tick += 1) {
     await onceEventLoop();
@@ -183,8 +184,8 @@ function registrationDeadlineMs(config: DaemonConfig): number {
  * unreached. Fake time cannot drive this one: it is reserved for an effect with no injectable
  * seam -- today the secret-file write `TmuxRuntime.preparePane` makes through `secrets.ts`
  * directly, with no injected dep between it and a tmux call the test can hold -- so there is no
- * fake to resolve from. Every other wait in this file awaits its event through the fixture's
- * observers. */
+ * fake to resolve from. Every other positive wait in this file awaits its event through the
+ * fixture's observers or a gate its own fake resolves (see `flushEventLoop`). */
 async function waitFor(condition: () => boolean): Promise<void> {
   while (!condition()) await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
@@ -576,7 +577,8 @@ function manager(
     ...overrides,
   };
   // Observed from outside the test's own fakes (`saveState`/`natsPublish`/`sleep`/`run` above),
-  // which keep working unchanged: `issued` fires before the injected fn, `completed` after it.
+  // which keep working unchanged. `saveState` and `run` are two-ended (`issued` before the
+  // injected fn, `completed` after it); `sleep` counts when armed and `natsPublish` after the fn.
   const injectedSleep = injected.sleep;
   const deps: Omit<ProcessManagerDeps, "runtime"> = {
     ...injected,
@@ -588,23 +590,18 @@ function manager(
     natsPublish: (subject, json) => {
       injected.natsPublish(subject, json);
       const payload: unknown = JSON.parse(json);
-      published(
-        typeof payload === "object" &&
-          payload !== null &&
-          "type" in payload &&
-          typeof payload.type === "string"
+      const type =
+        typeof payload === "object" && payload !== null && "type" in payload
           ? payload.type
-          : "?"
-      ).increment();
+          : undefined;
+      published(typeof type === "string" ? type : "?").increment();
     },
-    ...(injectedSleep
-      ? {
-          sleep: (ms: number) => {
-            sleeps(ms).increment();
-            return injectedSleep(ms);
-          },
-        }
-      : {}),
+    ...(injectedSleep && {
+      sleep: (ms: number) => {
+        sleeps(ms).increment();
+        return injectedSleep(ms);
+      },
+    }),
     run: async (command, runnerOptions) => {
       const observer = runs((command[0] === "tmux" ? command[3] : command[0]) ?? "?");
       observer.issued.increment();
@@ -621,8 +618,10 @@ function manager(
           await mkdir(workspaceDir, { recursive: true });
         }
       }
-      // Counted after the jj side effects and before the stdout defaulting: the code under test
-      // sees this result on its next microtask, which `reached()`'s deferral covers.
+      // The load-bearing order: `completed` fires AFTER the real `mkdir` the jj fakes perform, so
+      // an awaiter never resumes ahead of that I/O; it fires before the stdout defaulting, which
+      // is pure. The code under test sees the result on its next microtask, which `reached()`'s
+      // one-macrotask deferral covers.
       observer.completed.increment();
       if (result.exitCode !== 0) return result;
       if (
@@ -4921,7 +4920,7 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("claim missing after spawn");
     processes.cancelBootWatchdog(token, claim.generation);
 
-    // Negative wait: cancelBootWatchdog's abort reaches only cancelableSleep's unwind (the connect-retry loop exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the abort only unwinds cancelableSleep; the connect loop exits on `cancelled`.
     await flushEventLoop();
 
     expect(publications).toEqual([]);
@@ -4989,7 +4988,8 @@ describe("ProcessManager", () => {
 
     // The relaunch's own event: generation 1's pane was the 1st new-window; its retired locator
     // is gone and its window no longer verifies (`readProcessCmdline` says bash), so the retry
-    // opens a 2nd. Generation, locator, and launchFailures are written synchronously after it.
+    // opens a 2nd. Generation, locator, and launchFailures are written in its microtask-only
+    // continuation (the injected `readProcessStat` fake is awaited in between).
     await runs("new-window").completed.reached(2);
 
     const relaunched = managedState.roles[token];
@@ -5150,7 +5150,7 @@ describe("ProcessManager", () => {
     stillBooting.readyConfirmedAt = currentTime;
     processes.cancelBootWatchdog(token, stillBooting.generation);
     const attemptsAtConfirmation = connectAttempts;
-    // Negative wait: cancelBootWatchdog's abort reaches only cancelableSleep's unwind (the connect-retry loop exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the watch sits in the re-arm's real 0 ms yield; `cancelled` then ends it.
     await flushEventLoop(400);
 
     expect(connectAttempts).toBe(attemptsAtConfirmation);
@@ -5275,7 +5275,7 @@ describe("ProcessManager", () => {
     processes.dispose();
     const attemptsAtDispose = connects.count;
 
-    // Negative wait: dispose()'s abort reaches only both loops' cancelableSleep unwinds (each exits on `cancelled`) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the abort only unwinds both cancelableSleeps; each loop exits on `cancelled`.
     await flushEventLoop();
 
     expect(connects.count).toBe(attemptsAtDispose);
@@ -5437,7 +5437,7 @@ describe("ProcessManager", () => {
     // Only now does the deadline elapse -- its own callback must re-check the role rather than
     // trust whatever was true when it was armed.
     sleepGate.resolve();
-    // Negative wait: the fired deadline reaches only retireAndRespawnStuckController's role check (the claim is already recorded) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireAndRespawnStuckController's role check.
     await flushEventLoop();
 
     expect(commands.some((command) => command[3] === "new-window")).toBe(false);
@@ -5555,7 +5555,7 @@ describe("ProcessManager", () => {
     // cancel), but dispose() must have cleared the tracking `cancelControllerRegistrationDeadline`
     // relies on, so this stale fire is recognized as such and does nothing.
     sleepGate.resolve();
-    // Negative wait: the stale fire reaches only retireAndRespawnStuckController's wait-identity check (dispose() cleared the tracked wait) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the stale fire reaches only the wait-identity check (dispose() cleared it).
     await flushEventLoop();
 
     expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
@@ -5696,7 +5696,7 @@ describe("ProcessManager", () => {
     // The stale wait's own timer finally fires, late -- it must recognize itself as superseded
     // and touch neither the fresh locator nor spawn yet another replacement.
     staleSleepGate.resolve();
-    // Negative wait: the stale fire reaches only retireAndRespawnStuckController's wait-identity check (the fresh spawn replaced the tracked wait) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the stale fire reaches only the wait-identity check (fresh spawn replaced it).
     await flushEventLoop();
 
     expect(windowCount).toBe(1);
@@ -5757,7 +5757,8 @@ describe("ProcessManager", () => {
     await processes.ensureController();
     sleepGate.resolve();
     // The 2nd list-panes is the post-deadline re-check whose await the role claim lands in; the
-    // re-check that follows it is synchronous.
+    // re-check that follows it is its microtask-only continuation (the injected `readProcessStat`
+    // and `readProcessCmdline` fakes are awaited in between).
     await runs("list-panes").completed.reached(2);
 
     expect(commands.some((command) => command[3] === "kill-pane")).toBe(false);
@@ -5812,7 +5813,7 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.launchFailures).toBe(0);
 
     sleepGate.resolve();
-    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by confirmRootReady) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only stillUnconfirmed() (cancelled by confirmRootReady).
     await flushEventLoop();
 
     // The deadline was cancelled by the confirmation above: its stale fire takes no action.
@@ -6135,7 +6136,7 @@ describe("ProcessManager", () => {
     // (generation 1 no longer matches the currently-armed generation 2) and touch nothing.
     paneAlive = true;
     staleGate.resolve();
-    // Negative wait: the stale fire reaches only retireUnconfirmedRoot's stillUnconfirmed() (generation 1 no longer matches the armed generation 2) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the stale fire reaches only stillUnconfirmed() (generation 1 != armed 2).
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsBeforeStaleFire);
@@ -6189,7 +6190,7 @@ describe("ProcessManager", () => {
     // The registration deadline armed by the spawn above must have been cancelled by
     // `closeTree`: its stale fire takes no action on the now-closed tree.
     sleepGate.resolve();
-    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by closeTree) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only stillUnconfirmed() (entry cancelled by closeTree).
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsAfterClose);
@@ -6259,7 +6260,7 @@ describe("ProcessManager", () => {
 
     probeGate.resolve();
     // The released probe completes; the stillUnconfirmed() re-check that declines is its
-    // synchronous continuation.
+    // microtask-only continuation (the injected identity fakes are awaited in between).
     await runs("list-panes").completed.reached(1);
 
     expect(commands.some((command) => command[0] === "tmux" && command[3] === "kill-pane")).toBe(
@@ -6331,8 +6332,8 @@ describe("ProcessManager", () => {
     const commandsBeforeProbeResolves = commands.length;
 
     probeGate.resolve();
-    // The released probe completes; the disposed re-check that declines is its synchronous
-    // continuation.
+    // The released probe completes; the disposed re-check that declines is its microtask-only
+    // continuation (the injected identity fakes are awaited in between).
     await runs("list-panes").completed.reached(1);
 
     expect(commands.length).toBe(commandsBeforeProbeResolves);
@@ -7037,7 +7038,7 @@ describe("ProcessManager", () => {
     // The registration deadline armed by the spawn above must have been cancelled by
     // `beginLinger`: its stale fire takes no action on the now-lingering tree.
     sleepGate.resolve();
-    // Negative wait: the fired deadline reaches only retireUnconfirmedRoot's stillUnconfirmed() (its wait entry cancelled by beginLinger) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only stillUnconfirmed() (entry cancelled by beginLinger).
     await flushEventLoop();
 
     expect(commands.length).toBe(commandsAfterLinger);
@@ -11605,7 +11606,7 @@ describe("ProcessManager", () => {
     const worker = await idleWorkerFixture({ role: "implementer" });
     const seededLocator = structuredClone(worker.claim().locator);
 
-    // Negative wait: nothing fires (the armed clock stays pending in manualSleep), so nothing reaches the code under test; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: nothing fires -- the armed clock stays pending in manualSleep.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11622,7 +11623,7 @@ describe("ProcessManager", () => {
     worker.client.emitRunState("running");
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's runState check (the client is running) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's runState check (client running).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11656,7 +11657,7 @@ describe("ProcessManager", () => {
 
     // Oldest first: the superseded clock expires.
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the stale fire reaches only armIdleRetire's wait-identity check (superseded by the re-arm) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the stale fire reaches only armIdleRetire's wait-identity check.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11683,7 +11684,7 @@ describe("ProcessManager", () => {
     worker.manager.dispose();
     // dispose() cannot un-record the wait under an injected sleep; the fire still reaches the code.
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's disposed check by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's disposed check.
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11701,7 +11702,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's active-phase check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's active-phase check (re-armed).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11720,7 +11721,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's pendingAssignment check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's pendingAssignment check (re-armed).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11742,7 +11743,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's active-phase check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's active-phase check (re-armed).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11777,7 +11778,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's pendingAssignment check (re-armed in place) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's pendingAssignment check (re-armed).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -11803,7 +11804,7 @@ describe("ProcessManager", () => {
     const seededLocator = structuredClone(worker.claim().locator);
 
     expect(worker.clock.fire(600_000)).toBeTrue();
-    // Negative wait: the fired clock reaches only retireIdleWorker's architect check (never retired, never re-armed) by microtask hops; no file write or injected run is in flight, so a tick drain is the whole event.
+    // Negative wait: the fire reaches only retireIdleWorker's architect check (never re-armed).
     await flushEventLoop(20);
 
     expect(worker.shutdownCalls).toEqual([]);
@@ -14105,8 +14106,7 @@ describe("ProcessManager", () => {
    * `list-panes` answers each launched pane with ITS OWN launched pid (so a freshly-recorded
    * identity verifies) until the test reissues a pane id to another process. `resurrected`
    * settles on the `saveState` call that records the resurrected generation's fresh locator --
-   * the actual event those tests wait for -- never a tick-bounded guess, which would race
-   * `spawnRoot`'s real workspace/secret-file writes and time out under load instead. */
+   * the actual event those tests wait for. */
   function reissuablePanes(
     state: LegionState,
     resurrectedGeneration: number,
