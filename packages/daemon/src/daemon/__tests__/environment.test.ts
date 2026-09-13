@@ -40,7 +40,6 @@ function dependencies(
         [`git|${paneSearchPath}`]: "/tools/git",
         [`gh|${paneSearchPath}`]: "/tools/gh",
         [`tmux|${paneSearchPath}`]: "/tools/tmux",
-        "/mise/omp/bin/omp|": "/mise/omp/bin/omp",
       };
       return paths[`${command}|${searchPath ?? ""}`];
     },
@@ -55,9 +54,7 @@ function dependencies(
           exitCode: 0,
         };
       }
-      if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
-        return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
-      }
+      // No `mise where`: the daemon never resolves the pin to an install path.
       throw new Error(`Unexpected startup command: ${command.join(" ")}`);
     },
     stateDir,
@@ -103,7 +100,7 @@ describe("legionCliLauncherScript", () => {
 });
 
 describe("resolveDaemonEnvironment", () => {
-  it("resolves tools and the pinned OMP binary from mise's full environment", async () => {
+  it("resolves tools from mise's full environment and keeps the pinned OMP invocation as `mise x`, never the install path", async () => {
     const environment = await resolveDaemonEnvironment(`mise x ${OMP_PIN} -- omp`, dependencies());
 
     expect(environment).toMatchObject({
@@ -113,7 +110,9 @@ describe("resolveDaemonEnvironment", () => {
         gh: "/tools/gh",
         tmux: "/tools/tmux",
       },
-      ompInvocation: "/mise/omp/bin/omp",
+      // Every pane and boot probe runs this fragment; mise activates the pinned tool inside the
+      // pane. `mise` is the absolute path resolved on the daemon's own PATH.
+      ompInvocation: `/tools/mise x ${OMP_PIN} -- omp`,
       paneEnv: {
         PATH: `${path.join(stateDir, "bin")}${path.delimiter}/full/bin:/usr/bin`,
         HOME: "/home/legion",
@@ -202,9 +201,7 @@ describe("resolveDaemonEnvironment", () => {
               exitCode: 0,
             };
           }
-          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
-            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
-          }
+          // No `mise where`: any other startup command is a regression.
           throw new Error(`Unexpected startup command: ${command.join(" ")}`);
         },
       })
@@ -255,9 +252,7 @@ describe("resolveDaemonEnvironment", () => {
               exitCode: 0,
             };
           }
-          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
-            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
-          }
+          // No `mise where`: any other startup command is a regression.
           throw new Error(`Unexpected startup command: ${command.join(" ")}`);
         },
       })
@@ -316,7 +311,6 @@ describe("resolveDaemonEnvironment", () => {
         resolveExecutable(command, searchPath) {
           resolved.push({ command, searchPath });
           if (command === "mise") return "/tools/mise";
-          if (command === "/mise/omp/bin/omp") return "/mise/omp/bin/omp";
           // The shim would be found first by any resolver honoring an unstripped PATH.
           if (searchPath?.split(path.delimiter).includes(inheritedWorkerBin)) {
             return path.join(inheritedWorkerBin, command);
@@ -334,9 +328,7 @@ describe("resolveDaemonEnvironment", () => {
               exitCode: 0,
             };
           }
-          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
-            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
-          }
+          // No `mise where`: any other startup command is a regression.
           throw new Error(`Unexpected startup command: ${command.join(" ")}`);
         },
       })
@@ -349,7 +341,7 @@ describe("resolveDaemonEnvironment", () => {
     }
   });
 
-  it("gives the bootstrap `mise env`/`mise where` calls only the allow-listed daemon environment", async () => {
+  it("gives the bootstrap `mise env` call only the allow-listed daemon environment, and runs no other startup command", async () => {
     const received: Array<{ command: string[]; options?: Parameters<CommandRunner>[1] }> = [];
     const environment = await resolveDaemonEnvironment(
       `mise x ${OMP_PIN} -- omp`,
@@ -372,29 +364,20 @@ describe("resolveDaemonEnvironment", () => {
               exitCode: 0,
             };
           }
-          if (command.join(" ") === `/tools/mise where ${OMP_PIN}`) {
-            return { stdout: "/mise/omp\n", stderr: "", exitCode: 0 };
-          }
           throw new Error(`Unexpected startup command: ${command.join(" ")}`);
         },
       })
     );
 
-    const miseEnvCall = received.find(
-      (call) => call.command.join(" ") === "/tools/mise env --json"
-    );
-    const miseWhereCall = received.find(
-      (call) => call.command.join(" ") === `/tools/mise where ${OMP_PIN}`
-    );
-    // Neither bootstrap call runs under the daemon's raw process environment: `mise env` gets
-    // exactly the allow-listed subset of `deps.env` (it predates `paneEnv`), and `mise where` runs
-    // after the legion CLI launcher is installed, so it sees the finished `paneEnv`.
-    expect(miseEnvCall?.options?.env).toEqual({
+    // The only bootstrap command is `mise env --json`, and it does not run under the daemon's raw
+    // process environment: it gets exactly the allow-listed subset of `deps.env` (it predates
+    // `paneEnv`). `mise where` is gone — the daemon hands panes the `mise x` invocation itself.
+    expect(received.map((call) => call.command.join(" "))).toEqual(["/tools/mise env --json"]);
+    expect(received[0]?.options?.env).toEqual({
       PATH: "/narrow/bin",
       HOME: "/home/legion",
       MISE_DATA_DIR: "/home/legion/.mise",
     });
-    expect(miseWhereCall?.options?.env).toEqual(environment.paneEnv);
     expect(environment.paneEnv).toEqual({
       PATH: `${path.join(stateDir, "bin")}${path.delimiter}/full/bin:/usr/bin`,
       HOME: "/home/legion",
