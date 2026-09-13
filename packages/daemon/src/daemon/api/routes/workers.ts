@@ -10,7 +10,7 @@ import { writeStatus } from "../../dispatch-client";
 import {
   activePhaseLabel,
   type IssueStatus,
-  isActivePhase,
+  isBystanderRole,
   type LegionState,
   type WorkerRoleClaim,
 } from "../../legion-state";
@@ -230,13 +230,12 @@ export async function handleWorkerStarted(
       throw error;
     }
     // A fresh spawn or a resume carrying the architect's task is the normal path: its
-    // assignment makes it the active phase at ready. A phase worker registering with anything
-    // else -- a finished worker relaunched by the daemon's own recovery, or a reconnect -- is a
-    // bystander; say so once. An architect is exempt: a sub-architect is never its child's
-    // active phase, so every one of its catch-up relaunches would log here for nothing.
+    // assignment makes it the active phase at ready. A bystander role (`isBystanderRole`: a
+    // phase worker that is not the active phase; an architect never is one) registering with
+    // anything else -- a finished worker relaunched by the daemon's own recovery, or a
+    // reconnect -- gets one line saying so.
     if (
-      role !== "architect" &&
-      !isActivePhase(ctx.deps.state, issue, role) &&
+      isBystanderRole(ctx.deps.state, issue, role) &&
       nextClaim.pendingAssignment?.kind !== "assignment"
     ) {
       console.info(

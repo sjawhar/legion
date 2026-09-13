@@ -24,8 +24,8 @@ export const MAX_LAUNCH_FAILURES = 3;
  * (see `promoteQueuedWorker`'s handling below), so a failed prompt never strands the
  * assignment. `"stop"` covers both "still at cap" and a queued locator-carrying claim whose
  * client is alive but not currently idle (mid-prompt or genuinely busy) — neither is stale, so
- * neither drops the entry; only `"stale"` does that: the client is gone, a session was never
- * confirmed, or the entry is a bystander's catch-up (`isBystanderCatchup`), which is cleared
+ * neither drops the entry; only `"stale"` does that: the client is gone, no session was ever
+ * established, or the entry is a bystander's catch-up (`isBystanderCatchup`), which is cleared
  * from the claim as it is dropped so neither delivery branch ever runs for it. */
 type PromotionDecision =
   | { kind: "retry" }

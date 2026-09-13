@@ -22,6 +22,7 @@ import {
   activePhaseLabel,
   isActivePhase,
   isBystanderCatchup,
+  isBystanderRole,
   type LegionState,
   type PendingAssignment,
   type TreeState,
@@ -813,17 +814,33 @@ export class ProcessManager {
         this.cancelBootWatchdog(token, generation);
         return;
       }
-      let pending = claim.pendingAssignment;
+      const pending = claim.pendingAssignment;
       if (isBystanderCatchup(this.deps.state, issue, role, pending)) {
         // The phase moved on while this boot was in flight: the catch-up queued for it is a
-        // bystander's now. Ready is confirmed exactly as a connect-only ready would be (the boot
-        // itself succeeded), the pending prompt is cleared and persisted with it, and nothing is
-        // prompted; the architect's next spawn_worker is what gives this worker its next task.
+        // bystander's now, and this relaunched pane has nothing else to do. It cannot simply be
+        // left alive with the prompt dropped: a fresh `omp --mode rpc` that is never prompted
+        // emits no `agent_end`, and `clientFor` never asks `get_state`, so its client would sit at
+        // `runState: "unknown"` -- counted against `workerCap` by `runningWorkerCount` and never
+        // reached by `armIdleRetire` (which fires only from an idle transition) -- until some
+        // unrelated probe happened to seed it. So it is retired right here, exactly as
+        // `retireIdleWorker` retires a finished worker: graceful shutdown frame (kill-pane
+        // fallback), locator cleared, `ompSessionFile` carried into `resumeSessionFile` so the
+        // architect's next spawn_worker resumes the same agent with `--resume`, `launchFailures`
+        // reset because the boot itself did succeed. The slot is free the moment this persists.
         console.info(
-          `[legion] dropping queued catch-up for ${token} at ready: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
+          `[legion] dropping queued catch-up for ${token} at ready and retiring the relaunched pane: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
         );
+        const locator = claim.locator;
+        await this.retireWorkerLocator(token, locator);
         delete claim.pendingAssignment;
-        pending = undefined;
+        const resumeSessionFile = locator.ompSessionFile ?? claim.resumeSessionFile;
+        delete claim.locator;
+        if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
+        claim.readyConfirmedAt = this.deps.now();
+        delete claim.launchFailures;
+        await this.persist();
+        this.cancelBootWatchdog(token, generation);
+        return;
       }
       const client = await this.clientFor(token, claim.locator);
       if (pending) {
@@ -2067,11 +2084,7 @@ export class ProcessManager {
       );
       return;
     }
-    if (
-      role !== "architect" &&
-      !isActivePhase(this.deps.state, issue, role) &&
-      claim.pendingAssignment === undefined
-    ) {
+    if (isBystanderRole(this.deps.state, issue, role) && claim.pendingAssignment === undefined) {
       console.info(
         `[legion] no catch-up for ${token}: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)} and nothing is queued for this role; only spawn_worker resumes a finished worker`
       );

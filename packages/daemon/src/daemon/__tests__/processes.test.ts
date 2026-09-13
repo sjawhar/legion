@@ -3619,22 +3619,28 @@ describe("ProcessManager", () => {
     expect(state.phases[child]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
   });
 
-  it("drops a queued catch-up at worker/ready for a role that is no longer the active phase, confirming ready and prompting nothing, while an assignment in the same position is delivered", async () => {
+  it("retires a relaunched worker at worker/ready when its only queued prompt is a bystander's catch-up, freeing its cap slot, while an assignment in the same position is delivered", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "tester-session.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     tree(state);
     const testerToken = roleToken("omp", root, "tester");
     const reviewerToken = roleToken("omp", root, "reviewer");
-    const locator = (pane: string, sock: string) => ({
+    const locator = (pane: string, sock: string, ompSessionFile?: string) => ({
       runtime: "tmux" as const,
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: pane,
       socketPath: `/state/workers/${sock}.sock`,
+      ...(ompSessionFile ? { ompSessionFile } : {}),
     });
     // The tester finished earlier; a catch-up was queued on its relaunch (a delivery exception
     // arrived while the tester was still the active phase), and the architect moved the issue
     // on to the implementer before the relaunch reached ready. At delivery time the tester is a
-    // bystander: the catch-up is dropped, never prompted.
+    // bystander: the catch-up is dropped, never prompted -- and a relaunched pane that is never
+    // prompted emits no agent_end, so left alive it would count against workerCap forever with
+    // no path to idle-retire. It is retired right here instead.
     state.roles[testerToken] = {
       issue: root,
       role: "tester",
@@ -3645,10 +3651,12 @@ describe("ProcessManager", () => {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
       },
-      locator: locator("%2", "tester"),
+      locator: locator("%2", "tester", sessionFile),
     };
-    // The mirror: an architect assignment queued on a booting reviewer is delivered as today.
-    state.roles[reviewerToken] = {
+    // The mirror: an architect assignment queued on a booting reviewer is delivered as today. It
+    // is added only after the cap check below, so the tester's pane is the sole occupant of the
+    // one slot while that check runs.
+    const reviewerClaim: WorkerRoleClaim = {
       issue: root,
       role: "reviewer",
       sessionId: "ses_reviewer",
@@ -3658,8 +3666,19 @@ describe("ProcessManager", () => {
     };
     state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
     const testerClient = fakeWorkerRpcClient();
+    const shutdownCalls: string[] = [];
+    const shutdown = testerClient.shutdown.bind(testerClient);
+    testerClient.shutdown = () => {
+      shutdownCalls.push("tester");
+      shutdown();
+    };
     const reviewerClient = fakeWorkerRpcClient();
-    const { manager: processes, state: managedState } = manager(state, {
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
       connectWorkerRpc: async (socketPath) =>
         socketPath === "/state/workers/tester.sock" ? testerClient : reviewerClient,
     });
@@ -3670,8 +3689,12 @@ describe("ProcessManager", () => {
     const tester = managedState.roles[testerToken];
     if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
     expect(tester.pendingAssignment).toBeUndefined();
-    // Ready is confirmed exactly as a connect-only ready would be: the boot succeeded, it just
-    // has nothing to deliver.
+    // Retired exactly as retireIdleWorker retires a finished worker: one graceful shutdown
+    // frame, locator cleared, the session file kept for the next spawn_worker's --resume; the
+    // boot itself succeeded, so ready is confirmed and launchFailures reset.
+    expect(shutdownCalls).toEqual(["tester"]);
+    expect(tester.locator).toBeUndefined();
+    expect(tester.resumeSessionFile).toBe(sessionFile);
     expect(tester.readyConfirmedAt).toBeDefined();
     expect(tester.launchFailures).toBeUndefined();
     expect(managedState.phases[root]).toEqual({
@@ -3679,12 +3702,25 @@ describe("ProcessManager", () => {
       sessionId: "ses_implementer",
     });
 
+    // The slot is free immediately: at workerCap 1 a spawn for another role is admitted, not
+    // queued behind a pane that would never do anything. (Left alive at `runState: unknown`,
+    // the tester's pane would be counted by runningWorkerCount and this would answer `queued`.)
+    commands.length = 0;
+    const next = await processes.spawnWorker(root, root, "planner", "plan #42");
+    expect(next).toEqual({ status: "spawned", roleToken: roleToken("omp", root, "planner") });
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeTrue();
+    expect(managedState.workerAdmission.queue).toEqual([]);
+
+    managedState.roles[reviewerToken] = reviewerClaim;
     await processes.workerReady(root, "reviewer", "ses_reviewer", 1);
 
     expect(reviewerClient.prompts).toEqual(["review #41"]);
     const reviewer = managedState.roles[reviewerToken];
     if (!reviewer || !("issue" in reviewer)) throw new Error("reviewer claim disappeared");
     expect(reviewer.pendingAssignment).toBeUndefined();
+    expect(reviewer.locator).toBeDefined();
     expect(managedState.phases[root]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
   });
 

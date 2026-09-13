@@ -471,20 +471,31 @@ export function activePhaseLabel(state: LegionState, issue: IssueKey): string {
   return phase !== undefined && !phase.completed ? phase.phase : "none";
 }
 
-/** True when `pending` is the daemon's own catch-up queued for a phase-worker role that is no
- * longer `issue`'s active phase -- a bystander's catch-up, judged at delivery time (a queued
- * promotion or `/worker/ready`), not only when `resumeWorker` decides whether to queue one: the
- * phase can move on while the catch-up waits behind the cap or a boot. Such a catch-up is
- * dropped rather than prompted or relaunched; only the architect's next `spawn_worker` resumes a
- * finished worker. An architect's catch-up is never a bystander's: a sub-architect is never its
- * child's active phase and the catch-up is its only recovery path (see `resumeWorker`). */
+/** True when `role` is a phase worker on `issue` that is not its active phase -- a bystander: a
+ * finished (or superseded) worker whose next task comes only from the architect's `spawn_worker`.
+ * The one definition every bystander judgement uses (`resumeWorker`'s decision whether to queue a
+ * catch-up, `isBystanderCatchup` at delivery, `handleWorkerStarted`'s registration log), so the
+ * sub-architect rationale lives here once: an architect (`role === "architect"` on a child issue)
+ * is never a bystander, because it is never its child's active phase -- once it has spawned a
+ * planner, `phases[child]` names that phase worker -- yet it parks for the life of its subtree and
+ * a catch-up is its only recovery path. The root architect never holds a phase either and is
+ * recovered through `resurrect`, never through these paths. */
+export function isBystanderRole(state: LegionState, issue: IssueKey, role: string): boolean {
+  return role !== "architect" && !isActivePhase(state, issue, role);
+}
+
+/** True when `pending` is the daemon's own catch-up queued for a bystander role (`isBystanderRole`),
+ * judged at delivery time (a queued promotion or `/worker/ready`), not only when `resumeWorker`
+ * decides whether to queue one: the phase can move on while the catch-up waits behind the cap or
+ * a boot. Such a catch-up is dropped rather than prompted or relaunched; only the architect's
+ * next `spawn_worker` resumes a finished worker. */
 export function isBystanderCatchup(
   state: LegionState,
   issue: IssueKey,
   role: string,
   pending: PendingAssignment | undefined
 ): boolean {
-  return pending?.kind === "catchup" && role !== "architect" && !isActivePhase(state, issue, role);
+  return pending?.kind === "catchup" && isBystanderRole(state, issue, role);
 }
 
 function migrateV5State(state: unknown): unknown {
