@@ -1,0 +1,74 @@
+{
+  "pr": {
+    "number": 993,
+    "url": "https://github.com/sjawhar/legion/pull/993",
+    "branch": "legion/LEGION-33",
+    "headSha": "92909f8492e383c5f01e327dbd25ae69911f87c1",
+    "base": "main"
+  },
+  "commits": [
+    "6ae0093e623e feat(envoy): forward changed_paths on push events",
+    "e928d3ffe5d1 feat(daemon): PrState push-classification fields, state v25",
+    "a4c7ab9900fe feat(daemon): count only real fixes as fix attempts, publish pr-blocked once per count",
+    "92909f8492e3 docs: define a fix attempt and the push payload's changed_paths fields"
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/contracts/normalize.go",
+    "packages/envoy/internal/contracts/normalize_test.go",
+    "packages/envoy/internal/contracts/testdata/push_handoff_only.json",
+    "packages/envoy/scripts/fixtures/github/push.json",
+    "packages/contracts/fixtures/github-envelopes/push.json",
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/__tests__/legion-state.test.ts",
+    "packages/daemon/src/daemon/reducers.ts",
+    "packages/daemon/src/daemon/events.ts",
+    "packages/daemon/src/daemon/__tests__/reducers.test.ts",
+    "packages/daemon/src/daemon/__tests__/envelope-goldens.test.ts",
+    "packages/daemon/src/daemon/__tests__/resync.test.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/envoy/AGENTS.md",
+    "skills/legion-architect/SKILL.md",
+    "docs/solutions/daemon/external-red-and-phase-ownership.md"
+  ],
+  "decisionsHonoured": {
+    "D1-log-effect": "`{ kind: \"log\"; message }` added to the Effect union; events.ts dispatch executes it as console.warn(`[legion] ${message}`) before the `never` branch.",
+    "D2-optional-fields-pure-bump": "headCounted?: true (z.literal(true).optional()), pendingPush?: {sha, handoffOnly} (strict object, optional), blockedAttempts?: number (int nonneg optional); migrateV24State is the pure `version: 25` bump; no test PrState literal touched.",
+    "D3-take-back-forget-rule": "push(): `if (pr.blockedAttempts === pr.fixAttempts) delete pr.blockedAttempts; pr.fixAttempts -= 1; delete pr.headCounted;` — compared against the pre-decrement count.",
+    "D4-unknown-reason-mapping": "classifyPush reads changed_paths_truncated first: absent → 'changed_paths absent (listener predates LEGION-33)'; \"true\" → 'changed_paths truncated at 100'; other non-\"false\" → 'changed_paths_truncated=<v> unrecognised'; then missing/empty changed_paths → 'no commits listed'; else split on \\n and every path startsWith('.legion/').",
+    "D5-log-condition": "counted = pr.headSha === after ? pr.headCounted === true : pr.verdict === \"red\", evaluated before any mutation; message is exactly the planned template.",
+    "D6-resync-consumes-pending": "resetPrHead(pr, headSha) signature unchanged; pending consumption lives inside it; resync.ts:129 call untouched; locked by resync.test.ts 'applies a pending handoff-only push classification to a head first seen by the GitHub read'.",
+    "D7-no-push-special-cases": "No force-push / deletion / created handling; classification alone decides.",
+    "D8-prByBranch-is-the-filter": "The refs/heads/legion/ early return and the `repository()` helper it alone used are deleted; push() resolves state.prByBranch[`${repo}@${branch}`]."
+  },
+  "deviationsFromPlan": [
+    "push(state, payload) takes no `envelope` parameter (the plan's prose named one): the handler never routes, so the parameter would be unused and Biome's recommended noUnusedFunctionParameters would flag it. Not a D-decision.",
+    "One extra reducers.test.ts helper (`redPrState`, `settleGreen`) and one extra reduceCiEmission case beyond the plan's list ('publishes pr-blocked once per exhausted count, not on every later red verdict') covering the spec's Acceptance 4 with green/red alternation via settleCiVerdict."
+  ],
+  "tests": {
+    "daemon": {
+      "biome": "bunx biome check src/ → Checked 147 files. No fixes applied.",
+      "tsc": "bunx tsc --noEmit → exit 0",
+      "bunTest": "bun test → 980 pass, 5 skip, 0 fail (985 tests, 57 files); three consecutive clean full runs. One earlier full run showed 1 transient fail (process-manager tmux/socket timing; test name not captured) that did not reproduce.",
+      "targeted": "reducers + envelope-goldens + resync + events → 159 pass, 0 fail; legion-state → 39 pass, 0 fail",
+      "redBeforeGreen": "With the pre-change reducers.ts swapped in, 16 of the new reducer tests fail (all push classification cases plus both pr-blocked once-per-count cases); 83/83 pass with the change."
+    },
+    "envoy": {
+      "gofmt": "gofmt -l internal/contracts → nothing. gofmt -l . → internal/mcpbridge/{bridge,config,server}.go, pre-existing on main and untouched by this PR.",
+      "vet": "go vet ./internal/contracts/ → ok",
+      "goTest": "go test ./... -count=1 → every package ok; internal/integration FAILed once while running concurrently with the daemon bun suite (embedded NATS reconnect timeouts) and passed in isolation (ok, 170.556s).",
+      "goldenDiff": "packages/contracts/fixtures/github-envelopes/push.json changed by exactly two added lines: changed_paths and changed_paths_truncated."
+    },
+    "replaySmoke": "Throwaway (not committed): Go emitted the normalized envelope for testdata/push_handoff_only.json; bun script replayed it, the regenerated push golden, and an old-listener negative control through reduceGithubEvent/settleCiVerdict on a red PR in both orders. golden → fixAttempts=1 (both orders); handoff-only → 0 (both orders); old-listener → 1 + '[legion] fix attempt: … changed_paths absent (listener predates LEGION-33)' log; six handoff-only rounds → 0 attempts, 0 pr-blocked; six real rounds with two red settlements each → pr-blocked attempts [3,4,5,6] (4 publishes over 12 red settlements). Full output is in the PR body."
+  },
+  "e2e": "No live GitHub push webhook was observed; the reducer replay at head 92909f8492e3 is the proof. The reducer is not reachable through a live surface until the host Envoy listener is redeployed and the daemon restarted.",
+  "deploySkewNote": "Behaviour changes only once BOTH the host Envoy listener is redeployed AND the Legion daemon is restarted on this code. Daemon only: every push is 'changed_paths absent' → counted as today plus one [legion] fix attempt warn line per unclassifiable push on a red PR. Listener only: the daemon ignores the new fields. Live PR #966 sits at fixAttempts=6; with blockedAttempts absent after migration its next red settlement publishes pr-blocked exactly once more, then never again until the count grows. The redeploy + restart is the architect's post-merge action item for Sami, not part of this PR.",
+  "testerNotes": [
+    "Integration replay: `cd packages/envoy && go test ./internal/contracts -run 'TestGithubPayloadPushChangedPathsFixture|TestGithubEnvelopeGoldens' -v` shows the normalizer output; the daemon replay needs a small bun script importing reduceGithubEvent/settleCiVerdict from packages/daemon/src/daemon/reducers (the implementer's throwaway is not committed; the PR body has its output and the shape to reproduce).",
+    "State load check: copy the live daemon state file to a temp dir before running loadState on it (loadState writes <file>.v24.bak beside its input); expect version 25 and every PR unchanged.",
+    "Do not rebase to refresh CI; rerun a single failed job with `legion gh -- run rerun <run-id> --failed`."
+  ],
+  "workerEnvironmentFinding": "In this worker's bash tool, LEGION_GRANT export lines were sometimes injected more than once per call and only the FIRST value redeemed; later values 403'd (`Unable to redeem LEGION_GRANT`). Workaround used: a DEBUG trap capturing the first exported value and re-exporting it before `legion gh`.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T03:20:33.600Z"
+}
