@@ -1,39 +1,44 @@
 {
+  "round": 2,
   "verdict": "clean",
   "event": "COMMENT",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1023",
   "branch": "legion/LEGION-70",
-  "head": "2ac3d28b26de3a94c610ba497717cb241b54187e",
-  "spec": "dispatch://LEGION-70/spec (version 6)",
+  "head": "812d51057e6c235aa5a20eb406acf718b7e72658",
+  "spec": "dispatch://LEGION-70/spec (version 8)",
   "review": {
-    "id": 5190666377,
-    "url": "https://github.com/sjawhar/legion/pull/1023#pullrequestreview-5190666377",
-    "commitId": "2ac3d28b26de3a94c610ba497717cb241b54187e",
+    "id": 5191005033,
+    "url": "https://github.com/sjawhar/legion/pull/1023#pullrequestreview-5191005033",
+    "commitId": "812d51057e6c235aa5a20eb406acf718b7e72658",
     "threadsOpened": 0
   },
   "githubFacts": {
-    "checks": "Tests run 34756134643 at 2ac3d28b26de: lint, typecheck, test, pr-title success; Lint/Typecheck/Test workspace steps success",
+    "prState": "mergeable=CONFLICTING, mergeStateStatus=DIRTY at review time: #1014 (LEGION-55) merged to main at 2026-09-13T13:46:41Z touching packages/workspace/src/workspace.test.ts; 812d5105 was pushed 13:54:20Z, after it, so GitHub built no merge ref and no Tests run exists at 812d5105. The tester's MERGEABLE/BLOCKED read predates the merge.",
+    "checks": "none at 812d5105 (conflict); Tests run 34758122541 at 14a6e930 green (lint, typecheck, test, pr-title; Lint/Typecheck/Test workspace steps success). 812d5105 differs from 14a6e930 only by .legion/test.json.",
     "threads": "0 total, 0 unresolved",
-    "e2e": "tester comment 5653137964; head 190c68719d40 is an ancestor of 2ac3d28b26de (differs only by .legion/test.json); status legion/tester=success on 190c68719d40"
+    "e2e": "tester comment 5653690500 at 14a6e930 (ancestor of 812d5105), real jj 0.45.1 + 0.44.0 scratch remote, negative controls against 2ac3d28b and main@origin files; legion/tester=success on 14a6e930"
   },
-  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at 2ac3d28b26de: no blocking findings",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at 812d5105: clean, no blocking findings",
   "acceptance": {
-    "1": "PASS: no jj bookmark command on an existing workspace on any path; both `set -r @` sites follow a workspace add that just created the directory; every error path throws before a bookmark command",
-    "2": "PASS: real-jj merged-branch test asserts `bookmark list` stdout '' after two further provisions",
-    "3": "PASS: real-jj moved-on test asserts commitOf(bookmark) and commitOf(@) unchanged",
-    "4": "PASS: AGENTS.md:60 and createWorkspace/provisionIssueWorkspace comments match the code; the lookup-before-add jj claim verified (add at a gone revision registers the workspace on root, then errors); WorkspaceSpec.bookmark has one wording overreach (fast-follow)",
-    "5": "PASS: forget flag-free in source and both recovery tests' argv; list via runChecked, nonzero exit throws with one add and no set (tested); any stdout -> add at bookmark; empty -> log + add at main + set -r @ in workspaceDir"
+    "1": "PASS: resolution first (workspace.ts:218), one id -> add at id with no bookmark command, none -> add at main + set -r @ in the workspace; fake tests pin fresh-none, fresh-resolving, reactivation; real-jj forget-surviving test asserts @- = bookmark commit, bookmark unmoved, point-op count 1",
+    "2": "PASS: unchanged from round 1; real-jj merged-branch test",
+    "3": "PASS: unchanged from round 1; real-jj moved-on test",
+    "4": "PASS: AGENTS.md:60, createWorkspace doc, provisionIssueWorkspace comment, WorkspaceSpec.bookmark (qualifier present) all name the same command and none/one/several rule; log line quoted verbatim",
+    "5": "PASS: shared path; flag-free forget; both throw paths precede mkdir/prune/add; fake conflicted and failed-resolution tests pin argv exactly [fetch, resolve] and directory absent; real-jj conflicted test rejects twice naming bookmark and both ids with no directory and no registration"
   },
-  "negativeCheck": "scratch copy of packages/workspace with the old `bookmark set --allow-backwards` restored after createWorkspace: all three real-jj tests fail; with their argv filters also removed they still fail on commitOf(bookmark) (sibling-commit, moved-on) and on the rejected second provision (merged-branch)",
-  "updateStaleObservation": "tester's reasoning confirmed: the conflict needs the bookmark on `@` with an unsnapshotted change at the workspace's recorded op AND a main-line move/delete; a provisioning-created bookmark tracks no remote so no fetch can touch it, and a pushed bookmark sits on `@-` under the skill's push procedure; reachable only if a worker pushes `@` itself then edits without jj before the merge. Not a spawn/resume path; no acceptance line affected.",
-  "nonBlockingForArchitect": [
-    "spec v6 'any stdout = present' gap: a `(deleted)` tombstone or conflicted `legion/<KEY>` lists non-empty; `workspace add --revision legion/<KEY>` then registers the workspace and creates the directory before erroring (verified jj 0.45.1 tombstone; deep audit: 0.44.0 and conflicted), so the first provision fails loudly and the next resume silently adopts a workspace parented on root. Needs directory gone + registration kept + unresolvable bookmark. Fix if wanted: resolve the name to one commit (`jj log -r legion/<KEY> --no-graph -T commit_id`) before adding — spec v7.",
-    "fresh path with a surviving local bookmark (registration and directory gone, bookmark kept): `bookmark set -r @` refuses sideways; one loud failure, then the next resume adopts the main-based workspace with the bookmark untouched. Spec-consistent; plan concern 26."
+  "negativeCheck": "head's workspace.test.ts beside workspace.ts from 2ac3d28b26de: the two new real-jj tests 0 pass / 2 fail (surviving-bookmark: round 1 rejects on the sideways refusal; conflicted: round 1 resolves, silently settling the conflict onto the fresh working copy). Deeper assertions (working-copy parent, bookmark commit, op count, argv, directory, registration) each independently fail too.",
+  "ignoreWorkingCopy": "scratch clone with an unsnapshotted file: head op id identical before/after the resolution read, file not in @; without the flag a `snapshot working copy` op is appended. Reads the current op; works on a stale working copy.",
+  "specCodeDocsAgreement": "spec v8 Acceptance 1, resolveArgs, resolveBookmarkCommand, processes.test.ts literal, createWorkspace doc, AGENTS.md:60 all name `jj log -r 'bookmarks(exact:legion/<KEY>)' --no-graph -T 'commit_id ++ \"\\n\"' --ignore-working-copy -R <clone>` and the same rule; present() rejection recorded in the spec",
+  "fingerprintAtReviewedHead": "1b9e1fe41878f6a92b547142afcd82e0972c372101d23f691bdc394dce2fc4dd",
+  "conflictAnalysis": "adjacent insertion in workspace.test.ts: LEGION-55 added `watch` to the node:fs import, a whenPathExists helper after escapeRegExp, and a two-issue clone-race test right after the first clone test, where this branch inserts `creates a workspace on top of a resolving bookmark`. Keep both. LEGION-55's test pins no argv and its fake run returns exit 0 / empty stdout for everything, so it passes on this branch unchanged; a keep-both resolution should reproduce the fingerprint.",
+  "nextStep": "implementer: conflict-forced rebase of the whole chain onto main@origin (jj rebase -s 'roots(main@origin..@)' -d main@origin), fingerprint before/after, one `rebase <old> -> <new>; fingerprint ...; unchanged|changed` PR comment; if unchanged, stack the .legion/ deletion commit on the same push (one CI run); if changed, push the rebase alone (new round). Tester: `rebase re-check` on the E2E line once Tests is green. Reviewer approves the new head by SHA when fingerprint(new head) == 1b9e1fe4..., `jj file list -r <new> .legion` is empty, and Tests is green at that head.",
+  "fastFollow": "createWorkspace doc `creates or moves` -> `creates` (workspace.ts:178); provisionIssueWorkspace comment `conflicted` -> `conflicted or unresolvable` (:294); test-side workspaceAddCommand helper for the five `jj workspace add` argv literals. One docs-and-tests commit after merge.",
+  "nonBlockingNits": [
+    "workspace.ts:230 `const bookmarkCommit = commits[0]` is typed string (no noUncheckedIndexedAccess) so the `?? \"main\"` and `!== undefined` guards read as dead to a type-aware reader; an explicit `string | undefined` annotation states the contract",
+    "workspace.ts:224 trims for the emptiness test but passes the untrimmed line on; unreachable with jj's `commit_id ++ \"\\n\"` template",
+    "LEGION_MAX_RECURSION_DEPTH is set in every workspace test but never read by workspace.ts (pre-existing pattern)"
   ],
-  "fastFollow": "WorkspaceSpec.bookmark comment (workspace.ts:22-24): 'never re-creates it' -> 'never re-creates it on an existing workspace'",
-  "nextStep": "architect sends the implementer to push exactly the .legion/ deletion on top of 2ac3d28b26de (this review commit rides that push and is deleted by it); reviewer then confirms `jj diff --from 2ac3d28b26de --to <new> --summary` lists only .legion/ removals and submits APPROVE naming the new head by SHA; no threads to resolve",
-  "note": "Architect asked for APPROVED on a clean review; the legion-worker skill and the reviewer role prompt reserve APPROVE for a head without .legion/, so this round is COMMENT and APPROVE follows on the deletion head.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-13T12:29:01.410Z"
+  "completed": "2026-09-13T14:25:08.623Z"
 }
