@@ -1,0 +1,67 @@
+{
+  "verdict": "changes_requested",
+  "reviewedHeadSha": "dc1224cc01a323a5d54262122866cf54696f0bb0",
+  "codeHeadSha": "7924c7f1256fab1802aada6f6375c0a2fadf471f",
+  "correctiveCommit": "35fabe0db389",
+  "spec": "dispatch://LEGION-57/spec v5",
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1024#pullrequestreview-5191080569",
+  "reviewId": 5191080569,
+  "factsVerified": {
+    "head": "dc1224cc01a323a5d54262122866cf54696f0bb0",
+    "checks": "Tests: lint, pr-title, typecheck, test all SUCCESS at head (gh pr view statusCheckRollup)",
+    "threadsBefore": "0 threads, 0 unresolved (gh api graphql)",
+    "mergeable": "MERGEABLE",
+    "e2e": "tester E2E on the smoke rig at 85b6e098fed8 (code head 7924c7f1256f), an ancestor of the reviewed head; round 2 covered the two corrective changes with checkpoints.test.sh"
+  },
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at dc1224cc: no Blocking from either; one Should-fix each (both the stale root-architect roles entry left by adoptOwnerlessChildTrees); Minors folded into threads and the fast-follow",
+  "blocking": [
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941341",
+      "file": "packages/daemon/src/daemon/processes.ts:557",
+      "finding": "adoptOwnerlessChildTrees leaves the removed child's root-architect roles entry (written by /process/started with sessionId; launch-failed only revokes). launchWorker turns that sessionId into expectedSessionId with no --resume, so the parent's first sub-architect spawn 409s at /worker/started ('Worker respawn must resume the same agent session'), burns one boot-timeout cycle and one launchFailures tick; the doc comment's 'inert, no resumable session' is false.",
+      "fix": "revoke + delete state.roles[roleToken(project, key, 'architect')] alongside the tree (pair exists at processes.ts:1404-1405 / 1448-1449); correct the comment; add the claim to the WIDGETS-6 fixture in index.test.ts and assert it is gone"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941347",
+      "file": "skills/legion-architect/SKILL.md:285 (child-adopted row)",
+      "finding": "'released (todo or later)' includes done: the row would spawn a live sub-architect for a closed child (the daemon does not refuse a spawn on a done issue). The 'no architect roles entry' gate is sound only once blocking item 1 deletes the stale claim; otherwise it must read 'no architect claim with a locator'.",
+      "fix": "restrict to open released children (todo through retro; remaining already counts those)"
+    },
+    {
+      "thread": "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941349",
+      "file": "skills/legion-architect/SKILL.md:301 (catchup-overseer row)",
+      "finding": "same defect, live on this deployment: legion state shows LEGION-19's children LEGION-21/22/23 done, trees lingering, no architect claims; LEGION-19's next catchup-overseer would tell its architect to spawn architects for three closed children.",
+      "fix": "use childCounts[issue].open: 'any open released child (todo through retro) with no architect claim'"
+    }
+  ],
+  "nonBlocking": [
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941344 processes.ts:550 launch-failed child with surviving confirmed-generation workers loses its tree-scoped credential routes after removal; log/document or treat like dead",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941351 SKILL.md:286 child-status to backlog/icebox no longer lingers anything daemon-side; add a stop/re-scope clause",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941353 AGENTS.md:57 nearest-ancestor wording",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941355 index.test.ts:909 saved > 0 is weak; snapshot saves",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941358 api.test.ts:2770 same-path row (spawnWorker stubbed)",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941361 api.test.ts:2804 same-path row",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941364 api.test.ts:3252 glued duplicate; replace with the failed-PATCH knownIssueStatus fence edge",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941368 processes.test.ts:8622 pins unchanged code; delete or replace with a direct adoptOwnerlessChildTrees table test",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941371 workers.ts:85 fence wording (covers failed PATCH only)",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941374 checkpoints.sh:466 message misleading while the PATCH is in flight or parked",
+    "https://github.com/sjawhar/legion/pull/1024#discussion_r3999941377 index.ts:67 envelope fed to routeActive's dead _envelope parameter"
+  ],
+  "fastFollow": "one tidy-up batch: the four test rows, snapshot saves in the index boot test, drop CHILD_ADOPTION_ENVELOPE, liveAncestorTree over treeFor, publishWakeEffects prefix string, three wording items; may ride the corrective push if cheap",
+  "checkedClean": [
+    "liveAncestorTree cycle guard real; reducer and boot repair share it and cannot disagree",
+    "reduceIssueClosed root path byte-for-byte unchanged; child wakes keep order after linger",
+    "spawnStatus reached only for sub-architects (400 at workers.ts:464 first); knownIssueStatus fence used",
+    "boot order: adoptOwnerlessChildTrees under the hold -> enableLaunches -> reconnectRoots -> reconcileAdmission (unconditional persist) -> reconcileWorkerAdmission -> replayHeldRecoveries -> child-adopted publishes; admission.active spliced; no Dispatch write; idempotent",
+    "LEGION-20 conflict resolution keeps both sides in all six files",
+    "AGENTS.md rows 20/21 and bullets 57/58/67 true of the code at this head (57 wording only)"
+  ],
+  "outOfScopeNotRaised": [
+    "child-adopted / tree's-architect publishes resolve via routeActive to the root architect or the parent's active phase worker (re-filed)",
+    "processes.ts ~2268 phrasing"
+  ],
+  "nextRound": "answer every thread with Accepted:/Still open:; if the corrective diff is skill+processes.ts+index.test.ts only, a rig run is not needed for re-review — the index.test.ts WIDGETS-6 fixture with the stale claim is the proof for item 1",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-13T14:59:22.197Z"
+}
