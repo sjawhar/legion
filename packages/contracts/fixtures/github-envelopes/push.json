@@ -4,6 +4,8 @@
   "payload": {
     "after": "5555555555555555555555555555555555555555",
     "before": "4444444444444444444444444444444444444444",
+    "changed_paths": "docs/acceptance.md\nREADME.md",
+    "changed_paths_truncated": "false",
     "commit_count": "1",
     "compare_url": "https://example.invalid/example-org/example-repo/compare/4444444...5555555",
     "head_subject": "Exercise the local acceptance driver",
