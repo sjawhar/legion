@@ -1,16 +1,16 @@
 {
-  "head": "5388e5ca2e285b72f4d0f08415a44aa40171f734",
+  "head": "44675d2b809b",
   "pr": {
     "number": 1027,
     "url": "https://github.com/sjawhar/legion/pull/1027",
     "branch": "legion/LEGION-15",
-    "mergeable": "MERGEABLE (no conflict with main after #975), mergeStateStatus BLOCKED (awaiting review)"
+    "mergeable": "MERGEABLE (no conflict with main after #975), mergeStateStatus BLOCKED (awaiting review)",
+    "branchTipTested": "c42fd46cbbb39e210ef9401ffcab67474d336cdb (44675d2b + .legion/implement.json corrective round 1)"
   },
-  "testFileSha256": "0951a797d22eb0e6dbef393248d0bc9234aa683c9422d78117e04d56e1ae45e8",
+  "testFileSha256": "2b91200f4220a35f5450b73e5ff4c4bdace16f8573ceb548559234109846a3f5",
   "passed": 5,
   "failed": 0,
   "failures": [],
-  "verdict": "PASS on all five acceptance lines, independently re-derived on this box at the PR head. One finding for the architect (below): a converted test with bun's default 5 s timeout timed out once under the generator at load 148; not the tick race and not a daemon ordering bug.",
   "acceptance": {
     "1_grep_and_audit": {
       "command": "cd packages/daemon && grep -n 'flushEventLoopUntil' src/daemon/__tests__/processes.test.ts; grep -n -B1 'flushEventLoop(' src/daemon/__tests__/processes.test.ts",
@@ -46,23 +46,55 @@
     }
   },
   "negativeControl": "Head file with the one-line change `await published(\"worker-died\").reached(1)` -> `.reached(2)` (a second worker-died is never published) as a scratch copy: `(fail) ... escalating to worker-died at the launch-failure threshold [5011.56ms]  ^ this test timed out after 5000ms`, exit 1 -- the converted wait fails loud on the runner's timeout, never a silent pass (spec Errors row 1). Scratch copy removed.",
-  "findings": [
-    {
+  "findings": [],
+  "observations": [
+    "Acceptance 2 was run without the generator: the machine's own 1-minute load was 98.8-112.0 throughout, above the spec's 60.",
+    "Main moved past the PR base during this phase (#975 LEGION-20, #1017 LEGION-77 and three release commits; #975 edits processes.test.ts in the launch-command assertions). GitHub reports the PR MERGEABLE, so no rebase is due under the conflict-only rule.",
+    "The working copy also holds an empty `.omp/config.yml` created by the OMP process; it is not part of this phase and was left out of the handoff commit (bookmark set to the split-out handoff commit).",
+    "Helper scripts for every loop are on this box: /tmp/l15t-run30.sh, /tmp/l15t-suite10.sh, /tmp/l15t-suite-extra.sh, /tmp/l15t-prefix.sh, /tmp/l15t-postfix-load.sh, /tmp/l15t-981x10.sh; every per-run log is /tmp/l15t-*.log.",
+    "Corrective round 1 changed only the one test's timeout; the round-1 acceptance-1..5 evidence at 5388e5ca is unaffected and was not repeated (architect's scope: confirm the fix).",
+    "Per-run wall times here are bun's `Ran 1 test across 1 file. [X]` line (bun prints per-test durations only for failures), so they include ~0.2 s of runner start-up."
+  ],
+  "e2eSection": "PR body `E2E` and `Negative control` lines rewritten at head 5388e5ca with the figures above (legion gh -- pr edit 1027 --body-file).",
+  "round1": {
+    "head": "5388e5ca2e285b72f4d0f08415a44aa40171f734",
+    "handoffCommit": "67992d069cda5a9e81ffeda6e0d0ffb9608ce214",
+    "verdict": "PASS on all five acceptance lines, independently re-derived on this box at the PR head. One finding for the architect (below): a converted test with bun's default 5 s timeout timed out once under the generator at load 148; not the tick race and not a daemon ordering bug.",
+    "finding": {
       "severity": "non-blocking, architect's call",
       "title": "Converted test `retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold` (head lines 4506-4570) keeps bun's default 5 s per-test timeout while awaiting three real relaunch cycles; its root-deadline siblings that do the same kind of I/O carry `}, 20_000)` (head lines 5934, 6251, 11530).",
       "evidence": "Under the busy-loop generator at nice 19 (1-minute load 148.17), run 35 of 60 of the converted test: /tmp/l15t-postfix-site4430-converted-35.log = `(fail) ProcessManager > retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold [6234.28ms]  ^ this test timed out after 5000ms.  0 pass  254 filtered out  1 fail  Ran 1 test across 1 file. [9.14s]` (bun's own start-up took ~3 s of that 9.14 s wall). The other 59 runs under the same generator: median 452 ms, p90 ~1.06 s. At the machine's own load (98-112, acceptance 2): 30/30 in 190-351 ms.",
       "classification": "A starvation timeout with the awaited `worker-died` publish still pending -- the spec's Errors-row behaviour (fails on the runner's timeout, never a silent pass), not the tick-budget race (no tick budget remains in this test) and not a daemon ordering bug (the pre-fix copy of the same test passed 60/60 under the same generator only because its 50,000-tick budget happened to suffice; the converted wait has no budget to exhaust and simply outlived the 5 s default). Acceptance 2's stated condition (load >= 60) was met 690/690; this run was under a harsher condition I imposed for the acceptance-4 A/B.",
       "recommendation": "Add `}, 20_000)` to this one test, matching the plan's own instruction to keep the explicit timeouts that bound the fail-loud path under load (the plan listed only the timeouts that already existed). Test-file-only; no re-run of the other loops needed. Not fixed by me per the tester charter."
     }
-  ],
-  "observations": [
-    "Acceptance 2 was run without the generator: the machine's own 1-minute load was 98.8-112.0 throughout, above the spec's 60.",
-    "Main moved past the PR base during this phase (#975 LEGION-20, #1017 LEGION-77 and three release commits; #975 edits processes.test.ts in the launch-command assertions). GitHub reports the PR MERGEABLE, so no rebase is due under the conflict-only rule.",
-    "The working copy also holds an empty `.omp/config.yml` created by the OMP process; it is not part of this phase and was left out of the handoff commit (bookmark set to the split-out handoff commit).",
-    "Helper scripts for every loop are on this box: /tmp/l15t-run30.sh, /tmp/l15t-suite10.sh, /tmp/l15t-suite-extra.sh, /tmp/l15t-prefix.sh, /tmp/l15t-postfix-load.sh, /tmp/l15t-981x10.sh; every per-run log is /tmp/l15t-*.log."
-  ],
-  "e2eSection": "PR body `E2E` and `Negative control` lines rewritten at head 5388e5ca with the figures above (legion gh -- pr edit 1027 --body-file).",
+  },
+  "verdict": "PASS. Corrective round 1 confirmed: the one finding from round 1 is closed by commit 44675d2b, whose only change is the worker-died escalation test's explicit 20 s timeout; that test passed 120/120 under the same generator load (up to 148.9) that starved it once in round 1, and the full suite, biome, and tsc are clean at this head. Nothing else changed; the round-1 acceptance evidence stands.",
+  "correctiveRound1": {
+    "head": "44675d2b809b",
+    "ciRun": "Tests run 34756459268 green at 44675d2b (implementer-reported; PR body CI line)",
+    "step1_diff": {
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --from 67992d06 --to 44675d2b --summary; jj -R \"$LEGION_WORKSPACE\" diff --from 67992d06 --to 44675d2b --git",
+      "summary": "M packages/daemon/src/daemon/__tests__/processes.test.ts (1 file, 6 insertions, 1 deletion)",
+      "git": "one hunk at head lines 4567-4575: the closer of `retires and retries a worker whose boot the watchdog's timeout never sees /worker/started confirm, escalating to worker-died at the launch-failure threshold` changes from `});` to `}, 20_000);` with a five-line comment naming the two real relaunches (provisionWorkspace mkdir + new-window) as the reason. No production file; no other site touched. Explicit timeouts in the file are now at head lines 4575, 5939, 6256, 11535; flushEventLoopUntil still absent (0 matches); flushEventLoop( still 20 matches (helper + 19). Branch tip c42fd46c adds only .legion/implement.json on top."
+    },
+    "step2_60runs_under_load": {
+      "generator": "hub start legion-15-load = `nice -n 19 bash -c 'for i in $(seq $(nproc)); do (while :; do :; done) & done; wait'` (32 spinners, 33 bash processes counted); test loop at nice 19 so it competes with the spinners directly; stopped afterwards with `hub stop legion-15-load` (exit 143), `pgrep -fc 'while :; do :; done'` = 0.",
+      "command": "bash /tmp/l15t-r2-wddied60.sh: 60 x `nice -n 19 bun test src/daemon/__tests__/processes.test.ts -t \"escalating to worker-died at the launch-failure threshold\"`; a run counts only if exit 0 and the log has exactly `1 pass`, `0 fail`, `Ran 1 test across 1 file`; any `timed out` string is counted separately.",
+      "batch1": "60/60 passed, 0 bad, 0 runs mentioning a timeout; 1-minute load 128.89 at start -> 137.92 at end; wall time per run incl. bun start-up: min 0.27 s, median 0.69 s, p90 1.43 s, max 2.63 s; logs /tmp/l15t-r2-wddied-<n>.log.",
+      "batch2": "Run because batch 1 peaked below round 1's failure load (148): 60/60 passed, 0 bad, 0 runs mentioning a timeout; load 141.74 -> 148.87; wall time min 0.26 s, median 0.63 s, p90 1.84 s, max 4.10 s; logs /tmp/l15t-r2b-wddied-<n>.log.",
+      "comparison": "Round 1 at the old 5 s default, same generator, load 148.17: 1/60 `this test timed out after 5000ms` at 6234 ms (/tmp/l15t-postfix-site4430-converted-35.log). Round 2 at 20 s: 0/120 timeouts; the slowest run's whole bun process (start-up + test) finished in 4.10 s, so the test itself stayed inside even the old budget this time and the new 20 s budget leaves ~5x headroom over the worst observed run."
+    },
+    "step3_full_suite": {
+      "command": "cd packages/daemon && bun test > /tmp/l15t-r2-suite.log 2>&1",
+      "result": "exit 0; ` 1117 pass  7 skip  0 fail  Ran 1124 tests across 63 files. [39.14s]`; load 143.88 at start -> 131.85 after (generator already stopped; residual machine load). No scratch test files in the tree (verified 0 before the run)."
+    },
+    "step4_lint_typecheck": {
+      "command": "cd packages/daemon && bunx biome check src/ && bunx tsc --noEmit",
+      "result": "biome: `Checked 159 files in 734ms. No fixes applied.` exit 0. tsc: no output, exit 0."
+    },
+    "prBody": "E2E section extended with a `Corrective round 1 (tester, at head 44675d2b809b)` line carrying the figures above (legion gh -- pr edit 1027 --body-file)."
+  },
   "schemaVersion": 1,
   "phase": "test",
-  "completed": "2026-09-13T12:07:58.185Z"
+  "completed": "2026-09-13T12:47:11.358Z"
 }
