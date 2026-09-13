@@ -1034,7 +1034,7 @@ export async function executeDispatchTool(
       const result = await client.requestApproval(resolved.artifact.id, { actor });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
