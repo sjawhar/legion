@@ -358,6 +358,64 @@ func TestGitHubHandlerSubIssuesFixture(t *testing.T) {
 	}
 }
 
+// TestGitHubHandlerMergeGroup asserts GitHub's merge-queue event is acknowledged with 200 and
+// neither published nor recorded: a merge group names no pull request head and nothing in
+// Legion routes on it (LEGION-99). The fixture is production-shaped from GitHub's documented
+// merge_group payload; the signature check still runs before the skip.
+func TestGitHubHandlerMergeGroup(t *testing.T) {
+	checksRequested, err := os.ReadFile(filepath.Join("testdata", "merge_group_checks_requested.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	destroyed := []byte(`{
+		"action": "destroyed",
+		"reason": "merged",
+		"merge_group": {
+			"head_sha": "9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f",
+			"head_ref": "refs/heads/gh-readonly-queue/main/pr-1050-7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+			"base_sha": "7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+			"base_ref": "refs/heads/main"
+		},
+		"sender": {"login": "github-merge-queue[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+	}`)
+	for i, tc := range []struct {
+		name       string
+		body       []byte
+		signature  string // "" signs the body with the handler's secret
+		wantStatus int
+	}{
+		{name: "checks_requested is acknowledged and not published", body: checksRequested, wantStatus: 200},
+		{name: "destroyed is acknowledged and not published", body: destroyed, wantStatus: 200},
+		{name: "an unsigned merge_group is still refused", body: checksRequested, signature: "sha256=invalid", wantStatus: 401},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := &mockPublisher{}
+			recorder := &mockRecorder{}
+			handler := GitHubHandler("s", "@legion", "", pub, recorder)
+			req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(string(tc.body)))
+			req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("d-merge-group-%d", i))
+			req.Header.Set("X-GitHub-Event", "merge_group")
+			sig := tc.signature
+			if sig == "" {
+				sig = githubSign("s", tc.body)
+			}
+			req.Header.Set("X-Hub-Signature-256", sig)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if len(pub.published) != 0 {
+				t.Errorf("published = %d, want 0; first topic %q", len(pub.published), pub.published[0].Topic)
+			}
+			if n := len(recorder.calls) + len(recorder.suiteCalls) + len(recorder.headCalls); n != 0 {
+				t.Errorf("recorder calls = %d, want 0", n)
+			}
+		})
+	}
+}
+
 // TestGitHubHandlerCIRecordsObservations asserts a check_run webhook records
 // one state fact per associated PR and never publishes the obsolete raw topic.
 func TestGitHubHandlerCIRecordsObservations(t *testing.T) {
