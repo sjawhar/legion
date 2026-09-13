@@ -279,6 +279,39 @@ async function writeOmpConfig(workspaceDir: string): Promise<void> {
   await writeFile(path.join(ompDir, "config.yml"), "", "utf8");
 }
 
+/** Removes the repository-scoped jj identity an earlier worker boot left on the shared clone.
+ * Before LEGION-44 the extension ran `jj config set --repo user.name`/`user.email` at every
+ * worker boot; `--repo` on a workspace writes the one config file every workspace of the clone
+ * shares, so the last worker to boot, in any tree, set the author and committer for every other
+ * tree's commits. Identity now rides each pane's environment (`JJ_USER`/`JJ_EMAIL`, read over
+ * any config), so a leftover value is inert for panes but still wrong for anything else that
+ * commits from the clone; it is removed here, once, logged, and nothing writes it again. Runs on
+ * every provisioning so a pane still on the pre-upgrade plugin during a rollout is healed at the
+ * next launch. A key is probed first (`jj config list --repo` exits 0 with empty stdout when
+ * unset) because `jj config unset` exits 1 on a key that does not exist; a failed unset is
+ * re-probed once, since two issues provisioning at the same time can both see the key and only
+ * one of them removes it. */
+async function removeRepoScopedIdentity(
+  deps: ProvisionIssueWorkspaceDeps,
+  repoCloneDir: string
+): Promise<void> {
+  for (const key of ["user.name", "user.email"]) {
+    const probe = ["jj", "config", "list", "--repo", "-R", repoCloneDir, key];
+    const present = await run(deps, probe);
+    if (present.exitCode !== 0) throw commandFailure(present, probe);
+    if (present.stdout.trim() === "") continue;
+    console.error(
+      `[legion] removing repository-scoped jj ${key} from ${repoCloneDir}: an earlier worker boot wrote it, and one repo config is shared by every workspace of the clone; identity rides each pane's environment now`
+    );
+    const unset = ["jj", "config", "unset", "--repo", "-R", repoCloneDir, key];
+    const removed = await run(deps, unset);
+    if (removed.exitCode === 0) continue;
+    const recheck = await run(deps, probe);
+    if (recheck.exitCode === 0 && recheck.stdout.trim() === "") continue;
+    throw commandFailure(removed, unset);
+  }
+}
+
 export async function provisionIssueWorkspace(
   issue: IssueKey,
   deps: ProvisionIssueWorkspaceDeps
@@ -357,6 +390,7 @@ export async function provisionIssueWorkspace(
     "credential.interactive",
     "false",
   ]);
+  await removeRepoScopedIdentity(deps, repoCloneDir);
   await writeOmpConfig(workspaceDir);
 
   return { repoCloneDir, workspaceDir, bookmark };

@@ -772,6 +772,8 @@ describe("ProcessManager", () => {
         ],
         ["git", `--git-dir=${repo}/.git`, "config", "credential.interactive", "false"],
       ],
+      ["jj", "config", "list", "--repo", "-R", repo, "user.name"],
+      ["jj", "config", "list", "--repo", "-R", repo, "user.email"],
       ["tmux", "-L", "legion-omp", "has-session", "-t", "legion-omp"],
       [
         "tmux",
