@@ -97,3 +97,7 @@ what matters is that it fails for the defect's reason. Name that reason in the P
   guard.
 - `docs/solutions/testing/integration-seam-needs-producer-exact-value.md` — same principle
   ("the exact value, not a lookalike") at an integration seam.
+- `docs/solutions/testing/two-contenders-through-a-rename-collision-gate-both-in-wake-on-the-rename-pin-the-winner.md`
+  — the same owned-gate technique applied to the *entry* preconditions of a two-caller race, a
+  wake on a filesystem effect the fake does not own, and pinning which contender won (end-state
+  assertions alone pass a last-writer-wins mutant).

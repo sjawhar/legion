@@ -90,3 +90,6 @@ block into the PR body under the acceptance criterion it satisfies.
   this document is for the cases where it cannot (kernel scheduling, real processes).
 - `docs/solutions/daemon/instance-lock-is-a-kernel-flock-not-a-pid-file.md` — the defect and the
   kernel-lock fix these runs bracket.
+- `docs/solutions/testing/loop-a-flaky-suite-sequentially-parallel-lanes-of-it-starve-its-timer-tests.md`
+  — why the load recipe above is external busy loops and not parallel lanes of the suite itself:
+  lanes starve the suite's real-timer tests and hide the target race.
