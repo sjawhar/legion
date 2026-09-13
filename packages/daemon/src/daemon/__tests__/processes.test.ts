@@ -440,8 +440,8 @@ function manager(
   const processManager = new ProcessManager({ ...deps, runtime });
   liveManagers.push(processManager);
   // Every existing test exercises worker-queue promotion as already "booted" (index.ts calls
-  // this immediately after `api` is assigned) — only the dedicated boot-ordering test passes
-  // `skipEnableLaunches` to exercise the gate itself.
+  // this once `reconnectWorkers` has settled, after `api` is assigned) — only the dedicated
+  // boot-ordering test passes `skipEnableLaunches` to exercise the gate itself.
   if (!skipEnableLaunches) processManager.enableLaunches();
   return {
     manager: processManager,
@@ -7774,7 +7774,7 @@ describe("ProcessManager", () => {
           // Simulates the real worker-rpc client's get_state response seeding runState from
           // isStreaming: false — synchronously fires the registered onIdle callback (exactly
           // like a real boot-time reconnect probe would) while still inside reconnectWorkers,
-          // before `api` (and this gate) would ever be assigned in the real boot sequence.
+          // before enableLaunches() is called in the real boot sequence.
           client.getStateImpl = async () => {
             client.emitRunState("idle");
             return { isStreaming: false };
@@ -7811,9 +7811,8 @@ describe("ProcessManager", () => {
     await processes.reconnectWorkers();
 
     // The onIdle trigger fired mid-reconnect but the gate was still closed: no boot token was
-    // ever minted (the real bug this fixes — `mintWorkerBootToken` reads `api` by reference,
-    // which does not exist yet at this exact point in the real boot sequence), and the queued
-    // assignment is untouched.
+    // ever minted (a launch mid-probe would decide against a running-worker count that still
+    // holds every unprobed claim as running), and the queued assignment is untouched.
     expect(mintCalls).toBe(0);
     expect(managedState.workerAdmission.queue).toEqual([queuedToken]);
 

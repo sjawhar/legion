@@ -92,9 +92,6 @@ is a defect, not a style choice.
   placement. Unreachable in the documented ordering; self-heals via the registration deadline
   (403 at `/process/started` → retire → `launchFailures++` → resurrect). A stale-at-lane-entry
   guard is the architect's call.
-- Pre-existing on `main`: `index.ts` runs `reconnectWorkers` before `api` is assigned, so
-  `markWorkerDead → revokeRoleClaim → api.revokeSessionCapability` throws for a confirmed-dead
-  worker at boot. Needs its own issue.
 
 ## Related
 
@@ -102,3 +99,6 @@ is a defect, not a style choice.
   R1 reproductions were made deterministic.
 - `packages/daemon/src/daemon/AGENTS.md` — the persisted contract (`holdProcessSecret`, boot prune
   seeding, `PANE_GONE_STDERR`).
+- `docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven.md` — the boot
+  sequence this retro's `reconnectWorkers`-before-`api` edge was fixed into (LEGION-11): the
+  reconnect now runs after the API is assigned.
