@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -175,6 +176,81 @@ func TestAppendRejectsEventWithoutExactlyOneOwner(t *testing.T) {
 				t.Fatalf("append error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestChildAndParentPatchesCompleteWithoutDeadlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	database := openTestStore(t)
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values
+			('PP-1', 'PP', 1, 'Parent', '{"kind":"user","id":"alice"}', 'U'),
+			('PP-2', 'PP', 2, 'Child', '{"kind":"user","id":"alice"}', 'V')
+	`); err != nil {
+		t.Fatalf("seed parent and child: %v", err)
+	}
+	broker := NewBroker()
+	childEvent := model.Event{
+		IssueKey: new("PP-2"), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{},
+	}
+	childStatus := model.Event{
+		IssueKey: new("PP-1"), Type: "child.status", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{},
+	}
+	parentEvent := model.Event{
+		IssueKey: new("PP-1"), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{},
+	}
+	childTx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin child patch: %v", err)
+	}
+	defer childTx.Rollback(context.Background())
+	if err := broker.LockOwners(ctx, childTx, childEvent, childStatus); err != nil {
+		t.Fatalf("lock child patch owners: %v", err)
+	}
+
+	parentStarted := make(chan struct{})
+	parentDone := make(chan error, 1)
+	go func() {
+		parentTx, err := database.Pool.Begin(ctx)
+		if err != nil {
+			parentDone <- err
+			return
+		}
+		defer parentTx.Rollback(context.Background())
+		close(parentStarted)
+		if err := broker.LockOwners(ctx, parentTx, parentEvent); err != nil {
+			parentDone <- err
+			return
+		}
+		if _, err := broker.Append(ctx, parentTx, parentEvent); err != nil {
+			parentDone <- err
+			return
+		}
+		parentDone <- parentTx.Commit(ctx)
+	}()
+	<-parentStarted
+
+	if _, err := broker.Append(ctx, childTx, childEvent); err != nil {
+		t.Fatalf("append child patch event: %v", err)
+	}
+	if _, err := broker.Append(ctx, childTx, childStatus); err != nil {
+		t.Fatalf("append parent child.status event: %v", err)
+	}
+	if err := childTx.Commit(ctx); err != nil {
+		t.Fatalf("commit child patch: %v", err)
+	}
+	select {
+	case err := <-parentDone:
+		if err != nil {
+			t.Fatalf("complete parent patch: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("child and parent patches deadlocked")
 	}
 }
 

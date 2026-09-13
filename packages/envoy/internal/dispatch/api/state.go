@@ -90,9 +90,15 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		}
 		dismissed = encoded
 	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	value := userIssueState{}
 	var encodedDismissed []byte
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+	if err := tx.QueryRow(r.Context(), `
 		insert into user_issue_state (login, issue_key, pinned, last_read_seq, dismissed)
 		values ($1, $2, coalesce($3, false), coalesce($4, 0), coalesce($5, '[]'::jsonb))
 		on conflict (login, issue_key) do update
@@ -108,5 +114,22 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var project string
+	if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, key).Scan(&project); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	event, err := s.appendEvent(r.Context(), tx, projectOwner(project).event(
+		"user_state.updated", actor, map[string]any{"login": actor.ID, "state": value},
+	))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
 	writeJSON(w, http.StatusOK, value)
 }

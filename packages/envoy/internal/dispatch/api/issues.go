@@ -739,6 +739,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if statusChanged && after.Status == "done" {
 		eventType = "issue.closed"
 	}
+	if statusChanged && after.Parent != nil {
+		if err := s.deps.Events.LockOwners(r.Context(), tx,
+			issueOwner(key).event("", actor, nil),
+			issueOwner(*after.Parent).event("", actor, nil),
+		); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	after.LastSeq++
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, after))
 	if err != nil {

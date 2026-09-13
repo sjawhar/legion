@@ -13,8 +13,7 @@ production build from `web/dist`.
 - `features/issue/IssueLabels.tsx` edits issue-header labels with project-label suggestions; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
   browser API boundary.
-- `web/src/api/sse.ts` opens the issue event stream and invalidates TanStack
-  Query cache entries for the affected issue.
+- `web/src/api/sse.ts` opens the workspace event stream. Its shared cache-key vocabulary refreshes issue, ask/thread, comment, artifact-reference, project-document, subscriber, and settings data for the matching event; reconnect invalidates every live-data family before the UI renders stale data.
 - `web/src/main.tsx` installs React Router and the shared Query client.
 - `web/src/features/search/` owns the global palette, rail `Search` control, and `Ctrl/Cmd+K` shortcut. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 
@@ -25,6 +24,8 @@ Resolved asks leave the Inbox and open-ask badges, but their thread and Conversa
 A document's approval (`features/doc/ApprovalChip.tsx`) is a human review pinned to a version: the header of an issue document, the issue's Spec header, and a project document page show a chip (`Draft` header-only, `Awaiting approval`, `Approved v12`, `Approved v12 · changed since` when edited after approval, `Changes requested`) that opens the review history, plus `Approve` (`Approve v<latest>` when stale) and `Request changes` (reason required) controls that `POST /artifacts/{id}/reviews`; artifact and document lists show the chip only, never for a draft. An agent's `dispatch_request_approval` opens an ask of `kind: "approval"`, which the Inbox card renders as `Approval requested` with the two fixed options and no Other row, requiring a `Reason` when `Request changes` is chosen; answering it is the same review. Approval is the exception path (Legion's design gate), so nothing about it is prominent.
 
 Each open ask card (`features/inbox/`) keeps the full clarification exchange directly under its question (an inline reply list or collapsed reply-count disclosure) and uses one two-row composer for both outcomes. A human chooses any fixed options and can type a free-text answer or note, then selects **Answer** or **Ask back**; question-shaped free text with no option chosen is offered as a clarification first, while answered asks retain their separate **Reply** composer. An action ask keeps its `Action` chip, compact opened age, and fixed `Done` / `Can't` options (`Can't` requires an explanation).
+
+Each answer includes the nullable `edited_at` revision the human reviewed. On an `ASK_EDITED` response, the card reloads the latest question, keeps the draft text, clears its selected option, and requires explicit reconfirmation.
 
 The Inbox puts every open ask whose latest reply is not a human's under `Waiting on you`, oldest first, and never duplicates it in the remaining `Needs you` / `Waiting on agents` partition. The Inbox and every project page link their shared `GET /api/v1/inbox` data as `Blocked on you: N items, oldest 6h` when that leading group is non-empty. An issue header shows `Waiting on <login>` beside status when it has an open ask older than an hour.
 

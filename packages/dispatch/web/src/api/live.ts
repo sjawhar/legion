@@ -130,6 +130,20 @@ const reconnectInvalidationKeys: readonly QueryKey[] = [
   ["user-state"],
   ["issue"],
   ["events"],
+  ["projects"],
+  ["project"],
+  ["artifacts"],
+  ["artifact"],
+  ["artifact-ref"],
+  ["asks"],
+  ["ask"],
+  ["ask-thread"],
+  ["comments"],
+  ["comment"],
+  ["messages"],
+  ["subscribers"],
+  ["children"],
+  ["artifact-reviews"],
 ];
 
 function isCurrentStream(state: StreamState, streamId: number): boolean {

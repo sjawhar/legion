@@ -93,6 +93,14 @@ function isConversationComment(event: Event): event is CommentEvent {
 
 export function activityDescription(event: Event, previousStatus?: string): string {
   switch (event.type) {
+    case "project.created":
+      return `created project ${event.payload.key}`;
+    case "project.updated":
+      return `updated project ${event.payload.key}`;
+    case "settings.repo_project.updated":
+      return `${event.payload.deleted ? "removed" : "updated"} repository mapping ${event.payload.mapping.repo}`;
+    case "user_state.updated":
+      return "updated user state";
     case "issue.created":
       return "created the issue";
     case "issue.updated":
@@ -141,6 +149,8 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return "answered a message";
     case "child.status":
       return `moved ${event.payload.child_key} from ${event.payload.from} to ${event.payload.to}`;
+    case "subscription.remove_requested":
+      return `requested unsubscribe for ${shortSessionId(event.payload.session_id)}`;
     case "subscription.removed":
       return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
     case "block.repaired":
