@@ -539,20 +539,55 @@ fi
 rm -rf "$bare_temporary_dir"
 printf 'PASS: fails with a clear message when neither SMOKE_ROOT_ISSUE nor a recorded root-issue file is present\n'
 
+# LEGION-40: checkpoints.sh resolves DISPATCH_URL/DISPATCH_TOKEN exactly as up.sh does (shared
+# dispatch-config.sh). XDG_CONFIG_HOME points at harness-owned directories so both cases are
+# independent of the box's own ~/.config/opencode/envoy.json (present here, absent in CI).
+xdg_file_dir="${temporary_dir}/xdg-with-file"
+xdg_empty_dir="${temporary_dir}/xdg-empty"
+mkdir -p "${xdg_file_dir}/opencode" "$xdg_empty_dir"
+printf '{"dispatch":{"enabled":true,"serverUrl":"http://dispatch.test","token":"file-token"}}\n' >"${xdg_file_dir}/opencode/envoy.json"
+# Both from the file: the token reaches the Authorization header of a real Dispatch request.
+if ! PATH="${fake_bin}:${PATH}" \
+  SMOKE_DIR="$smoke_dir" \
+  SMOKE_REPO="example-org/legion-smoke" \
+  SMOKE_PROJECT="example-org/24" \
+  XDG_CONFIG_HOME="$xdg_file_dir" \
+  env -u DISPATCH_URL -u DISPATCH_TOKEN bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 1 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+grep -Fq 'Authorization: Bearer file-token' "$curl_log" || {
+  printf 'expected the envoy.json token to reach the Dispatch request\n' >&2
+  exit 1
+}
+printf 'PASS: checkpoints read DISPATCH_URL and DISPATCH_TOKEN from envoy.json when the variables are unset\n'
+
+# Neither source: the checkpoint stops naming the variable, the file, and the key -- not a `secrets`
+# command (DISPATCH_TOKEN is not a secretsd key on this machine) -- and makes no Dispatch request.
+curl_calls_before="$(wc -l <"$curl_log")"
 if PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
   SMOKE_REPO="example-org/legion-smoke" \
   SMOKE_PROJECT="example-org/24" \
   DISPATCH_URL="http://dispatch.test" \
+  XDG_CONFIG_HOME="$xdg_empty_dir" \
   env -u DISPATCH_TOKEN bash "$checkpoints_script" 1 >"$output_file" 2>&1; then
-  printf 'expected checkpoint 1 to fail without DISPATCH_TOKEN\n' >&2
+  printf 'expected checkpoint 1 to fail without DISPATCH_TOKEN and without envoy.json\n' >&2
   exit 1
 fi
-[[ "$(<"$output_file")" == *'secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh'* ]] || {
+[[ "$(<"$output_file")" == *"CHECKPOINT 1 FAILED: DISPATCH_TOKEN is unset and ${xdg_empty_dir}/opencode/envoy.json does not exist; export DISPATCH_TOKEN or set .dispatch.token in that file"* ]] || {
   cat "$output_file" >&2
   exit 1
 }
-printf 'PASS: missing-token error names the exact secrets-wrapped invocation\n'
+[[ "$(wc -l <"$curl_log")" == "$curl_calls_before" ]] || {
+  printf 'expected no Dispatch request when the token cannot be resolved\n' >&2
+  exit 1
+}
+printf 'PASS: missing-token error names the variable, the envoy.json path, and the key\n'
 
 checkpoint_nine_root_file="${temporary_dir}/checkpoint-nine-root.json"
 checkpoint_nine_children_file="${temporary_dir}/checkpoint-nine-children.json"

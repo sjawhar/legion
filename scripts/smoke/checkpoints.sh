@@ -16,6 +16,9 @@ require_env() {
   [[ -n "${!1:-}" ]] || fail "$1 is required"
 }
 
+# shellcheck source=scripts/smoke/dispatch-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/dispatch-config.sh"
+
 # The daemon's own persisted LegionState -- `GET /legion/v1/state` only ever returns `{project}`
 # (see LegionDaemonApi.State.response and its handler), so the tree/role/gate/admission fields
 # every checkpoint below reads have never been servable over that endpoint. `state_dir` in the
@@ -27,14 +30,9 @@ state() {
   [[ -r "$state_file" ]] || fail "daemon state file is missing: ${state_file}"
   cat "$state_file"
 }
-require_dispatch_token() {
-  [[ -n "${DISPATCH_TOKEN:-}" ]] ||
-    fail 'DISPATCH_TOKEN is required; run: secrets DISPATCH_TOKEN -- bash scripts/smoke/checkpoints.sh <n>'
-}
 dispatch_request() {
   local path="$1"
-  require_env DISPATCH_URL
-  require_dispatch_token
+  resolve_dispatch_config
   curl --fail --silent --show-error \
     -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
     "${DISPATCH_URL%/}/api/v1/${path}"
