@@ -19,9 +19,12 @@ mkdir -p "$fake_bin" "$smoke_dir" "${smoke_dir}/daemon"
 printf 'envoy\n' >"${smoke_dir}/webhook-mode"
 # The daemon state every checkpoint reads. `write_state` takes the `gates` record so the
 # design-gate runs below can vary it; the default carries no gate, matching the rig's default
-# `gates.design: off` (recorded in `design-gate` exactly as `up.sh` records it).
+# `gates.design: off` (recorded in `design-gate` exactly as `up.sh` records it). LEGSMOKE-2 is
+# LEGSMOKE-1's released child under LEGION-57's model: no tree or admission entry of its own, an
+# architect (sub-architect) role claim whose locator is a worker pane, Dispatch status
+# `in_progress` (what the first sub-architect spawn writes).
 write_state() {
-  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"todo","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}},"LEGSMOKE-2":{"root":"LEGSMOKE-2","status":"active","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1","LEGSMOKE-2"]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-architect":{"issue":"LEGSMOKE-2","role":"architect","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}},"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1"],"queue":[]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
 }
 # The same rig as a single-issue tree: LEGSMOKE-1 has no child, and the architect spawned a
 # planner on the root itself (`roles` carries a non-architect claim with issue == root). `$1` is
@@ -62,7 +65,7 @@ case "$request" in
     if [[ -n "${CHILDREN_FILE:-}" ]]; then
       cat "$CHILDREN_FILE"
     else
-      printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"todo"}]'
+      printf '%s' '[{"key":"LEGSMOKE-2","parent":"LEGSMOKE-1","status":"in_progress"}]'
     fi
     ;;
   *"/api/v1/issues/LEGSMOKE-1"*)
@@ -187,8 +190,25 @@ grep -Fq 'http://dispatch.test/api/v1/issues?project=LEGSMOKE&parent=LEGSMOKE-1'
   exit 1
 }
 run_checkpoint 4
-expect_output 'CHECKPOINT 4 OK: a released child is tracked by admission or tree state'
-printf 'PASS: checkpoints 3 and 4 pass under gates.design: off with no gate and no approval request\n'
+expect_output 'CHECKPOINT 4 OK: released child LEGSMOKE-2 has no tree or admission entry of its own; its architect runs as a worker pane of LEGSMOKE-1 and Dispatch reports it in_progress'
+printf 'PASS: checkpoints 3 and 4 pass under gates.design: off with no gate and no approval request; the released child is owned by a sub-architect worker pane inside its parent tree\n'
+
+# The pre-LEGION-57 shape: the child admitted as a queued root tree of its own.
+state_file="${smoke_dir}/daemon/state.json"
+jq -c '.trees["LEGSMOKE-2"] = {"root":"LEGSMOKE-2","status":"queued"} | .admission.queue = ["LEGSMOKE-2"]' \
+  "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+run_checkpoint 4 && { printf 'checkpoint 4 passed with the child admitted as a tree of its own\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: child LEGSMOKE-2 is admitted as a tree of its own (LEGION-57)'
+printf 'PASS: checkpoint 4 fails with a clear message when a child is admitted as a tree of its own\n'
+# Released but not yet spawned: no sub-architect claim for the child, and no phase worker on the
+# root either.
+write_state '{}'
+jq -c 'del(.roles["legion-exampleorg24-legsmoke-2-architect"])' \
+  "$state_file" >"${state_file}.next" && mv "${state_file}.next" "$state_file"
+run_checkpoint 4 && { printf 'checkpoint 4 passed with no sub-architect claim for the released child\n' >&2; exit 1; }
+expect_output 'CHECKPOINT 4 FAILED: neither a released child holds a sub-architect role claim with a worker pane nor a phase worker is claimed on LEGSMOKE-1'
+printf 'PASS: checkpoint 4 fails with a clear message when no released child holds a sub-architect claim\n'
+write_state '{}'
 
 # Under `off`, a registered gate means the architect ignored its policy line: fail naming it.
 write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
@@ -210,7 +230,7 @@ ARTIFACTS_FILE="$awaiting_artifacts" CHILDREN_FILE="$triage_children" run_checkp
 expect_output 'CHECKPOINT 3 OK: posted spec artifact awaiting approval, registered design gate, and the architect parked on it (nothing released, no phase worker)'
 # An architect that released a child while the document is still awaiting moved before approval.
 ARTIFACTS_FILE="$awaiting_artifacts" run_checkpoint 3 && { printf 'checkpoint 3 passed with a child released while the spec awaits approval\n' >&2; exit 1; }
-expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (todo) was released while the spec document is still awaiting approval"
+expect_output "CHECKPOINT 3 FAILED: LEGSMOKE-1's architect moved before approval: child issue LEGSMOKE-2 (in_progress) was released while the spec document is still awaiting approval"
 printf 'PASS: checkpoint 3 under root-issues proves the architect parked, and fails naming a child released before approval\n'
 write_parked_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1}}'
 # A Dispatch server without document approval (or a spec nobody requested approval of) reports no
@@ -226,7 +246,7 @@ run_checkpoint 4 && { printf 'checkpoint 4 passed before the daemon recorded the
 expect_output 'CHECKPOINT 4 FAILED: daemon has not recorded the spec approval for LEGSMOKE-1'
 write_state '{"LEGSMOKE-1":{"artifactId":"art-spec","latestVersion":1,"approvedVersion":1}}'
 run_checkpoint 4
-expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; a released child is tracked by admission or tree state'
+expect_output 'CHECKPOINT 4 OK: spec approval recorded on the gate; released child LEGSMOKE-2 has no tree or admission entry of its own; its architect runs as a worker pane of LEGSMOKE-1 and Dispatch reports it in_progress'
 printf 'PASS: checkpoint 4 under root-issues requires the recorded approval at the current spec version\n'
 printf 'off\n' >"${smoke_dir}/design-gate"
 
@@ -260,7 +280,7 @@ write_single_issue_state '{}' architect
 CHILDREN_FILE="$no_children" run_checkpoint 3 && { printf 'checkpoint 3 passed with neither a child issue nor a phase worker\n' >&2; exit 1; }
 expect_output 'CHECKPOINT 3 FAILED: LEGSMOKE-1 has neither a Dispatch child issue nor a phase-worker role claim on the root'
 CHILDREN_FILE="$no_children" run_checkpoint 4 && { printf 'checkpoint 4 passed with neither a released child nor a phase worker\n' >&2; exit 1; }
-expect_output 'CHECKPOINT 4 FAILED: neither a child is released into admission or an active tree nor a phase worker is claimed on LEGSMOKE-1'
+expect_output 'CHECKPOINT 4 FAILED: neither a released child holds a sub-architect role claim with a worker pane nor a phase worker is claimed on LEGSMOKE-1'
 printf 'PASS: checkpoints 3 and 4 fail naming the root when neither a child issue nor a phase worker exists\n'
 write_state '{}'
 
