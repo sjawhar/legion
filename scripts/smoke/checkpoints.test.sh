@@ -26,6 +26,12 @@ printf 'envoy\n' >"${smoke_dir}/webhook-mode"
 write_state() {
   printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-legsmoke-2-architect":{"issue":"LEGSMOKE-2","role":"architect","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}},"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1"],"queue":[]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
 }
+# `write_state` plus the controller's own role claim (`legion-<slug>-controller`, no `issue`): the
+# state a rig whose controller has registered shows; `write_state` itself is the missing-claim
+# fixture checkpoint 14 fails on.
+write_claimed_state() {
+  printf '%s' '{"issues":{"LEGSMOKE-1":{"status":"in_progress","children":["LEGSMOKE-2"]},"LEGSMOKE-2":{"parent":"LEGSMOKE-1","status":"in_progress","children":[]},"LEGSMOKE-99":{"status":"in_progress","children":[]}},"trees":{"LEGSMOKE-1":{"root":"LEGSMOKE-1","status":"active","locator":{"tmuxWindowId":"@2","tmuxPaneId":"%2"}}},"controllerLocator":{"tmuxWindowId":"@1","tmuxPaneId":"%1"},"roles":{"legion-exampleorg24-controller":{"role":"controller","sessionId":"ses_controller"},"legion-exampleorg24-legsmoke-2-architect":{"issue":"LEGSMOKE-2","role":"architect","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%3"}},"legion-exampleorg24-legsmoke-2-tester":{"issue":"LEGSMOKE-2","role":"tester","locator":{"tmuxWindowId":"@3","tmuxPaneId":"%4"}}},"admission":{"active":["LEGSMOKE-1"],"queue":[]},"gates":'"$1"'}' >"${smoke_dir}/daemon/state.json"
+}
 # The same rig as a single-issue tree: LEGSMOKE-1 has no child, and the architect spawned a
 # planner on the root itself (`roles` carries a non-architect claim with issue == root). `$1` is
 # the gates record, `$2` the role claimed on the root (default planner; pass "architect" to model
@@ -79,7 +85,9 @@ esac
 EOF
 # Understands the `-L <socket>` global option the real daemon and checkpoints.sh use, logging
 # `<socket> <args…>` per invocation so the harness can assert every call targeted the private
-# server. `has-session` on the default server (no socket) reports no session.
+# server. `has-session` on the default server (no socket) reports no session. `display-message`
+# answers the pid FAKE_TMUX_PANE_PIDS (space-separated `%1=1234 %2=5678 …`) maps for the `-t <pane>`
+# in its argv, else FAKE_TMUX_PID for every pane and the server alike (the checkpoint-13 cases).
 cat >"${fake_bin}/tmux" <<'EOF'
 #!/usr/bin/env bash
 socket=""
@@ -87,7 +95,17 @@ if [[ "${1:-}" == "-L" ]]; then socket="$2"; shift 2; fi
 printf '%s\n' "$socket $*" >>"${TMUX_LOG:-/dev/null}"
 case "${1:-}" in
   has-session) [[ -n "$socket" ]] ;;
-  display-message) printf '%s\n' "$FAKE_TMUX_PID" ;;
+  display-message)
+    target=""
+    args=("$@")
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if [[ "${args[i]}" == "-t" ]]; then target="${args[i + 1]:-}"; fi
+    done
+    pid="$FAKE_TMUX_PID"
+    for mapping in ${FAKE_TMUX_PANE_PIDS:-}; do
+      if [[ -n "$target" && "${mapping%%=*}" == "$target" ]]; then pid="${mapping#*=}"; fi
+    done
+    printf '%s\n' "$pid" ;;
   show-environment) printf 'PATH=/usr/bin\n' ;;
   list-windows|list-panes)
     if [[ "$*" == *"#{window_id}"* ]]; then printf '@1\n@2\n@3\n'; else printf 'controller\nlegsmoke-1\nlegsmoke-2\n'; fi ;;
@@ -189,6 +207,76 @@ fi
   exit 1
 }
 printf 'PASS: checkpoint 13 inspects an operator-planted canary only when SMOKE_CANARY_ENV names it\n'
+
+# Checkpoint 14 (LEGION-88) inspects each recorded pane's process tree for the Legion identity the
+# daemon set for it, so the fixture processes below stand in for panes: each `sleep` is launched
+# with the identity family scrubbed from whatever pane runs this harness (a Legion worker's own pane
+# carries LEGION_TREE and friends), then given exactly the identity its case needs. The checkpoint
+# reads the fixtures, never its own environment, so the harness invocation itself needs no scrub.
+identity_scrub=(-u LEGION_TREE -u LEGION_ISSUE -u LEGION_GENERATION -u LEGION_WORKSPACE)
+env "${identity_scrub[@]}" sleep 300 &
+controller_clean=$!
+env "${identity_scrub[@]}" LEGION_TREE="CANARY-1" sleep 300 &
+controller_canary=$!
+env "${identity_scrub[@]}" LEGION_TREE="LEGSMOKE-1" LEGION_ISSUE="LEGSMOKE-1" sleep 300 &
+root_ok=$!
+env "${identity_scrub[@]}" LEGION_TREE="CANARY-1" LEGION_ISSUE="LEGSMOKE-1" sleep 300 &
+root_wrong=$!
+env "${identity_scrub[@]}" LEGION_TREE="LEGSMOKE-1" LEGION_ISSUE="LEGSMOKE-2" sleep 300 &
+worker_ok=$!
+trap 'kill "$clean_pid" "$planted_pid" "$canary_pid" "$app_key_pid" "$controller_clean" "$controller_canary" "$root_ok" "$root_wrong" "$worker_ok" 2>/dev/null; rm -rf "$temporary_dir"' EXIT
+
+checkpoint_fourteen_against() {
+  # $1: the `%pane=pid` map the fake tmux answers `display-message -t <pane>` from.
+  PATH="${fake_bin}:${PATH}" SMOKE_DIR="$smoke_dir" SMOKE_REPO="example-org/legion-smoke" \
+    SMOKE_PROJECT="example-org/24" DISPATCH_URL="http://dispatch.test" FAKE_TMUX_PID="$clean_pid" \
+    FAKE_TMUX_PANE_PIDS="$1" env -u DISPATCH_TOKEN bash "$checkpoints_script" 14 >"$output_file" 2>&1
+}
+pass_map="%1=${controller_clean} %2=${root_ok} %3=${worker_ok} %4=${worker_ok}"
+
+write_claimed_state '{}'
+if ! checkpoint_fourteen_against "$pass_map"; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 14 OK'*'legion-exampleorg24-controller'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 14 passes when the controller has claimed and every pane carries only the identity the daemon set\n'
+
+write_state '{}'
+if checkpoint_fourteen_against "$pass_map"; then
+  printf 'expected checkpoint 14 to fail when daemon state has no controller role claim\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'no controller role claim (legion-exampleorg24-controller)'*'tmux -L legion-exampleorg24 attach -t legion-exampleorg24'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 14 fails naming the missing controller claim and the attach command\n'
+
+write_claimed_state '{}'
+if checkpoint_fourteen_against "%1=${controller_canary} %2=${root_ok} %3=${worker_ok} %4=${worker_ok}"; then
+  printf 'expected checkpoint 14 to fail when the controller pane carries LEGION_TREE\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"controller pane %1 (pid ${controller_canary}) carries LEGION_TREE"* && "$(<"$output_file")" != *'CANARY-1'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 14 fails naming the controller pane, pid, and variable -- never its value -- when the controller pane carries LEGION_TREE\n'
+
+if checkpoint_fourteen_against "%1=${controller_clean} %2=${root_wrong} %3=${worker_ok} %4=${worker_ok}"; then
+  printf 'expected checkpoint 14 to fail when a root pane carries a LEGION_TREE that is not its recorded tree\n' >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *"pane %2 (pid ${root_wrong}, root LEGSMOKE-1) carries a LEGION_TREE that differs"* && "$(<"$output_file")" != *'CANARY-1'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: checkpoint 14 fails naming the root pane when its LEGION_TREE differs from the recorded tree, never printing the value\n'
+write_state '{}'
 
 PATH="${fake_bin}:${PATH}" \
   SMOKE_DIR="$smoke_dir" \
@@ -355,7 +443,8 @@ write_state '{}'
 
 # none mode: no Dispatch issue event reaches the rig NATS, so 1-4 and 12 are blocked with the
 # Dispatch-ingress reason before any Dispatch request is made (12 before it even asks for
-# SMOKE_QUEUED_ISSUE); 5-7 and 9-11 keep the GitHub-ingress reason below; 13 is not gated by mode.
+# SMOKE_QUEUED_ISSUE); 5-7 and 9-11 keep the GitHub-ingress reason below; 13 and 14 are not gated
+# by mode.
 printf 'none\n' >"${smoke_dir}/webhook-mode"
 curl_calls_before="$(wc -l <"$curl_log")"
 for blocked_checkpoint in 1 2 3 4 12; do
@@ -390,7 +479,17 @@ fi
   cat "$output_file" >&2
   exit 1
 }
-printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 ungated\n'
+write_claimed_state '{}'
+if ! checkpoint_fourteen_against "$pass_map"; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 14 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+write_state '{}'
+printf 'PASS: none mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and leaves 13 and 14 ungated\n'
 
 # The same none mode with the recorded Dispatch ingress `rig` (a scratch Dispatch publishes into
 # the rig NATS itself): the webhook mode no longer decides checkpoints 1-4 and 12. Checkpoint 1
@@ -515,7 +614,7 @@ printf 'PASS: none mode blocks GitHub-fed checkpoints 5-7 and 9-11 with the GitH
 
 # forward mode: `gh webhook forward` relays GitHub events only, so 1-4 and 12 are blocked with the
 # same Dispatch-ingress reason (naming forward as the recorded mode), while 5 passes the mode gate
-# and reaches its own PR-fixture check exactly as under envoy.
+# and reaches its own PR-fixture check exactly as under envoy, and 14 runs ungated as under none.
 printf 'forward\n' >"${smoke_dir}/webhook-mode"
 curl_calls_before="$(wc -l <"$curl_log")"
 for blocked_checkpoint in 1 2 3 4 12; do
@@ -554,8 +653,18 @@ fi
   printf 'expected forward mode to let checkpoint 5 past the mode gate to its PR-fixture check; got %s:\n%s\n' "$status" "$(<"$output_file")" >&2
   exit 1
 }
+write_claimed_state '{}'
+if ! checkpoint_fourteen_against "$pass_map"; then
+  cat "$output_file" >&2
+  exit 1
+fi
+[[ "$(<"$output_file")" == *'CHECKPOINT 14 OK'* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+write_state '{}'
 printf 'envoy\n' >"${smoke_dir}/webhook-mode"
-printf 'PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason and lets checkpoint 5 reach its own PR check\n'
+printf 'PASS: forward mode blocks checkpoints 1-4 and 12 with the Dispatch-ingress reason, lets checkpoint 5 reach its own PR check, and leaves 14 ungated\n'
 
 # A SMOKE_DIR up.sh never populated, under the trapped temporary directory so every exit path
 # below leaves nothing behind.
@@ -821,4 +930,4 @@ grep -q '^ has-session -t legion-exampleorg24$' "$TMUX_LOG" || {
   printf 'checkpoint 13 never probed the default server for a legion-exampleorg24 session\n' >&2
   exit 1
 }
-printf 'PASS: every tmux invocation across checkpoints 1-13 targets the private legion-<slug> socket (default-server probe excepted)\n'
+printf 'PASS: every tmux invocation across checkpoints 1-14 targets the private legion-<slug> socket (default-server probe excepted)\n'

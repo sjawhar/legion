@@ -55,7 +55,7 @@ require_env() {
 # gating from the recorded mode.
 webhook_ingress_block_reason() {
   printf '%s\n' \
-    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8 and 13 are not gated by the mode'
+    'SMOKE_WEBHOOK_MODE=none: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (resync skips issue keys it never ingested), and no live GitHub event does either; checkpoints 1-4 and 12 need SMOKE_WEBHOOK_MODE=envoy, 5-7 and 9-11 need envoy or forward; checkpoints 8, 13, and 14 are not gated by the mode'
 }
 
 resolve_webhook_mode() {

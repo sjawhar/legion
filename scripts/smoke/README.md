@@ -46,7 +46,7 @@ Provide the three GitHub secrets with the `secrets` wrapper rather than writing 
 | --- | --- | --- |
 | `SMOKE_WEBHOOK_MODE=envoy` | Production Envoy ingress | App-only, live GitHub envelope and Dispatch issue-event ingress from the production Envoy receiver; the only mode that reaches checkpoints 1–4 and 12. It never registers a hook or calls GitHub with a personal identity. |
 | `SMOKE_WEBHOOK_MODE=forward` | Local GitHub webhook ingress (live GitHub events only) | `gh webhook forward` relays GitHub events only: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue `up.sh` creates and `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 (exit 3) — unless the recorded `SMOKE_DISPATCH_INGRESS` is `rig`, in which case a scratch Dispatch feeds those events itself and the checkpoints run, saying which record let them through; 5–7 and 9–11 are available. This is the default whenever `gh webhook forward --help` is available (otherwise `none`) and needs a user-authenticated `gh` identity. |
-| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live ingress: neither GitHub events nor Dispatch issue events reach the rig NATS | Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoint 13. The daemon never admits the root issue `up.sh` creates (its resync skips issue keys it never ingested), so `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 and with the GitHub-ingress reason for 5–7 and 9–11, exit 3 each. `envoy` is the mode for checkpoints 1–4 and 12 against the shared Dispatch server; with a scratch Dispatch publishing into the rig NATS (`SMOKE_DISPATCH_INGRESS=rig`) they run under `none` too, while 5–7 and 9–11 stay blocked. |
+| `SMOKE_WEBHOOK_MODE=none` | Deliberately no live ingress: neither GitHub events nor Dispatch issue events reach the rig NATS | Exercises rig start-up, the fail-closed OMP probe, controller spawn, and checkpoints 13 and 14. The daemon never admits the root issue `up.sh` creates (its resync skips issue keys it never ingested), so `checkpoints.sh` prints `SKIPPED-BLOCKED` with the Dispatch-ingress reason for checkpoints 1–4 and 12 and with the GitHub-ingress reason for 5–7 and 9–11, exit 3 each. `envoy` is the mode for checkpoints 1–4 and 12 against the shared Dispatch server; with a scratch Dispatch publishing into the rig NATS (`SMOKE_DISPATCH_INGRESS=rig`) they run under `none` too, while 5–7 and 9–11 stay blocked. |
 | `SMOKE_BRANCH_PROTECTION=1` | Branch protection | `up.sh` configures `main` to require one approving review only when explicitly armed. This needs a user-authenticated `gh` identity. Without it, the rig prints `SKIPPED-BLOCKED`; checkpoints 7–8 exit 3 with the exact missing-ruleset reason. |
 
 The sandbox repository includes the 20-second `ci` check and the `.fail-me`-controlled `fail-on-demand` workflow. Both Legion Apps are installed account-wide for `sjawhar`; no per-repository install step is required.
@@ -147,6 +147,31 @@ prints the bare option name (an empty list), the daemon log names `SSH_AUTH_SOCK
 opened afterwards prints `0` for `tr '\0' '\n' < /proc/<pid>/environ | grep -c SSH_AUTH_SOCK`. A
 second attach must copy nothing.
 
+**Checkpoint 14's negative (LEGION-88).** The identity family (`LEGION_TREE`, `LEGION_ISSUE`,
+`LEGION_GENERATION`, `LEGION_WORKSPACE`) needs no unsetting before `up.sh`: the same allow-list
+drops it, so a rig started from a Legion worker pane gets a controller that claims its role.
+Checkpoint 14 requires that claim and fails the rig if any pane carries an identity the daemon did
+not set for it. To prove the negative on a rig, start it in `none` mode with the identity injected
+below the daemon's own boundary — through the launch prefix, exactly as the bug looked from the
+pane — and a short registration deadline:
+
+```sh
+LEGION_WORKER_BOOT_TIMEOUT_SECONDS=20 \
+SMOKE_OMP_LAUNCH_PREFIX='env LEGION_TREE=CANARY-1 secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --' \
+  secrets ENVOY_GITHUB_WEBHOOK_SECRET GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- \
+  bash -c 'GITHUB_WEBHOOK_SECRET="$ENVOY_GITHUB_WEBHOOK_SECRET" exec bash scripts/smoke/up.sh'
+```
+
+Then `bash scripts/smoke/checkpoints.sh 14` fails naming `LEGION_TREE` on the controller pane
+(`controller pane %<n> (pid <p>) carries LEGION_TREE: …`, exit 1, the value never printed);
+`tmux -L legion-<slug> capture-pane -p -J -t <controller pane>` shows the extension's one
+sentence — it was launched with both `LEGION_CONTROLLER` and `LEGION_TREE`, so it claims nothing
+and stays up; and after the 60 s deadline (`20 × 3`) `${SMOKE_DIR}/daemon.log` carries
+`[legion] retiring the controller: alive in pane %<n> in window @<m> of tmux server legion-<slug>
+(attach with …) but it never claimed its role within its 60s registration deadline; …`, once per
+cycle. The positive is the same rig with the default prefix, started from a worker pane with
+nothing unset: `CHECKPOINT 14 OK`.
+
 The daemon health check is `http://127.0.0.1:19370/legion/v1/state`. Its state, generated configuration, process IDs, and logs live in `/tmp/legion-smoke` by default; set `SMOKE_DIR` to use another location. `NATS_PORT`, `ENVOY_PORT`, and `LEGION_DAEMON_PORT` override the scratch defaults. The daemon also binds the port one above `LEGION_DAEMON_PORT` for its worker stream (`worker_stream_port` defaults to the daemon port plus one), so that port must be free too. `up.sh` refuses to start when any of those ports is already occupied, except for a live process recorded in its own PID file and matching Linux `/proc/<pid>/stat` start time (the daemon's record covers both of its ports). Re-running `up.sh` reuses only those verified rig processes and the `legion-smoke-nats-<slug>` container (reused only when it is mapped to the configured `NATS_PORT`; otherwise `up.sh` refuses with `NATS container legion-smoke-nats-<slug> is not mapped to configured port <NATS_PORT>`). In `envoy` mode, `envoy-bridge.log` records readiness, the first-envelope validation verdict, every forwarded subject, and byte size.
 
 Two rigs share one machine when each has its own `SMOKE_PROJECT`, `SMOKE_DIR`, and ports — and their `LEGION_DAEMON_PORT` values are not adjacent, since each daemon also binds the port one above its own for its worker stream. The NATS container is `legion-smoke-nats-<slug>` and the listener's `ENVOY_MACHINE_ID` is `legion-smoke-<slug>` (it keys the listener's durable JetStream consumer, so two listeners sharing one id fail with `consumer is already bound to a subscription`), where `<slug>` is the same one the tmux session name below uses. Once the container is running, `up.sh` writes its name to `${SMOKE_DIR}/nats-container` so `down.sh` needs no environment to find it; a refused start writes no record.
@@ -175,14 +200,14 @@ Legion panes never appear in your own `tmux list-sessions`; attach with `tmux -L
 Run the numbered assertions during the end-to-end exercise:
 
 ```sh
-bash scripts/smoke/checkpoints.sh <1-13>
+bash scripts/smoke/checkpoints.sh <1-14>
 ```
 
 `checkpoints.sh` resolves `DISPATCH_URL` and `DISPATCH_TOKEN` exactly as `up.sh` does — the environment when set, otherwise `.dispatch.serverUrl` / `.dispatch.token` from `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/envoy.json` (the two rows in "Prerequisites") — at the moment a checkpoint makes a Dispatch request, and never persists either under `SMOKE_DIR`. When neither source has the token it prints `CHECKPOINT <n> FAILED: DISPATCH_TOKEN is unset and <config dir>/opencode/envoy.json has no .dispatch.token; export DISPATCH_TOKEN or set .dispatch.token in that file` and exits 1 before any request. Checkpoint 13 makes no Dispatch request and needs neither.
 
 Each invocation exits nonzero on a failed observable and prints one `CHECKPOINT <n> OK` line on success. A human-controlled gate that is unavailable prints `CHECKPOINT <n> SKIPPED-BLOCKED` and exits 3 rather than reporting a false green. Checkpoints 1–4, 9, and 12 read the root issue `up.sh` recorded at `${SMOKE_DIR}/root-issue`; checkpoint 5 infers the Legion pull request from `gh pr list` where possible. Set the listed variable when a later exercise has more than one candidate, or when checkpoints run against a `SMOKE_DIR` `up.sh` never populated. Such a directory also has no recorded webhook mode: `checkpoints.sh` reads `${SMOKE_DIR}/webhook-mode`, uses an exported `SMOKE_WEBHOOK_MODE` (`envoy`, `forward`, or `none`) when there is no record, and otherwise stops naming the missing file — it never guesses a mode, because the mode decides which checkpoints are reachable at all.
 
-With a recorded `SMOKE_WEBHOOK_MODE=none`, checkpoints 1–4 and 12 are blocked: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (`resync.ts`'s `healStatusDrift` skips issue keys it has never ingested). Checkpoints 5–7 and 9–11 are blocked because they assert pull-request, check-run, issue-comment, or issue-event delivery. With a recorded `forward`, checkpoints 1–4 and 12 are blocked for the same reason — `gh webhook forward` provides live GitHub events only, never Dispatch issue events — while 5–7 and 9–11 are available. Checkpoints 8 and 13 are not gated by the mode. Against the shared Dispatch server, `envoy` is the only mode for checkpoints 1–4 and 12; when `up.sh` recorded `SMOKE_DISPATCH_INGRESS=rig` (a scratch Dispatch publishes into the rig NATS itself), the webhook mode says nothing about those five checkpoints and `checkpoints.sh` runs them, printing which record let it through. `envoy` and `forward` both provide the live GitHub ingress that checkpoints 5–7 and 9–11 need, whatever the Dispatch ingress.
+With a recorded `SMOKE_WEBHOOK_MODE=none`, checkpoints 1–4 and 12 are blocked: no Dispatch issue event reaches the rig NATS, so the daemon never admits the root issue (`resync.ts`'s `healStatusDrift` skips issue keys it has never ingested). Checkpoints 5–7 and 9–11 are blocked because they assert pull-request, check-run, issue-comment, or issue-event delivery. With a recorded `forward`, checkpoints 1–4 and 12 are blocked for the same reason — `gh webhook forward` provides live GitHub events only, never Dispatch issue events — while 5–7 and 9–11 are available. Checkpoints 8, 13, and 14 are not gated by the mode. Against the shared Dispatch server, `envoy` is the only mode for checkpoints 1–4 and 12; when `up.sh` recorded `SMOKE_DISPATCH_INGRESS=rig` (a scratch Dispatch publishes into the rig NATS itself), the webhook mode says nothing about those five checkpoints and `checkpoints.sh` runs them, printing which record let it through. `envoy` and `forward` both provide the live GitHub ingress that checkpoints 5–7 and 9–11 need, whatever the Dispatch ingress.
 
 ### Required checkpoint sequence
 
@@ -246,3 +271,4 @@ a gate that can never be satisfied.
 | 11 | `SMOKE_RESURRECTION_ISSUE`, `SMOKE_RESURRECTION_ROLE`, `SMOKE_RESURRECTION_WORKER_SESSION`, `SMOKE_WORKER_WINDOW`, `SMOKE_CATCHUP_FRAGMENT` | Second live issue advances exactly one generation and its specific revived worker receives catch-up. |
 | 12 | `SMOKE_ROOT_ISSUE`, `SMOKE_QUEUED_ISSUE` | The lingering root released its slot and the queued issue was promoted. |
 | 13 | `SMOKE_CANARY_ENV` optional | The private tmux server and every recorded pane (controller, roots, workers) carry none of `DISPATCH_TOKEN`, `LEGION_BOOT_TOKEN`, `LEGION_CONTROLLER_SECRET`, `GH_AGENT_APP_PRIVATE_KEY_B64`, `GH_REVIEW_APP_PRIVATE_KEY_B64`, or any name in `SMOKE_CANARY_ENV` (space-separated) on argv or in environ; the server's global environment has none; the default server hosts no `legion-<slug>` session. |
+| 14 | — | The controller holds its role claim in daemon state (`legion-<slug>-controller`); every recorded pane's process tree carries only the Legion identity the daemon set for it — the controller pane none of `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_GENERATION`, `LEGION_WORKSPACE`; a root or worker pane a `LEGION_TREE`/`LEGION_ISSUE` equal to the tree and issue recorded for it — and the private server's global environment names no `LEGION_*`. Values are compared, never printed. Runs in every `SMOKE_WEBHOOK_MODE`, `none` included; run it once the controller has had time to claim (RIG READY does not wait for the claim). |

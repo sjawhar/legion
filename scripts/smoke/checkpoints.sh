@@ -124,6 +124,26 @@ legion_tmux() {
   tmux -L "legion-$(project_slug)" "$@"
 }
 
+# The pane pid and every process below it, breadth-first from one `ps` snapshot, one pid per line.
+# Checkpoint 14 walks descendants because every pane runs `legion worker-shim -- <launch prefix>
+# <omp>`: an identity `omp_launch_prefix` injects (`env LEGION_TREE=… secrets … -- mise x … -- omp`)
+# sits on the OMP process and its children, never on the pane's own pid, so a pane-pid-only read
+# would pass the very rig the check exists to fail (LEGION-88).
+descendant_pids() {
+  local snapshot
+  snapshot="$(ps -eo pid=,ppid=)"
+  local -a queue=("$1")
+  local pid child
+  while ((${#queue[@]} > 0)); do
+    pid="${queue[0]}"
+    queue=("${queue[@]:1}")
+    printf '%s\n' "$pid"
+    while IFS= read -r child; do
+      [[ -n "$child" ]] && queue+=("$child")
+    done < <(awk -v parent="$pid" '$2 == parent { print $1 }' <<<"$snapshot")
+  done
+}
+
 # The root Dispatch issue for this exercise: `up.sh` creates it once and records its key at
 # `${smoke_dir}/root-issue` for every later checkpoints.sh invocation to read (it never guesses
 # by picking "the first parentless issue" -- LEGSMOKE is a shared project, and other concurrent
@@ -712,6 +732,73 @@ checkpoint_thirteen() {
     "${#pids[@]}" "$socket" "$joined" "$socket"
 }
 
+# LEGION-88: a rig prints RIG READY and passes checkpoint 1 with a controller that is alive but has
+# never claimed its role -- the shape both LEGION-72 reproductions took, when a rig daemon built
+# before LEGION-74's allow-list handed the launching worker pane's LEGION_TREE to its controller
+# pane and the extension refused the both-markers session. Two facts, in every webhook mode: the
+# controller's role claim is in daemon state, and every recorded pane's process tree carries only
+# the Legion identity the daemon set for it -- the controller none of LEGION_TREE, LEGION_ISSUE,
+# LEGION_GENERATION, LEGION_WORKSPACE; a root or worker pane a LEGION_TREE/LEGION_ISSUE equal to the
+# tree and issue the daemon recorded for it (a sub-architect on a child has LEGION_TREE the root
+# and LEGION_ISSUE the child, mirroring the daemon's liveAncestorTree) -- and the private server's
+# global table names no LEGION_*. Descendants are walked (see descendant_pids). Absence never fails
+# a root or worker pane: a worker's own subprocess may legitimately run under `env -u LEGION_TREE …`
+# (docs/solutions/legion/worker-pane-shell-gotchas.md), and the pane pid itself always carries both
+# from its -e pairs. An observed value is compared, never printed; the recorded key is.
+checkpoint_fourteen() {
+  local slug socket token entry pane kind tree issue pid p environ name
+  local panes=0 processes=0
+  slug="$(project_slug)"
+  socket="legion-${slug}"
+  token="legion-${slug}-controller"
+  state | jq -e --arg token "$token" '
+    .roles[$token] | type == "object" and .role == "controller" and (.sessionId | type == "string" and length > 0)
+  ' >/dev/null ||
+    fail "daemon state has no controller role claim (${token}): the controller pane never registered — attach with \`tmux -L ${socket} attach -t ${socket}\` and read its pane"
+  while IFS=$'\t' read -r pane kind tree issue; do
+    [[ -n "$pane" ]] || continue
+    panes=$((panes + 1))
+    pid="$(legion_tmux display-message -p -t "$pane" '#{pane_pid}')" || fail "recorded pane ${pane} is absent from ${socket}"
+    [[ -r "/proc/${pid}/environ" ]] || fail "cannot read /proc/${pid}"
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      # A child that exited between the snapshot and this read proves nothing either way.
+      [[ -d "/proc/${p}" ]] || continue
+      [[ -r "/proc/${p}/environ" ]] || fail "cannot read /proc/${p} (under recorded pane ${pane})"
+      environ="$(tr '\0' '\n' <"/proc/${p}/environ")"
+      processes=$((processes + 1))
+      if [[ "$kind" == controller ]]; then
+        for name in LEGION_TREE LEGION_ISSUE LEGION_GENERATION LEGION_WORKSPACE; do
+          if grep -q "^${name}=" <<<"$environ"; then
+            fail "controller pane ${pane} (pid ${p}) carries ${name}: a Legion identity the daemon did not set for it — the rig launcher inherited it from an outer Legion pane, or the launch prefix injected it"
+          fi
+        done
+      else
+        if entry="$(grep -m1 '^LEGION_TREE=' <<<"$environ")" && [[ "${entry#*=}" != "$tree" ]]; then
+          fail "pane ${pane} (pid ${p}, ${kind} ${issue}) carries a LEGION_TREE that differs from the tree the daemon recorded for it (${tree})"
+        fi
+        if entry="$(grep -m1 '^LEGION_ISSUE=' <<<"$environ")" && [[ "${entry#*=}" != "$issue" ]]; then
+          fail "pane ${pane} (pid ${p}, ${kind} ${issue}) carries a LEGION_ISSUE that differs from the issue the daemon recorded for it (${issue})"
+        fi
+      fi
+    done < <(descendant_pids "$pid")
+  done < <(state | jq -r '
+    . as $s
+    | def tree_of(k): if $s.trees[k] then k elif ($s.issues[k].parent? // null) then tree_of($s.issues[k].parent) else k end;
+    [ {pane: .controllerLocator.tmuxPaneId?, kind: "controller", tree: "", issue: ""},
+      (.trees | to_entries[] | {pane: .value.locator.tmuxPaneId?, kind: "root", tree: .key, issue: .key}),
+      (.roles | to_entries[] | select(.value | has("issue"))
+        | {pane: .value.locator.tmuxPaneId?, kind: "worker", tree: tree_of(.value.issue), issue: .value.issue}) ]
+    | map(select(.pane != null))
+    | .[] | [.pane, .kind, .tree, .issue] | @tsv')
+  ((panes > 0)) || fail "daemon state records no pane to inspect"
+  if entry="$(legion_tmux show-environment -g | grep -m1 -E '^LEGION_[A-Za-z0-9_]*=')"; then
+    fail "private tmux server global environment names ${entry%%=*}"
+  fi
+  printf 'CHECKPOINT 14 OK: controller claim %s present; %d processes under %d recorded panes carry only the Legion identity the daemon set; private server global environment names no LEGION_*\n' \
+    "$token" "$processes" "$panes"
+}
+
 if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
   [[ -r "${smoke_dir}/daemon.log" ]] || {
     printf 'arm-revival: daemon log is unavailable\n' >&2
@@ -722,8 +809,8 @@ if [[ $# -eq 1 && "$1" == "arm-revival" ]]; then
   exit 0
 fi
 
-[[ $# -eq 1 && "$1" =~ ^([1-9]|1[0-3])$ ]] || {
-  printf 'usage: %s <1-13>\n' "$0" >&2
+[[ $# -eq 1 && "$1" =~ ^([1-9]|1[0-4])$ ]] || {
+  printf 'usage: %s <1-14>\n' "$0" >&2
   exit 2
 }
 
@@ -802,4 +889,5 @@ case "$checkpoint" in
   11) checkpoint_eleven ;;
   12) checkpoint_twelve ;;
   13) checkpoint_thirteen ;;
+  14) checkpoint_fourteen ;;
 esac
