@@ -1,0 +1,87 @@
+{
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1023",
+  "branch": "legion/LEGION-70",
+  "head": "9969071b332e44149ce591a017821b93592ed22c",
+  "spec": "dispatch://LEGION-70/spec (version 6)",
+  "commits": [
+    {
+      "changeId": "mwzlupnwxlou",
+      "commit": "97054a154fc4",
+      "subject": "fix(workspace): create the issue bookmark only when creating the workspace (LEGION-70)",
+      "planTask": 1
+    },
+    {
+      "changeId": "sntmrwwymtmy",
+      "commit": "007fc4dd65a6",
+      "subject": "test(workspace): prove a resume leaves the issue bookmark alone under real jj (LEGION-70)",
+      "planTask": 2
+    },
+    {
+      "changeId": "xpvvontvpomx",
+      "commit": "804f4c201b5f",
+      "subject": "docs(daemon): record when provisioning creates the issue bookmark (LEGION-70)",
+      "planTask": 3
+    },
+    {
+      "changeId": "yrlzokmuturm",
+      "commit": "01cd60a642d1",
+      "subject": "ci: lint, typecheck, and test packages/workspace in the Tests workflow (LEGION-70)",
+      "planTask": 4
+    },
+    {
+      "changeId": "llxkumnrmmxo",
+      "commit": "9969071b332e",
+      "subject": "test(workspace): give the real-jj rig a commit identity so its pushes run on CI (LEGION-70)",
+      "planTask": 2,
+      "note": "Added after the first CI run: the runner has no jj user config and `jj git push` refused the rig's commits (`Won't push commit … since it has no author and/or committer set`). The rig now passes JJ_USER/JJ_EMAIL on every jj invocation, its own and provisioning's. Reproduced locally with an empty JJ_CONFIG before the fix; the old stale-workspace test would have failed the same way had CI ever run it (plan F8)."
+    }
+  ],
+  "architectCorrectionApplied": "spec v6: `jj workspace forget` drops `--cleanup --force` (both jj 0.44.0 and 0.45.1 reject them: `error: unexpected argument '--cleanup'`, exit 2 — verified on this box). Source argv is now [\"jj\",\"workspace\",\"forget\",<name>,\"-R\",<repo>]; every expected argv in workspace.test.ts follows; processes.test.ts carried no forget pin. The AGENTS.md sentence quotes the flag-free form.",
+  "tests": {
+    "workspace": {
+      "file": "packages/workspace/src/workspace.test.ts",
+      "pass": 16,
+      "fail": 0,
+      "binaries": [
+        "jj 0.45.1 (local)",
+        "jj 0.44.0 (mise x github:jj-vcs/jj@0.44.0)"
+      ],
+      "negativeCheck": "with the old unconditional `bookmark set … --allow-backwards` temporarily restored after createWorkspace, all three real-jj tests fail (stale-workspace on commitOf(bookmark), merged-branch on non-empty bookmark list, moved-on on commitOf(bookmark)); source restored byte-identical"
+    },
+    "daemon": {
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "pass": 252,
+      "fail": 0
+    },
+    "lint": "biome check --error-on-warnings clean in packages/workspace and packages/daemon",
+    "typecheck": "tsc --noEmit clean in packages/workspace and packages/daemon",
+    "ci": {
+      "run": "https://github.com/sjawhar/legion/actions/runs/34752841415",
+      "conclusion": "success",
+      "head": "9969071b332e",
+      "jobs": [
+        "lint",
+        "pr-title",
+        "typecheck",
+        "test"
+      ],
+      "testWorkspaceStep": "16 pass / 0 fail"
+    }
+  },
+  "e2e": {
+    "driver": "/tmp/legion-70-e2e.ts (outside the repository, never committed; plan Task 5 Step 2 verbatim), run from packages/workspace with real jj 0.45.1 against a scratch colocated remote: provision, `jj new -m \"later work\"` in the workspace, provision again",
+    "fixOpLog": "new empty commit\nsnapshot working copy\npoint bookmark legion/WIDGETS-42 to commit 887adae0d44935c883c284a1e9e8e912f91f46e5\ncreate initial working-copy commit in workspace widgets-42\nadd workspace 'widgets-42'\nadd git remote origin\npoint bookmark main to commit bd13aa2930e7ee506249db1db291956dc1a8cf1a\nadd workspace 'default'\n\npoint bookmark legion/WIDGETS-42 operations: 1",
+    "negativeControl": "same driver against main@origin's packages/workspace/src/workspace.ts (`jj file show -r main@origin …`)",
+    "negativeControlOpLog": "point bookmark legion/WIDGETS-42 to commit d6272511db3afd7f9f6b3a48867cedafb3dcec55\nnew empty commit\nsnapshot working copy\npoint bookmark legion/WIDGETS-42 to commit 02a8a6d45f314f908284d93c185811e5ef672f97\ncreate initial working-copy commit in workspace widgets-42\nadd workspace 'widgets-42'\nadd git remote origin\npoint bookmark main to commit 54ef106e6db44a61ca4b6b102dd81115e22ff14a\nadd workspace 'default'\n\npoint bookmark legion/WIDGETS-42 operations: 2"
+  },
+  "observations": [
+    "jj behaviour surfaced by the rewritten stale-workspace test, not changed here: `jj workspace update-stale` loads the repo at the workspace's last-recorded operation and snapshots there on a divergent operation before reconciling (`Concurrent modification detected, resolving automatically`). When a bookmark sits on an unsnapshotted `@` at that recorded operation and the main line has moved or deleted it, the reconciliation conflicts the bookmark (`- base + A + B`) — reproduced on 0.44 and 0.45. The old unconditional `bookmark set` masked it by force-resolving to `@`. In production a worker's first jj command snapshots `.omp/config.yml` on the main line, so the window is a fresh workspace no worker ever touched whose bookmark was then moved from elsewhere. The test snapshots (`jj status`) after the first provision, as spec acceptance 2 requires for the merged-branch shape; the comment in the test says why.",
+    "Plan Task 5 Step 3 (production op-log check on the live daemon's clone) is post-merge; not run. Today the live clone still shows a `point bookmark legion/<KEY>` per resume (the old code moved this very workspace's legion/LEGION-70 onto my `@` at spawn; I set it back to `@-` before each push).",
+    "LEGION-44 also edits the provisioning argv lists in workspace.test.ts and processes.test.ts (appends `jj config list --repo` probes after the git credential writes); whichever PR lands second rebases over a textual conflict there (architect's note)."
+  ],
+  "forTester": "Repeat the E2E driver independently (fix and negative control) and add the merged-branch shape: provision, `jj status` in the workspace (snapshot — required, see the F5 note in the plan and the observation above), push the bookmark to origin, `git --git-dir=<remoteDir>/.git branch -D legion/WIDGETS-42`, provision again → `jj -R <repoCloneDir> bookmark list legion/WIDGETS-42` prints nothing; with main's file it prints the bookmark at the workspace's `@`.",
+  "workspaceState": ".omp/config.yml sits unsnapshotted in the undescribed working copy `@` above the bookmark; never committed.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-13T10:52:12.778Z"
+}
