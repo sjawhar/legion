@@ -1,7 +1,7 @@
 > **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
 
 ---
-title: "Smoke rig from a worker pane: run main's rig scripts, launch under env -u LEGION_OMP_PATH, restart a seeded daemon under the App keys, send Dispatch a session actor, and expect sibling-rig noise"
+title: "Smoke rig from a worker pane: historical environment, boot-probe, actor, and event-isolation findings"
 category: testing
 tags:
   - smoke-rig
@@ -29,7 +29,7 @@ symptoms:
   - "Issues you never created appear in your rig's admission queue"
 ---
 
-# Smoke rig from a worker pane
+# Smoke Rig from a Worker Pane: Historical Findings
 
 The implementer's historical production-like proof ran the smoke rig from inside a Legion worker
 pane. The rig is retired; this record keeps the environment, boot-probe, actor, and event-isolation
