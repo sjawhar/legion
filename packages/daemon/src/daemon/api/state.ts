@@ -1,4 +1,4 @@
-import type { DaemonStateResponse } from "@legion/contracts";
+import { type DaemonStateResponse, parseRoleToken } from "@legion/contracts";
 import type { ControllerRoleClaim, LegionState, RoleClaim, WorkerRoleClaim } from "../legion-state";
 import type { Locator } from "../runtime";
 
@@ -52,6 +52,26 @@ function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
     launchFailures: claim.launchFailures,
     locator: claim.locator && redactLocator(claim.locator, false),
   };
+}
+
+/** The running-worker queue in FIFO order. Its token is the durable identity; an absent or stale
+ * claim only omits the pending-task fields, and the task text is never projected. */
+function queuedWorkers(state: LegionState): DaemonStateResponse["workerAdmission"]["queue"] {
+  const entries: DaemonStateResponse["workerAdmission"]["queue"] = [];
+  for (const token of state.workerAdmission.queue) {
+    const parsed = parseRoleToken(state.project, token);
+    if (parsed === undefined || "controller" in parsed) continue;
+    const claim = state.roles[token];
+    const pending =
+      claim !== undefined && isWorkerRoleClaim(claim) ? claim.pendingAssignment : undefined;
+    entries.push({
+      roleToken: token,
+      issue: parsed.issue,
+      role: parsed.role,
+      ...(pending === undefined ? {} : { kind: pending.kind, queuedAt: pending.queuedAt }),
+    });
+  }
+  return entries;
 }
 
 /** Builds the redacted `GET /legion/v1/state` projection: an explicit field-by-field allowlist
@@ -114,5 +134,6 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
     roles,
     controllerPendingNotices: state.controllerPendingNotices.length,
     pendingStatusWrites: Object.keys(state.pendingStatusWrites),
+    workerAdmission: { queue: queuedWorkers(state) },
   };
 }

@@ -4,6 +4,7 @@ import type { LegionState } from "../legion-state";
 import type { CapabilityService } from "./auth";
 import type { GitHubService } from "./github";
 import { HttpError, issueKey } from "./http";
+import type { SpawnRequestLedger } from "./spawn-requests";
 
 export function treeContains(state: LegionState, tree: IssueKey, candidate: IssueKey): boolean {
   const pending = [tree];
@@ -67,6 +68,8 @@ export interface RouteContext {
   grantTtlMs: number;
   auth: CapabilityService;
   github: GitHubService;
+  /** The per-request-id dedupe behind `/legion/v1/worker/spawn` (LEGION-102). */
+  spawnRequests: SpawnRequestLedger;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };
 }

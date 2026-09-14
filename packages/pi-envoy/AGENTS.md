@@ -21,7 +21,7 @@ logged while delivery continues.
 ## Daemon contract
 
 `package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
-speaks (currently 3). It covers the `LegionDaemonApi` HTTP request and response shapes the
+speaks (currently 4). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
 `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
@@ -45,6 +45,11 @@ discriminant (LEGION-21). Contract 2 was introduced by LEGION-20 (PR #975) for t
 file (`LEGION_GRANT_FILE`, LEGION-54); release 1.23.0 is the first to declare 2. Releases 1.14.0
 through 1.22.2 declare 1 and are refused as `speaks daemon API contract 1`; releases before 1.14.0
 have no field and are refused as `contract none`.
+
+Contract 3 adds `ENVOY_TOKEN_FILE` to the daemon/pane contract (LEGION-25). Contract 4 adds the
+plugin-minted UUID `requestId` to `spawn_worker` and `workerAdmission` to the state response
+(LEGION-102). The first release built from this commit declares 4; a release declaring 3 is
+refused as `speaks daemon API contract 3; this daemon requires 4`.
 
 ## Native Dispatch tools
 
@@ -116,6 +121,7 @@ query succeeds.
 - The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs the controller's `/controller/ready` and a root architect's `/process/ready` with bounded retries; a phase worker needs nothing, the daemon's own no-holder recovery prompts its catch-up. `legion.ts` registers that listener on the `LEGION_ROLE_CLAIM_BRIDGE` slot only once it holds a Legion identity (`claimController`, `bootstrapRoot`), since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
 - A `task` subagent's session in a Legion process claims no role, calls no daemon route, installs no tool gate, and never exits (`isSubagentSession` in `extensions/legion.ts`). It is recognised by either of two signals: the process-local one — `bootstrapRoot`, `bootstrapWorker`, and the controller's `session_start` record the bootstrapped session's transcript path on `globalThis` under `Symbol.for("legion.pi-envoy.bootstrapped-session")`, and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything.
 - A daemon `403 Invalid session secret` is recovered once per forgotten secret, shared by every request in flight: `src/legion/daemon-client.ts` keeps, per session id, the newest recovered secret and the recovery in flight — a refused request retries with a newer secret already known, else awaits the in-flight recovery, else starts the one `/legion/v1/worker-session` recovery, one retry per request and a second refusal returned to the caller — and `roleDaemon()` in `extensions/legion.ts` hands every caller the same client so that record is shared (LEGION-73).
+- `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
 - `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider.

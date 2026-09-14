@@ -582,14 +582,23 @@ export async function handleSpawnWorker(
     );
   }
   const task = requiredString(body, "task");
-  const result = await ctx.deps.processManager.spawnWorker(tree, issue, role, task);
-  // Written after the process manager accepted the spawn (a refused one moves nothing) and before
-  // the result is returned, whether it was spawned, resumed, or queued: the worker's phase has
-  // started from the architect's point of view either way.
-  const nextStatus = spawnStatus(ctx.deps.state, issue, role);
-  if (nextStatus) {
-    await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, nextStatus);
-    await ctx.save();
-  }
+  // The contract already validated the UUID shape. Auth and the root-architect refusal above run
+  // before the ledger so a repeat is still authenticated and a bad body is still refused first.
+  const requestId = requiredString(body, "requestId");
+  const result = await ctx.spawnRequests.settle(
+    requestId,
+    { tree, issue, role, task },
+    async () => {
+      const spawned = await ctx.deps.processManager.spawnWorker(tree, issue, role, task);
+      // Written after the process manager accepted the spawn (a refused one moves nothing) and
+      // before the result is returned, whether it was spawned, resumed, or queued: the worker's
+      // phase has started from the architect's point of view either way.
+      const nextStatus = spawnStatus(ctx.deps.state, issue, role);
+      if (nextStatus) {
+        await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, issue, nextStatus);
+      }
+      return spawned;
+    }
+  );
   return Response.json(validateContractResponse(LegionDaemonApi.SpawnWorker.response, result));
 }

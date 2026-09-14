@@ -5,6 +5,7 @@ import {
   isBystanderCatchup,
   type LegionState,
   type PendingAssignment,
+  samePendingTask,
   type WorkerRoleClaim,
 } from "./legion-state";
 import {
@@ -32,6 +33,11 @@ export const MAX_PROMPT_RETIRES = 2;
  * the task queued for a cold `--resume` relaunch on the next drain; `"died"` retires it
  * terminally — queue entry removed, `worker-died` published, nothing relaunches it. */
 export type PromptRetireVerdict = "relaunch" | "died";
+
+interface QueueMutation {
+  changed: boolean;
+  newlyQueued: boolean;
+}
 
 /** Where a queued worker sits relative to the others: lower runs first, FIFO within a tier. Work
  * that finishes an open pull request outranks work that opens a new one — a merger turns an
@@ -310,13 +316,8 @@ export class WorkerAdmission {
   /**
    * Pure in-memory mutation (called only from inside `admissionLock`'s critical section — no
    * I/O here; the caller does `saveState`/publish after the lock releases) for a worker with no
-   * live pane to reuse: records the pending prompt on the existing claim (mutated in place, never
-   * replaced, so `agentId`/`generation`/`launchFailures` survive) and appends its token to
-   * the running-worker queue (ordered by `orderWorkerQueue` when a drain pass consumes it). Any existing locator is cleared, moving its `ompSessionFile` to
-   * `resumeSessionFile` so the eventual promoted launch still resumes the same agent;
-   * `sessionId` is deliberately kept (never deleted) so a subsequent respawn's boot token still
-   * names this session as the one it must resume — the exact path a delayed promotion depends
-   * on to reject a boot that comes back as a different agent.
+   * live pane to reuse. The existing claim is mutated in place so `agentId`, `generation`, and
+   * `launchFailures` survive. A replacement preserves its queue position and first `queuedAt`.
    */
   private enqueueClaimForLaunch(
     token: string,
@@ -324,44 +325,54 @@ export class WorkerAdmission {
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
     pending: PendingAssignment
-  ): boolean {
+  ): QueueMutation {
     const target: WorkerRoleClaim = claim ?? { issue, role };
+    const queue = this.deps.state.workerAdmission.queue;
+    const newlyQueued = !queue.includes(token);
+    const previous = target.pendingAssignment;
+    const replaced = !samePendingTask(previous, pending);
+    if (replaced) {
+      target.pendingAssignment = {
+        ...pending,
+        queuedAt: newlyQueued ? pending.queuedAt : (previous?.queuedAt ?? pending.queuedAt),
+      };
+    }
+    const hadLocator = target.locator !== undefined;
     const resumeSessionFile = target.locator?.ompSessionFile ?? target.resumeSessionFile;
-    target.pendingAssignment = pending;
     delete target.locator;
     if (resumeSessionFile) target.resumeSessionFile = resumeSessionFile;
     else delete target.resumeSessionFile;
     this.deps.state.roles[token] = target;
-    const queue = this.deps.state.workerAdmission.queue;
-    const newlyQueued = !queue.includes(token);
     if (newlyQueued) queue.push(token);
-    return newlyQueued;
+    return { changed: replaced || newlyQueued || hadLocator, newlyQueued };
   }
 
   /**
    * Pure in-memory mutation (same `admissionLock`-only calling convention as
-   * `enqueueClaimForLaunch`) for a worker whose pane is still alive and idle but the cap has no
-   * free slot right now: the locator and cached client are left completely alone — the worker
-   * is not retired, its pane is not touched — since `promoteQueuedWorker`'s `"prompt"` branch
-   * only needs to `prompt()` it in place once a slot frees up, never relaunch it. Like
-   * `enqueueClaimForLaunch`, answers whether the token joined the queue now (an already-queued
-   * role's pending task is replaced in place — latest task wins — and the answer is false).
+   * `enqueueClaimForLaunch`) for a worker whose pane is alive and idle but the cap has no free
+   * slot. A replacement keeps its original `queuedAt` and does not become a new queue entry.
    */
   private enqueueIdleWorker(
     token: string,
     claim: WorkerRoleClaim,
     pending: PendingAssignment
-  ): boolean {
-    claim.pendingAssignment = pending;
+  ): QueueMutation {
     const queue = this.deps.state.workerAdmission.queue;
     const newlyQueued = !queue.includes(token);
+    const previous = claim.pendingAssignment;
+    const replaced = !samePendingTask(previous, pending);
+    if (replaced) {
+      claim.pendingAssignment = {
+        ...pending,
+        queuedAt: newlyQueued ? pending.queuedAt : (previous?.queuedAt ?? pending.queuedAt),
+      };
+    }
     if (newlyQueued) queue.push(token);
-    return newlyQueued;
+    return { changed: replaced || newlyQueued, newlyQueued };
   }
 
   /** The one rule for telling the architect `worker-queued`: once, when the role's token joins
-   * the queue, and only for an architect assignment. A second task for an already-queued role
-   * replaces the queued task silently, and a daemon catch-up is queued silently. */
+   * the queue, and only for an architect assignment. A replacement is silent; a catch-up is too. */
   private publishQueued(
     newlyQueued: boolean,
     issue: IssueKey,
@@ -373,17 +384,9 @@ export class WorkerAdmission {
   }
 
   /**
-   * Launches a brand-new worker pane when a running-worker slot is available (fewer than
-   * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
-   * locator-less claim otherwise, publishing `worker-queued` to the architect that owns the issue
-   * once, when the token joins the queue, and only for an architect assignment (`publishQueued`).
-   * Every queued task is promoted in priority order (FIFO within a tier) by
-   * `promoteWorkerQueue` once a slot frees up. Only the read-count/decide/reserve-or-enqueue step
-   * runs inside the `admissionLock` critical section (pure in-memory claim/queue mutation only —
-   * no tmux, workspace, or save I/O), so a concurrent decision for a different role can never
-   * observe the same free slot before this one commits it, and never blocks behind this decision's
-   * own `saveState`/publish; the actual `launchWorker` call runs outside the lock so a slow or
-   * hung launch never wedges every other admission decision.
+   * Launches a brand-new worker pane when a running-worker slot is available, or queues the task
+   * otherwise. A new queue entry is announced once to the architect; replacements are silent.
+   * The actual launch runs outside the lock so it cannot block other admission decisions.
    */
   async launchOrQueue(
     token: string,
@@ -393,18 +396,19 @@ export class WorkerAdmission {
     claim: WorkerRoleClaim | undefined,
     pending: PendingAssignment
   ): Promise<SpawnWorkerResponse> {
-    let newlyQueued = false;
-    const admitted = await this.withAdmissionLock(async () => {
+    const decision = await this.withAdmissionLock(async () => {
       if (!this.workerPromotionEnabled || this.runningWorkerCount() >= this.deps.config.workerCap) {
-        newlyQueued = this.enqueueClaimForLaunch(token, issue, role, claim, pending);
-        return false;
+        return {
+          admitted: false as const,
+          ...this.enqueueClaimForLaunch(token, issue, role, claim, pending),
+        };
       }
       this.launching.add(token);
-      return true;
+      return { admitted: true as const };
     });
-    if (!admitted) {
-      await this.deps.persist();
-      this.publishQueued(newlyQueued, issue, role, pending);
+    if (!decision.admitted) {
+      if (decision.changed) await this.deps.persist();
+      this.publishQueued(decision.newlyQueued, issue, role, pending);
       return { status: "queued", roleToken: token };
     }
     try {
@@ -420,12 +424,8 @@ export class WorkerAdmission {
 
   /** Pure in-memory queue-push mutation only — no persist, no drain trigger — locking the
    * shared admission queue against a concurrent decision for a different role. Exposed
-   * separately from `enqueueForRetry` so a caller that must fold this push into a *larger*
-   * durable transition of its own (`ProcessManager.retireUnconfirmedBoot`, whose locator-clear
-   * and queue-push must land in the very same save — two separate saves would let a crash, or
-   * a persist failure, between them strand the claim: locator-less, unqueued, and invisible to
-   * `reconnectWorkers`' locator-only filter, with nothing left to ever retry it) can push
-   * without triggering a save of its own. */
+   * separately from `enqueueForRetry` so a caller that must fold this push into a larger durable
+   * transition can do so without triggering a save of its own. */
   async enqueueForRetryPending(token: string): Promise<void> {
     await this.withAdmissionLock(async () => {
       const queue = this.deps.state.workerAdmission.queue;
@@ -526,15 +526,13 @@ export class WorkerAdmission {
     pending: PendingAssignment,
     reason: PromptNotStartedReason
   ): Promise<void> {
-    let newlyQueued = false;
+    let queued: QueueMutation = { changed: false, newlyQueued: false };
     await this.withAdmissionLock(async () => {
-      newlyQueued = this.enqueueIdleWorker(token, claim, pending);
+      queued = this.enqueueIdleWorker(token, claim, pending);
     });
     const verdict = reason === "no-turn" ? await this.recordPromptFailure(token) : undefined;
     await this.deps.persist();
-    // Two gates: no `worker-queued` when the failure escalated to `worker-died`, and otherwise
-    // only once, for an assignment that newly joined the queue.
-    if (verdict !== "died") this.publishQueued(newlyQueued, issue, role, pending);
+    if (verdict !== "died") this.publishQueued(queued.newlyQueued, issue, role, pending);
   }
 
   /**
@@ -567,22 +565,20 @@ export class WorkerAdmission {
     pending: PendingAssignment,
     client: WorkerRpcClient
   ): Promise<{ kind: "queued" } | { kind: "resumed" }> {
-    let newlyQueued = false;
-    const shouldPrompt = await this.withAdmissionLock(async () => {
+    const decision = await this.withAdmissionLock(async () => {
       if (
         client.runState !== "idle" ||
         !this.workerPromotionEnabled ||
         this.runningWorkerCount() >= this.deps.config.workerCap
       ) {
-        newlyQueued = this.enqueueIdleWorker(token, claim, pending);
-        return false;
+        return { prompt: false as const, ...this.enqueueIdleWorker(token, claim, pending) };
       }
       this.reserve(token);
-      return true;
+      return { prompt: true as const };
     });
-    if (!shouldPrompt) {
-      await this.deps.persist();
-      this.publishQueued(newlyQueued, issue, role, pending);
+    if (!decision.prompt) {
+      if (decision.changed) await this.deps.persist();
+      this.publishQueued(decision.newlyQueued, issue, role, pending);
       return { kind: "queued" };
     }
     let notStarted = false;
@@ -597,8 +593,6 @@ export class WorkerAdmission {
     } finally {
       this.release(token);
       this.deps.onAdmissionEvent?.(token, "reservation-released");
-      // No drain trigger on the not-started path, for the same reason `promoteQueuedWorker`'s
-      // catch has none: it would re-peek this same head and re-prompt the same client at once.
       if (!notStarted) {
         this.promoteWorkerQueue();
         this.deps.onAdmissionEvent?.(token, "queue-drain-triggered");

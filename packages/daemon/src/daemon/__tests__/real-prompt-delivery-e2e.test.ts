@@ -252,7 +252,11 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     generation: 1,
     sessionId: "ses_tester",
     readyConfirmedAt: Date.now(),
-    pendingAssignment: { kind: "assignment", task: "verify #41" },
+    pendingAssignment: {
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    },
     locator: { ...opened, ompSessionFile: sessionFile },
   };
   state.workerAdmission.queue.push(token);
@@ -370,7 +374,11 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         for (let attempt = 1; attempt <= 3; attempt += 1) {
           await t.processes.reconcileWorkerAdmission();
           expect(t.state.workerAdmission.queue).toEqual([t.token]);
-          expect(claimOf(t).pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+          expect(claimOf(t).pendingAssignment).toEqual({
+            kind: "assignment",
+            task: "verify #41",
+            queuedAt: "2026-08-24T00:00:00.000Z",
+          });
           // The third failure retires the pane and zeroes the count for the relaunch (LEGION-93).
           expect(claimOf(t).promptFailures).toBe(attempt === 3 ? 0 : attempt);
           expect(t.state.phases[t.root]).toBeUndefined();

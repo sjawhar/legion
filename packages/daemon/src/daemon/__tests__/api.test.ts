@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -897,6 +898,8 @@ describe("Legion HTTP API", () => {
     });
     expect(body.controllerPendingNotices).toBe(1);
     expect(body.pendingStatusWrites).toEqual([child]);
+    expect(Object.keys(body)).toContain("workerAdmission");
+    expect(body.workerAdmission).toEqual({ queue: [] });
 
     // Every locator in the response is a plain tmux/window triple: no `socketPath` survived the
     // projection anywhere (tree, controller, or role locators).
@@ -917,6 +920,51 @@ describe("Legion HTTP API", () => {
     };
     walk(body);
     expect(leakedKeys).toEqual([]);
+  });
+
+  it("lists the worker admission queue in order with roleToken, issue, role, kind, and queuedAt, omitting kind and queuedAt for a stale entry and never the task text", async () => {
+    const testerToken = roleToken(state.project, root, "tester");
+    const plannerToken = roleToken(state.project, child, "planner");
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41 with the secret phrase xyzzy",
+        queuedAt: "2026-09-13T17:00:00.000Z",
+      },
+    };
+    // A stale head: the claim lost its pending task (the next promotion drain drops it).
+    state.roles[plannerToken] = { issue: child, role: "planner" };
+    state.workerAdmission.queue.push(testerToken, plannerToken);
+
+    await start();
+    const stateResponse = await request("/legion/v1/state");
+    // A 200 proves `validateContractResponse` accepted the projection against the strict schema.
+    expect(stateResponse.status).toBe(200);
+    const text = await stateResponse.text();
+    const body = JSON.parse(text) as Record<string, unknown>;
+
+    expect(body.workerAdmission).toEqual({
+      queue: [
+        {
+          roleToken: testerToken,
+          issue: root,
+          role: "tester",
+          kind: "assignment",
+          queuedAt: "2026-09-13T17:00:00.000Z",
+        },
+        { roleToken: plannerToken, issue: child, role: "planner" },
+      ],
+    });
+    expect(text).not.toContain("xyzzy");
   });
 
   it("responds to controller/ready before its own shim connects, delivering the connect afterward", async () => {
@@ -2816,7 +2864,11 @@ describe("Legion HTTP API", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -2869,7 +2921,11 @@ describe("Legion HTTP API", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -2964,14 +3020,10 @@ describe("Legion HTTP API", () => {
     });
     expect(started.response.status).toBe(200);
 
-    const spawn = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret: started.body.secret,
-      role: "planner",
-      task: "plan #1",
-    });
+    const spawn = await json<{ status: string; roleToken: string }>(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret: started.body.secret })
+    );
 
     expect(spawn.response.status).toBe(200);
     expect(spawn.body).toEqual({
@@ -2994,6 +3046,20 @@ describe("Legion HTTP API", () => {
     });
     expect(started.response.status).toBe(200);
     return started.body.secret;
+  }
+
+  /** A `/legion/v1/worker/spawn` body: the architect capability plus the spawn fields, with a
+   * fresh `requestId` per call unless the test pins one to exercise the daemon's dedupe. */
+  function spawnBody(overrides: Record<string, unknown>): Record<string, unknown> {
+    return {
+      tree: root,
+      issue: root,
+      sessionId: "ses_root",
+      role: "planner",
+      task: "plan #1",
+      requestId: randomUUID(),
+      ...overrides,
+    };
   }
 
   function recordingDispatchClient(): {
@@ -3020,14 +3086,7 @@ describe("Legion HTTP API", () => {
     state.issues[root].status = "todo";
     const secret = await architectSecret();
 
-    const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret,
-      role: "planner",
-      task: "plan #1",
-    });
+    const spawn = await json<{ status: string }>("/legion/v1/worker/spawn", spawnBody({ secret }));
 
     expect(spawn.response.status).toBe(200);
     expect(spawn.body.status).toBe("spawned");
@@ -3047,14 +3106,10 @@ describe("Legion HTTP API", () => {
     };
     const secret = await architectSecret();
 
-    const spawn = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: child,
-      sessionId: "ses_root",
-      secret,
-      role: "architect",
-      task: "own this child",
-    });
+    const spawn = await json<{ status: string; roleToken: string }>(
+      "/legion/v1/worker/spawn",
+      spawnBody({ issue: child, secret, role: "architect", task: "own this child" })
+    );
 
     expect(spawn.response.status).toBe(200);
     expect(spawn.body).toEqual({
@@ -3069,14 +3124,10 @@ describe("Legion HTTP API", () => {
     // Dispatch echoes the write back through the durable lane; the next spawn for the same live
     // sub-architect (a new task for it) writes nothing.
     state.issues[child].status = "in_progress";
-    const again = await json<{ status: string }>("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: child,
-      sessionId: "ses_root",
-      secret,
-      role: "architect",
-      task: "re-scope the child",
-    });
+    const again = await json<{ status: string }>(
+      "/legion/v1/worker/spawn",
+      spawnBody({ issue: child, secret, role: "architect", task: "re-scope the child" })
+    );
     expect(again.response.status).toBe(200);
     expect(dispatch.statusWrites).toEqual([{ issue: child, status: "in_progress" }]);
   });
@@ -3088,14 +3139,10 @@ describe("Legion HTTP API", () => {
     state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "changes_requested" });
     const secret = await architectSecret();
 
-    const spawn = await json("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret,
-      role: "implementer",
-      task: "address the human's review",
-    });
+    const spawn = await json(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret, role: "implementer", task: "address the human's review" })
+    );
 
     expect(spawn.response.status).toBe(200);
     expect(dispatch.statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
@@ -3108,14 +3155,10 @@ describe("Legion HTTP API", () => {
     state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "approved" });
     const secret = await architectSecret();
 
-    const spawn = await json("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret,
-      role: "implementer",
-      task: "run retro",
-    });
+    const spawn = await json(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret, role: "implementer", task: "run retro" })
+    );
 
     expect(spawn.response.status).toBe(200);
     expect(dispatch.statusWrites).toEqual([]);
@@ -3127,14 +3170,10 @@ describe("Legion HTTP API", () => {
     state.issues[root].status = "retro";
     const secret = await architectSecret();
 
-    const spawn = await json("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret,
-      role: "implementer",
-      task: "run retro",
-    });
+    const spawn = await json(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret, role: "implementer", task: "run retro" })
+    );
 
     expect(spawn.response.status).toBe(200);
     expect(dispatch.statusWrites).toEqual([]);
@@ -3167,14 +3206,10 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/tester.json",
     });
 
-    const spawn = await json("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_tester",
-      secret: started.body.secret,
-      role: "planner",
-      task: "plan #1",
-    });
+    const spawn = await json(
+      "/legion/v1/worker/spawn",
+      spawnBody({ sessionId: "ses_tester", secret: started.body.secret })
+    );
 
     expect(spawn.response.status).toBe(403);
     expect(spawnedWorkers).toEqual([]);
@@ -3194,14 +3229,10 @@ describe("Legion HTTP API", () => {
     });
     expect(started.response.status).toBe(200);
 
-    const spawn = await json("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret: started.body.secret,
-      role: "architect",
-      task: "reboot",
-    });
+    const spawn = await json(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret: started.body.secret, role: "architect", task: "reboot" })
+    );
 
     expect(spawn.response.status).toBe(400);
     expect(spawnedWorkers).toEqual([]);
@@ -3225,18 +3256,255 @@ describe("Legion HTTP API", () => {
     });
     expect(started.response.status).toBe(200);
 
-    const spawn = await json<{ error: string }>("/legion/v1/worker/spawn", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_root",
-      secret: started.body.secret,
-      role: "planner",
-      task: "plan #1",
-    });
+    const spawn = await json<{ error: string }>(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret: started.body.secret })
+    );
 
     expect(spawn.response.status).toBe(409);
     expect(spawn.body.error).toContain(root);
     expect(spawnedWorkers).toEqual([]);
+  });
+
+  /** Polls `condition` across real macrotask ticks (`setImmediate`, never a wall-clock wait)
+   * until it holds — the awaited chain is an HTTP request reaching a handler on the same event
+   * loop — bounded so a broken expectation fails the test instead of hanging it. */
+  async function waitUntil(condition: () => boolean, maxTicks = 20_000): Promise<void> {
+    for (let tick = 0; tick < maxTicks; tick += 1) {
+      if (condition()) return;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+    throw new Error("condition did not hold within the wait bound");
+  }
+
+  /** Fires two spawn requests with one body and holds the caller until both have reached the
+   * daemon: the first is inside `spawnWorkerImpl` (`started()` true) and the second has been
+   * answered from the ledger (its `repeated` log line). Without the second wait a request still
+   * on the wire when the gate opens arrives after the entry settled and runs its own spawn. */
+  async function twoSpawnsInFlight<T>(body: Record<string, unknown>, started: () => boolean) {
+    const infoSpy = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const a = json<T>("/legion/v1/worker/spawn", body);
+      const b = json<T>("/legion/v1/worker/spawn", body);
+      await waitUntil(
+        () =>
+          started() &&
+          infoSpy.mock.calls.some(
+            (call) =>
+              String(call[0]).includes("spawn request") && String(call[0]).includes("repeated")
+          )
+      );
+      return [a, b] as const;
+    } finally {
+      infoSpy.mockRestore();
+    }
+  }
+
+  it("answers a repeated spawn requestId with the first result and runs nothing again — no second process-manager call, Dispatch write, or save", async () => {
+    const dispatch = recordingDispatchClient();
+    let saves = 0;
+    await start({
+      dispatchClient: dispatch.client,
+      saveState: async () => {
+        saves += 1;
+      },
+    });
+    state.issues[root].status = "retro";
+    state.prs["acme/widgets#9"] = checkPr(root, { number: 9, reviewDecision: "changes_requested" });
+    const secret = await architectSecret();
+    const body = spawnBody({ role: "implementer", task: "address the review", secret });
+
+    const first = await json("/legion/v1/worker/spawn", body);
+    const savesAfterFirst = saves;
+    const publicationsAfterFirst = publications.length;
+    const second = await json("/legion/v1/worker/spawn", body);
+
+    expect(first.response.status).toBe(200);
+    expect(second.response.status).toBe(200);
+    expect(second.body).toEqual(first.body);
+    expect(spawnedWorkers).toHaveLength(1);
+    expect(dispatch.statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(saves).toBe(savesAfterFirst);
+    expect(publications).toHaveLength(publicationsAfterFirst);
+  });
+
+  it("returns an accepted spawn request's persisted result after a daemon restart without reprocessing it", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-spawn-request-"));
+    const file = path.join(tempDir, "state.json");
+    try {
+      await start({ saveState: async () => saveState(file, state) });
+      const bootToken = await api?.mintBootToken(root, 3);
+      if (!bootToken) throw new Error("root boot token was not minted");
+      const started = await json<{ secret: string }>("/legion/v1/process/started", {
+        tree: root,
+        generation: 3,
+        rootSessionId: "ses_root",
+        bootToken,
+        agentId: "root-agent",
+        ompSessionFile: "/tmp/root.json",
+      });
+      expect(started.response.status).toBe(200);
+      const body = spawnBody({ secret: started.body.secret });
+
+      const first = await json<{ status: string; roleToken: string }>(
+        "/legion/v1/worker/spawn",
+        body
+      );
+      expect(first.response.status).toBe(200);
+      expect(spawnedWorkers).toHaveLength(1);
+
+      api?.stop();
+      state = await loadState(file, { project: "omp", cap: 2 });
+      await start({ state, mintController: false, saveState: async () => saveState(file, state) });
+
+      const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
+        sessionId: "ses_root",
+        recoveryToken: bootToken,
+      });
+      expect(recovered.response.status).toBe(200);
+      const replay = await json<{ status: string; roleToken: string }>("/legion/v1/worker/spawn", {
+        ...body,
+        secret: recovered.body.secret,
+      });
+      expect(replay.response.status).toBe(200);
+      expect(replay.body).toEqual(first.body);
+      expect(spawnedWorkers).toHaveLength(1);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a repeat that arrives while the original is still running waits for and shares its result", async () => {
+    const gate = Promise.withResolvers<void>();
+    let calls = 0;
+    await start({
+      spawnWorkerImpl: async (_tree, issue, role) => {
+        calls += 1;
+        await gate.promise;
+        return { status: "queued", roleToken: roleToken(state.project, issue, role) };
+      },
+    });
+    const secret = await architectSecret();
+    const body = spawnBody({ secret });
+
+    const [a, b] = await twoSpawnsInFlight(body, () => calls === 1);
+    gate.resolve();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(ra.response.status).toBe(200);
+    expect(rb.response.status).toBe(200);
+    const expected = { status: "queued", roleToken: roleToken(state.project, root, "planner") };
+    expect(ra.body).toEqual(expected);
+    expect(rb.body).toEqual(expected);
+    expect(calls).toBe(1);
+  });
+
+  it("every request sharing a requestId receives the same error, and the id can be used again once it has settled", async () => {
+    const gate = Promise.withResolvers<void>();
+    let calls = 0;
+    let explode = true;
+    await start({
+      spawnWorkerImpl: async (_tree, issue, role) => {
+        calls += 1;
+        await gate.promise;
+        if (explode) throw new Error("tmux exploded");
+        return { status: "spawned", roleToken: roleToken(state.project, issue, role) };
+      },
+    });
+    const secret = await architectSecret();
+    const body = spawnBody({ secret });
+
+    const [a, b] = await twoSpawnsInFlight<{ error: string }>(body, () => calls === 1);
+    gate.resolve();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(ra.response.status).toBe(500);
+    expect(rb.response.status).toBe(500);
+    expect(ra.body.error).toBe("tmux exploded");
+    expect(rb.body.error).toBe("tmux exploded");
+    expect(calls).toBe(1);
+
+    explode = false;
+    const again = await json("/legion/v1/worker/spawn", body);
+    expect(again.response.status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  it("refuses a repeated requestId whose body differs with 409 naming the id", async () => {
+    await start();
+    state.issues[root].children = [child];
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "todo",
+      children: [],
+    };
+    const secret = await architectSecret();
+    const requestId = randomUUID();
+    const body = spawnBody({ secret, requestId });
+
+    const first = await json("/legion/v1/worker/spawn", body);
+    expect(first.response.status).toBe(200);
+
+    const otherTask = await json<{ error: string }>("/legion/v1/worker/spawn", {
+      ...body,
+      task: "plan #2",
+    });
+    expect(otherTask.response.status).toBe(409);
+    expect(otherTask.body.error).toContain(requestId);
+
+    const otherIssue = await json<{ error: string }>("/legion/v1/worker/spawn", {
+      ...body,
+      issue: child,
+    });
+    expect(otherIssue.response.status).toBe(409);
+    expect(otherIssue.body.error).toContain(requestId);
+
+    expect(spawnedWorkers).toHaveLength(1);
+  });
+
+  it("rejects a spawn without a UUID requestId with 400 naming the field", async () => {
+    await start();
+    const secret = await architectSecret();
+    const { requestId: _dropped, ...withoutRequestId } = spawnBody({ secret });
+
+    const missing = await json<{ error: string }>("/legion/v1/worker/spawn", withoutRequestId);
+    expect(missing.response.status).toBe(400);
+    expect(missing.body.error).toContain("requestId");
+
+    const malformed = await json<{ error: string }>(
+      "/legion/v1/worker/spawn",
+      spawnBody({ secret, requestId: "not-a-uuid" })
+    );
+    expect(malformed.response.status).toBe(400);
+    expect(malformed.body.error).toContain("requestId");
+
+    expect(spawnedWorkers).toEqual([]);
+  });
+
+  it("forgets a settled spawn request after ten minutes: the same id is processed again", async () => {
+    await start();
+    const secret = await architectSecret();
+    const body = spawnBody({ secret });
+    const control = spawnBody({ secret, role: "tester", task: "verify #1" });
+
+    expect((await json("/legion/v1/worker/spawn", body)).response.status).toBe(200);
+    expect(spawnedWorkers).toHaveLength(1);
+
+    // Control: a repeat one millisecond short of the retention window is still deduped.
+    expect((await json("/legion/v1/worker/spawn", control)).response.status).toBe(200);
+    expect(spawnedWorkers).toHaveLength(2);
+    now += 10 * 60_000 - 1;
+    expect((await json("/legion/v1/worker/spawn", control)).response.status).toBe(200);
+    expect(spawnedWorkers).toHaveLength(2);
+
+    // The first request is now past the window; the same id runs the spawn again.
+    now += 2;
+    expect((await json("/legion/v1/worker/spawn", body)).response.status).toBe(200);
+    expect(spawnedWorkers).toHaveLength(3);
   });
 
   async function mintGrant(issue: IssueKey, sessionId: string, secret: string): Promise<string> {
@@ -3707,14 +3975,10 @@ describe("Legion HTTP API", () => {
     const secret = await architectSecret();
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
-      const spawn = await json("/legion/v1/worker/spawn", {
-        tree: root,
-        issue: child,
-        sessionId: "ses_root",
-        secret,
-        role: "architect",
-        task: "own this child",
-      });
+      const spawn = await json(
+        "/legion/v1/worker/spawn",
+        spawnBody({ issue: child, secret, role: "architect", task: "own this child" })
+      );
       expect(spawn.response.status).toBe(200);
     } finally {
       errorSpy.mockRestore();

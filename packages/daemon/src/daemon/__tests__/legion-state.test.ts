@@ -5,11 +5,13 @@ import path from "node:path";
 import { controllerToken, roleToken } from "@legion/contracts";
 import {
   describeAdmissionDrift,
+  type LegionState,
   loadState,
   newLegionState,
   owningArchitect,
   pruneStalePrTombstones,
   repairAdmissionDrift,
+  samePendingTask,
   saveState,
   type TreeState,
 } from "../legion-state";
@@ -17,6 +19,10 @@ import {
 const issue = "LEGION-42";
 const initialState = { project: "omp", cap: 4 };
 const prKey = "sjawhar/legion#7";
+/** The `Date.now()` a migration test pins so a backfilled time (v19/v20's `readyConfirmedAt`,
+ * v30 -> v31's `queuedAt`) is predictable; `MIGRATED_AT_ISO` is what v31 stamps from it. */
+const MIGRATED_AT = 1_726_000_000_000;
+const MIGRATED_AT_ISO = new Date(MIGRATED_AT).toISOString();
 
 function stateWithTree() {
   const state = newLegionState(initialState.project, initialState.cap);
@@ -113,9 +119,9 @@ describe("legion state", () => {
     }
   });
 
-  it("initializes empty v30 state with a valid project and admission capacity", () => {
+  it("initializes empty v31 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 30,
+      version: 31,
       project: "omp",
       issues: {},
       trees: {},
@@ -126,6 +132,7 @@ describe("legion state", () => {
       prTombstones: {},
       admission: { cap: 4, active: [], queue: [] },
       workerAdmission: { queue: [] },
+      spawnRequests: {},
       phases: {},
       controllerPendingNotices: [],
       gates: {},
@@ -483,7 +490,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, and v30", async () => {
+  it("migrates a controller-held-events-free v17 state through v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, and v31", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v17-chain-"));
     const file = path.join(tempDir, "state.json");
     const current = newLegionState(initialState.project, initialState.cap);
@@ -497,7 +504,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
+    expect(migrated.version).toBe(31);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -586,7 +593,7 @@ describe("legion state", () => {
     }
   });
 
-  it("converts a tree-less, issue-less v18 state to v19 (and onward to v30), preserving its controller notices", async () => {
+  it("converts a tree-less, issue-less v18 state to v19 (and onward to v31), preserving its controller notices", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v18-gates-"));
     const file = path.join(tempDir, "state.json");
     const notice = {
@@ -615,7 +622,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
+    expect(migrated.version).toBe(31);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -647,10 +654,15 @@ describe("legion state", () => {
         // No sessionId at all: /worker/started never registered this generation, so it was
         // never confirmed under either the old or new meaning and must stay untouched. Its
         // pending assignment is written to the v19 file as the bare string that era persisted;
-        // the v25 -> v26 migration classifies it into this object form.
+        // the v25 -> v26 migration classifies it into this object form and v30 -> v31 stamps
+        // the migration instant as its queuedAt.
         issue,
         role: "tester",
-        pendingAssignment: { kind: "assignment", task: "verify #41" },
+        pendingAssignment: {
+          kind: "assignment",
+          task: "verify #41",
+          queuedAt: new Date(1_726_000_000_000).toISOString(),
+        },
       },
       [alreadyConfirmedToken]: {
         // Already carries readyConfirmedAt (persisted by an already-patched daemon): never
@@ -675,7 +687,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(30);
+      expect(migrated.version).toBe(31);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -743,7 +755,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(30);
+      expect(migrated.version).toBe(31);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -811,7 +823,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
+    expect(migrated.version).toBe(31);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
@@ -833,14 +845,14 @@ describe("legion state", () => {
         issue,
         role: "implementer",
         generation: 1,
-        pendingAssignment: { kind: "assignment", task: "implement #43" },
+        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
       },
       [testerToken]: {
         issue,
         role: "tester",
         sessionId: "ses_tester",
         generation: 2,
-        pendingAssignment: { kind: "catchup", task: catchupTask },
+        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
       },
       [reviewerToken]: {
         issue,
@@ -861,23 +873,28 @@ describe("legion state", () => {
     const raw = JSON.stringify(v25State);
     await writeFile(file, raw, "utf8");
 
-    const migrated = await loadState(file, initialState);
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    try {
+      const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
-    expect(migrated.roles[implementerToken]).toEqual({
-      ...current.roles[implementerToken],
-      pendingAssignment: { kind: "assignment", task: "implement #43" },
-    });
-    expect(migrated.roles[testerToken]).toEqual({
-      ...current.roles[testerToken],
-      pendingAssignment: { kind: "catchup", task: catchupTask },
-    });
-    expect(migrated.roles[reviewerToken]).toEqual(current.roles[reviewerToken]);
-    expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
-      current.roles[controllerToken(initialState.project)]
-    );
-    expect(migrated).toEqual(current);
-    expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
+      expect(migrated.version).toBe(31);
+      expect(migrated.roles[implementerToken]).toEqual({
+        ...current.roles[implementerToken],
+        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
+      });
+      expect(migrated.roles[testerToken]).toEqual({
+        ...current.roles[testerToken],
+        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
+      });
+      expect(migrated.roles[reviewerToken]).toEqual(current.roles[reviewerToken]);
+      expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
+        current.roles[controllerToken(initialState.project)]
+      );
+      expect(migrated).toEqual(current);
+      expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("composes the LEGION-33 v24 -> v25 bump with the v25 -> v26 classification and the v26 -> v27 bump: a v24 file with bare-string pendingAssignments migrates through all three to v27 objects", async () => {
@@ -892,14 +909,14 @@ describe("legion state", () => {
         issue,
         role: "implementer",
         generation: 1,
-        pendingAssignment: { kind: "assignment", task: "implement #43" },
+        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
       },
       [testerToken]: {
         issue,
         role: "tester",
         sessionId: "ses_tester",
         generation: 2,
-        pendingAssignment: { kind: "catchup", task: catchupTask },
+        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
       },
     };
     // A file the pre-LEGION-33 daemon wrote: version 24, bare-string pending assignments.
@@ -909,11 +926,16 @@ describe("legion state", () => {
     const raw = JSON.stringify(v24State);
     await writeFile(file, raw, "utf8");
 
-    const migrated = await loadState(file, initialState);
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    try {
+      const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
-    expect(migrated).toEqual(current);
-    expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
+      expect(migrated.version).toBe(31);
+      expect(migrated).toEqual(current);
+      expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("classifies a v25 pendingAssignment that is not JSON, or JSON of another type, as an architect assignment", async () => {
@@ -927,12 +949,12 @@ describe("legion state", () => {
       [plannerToken]: {
         issue,
         role: "planner",
-        pendingAssignment: { kind: "assignment", task: '{"not json' },
+        pendingAssignment: { kind: "assignment", task: '{"not json', queuedAt: MIGRATED_AT_ISO },
       },
       [architectToken]: {
         issue,
         role: "architect",
-        pendingAssignment: { kind: "assignment", task: otherJson },
+        pendingAssignment: { kind: "assignment", task: otherJson, queuedAt: MIGRATED_AT_ISO },
       },
     };
     const v25State = JSON.parse(JSON.stringify({ ...current, version: 25 }));
@@ -940,7 +962,12 @@ describe("legion state", () => {
     v25State.roles[architectToken].pendingAssignment = otherJson;
     await writeFile(file, JSON.stringify(v25State), "utf8");
 
-    expect(await loadState(file, initialState)).toEqual(current);
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    try {
+      expect(await loadState(file, initialState)).toEqual(current);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
   });
 
   it("rejects a v26 worker claim whose pendingAssignment is still a bare string", async () => {
@@ -954,9 +981,9 @@ describe("legion state", () => {
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
   });
 
-  it("migrates v26 state to v27 as a pure version bump, keeping identity-less tmux locators and LEGION-37's {kind, task} pendingAssignments", async () => {
+  it("migrates v26 state to v27 as a pure version bump, keeping identity-less tmux locators and LEGION-37's {kind, task} pendingAssignments (stamped with queuedAt only at v31)", async () => {
     // The v26 file exactly as a daemon on main's LEGION-37 bump (#991) persists it: pending
-    // assignments already `{ kind, task }` objects, no pane identity on any locator.
+    // assignments `{ kind, task }` objects without queuedAt, no pane identity on any locator.
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v26-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -974,7 +1001,7 @@ describe("legion state", () => {
       role: "tester",
       sessionId: "ses_tester",
       generation: 2,
-      pendingAssignment: { kind: "catchup", task: catchupTask },
+      pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp-project",
@@ -983,19 +1010,152 @@ describe("legion state", () => {
         socketPath: "/state/workers/tester.sock",
       },
     };
-    const raw = JSON.stringify({ ...current, version: 26 });
+    const v26State = JSON.parse(JSON.stringify({ ...current, version: 26 }));
+    delete v26State.roles[testerToken].pendingAssignment.queuedAt;
+    const raw = JSON.stringify(v26State);
     await writeFile(file, raw, "utf8");
+
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    try {
+      const migrated = await loadState(file, initialState);
+
+      expect(migrated.version).toBe(31);
+      // The v31 queuedAt backfill and durable-ledger migration preserve the #991 shape and its
+      // identity-less locator, so the migrated state equals the current fixture.
+      expect(migrated).toEqual(current);
+      expect(await readFile(`${file}.v26.bak`, "utf8")).toBe(raw);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("migrates v30 state to v31 by stamping the migration time as queuedAt onto every pending task without one, leaving stamped, pending-less, and controller claims untouched", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v30-"));
+    const file = path.join(tempDir, "state.json");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const plannerToken = roleToken(initialState.project, issue, "planner");
+    const reviewerToken = roleToken(initialState.project, issue, "reviewer");
+    const raw = JSON.parse(JSON.stringify(stateWithTree()));
+    raw.version = 30;
+    delete raw.spawnRequests;
+    raw.roles[testerToken] = {
+      issue,
+      role: "tester",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+    };
+    raw.roles[plannerToken] = {
+      issue,
+      role: "planner",
+      pendingAssignment: {
+        kind: "catchup",
+        task: '{"type":"catchup-worker"}',
+        queuedAt: "2026-09-01T00:00:00.000Z",
+      },
+    };
+    raw.roles[reviewerToken] = { issue, role: "reviewer" };
+    const rawText = JSON.stringify(raw);
+    await writeFile(file, rawText, "utf8");
+
+    const migrationTimestamp = 1_726_000_000_000;
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    try {
+      const migrated = await loadState(file, initialState);
+
+      expect(migrated.version).toBe(31);
+      expect(migrated.roles[testerToken]).toEqual({
+        issue,
+        role: "tester",
+        pendingAssignment: {
+          kind: "assignment",
+          task: "verify #41",
+          queuedAt: new Date(migrationTimestamp).toISOString(),
+        },
+      });
+      expect(migrated.roles[plannerToken]).toEqual(raw.roles[plannerToken]);
+      expect(migrated.roles[reviewerToken]).toEqual(raw.roles[reviewerToken]);
+      expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
+        raw.roles[controllerToken(initialState.project)]
+      );
+      expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it("migrates v30 state to v31 with an empty durable spawn request ledger", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v30-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const raw = JSON.parse(JSON.stringify(current));
+    raw.version = 30;
+    delete raw.spawnRequests;
+    const rawText = JSON.stringify(raw);
+    await writeFile(file, rawText, "utf8");
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
-    // Nothing rewritten: `current` carries the #991 shape and no pane identity anywhere, and the
-    // migrated state is equal to it.
     expect(migrated).toEqual(current);
-    expect(await readFile(`${file}.v26.bak`, "utf8")).toBe(raw);
+    expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
   });
 
-  it("migrates v28 state through v29 and v30, keeping phase records without assignedAt and accepting a fresh assignment-shaped one (LEGION-72)", async () => {
+  it("loads a retained spawn result with a future response field", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-spawn-result-"));
+    const file = path.join(tempDir, "state.json");
+    const requestId = "4e0aca36-77b3-43bd-96cf-d58890ae64e4";
+    const raw = JSON.parse(JSON.stringify(stateWithTree()));
+    raw.spawnRequests[requestId] = {
+      tree: issue,
+      issue,
+      role: "tester",
+      task: "verify #41",
+      result: {
+        status: "queued",
+        roleToken: roleToken(initialState.project, issue, "tester"),
+        futureField: "preserved",
+      },
+      settledAt: MIGRATED_AT,
+    };
+    await writeFile(file, JSON.stringify(raw), "utf8");
+
+    const loaded = await loadState(file, initialState);
+
+    expect((loaded.spawnRequests[requestId]?.result as Record<string, unknown>).futureField).toBe(
+      "preserved"
+    );
+  });
+
+  it("rejects a current-version (v31) pending task without queuedAt", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v31-unstamped-"));
+    const file = path.join(tempDir, "state.json");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const raw = JSON.parse(JSON.stringify(stateWithTree()));
+    raw.roles[testerToken] = {
+      issue,
+      role: "tester",
+      pendingAssignment: { kind: "assignment", task: "verify #41" },
+    };
+    await writeFile(file, JSON.stringify(raw), "utf8");
+
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+  });
+
+  it.each([
+    ["the same kind and text", { kind: "assignment", task: "verify #41" }, true],
+    ["the same kind, other text", { kind: "assignment", task: "verify #42" }, false],
+    ["another kind, the same text", { kind: "catchup", task: "verify #41" }, false],
+  ] as const)("samePendingTask is true only for the same kind and text: %s", (_label, next, same) => {
+    const existing = {
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-09-13T17:00:00.000Z",
+    } as const;
+    expect(samePendingTask(existing, next)).toBe(same);
+    expect(samePendingTask(undefined, next)).toBeFalse();
+  });
+
+  it("migrates v28 state through v29, v30, and v31, keeping phase records without assignedAt and accepting a fresh assignment-shaped one (LEGION-72)", async () => {
     // A v28 file exactly as a daemon on main persists it: one live phase record and one completed
     // record, neither carrying `assignedAt`. The migration backfills nothing — a record from
     // before the field existed stays without it forever (the log prints `assignedAt unknown`).
@@ -1020,7 +1180,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
+    expect(migrated.version).toBe(31);
     expect(migrated).toEqual(current);
     expect(migrated.phases[issue]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
     expect(migrated.phases[otherIssue]).toEqual({
@@ -1030,7 +1190,7 @@ describe("legion state", () => {
     });
     expect(await readFile(`${file}.v28.bak`, "utf8")).toBe(raw);
 
-    // A record the v30 daemon writes on an assignment carries `assignedAt` and round-trips.
+    // A record the current daemon writes on an assignment carries `assignedAt` and round-trips.
     migrated.phases[issue] = {
       phase: "reviewer",
       sessionId: "ses_reviewer",
@@ -1045,21 +1205,24 @@ describe("legion state", () => {
     });
   });
 
-  it("migrates v29 state to v30 as a pure version bump, leaving every tree unchanged (LEGION-83, acceptance 5)", async () => {
+  it("migrates v29 state through v30 and v31, leaving every tree unchanged (LEGION-83, acceptance 5)", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v29-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
-    const raw = JSON.stringify({ ...current, version: 29 });
+    const rawState = JSON.parse(JSON.stringify(current));
+    rawState.version = 29;
+    delete rawState.spawnRequests;
+    const raw = JSON.stringify(rawState);
     await writeFile(file, raw, "utf8");
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(30);
+    expect(migrated.version).toBe(31);
     expect(migrated.trees).toEqual(current.trees);
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v29.bak`, "utf8")).toBe(raw);
-    // Written once, at load: the next boot reads v30 and runs no migration.
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(30);
+    // Written once, at load: the next boot reads v31 and runs no migration.
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
   });
 
   it("round-trips a tree's kept session file (resumeSessionFile) through save and load", async () => {
@@ -1182,7 +1345,7 @@ describe("legion state", () => {
     }
   });
 
-  it("migrates a v24 file through v25, v26, v27, v28, and v29 to v30, leaving PR records untouched", async () => {
+  it("migrates a v24 file through v25, v26, v27, v28, v29, and v30 to v31, leaving PR records untouched", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -1193,8 +1356,9 @@ describe("legion state", () => {
 
     expect(migrated).toEqual(current);
     // A v24 file walks the whole chain: v24 -> v25 (#993) -> v26 (#991) -> v27 (pane identity)
-    // -> v28 (design gate) -> v29 (assignedAt) -> v30 (LEGION-83).
-    expect(migrated.version).toBe(30);
+    // -> v28 (design gate) -> v29 (assignedAt) -> v30 (resumeSessionFile) -> v31
+    // (queuedAt and durable spawn requests).
+    expect(migrated.version).toBe(31);
     expect(Object.keys(migrated.prs[prKey] ?? {})).toEqual(Object.keys(current.prs[prKey] ?? {}));
     expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
   });
@@ -1280,7 +1444,7 @@ describe("legion state", () => {
           },
         });
 
-        expect(migrated.version).toBe(30);
+        expect(migrated.version).toBe(31);
         expect(migrated.gates).toEqual({
           "LEGION-1": { artifactId: "art-a", latestVersion: 7, approvedVersion: 7 },
           "LEGION-2": { artifactId: "art-b", latestVersion: 2 },
@@ -1290,9 +1454,9 @@ describe("legion state", () => {
         expect(warnings.filter((line) => line.includes("LEGION-4"))).toHaveLength(1);
         expect(warnings.some((line) => line.includes("LEGION-1"))).toBe(false);
         expect(await readFile(`${file}.v27.bak`, "utf8")).toBe(JSON.stringify(source));
-        // The migrated state is on disk at once: the next boot loads v30 and never asks Dispatch
-        // again, even with no ordinary save in between.
-        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(30);
+        // The migrated state is on disk at once: the next boot loads the current version and
+        // never asks Dispatch again, even with no ordinary save in between.
+        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
         const reloaded = await loadState(file, {
           ...initialState,
           resolveSpecArtifact: async (issue) => {
@@ -1339,8 +1503,8 @@ describe("legion state", () => {
       expect(await loadState(file, initialState)).toEqual(current);
     });
 
-    it("migrates a v24 file end to end through 25 (#993), 26 (#991), 27 (#981), 28 (LEGION-72), and 29 (LEGION-83) to a v30 gate, composing every step", async () => {
-      tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-through-v30-"));
+    it("migrates a v24 file end to end through 25 (#993), 26 (#991), 27 (#981), 28 (design gate), 29 (assignedAt), and 30 (resumeSessionFile) to v31, composing every step", async () => {
+      tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v24-through-v31-"));
       const file = path.join(tempDir, "state.json");
       // What a pre-LEGION-33 daemon wrote: a v24 file whose root tree carries a locator without
       // #981's process identity, whose architect claim carries a bare-string pending assignment
@@ -1373,19 +1537,28 @@ describe("legion state", () => {
       };
       await writeFile(file, JSON.stringify(source), "utf8");
 
-      const migrated = await loadState(file, {
-        ...initialState,
-        resolveSpecArtifact: async () => ({ artifactId: "art-a", latestVersion: 4 }),
-      });
+      const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+      let migrated: LegionState;
+      try {
+        migrated = await loadState(file, {
+          ...initialState,
+          resolveSpecArtifact: async () => ({ artifactId: "art-a", latestVersion: 4 }),
+        });
+      } finally {
+        dateNowSpy.mockRestore();
+      }
 
-      expect(migrated.version).toBe(30);
+      expect(migrated.version).toBe(31);
       // #991's step classified the bare string; #981's step left the identity-less locator as it
-      // was (both identity fields optional); the later steps resolved the gate and added optional state.
+      // was (both identity fields optional); the design-gate step resolved the gate; v29 added
+      // optional assignedAt; v30 added optional resumeSessionFile; and v31 stamped queuedAt and
+      // added the empty durable request ledger.
       const claim = migrated.roles[architectToken];
       if (!claim || !("issue" in claim)) throw new Error("architect claim was not migrated");
       expect(claim.pendingAssignment).toEqual({
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: MIGRATED_AT_ISO,
       });
       expect(migrated.trees["LEGION-1"]?.locator).toEqual({
         runtime: "tmux",
@@ -1398,7 +1571,7 @@ describe("legion state", () => {
         "LEGION-1": { artifactId: "art-a", latestVersion: 4, approvedVersion: 4 },
       });
       expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(JSON.stringify(source));
-      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(30);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
     });
   });
 

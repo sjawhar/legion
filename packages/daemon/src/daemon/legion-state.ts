@@ -5,8 +5,10 @@ import {
   type IssueKey,
   isLegionProjectToken,
   isLegionRole,
+  LEGION_ROLES,
   type LegionRole,
   roleToken,
+  type SpawnWorkerResponse,
 } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
@@ -87,9 +89,9 @@ export interface TreeState {
    * own: copied from its locator's `ompSessionFile` before the locator is deleted) and by
    * `resurrectDeadTree` immediately after clearing a root's locator, before it starts a
    * replacement; read by `spawnRoot`, which resumes whenever it is set whatever its caller asked,
-   * and by `spawnTree` as the last fallback for the resume file. Cleared when `spawnTree` records
-   * a fresh locator; whenever a tree enters `lingering` or `closed`; and when the tree reaches
-   * `launch-failed` (a controller re-admit starts fresh, as before). LEGION-83. */
+   * and by `spawnTree` as the last fallback for the resume file; cleared by `spawnTree` when it
+   * records the fresh locator, and when the tree reaches `launch-failed` (a controller re-admit
+   * starts fresh, as before). LEGION-83. */
   resumeSessionFile?: string;
 }
 
@@ -145,6 +147,19 @@ export interface PrState {
 export interface PendingAssignment {
   kind: "assignment" | "catchup";
   task: string;
+  /** ISO time this role first entered the queue. An identical re-send and a replacement in the
+   * same queue slot keep it; a newly queued task receives the current time. */
+  queuedAt: string;
+}
+
+/** The identical re-send rule (LEGION-102): a task of the same kind and text as the one a role
+ * already holds changes nothing — no persist, no `worker-queued`, the entry keeps its position
+ * and its `queuedAt`. */
+export function samePendingTask(
+  existing: PendingAssignment | undefined,
+  next: Pick<PendingAssignment, "kind" | "task">
+): boolean {
+  return existing !== undefined && existing.kind === next.kind && existing.task === next.task;
 }
 
 export interface WorkerRoleClaim {
@@ -274,8 +289,20 @@ export function staleQueueEntryReason(state: LegionState, issue: IssueKey): stri
   return undefined;
 }
 
+/** A fulfilled `spawn_worker` result kept long enough for a transport retry to survive a daemon
+ * restart. It intentionally includes the original task so a reused id with different work is
+ * still refused, while the response lets a repeat return without touching ProcessManager. */
+export interface PersistedSpawnRequest {
+  tree: IssueKey;
+  issue: IssueKey;
+  role: LegionRole;
+  task: string;
+  result: SpawnWorkerResponse;
+  settledAt: number;
+}
+
 export interface LegionState {
-  version: 30;
+  version: 31;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -290,6 +317,9 @@ export interface LegionState {
   /** FIFO role tokens waiting for a running-worker slot (config.workerCap); the currently-running
    * set is derived from live RPC frames and kept in-memory by ProcessManager, never persisted. */
   workerAdmission: { queue: string[] };
+  /** Fulfilled `spawn_worker` requests retained for `SPAWN_REQUEST_RETENTION_MS` so a retry after
+   * a daemon restart returns its original result instead of re-delivering the task. */
+  spawnRequests: Record<string, PersistedSpawnRequest>;
   /** The issue's active phase, keyed by issue. Written in exactly one place — the delivery of an
    * architect assignment (`promptExistingWorker`, kind `assignment`), which stamps `assignedAt`
    * (ISO) with the delivery time — and marked `completed` by `/phase/complete` when no architect is
@@ -439,7 +469,7 @@ const PrStateSchema = z
   })
   .strict();
 const PendingAssignmentSchema = z
-  .object({ kind: z.enum(["assignment", "catchup"]), task: z.string() })
+  .object({ kind: z.enum(["assignment", "catchup"]), task: z.string(), queuedAt: z.string() })
   .strict();
 const WorkerRoleClaimSchema = z
   .object({
@@ -507,9 +537,26 @@ const ControllerPendingNoticeSchema = z
     eventId: z.string(),
   })
   .strict();
+const PersistedSpawnRequestSchema = z
+  .object({
+    tree: IssueKeySchema,
+    issue: IssueKeySchema,
+    role: z.enum(LEGION_ROLES),
+    task: z.string().min(1),
+    // A future SpawnWorker response may add fields while this ten-minute record remains on disk;
+    // retaining it must not make a newly deployed daemon refuse to start.
+    result: z
+      .object({
+        status: z.enum(["spawned", "resumed", "queued"]),
+        roleToken: z.string().min(1),
+      })
+      .passthrough(),
+    settledAt: z.number().nonnegative(),
+  })
+  .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(30),
+    version: z.literal(31),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -533,6 +580,7 @@ const LegionStateSchema = z
         queue: z.array(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN)),
       })
       .strict(),
+    spawnRequests: z.record(z.string().uuid(), PersistedSpawnRequestSchema),
     phases: z.record(IssueKeySchema, PhaseSchema),
     controllerCapabilityHash: z
       .string()
@@ -573,7 +621,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 30,
+    version: 31,
     project,
     issues: {},
     trees: {},
@@ -584,6 +632,7 @@ export function newLegionState(project: string, cap: number): LegionState {
     prTombstones: {},
     admission: { cap, active: [], queue: [] },
     workerAdmission: { queue: [] },
+    spawnRequests: {},
     phases: {},
     controllerPendingNotices: [],
     gates: {},
@@ -1352,13 +1401,37 @@ function migrateV28State(state: unknown): unknown {
 
 /** v29 -> v30: `TreeState` gains the optional `resumeSessionFile` (LEGION-83) -- a pure version
  * bump: every existing tree validates with it absent, and absent is the correct starting value
- * (no root has yet had its session file kept across a cleared pane). Sits after the v28 -> v29
- * `assignedAt` bump (LEGION-72), because a deployed daemon already persists version 29 under that
- * meaning. */
+ * (no root has yet had its session file kept across a cleared pane). */
 function migrateV29State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 29) return state;
   return { ...state, version: 30 };
 }
+
+/** v30 -> v31: `PendingAssignment` gains `queuedAt` and fulfilled `spawn_worker` requests become
+ * durable (LEGION-102). Older pending tasks recorded no queue time, so each missing timestamp is
+ * stamped with this load's migration instant; the new request ledger starts empty. */
+function migrateV30State(state: unknown, migratedAt: number): unknown {
+  if (!recordValue(state) || state.version !== 30) return state;
+  const { roles, ...rest } = state;
+  const stamp = new Date(migratedAt).toISOString();
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) =>
+          recordValue(claim) &&
+          "issue" in claim &&
+          recordValue(claim.pendingAssignment) &&
+          typeof claim.pendingAssignment.queuedAt !== "string"
+            ? [
+                key,
+                { ...claim, pendingAssignment: { ...claim.pendingAssignment, queuedAt: stamp } },
+              ]
+            : [key, claim]
+        )
+      )
+    : roles;
+  return { ...rest, version: 31, roles: migratedRoles, spawnRequests: {} };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1372,9 +1445,9 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const source = JSON.parse(raw);
   const sourceVersion = recordValue(source) ? source.version : undefined;
-  // A single timestamp for this whole load, used only by migrateV19State's and
-  // migrateV20State's own readyConfirmedAt backfills -- every claim/tree either touches in this
-  // one load gets the same migration instant.
+  // A single timestamp for this whole load, used only by the migrations that backfill a time
+  // (migrateV19State's and migrateV20State's readyConfirmedAt, migrateV30State's queuedAt) --
+  // every claim/tree either touches in this one load gets the same migration instant.
   const migratedAt = Date.now();
   // Ordered oldest-to-newest: each migration is a no-op unless `state.version` matches the one
   // it upgrades from, so this reduce applies exactly the same chain the prior nested-call form
@@ -1400,19 +1473,19 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV25State,
     migrateV26State,
   ];
-  const state = migrateV29State(
-    migrateV28State(
-      await migrateV27State(
-        migrations.reduce((current, migrate) => migrate(current), source as unknown),
-        init.resolveSpecArtifact
-      )
-    )
-  );
+  const preGateState = migrations.reduce((current, migrate) => migrate(current), source as unknown);
+  const gatedState = await migrateV27State(preGateState, init.resolveSpecArtifact);
+  const postGateMigrations: Array<(state: unknown) => unknown> = [
+    migrateV28State,
+    migrateV29State,
+    (state) => migrateV30State(state, migratedAt),
+  ];
+  const state = postGateMigrations.reduce((current, migrate) => migrate(current), gatedState);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 30) {
+  if (version !== 31) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

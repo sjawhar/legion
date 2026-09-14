@@ -38,6 +38,7 @@ import {
   handleWorkerSession,
   handleWorkerStarted,
 } from "./api/routes/workers";
+import { SpawnRequestLedger } from "./api/spawn-requests";
 import { buildLegionStateResponse } from "./api/state";
 import type { DispatchClient } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
@@ -205,6 +206,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   };
   const auth = new CapabilityService(now);
   const github = new GitHubService(config.repo, deps.tokenManager);
+  const spawnRequests = new SpawnRequestLedger(deps.state, now, save);
 
   const ctx: RouteContext = {
     config,
@@ -214,6 +216,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     grantTtlMs: GRANT_TTL_MS,
     auth,
     github,
+    spawnRequests,
     requireTree: (body) => requireTree(deps.state, body),
     requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
   };
@@ -262,6 +265,13 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   const server = Bun.serve({
     hostname: config.hostname ?? "127.0.0.1",
     port: config.port,
+    // Never close a connection whose request a handler is still working on. Bun documents a
+    // ten-second default; on Bun 1.3.14 the default does not fire for a pending handler
+    // (LEGION-102's reproduction), so this guards a later runtime, not the incident.
+    // Loopback-only, and every client is one of this daemon's own panes with its own deadline;
+    // 255 would not cover a fresh worker's workspace provisioning (slow_command_timeout_seconds,
+    // default 300).
+    idleTimeout: 0,
     fetch: handler,
   });
   return {

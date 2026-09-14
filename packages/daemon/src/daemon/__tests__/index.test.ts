@@ -634,7 +634,11 @@ describe("startDaemon", () => {
     state.roles[testerToken] = {
       issue,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       resumeSessionFile,
     };
     state.workerAdmission.queue.push(testerToken);
@@ -820,7 +824,11 @@ describe("startDaemon", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-23T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: `legion-${daemonConfig.project}`,
@@ -1024,6 +1032,7 @@ describe("startDaemon", () => {
           secret,
           role: "planner",
           task: "Plan the child",
+          requestId: "f3db17e8-20fa-4e07-98c1-3b49c685c0de",
         }),
       });
       expect(spawned.status).toBe(200);

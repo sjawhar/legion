@@ -44,8 +44,11 @@ function redactedLegionState(project: string) {
     roles: {},
     controllerPendingNotices: 0,
     pendingStatusWrites: [],
+    workerAdmission: { queue: [] },
   };
 }
+/** RFC 4122 text form, the shape `node:crypto`'s `randomUUID()` mints for a spawn request id. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const natsConnections: { readonly name: string }[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
@@ -3083,6 +3086,7 @@ describe("Legion OMP extension", () => {
             task: "Implement the feature",
             sessionId: "ses_architect",
             secret: "root-secret",
+            requestId: expect.stringMatching(UUID_PATTERN),
           },
         },
         details: { status: "spawned", roleToken: "role-token-implementer" },
@@ -3118,6 +3122,20 @@ describe("Legion OMP extension", () => {
         details: entry.details,
       });
     }
+
+    // One request id per spawn_worker tool call: two more identical calls mint two more ids.
+    const spawnInput = { op: "spawn_worker", issue, role: "implementer", task: "Implement again" };
+    await legion.execute("call-spawn-a", spawnInput, undefined, undefined, context);
+    await legion.execute("call-spawn-b", spawnInput, undefined, undefined, context);
+    const spawnRequestIds = requests
+      .filter((request) => request.path === "/legion/v1/worker/spawn")
+      .map(({ body }) =>
+        body !== null && typeof body === "object" && "requestId" in body
+          ? body.requestId
+          : undefined
+      );
+    expect(spawnRequestIds).toHaveLength(3);
+    expect(new Set(spawnRequestIds).size).toBe(3);
 
     const requestCountBeforeRejectedField = requests.length;
     expect(
