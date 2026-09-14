@@ -15,14 +15,11 @@ repository skill drives that surface. Name the production-like surface and the e
 since the implementer must prove the change on that surface before its phase completes and the
 tester must be able to re-run what you named. If no surface can reach a criterion today, building
 it is part of this plan — a task of this issue, or a prerequisite child issue you report to the
-architect — never a criterion the implementer is expected to skip. If the repository cannot yet
-exercise a criterion end to end, building that path is part of this plan — as a task of this
-issue, or reported to the architect as a prerequisite sub-issue when it must exist before
-implementation starts. Fill
-`requiredSkills.implement`, `.test`, and `.review` — the schema's only three keys, one per
-downstream role — with one line each on why. Read the issue, its acceptance criteria, the
-relevant code, and durable `.legion/` handoffs. Use ordinary scouts, reviewers, and oracle agents
-when they improve the plan; never spawn a Legion role yourself.
+architect — never a criterion the implementer is expected to skip. Fill `requiredSkills.implement`,
+`.test`, and `.review` — the schema's only three keys, one per downstream role — with one line
+each on why. Read the issue, its acceptance criteria, the relevant code, and durable `.legion/`
+handoffs. Use ordinary scouts, reviewers, and oracle agents when they improve the plan; never
+spawn a Legion role yourself.
 
 The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan
