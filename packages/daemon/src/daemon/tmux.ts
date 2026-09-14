@@ -335,12 +335,8 @@ export interface OpenedWindow {
   windowId: string;
   paneId: string;
   pid: number;
-  /** Set when the window took two attempts: the first `new-window` failed after `has-session` had
-   * reported the session present, and the session was gone when `openWindow` asked again — the
-   * last window's process exited and tmux tore session and server down between the two commands
-   * (a stuck controller retired while its window was the session's only one, LEGION-89). Carries
-   * the first attempt's error text for the runtime to log; the returned window is the second
-   * attempt's, opened in the recreated session. */
+  /** The first attempt's error text when session recreation recovered the open. See `openWindow`
+   * for the retry conditions. */
   recovered?: string;
 }
 

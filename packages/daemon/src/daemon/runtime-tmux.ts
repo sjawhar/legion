@@ -473,12 +473,8 @@ export class TmuxRuntime implements Runtime {
     };
   }
 
-  /** `tmux.openWindow` in the daemon's own session, logging the one recovery it may report: the
-   * first `new-window` failed after `has-session` had said the session was present, and the
-   * session was gone when asked again — the last window's process exited (a stuck controller
-   * retired while its window was the session's only one, LEGION-89) and tmux tore session and
-   * server down between the two commands — so it was recreated and the window opened on a second
-   * attempt. Logged here, not in `tmux.ts`: that module returns details and the runtime logs. */
+  /** Opens a window in the daemon's session. Recovery diagnostics are logged here; `tmux.openWindow`
+   * returns them without logging. */
   private async openWindow(name: string, paneArgv: string[]): Promise<tmux.OpenedWindow> {
     const session = this.deps.tmux.socket;
     const window = await tmux.openWindow(this.deps.tmux, session, name, paneArgv, session);

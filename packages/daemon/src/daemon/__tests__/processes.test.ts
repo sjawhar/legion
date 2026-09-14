@@ -6128,8 +6128,8 @@ describe("ProcessManager", () => {
       ...paneIdentity(),
     };
     state.controllerLocator = { ...staleLocator };
-    const sleepGate = Promise.withResolvers<void>();
-    let sleepCalls = 0;
+    const clock = manualSleep();
+    const testConfig = config(stateDir);
     const commands: string[][] = [];
     const controllerRelaunched = Promise.withResolvers<void>();
     const noServer = "no server running on /tmp/tmux-1000/legion-omp";
@@ -6138,7 +6138,7 @@ describe("ProcessManager", () => {
     let sessionRecreated = false;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir),
+      config: testConfig,
       saveState: async () => {
         if (tmuxFields(state.controllerLocator)?.tmuxWindowId === "@44") {
           controllerRelaunched.resolve();
@@ -6146,13 +6146,8 @@ describe("ProcessManager", () => {
       },
       // As in the fixture above: only the stale locator's deadline elapses; the fresh
       // controller's own deadline must stay pending.
-      sleep: async () => {
-        sleepCalls += 1;
-        if (sleepCalls === 1) {
-          await sleepGate.promise;
-          return;
-        }
-        await new Promise<void>(() => {});
+      sleep: async (ms) => {
+        await clock.sleep(ms);
       },
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
@@ -6183,7 +6178,11 @@ describe("ProcessManager", () => {
 
     try {
       await processes.ensureController();
-      sleepGate.resolve();
+      clock.fire(
+        testConfig.workerBootTimeoutSeconds *
+          1_000 *
+          testConfig.workerBootRegistrationDeadlineIntervals
+      );
       await controllerRelaunched.promise;
 
       expect(managedState.controllerLocator).toEqual({
@@ -6222,8 +6221,8 @@ describe("ProcessManager", () => {
       ...paneIdentity(),
     };
     state.controllerLocator = { ...staleLocator };
-    const sleepGate = Promise.withResolvers<void>();
-    let sleepCalls = 0;
+    const clock = manualSleep();
+    const testConfig = config(stateDir);
     const commands: string[][] = [];
     const respawnFailed = Promise.withResolvers<unknown>();
     const errorLog = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
@@ -6232,14 +6231,9 @@ describe("ProcessManager", () => {
       }
     });
     const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir),
-      sleep: async () => {
-        sleepCalls += 1;
-        if (sleepCalls === 1) {
-          await sleepGate.promise;
-          return;
-        }
-        await new Promise<void>(() => {});
+      config: testConfig,
+      sleep: async (ms) => {
+        await clock.sleep(ms);
       },
       connectWorkerRpc: async () => {
         throw new Error("ECONNREFUSED");
@@ -6257,7 +6251,11 @@ describe("ProcessManager", () => {
 
     try {
       await processes.ensureController();
-      sleepGate.resolve();
+      clock.fire(
+        testConfig.workerBootTimeoutSeconds *
+          1_000 *
+          testConfig.workerBootRegistrationDeadlineIntervals
+      );
       const error = await respawnFailed.promise;
 
       expect(error).toBeInstanceOf(Error);

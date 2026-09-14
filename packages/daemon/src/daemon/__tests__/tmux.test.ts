@@ -51,7 +51,7 @@ function scripted(
       const verb = cmd[3] ?? "";
       const nth = (counts.get(verb) ?? 0) + 1;
       counts.set(verb, nth);
-      return reply(verb, nth, (other) => (counts.get(other) ?? 0) > 0);
+      return reply(verb, nth, (other) => counts.has(other));
     },
   };
 }
