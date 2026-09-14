@@ -1434,7 +1434,7 @@ describe("Legion OMP extension", () => {
   test("recognises a subagent by the session this process already bootstrapped when no transcript is on disk", async () => {
     // With the transcript in a SQL row there is no parent `.jsonl` beside the subagent's path, so
     // the on-disk layout says nothing; the guard must still fall back on what this process booted.
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const requests: { readonly path: string }[] = [];
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
       exits.push(code);
@@ -1449,10 +1449,9 @@ describe("Legion OMP extension", () => {
     process.env.LEGION_TREE = tree;
     process.env.LEGION_ROLE = "architect";
     process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = (async (input) => {
       const url = new URL(input.toString());
-      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-      requests.push({ path: url.pathname, body });
+      requests.push({ path: url.pathname });
       if (url.pathname === "/legion/v1/process/started") {
         return Response.json({
           roleTokens: { architect: token },
@@ -1471,7 +1470,13 @@ describe("Legion OMP extension", () => {
     const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-sql-subagent-"));
     temporaryPaths.push(baseDirectory);
     const rootFile = path.join(baseDirectory, "sessions", "-repo", "2026_root.jsonl");
-    const subagentFile = path.join(baseDirectory, "sessions", "-repo", "2026_root", "2026_task.jsonl");
+    const subagentFile = path.join(
+      baseDirectory,
+      "sessions",
+      "-repo",
+      "2026_root",
+      "2026_task.jsonl"
+    );
 
     const root = createPi();
     legionExtension(root.pi);

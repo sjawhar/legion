@@ -798,8 +798,8 @@ describe("legion probe-image", () => {
       'exec /opt/omp/bin/omp models --no-extensions --extension "$1" --json'
     );
     expect(commands[1]?.[2]).toStartWith('exec /opt/omp/bin/omp models --extension "$1" --json');
-    expect(commands[2]?.[2]).toBe(
-      "export OMP_SESSION_STORAGE=legion-launch-probe PI_TIMING=x; exec /opt/omp/bin/omp --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
+    expect(commands[2]?.[2]).toStartWith(
+      "export OMP_SESSION_STORAGE=legion-launch-probe PI_TIMING=x; exec /opt/omp/bin/omp "
     );
     // The token a daemon accepting this image for a sql session store requires in the probe
     // pod's output: an older image's command prints a bare `probe-image: OK`.

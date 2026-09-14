@@ -32,8 +32,8 @@ version.
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
 (`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs those two probes plus a third
 — the build must carry the `session.storage` setting the [Session store](#session-store) depends on, proven by
-starting it with a nonsense `OMP_SESSION_STORAGE` and requiring the refusal; an older build accepts the value
-and fails the probe — through `legion probe-image`, so a build whose OMP or plugin is broken, or whose OMP
+starting it with a nonsense `OMP_SESSION_STORAGE` value and requiring the refusal; an older build never reads
+the variable, starts normally, and so fails the probe — through `legion probe-image`, so a build whose OMP or plugin is broken, or whose OMP
 would silently keep a `sql` deployment's sessions on files, fails instead of publishing. Its success line is
 `probe-image: OK (<omp path>) session-storage=probed`: the token (`SESSION_STORAGE_PROBE_MARK` in
 `boot-probes.ts`) is what tells this command's output from an older image's bare `probe-image: OK`, which
@@ -169,7 +169,8 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 | `OMP_SESSION_STORAGE=sql`, no file named by the variable or the setting | refuses, naming both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`                                                                                                        |
 | the named file is missing or unreadable                           | `OMP_SESSION_SQL_DSN_FILE names <path>, which could not be read: <reason>` (or `session.sql.dsnFile names …` when the setting supplied it)                                            |
 | the named file is blank after trimming                            | `… names <path>, which is empty`                                                                                                                                                       |
-| the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)` — the driver's error, never the connection string                     |
+| the file's contents are not a connection URL the driver accepts (for example the libpq keyword form `host=… user=… password=…`) | `… names <path>, but its contents are not a connection URL the database driver accepts` — the driver's parse error is not printed, since it embeds the whole string; never the contents |
+| the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: <driver error> (<code>)` — for a closed port `Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)`; the driver's error, never the connection string |
 | any other `OMP_SESSION_STORAGE` value                             | `OMP_SESSION_STORAGE is "<value>"; expected "file" or "sql"`                                                                                                                           |
 | the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`) runs inside the worker image through `legion probe-image` (see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), fails on such a build so the image never publishes, and on a passing image prints `session-storage=probed` on the command's OK line; under `session_store: postgres` the daemon requires that token in the probe pod's output — it never probes a host OMP for it |
 

@@ -7,13 +7,17 @@ import type { CommandResult, CommandRunner } from "../state/fetch";
 import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
 import { withOmpLaunchPrefix } from "./processes";
 
-/** The launch probes. `startDaemon` starts the first two first and awaits them only at its launch
- * hold (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane
- * opens until they pass); `legion probe-image` runs all three inside the worker image
+/** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
+ * (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane opens
+ * until they pass); `legion probe-image` runs all three inside the worker image
  * (packages/daemon/docker/worker.Dockerfile's last step) — one module so the daemon and the image
- * gate are the same code. The third, `verifySessionStorageSetting`, is exported for the daemon to
- * run under a `sql` session store (its sibling issue wires that); the daemon's default boot does
- * not run it, so a tmux deployment on an older build is untouched. */
+ * gate are the same code. The third, `verifySessionStorageSetting`, runs only there: the daemon
+ * never probes a host OMP for it — under a `sql` session store it requires the image's own
+ * `probe-image` output to carry `SESSION_STORAGE_PROBE_MARK` instead (its sibling issue wires
+ * that). Two reasons it stays out of the daemon's boot: a tmux deployment on an older build must
+ * stay untouched, and this probe classifies a launch-prefix failure as transient (its negative
+ * answer is an exit code, so a `secrets` denial is indistinguishable from OMP dying early), which
+ * the daemon's unbounded retry policy would retry forever. */
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
 const OMP_AGENTS_MISSING_MARKER = "LEGION_OMP_AGENTS=missing";
 const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
@@ -384,7 +388,7 @@ export async function verifyLegionPluginLoaded(
 /** The setting the fork build must carry for a `sql` session store, and the value no build of
  * any age accepts for it: a build that carries the setting refuses it (exit 1, naming the
  * variable); one that predates the setting never reads the variable and starts normally. */
-export const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
+const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
 const SESSION_STORAGE_PROBE_VALUE = "legion-launch-probe";
 /** The token `legion probe-image` prints on its success line once `verifySessionStorageSetting`
  * has passed: `probe-image: OK (<omp path>) session-storage=probed`. An image built before this
