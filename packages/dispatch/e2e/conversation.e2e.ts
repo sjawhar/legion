@@ -120,7 +120,23 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     }
     await expect(turn(page, "From a disconnected agent")).toContainText("session:ghost-se…");
 
-    const screenshot = testInfo.outputPath("conversation-desktop.png");
+    // The pin is the shared icon toggle at the turn's top-right, not a text button beside it.
+    const firstTurn = turn(page, "First bold line");
+    const pin = firstTurn.getByRole("button", { name: "Pin" });
+    await expect(pin).toHaveAttribute("aria-pressed", "false");
+    const [turnBox, pinBox] = await Promise.all([firstTurn.boundingBox(), pin.boundingBox()]);
+    if (turnBox === null || pinBox === null) throw new Error("turn or pin has no layout box");
+    expect(pinBox.x + pinBox.width).toBeGreaterThan(turnBox.x + turnBox.width - 16);
+    expect(pinBox.y).toBeLessThan(turnBox.y + 16);
+    await pin.click();
+    await expect(firstTurn.getByRole("button", { name: "Unpin" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+
+    const screenshot = testInfo.outputPath(
+      `conversation-pinned-turn-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
+    );
     await page.screenshot({ path: screenshot, fullPage: true });
     await testInfo.attach("conversation desktop", { contentType: "image/png", path: screenshot });
   } finally {

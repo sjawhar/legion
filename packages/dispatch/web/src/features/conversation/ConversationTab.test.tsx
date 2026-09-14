@@ -185,7 +185,9 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
 
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText("Another message");
-    for (const button of screen.getAllByRole("button", { name: "Pin" })) {
+    const pins = screen.getAllByRole("button", { name: "Pin" });
+    expect(pins.map((button) => button.getAttribute("aria-pressed"))).toEqual(["false", "false"]);
+    for (const button of pins) {
       fireEvent.click(button);
     }
 

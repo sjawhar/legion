@@ -10,6 +10,7 @@ import {
   getIssueEvents,
   patchIssue,
 } from "./api";
+import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -84,12 +85,15 @@ const session = {
   as: "agent" as const,
 };
 
-test("issue header persists its title, status, and route", async ({ browser }, testInfo) => {
+test("issue header copies its key and persists its title, status, and route", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "First decision" });
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
+  const copied = await recordClipboard(page);
   const issueWrites: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "PATCH" && request.url().includes("/api/v1/issues/")) {
@@ -106,6 +110,14 @@ test("issue header persists its title, status, and route", async ({ browser }, t
     await page.goto(`/issues/${issue.key}`);
     const heading = page.getByRole("heading", { level: 1, name: "First decision" });
     await expect(heading).toBeVisible();
+    await page.getByRole("button", { name: `Copy issue key ${issue.key}` }).click();
+    await expect(page.getByText("Copied", { exact: true })).toBeVisible();
+    await expect.poll(copied).toEqual([issue.key]);
+    await page.screenshot({
+      path: testInfo.outputPath(
+        `issue-header-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
+      ),
+    });
     await heading.click();
     const issueTitle = page.getByLabel("Issue title");
     await issueTitle.fill("First decision revised");

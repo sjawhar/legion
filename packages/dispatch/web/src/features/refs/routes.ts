@@ -25,6 +25,12 @@ export type ProjectRoute =
 export type DispatchRoute = IssueRoute | ProjectRoute;
 export type ProjectDocumentRoute = Extract<ProjectRoute, { kind: "document" }>;
 export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute;
+/** The Inbox at `/`, optionally narrowed to one agent's asks (`?agent=<session id>`); with
+ *  `section=needs-you` only the asks waiting on the viewer are shown. */
+export interface InboxRoute {
+  agent?: string;
+  section?: "needs-you";
+}
 export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
@@ -349,4 +355,29 @@ export function buildProjectPath(route: ProjectRoute): string {
   }
   const search = query.toString();
   return search === "" ? document : `${document}?${search}`;
+}
+
+export function parseInboxSearch(search: string): InboxRoute {
+  const params = new URLSearchParams(search);
+  const agent = params.get("agent");
+  const route: InboxRoute = {};
+  if (agent !== null && agent !== "") {
+    route.agent = agent;
+  }
+  if (params.get("section") === "needs-you") {
+    route.section = "needs-you";
+  }
+  return route;
+}
+
+export function buildInboxPath(route: InboxRoute = {}): string {
+  const query = new URLSearchParams();
+  if (route.agent !== undefined) {
+    query.set("agent", route.agent);
+  }
+  if (route.section !== undefined) {
+    query.set("section", route.section);
+  }
+  const search = query.toString();
+  return search === "" ? "/" : `/?${search}`;
 }
