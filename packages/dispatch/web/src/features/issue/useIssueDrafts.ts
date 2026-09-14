@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Issue } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
-export type IssueUpdateInput = Partial<Pick<Issue, "priority" | "route" | "status" | "title">>;
+export type IssueUpdateInput = Partial<Pick<Issue, "route" | "status" | "title">>;
 
 export interface IssueUpdateMutation {
   mutate: (input: IssueUpdateInput) => void;
@@ -17,7 +17,6 @@ export interface IssueDrafts {
   onIssueSuccess: (next: Issue, input: IssueUpdateInput) => void;
   requestRouteSubmit: () => boolean;
   requestStatusSubmit: (status: string) => boolean;
-  requestPrioritySubmit: (priority: Issue["priority"]) => boolean;
   requestTitleSubmit: () => boolean;
   retry: () => void;
   route: string;
@@ -187,8 +186,6 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
   };
   const requestStatusSubmit = (status: string): boolean =>
     updateIssueGuard.guard(() => updateIssue.mutate({ status }));
-  const requestPrioritySubmit = (priority: Issue["priority"]): boolean =>
-    updateIssueGuard.guard(() => updateIssue.mutate({ priority }));
 
   useEffect(() => {
     if (!titleDirty && !titleDirtyRef.current && titlePendingSubmit === null) {
@@ -214,7 +211,6 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     routeIsValid: route === "" || routePattern.test(route),
     title,
     requestStatusSubmit,
-    requestPrioritySubmit,
     titleDirty,
     titleError,
     writeRoute,

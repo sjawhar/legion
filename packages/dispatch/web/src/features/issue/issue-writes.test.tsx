@@ -354,7 +354,7 @@ test("IssuePage submits the selected priority through the issue mutation", async
   const { unmount } = renderIssuePage();
 
   try {
-    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    const priority = (await screen.findByLabelText("Priority of CORE-1")) as HTMLSelectElement;
     expect([...priority.options].map((option) => option.value)).toEqual(["", "0", "1", "2", "3"]);
     fireEvent.change(priority, { target: { value: "0" } });
 
@@ -372,7 +372,7 @@ test("IssuePage keeps an optimistic priority selection while its save is pending
   const { unmount } = renderIssuePage();
 
   try {
-    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    const priority = (await screen.findByLabelText("Priority of CORE-1")) as HTMLSelectElement;
     fireEvent.change(priority, { target: { value: "0" } });
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
 
@@ -396,7 +396,7 @@ test("IssuePage restores the previous priority after a failed save", async () =>
   const { unmount } = renderIssuePage();
 
   try {
-    const priority = (await screen.findByLabelText("Priority")) as HTMLSelectElement;
+    const priority = (await screen.findByLabelText("Priority of CORE-1")) as HTMLSelectElement;
     fireEvent.change(priority, { target: { value: "0" } });
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
     expect(priority.value).toBe("0");

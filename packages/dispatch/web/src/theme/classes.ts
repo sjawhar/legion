@@ -151,6 +151,11 @@ export const borderStrongHover = "hover:border-slate-300 dark:hover:border-slate
 export const focusBorder = "focus:border-sky-600 dark:focus:border-sky-400";
 export const focusRing = "focus:ring-sky-600 dark:focus:ring-sky-400";
 export const focusVisibleRing = "focus-visible:ring-sky-600 dark:focus-visible:ring-sky-400";
+/** `focusVisibleRing` for a wrapper whose focusable control is invisible inside it (e.g. a
+ * native `<select>` laid over a badge): the ring shows on the wrapper when the control has
+ * keyboard focus. */
+export const hasFocusVisibleRing =
+  "has-focus-visible:ring-sky-600 dark:has-focus-visible:ring-sky-400";
 export const cardHoverBorder = "hover:border-sky-400 dark:hover:border-sky-300";
 /** The `cardHoverBorder` accent, scoped to `enabled:` so it doesn't apply while a button is
  * `disabled` (paired with `disabled:opacity-50`-style buttons). */

@@ -338,6 +338,45 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
   }
 });
 
+test("an inbox row sets its issue's priority in place", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Needs a priority" });
+  await patchIssue(issue.key, { priority: 2 });
+  const ask = await createAsk(issue.key, { question: "How urgent is this?" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const row = page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${ask.id}`) });
+    const control = row.getByLabel(`Priority of ${issue.key}`);
+    await expect(row.locator("span", { hasText: /^P2$/ })).toBeVisible();
+    const patch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+    );
+    await control.selectOption("0");
+    expect((await patch).postDataJSON()).toEqual({ priority: 0 });
+    await expect(row.locator("span", { hasText: /^P0$/ })).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 0 });
+    // The row's link was not followed.
+    expect(new URL(page.url()).pathname).toBe("/");
+
+    const shot = testInfo.outputPath(`inbox-priority-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`inbox priority (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    await page.reload();
+    await expect(row.locator("span", { hasText: /^P0$/ })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an unanchored issue-level comment reaches Conversation, not document review", async ({
   browser,
 }, testInfo) => {
