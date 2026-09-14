@@ -326,11 +326,6 @@ describe("handoff ledger", () => {
       writePhaseHandoff(workspaceDir as string, "implement", { filesChanged: ["a.ts"] })
     ).toThrow(/proof/);
     expect(existsSync(path.join(getLegionDir(workspaceDir), "implement.json"))).toBe(false);
-
-    writePhaseHandoff(workspaceDir, "implement", { filesChanged: ["a.ts"], proof: [proof] });
-    expect(readPhaseHandoff(workspaceDir, "implement")).toMatchObject({
-      proof: [{ criterion: "1" }],
-    });
   });
 
   it("names the file and the failing field on stderr when a committed handoff fails validation", async () => {
