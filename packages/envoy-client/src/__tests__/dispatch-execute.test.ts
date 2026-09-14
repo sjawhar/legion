@@ -119,6 +119,18 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe(`Opened ask ask-1: Ship this change?\n\nRef: ${ref}`);
   });
 
+  test("names the configured Dispatch URL when its transport is unreachable", async () => {
+    const fetchImpl = (() => {
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeAsk({ issue: "DSP-41", question: "Should this ship?" }, fetchImpl)
+    ).rejects.toThrow(
+      "If the Dispatch URL changed, restart this agent process so it picks up the new configuration."
+    );
+  });
+
   test("does not duplicate an ask ref already in the question", async () => {
     const requests: unknown[] = [];
     const ref = "dispatch://DSP-41/message/message-1";

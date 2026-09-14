@@ -743,11 +743,27 @@ export async function executeDispatchTool(
   if (!input.config.enabled || !configUrl || !configToken) {
     throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
   }
+  const baseFetch = input.fetchImpl ?? fetch;
+  const fetchImpl = Object.assign(
+    async (...args: Parameters<typeof fetch>): Promise<Response> => {
+      try {
+        return await baseFetch(...args);
+      } catch (error) {
+        if (error instanceof TypeError) {
+          throw new Error(
+            `Dispatch at ${configUrl} is unreachable: ${error.message}. If the Dispatch URL changed, restart this agent process so it picks up the new configuration.`
+          );
+        }
+        throw error;
+      }
+    },
+    { preconnect: baseFetch.preconnect }
+  );
   if (input.tool === "dispatch_open_asks") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
     toolSchema(input.tool).parse(input.args);
-    const client = new DispatchClient(configUrl, configToken, input.fetchImpl, input.signal);
+    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
@@ -759,7 +775,7 @@ export async function executeDispatchTool(
   // argument only needs the contract's shape named when it is forwarded.
   const args = toolSchema(input.tool).parse(ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
-  const client = new DispatchClient(configUrl, configToken, input.fetchImpl, input.signal);
+  const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   const owner =
     ownerArguments.owner?.kind === "issue"
       ? {

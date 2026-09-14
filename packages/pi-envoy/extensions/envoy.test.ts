@@ -50,7 +50,7 @@ type SessionContext = {
     readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
     readonly getEditorText: () => string;
   };
-}
+};
 
 type CommandContext = {
   readonly ui: {
@@ -423,7 +423,7 @@ describe("envoy OMP extension", () => {
     expect(existsSync(join(result.skillPaths[0], "envoy", "SKILL.md"))).toBe(true);
   });
 
-  test("injects an authored-ask summary and nudges an ask-free user turn once", async () => {
+  test("injects an authored-ask summary", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const requests: string[] = [];
@@ -446,17 +446,13 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import("./envoy.ts?open-ask-reminder");
+    const { default: envoyExtension } = await import("./envoy.ts?open-ask-summary");
     const fixture = createPi();
     envoyExtension(fixture.pi);
     const context = sessionContext("ses_reminder");
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const messageStart = fixture.handlers.get("message_start");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (beforeAgentStart === undefined || messageStart === undefined || sessionStop === undefined) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
+    if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
     const summary = await beforeAgentStart({ prompt: "finish the task" }, context);
     expect(summary).toMatchObject({
@@ -466,264 +462,10 @@ describe("envoy OMP extension", () => {
         content: expect.stringContaining("There are no unanswered asks for this session."),
       },
     });
-    await messageStart(
-      { message: { role: "user", attribution: "user", content: "finish the task" } },
-      context
-    );
-    const stop = {
-      last_assistant_message: { role: "assistant" },
-      messages: [],
-      turn_id: 1,
-      session_id: "ses_reminder",
-      stop_hook_active: false,
-      signal: new AbortController().signal,
-    };
-    await expect(sessionStop(stop, context)).resolves.toEqual({
-      continue: true,
-      additionalContext:
-        "You have no unanswered asks in Dispatch. If you are waiting for human input, open an ask. Otherwise ignore this reminder and continue with any remaining work. Do not reply just to acknowledge this reminder.",
-    });
-    await expect(sessionStop(stop, context)).resolves.toBeUndefined();
-    expect(requests).toEqual([
-      "/api/v1/asks/open?author_session=ses_reminder",
-      "/api/v1/asks/open?author_session=ses_reminder&since=2026-09-13T00%3A00%3A00Z",
-    ]);
+    expect(requests).toEqual(["/api/v1/asks/open?author_session=ses_reminder"]);
   });
 
-  test("keeps one-time ask reminders active when NATS is disabled", async () => {
-    delete process.env.ENVOY_NATS_URL;
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "token";
-    globalThis.fetch = async (input) => {
-      if (new URL(input.toString()).pathname !== "/api/v1/asks/open") return response({});
-      return new Response(
-        JSON.stringify({
-          session_id: "ses_without_nats",
-          as_of: "2026-09-13T00:00:00Z",
-          opened_since: false,
-          count: 0,
-          waiting_on_human: 0,
-          waiting_on_agent: 0,
-          asks: [],
-        }),
-        { headers: { "Content-Type": "application/json" } }
-      );
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?open-ask-no-nats");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    const context = sessionContext("ses_without_nats");
-    await fixture.handlers.get("session_start")?.({}, context);
-    const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const messageStart = fixture.handlers.get("message_start");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (beforeAgentStart === undefined || messageStart === undefined || sessionStop === undefined) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
-    await beforeAgentStart({ prompt: "finish" }, context);
-    await messageStart({ message: { role: "user", attribution: "user" } }, context);
-
-    await expect(
-      sessionStop(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_without_nats",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-    ).resolves.toEqual({ continue: true, additionalContext: expect.any(String) });
-  });
-
-  test("arms a reminder period for a human Dispatch steer", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "token";
-    const freshBaseline = Promise.withResolvers<void>();
-    let openAskReads = 0;
-    globalThis.fetch = async (input, init) => {
-      if (new URL(input.toString()).pathname !== "/api/v1/asks/open") {
-        return responseWithRegistration(input, init, {});
-      }
-      openAskReads += 1;
-      if (openAskReads === 2) freshBaseline.resolve();
-      return new Response(
-        JSON.stringify({
-          session_id: "ses_dispatch_human",
-          as_of: "2026-09-13T00:00:00Z",
-          opened_since: false,
-          count: 0,
-          waiting_on_human: 0,
-          waiting_on_agent: 0,
-          asks: [],
-        }),
-        { headers: { "Content-Type": "application/json" } }
-      );
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?open-ask-human-delivery");
-    const fixture = createPi();
-    const injected = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        injected.resolve();
-      },
-    });
-    const context = sessionContext("ses_dispatch_human");
-    await fixture.handlers.get("session_start")?.({}, context);
-    const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const agentStart = fixture.handlers.get("agent_start");
-    const agentEnd = fixture.handlers.get("agent_end");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (
-      beforeAgentStart === undefined ||
-      agentStart === undefined ||
-      agentEnd === undefined ||
-      sessionStop === undefined
-    ) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
-    await beforeAgentStart({ prompt: "working" }, context);
-    await agentStart({}, context);
-    const agent = natsState.controls.get("notifications.agent.ses_dispatch_human");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-    agent.push(targetedDispatchEnvelope("steer", "human-dispatch-reminder"));
-    await injected.promise;
-    expect(fixture.entries.at(-1)).toMatchObject({
-      customType: "dispatch-ask-awareness",
-      data: { session_id: "ses_dispatch_human", period: 1, baseline_as_of: "2026-09-13T00:00:00Z" },
-    });
-    await agentEnd({ willContinue: false }, context);
-
-    await expect(
-      sessionStop(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_dispatch_human",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-
-    ).resolves.toEqual({ continue: true, additionalContext: expect.any(String) });
-  });
-  test("does not arm a reminder period for an agent-authored Dispatch steer", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "token";
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?open-ask-agent-delivery");
-    const fixture = createPi();
-    const injected = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        injected.resolve();
-      },
-    });
-    const context = sessionContext("ses_dispatch_agent");
-    await fixture.handlers.get("session_start")?.({}, context);
-    await fixture.handlers.get("agent_start")?.({}, context);
-    const agent = natsState.controls.get("notifications.agent.ses_dispatch_agent");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-    const envelope = JSON.parse(targetedDispatchEnvelope("steer", "agent-dispatch-reminder")) as {
-      payload: string;
-    };
-    const frame = JSON.parse(envelope.payload) as { event: { actor: { kind: string; id: string } } };
-    frame.event.actor = { kind: "session", id: "ses_other" };
-    envelope.payload = JSON.stringify(frame);
-    agent.push(JSON.stringify(envelope));
-    await injected.promise;
-    await fixture.handlers.get("agent_end")?.({ willContinue: false }, context);
-
-    await expect(
-      fixture.handlers.get("session_stop")?.(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_dispatch_agent",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-  });
-
-  test("disarms an ask-free period when dispatch_ask succeeds before the session stops", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "token";
-    const askQueries: string[] = [];
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/api/v1/asks/open") {
-        askQueries.push(url.search);
-        return new Response(
-          JSON.stringify({
-            session_id: "ses_created",
-            as_of: "2026-09-13T00:00:00Z",
-            opened_since: false,
-            count: 0,
-            waiting_on_human: 0,
-            waiting_on_agent: 0,
-            asks: [],
-          }),
-          { headers: { "Content-Type": "application/json" } }
-        );
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?open-ask-created");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    const context = sessionContext("ses_created");
-    await fixture.handlers.get("session_start")?.({}, context);
-    const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const messageStart = fixture.handlers.get("message_start");
-    const toolResult = fixture.handlers.get("tool_result");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (
-      beforeAgentStart === undefined ||
-      messageStart === undefined ||
-      toolResult === undefined ||
-      sessionStop === undefined
-    ) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
-    await beforeAgentStart({ prompt: "wait for input" }, context);
-    await messageStart(
-      { message: { role: "user", attribution: "user", content: "wait for input" } },
-      context
-    );
-    await toolResult(
-      { toolName: "dispatch_ask", toolCallId: "call-1", input: {}, details: { ask: "ask-1" }, isError: false },
-      context
-    );
-
-    await expect(
-      sessionStop(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_created",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(askQueries).toEqual(["?author_session=ses_created", "?author_session=ses_created&since=2026-09-13T00%3A00%3A00Z"]);
-  });
-
-  test("treats an unavailable open-ask query as unknown instead of emitting a reminder", async () => {
+  test("renders an unavailable authored-ask summary and warns once", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const notifications: string[] = [];
@@ -745,44 +487,27 @@ describe("envoy OMP extension", () => {
     };
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const messageStart = fixture.handlers.get("message_start");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (beforeAgentStart === undefined || messageStart === undefined || sessionStop === undefined) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
+    if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
+
     const summary = await beforeAgentStart({ prompt: "wait" }, context);
     expect(summary).toMatchObject({
       message: { content: expect.stringContaining("unavailable"), attribution: "agent" },
     });
-    await messageStart({ message: { role: "user", attribution: "user", content: "wait" } }, context);
-    await expect(
-      sessionStop(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_unknown",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]).toContain("Dispatch open-ask check unavailable");
+    expect(notifications).toEqual([expect.stringContaining("Dispatch open-ask check unavailable")]);
   });
 
-  test("suppresses automatic reminders only after the Legion role bridge marks the session", async () => {
+  test("keeps each session's availability warning latched until that session recovers", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
-    const askQueries: string[] = [];
+    const notifications: string[] = [];
+    let activeSessionID = "ses_availability_a";
+    let available = false;
     globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/api/v1/asks/open") {
-        askQueries.push(url.search);
+      if (new URL(input.toString()).pathname === "/api/v1/asks/open") {
+        if (!available) throw new Error("network offline");
         return new Response(
           JSON.stringify({
-            session_id: "ses_legion",
+            session_id: activeSessionID,
             as_of: "2026-09-13T00:00:00Z",
             opened_since: false,
             count: 0,
@@ -793,48 +518,40 @@ describe("envoy OMP extension", () => {
           { headers: { "Content-Type": "application/json" } }
         );
       }
-      if (url.pathname === "/v1/roles/set") {
-        return response({
-          session_id: "ses_legion",
-          machine_id: "test",
-          dir: "/tmp/envoy-omp-test",
-          topics: ["notifications.role.legion-project-issue-worker"],
-        });
-      }
       return responseWithRegistration(input, init, {});
     };
-    const extension = await import("./envoy.ts?open-ask-legion");
+    const { default: envoyExtension } = await import("./envoy.ts?open-ask-availability-latch");
     const fixture = createPi();
-    extension.default(fixture.pi);
-    const context = sessionContext("ses_legion");
+    envoyExtension(fixture.pi);
+    const context = {
+      ...sessionContext(),
+      sessionManager: { getSessionId: () => activeSessionID },
+      ui: {
+        ...sessionContext().ui,
+        notify: (message: string) => notifications.push(message),
+      },
+    };
     await fixture.handlers.get("session_start")?.({}, context);
-    await extension.claimEnvoyRole("ses_legion", "legion-project-issue-worker", context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
-    const messageStart = fixture.handlers.get("message_start");
-    const sessionStop = fixture.handlers.get("session_stop");
-    if (beforeAgentStart === undefined || messageStart === undefined || sessionStop === undefined) {
-      throw new Error("open-ask reminder lifecycle handlers were not registered");
-    }
-    await beforeAgentStart({ prompt: "complete the handoff" }, context);
-    await messageStart(
-      { message: { role: "user", attribution: "user", content: "complete the handoff" } },
-      context
-    );
+    if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
-    await expect(
-      sessionStop(
-        {
-          last_assistant_message: { role: "assistant" },
-          messages: [],
-          turn_id: 1,
-          session_id: "ses_legion",
-          stop_hook_active: false,
-          signal: new AbortController().signal,
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-    expect(askQueries).toEqual(["?author_session=ses_legion"]);
+    await beforeAgentStart({ prompt: "first" }, context);
+    activeSessionID = "ses_availability_b";
+    await beforeAgentStart({ prompt: "second session" }, context);
+    expect(notifications).toHaveLength(2);
+
+    available = true;
+    await beforeAgentStart({ prompt: "second session recovered" }, context);
+    available = false;
+    activeSessionID = "ses_availability_a";
+    await beforeAgentStart({ prompt: "first session still unavailable" }, context);
+    expect(notifications).toHaveLength(2);
+
+    available = true;
+    await beforeAgentStart({ prompt: "first session recovered" }, context);
+    available = false;
+    await beforeAgentStart({ prompt: "first session failed again" }, context);
+    expect(notifications).toHaveLength(3);
   });
 
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {
@@ -1741,7 +1458,10 @@ describe("envoy OMP extension", () => {
     const notifications: string[] = [];
     await fixture.handlers.get("session_start")?.(
       {},
-      { ...sessionContext(), ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) } }
+      {
+        ...sessionContext(),
+        ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+      }
     );
     expect(
       notifications.filter((message) => message.startsWith("envoy: dispatch tool disabled — "))
