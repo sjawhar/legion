@@ -129,7 +129,10 @@ describe("the session-storage setting probe", () => {
     const probe = verifySessionStorageSetting(
       "/opt/omp/bin/omp",
       [],
-      fixedRunner({ stdout: "", stderr: "Total: 4925.1ms (since first marker)\n", exitCode: 0 }, commands),
+      fixedRunner(
+        { stdout: "", stderr: "Total: 4925.1ms (since first marker)\n", exitCode: 0 },
+        commands
+      ),
       bounded(sleeps)
     );
     await expect(probe).rejects.toThrow(
@@ -147,7 +150,10 @@ describe("the session-storage setting probe", () => {
       const probe = verifySessionStorageSetting(
         "/opt/omp/bin/omp",
         [],
-        fixedRunner({ stdout: "", stderr: "secrets: ANTHROPIC_API_KEY denied\n", exitCode: 1 }, commands),
+        fixedRunner(
+          { stdout: "", stderr: "secrets: ANTHROPIC_API_KEY denied\n", exitCode: 1 },
+          commands
+        ),
         bounded(sleeps)
       );
       await expect(probe).rejects.toThrow(
@@ -169,7 +175,12 @@ describe("the session-storage setting probe", () => {
         "/opt/omp/bin/omp",
         [],
         fixedRunner(
-          { stdout: "", stderr: "", exitCode: 143, timedOut: { limitMs: 300_000, elapsedMs: 300_100 } },
+          {
+            stdout: "",
+            stderr: "",
+            exitCode: 143,
+            timedOut: { limitMs: 300_000, elapsedMs: 300_100 },
+          },
           commands
         ),
         bounded(sleeps)

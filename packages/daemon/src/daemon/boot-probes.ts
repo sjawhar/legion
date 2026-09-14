@@ -101,7 +101,10 @@ function killedOutcome(
 ): ProbeOutcome | undefined {
   if (result.aborted) return { passed: false, definitive: false, aborted: true, detail: "" };
   if (result.timedOut === undefined) return undefined;
-  if (negativeMarker !== undefined && `${result.stderr}\n${result.stdout}`.includes(negativeMarker)) {
+  if (
+    negativeMarker !== undefined &&
+    `${result.stderr}\n${result.stdout}`.includes(negativeMarker)
+  ) {
     return undefined;
   }
   const { limitMs, elapsedMs } = result.timedOut;
