@@ -3,8 +3,7 @@ import type { ReactNode } from "react";
 import { trimReference } from "../margin/Composer";
 import {
   buildDispatchReference,
-  buildIssuePath,
-  buildProjectPath,
+  buildReferencePath,
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
@@ -121,7 +120,12 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
   }
 }
 
-function routeFromHref(href: string, appOrigin: string): DispatchReferenceRoute | undefined {
+/** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
+ * external link or a dashboard path that is not an issue/document reference. */
+export function referenceRouteFromHref(
+  href: string,
+  appOrigin: string = window.location.origin
+): DispatchReferenceRoute | undefined {
   if (href.startsWith("dispatch://")) {
     return parseDispatchReference(href);
   }
@@ -146,7 +150,7 @@ function routeFromHref(href: string, appOrigin: string): DispatchReferenceRoute 
  * Finds every already-rendered `<a>` in root whose href is a dispatch:// reference or a
  * same-origin dashboard path — a link `linkifyDispatchRefs` just inserted, an ordinary Markdown
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
- * to the SPA route via `buildIssuePath`/`buildProjectPath`, and clears its text so the caller can
+ * to the SPA route via `buildReferencePath`, and clears its text so the caller can
  * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
  * parse as a reference, is left untouched.
  *
@@ -168,14 +172,11 @@ export function collectReferenceAnchors(
     if (href === null) {
       continue;
     }
-    const route = routeFromHref(href, appOrigin);
+    const route = referenceRouteFromHref(href, appOrigin);
     if (route === undefined) {
       continue;
     }
-    anchor.setAttribute(
-      "href",
-      isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route)
-    );
+    anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
     anchor.replaceChildren();

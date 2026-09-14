@@ -10,6 +10,7 @@ import { waitingOnYou } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { Margin, MarginProvider } from "./features/margin/Margin";
+import { RefPreviewHost } from "./features/refs/RefPreview";
 import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
@@ -531,6 +532,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
+        <RefPreviewHost />
       </div>
     </MarginProvider>
   );

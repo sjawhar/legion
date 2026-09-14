@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { primarySpec } from "../../api/issue-cache";
 import { type IssueRoute, isPrimaryDocumentArtifactRoute, issueTabForRoute } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 
@@ -18,9 +19,7 @@ export function useIssueDetail(route: IssueRoute) {
     queryFn: () => api.getIssue(route.key),
   });
   const state = useQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() });
-  const primaryArtifact = issue.data?.artifacts?.find(
-    ({ id }) => id === issue.data?.primary_artifact_id
-  );
+  const primaryArtifact = primarySpec(issue.data);
   const selectedArtifact =
     artifactRouteSlug === undefined
       ? primaryArtifact

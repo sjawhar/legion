@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
-  type RefObject,
   useCallback,
   useContext,
   useEffect,
@@ -29,11 +28,9 @@ import type { MarginOwner } from "../margin/useMarginItems";
 import {
   buildIssuePath,
   buildProjectPath,
-  type DispatchReferenceRoute,
-  isProjectRoute,
+  buildReferencePath,
   parseDispatchReference,
 } from "../refs/routes";
-import { useReferenceTarget } from "../refs/Unfurl";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
 import type { ConnectionState } from "./connection";
@@ -139,54 +136,6 @@ function dispatchHrefOf(anchor: Element): string | null {
   return href?.startsWith("dispatch://") ? href : null;
 }
 
-/** Every already-rendered dispatch:// link mark in the live editor, deduplicated by target.
- * Read-only: unlike `RefLink`'s DOM rewriting for static Markdown bodies, this never touches the
- * editor's DOM — `@sjawhar/proof-editor` exposes no decoration/markView hook to safely replace a
- * live, editable mark's rendered text, so `ReferenceTooltip` below only sets a hover tooltip. */
-function collectDispatchHrefRoutes(
-  root: HTMLElement
-): { reference: string; route: DispatchReferenceRoute }[] {
-  const routes = new Map<string, DispatchReferenceRoute>();
-  for (const anchor of root.querySelectorAll("a")) {
-    const href = dispatchHrefOf(anchor);
-    if (href === null) {
-      continue;
-    }
-    const route = parseDispatchReference(href);
-    if (route !== undefined) {
-      routes.set(href, route);
-    }
-  }
-  return [...routes].map(([reference, route]) => ({ reference, route }));
-}
-
-/** Sets the resolved title as a hover tooltip on every editor anchor matching reference. Renders
- * nothing itself; `useReferenceTarget` drives the effect that mutates the DOM directly, the same
- * pattern `setSearchHighlights`/`setActiveMarkClass` already use for this editor surface. */
-function ReferenceTooltip({
-  reference,
-  route,
-  rootRef,
-}: {
-  reference: string;
-  route: DispatchReferenceRoute;
-  rootRef: RefObject<HTMLDivElement | null>;
-}): null {
-  const { title } = useReferenceTarget(route);
-  useEffect(() => {
-    const root = rootRef.current;
-    if (root === null) {
-      return;
-    }
-    for (const anchor of root.querySelectorAll("a")) {
-      if (dispatchHrefOf(anchor) === reference) {
-        anchor.title = title ?? "";
-      }
-    }
-  }, [reference, rootRef, title]);
-  return null;
-}
-
 export function ProofDocument({
   artifact,
   highlight,
@@ -208,9 +157,6 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
-  const [dispatchLinkRoutes, setDispatchLinkRoutes] = useState<
-    { reference: string; route: DispatchReferenceRoute }[]
-  >([]);
   const { blockSchema: runtimeBlockSchema, connect, createEditor } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const {
@@ -402,7 +348,6 @@ export function ProofDocument({
       __dispatchDocument?: { editor: EditorHandle; view: EditorHandle["view"] };
     };
     setConnection("connecting");
-    setDispatchLinkRoutes([]);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
     const document = connect(artifact.id, {
@@ -504,15 +449,6 @@ export function ProofDocument({
           };
           refreshSearchHighlights();
           fragment.observeDeep(refreshSearchHighlights);
-          let referenceFrame = 0;
-          const refreshDispatchLinks = () => {
-            cancelAnimationFrame(referenceFrame);
-            referenceFrame = requestAnimationFrame(() => {
-              setDispatchLinkRoutes(collectDispatchHrefRoutes(handle.view.dom));
-            });
-          };
-          refreshDispatchLinks();
-          fragment.observeDeep(refreshDispatchLinks);
           let frame = 0;
           const publishPlacements = () => {
             cancelAnimationFrame(frame);
@@ -532,12 +468,10 @@ export function ProofDocument({
           disposeEditorBindings = () => {
             cancelAnimationFrame(frame);
             cancelAnimationFrame(searchFrame);
-            cancelAnimationFrame(referenceFrame);
             resizeObserver.disconnect();
             marks.unobserve(project);
             fragment.unobserveDeep(publishPlacements);
             fragment.unobserveDeep(refreshSearchHighlights);
-            fragment.unobserveDeep(refreshDispatchLinks);
             registerDocumentRef.current(undefined);
           };
         });
@@ -662,7 +596,7 @@ export function ProofDocument({
             return;
           }
           event.preventDefault();
-          navigate(isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route));
+          navigate(buildReferencePath(route));
         }}
       >
         <div ref={root} />
@@ -720,9 +654,6 @@ export function ProofDocument({
               })}
           </aside>
         ) : null}
-        {dispatchLinkRoutes.map(({ reference, route }) => (
-          <ReferenceTooltip key={reference} reference={reference} route={route} rootRef={root} />
-        ))}
       </article>
       {version === undefined ? null : versionQuery.isError ? (
         <section aria-label={`Document version ${version}`} className="space-y-3">

@@ -396,7 +396,7 @@ test("a version deep link renders the comment's original quote highlighted in a 
 
 test("clicking a Markdown dispatch:// link in the live editor navigates in-app without a reload", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "NAV", name: "Navigation" });
   const target = await createIssue({
     project: "NAV",
@@ -416,10 +416,15 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
     const editor = documentEditor(page);
     // The live editor keeps the author's own link text (`@sjawhar/proof-editor` exposes no
     // decoration hook to safely replace a live editable mark's rendered text) and surfaces the
-    // resolved title as a hover tooltip instead.
+    // resolved target in the hover card instead.
     const link = editor.getByRole("link", { name: "the other issue" });
     await expect(link).toBeVisible();
-    await expect(link).toHaveAttribute("title", "Navigation target");
+    if (testInfo.project.name !== "iphone") {
+      await link.hover();
+      await expect(page.getByRole("tooltip")).toContainText("Navigation target");
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
+    }
 
     // A full page reload would reset this marker; an in-app route change preserves it.
     await page.evaluate(() => {
