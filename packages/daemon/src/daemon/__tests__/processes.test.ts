@@ -1863,7 +1863,6 @@ describe("ProcessManager", () => {
     state.issues[root] = { key: root, title: "Parked root", status: "backlog", children: [] };
     tree(state);
     state.trees[root].status = "lingering";
-    state.trees[root].resumeSessionFile = "/state/trees/legion-42/session.json";
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
     const { manager: processes, state: managedState } = manager(state, {
       dispatchClient: fakeDispatchClient({
@@ -1876,23 +1875,14 @@ describe("ProcessManager", () => {
     await processes.expireLinger(root);
 
     expect(managedState.trees[root]?.status).toBe("closed");
-    expect(managedState.trees[root]?.resumeSessionFile).toBeUndefined();
     expect(statusWrites).toEqual([]);
   });
 
   it("retires a just-opened root pane without a status write when a human parks it during launch", async () => {
     const stateDir = await temporaryDir();
-    const sessionFile = path.join(stateDir, "architect-session.json");
-    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
-    state.trees[root] = {
-      root,
-      generation: 0,
-      status: "active",
-      launchFailures: 0,
-      resumeSessionFile: sessionFile,
-    };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
     state.admission.active.push(root);
     const launchStarted = Promise.withResolvers<void>();
     const launchGate = Promise.withResolvers<void>();
@@ -1924,13 +1914,14 @@ describe("ProcessManager", () => {
     const spawning = processes.spawnRoot(root);
     await launchStarted.promise;
     state.issues[root].status = "backlog";
+    state.trees[root].status = "lingering";
+    state.admission.active.splice(state.admission.active.indexOf(root), 1);
     launchGate.resolve();
 
     await spawning;
 
     expect(managedState.trees[root]).toMatchObject({ status: "lingering" });
     expect(managedState.trees[root]?.locator).toBeUndefined();
-    expect(managedState.trees[root]?.resumeSessionFile).toBeUndefined();
     expect(statusWrites).toEqual([]);
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
@@ -2413,134 +2404,6 @@ describe("ProcessManager", () => {
 
     expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
     expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
-    const launch = commands.find((command) => command[3] === "new-window");
-    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
-  });
-
-  it("recovers a slotless root from its first resurrection save at boot (LEGION-83)", async () => {
-    const stateDir = await temporaryDir();
-    const sessionFile = path.join(stateDir, "architect-session.json");
-    await writeFile(sessionFile, "{}", "utf8");
-    const state = newLegionState("omp", 1);
-    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
-    state.trees[root] = {
-      root,
-      generation: 1,
-      status: "dead",
-      launchFailures: 0,
-      resumeSessionFile: sessionFile,
-    };
-    let persisted: LegionState | undefined;
-    const { manager: processes } = manager(state, {
-      config: config(stateDir),
-      saveState: async () => {
-        persisted ??= structuredClone(state);
-      },
-    });
-
-    await processes.resurrect(root);
-    if (!persisted) throw new Error("resurrection did not persist its recovery state");
-    const { manager: restarted, commands } = manager(
-      persisted,
-      { config: config(stateDir) },
-      { skipEnableLaunches: true }
-    );
-    restarted.reconnectRoots();
-    restarted.enableLaunches();
-    await restarted.reconcileAdmission();
-    await restarted.replayHeldRecoveries();
-    await restarted.drainSpawns();
-
-    expect(persisted.admission).toEqual({ cap: 1, active: [root], queue: [] });
-    expect(persisted.trees[root]).toMatchObject({ status: "active", generation: 2 });
-    const launch = commands.find((command) => command[3] === "new-window");
-    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
-  });
-
-  it("adopts a dead legacy child tree at boot instead of replaying it as a root (LEGION-83)", async () => {
-    const stateDir = await temporaryDir();
-    const state = newLegionState("omp", 2);
-    tree(state);
-    state.issues[root] = {
-      key: root,
-      title: "Parent",
-      status: "in_progress",
-      children: [child],
-    };
-    state.issues[child] = {
-      key: child,
-      title: "Legacy child root",
-      parent: root,
-      status: "in_progress",
-      children: [],
-    };
-    state.trees[child] = { root: child, generation: 1, status: "dead", launchFailures: 0 };
-    state.admission.active = [root, child];
-    const { manager: processes, commands } = manager(
-      state,
-      { config: config(stateDir, { admissionCap: 2 }) },
-      { skipEnableLaunches: true }
-    );
-
-    expect(processes.adoptOwnerlessChildTrees()).toEqual([{ child, parent: root }]);
-    processes.enableLaunches();
-    processes.reconnectRoots();
-    await processes.reconcileAdmission();
-    await processes.replayHeldRecoveries();
-    await processes.drainSpawns();
-
-    expect(state.trees[child]).toBeUndefined();
-    expect(state.admission).toEqual({ cap: 2, active: [root], queue: [] });
-    expect(
-      commands.some(
-        (command) =>
-          command[3] === "new-window" && tmuxWindowEnvironment(command).LEGION_TREE === child
-      )
-    ).toBe(false);
-  });
-
-  it("replays a dead admitted child with no live ancestor as an orphan root at boot (LEGION-83)", async () => {
-    const stateDir = await temporaryDir();
-    const sessionFile = path.join(stateDir, "architect-session.json");
-    await writeFile(sessionFile, "{}", "utf8");
-    const state = newLegionState("omp", 1);
-    state.issues[root] = {
-      key: root,
-      title: "Closed parent",
-      status: "done",
-      children: [child],
-    };
-    state.trees[root] = { root, generation: 1, status: "closed", launchFailures: 0 };
-    state.issues[child] = {
-      key: child,
-      title: "Orphaned child root",
-      parent: root,
-      status: "in_progress",
-      children: [],
-    };
-    state.trees[child] = {
-      root: child,
-      generation: 1,
-      status: "dead",
-      launchFailures: 0,
-      resumeSessionFile: sessionFile,
-    };
-    state.admission.active = [child];
-    const { manager: processes, commands } = manager(
-      state,
-      { config: config(stateDir) },
-      { skipEnableLaunches: true }
-    );
-
-    expect(processes.adoptOwnerlessChildTrees()).toEqual([]);
-    processes.enableLaunches();
-    processes.reconnectRoots();
-    await processes.reconcileAdmission();
-    await processes.replayHeldRecoveries();
-    await processes.drainSpawns();
-
-    expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
-    expect(state.trees[child]).toMatchObject({ status: "active", generation: 2 });
     const launch = commands.find((command) => command[3] === "new-window");
     expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
   });
@@ -4733,7 +4596,6 @@ describe("ProcessManager", () => {
     const stateFile = path.join(stateDir, "state.json");
     const state = newLegionState("omp", 1);
     tree(state);
-    state.trees[root].resumeSessionFile = path.join(stateDir, "architect-session.json");
     state.trees[root].locator = {
       ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
@@ -4771,7 +4633,6 @@ describe("ProcessManager", () => {
     const reloaded = await legionStateLoadState(stateFile, { project: "omp", cap: 1 });
     expect(reloaded.trees[root]?.status).toBe("lingering");
     expect(reloaded.trees[root]?.lingerUntil).toBeString();
-    expect(reloaded.trees[root]?.resumeSessionFile).toBeUndefined();
 
     // The periodic sweep's retry, against the reloaded (post-crash) state: finishes cleanly.
     const { manager: retryProcesses } = manager(reloaded, {
@@ -5623,6 +5484,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
       locator: {
         runtime: "tmux",
@@ -5819,6 +5681,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
     });
 
@@ -5880,6 +5743,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
     });
     const relaunched = state.roles[token];
@@ -6102,6 +5966,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
       locator: locator("%2", "tester", sessionFile),
     };
@@ -6113,7 +5978,11 @@ describe("ProcessManager", () => {
       role: "reviewer",
       sessionId: "ses_reviewer",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "review #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "review #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: locator("%3", "reviewer"),
     };
     state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
@@ -6188,7 +6057,11 @@ describe("ProcessManager", () => {
     const planner = managedState.roles[plannerToken];
     if (!planner || !("issue" in planner)) throw new Error("planner claim disappeared");
     expect(planner.locator).toBeDefined();
-    expect(planner.pendingAssignment).toEqual({ kind: "assignment", task: "plan #42" });
+    expect(planner.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "plan #42",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
 
     managedState.roles[reviewerToken] = reviewerClaim;
     await processes.workerReady(root, "reviewer", "ses_reviewer", 1);
@@ -6221,6 +6094,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
       locator: {
         runtime: "tmux",
@@ -6321,6 +6195,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
       locator: {
         runtime: "tmux",
@@ -6367,6 +6242,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
       locator: {
         runtime: "tmux",
@@ -6399,7 +6275,11 @@ describe("ProcessManager", () => {
 
     // The mirror: the same queue position holding an architect assignment is prompted in place
     // and, being an assignment, makes the tester the active phase.
-    claim.pendingAssignment = { kind: "assignment", task: "verify #41" };
+    claim.pendingAssignment = {
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    };
     managedState.workerAdmission.queue.push(token);
     await processes.reconcileWorkerAdmission();
 
@@ -6432,6 +6312,7 @@ describe("ProcessManager", () => {
       pendingAssignment: {
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+        queuedAt: "2026-08-24T00:00:00.000Z",
       },
     };
     state.workerAdmission.queue.push(token);
@@ -6465,7 +6346,11 @@ describe("ProcessManager", () => {
     });
 
     // The mirror: an architect assignment in the same queue position relaunches with --resume.
-    claim.pendingAssignment = { kind: "assignment", task: "verify #41" };
+    claim.pendingAssignment = {
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    };
     managedState.workerAdmission.queue.push(token);
     await processes.reconcileWorkerAdmission();
 
@@ -6476,14 +6361,22 @@ describe("ProcessManager", () => {
     const launched = managedState.roles[token];
     if (!launched || !("issue" in launched)) throw new Error("tester claim disappeared");
     expect(launched.locator).toBeDefined();
-    expect(launched.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(launched.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("leaves a booting claim's architect assignment untouched when a catch-up arrives for the same role", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     const testerToken = roleToken("omp", root, "tester");
-    const assignment = { kind: "assignment" as const, task: "verify #41" };
+    const assignment = {
+      kind: "assignment" as const,
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    };
     state.roles[testerToken] = {
       issue: root,
       role: "tester",
@@ -6531,7 +6424,11 @@ describe("ProcessManager", () => {
     // The tester is the active phase, so resumeWorker's pre-check passes and it goes on to
     // compute the catch-up -- a GitHub fetch it awaits outside the role's lock.
     state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
-    const assignment = { kind: "assignment" as const, task: "verify #41" };
+    const assignment = {
+      kind: "assignment" as const,
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    };
     const client = fakeWorkerRpcClient();
     const { manager: processes, commands } = manager(state, {
       connectWorkerRpc: async () => client,
@@ -6673,7 +6570,11 @@ describe("ProcessManager", () => {
     if (!relaunched || !("issue" in relaunched) || !relaunched.locator) {
       throw new Error("relaunched claim missing");
     }
-    expect(relaunched.pendingAssignment).toEqual({ kind: "assignment", task: "implement #43" });
+    expect(relaunched.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "implement #43",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(relaunched.launchFailures).toBe(1);
     expect(commands.some((command) => command.join(" ").includes("--resume"))).toBeTrue();
 
@@ -10316,7 +10217,11 @@ describe("ProcessManager", () => {
     // The retry relaunched the same role onto a fresh process, still carrying its assignment.
     const relaunched = managedState.roles[token];
     if (!relaunched || !("issue" in relaunched)) throw new Error("relaunched claim missing");
-    expect(relaunched.pendingAssignment).toEqual({ kind: "assignment", task: "implement #41" });
+    expect(relaunched.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "implement #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(relaunched.locator).toBeDefined();
     expect(relaunched.locator).not.toEqual(workerLocator);
   });
@@ -10398,7 +10303,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[roleToken("omp", root, "tester")];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
     expect(claim.generation).toBe(1);
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toMatchObject({
       runtime: "tmux",
       tmuxSession: "legion-omp",
@@ -11125,7 +11034,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -11272,7 +11185,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.sessionId).toBeUndefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #55" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #55",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("queues a same-role spawn against a started-but-unconfirmed claim as resumed-pending, never probing or prompting its socket", async () => {
@@ -11315,7 +11232,11 @@ describe("ProcessManager", () => {
     expect(connectCalls).toBe(0);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #55" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #55",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.readyConfirmedAt).toBeUndefined();
   });
 
@@ -11499,7 +11420,11 @@ describe("ProcessManager", () => {
     if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("tester claim disappeared");
     expect(queuedClaim.locator).toBeUndefined();
     expect(queuedClaim.resumeSessionFile).toBe(resumeFile);
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify again" });
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify again",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     // Preserved in place, never replaced.
     expect(queuedClaim.agentId).toBe("agt_tester");
     // sessionId is kept (never deleted) while queued: a delayed promotion's boot token still
@@ -11920,7 +11845,11 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("sub-architect claim was not recorded");
     expect(claim.issue).toBe(child);
     expect(claim.locator).toMatchObject({ tmuxWindowId: "@7", tmuxPaneId: "%71" });
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "own this child" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "own this child",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     // The child is a member of the parent's tree, never a tree or admission entry of its own.
     expect(managedState.trees[child]).toBeUndefined();
     expect(managedState.admission).toEqual(admissionBefore);
@@ -12022,20 +11951,20 @@ describe("ProcessManager", () => {
 
     // Removed: queued (OMP-2), its queued grandchild (OMP-7, owned through OMP-2's parent chain
     // once the nearest tree is a live one -- OMP-2's own tree is `queued`, which owns),
-    // launch-failed (OMP-3), active without a locator (OMP-4), and dead (OMP-5).
+    // launch-failed (OMP-3), active without a locator (OMP-4).
     expect(adoptions).toEqual([
       { child: "OMP-2", parent: "OMP-1" },
       { child: "OMP-7", parent: "OMP-2" },
       { child: "OMP-3", parent: "OMP-1" },
       { child: "OMP-4", parent: "OMP-1" },
-      { child: "OMP-5", parent: "OMP-1" },
     ]);
-    // Kept: active with a locator (OMP-6), the lingering legacy tree (OMP-8) and the queued
-    // grandchild under it (OMP-9: its nearest ancestor tree is lingering, so it is an orphan),
-    // and the parentless root (OMP-10).
+    // Kept: dead (OMP-5), active with a locator (OMP-6), the lingering legacy tree (OMP-8) and the
+    // queued grandchild under it (OMP-9: its nearest ancestor tree is lingering, so it is an
+    // orphan), and the parentless root (OMP-10).
     expect(Object.keys(managed.trees).sort()).toEqual([
       "OMP-1",
       "OMP-10",
+      "OMP-5",
       "OMP-6",
       "OMP-8",
       "OMP-9",
@@ -12050,7 +11979,7 @@ describe("ProcessManager", () => {
     expect(logged).toContain(
       `OMP-3's removed root tree still has worker claims with recorded panes (${roleToken("omp", "OMP-3", "planner")})`
     );
-    expect(logged.match(/\(LEGION-57\)/g)).toHaveLength(5);
+    expect(logged.match(/\(LEGION-57\)/g)).toHaveLength(4);
 
     // Idempotent.
     expect(processes.adoptOwnerlessChildTrees()).toEqual([]);
@@ -12079,45 +12008,60 @@ describe("ProcessManager", () => {
     const queuedClaim = managedState.roles[testerToken];
     if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("queued claim missing");
     expect(queuedClaim.locator).toBeUndefined();
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications).toContainEqual({
       subject: roleTopic(roleToken("omp", root, "architect")),
       json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
     });
   });
 
-  it("replaces an already-queued role's task on a second spawnWorker and publishes no second worker-queued", async () => {
+  it("replaces a queued task silently in place, preserving queuedAt", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
+    let now = Date.parse("2026-08-24T00:00:00.000Z");
+    let saves = 0;
     const {
       manager: processes,
       state: managedState,
       publications,
     } = manager(state, {
       config: config(stateDir, { workerCap: 1 }),
+      now: () => now,
+      saveState: async () => {
+        saves += 1;
+      },
     });
     await processes.spawnWorker(root, root, "planner", "plan #41");
     const testerToken = roleToken("omp", root, "tester");
+    const reviewerToken = roleToken("omp", root, "reviewer");
     const workerQueued = {
       subject: roleTopic(roleToken("omp", root, "architect")),
       json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
     };
-    expect(await processes.spawnWorker(root, root, "tester", "verify #41")).toEqual({
-      status: "queued",
-      roleToken: testerToken,
-    });
-    expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+    await processes.spawnWorker(root, root, "reviewer", "review #41");
+    const savesBeforeReplacement = saves;
 
+    now += 60_000;
     const again = await processes.spawnWorker(root, root, "tester", "verify #41 again");
 
     expect(again).toEqual({ status: "queued", roleToken: testerToken });
-    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    expect(managedState.workerAdmission.queue).toEqual([testerToken, reviewerToken]);
     const queuedClaim = managedState.roles[testerToken];
     if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("queued claim missing");
-    // Latest task wins; the architect already heard the role is queued.
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41 again" });
+    // Latest task wins without moving its FIFO position, timestamp, or notifying the architect.
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41 again",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+    expect(saves).toBe(savesBeforeReplacement + 1);
   });
 
   it("queues a root admitted and a worker spawned while launches are held, and launches both once enableLaunches() runs", async () => {
@@ -12449,7 +12393,11 @@ describe("ProcessManager", () => {
     if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("tester claim disappeared");
     // Locator left completely alone: no relaunch is ever needed for a still-live idle pane.
     expect(queuedClaim.locator).toBeDefined();
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications).toContainEqual({
       subject: architectTopic,
       json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
@@ -12555,7 +12503,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([testerToken]);
     const queuedClaim = managedState.roles[testerToken];
     if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("tester claim disappeared");
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(testerClient.prompts).toEqual([]);
   });
 
@@ -12575,7 +12527,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -12599,7 +12555,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([token]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(client.prompts).toEqual([]);
   });
@@ -12682,7 +12642,11 @@ describe("ProcessManager", () => {
       role: "tester",
       sessionId: "ses_tester",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -12712,7 +12676,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeDefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(
       commands.some(
         (command) =>
@@ -12763,7 +12731,11 @@ describe("ProcessManager", () => {
     state.roles[queuedToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(queuedToken);
 
@@ -12804,7 +12776,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -12861,7 +12837,11 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: staleLocator,
     };
     const connectGate = Promise.withResolvers<void>();
@@ -12895,7 +12875,11 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       generation: 2,
-      pendingAssignment: { kind: "assignment", task: "verify #55" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #55",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: freshLocator,
     };
 
@@ -12933,7 +12917,11 @@ describe("ProcessManager", () => {
     state.roles[failingToken] = {
       issue: root,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // A deterministic, permanent failure (missing session file, never appears on retry) — the
       // same mechanism "fails a worker respawn loudly..." above exercises directly.
       resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
@@ -12942,7 +12930,11 @@ describe("ProcessManager", () => {
     state.roles[okToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(failingToken, okToken);
 
@@ -12977,7 +12969,11 @@ describe("ProcessManager", () => {
     state.roles[failingToken] = {
       issue: root,
       role: "reviewer",
-      pendingAssignment: { kind: "assignment", task: "review #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "review #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // A deterministic, permanent failure (missing session file, never appears on retry) — but
       // launchFailures starts at 0, so one attempt stays *below* MAX_LAUNCH_FAILURES (3).
       resumeSessionFile: path.join(stateDir, "missing-reviewer-session.json"),
@@ -12985,7 +12981,11 @@ describe("ProcessManager", () => {
     state.roles[okToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(failingToken, okToken);
 
@@ -13028,7 +13028,11 @@ describe("ProcessManager", () => {
       [reviewer, root, "reviewer"],
       [merger, otherRoot, "merger"],
     ] as const) {
-      state.roles[token] = { issue, role, pendingAssignment: { kind: "assignment", task: role } };
+      state.roles[token] = {
+        issue,
+        role,
+        pendingAssignment: { kind: "assignment", task: role, queuedAt: "2026-08-24T00:00:00.000Z" },
+      };
       state.workerAdmission.queue.push(token);
     }
 
@@ -13056,7 +13060,11 @@ describe("ProcessManager", () => {
       [planner, otherRoot, "planner"],
       [correctiveImplementer, root, "implementer"],
     ] as const) {
-      state.roles[token] = { issue, role, pendingAssignment: { kind: "assignment", task: role } };
+      state.roles[token] = {
+        issue,
+        role,
+        pendingAssignment: { kind: "assignment", task: role, queuedAt: "2026-08-24T00:00:00.000Z" },
+      };
       state.workerAdmission.queue.push(token);
     }
 
@@ -13082,13 +13090,21 @@ describe("ProcessManager", () => {
     state.roles[retryingMerger] = {
       issue: root,
       role: "merger",
-      pendingAssignment: { kind: "assignment", task: "merge #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "merge #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       launchFailures: 1,
     };
     state.roles[cleanImplementer] = {
       issue: otherRoot,
       role: "implementer",
-      pendingAssignment: { kind: "assignment", task: "implement #99" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #99",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     // Arrival order and tier both favour the merger; its unresolved launch failure decides.
     state.workerAdmission.queue.push(retryingMerger, cleanImplementer);
@@ -13115,7 +13131,11 @@ describe("ProcessManager", () => {
     state.roles[failingToken] = {
       issue: root,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // A deterministic, permanent failure (missing session file, never appears on retry) — but
       // launchFailures starts at 0, so one attempt stays *below* MAX_LAUNCH_FAILURES (3). This
       // queue holds ONLY this one token — a rotate-in-place (shift then push, same array)
@@ -13355,7 +13375,11 @@ describe("ProcessManager", () => {
     state.roles[testerToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(testerToken);
 
@@ -13434,7 +13458,11 @@ describe("ProcessManager", () => {
     state.roles[testerToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(testerToken);
 
@@ -13608,7 +13636,11 @@ describe("ProcessManager", () => {
     state.roles[deadToken] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
 
     const otherRoot = "LEGION-99";
@@ -13622,7 +13654,11 @@ describe("ProcessManager", () => {
     state.roles[liveToken] = {
       issue: otherRoot,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #99" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #99",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(deadToken, liveToken);
 
@@ -13714,7 +13750,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -13842,7 +13882,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // A prior generation's unconfirmed boot(s) left this behind; a durable ready
       // confirmation is the only thing that ever resets it (never mere registration).
       launchFailures: 2,
@@ -13914,7 +13958,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -13957,7 +14005,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 2,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #55" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #55",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -13978,7 +14030,11 @@ describe("ProcessManager", () => {
     expect(client.prompts).toEqual([]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #55" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #55",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("treats a saveState failure after a successful prompt as a persistence issue, not a prompt failure: keeps the delivered phase and cleared pendingAssignment regardless", async () => {
@@ -13989,7 +14045,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14303,7 +14363,13 @@ describe("ProcessManager", () => {
     // to drain, so this isolates the pendingAssignment guard itself.
     const worker = await idleWorkerFixture({
       role: "implementer",
-      claim: { pendingAssignment: { kind: "assignment", task: "verify again" } },
+      claim: {
+        pendingAssignment: {
+          kind: "assignment",
+          task: "verify again",
+          queuedAt: "2026-08-24T00:00:00.000Z",
+        },
+      },
     });
     const seededLocator = structuredClone(worker.claim().locator);
 
@@ -14313,7 +14379,11 @@ describe("ProcessManager", () => {
 
     expect(worker.shutdownCalls).toEqual([]);
     expect(worker.claim().locator).toEqual(seededLocator);
-    expect(worker.claim().pendingAssignment).toEqual({ kind: "assignment", task: "verify again" });
+    expect(worker.claim().pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify again",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(worker.revokedSessions).toEqual([]);
     expect(worker.connectAttempts()).toBe(1);
   });
@@ -14360,7 +14430,9 @@ describe("ProcessManager", () => {
   it("re-arms the clock when expiry declines because a pendingAssignment is queued, and retires within one further window once it is cleared", async () => {
     const worker = await idleWorkerFixture({
       role: "reviewer",
-      claim: { pendingAssignment: { kind: "assignment", task: "x" } },
+      claim: {
+        pendingAssignment: { kind: "assignment", task: "x", queuedAt: "2026-08-24T00:00:00.000Z" },
+      },
     });
     const seededLocator = structuredClone(worker.claim().locator);
 
@@ -14370,7 +14442,11 @@ describe("ProcessManager", () => {
 
     expect(worker.shutdownCalls).toEqual([]);
     expect(worker.claim().locator).toEqual(seededLocator);
-    expect(worker.claim().pendingAssignment).toEqual({ kind: "assignment", task: "x" });
+    expect(worker.claim().pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "x",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(worker.clock.pending.filter((wait) => wait.ms === 600_000)).toHaveLength(1);
 
     delete worker.claim().pendingAssignment;
@@ -14449,7 +14525,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14496,7 +14576,11 @@ describe("ProcessManager", () => {
     state.roles[token] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14516,7 +14600,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeUndefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("clears a dead worker's locator on boot when the private tmux socket does not exist yet (first boot after upgrade or reboot)", async () => {
@@ -14534,7 +14622,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14564,7 +14656,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeUndefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("passes DISPATCH_URL and a DISPATCH_TOKEN_FILE pointer to a spawned phase worker, never the token or the retired DISPATCH_MCP_URL alias", async () => {
@@ -14633,7 +14729,11 @@ describe("ProcessManager", () => {
     state.roles[token] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14673,7 +14773,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     expect(claim.locator).toBeUndefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("bails without connecting again or killing when the current claim's locator no longer matches the one that was probed", async () => {
@@ -14696,7 +14800,11 @@ describe("ProcessManager", () => {
     state.roles[token] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: staleLocator,
     };
     const connectAttempts: string[] = [];
@@ -14749,7 +14857,11 @@ describe("ProcessManager", () => {
       issue: child,
       role: "implementer",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "implement #43" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #43",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14800,7 +14912,11 @@ describe("ProcessManager", () => {
     expect(queuedClaim.locator).toBeUndefined();
     expect(queuedClaim.resumeSessionFile).toBe(resumeFile);
     expect(queuedClaim.launchFailures).toBe(1);
-    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "implement #43" });
+    expect(queuedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "implement #43",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
 
     // Only once promotion is enabled (the post-`api`-assignment boot step) does the queued
     // retry actually launch, through the normal cap-aware, role-locked drain.
@@ -14953,7 +15069,11 @@ describe("ProcessManager", () => {
       issue: child,
       role: "implementer",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "implement #43" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #43",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -14993,7 +15113,11 @@ describe("ProcessManager", () => {
     expect(reloadedClaim.locator).toBeUndefined();
     expect(reloadedClaim.resumeSessionFile).toBe(resumeFile);
     expect(reloadedClaim.launchFailures).toBe(1);
-    expect(reloadedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "implement #43" });
+    expect(reloadedClaim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "implement #43",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
 
     // Promotion, once enabled against the *reloaded* state, finds the token still queued and
     // relaunches it — proving the persisted queue entry is actually usable, not merely present.
@@ -15102,7 +15226,11 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("claim disappeared");
     expect(claim.locator).toBeDefined();
     expect(tmuxFields(claim.locator)?.tmuxPaneId).toBe("%50");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "task2" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "task2",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.resumeSessionFile ?? claim.locator?.ompSessionFile).toBe(resumeFile);
     // Whichever race order wins, the decision still funnels through `launchWorker`'s
     // `provisionWorkspace` step, which performs real `mkdir` I/O (via this file's shared
@@ -15312,7 +15440,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -15331,7 +15463,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([token]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(claim.promptFailures).toBe(1);
   });
@@ -15363,7 +15499,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -15430,7 +15570,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -15481,7 +15625,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -15537,6 +15685,44 @@ describe("ProcessManager", () => {
   const retireLine = (token: string, cycle: number): string =>
     `[legion] ${token}: retiring after 3 prompts with no turn started; relaunch cycle ${cycle} (bound 2)`;
 
+  it("an identical re-send to a queued idle-live worker at cap changes nothing: no save, no publish, no prompt", async () => {
+    let saves = 0;
+    const { processes, managedState, publications, token, client } = await queuedIdleWorkerFixture(
+      1,
+      {
+        saveState: async () => {
+          saves += 1;
+        },
+      }
+    );
+    // An idle worker holds no slot; a located claim with no cached client counts as running and
+    // fills the one slot, so the tester's re-send is judged at cap.
+    managedState.roles[roleToken("omp", root, "planner")] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      sessionId: "ses_planner",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%8",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    const savesBefore = saves;
+    const publicationsBefore = publications.length;
+
+    const result = await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    expect(result).toEqual({ status: "queued", roleToken: token });
+    expect(saves).toBe(savesBefore);
+    expect(publications).toHaveLength(publicationsBefore);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(client.prompts).toEqual([]);
+  });
+
   it("commits a queued idle-resume prompt only when the worker's turn starts, not on the shim's acknowledgement", async () => {
     const { processes, managedState, publications, token, clock, client, sleeps } =
       await queuedIdleWorkerFixture(2);
@@ -15553,6 +15739,7 @@ describe("ProcessManager", () => {
     expect(testerClaim(managedState, token).pendingAssignment).toEqual({
       kind: "assignment",
       task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
     });
     expect(managedState.phases[root]).toBeUndefined();
     expect(client.runState).toBe("running");
@@ -15595,7 +15782,11 @@ describe("ProcessManager", () => {
 
     expect(managedState.workerAdmission.queue).toEqual([token]);
     const claim = testerClaim(managedState, token);
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(claim.promptFailures).toBe(1);
     expect(managedState.phases[root]).toBeUndefined();
@@ -15672,7 +15863,11 @@ describe("ProcessManager", () => {
     }
 
     // A newer assignment for the same role replaced the one whose receipt is still pending.
-    testerClaim(managedState, token).pendingAssignment = { kind: "assignment", task: "other" };
+    testerClaim(managedState, token).pendingAssignment = {
+      kind: "assignment",
+      task: "other",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    };
     client.emitRunState("running");
     // Negative wait: the late start reaches only commitLateStart's task-value check (replaced).
     await flushEventLoop(50);
@@ -15681,6 +15876,7 @@ describe("ProcessManager", () => {
     expect(testerClaim(managedState, token).pendingAssignment).toEqual({
       kind: "assignment",
       task: "other",
+      queuedAt: "2026-08-24T00:00:00.000Z",
     });
     expect(managedState.phases[root]).toBeUndefined();
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(0);
@@ -15852,7 +16048,11 @@ describe("ProcessManager", () => {
       expect(relaunchedClaim.generation).toBe(2);
       expect(relaunchedClaim.promptRetires).toBe(1);
       expect(relaunchedClaim.promptFailures).toBeUndefined();
-      expect(relaunchedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+      expect(relaunchedClaim.pendingAssignment).toEqual({
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      });
       expect(first.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
       expect(resumeArgument(tmuxFake.commands)).toContain(`--resume=${sessionFile}`);
       expect(splitWindows()).toBe(1);
@@ -15888,7 +16088,11 @@ describe("ProcessManager", () => {
       ]);
       const terminal = claim();
       expect(terminal.locator).toBeUndefined();
-      expect(terminal.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+      expect(terminal.pendingAssignment).toEqual({
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      });
       expect(terminal.promptRetires).toBe(2);
       expect(terminal.promptFailures).toBe(0);
       expect(terminal.resumeSessionFile).toBe(sessionFile);
@@ -15947,7 +16151,11 @@ describe("ProcessManager", () => {
       expect(counted.locator).toBeDefined();
       expect(counted.promptFailures).toBe(1);
       expect(counted.promptRetires).toBeUndefined();
-      expect(counted.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41 again" });
+      expect(counted.pendingAssignment).toEqual({
+        kind: "assignment",
+        task: "verify #41 again",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      });
       expect(managedState.workerAdmission.queue).toEqual([token]);
       expect(publications.filter((p) => p.json === workerDiedJson)).toHaveLength(0);
     } finally {
@@ -16004,7 +16212,11 @@ describe("ProcessManager", () => {
     }
 
     const claim = testerClaim(managedState, token);
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #55" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #55",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(claim.promptFailures).toBe(1);
     expect(managedState.workerAdmission.queue).toEqual([token]);
@@ -16095,7 +16307,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       launchFailures: 2,
       locator: {
         runtime: "tmux",
@@ -16136,7 +16352,11 @@ describe("ProcessManager", () => {
     // The boot did succeed and is confirmed exactly as a delivered prompt would have confirmed it.
     expect(claim.readyConfirmedAt).toBeDefined();
     expect(claim.launchFailures).toBeUndefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(claim.promptFailures).toBe(1);
     expect(managedState.workerAdmission.queue).toEqual([token]);
@@ -16291,7 +16511,11 @@ describe("ProcessManager", () => {
       expect(tmuxFields(relaunched.locator)?.tmuxPaneId).toBe("%302");
       expect(relaunched.generation).toBe(2);
       expect(relaunched.readyConfirmedAt).toBeUndefined();
-      expect(relaunched.pendingAssignment).toEqual({ kind: "assignment", task: "plan #41" });
+      expect(relaunched.pendingAssignment).toEqual({
+        kind: "assignment",
+        task: "plan #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      });
       expect(relaunched.launchFailures).toBe(1);
       expect(relaunched.promptFailures).toBeUndefined();
       expect(managedState.workerAdmission.queue).toEqual([]);
@@ -16354,7 +16578,11 @@ describe("ProcessManager", () => {
     const claim = testerClaim(managedState, token);
     expect(claim.promptFailures ?? 0).toBe(0);
     expect(claim.locator).toBeDefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(managedState.workerAdmission.queue).toEqual([token]);
     expect(managedState.phases[root]).toBeUndefined();
     expect(client.prompts).toEqual(["verify #41"]);
@@ -16416,7 +16644,11 @@ describe("ProcessManager", () => {
       generation: 1,
       sessionId: "ses_tester",
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -16437,7 +16669,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([token]);
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(claim.locator).toBeDefined();
     expect(client.prompts).toEqual([]);
 
@@ -16462,7 +16698,11 @@ describe("ProcessManager", () => {
       role: "tester",
       generation: 1,
       sessionId: "ses_tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // readyConfirmedAt deliberately absent: a restart landed between /worker/ready's ack and
       // its durable confirmation write, so this claim is neither stale (a real session and a
       // live client) nor safely promotable (admission cannot yet trust its readiness).
@@ -16484,7 +16724,11 @@ describe("ProcessManager", () => {
     const claim = managedState.roles[token];
     if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
     expect(claim.locator).toBeDefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("stops the drain after one below-threshold failure each for two queued tokens instead of burning every MAX_LAUNCH_FAILURES attempt on both in one pass", async () => {
@@ -16503,7 +16747,11 @@ describe("ProcessManager", () => {
     state.roles[failingTokenA] = {
       issue: root,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       // Deterministic, permanent failures (missing session files, never appear on retry) — but
       // launchFailures starts at 0 for both, so one attempt each stays *below* MAX_LAUNCH_FAILURES.
       resumeSessionFile: path.join(stateDir, "missing-planner-session.json"),
@@ -16511,7 +16759,11 @@ describe("ProcessManager", () => {
     state.roles[failingTokenB] = {
       issue: otherRoot,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #99" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #99",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       resumeSessionFile: path.join(stateDir, "missing-planner-99-session.json"),
     };
     state.workerAdmission.queue.push(failingTokenA, failingTokenB);
@@ -16559,12 +16811,20 @@ describe("ProcessManager", () => {
     state.roles[token] = {
       issue: root,
       role: "tester",
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.roles[secondToken] = {
       issue: root,
       role: "planner",
-      pendingAssignment: { kind: "assignment", task: "plan #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "plan #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
     };
     state.workerAdmission.queue.push(token, secondToken);
 
@@ -16600,7 +16860,11 @@ describe("ProcessManager", () => {
     if (!claim || !("issue" in claim)) throw new Error("tester claim missing");
     expect(claim.launchFailures).toBe(0);
     expect(claim.locator).toBeDefined();
-    expect(claim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(claim.pendingAssignment).toEqual({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+    });
     // Tester's own (never-rolled-back) locator keeps cap 1 fully occupied, so the second
     // queued token correctly never promotes either.
     expect(managedState.workerAdmission.queue).toEqual([secondToken]);
@@ -17067,7 +17331,11 @@ describe("ProcessManager", () => {
       issue: root,
       role: "implementer",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "implement #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         ...sharedPane,
         socketPath: "/state/workers/live.sock",
@@ -17078,7 +17346,11 @@ describe("ProcessManager", () => {
       issue: root,
       role: "tester",
       generation: 1,
-      pendingAssignment: { kind: "assignment", task: "verify #41" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+      },
       locator: {
         ...sharedPane,
         socketPath: "/state/workers/stale.sock",
@@ -18068,7 +18340,11 @@ describe("ProcessManager", () => {
       state.roles[failingToken] = {
         issue: child,
         role: "planner",
-        pendingAssignment: { kind: "assignment", task: "plan child" },
+        pendingAssignment: {
+          kind: "assignment",
+          task: "plan child",
+          queuedAt: "2026-08-24T00:00:00.000Z",
+        },
         // A deterministic, permanent failure: the session file never appears on a retry.
         resumeSessionFile: path.join(stateDir, "missing-child-planner-session.json"),
         launchFailures: 2,

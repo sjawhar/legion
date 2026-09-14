@@ -106,6 +106,18 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
     },
     controllerPendingNotices: 0,
     pendingStatusWrites: ["WIDGETS-2"],
+    workerAdmission: {
+      queue: [
+        {
+          roleToken: "legion-acme-WIDGETS-2-tester",
+          issue: "WIDGETS-2",
+          role: "tester",
+          kind: "assignment",
+          queuedAt: "2026-09-13T17:00:00.000Z",
+        },
+        { roleToken: "legion-acme-WIDGETS-3-planner", issue: "WIDGETS-3", role: "planner" },
+      ],
+    },
   };
 
   expect(LegionDaemonApi.State.response.safeParse(redacted).success).toBeTrue();
@@ -162,6 +174,93 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
   ]) {
     expect(LegionDaemonApi.State.response.safeParse(leak).success).toBeFalse();
   }
+});
+
+test("the state response refuses a worker-queue entry that carries the task text", () => {
+  const queued = {
+    roleToken: "legion-acme-WIDGETS-2-tester",
+    issue: "WIDGETS-2",
+    role: "tester",
+    kind: "assignment",
+    queuedAt: "2026-09-13T17:00:00.000Z",
+  };
+  const base = {
+    project: "acme/widgets",
+    version: 29,
+    issues: {},
+    trees: {},
+    admission: { cap: 2, active: [], queue: [] },
+    gates: {},
+    roles: {},
+    controllerPendingNotices: 0,
+    pendingStatusWrites: [],
+  };
+
+  expect(
+    LegionDaemonApi.State.response.safeParse({ ...base, workerAdmission: { queue: [queued] } })
+      .success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.State.response.safeParse({
+      ...base,
+      workerAdmission: { queue: [{ ...queued, task: "plan #1" }] },
+    }).success
+  ).toBeFalse();
+});
+
+test("the state response requires queue kind and queuedAt together", () => {
+  const queued = {
+    roleToken: "legion-acme-WIDGETS-2-tester",
+    issue: "WIDGETS-2",
+    role: "tester",
+    kind: "assignment",
+    queuedAt: "2026-09-13T17:00:00.000Z",
+  };
+  const { kind: _kind, ...withoutKind } = queued;
+  const { queuedAt: _queuedAt, ...withoutQueuedAt } = queued;
+  const base = {
+    project: "acme/widgets",
+    version: 29,
+    issues: {},
+    trees: {},
+    admission: { cap: 2, active: [], queue: [] },
+    gates: {},
+    roles: {},
+    controllerPendingNotices: 0,
+    pendingStatusWrites: [],
+  };
+
+  for (const partial of [withoutKind, withoutQueuedAt]) {
+    expect(
+      LegionDaemonApi.State.response.safeParse({
+        ...base,
+        workerAdmission: { queue: [partial] },
+      }).success
+    ).toBeFalse();
+  }
+});
+
+test("SpawnWorker.request requires a UUID requestId", () => {
+  const body = {
+    tree: "WIDGETS-1",
+    sessionId: "ses_architect",
+    secret: "root-secret",
+    issue: "WIDGETS-2",
+    role: "planner",
+    task: "plan #1",
+  };
+
+  for (const missing of [body, { ...body, requestId: "not-a-uuid" }]) {
+    const parsed = LegionDaemonApi.SpawnWorker.request.safeParse(missing);
+    expect(parsed.success).toBeFalse();
+    expect(parsed.error?.issues.map((issue) => issue.path)).toEqual([["requestId"]]);
+  }
+  expect(
+    LegionDaemonApi.SpawnWorker.request.safeParse({
+      ...body,
+      requestId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+    }).success
+  ).toBeTrue();
 });
 
 test("GatesRegister.request names the spec document by its id and version, never an ask id or a slug", () => {

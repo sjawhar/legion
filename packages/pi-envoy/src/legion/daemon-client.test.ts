@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { createLegionDaemonClient } from "./daemon-client";
+import {
+  createLegionDaemonClient,
+  LegionDaemonApiError,
+  LegionDaemonTransportError,
+  SPAWN_WORKER_RETRY_DELAYS_MS,
+} from "./daemon-client";
 
 test("reads the Legion project from daemon state", async () => {
   const requests: { readonly method: string; readonly path: string }[] = [];
@@ -13,6 +18,7 @@ test("reads the Legion project from daemon state", async () => {
     roles: {},
     controllerPendingNotices: 0,
     pendingStatusWrites: [],
+    workerAdmission: { queue: [] },
   };
   const client = createLegionDaemonClient("http://daemon.test", (async (input, init) => {
     const url = new URL(input.toString());
@@ -352,4 +358,246 @@ test("a request still refused after retrying with the recovered secret is return
     "/legion/v1/worker-session",
     "/legion/v1/waves/release",
   ]);
+});
+
+const spawnCall = {
+  tree: "REPO-42",
+  issue: "REPO-43",
+  role: "tester" as const,
+  task: "verify",
+  sessionId: "ses",
+  secret: "s",
+  requestId: "4e0aca36-77b3-43bd-96cf-d58890ae64e4",
+};
+const connectionRefused = () =>
+  Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), {
+    code: "ConnectionRefused",
+  });
+const queuedResponse = () =>
+  Response.json({ status: "queued", roleToken: "legion-omp-REPO-43-tester" });
+
+/** Consumes one scripted error or response per fetch and records requests and retry delays. */
+function scriptedSpawnFetch(script: Array<Error | Response>) {
+  const requests: { readonly path: string; readonly body: Record<string, unknown> }[] = [];
+  const sleeps: number[] = [];
+  const fetchFn = (async (input, init) => {
+    const path = new URL(input.toString()).pathname;
+    requests.push({
+      path,
+      body: JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>,
+    });
+    const next = script.shift();
+    if (next === undefined) throw new Error("scripted fetch exhausted");
+    if (next instanceof Error) throw next;
+    return next;
+  }) as typeof fetch;
+  const sleep = async (ms: number) => {
+    sleeps.push(ms);
+  };
+  return { requests, sleeps, fetchFn, sleep };
+}
+
+test("retries spawn_worker only when the fetch itself rejects, with the same requestId, and answers the attempt that reaches the daemon", async () => {
+  const daemon = scriptedSpawnFetch([connectionRefused(), queuedResponse()]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    undefined,
+    daemon.sleep
+  );
+
+  await expect(client.spawnWorker(spawnCall)).resolves.toEqual({
+    status: "queued",
+    roleToken: "legion-omp-REPO-43-tester",
+  });
+  expect(daemon.requests.map((request) => request.path)).toEqual([
+    "/legion/v1/worker/spawn",
+    "/legion/v1/worker/spawn",
+  ]);
+  expect(daemon.requests.map((request) => request.body.requestId)).toEqual([
+    spawnCall.requestId,
+    spawnCall.requestId,
+  ]);
+  expect(daemon.sleeps).toEqual([SPAWN_WORKER_RETRY_DELAYS_MS[0]]);
+});
+
+test("surfaces the real cause, the attempts, and the request id after three transport rejections", async () => {
+  const third = connectionRefused();
+  const daemon = scriptedSpawnFetch([connectionRefused(), connectionRefused(), third]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    undefined,
+    daemon.sleep
+  );
+
+  const failure = await client.spawnWorker(spawnCall).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+
+  expect(failure).toBeInstanceOf(LegionDaemonTransportError);
+  if (!(failure instanceof LegionDaemonTransportError)) throw new Error("expected transport error");
+  expect(failure.message).toContain("Unable to connect");
+  expect(failure.message).toContain("3 attempts");
+  expect(failure.message).toContain(spawnCall.requestId);
+  expect(failure.message).toContain("may have received");
+  expect(failure.message).toContain("legion state");
+  expect(failure.attempts).toBe(3);
+  expect(failure.cause).toBe(third);
+  expect(daemon.requests).toHaveLength(3);
+  expect(daemon.sleeps).toEqual([...SPAWN_WORKER_RETRY_DELAYS_MS]);
+});
+
+test("never retries a daemon HTTP error on spawn_worker", async () => {
+  for (const status of [409, 500]) {
+    const daemon = scriptedSpawnFetch([
+      Response.json({ error: `daemon said ${status}` }, { status }),
+    ]);
+    const client = createLegionDaemonClient(
+      "http://daemon.test",
+      daemon.fetchFn,
+      undefined,
+      daemon.sleep
+    );
+
+    const failure = await client.spawnWorker(spawnCall).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    expect(failure).toBeInstanceOf(LegionDaemonApiError);
+    if (!(failure instanceof LegionDaemonApiError)) throw new Error("expected API error");
+    expect(failure.status).toBe(status);
+    expect(daemon.requests).toHaveLength(1);
+    expect(daemon.sleeps).toEqual([]);
+  }
+});
+
+test("composes with the 403 Invalid session secret recovery under one request id and one retry budget", async () => {
+  const daemon = scriptedSpawnFetch([
+    connectionRefused(),
+    Response.json({ error: "Invalid session secret" }, { status: 403 }),
+    Response.json({ tree: "REPO-42", issue: "REPO-42", role: "architect", secret: "fresh" }),
+    queuedResponse(),
+  ]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    { recoveryToken: () => "root-boot-token" },
+    daemon.sleep
+  );
+
+  await expect(client.spawnWorker(spawnCall)).resolves.toEqual({
+    status: "queued",
+    roleToken: "legion-omp-REPO-43-tester",
+  });
+  expect(daemon.requests.map((request) => request.path)).toEqual([
+    "/legion/v1/worker/spawn",
+    "/legion/v1/worker/spawn",
+    "/legion/v1/worker-session",
+    "/legion/v1/worker/spawn",
+  ]);
+  const spawnRequests = daemon.requests.filter((r) => r.path === "/legion/v1/worker/spawn");
+  expect(spawnRequests.map((request) => request.body.requestId)).toEqual([
+    spawnCall.requestId,
+    spawnCall.requestId,
+    spawnCall.requestId,
+  ]);
+  expect(spawnRequests.at(-1)?.body.secret).toBe("fresh");
+  expect(daemon.sleeps).toEqual([SPAWN_WORKER_RETRY_DELAYS_MS[0]]);
+});
+
+test("allows two rejected spawn fetches after a 403 recovery before the third succeeds", async () => {
+  const daemon = scriptedSpawnFetch([
+    Response.json({ error: "Invalid session secret" }, { status: 403 }),
+    Response.json({ tree: "REPO-42", issue: "REPO-42", role: "architect", secret: "fresh" }),
+    connectionRefused(),
+    connectionRefused(),
+    queuedResponse(),
+  ]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    { recoveryToken: () => "root-boot-token" },
+    daemon.sleep
+  );
+
+  await expect(client.spawnWorker(spawnCall)).resolves.toEqual({
+    status: "queued",
+    roleToken: "legion-omp-REPO-43-tester",
+  });
+  const spawnRequests = daemon.requests.filter((request) => request.path === "/legion/v1/worker/spawn");
+  expect(spawnRequests).toHaveLength(4);
+  expect(spawnRequests.map((request) => request.body.requestId)).toEqual([
+    spawnCall.requestId,
+    spawnCall.requestId,
+    spawnCall.requestId,
+    spawnCall.requestId,
+  ]);
+  expect(spawnRequests.at(-1)?.body.secret).toBe("fresh");
+  expect(daemon.sleeps).toEqual([...SPAWN_WORKER_RETRY_DELAYS_MS]);
+});
+
+test("reports three rejected spawn fetches after a 403 recovery", async () => {
+  const third = connectionRefused();
+  const daemon = scriptedSpawnFetch([
+    Response.json({ error: "Invalid session secret" }, { status: 403 }),
+    Response.json({ tree: "REPO-42", issue: "REPO-42", role: "architect", secret: "fresh" }),
+    connectionRefused(),
+    connectionRefused(),
+    third,
+  ]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    { recoveryToken: () => "root-boot-token" },
+    daemon.sleep
+  );
+
+  const failure = await client.spawnWorker(spawnCall).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+
+  expect(failure).toBeInstanceOf(LegionDaemonTransportError);
+  if (!(failure instanceof LegionDaemonTransportError)) throw new Error("expected transport error");
+  expect(failure.message).toContain("3 attempts");
+  expect(failure.attempts).toBe(3);
+  expect(failure.cause).toBe(third);
+  expect(daemon.requests).toHaveLength(5);
+  expect(daemon.sleeps).toEqual([...SPAWN_WORKER_RETRY_DELAYS_MS]);
+});
+
+test("labels an incomplete spawn response with request-id guidance", async () => {
+  const bodyReadError = new Error("connection closed while reading the response");
+  const daemon = scriptedSpawnFetch([
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(bodyReadError);
+        },
+      })
+    ),
+  ]);
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon.fetchFn,
+    undefined,
+    daemon.sleep
+  );
+
+  const failure = await client.spawnWorker(spawnCall).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+
+  expect(failure).toBeInstanceOf(Error);
+  if (!(failure instanceof Error)) throw new Error("expected response read error");
+  expect(failure.message).toContain(spawnCall.requestId);
+  expect(failure.message).toContain("may have received");
+  expect(failure.message).toContain("legion state");
+  expect(failure.cause).toBe(bodyReadError);
+  expect(daemon.requests).toHaveLength(1);
+  expect(daemon.sleeps).toEqual([]);
 });

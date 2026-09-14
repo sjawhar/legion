@@ -38,6 +38,7 @@ import {
   owningArchitect,
   type PendingAssignment,
   repairAdmissionDrift,
+  samePendingTask,
   staleQueueEntryReason,
   type TreeState,
   type WorkerRoleClaim,
@@ -559,28 +560,28 @@ export class ProcessManager {
 
   /** LEGION-57 boot repair, idempotent: a pre-LEGION-57 daemon admitted every child released to
    * `todo` as a root tree of its own. Removes each child tree that holds no process -- one of
-   * four shapes: `queued`; `launch-failed`; `dead`; or `active` with no recorded locator (a
-   * promotion persisted before `spawnRoot` ever recorded a locator, so the spawn never completed
-   * before the daemon stopped) -- whose issue has a live ancestor tree (`liveAncestorTree`, the
-   * reducer's own ownership predicate) from `trees`, `admission.queue`, and `admission.active`,
-   * and with it the child's stale root-architect claim (`roles[roleToken(child, "architect")]`,
-   * revoked through `revokeRoleClaim` exactly as `closeTree` does): a `launch-failed`,
-   * `dead`, or active-without-locator tree has had `/process/started` write that claim with a
-   * `sessionId` and nothing but `closeTree` ever deletes it, so left in place its `sessionId`
-   * would become the `expectedSessionId` of the parent's first sub-architect spawn, whose fresh
-   * session would 409 at `/worker/started` and burn a boot-timeout cycle before the retry launched
-   * clean -- and the architect skill's "no architect claim" gate would see it and skip the spawn.
-   * The claim holds no locator (a root architect's never does), so there is nothing to stop.
-   * Never the child's Dispatch status, whatever it is; one log line each. Returns the (child,
-   * parent) pairs so `index.ts` can wake each parent's architect with the reducer's own
-   * `child-adopted` payload once boot admission has settled. Left alone: an `active` child with a
-   * locator (a live root architect holding capabilities and workers); it lingers and releases its
-   * slot when its issue closes (`reduceIssueClosed`). Runs before `enableLaunches()` with the launch
-   * hold on, and so before `reconcileAdmission` -- which would otherwise promote a queued child,
-   * or demote and relaunch an active-no-locator child as a root in the same boot -- and a
-   * `launch-failed` child left in place would refuse the parent's `spawn_worker`
-   * (`rootForIssue` resolves to the child itself) forever now that the controller's `todo` no
-   * longer re-admits it.
+   * three shapes: `queued`; `launch-failed`; or `active` with no recorded locator (a promotion
+   * persisted before `spawnRoot` ever recorded a locator, so the spawn never completed before the
+   * daemon stopped) -- whose issue has a live ancestor tree (`liveAncestorTree`, the reducer's own
+   * ownership predicate) from `trees`, `admission.queue`, and `admission.active`, and with it the
+   * child's stale root-architect claim (`roles[roleToken(child, "architect")]`, revoked through
+   * `revokeRoleClaim` exactly as `closeTree` does): a `launch-failed` or active-without-locator
+   * tree has had `/process/started` write that claim with a `sessionId` and nothing but
+   * `closeTree` ever deletes it, so left in place its `sessionId` would become the
+   * `expectedSessionId` of the parent's first sub-architect spawn, whose fresh session would 409
+   * at `/worker/started` and burn a boot-timeout cycle before the retry launched clean -- and the
+   * architect skill's "no architect claim" gate would see it and skip the spawn. The claim holds
+   * no locator (a root architect's never does), so there is nothing to stop. Never the child's
+   * Dispatch status, whatever it is; one log line each. Returns the (child, parent) pairs so
+   * `index.ts` can wake each parent's architect with the reducer's own `child-adopted` payload once
+   * boot admission has settled. Left alone: a `dead` child tree (a root mid-resurrection) and an
+   * `active` one with a locator (a live root architect holding capabilities and workers); each
+   * lingers and releases its slot when its issue closes (`reduceIssueClosed`). Runs before
+   * `enableLaunches()` with the launch hold on, and so before `reconcileAdmission` -- which would
+   * otherwise promote a queued child, or demote an active-no-locator one to queued and relaunch it
+   * as a root in the same boot -- and a `launch-failed` child left in place would refuse the
+   * parent's `spawn_worker` (`rootForIssue` resolves to the child itself) forever now that the
+   * controller's `todo` no longer re-admits it.
    *
    * One exposure, logged rather than repaired: a `launch-failed` tree is reached from `dead` after
    * `MAX_LAUNCH_FAILURES` resurrections, and neither that path nor `recordRootExit` stops the phase
@@ -599,7 +600,6 @@ export class ProcessManager {
       const holdsNoProcess =
         tree.status === "queued" ||
         tree.status === "launch-failed" ||
-        tree.status === "dead" ||
         (tree.status === "active" && tree.locator === undefined);
       if (!holdsNoProcess) continue;
       const parent = state.issues[key]?.parent;
@@ -780,7 +780,11 @@ export class ProcessManager {
     role: LegionRole,
     task: string
   ): Promise<SpawnWorkerResponse> {
-    return this.deliverToWorker(treeKey, issue, role, { kind: "assignment", task });
+    return this.deliverToWorker(treeKey, issue, role, {
+      kind: "assignment",
+      task,
+      queuedAt: new Date(this.deps.now()).toISOString(),
+    });
   }
 
   /** Resumes, prompts, launches, or queues the worker for `role` so that `pending` reaches it:
@@ -844,9 +848,11 @@ export class ProcessManager {
             // /worker/ready has not yet durably confirmed the boot. Never launch a second
             // process or probe/prompt the socket while a boot's readiness is still unconfirmed —
             // queue the pending prompt and let /worker/ready deliver it once the worker's boot
-            // is confirmed.
-            claim.pendingAssignment = pending;
-            await this.persist();
+            // is confirmed. An identical re-send keeps the first queuedAt and saves nothing.
+            if (!samePendingTask(claim.pendingAssignment, pending)) {
+              claim.pendingAssignment = pending;
+              await this.persist();
+            }
             return { status: "resumed", roleToken: token };
           }
           const locator = claim.locator;
@@ -1147,8 +1153,7 @@ export class ProcessManager {
         !("issue" in claim) ||
         claim.sessionId !== sessionId ||
         claim.locator === undefined ||
-        claim.pendingAssignment?.kind !== pending.kind ||
-        claim.pendingAssignment.task !== pending.task ||
+        !samePendingTask(claim.pendingAssignment, pending) ||
         treeKey === undefined ||
         this.isTreeGone(treeKey, issue)
       ) {
@@ -1511,20 +1516,16 @@ export class ProcessManager {
    * `rootRegistrationWaits` map is purely in-memory, so a daemon restart between `spawnTree`
    * recording a locator and a confirmed ready discards whatever deadline was armed for it,
    * exactly like `reconnectWorkers` re-arms the boot watchdog for a worker whose
-   * `/worker/started` never confirmed. A dead tree with no live ancestor still holding an
-   * admission slot is a persisted mid-resurrection state, not a live root: hold it for
-   * `replayHeldRecoveries` so it resumes with `resumeSessionFile` after boot retains the reserved
-   * slot. An already-confirmed active tree (or one with no locator at all -- nothing was ever
-   * launched, or `reconcileAdmission`'s own orphan check already demoted it) is left untouched.
-   * Each tree is armed in isolation, exactly like `reconnectWorkers`: a throw while arming one is
-   * logged with its key and the rest are still armed. */
+   * `/worker/started` never confirmed. A dead tree still holding an admission slot is a persisted
+   * mid-resurrection state, not a live root: hold it for `replayHeldRecoveries` so it resumes
+   * with `resumeSessionFile` after boot retains the reserved slot. An already-confirmed active
+   * tree (or one with no locator at all -- nothing was ever launched, or `reconcileAdmission`'s
+   * own orphan check already demoted it) is left untouched. Each tree is armed in isolation,
+   * exactly like `reconnectWorkers`: a throw while arming one is logged with its key and the rest
+   * are still armed. */
   reconnectRoots(): void {
     for (const tree of Object.values(this.deps.state.trees)) {
-      if (
-        tree.status === "dead" &&
-        liveAncestorTree(this.deps.state, tree.root) === undefined &&
-        this.deps.state.admission.active.includes(tree.root)
-      ) {
+      if (tree.status === "dead" && this.deps.state.admission.active.includes(tree.root)) {
         this.heldResurrects.add(tree.root);
         continue;
       }
@@ -1768,7 +1769,8 @@ export class ProcessManager {
     const tree = this.requireTree(treeKey);
     this.cancelRootRegistrationDeadline(treeKey);
     if (tree.status !== "lingering") {
-      this.enterLinger(tree, this.deps.now());
+      tree.status = "lingering";
+      tree.lingerUntil = new Date(this.deps.now()).toISOString();
       await this.persist();
     }
     const stopRoot = options?.stopRoot ?? true;
@@ -1875,7 +1877,8 @@ export class ProcessManager {
       }
     }
     if (anyFailed) {
-      this.enterLinger(tree, this.deps.now());
+      tree.status = "lingering";
+      tree.lingerUntil = new Date(this.deps.now()).toISOString();
       await this.persist();
       throw new StopFailed(
         treeKey,
@@ -1889,7 +1892,6 @@ export class ProcessManager {
 
     tree.status = "closed";
     delete tree.lingerUntil;
-    delete tree.resumeSessionFile;
     const rootStatus = this.deps.state.issues[treeKey]?.status;
     if (rootStatus !== "done" && rootStatus !== "backlog" && rootStatus !== "icebox") {
       await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
@@ -2704,13 +2706,6 @@ export class ProcessManager {
     await this.clientFor(roleToken(this.deps.state.project, treeKey, "architect"), tree.locator);
   }
 
-  /** Marks a root terminally lingering so it cannot resume a prior agent session. */
-  private enterLinger(tree: TreeState, lingerUntilMs: number): void {
-    tree.status = "lingering";
-    delete tree.resumeSessionFile;
-    tree.lingerUntil = new Date(lingerUntilMs).toISOString();
-  }
-
   /**
    * Marks a tree lingering and releases its admission slot, awaiting the
    * full release-promote-spawn cascade this can trigger (see `releaseSlot`,
@@ -2727,7 +2722,10 @@ export class ProcessManager {
   async beginLinger(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     this.cancelRootRegistrationDeadline(treeKey);
-    this.enterLinger(tree, this.deps.now() + this.deps.config.lingerHours * HOUR_MS);
+    tree.status = "lingering";
+    tree.lingerUntil = new Date(
+      this.deps.now() + this.deps.config.lingerHours * HOUR_MS
+    ).toISOString();
     this.clearTreePhases(treeKey);
     await this.releaseSlot(treeKey);
     await this.persist();
@@ -2974,6 +2972,7 @@ export class ProcessManager {
       await this.deliverToWorker(root, issue, role, {
         kind: "catchup",
         task: JSON.stringify(catchup),
+        queuedAt: new Date(this.deps.now()).toISOString(),
       });
     } catch (error) {
       console.error(`[legion] failed to resume worker ${issue}/${role}:`, error);
@@ -3320,7 +3319,10 @@ export class ProcessManager {
           // The reducer's own park/close effect never ran for this tree (see above), so nothing
           // has released this admission slot or lingered it yet -- replicate `beginLinger`'s own
           // rollback here rather than leave an admitted slot with a doomed process and no locator.
-          this.enterLinger(tree, this.deps.now() + this.deps.config.lingerHours * HOUR_MS);
+          tree.status = "lingering";
+          tree.lingerUntil = new Date(
+            this.deps.now() + this.deps.config.lingerHours * HOUR_MS
+          ).toISOString();
           this.clearTreePhases(tree.root);
           await this.releaseSlot(tree.root);
         }
@@ -3344,7 +3346,8 @@ export class ProcessManager {
         // through the ordinary closeTree path; the locator stays in place (set above) so that
         // retry has something to target.
         if (!treeReplaced) {
-          this.enterLinger(tree, this.deps.now());
+          tree.status = "lingering";
+          tree.lingerUntil = new Date(this.deps.now()).toISOString();
         }
       }
       return;
@@ -3947,18 +3950,26 @@ export class ProcessManager {
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
     if (resumeSessionFile !== undefined) tree.resumeSessionFile = resumeSessionFile;
-    // Decide the recovered root's admission state before persisting. A crash before the next
-    // launch sees either its reserved slot or a queue-head entry together with the same-agent
-    // session file; it never sees a slotless dead root with neither recovery path.
+    // Persist the recoverable handoff before the next await reaches workspace provisioning or the
+    // root spawn. A daemon crash here leaves a dead tree holding its slot with the same-agent
+    // session file, which boot and resync resume rather than treating as a live root.
+    await this.persist();
+    // The slot is guaranteed before anything spawns (LEGION-83): a tree the daemon resumes keeps
+    // the slot it holds; one that lost it (its own exit released it, and the sweep gave it away)
+    // takes a free one, or waits at the HEAD of the queue -- it was already admitted, ahead of
+    // never-started issues -- with its session file kept, and the sweep promotes it with
+    // `--resume` once a slot frees. `spawnTree`'s `status = "active"` is therefore reached only by
+    // a tree that holds a slot.
     const admission = this.deps.state.admission;
     if (!admission.active.includes(treeKey)) {
-      if (admission.active.length < admission.cap) {
+      if (admission.active.length < admission.cap && this.launchesEnabled) {
         admission.active.push(treeKey);
         console.error(
           `[legion] ${treeKey}'s root is resumed without an admission slot; taking a free one (${admission.active.length}/${admission.cap})`
         );
       } else {
         tree.status = "queued";
+        if (resumeSessionFile !== undefined) tree.resumeSessionFile = resumeSessionFile;
         const queueIndex = admission.queue.indexOf(treeKey);
         if (queueIndex !== -1) admission.queue.splice(queueIndex, 1);
         admission.queue.unshift(treeKey);
@@ -3969,7 +3980,6 @@ export class ProcessManager {
         return;
       }
     }
-    await this.persist();
     await this.spawnRoot(treeKey, true, resumeSessionFile);
   }
 

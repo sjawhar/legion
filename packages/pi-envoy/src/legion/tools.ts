@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { LEGION_ROLES, LegionDaemonApi, type LegionRole } from "@legion/contracts";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
@@ -91,7 +92,11 @@ export function createLegionTool(deps: {
       'deliver once that boot completes; "queued" — the task was recorded and this role will ' +
       "start on its own: either the running-worker cap is full, or the live worker acknowledged " +
       "the task without starting a turn and the daemon is retrying it. Never re-spawn a role " +
-      'after "resumed" or "queued" — wait for the worker-started notification instead.',
+      'after "resumed" or "queued" — wait for the worker-started notification instead. A call ' +
+      'that fails with "got no response in 3 attempts" was retried by the plugin with one ' +
+      "request id; the daemon may still have received it — read legion state " +
+      "(workerAdmission.queue, and the role in roles) before sending it again. A spawn_worker " +
+      "identical to the task already queued for the role changes nothing and is not announced again.",
     defaultInactive: true,
     parameters: legionToolSchema(pi),
     execute: async (_id, parameters, _signal, _onUpdate, context) => {
@@ -188,6 +193,9 @@ export function createLegionTool(deps: {
             if (typeof role !== "string" || !LEGION_ROLES.includes(role as LegionRole)) {
               throw new Error("spawn_worker requires a valid Legion role");
             }
+            // One request id per tool call: the daemon dedupes repeats of it, so a transport
+            // retry (daemon-client.ts) can never queue the same task twice.
+            const requestId = randomUUID();
             return jsonSuccess(
               await daemon.spawnWorker({
                 tree: architect.tree,
@@ -196,6 +204,7 @@ export function createLegionTool(deps: {
                 issue: stringInput("issue"),
                 role: role as LegionRole,
                 task: stringInput("task"),
+                requestId,
               })
             );
           }

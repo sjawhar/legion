@@ -33,9 +33,11 @@ import { LEGION_ROLES } from "./legion-roles";
  * field and are refused as `contract none`. 3 — LEGION-25: `ENVOY_TOKEN_FILE` on every pane and
  * pod when the daemon has an Envoy bearer (`envoy_token_file`); the plugin's bundled
  * `@legion/envoy-client` reads it ahead of `ENVOY_TOKEN`. A contract-2 plugin on a daemon with
- * `envoy_token_file` set would ignore the file and have every listener call answered 401.
+ * `envoy_token_file` set would ignore the file and have every listener call answered 401. 4 —
+ * `spawn_worker` carries a plugin-minted `requestId` and the state response carries
+ * `workerAdmission`; accepted spawns survive a daemon restart (LEGION-102).
  */
-export const LEGION_DAEMON_API_VERSION = 3;
+export const LEGION_DAEMON_API_VERSION = 4;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -127,6 +129,23 @@ const stateRole = z.strictObject({
   launchFailures: z.number().int().nonnegative().optional(),
   locator: stateLocator.optional(),
 });
+// One FIFO entry of the running-worker queue (`state.workerAdmission.queue`): a stale entry whose
+// claim has lost its pending task has only its identity; a pending task carries both `kind` and
+// `queuedAt`. Neither shape includes task text — it is long and already sits in the architect's
+// transcript.
+const stateQueuedWorkerIdentity = {
+  roleToken: nonEmptyString,
+  issue: nonEmptyString,
+  role: nonEmptyString,
+};
+const stateQueuedWorker = z.union([
+  z.strictObject(stateQueuedWorkerIdentity),
+  z.strictObject({
+    ...stateQueuedWorkerIdentity,
+    kind: z.enum(["assignment", "catchup"]),
+    queuedAt: nonEmptyString,
+  }),
+]);
 
 export const LegionDaemonApi = {
   State: {
@@ -148,6 +167,7 @@ export const LegionDaemonApi = {
       roles: z.record(z.string(), stateRole),
       controllerPendingNotices: z.number().int().nonnegative(),
       pendingStatusWrites: z.array(nonEmptyString),
+      workerAdmission: z.strictObject({ queue: z.array(stateQueuedWorker) }),
     }),
   },
   ControllerReady: {
@@ -238,6 +258,9 @@ export const LegionDaemonApi = {
       issue: nonEmptyString,
       role: legionRole,
       task: nonEmptyString,
+      // Minted once per `legion` `spawn_worker` tool call by the plugin; the daemon dedupes
+      // repeats of it (`handleSpawnWorker`) so a transport retry can never queue the task twice.
+      requestId: z.uuid(),
     }),
     response: z.object({
       status: z.enum(["spawned", "resumed", "queued"]),
