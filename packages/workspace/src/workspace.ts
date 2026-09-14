@@ -69,17 +69,18 @@ export function commandFailure(result: RunResult, cmd: string[]): Error {
   return new Error(`Command failed (exit ${result.exitCode}): ${cmd.join(" ")}\n${result.stderr}`);
 }
 
-/** Every provisioning command goes through here so each carries `deps.commandTimeoutMs`. */
-function run(
-  deps: ProvisionIssueWorkspaceDeps,
-  cmd: string[],
-  opts?: WorkspaceCommandOptions
-): Promise<RunResult> {
+/** What the command helpers need: the runner and its budget. Both `ProvisionIssueWorkspaceDeps`
+ * and `RemoveIssueWorkspaceDeps` satisfy it. */
+type CommandDeps = Pick<ProvisionIssueWorkspaceDeps, "run" | "commandTimeoutMs">;
+
+/** Every provisioning and removal command goes through here so each carries
+ * `deps.commandTimeoutMs`. */
+function run(deps: CommandDeps, cmd: string[], opts?: WorkspaceCommandOptions): Promise<RunResult> {
   return deps.run(cmd, { ...opts, timeoutMs: deps.commandTimeoutMs });
 }
 
 async function runChecked(
-  deps: ProvisionIssueWorkspaceDeps,
+  deps: CommandDeps,
   cmd: string[],
   opts?: WorkspaceCommandOptions
 ): Promise<RunResult> {
@@ -334,13 +335,20 @@ export function issueWorkspaceDir(
   return path.join(stateDir, "workspaces", owner, name, issue.toLowerCase());
 }
 
+/** Where the one shared clone of `repo` lives under `stateDir` — the `-R` target of every jj
+ * command provisioning and removal run against the repository rather than a workspace. */
+export function sharedCloneDir(stateDir: string, repo: `${string}/${string}`): string {
+  const [owner, name] = repo.split("/") as [string, string];
+  return path.join(stateDir, "repos", "github.com", owner, name);
+}
+
 export async function provisionIssueWorkspace(
   issue: IssueKey,
   deps: ProvisionIssueWorkspaceDeps
 ): Promise<WorkspaceSpec> {
   const [owner, repo] = deps.repo.split("/") as [string, string];
   const workspaceName = issue.toLowerCase();
-  const repoCloneDir = path.join(deps.stateDir, "repos", "github.com", owner, repo);
+  const repoCloneDir = sharedCloneDir(deps.stateDir, deps.repo);
   const workspaceDir = issueWorkspaceDir(deps.stateDir, deps.repo, issue);
   const gitDir = path.join(repoCloneDir, ".git");
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
@@ -449,4 +457,107 @@ export async function provisionIssueWorkspace(
   await writeOmpConfig(workspaceDir);
 
   return { repoCloneDir, workspaceDir, bookmark };
+}
+
+export type RemoveIssueWorkspaceDeps = Pick<
+  ProvisionIssueWorkspaceDeps,
+  "run" | "stateDir" | "repo" | "commandTimeoutMs"
+>;
+
+export interface RemoveIssueWorkspaceResult {
+  readonly workspaceDir: string;
+  /** False when jj did not register the workspace and its directory did not exist: nothing ran
+   * beyond the registration check, and there is nothing to log. */
+  readonly removed: boolean;
+  /** The commit ids abandoned — the issue's own commits nothing else reached — newest first;
+   * empty when every commit was kept (or nothing was removed). */
+  readonly abandoned: readonly string[];
+}
+
+/** The revset of `workspaceName`'s own commits: every ancestor of its working copy that no other
+ * workspace's working copy, bookmark, remote bookmark, or tag reaches. `::main` (and so the root
+ * commit and everything merged) is always subtracted because `main` is a bookmark; a commit a
+ * bookmark still reaches is pushed work and is kept; a commit another workspace is stacked on is
+ * that workspace's business. Verified on jj 0.44.0 and 0.45.1
+ * (docs/solutions/legion/jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md, "Removing a
+ * workspace"). */
+export function ownCommitsRevset(workspaceName: string): string {
+  return `::${workspaceName}@ ~ ::(working_copies() ~ ${workspaceName}@) ~ ::(bookmarks() | remote_bookmarks() | tags())`;
+}
+
+/** Removes `issue`'s workspace from the shared clone once nothing runs in it (the daemon calls
+ * this when the tree that owns the issue closes — `ProcessManager.removeTreeWorkspaces`): lists
+ * the issue's own commits (`ownCommitsRevset`), deletes the directory, abandons those commits
+ * (the working-copy commit among them; jj gives the workspace a new empty one), forgets the
+ * workspace (which hides that empty commit), and prunes the colocated git worktree. Every jj
+ * command targets the clone with `--ignore-working-copy`, so no other workspace's working copy is
+ * snapshotted or touched.
+ *
+ * The directory goes first: a crash between the deletion and the forget leaves a registered
+ * workspace whose directory is gone, exactly the shape `createWorkspace` repairs on the next
+ * provisioning (`jj workspace add` answers `already exists`, so it forgets, prunes, and adds
+ * again). The reverse order would leave a directory jj no longer knows, and every later
+ * provisioning would fail at `jj workspace update-stale` (`Nothing checked out in this
+ * workspace`). Idempotent: a workspace jj does not register runs no jj command past the list, a
+ * missing directory is a no-op `rm`, an empty set skips the abandon; a second call returns
+ * `removed: false` having run only the list. No fetch: the bookmarks are as the last provisioning
+ * left them. A failing command throws `commandFailure` and leaves the remaining steps undone
+ * (the caller logs once; the next provisioning repairs whichever half state it finds). */
+export async function removeIssueWorkspace(
+  issue: IssueKey,
+  deps: RemoveIssueWorkspaceDeps
+): Promise<RemoveIssueWorkspaceResult> {
+  const workspaceName = issue.toLowerCase();
+  const cloneDir = sharedCloneDir(deps.stateDir, deps.repo);
+  const workspaceDir = issueWorkspaceDir(deps.stateDir, deps.repo, issue);
+  const repoArgs = ["--ignore-working-copy", "-R", cloneDir];
+
+  // No clone, nothing registered: jj cannot be asked and there is nothing to forget or prune.
+  const cloneExists = existsSync(path.join(cloneDir, ".jj"));
+  let registered = false;
+  if (cloneExists) {
+    const listed = await runChecked(deps, [
+      "jj",
+      "workspace",
+      "list",
+      "-T",
+      'name ++ "\n"',
+      ...repoArgs,
+    ]);
+    registered = listed.stdout.split("\n").includes(workspaceName);
+  }
+  let abandoned: string[] = [];
+  if (registered) {
+    const own = await runChecked(deps, [
+      "jj",
+      "log",
+      "-r",
+      ownCommitsRevset(workspaceName),
+      "--no-graph",
+      "-T",
+      'commit_id ++ "\n"',
+      ...repoArgs,
+    ]);
+    abandoned = own.stdout.split("\n").filter((line) => line.trim() !== "");
+  }
+  if (!registered && !existsSync(workspaceDir)) {
+    return { workspaceDir, removed: false, abandoned: [] };
+  }
+
+  await rm(workspaceDir, { recursive: true, force: true });
+  if (registered) {
+    if (abandoned.length > 0) {
+      await runChecked(deps, ["jj", "abandon", "-r", abandoned.join(" | "), ...repoArgs]);
+    }
+    await runChecked(deps, ["jj", "workspace", "forget", workspaceName, ...repoArgs]);
+  }
+  if (cloneExists) {
+    await runChecked(deps, [
+      "git",
+      `--git-dir=${path.join(cloneDir, ".git")}`,
+      "worktree",
+      "prune",
+    ]);
+  }
+  return { workspaceDir, removed: true, abandoned };
 }

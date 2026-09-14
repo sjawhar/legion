@@ -3,7 +3,13 @@ import { existsSync, watch } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { provisionIssueWorkspace, type RunResult, type WorkspaceSpec } from "./workspace";
+import {
+  ownCommitsRevset,
+  provisionIssueWorkspace,
+  type RunResult,
+  removeIssueWorkspace,
+  type WorkspaceSpec,
+} from "./workspace";
 
 type RunCall = {
   readonly cmd: string[];
@@ -192,6 +198,37 @@ function workspaceAddCommand(
     "-R",
     repoCloneDir,
   ];
+}
+
+/** The registration check `removeIssueWorkspace` runs first (LEGION-104), verbatim: one workspace
+ * name per line, against the shared clone with `--ignore-working-copy`, since the issue's own
+ * directory may already be gone and no other workspace's working copy is to be touched. */
+function workspaceListCommand(repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "workspace",
+    "list",
+    "-T",
+    'name ++ "\n"',
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ];
+}
+/** `git worktree list --porcelain` rows are `worktree <path>`: the directories git still knows. */
+async function gitWorktrees(repoCloneDir: string): Promise<string[]> {
+  const listed = await runCommand([
+    SYSTEM_GIT,
+    `--git-dir=${path.join(repoCloneDir, ".git")}`,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
+  expect(listed.exitCode, listed.stderr).toBe(0);
+  return listed.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length));
 }
 
 const JJ_BINARIES = [
@@ -1575,4 +1612,235 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       writeKeepUnreachableCommitsCommand(repoCloneDir),
     ]);
   });
+
+  test("removes a finished issue's workspace: its unreachable commits leave the other workspace's log, jj and git forget it, the directory is gone, a second removal is a no-op, and the next provisioning starts fresh at main", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const workspaceB = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-43");
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+      // Provisioning itself writes `git.abandon-unreachable-commits = false` before every fetch
+      // (LEGION-84), so the fetch below that deletes the merged branch's bookmark keeps A's
+      // commits — the removal, not the fetch, is what makes them leave B's log.
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      await provisionIssueWorkspace("WIDGETS-43", deps);
+      // A's work: a described commit the bookmark follows (it was created on the unsnapshotted
+      // `@`, so the snapshot moves it), then an empty working copy above it — the shape a worker
+      // leaves. B commits its own file.
+      await writeFile(path.join(workspaceDir, "a.txt"), "a\n", "utf8");
+      await jj(["describe", "-m", "a work"], { cwd: workspaceDir });
+      await jj(["new"], { cwd: workspaceDir });
+      await writeFile(path.join(workspaceB, "b.txt"), "b\n", "utf8");
+      await jj(["describe", "-m", "b work"], { cwd: workspaceB });
+      const aWork = await commitOf(bookmark);
+      const bWork = await commitOf("@", workspaceB);
+      await jj(
+        ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+      // GitHub deletes the branch when the pull request merges; the production-check resume's
+      // fetch (a provisioning) then deletes the local bookmark.
+      const deleted = await runCommand([
+        SYSTEM_GIT,
+        `--git-dir=${remoteDir}/.git`,
+        "branch",
+        "-D",
+        bookmark,
+      ]);
+      expect(deleted.exitCode, `${name}: ${deleted.stderr}`).toBe(0);
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      expect((await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout, name).toBe(
+        ""
+      );
+      const aWorkingCopy = await commitOf("@", workspaceDir);
+      const logB = async () =>
+        (
+          await jj(["log", "-r", "all()", "--no-graph", "-T", 'commit_id ++ "\n"'], {
+            cwd: workspaceB,
+          })
+        ).stdout.split("\n");
+      const workspaceNames = async () =>
+        (await jj(workspaceListCommand(repoCloneDir).slice(1))).stdout.split("\n");
+      // Today's leftover, and the precondition for the assertion below: A's commits are visible
+      // heads in B's log (`all()` is a superset of the default log revset).
+      expect(await logB(), name).toEqual(expect.arrayContaining([aWork, aWorkingCopy, bWork]));
+      expect(await workspaceNames(), name).toContain("widgets-42");
+
+      calls.length = 0;
+      await expect(removeIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        workspaceDir,
+        removed: true,
+        abandoned: [aWorkingCopy, aWork],
+      });
+      expect(calls, name).toEqual([
+        workspaceListCommand(repoCloneDir),
+        [
+          "jj",
+          "log",
+          "-r",
+          ownCommitsRevset("widgets-42"),
+          "--no-graph",
+          "-T",
+          'commit_id ++ "\n"',
+          "--ignore-working-copy",
+          "-R",
+          repoCloneDir,
+        ],
+        [
+          "jj",
+          "abandon",
+          "-r",
+          `${aWorkingCopy} | ${aWork}`,
+          "--ignore-working-copy",
+          "-R",
+          repoCloneDir,
+        ],
+        ["jj", "workspace", "forget", "widgets-42", "--ignore-working-copy", "-R", repoCloneDir],
+        ["git", `--git-dir=${path.join(repoCloneDir, ".git")}`, "worktree", "prune"],
+      ]);
+      expect(existsSync(workspaceDir), name).toBeFalse();
+      expect(await workspaceNames(), name).not.toContain("widgets-42");
+      expect(await workspaceNames(), name).toContain("widgets-43");
+      expect(await gitWorktrees(repoCloneDir), name).not.toContain(workspaceDir);
+      const afterRemoval = await logB();
+      expect(afterRemoval, name).not.toContain(aWork);
+      expect(afterRemoval, name).not.toContain(aWorkingCopy);
+      expect(afterRemoval, name).toContain(bWork);
+      expect(existsSync(path.join(workspaceB, "b.txt")), name).toBeTrue();
+
+      // Idempotent: nothing registered, no directory — the registration check and nothing else.
+      calls.length = 0;
+      await expect(removeIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        workspaceDir,
+        removed: false,
+        abandoned: [],
+      });
+      expect(calls, name).toEqual([workspaceListCommand(repoCloneDir)]);
+
+      // A worker resumed on the issue gets the brand-new-issue shape: a workspace at `main` with
+      // the bookmark created on its fresh working copy (LEGION-70), nothing of the old one.
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(calls, name).toContainEqual(["jj", "bookmark", "set", bookmark, "-r", "@"]);
+      // Snapshot before reading `@`: the bookmark sits on the unsnapshotted working copy and
+      // moves with its first snapshot.
+      await jj(["status"], { cwd: workspaceDir });
+      expect(await commitOf("@-", workspaceDir), name).toBe(await commitOf("main"));
+      expect(await commitOf(bookmark), name).toBe(await commitOf("@", workspaceDir));
+      expect(existsSync(path.join(workspaceDir, "a.txt")), name).toBeFalse();
+    }
+  }, 60_000);
+
+  test("keeps pushed work when removing a workspace whose bookmark still exists, and the next provisioning re-creates it on that bookmark", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const workspaceB = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-43");
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      await provisionIssueWorkspace("WIDGETS-43", deps);
+      await writeFile(path.join(workspaceDir, "a.txt"), "a\n", "utf8");
+      await jj(["describe", "-m", "a pushed work"], { cwd: workspaceDir });
+      await jj(["new"], { cwd: workspaceDir });
+      await jj(["status"], { cwd: workspaceB });
+      const aWork = await commitOf(bookmark);
+      const aWorkingCopy = await commitOf("@", workspaceDir);
+      // A closed-but-unmerged issue: its branch is still on GitHub, so the bookmark survives.
+      await jj(
+        ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+        { cwd: repoCloneDir }
+      );
+
+      calls.length = 0;
+      await expect(removeIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        workspaceDir,
+        removed: true,
+        abandoned: [aWorkingCopy],
+      });
+      expect(existsSync(workspaceDir), name).toBeFalse();
+      expect(
+        (await jj(workspaceListCommand(repoCloneDir).slice(1))).stdout.split("\n"),
+        name
+      ).not.toContain("widgets-42");
+      // The pushed commit is kept, still under its bookmark, still in B's log.
+      expect(await commitOf(bookmark), name).toBe(aWork);
+      const logB = (
+        await jj(["log", "-r", "all()", "--no-graph", "-T", 'commit_id ++ "\n"'], {
+          cwd: workspaceB,
+        })
+      ).stdout.split("\n");
+      expect(logB, name).toContain(aWork);
+      expect(logB, name).not.toContain(aWorkingCopy);
+
+      // Resumed later: re-created on top of the surviving bookmark, no bookmark command.
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toMatchObject({
+        workspaceDir,
+      });
+      expect(
+        calls.some((cmd) => cmd[1] === "bookmark"),
+        name
+      ).toBeFalse();
+      expect(await commitOf("@-", workspaceDir), name).toBe(aWork);
+      expect(await commitOf(bookmark), name).toBe(aWork);
+    }
+  }, 60_000);
+
+  test("repairs the shape a crash between the directory deletion and the forget leaves: the next provisioning forgets, prunes, and re-adds the still-registered workspace", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
+
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      await jj(["status"], { cwd: workspaceDir });
+      const bookmarkCommit = await commitOf(bookmark);
+      // Removal deletes the directory first, then forgets; a crash in between leaves this.
+      await rm(workspaceDir, { recursive: true, force: true });
+      expect(
+        (await jj(workspaceListCommand(repoCloneDir).slice(1))).stdout.split("\n"),
+        name
+      ).toContain("widgets-42");
+
+      calls.length = 0;
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      // `createWorkspace`'s `already registered|exists` branch on a real binary: forget, prune,
+      // add again at the bookmark's commit (the bookmark survived, so no bookmark command).
+      expect(calls, name).toContainEqual([
+        "jj",
+        "workspace",
+        "forget",
+        "widgets-42",
+        "-R",
+        repoCloneDir,
+      ]);
+      expect(
+        calls.some((cmd) => cmd[1] === "bookmark"),
+        name
+      ).toBeFalse();
+      expect(existsSync(workspaceDir), name).toBeTrue();
+      expect(await commitOf("@-", workspaceDir), name).toBe(bookmarkCommit);
+    }
+  }, 60_000);
 });
