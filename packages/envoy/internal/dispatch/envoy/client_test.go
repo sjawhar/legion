@@ -196,8 +196,15 @@ func TestUnsubscribeReportsUnavailableListener(t *testing.T) {
 	}
 }
 func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
+	// A non-loopback listener requires the bearer on every /v1 call; the send is the one that
+	// reaches a live agent, so an unauthenticated send fails delivery in production while
+	// every read succeeds.
+	t.Setenv("ENVOY_TOKEN", "listener-token")
 	var sent map[string]any
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
+			t.Errorf("%s %s Authorization = %q, want Bearer listener-token", r.Method, r.URL.Path, got)
+		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/legion-planner":
 			_, _ = w.Write([]byte(`{"role":"legion-planner","holder":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","capabilities":["aside","btw"],"last_seen":42}`))

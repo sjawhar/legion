@@ -223,6 +223,7 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	if err != nil {
 		return Session{}, fmt.Errorf("%w: build GET /v1/roles/%s request: %v", ErrUnavailable, role, err)
 	}
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return Session{}, fmt.Errorf("%w: GET /v1/roles/%s: %v", ErrUnavailable, role, err)
@@ -277,6 +278,7 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 		return SendResult{}, fmt.Errorf("%w: build POST /v1/messages/send request: %v", ErrUnavailable, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("%w: POST /v1/messages/send: %v", ErrUnavailable, err)
