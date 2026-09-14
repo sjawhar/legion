@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ProbeRetryPolicy } from "../boot-probes";
+import { type ProbeRetryPolicy, SESSION_STORAGE_PROBE_MARK } from "../boot-probes";
 import { DEFAULT_KUBERNETES_RESOURCES } from "../config";
 import { parseImageDigestRef } from "../image-ref";
 import { createK8sClient } from "../k8s-client";
@@ -23,7 +23,10 @@ const IMAGE = parseImageDigestRef(`ghcr.io/sjawhar/legion-worker:sha-1a2b3c@sha2
 const POD = `legion-probe-demo-${HEX.slice(0, 12)}`;
 const START = Date.parse("2026-09-13T12:00:00.000Z");
 const CONTRACT = 7;
+/** An image whose `legion` CLI predates the session-storage probe: a bare contract-confirming OK. */
 const OK_LOG = `probe-image: OK (/opt/omp/bin/omp) daemon-api-version=${CONTRACT}\n`;
+/** The OK line an image built at or after LEGION-80 prints (`cmdProbeImage`). */
+const OK_LOG_PROBED = `probe-image: OK (/opt/omp/bin/omp) ${SESSION_STORAGE_PROBE_MARK} daemon-api-version=${CONTRACT}\n`;
 /** One attempt, no backoff: the outcome of a single pod run is what most cases assert. */
 const ONCE: ProbeRetryPolicy = { initialDelayMs: 10, maxDelayMs: 10, maxAttempts: 1 };
 
@@ -71,6 +74,7 @@ function harness(): Harness {
           resources: DEFAULT_KUBERNETES_RESOURCES.small,
           stateDir,
           daemonApiVersion: CONTRACT,
+          sessionStore: "pvc",
           now: () => START,
           log: (line) => {
             logs.push(line);
@@ -342,6 +346,87 @@ describe("verifyWorkerImage", () => {
       digest: IMAGE.digest,
       daemonApiVersion: CONTRACT,
       probedAt: new Date(START).toISOString(),
+    });
+  });
+
+  describe("session_store", () => {
+    const cacheFile = () => imageProbeCachePath(stateDir, IMAGE.digest);
+    const seedCache = async (entry: Record<string, unknown>) => {
+      await mkdir(path.dirname(cacheFile()), { recursive: true });
+      await writeFile(
+        cacheFile(),
+        JSON.stringify({
+          digest: IMAGE.digest,
+          daemonApiVersion: CONTRACT,
+          probedAt: "2026-09-12T08:00:00.000Z",
+          ...entry,
+        })
+      );
+    };
+
+    it("under postgres, passes on a probe pod whose log carries the session-storage marker and records sessionStorageProbed in the cache", async () => {
+      const h = harness();
+      await h.run(() => succeed(h.api, OK_LOG_PROBED), { sessionStore: "postgres" });
+      expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toEqual({
+        digest: IMAGE.digest,
+        daemonApiVersion: CONTRACT,
+        probedAt: new Date(START).toISOString(),
+        sessionStorageProbed: true,
+      });
+    });
+
+    it("under postgres, refuses definitively a Succeeded probe pod whose log lacks the marker, naming session_store, writing no cache, and deleting the pod", async () => {
+      const h = harness();
+      await expect(
+        h.run(() => succeed(h.api, OK_LOG), { sessionStore: "postgres" })
+      ).rejects.toThrow(
+        `[legion] worker image ${IMAGE.digest} failed its probe: pod ${POD} Succeeded without printing ${SESSION_STORAGE_PROBE_MARK}, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting) — log tail: ${OK_LOG.trim()}`
+      );
+      await expect(stat(cacheFile())).rejects.toThrow();
+      expect(requests(h.api).at(-1)).toEqual(["DELETE", `/pods/${POD}`]);
+    });
+
+    it("under pvc, does not require the marker, and a cache written without it carries no sessionStorageProbed key", async () => {
+      const h = harness();
+      await h.run(() => succeed(h.api, OK_LOG));
+      expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toEqual({
+        digest: IMAGE.digest,
+        daemonApiVersion: CONTRACT,
+        probedAt: new Date(START).toISOString(),
+      });
+    });
+
+    it("under pvc, still records a marker the image printed, so the same pass is reusable under postgres later", async () => {
+      const h = harness();
+      await h.run(() => succeed(h.api, OK_LOG_PROBED));
+      expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toMatchObject({
+        sessionStorageProbed: true,
+      });
+      const again = harness();
+      await again.run(undefined, { sessionStore: "postgres" });
+      expect(again.api.requests).toEqual([]);
+      expect(again.logs.at(-1)).toContain(`reusing ${cacheFile()}`);
+    });
+
+    it("under postgres, ignores a cached pass that records no session-storage probe, runs the pod, and rewrites the cache", async () => {
+      await seedCache({});
+      const h = harness();
+      await h.run(() => succeed(h.api, OK_LOG_PROBED), { sessionStore: "postgres" });
+      expect(h.logs[0]).toBe(
+        `[legion] ignoring worker image probe cache ${cacheFile()}: it records no session-storage probe, and this daemon runs session_store: postgres`
+      );
+      expect(requests(h.api)[0]).toEqual(["POST", "/pods"]);
+      expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toMatchObject({
+        sessionStorageProbed: true,
+      });
+    });
+
+    it("under pvc, reuses a cached pass that records no session-storage probe, with no API call", async () => {
+      await seedCache({});
+      const h = harness();
+      await h.run();
+      expect(h.api.requests).toEqual([]);
+      expect(h.logs.at(-1)).toContain(`reusing ${cacheFile()}`);
     });
   });
 
