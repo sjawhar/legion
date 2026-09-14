@@ -174,16 +174,75 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		model.Issue
 		Artifacts []model.Artifact   `json:"artifacts"`
-		OpenAsks  []model.Ask        `json:"open_asks"`
+		OpenAsks  []issueOpenAsk     `json:"open_asks"`
 		Children  []model.IssueChild `json:"children"`
 	}{Issue: issue, Artifacts: artifacts, OpenAsks: openAsks, Children: children})
 }
 
-// loadOpenAsks returns the issue's unanswered asks, oldest first. The issue
-// listing carries only a count; the detail response carries the asks themselves
-// so agents, which cannot read the human inbox, can see what is waiting.
-func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]model.Ask, error) {
-	return s.loadIssueAsks(ctx, q, key, "open")
+// issueOpenAsk is an open ask on the issue detail together with the newest
+// comment in its thread — the same last_reply the inbox row carries — so the
+// issue header can tell whose turn it is without the human-only inbox.
+type issueOpenAsk struct {
+	model.Ask
+	LastReply *model.AskLastReply `json:"last_reply"`
+}
+
+// loadOpenAsks returns the issue's unanswered asks, oldest first, each with the
+// newest reply in its thread (null when nobody has replied). The issue listing
+// carries only a count; the detail response carries the asks themselves so
+// agents, which cannot read the human inbox, can see what is waiting.
+func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]issueOpenAsk, error) {
+	asks, err := s.loadIssueAsks(ctx, q, key, "open")
+	if err != nil {
+		return nil, err
+	}
+	replies, err := s.loadAskLastReplies(ctx, q, asks)
+	if err != nil {
+		return nil, err
+	}
+	openAsks := make([]issueOpenAsk, len(asks))
+	for index, ask := range asks {
+		openAsks[index] = issueOpenAsk{Ask: ask, LastReply: replies[ask.ID]}
+	}
+	return openAsks, nil
+}
+
+// loadAskLastReplies returns the newest comment in each ask's thread keyed by
+// ask id; an ask nobody has replied to has no entry. It is the reading the
+// inbox query makes inline in its lateral join.
+func (s *server) loadAskLastReplies(ctx context.Context, q queryer, asks []model.Ask) (map[string]*model.AskLastReply, error) {
+	if len(asks) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(asks))
+	for index, ask := range asks {
+		ids[index] = ask.ID
+	}
+	rows, err := q.Query(ctx, `
+		select distinct on (ask_id) ask_id::text, author, created_at
+		from comments where ask_id = any($1::uuid[])
+		order by ask_id, created_at desc, id desc
+	`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load ask last replies: %w", err)
+	}
+	defer rows.Close()
+	replies := make(map[string]*model.AskLastReply, len(ids))
+	for rows.Next() {
+		var askID string
+		var author []byte
+		var createdAt time.Time
+		if err := rows.Scan(&askID, &author, &createdAt); err != nil {
+			return nil, err
+		}
+		var reply model.AskLastReply
+		if err := json.Unmarshal(author, &reply.Author); err != nil {
+			return nil, fmt.Errorf("decode ask last reply author: %w", err)
+		}
+		reply.CreatedAt = *askTimestamp(createdAt)
+		replies[askID] = &reply
+	}
+	return replies, rows.Err()
 }
 func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
 	var issue model.Issue

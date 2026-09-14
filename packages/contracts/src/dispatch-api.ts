@@ -231,8 +231,9 @@ export interface Ask {
   readonly created_at: string;
   readonly issue?: Pick<Issue, "key" | "title">;
   readonly document?: InboxDocument;
-  /** Inbox rows only: the newest reply in the ask's thread, or null when nobody has replied.
-   *  A human reply on an open ask means the asker owes the next turn (a clarification). */
+  /** Inbox rows and the issue detail's `open_asks`: the newest reply in the ask's thread, or
+   *  null when nobody has replied. A human reply on an open ask means the asker owes the next
+   *  turn (a clarification). Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
   readonly edited_at: string | null;
 }

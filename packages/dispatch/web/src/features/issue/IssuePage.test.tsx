@@ -480,6 +480,56 @@ for (const fixture of [
   });
 }
 
+test("IssuePage keeps a pull request's title and state when only its check-runs lookup fails", async () => {
+  const restore = stubIssuePage(
+    issueWithExternalLink("https://github.com/owner/repository/pull/7")
+  );
+  const githubRest = spyOn(api, "githubRest").mockImplementation(async (path) => {
+    if (path === "repos/owner/repository/pulls/7") {
+      return new Response(
+        JSON.stringify({
+          head: { sha: "abcdef" },
+          merged: false,
+          state: "open",
+          title: "Keep the title when checks vanish",
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+    throw new Error("check-runs unavailable");
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = renderIssuePage("/issues/CORE-1", undefined, undefined, queryClient);
+
+  try {
+    // Only once the check-runs query has failed does the assertion mean anything: while it is
+    // still pending the pre-fix code showed the title too.
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          "github-link-checks",
+          "https://github.com/owner/repository/pull/7",
+          "abcdef",
+        ])?.status
+      ).toBe("error")
+    );
+    // The failed check-runs read drops only the checks pill; the loaded title and state stay.
+    const link = screen.getByRole("link", { name: /#7 Keep the title when checks vanish/ });
+    expect(within(link).getByText("Keep the title when checks vanish")).toBeDefined();
+    expect(within(link).getByText("open")).toBeDefined();
+    expect(within(link).queryByText(/^checks:/)).toBeNull();
+    expect(link.getAttribute("title")).toBe(
+      "owner/repository#7: Keep the title when checks vanish"
+    );
+  } finally {
+    view.unmount();
+    githubRest.mockRestore();
+    restore();
+  }
+});
+
 test("IssuePage continues to unfurl GitHub issues through the issues endpoint", async () => {
   const restore = stubIssuePage(
     issueWithExternalLink("https://github.com/owner/repository/issues/9")
@@ -1174,6 +1224,19 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
       ],
     });
     expect(await screen.findByText("Waiting on agents (1)")).not.toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage hides whose turn when the server sent open asks without last_reply", async () => {
+  const restore = stubIssuePage({ ...issue, open_asks: [openIssueAsk] });
+  const view = renderIssuePage("/issues/CORE-1");
+
+  try {
+    await screen.findByRole("heading", { level: 1, name: issue.title });
+    expect(screen.queryByText(/^Waiting on (you|agents)/)).toBeNull();
   } finally {
     view.unmount();
     restore();

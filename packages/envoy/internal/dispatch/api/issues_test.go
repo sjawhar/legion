@@ -52,6 +52,82 @@ func TestIssueDetailCarriesOpenAsks(t *testing.T) {
 	}
 }
 
+// The issue header decides whose turn it is from the newest reply in each open
+// ask's thread, exactly as the inbox does, so the detail carries the same
+// last_reply: null until someone replies, then the newest comment's author.
+func TestIssueDetailOpenAsksCarryLastReply(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Whose turn", "A spec")
+	opened := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which layout?", "actor": sessionActor(),
+	})
+	if opened.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	askID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, opened).ID
+	type openAsk struct {
+		ID        string `json:"id"`
+		LastReply *struct {
+			Author    model.Actor `json:"author"`
+			CreatedAt string      `json:"created_at"`
+		} `json:"last_reply"`
+	}
+	readOpenAsk := func() (openAsk, bool) {
+		detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+		if detail.Code != http.StatusOK {
+			t.Fatalf("read issue: status=%d body=%s", detail.Code, detail.Body.String())
+		}
+		var body struct {
+			OpenAsks []json.RawMessage `json:"open_asks"`
+		}
+		if err := json.NewDecoder(detail.Body).Decode(&body); err != nil {
+			t.Fatalf("decode issue detail: %v", err)
+		}
+		if len(body.OpenAsks) != 1 {
+			t.Fatalf("open asks = %s, want one ask", body.OpenAsks)
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(body.OpenAsks[0], &keys); err != nil {
+			t.Fatalf("decode open ask keys: %v", err)
+		}
+		_, present := keys["last_reply"]
+		var ask openAsk
+		if err := json.Unmarshal(body.OpenAsks[0], &ask); err != nil {
+			t.Fatalf("decode open ask: %v", err)
+		}
+		return ask, present
+	}
+
+	fresh, present := readOpenAsk()
+	if !present || fresh.ID != askID || fresh.LastReply != nil {
+		t.Fatalf("unreplied open ask = %#v (last_reply key present=%t), want the ask with an explicit null last_reply", fresh, present)
+	}
+
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Which widths matter?", "ask_id": askID,
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human reply: status=%d body=%s", human.Code, human.Body.String())
+	}
+	clarified, _ := readOpenAsk()
+	if clarified.LastReply == nil || clarified.LastReply.Author.Kind != "user" || clarified.LastReply.Author.ID != "alice" || clarified.LastReply.CreatedAt == "" {
+		t.Fatalf("open ask after a human reply = %#v, want alice as the newest reply", clarified)
+	}
+
+	agent := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "390, 1280 and 1536.", "ask_id": askID, "actor": sessionActor(),
+	})
+	if agent.Code != http.StatusCreated {
+		t.Fatalf("agent reply: status=%d body=%s", agent.Code, agent.Body.String())
+	}
+	answered, _ := readOpenAsk()
+	if answered.LastReply == nil || answered.LastReply.Author.Kind != "session" || answered.LastReply.Author.ID != "session-0123456789abcdef" {
+		t.Fatalf("open ask after the agent's reply = %#v, want the session as the newest reply", answered)
+	}
+}
+
 func TestCreateExternalIssueIsIdempotentDuringConcurrentCreation(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
