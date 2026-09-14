@@ -81,6 +81,23 @@ it without anyone editing a line of the branch:
   both sides — `main`'s new clause folded into this PR's rewritten paragraph — and that resolved
   paragraph is a *new* added line against the new base. Eight of ten files were identical;
   two differed by exactly the merged sentences.
+- **Unchanged under a CI-forced rebase, then changed in exactly one hunk under a conflict-forced
+  one (LEGION-131, #1106).** Rebase 1 (`239aaa28 → 31a29f24`) was forced by CI, not a conflict:
+  #1103 had committed the Claude bridge's bundles, which inline `@legion/contracts`
+  ([`committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`](committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md)).
+  With `packages/claude-envoy-bridge/dist` added to the exclusion the hash was equal
+  (`0e332ee2…28ed` both sides; the two stripped diffs line-identical) — the generated files are
+  proven by `check-dist`, not by the fingerprint, so exclude them and say so. The architect
+  routed it as bare gates: the tester re-checked CI at the new head and re-ran the one-line
+  anchor greps, the reviewer confirmed the new head by SHA. Rebase 2 (`31a29f24 → 65290bcb`) was
+  GitHub `CONFLICTING` after #961 rewrote `merger.md`'s READY paragraph, the one paragraph this
+  PR re-wraps. Ten files merged cleanly; the hash changed (`0e332ee2… → d9174ff3…`), and
+  `diff` of the two stripped diffs printed exactly one hunk — both its removed and added sides
+  now carry #961's sentence. The rebase comment listed that hunk and nothing else; the architect
+  routed *that hunk* to the reviewer, who checked it (word-identical to `main@origin` once
+  whitespace is folded, orphan grep 0) and approved the head by SHA — no tester round. The
+  interdiff is what earns the narrower route: a changed hash with an empty or fully explained
+  interdiff is a confirmation scoped to the listed hunks; an unexplained one is a round.
 
 The rule is the rule: a different fingerprint is a round, not a confirmation, even when the
 delta is prose. What the implementer owes the other roles in that case is attribution — run the
@@ -106,7 +123,10 @@ merged-prose case is common on a fast `main` that edits the same skills.
    file to the resolved text, `jj squash`), first conflicted commit first; the descendants
    re-apply and often clear several commits at once. A later commit that rewrote the same
    paragraph will conflict again — resolve it the same way. Never `jj op restore` in a shared
-   workspace.
+   workspace. When only one commit owns the conflict and the working copy sits at the tip,
+   editing the file *there* and `jj squash --into <owning change id> <path>` does the same
+   without moving the working copy (LEGION-131: one call, six descendants cleared, and the
+   untracked-added `.omp/config.yml` never left disk).
 4. `jj new <tip>`, fold any stray empty working-copy commit the resolution left behind, run the
    package's tests, lint, and typecheck at the tip, re-run every read-check grep.
 5. Hash the new tip; post one PR comment (Legion footer) in the form
@@ -120,6 +140,9 @@ merged-prose case is common on a fast `main` that edits the same skills.
 
 - `conflict-only-rebases-keep-the-diff-auditable.md` — the added/removed-line identity check
   this fingerprint mechanises, and the rules for what a resolution may contain.
+- `committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`
+  — a generated-output directory that must be excluded from the fileset, and the CI-forced
+  rebase that is not a conflict but is still necessary.
 - `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for
   `.legion/` files.
 - `../github/conflicting-pr-gets-no-pull-request-ci.md` — why a `CONFLICTING` PR gets no CI
