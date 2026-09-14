@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -143,13 +144,15 @@ export interface PrState {
 /** A prompt queued on a worker claim for delivery once the worker is ready or admitted.
  * `assignment` is an architect's `spawn_worker` task: the one delivery that makes its role the
  * issue's active phase (`state.phases[issue]`). `catchup` is the daemon's own `catchup-worker`
- * recovery prompt (`resumeWorker`), which never changes the phase. */
+ * recovery prompt (`resumeWorker`), which never changes the phase. `deliveryId` identifies one
+ * logical prompt: v31 -> v32 stamps every persisted task missing it before runtime validation. */
 export interface PendingAssignment {
   kind: "assignment" | "catchup";
   task: string;
   /** ISO time this role first entered the queue. An identical re-send and a replacement in the
    * same queue slot keep it; a newly queued task receives the current time. */
   queuedAt: string;
+  deliveryId: string;
 }
 
 /** The identical re-send rule (LEGION-102): a task of the same kind and text as the one a role
@@ -302,7 +305,7 @@ export interface PersistedSpawnRequest {
 }
 
 export interface LegionState {
-  version: 31;
+  version: 32;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -469,7 +472,12 @@ const PrStateSchema = z
   })
   .strict();
 const PendingAssignmentSchema = z
-  .object({ kind: z.enum(["assignment", "catchup"]), task: z.string(), queuedAt: z.string() })
+  .object({
+    kind: z.enum(["assignment", "catchup"]),
+    task: z.string(),
+    queuedAt: z.string(),
+    deliveryId: z.string().uuid(),
+  })
   .strict();
 const WorkerRoleClaimSchema = z
   .object({
@@ -556,7 +564,7 @@ const PersistedSpawnRequestSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(31),
+    version: z.literal(32),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -621,7 +629,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 31,
+    version: 32,
     project,
     issues: {},
     trees: {},
@@ -1432,6 +1440,32 @@ function migrateV30State(state: unknown, migratedAt: number): unknown {
   return { ...rest, version: 31, roles: migratedRoles, spawnRequests: {} };
 }
 
+/** v31 -> v32: every persisted pending assignment gains its stable prompt delivery identifier.
+ * Existing identifiers remain unchanged; only an absent field is initialized. */
+function migrateV31State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 31) return state;
+  const { roles, ...rest } = state;
+  const migratedRoles = recordValue(roles)
+    ? Object.fromEntries(
+        Object.entries(roles).map(([key, claim]) =>
+          recordValue(claim) &&
+          "issue" in claim &&
+          recordValue(claim.pendingAssignment) &&
+          typeof claim.pendingAssignment.deliveryId !== "string"
+            ? [
+                key,
+                {
+                  ...claim,
+                  pendingAssignment: { ...claim.pendingAssignment, deliveryId: randomUUID() },
+                },
+              ]
+            : [key, claim]
+        )
+      )
+    : roles;
+  return { ...rest, version: 32, roles: migratedRoles };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1479,13 +1513,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV28State,
     migrateV29State,
     (state) => migrateV30State(state, migratedAt),
+    migrateV31State,
   ];
   const state = postGateMigrations.reduce((current, migrate) => migrate(current), gatedState);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 31) {
+  if (version !== 32) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

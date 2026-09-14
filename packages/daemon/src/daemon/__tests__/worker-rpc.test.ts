@@ -274,13 +274,72 @@ for (const transport of [unixTransport, tcpTransport]) {
       });
       try {
         const client = await connect();
-        const receipt = await client.prompt("verify #41");
+        const receipt = await client.prompt("verify #41", "delivery-1");
         expect(receipt.hasStarted).toBe(false);
         expect(client.runState).toBe("running");
         shim.write({ type: "agent_start" });
         await receipt.turnStarted;
         expect(receipt.hasStarted).toBe(true);
         expect(client.runState).toBe("running");
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+    it("reports a late refusal after the prompt acknowledgement and an observed foreign turn", async () => {
+      let promptId: string | undefined;
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type === "prompt") {
+          promptId = frame.id as string;
+          write({ id: promptId, type: "response", command: "prompt", success: true });
+        }
+      });
+      try {
+        const client = await connect();
+        const lateRefusal = Promise.withResolvers<void>();
+        const receipt = await client.prompt("verify #41", "delivery-1", () => {
+          lateRefusal.resolve();
+        });
+        shim.write({ type: "agent_start" });
+        await receipt.turnStarted;
+        shim.write({
+          id: promptId,
+          type: "response",
+          command: "prompt",
+          success: false,
+          error: "Agent is busy",
+        });
+        await lateRefusal.promise;
+        expect(client.runState).toBe("running");
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+
+    it("does not report a prompt refusal as late after its observed turn ended", async () => {
+      let promptId: string | undefined;
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type === "prompt") {
+          promptId = frame.id as string;
+          write({ id: promptId, type: "response", command: "prompt", success: true });
+        }
+      });
+      try {
+        const client = await connect();
+        let lateRefusals = 0;
+        const becameIdle = Promise.withResolvers<void>();
+        client.onIdle(() => becameIdle.resolve());
+        const receipt = await client.prompt("verify #41", "delivery-1", () => {
+          lateRefusals += 1;
+        });
+        shim.write({ type: "agent_start" });
+        await receipt.turnStarted;
+        shim.write({ type: "agent_end" });
+        await becameIdle.promise;
+        shim.write({ id: promptId, type: "response", command: "prompt", success: false });
+        expect(lateRefusals).toBe(0);
+        expect(client.runState).toBe("idle");
         client.close();
       } finally {
         shim.stop();
@@ -296,7 +355,7 @@ for (const transport of [unixTransport, tcpTransport]) {
       });
       try {
         const client = await connect();
-        const receipt = await client.prompt("verify #41");
+        const receipt = await client.prompt("verify #41", "delivery-1");
         expect(receipt.hasStarted).toBe(true);
         await receipt.turnStarted;
         client.close();
@@ -327,7 +386,7 @@ for (const transport of [unixTransport, tcpTransport]) {
         client.onIdle(() => {
           idleFired++;
         });
-        const receipt = await client.prompt("verify #41");
+        const receipt = await client.prompt("verify #41", "delivery-1");
         expect(client.runState).toBe("running");
         receipt.abandonWait();
         expect(client.runState).toBe("idle");
@@ -362,7 +421,7 @@ for (const transport of [unixTransport, tcpTransport]) {
       });
       try {
         const client = await connect();
-        const receipt = await client.prompt("verify #41");
+        const receipt = await client.prompt("verify #41", "delivery-1");
         expect(receipt.hasStarted).toBe(false);
         await client.getState(2_000);
         expect(receipt.hasStarted).toBe(true);
@@ -508,7 +567,9 @@ for (const transport of [unixTransport, tcpTransport]) {
       const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
       try {
         const client = await connect();
-        await expect(client.prompt("verify #41")).resolves.toMatchObject({ hasStarted: false });
+        await expect(client.prompt("verify #41", "delivery-1")).resolves.toMatchObject({
+          hasStarted: false,
+        });
         // "running" is exactly what `prompt()` itself sets optimistically before sending the
         // request -- the aborted chunk sequence never dispatched anything, so it never had a
         // chance to touch `runState` on its own.

@@ -19,9 +19,10 @@ export async function handleControllerReady(
     sessionId,
   };
   await ctx.save();
-  // Same deadlock shape as /process/ready — see handleProcessReady. markControllerReady
-  // already never rejects (its own internal try/catch), but it must still never be awaited
-  // here: even a caught failure costs the full RPC timeout before this call would return.
+  // Same deadlock shape as /process/ready — see handleProcessReady. markControllerReady never
+  // rejects (it retries one bounded backoff cycle itself, LEGION-39, and exhaustion only logs),
+  // but it must still never be awaited here: it settles only when that cycle ends, minutes after
+  // this call must have returned.
   Promise.resolve(ctx.deps.processManager.markControllerReady()).catch(() => {});
   await ctx.deps.onControllerReady();
   return Response.json(validateContractResponse(LegionDaemonApi.ControllerReady.response, {}));

@@ -380,9 +380,11 @@ export async function handleWorkerReady(
   // Same deadlock shape as /process/ready (see handleProcessReady): the calling worker's own
   // bootstrap cannot answer a negotiate_protocol request until this response returns, so the
   // shim connect and the pending-prompt delivery it enables must happen after we respond, not
-  // before. A connect/prompt failure leaves pendingAssignment queued exactly as it is today —
-  // `ProcessManager.clientFor` never caches a failed connect, so the next touch (a probe, a
-  // resume, another spawnWorker) retries it.
+  // before. `workerReady` retries a failed connect or prompt itself on a fixed backoff
+  // (LEGION-39) and settles only when the retries end -- delivered, stopped because the claim
+  // moved on, or a rethrown TreeClosingError/StopFailed -- which can be minutes, so it is never
+  // awaited here; this `.catch` handles only what escapes the loop (`workerReady` logs the same
+  // message itself for a first failed attempt it goes on to retry).
   Promise.resolve(ctx.deps.processManager.workerReady(issue, role, sessionId, generation)).catch(
     (error) => {
       console.error(

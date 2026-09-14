@@ -32,7 +32,7 @@ export class StopFailed extends Error {
  * closed before any turn began — a dead worker (or shim), not a slow one; nothing about the
  * prompt is counted, and the socket-close handler (`onWorkerClientClosed`) owns what happens to
  * the claim, so no prompt site touches it twice. */
-export type PromptNotStartedReason = "no-turn" | "socket-closed";
+export type PromptNotStartedReason = "no-turn" | "refused-late" | "socket-closed";
 
 /** Thrown by `ProcessManager.promptExistingWorker` when a live worker's shim acknowledged a
  * prompt but no turn was observed to start (`agent_start`, or `get_state` reporting a stream)

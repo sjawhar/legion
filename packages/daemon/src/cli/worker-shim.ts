@@ -151,19 +151,19 @@ function safeParseJsonLine(line: string): unknown {
   }
 }
 
-function isShimFrame(line: string, type: string): boolean {
-  const parsed = safeParseJsonLine(line);
+/** Whether an already-parsed daemon line is the shim-consumed frame of `type`. */
+function isShimFrame(frame: unknown, type: string): boolean {
   return (
-    typeof parsed === "object" &&
-    parsed !== null &&
-    (parsed as Record<string, unknown>).type === type
+    typeof frame === "object" && frame !== null && (frame as Record<string, unknown>).type === type
   );
 }
 
 /** The daemon's `adopt-working-copy` frame, or `undefined` for any other line. A frame of that
  * type whose fields are malformed is an error naming it: the daemon is the only sender. */
-function parseAdoptionFrame(line: string): (WorkerShimAdoption & { id: string }) | undefined {
-  const parsed = safeParseJsonLine(line);
+function parseAdoptionFrame(
+  parsed: unknown,
+  line: string
+): (WorkerShimAdoption & { id: string }) | undefined {
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const frame = parsed as Record<string, unknown>;
   if (frame.type !== "adopt-working-copy") return undefined;
@@ -184,10 +184,16 @@ function parseAdoptionFrame(line: string): (WorkerShimAdoption & { id: string })
 /** The transport-independent half of the shim, shared by `--socket` and `--connect`: summarizes
  * and forwards the wrapped process's stdout frames to the connected daemon (or the bounded
  * backlog while none is connected, replayed in order on the next connect), and forwards daemon
- * frames to the process's stdin — except the two shim frames: `shutdown`, which closes that
- * stdin instead, and `adopt-working-copy`, which the shim answers itself (`adopt`) with an
- * `adopt-working-copy-result` carrying the request's `id`, over the same stream the process's
- * own frames take (so an answer to a daemon that dropped meanwhile waits in the backlog). */
+ * frames to the process's stdin — except the two it answers itself: `shutdown` closes that stdin,
+ * and `adopt-working-copy` runs the daemon's working-copy adoption (`WorkerShimDeps.adopt`) and
+ * writes its `adopt-working-copy-result` back to the daemon. A prompt `deliveryId` identifies
+ * one logical delivery: if the shim forwards a prompt while no turn is in progress, the next
+ * `agent_start` — on either side of OMP's response — belongs to that delivery unless OMP later
+ * refuses that same request. A foreign turn that starts and ends entirely in that gap remains
+ * indistinguishable without OMP carrying the prompt id in `agent_start` (LEGION-144). A duplicate
+ * prompt for the current delivery is answered without another OMP prompt, replaying only an
+ * observed start; the daemon then reads the worker's current run state.
+ */
 interface ShimBridge {
   /** Starts pumping `child`'s stdout. Called once, when the child is spawned, before any daemon
    * frame can reach `onLine`. */
@@ -214,10 +220,16 @@ function createShimBridge(
   let client: WorkerShimSocketHandle | undefined;
   const backlog: string[] = [];
   let droppedBacklogFrames = false;
-
-  const forwardToSocket = (line: string): void => {
-    const summary = summarizeShimFrame(safeParseJsonLine(line));
-    if (summary) log(summary);
+  let delivery:
+    | {
+        id: string;
+        requestIds: Set<string>;
+        phase: "sent" | "acked" | "started";
+        turnWasIdle: boolean;
+      }
+    | undefined;
+  let turnInProgress = false;
+  const forward = (line: string): void => {
     if (client) {
       client.write(line);
       return;
@@ -232,6 +244,51 @@ function createShimBridge(
         );
       }
     }
+  };
+
+  const forwardToSocket = (line: string): void => {
+    const frame = safeParseJsonLine(line);
+    const duplicateResponses: string[] = [];
+    if (typeof frame === "object" && frame !== null && !Array.isArray(frame)) {
+      const record = frame as Record<string, unknown>;
+      if (
+        record.type === "response" &&
+        record.command === "prompt" &&
+        typeof record.id === "string" &&
+        delivery?.requestIds.has(record.id)
+      ) {
+        const requestIds = [...delivery.requestIds];
+        if (record.success === false) {
+          delivery = undefined;
+        } else if (delivery.phase === "sent") {
+          delivery.phase = "acked";
+        }
+        for (const requestId of requestIds) {
+          if (requestId !== record.id) {
+            duplicateResponses.push(JSON.stringify({ ...record, id: requestId }));
+          }
+        }
+      } else if (record.type === "rpc_chunk") {
+        // A logical agent_end is the only worker frame that grows with the full transcript and
+        // therefore the one the RPC encoder chunks; the replay must preserve its idle outcome.
+        turnInProgress = false;
+      } else if (record.type === "agent_start") {
+        if (
+          !turnInProgress &&
+          delivery?.turnWasIdle &&
+          (delivery.phase === "sent" || delivery.phase === "acked")
+        ) {
+          delivery.phase = "started";
+        }
+        turnInProgress = true;
+      } else if (record.type === "agent_end") {
+        turnInProgress = false;
+      }
+    }
+    const summary = summarizeShimFrame(frame);
+    if (summary) log(summary);
+    forward(line);
+    for (const response of duplicateResponses) forward(response);
   };
 
   return {
@@ -262,11 +319,12 @@ function createShimBridge(
           "worker-shim: daemon frame received before the wrapped process was spawned"
         );
       }
-      if (isShimFrame(line, "shutdown")) {
+      const frame = safeParseJsonLine(line);
+      if (isShimFrame(frame, "shutdown")) {
         child.stdin.end();
         return;
       }
-      const adoption = parseAdoptionFrame(line);
+      const adoption = parseAdoptionFrame(frame, line);
       if (adoption) {
         const { id, ...request } = adoption;
         void adopt(request).then(
@@ -283,6 +341,41 @@ function createShimBridge(
             )
         );
         return;
+      }
+      if (typeof frame === "object" && frame !== null && !Array.isArray(frame)) {
+        const record = frame as Record<string, unknown>;
+        if (
+          record.type === "prompt" &&
+          typeof record.id === "string" &&
+          typeof record.deliveryId === "string"
+        ) {
+          if (delivery?.id === record.deliveryId) {
+            delivery.requestIds.add(record.id);
+            if (delivery.phase !== "sent") {
+              client?.write(
+                JSON.stringify({
+                  id: record.id,
+                  type: "response",
+                  command: "prompt",
+                  success: true,
+                })
+              );
+              if (delivery.phase === "started") {
+                client?.write(
+                  JSON.stringify({ type: "agent_start", deliveryId: record.deliveryId })
+                );
+                if (!turnInProgress) client?.write(JSON.stringify({ type: "agent_end" }));
+              }
+            }
+            return;
+          }
+          delivery = {
+            id: record.deliveryId,
+            requestIds: new Set([record.id]),
+            phase: "sent",
+            turnWasIdle: !turnInProgress,
+          };
+        }
       }
       child.stdin.write(new TextEncoder().encode(`${line}\n`));
     },
@@ -396,7 +489,7 @@ export async function cmdWorkerShimConnect(
             bridge.onLine(line);
             return;
           }
-          if (!isShimFrame(line, "hello_ack")) {
+          if (!isShimFrame(safeParseJsonLine(line), "hello_ack")) {
             deps.log(
               `[worker-shim] ignoring a frame received before hello_ack: ${line.slice(0, 80)}`
             );
@@ -585,10 +678,13 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
       fs.rmSync(socketPath, { force: true });
       const reader = createLineReader(handlers.onLine);
       const writers = new WeakMap<object, SocketLineWriter>();
+      let current: object | undefined;
       const server = Bun.listen({
         unix: socketPath,
         socket: {
           open(socket) {
+            if (current) reader.reset();
+            current = socket;
             const writer = createSocketLineWriter(socket);
             writers.set(socket, writer);
             handlers.onConnect({
@@ -599,12 +695,14 @@ export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps 
           drain(socket) {
             writers.get(socket)?.drain();
           },
-          data(_socket, data) {
-            reader.push(data);
+          data(socket, data) {
+            if (socket === current) reader.push(data);
           },
           close(socket) {
             writers.get(socket)?.clear();
             writers.delete(socket);
+            if (socket !== current) return;
+            current = undefined;
             reader.reset();
             handlers.onDisconnect();
           },

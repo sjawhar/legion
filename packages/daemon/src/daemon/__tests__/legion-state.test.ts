@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as crypto from "node:crypto";
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,7 @@ const prKey = "sjawhar/legion#7";
  * v30 -> v31's `queuedAt`) is predictable; `MIGRATED_AT_ISO` is what v31 stamps from it. */
 const MIGRATED_AT = 1_726_000_000_000;
 const MIGRATED_AT_ISO = new Date(MIGRATED_AT).toISOString();
+const TEST_DELIVERY_ID = "00000000-0000-4000-8000-000000000001";
 
 function stateWithTree() {
   const state = newLegionState(initialState.project, initialState.cap);
@@ -73,8 +75,14 @@ function stateWithTree() {
   state.prByBranch["sjawhar/legion@legion-42"] = "sjawhar/legion#7";
   state.admission.active.push(issue);
   state.phases[issue] = { phase: "implement", sessionId: "ses_123" };
+
   state.controllerCapabilityHash = "f".repeat(64);
   return state;
+}
+function pendingDeliveryId(state: LegionState, token: string): string | undefined {
+  const claim = state.roles[token];
+  if (!claim || !("issue" in claim)) throw new Error(`worker claim ${token} disappeared`);
+  return claim.pendingAssignment?.deliveryId;
 }
 
 function legacyV8State(pr: Record<string, unknown>) {
@@ -121,7 +129,7 @@ describe("legion state", () => {
 
   it("initializes empty v31 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 31,
+      version: 32,
       project: "omp",
       issues: {},
       trees: {},
@@ -504,7 +512,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -622,7 +630,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -662,6 +670,7 @@ describe("legion state", () => {
           kind: "assignment",
           task: "verify #41",
           queuedAt: new Date(1_726_000_000_000).toISOString(),
+          deliveryId: TEST_DELIVERY_ID,
         },
       },
       [alreadyConfirmedToken]: {
@@ -684,10 +693,11 @@ describe("legion state", () => {
 
     const migrationTimestamp = 1_726_000_000_000;
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(migrationTimestamp);
+    const randomUuidSpy = vi.spyOn(crypto, "randomUUID").mockReturnValue(TEST_DELIVERY_ID);
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
+      expect(migrated.version).toBe(32);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -699,6 +709,7 @@ describe("legion state", () => {
       );
     } finally {
       dateNowSpy.mockRestore();
+      randomUuidSpy.mockRestore();
     }
   });
 
@@ -755,7 +766,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
+      expect(migrated.version).toBe(32);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -823,7 +834,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
@@ -845,14 +856,24 @@ describe("legion state", () => {
         issue,
         role: "implementer",
         generation: 1,
-        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "assignment",
+          task: "implement #43",
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
       [testerToken]: {
         issue,
         role: "tester",
         sessionId: "ses_tester",
         generation: 2,
-        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "catchup",
+          task: catchupTask,
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
       [reviewerToken]: {
         issue,
@@ -874,26 +895,24 @@ describe("legion state", () => {
     await writeFile(file, raw, "utf8");
 
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    const randomUuidSpy = vi.spyOn(crypto, "randomUUID").mockReturnValue(TEST_DELIVERY_ID);
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
-      expect(migrated.roles[implementerToken]).toEqual({
-        ...current.roles[implementerToken],
-        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
-      });
-      expect(migrated.roles[testerToken]).toEqual({
-        ...current.roles[testerToken],
-        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
-      });
+      expect(migrated.version).toBe(32);
+      expect(migrated.roles[implementerToken]).toEqual(current.roles[implementerToken]);
+      expect(migrated.roles[testerToken]).toEqual(current.roles[testerToken]);
       expect(migrated.roles[reviewerToken]).toEqual(current.roles[reviewerToken]);
       expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
         current.roles[controllerToken(initialState.project)]
       );
       expect(migrated).toEqual(current);
+      expect(pendingDeliveryId(migrated, implementerToken)).toBe(TEST_DELIVERY_ID);
+      expect(pendingDeliveryId(migrated, testerToken)).toBe(TEST_DELIVERY_ID);
       expect(await readFile(`${file}.v25.bak`, "utf8")).toBe(raw);
     } finally {
       dateNowSpy.mockRestore();
+      randomUuidSpy.mockRestore();
     }
   });
 
@@ -909,14 +928,24 @@ describe("legion state", () => {
         issue,
         role: "implementer",
         generation: 1,
-        pendingAssignment: { kind: "assignment", task: "implement #43", queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "assignment",
+          task: "implement #43",
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
       [testerToken]: {
         issue,
         role: "tester",
         sessionId: "ses_tester",
         generation: 2,
-        pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "catchup",
+          task: catchupTask,
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
     };
     // A file the pre-LEGION-33 daemon wrote: version 24, bare-string pending assignments.
@@ -927,14 +956,18 @@ describe("legion state", () => {
     await writeFile(file, raw, "utf8");
 
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    const randomUuidSpy = vi.spyOn(crypto, "randomUUID").mockReturnValue(TEST_DELIVERY_ID);
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
+      expect(migrated.version).toBe(32);
       expect(migrated).toEqual(current);
+      expect(pendingDeliveryId(migrated, implementerToken)).toBe(TEST_DELIVERY_ID);
+      expect(pendingDeliveryId(migrated, testerToken)).toBe(TEST_DELIVERY_ID);
       expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
     } finally {
       dateNowSpy.mockRestore();
+      randomUuidSpy.mockRestore();
     }
   });
 
@@ -949,12 +982,22 @@ describe("legion state", () => {
       [plannerToken]: {
         issue,
         role: "planner",
-        pendingAssignment: { kind: "assignment", task: '{"not json', queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "assignment",
+          task: '{"not json',
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
       [architectToken]: {
         issue,
         role: "architect",
-        pendingAssignment: { kind: "assignment", task: otherJson, queuedAt: MIGRATED_AT_ISO },
+        pendingAssignment: {
+          kind: "assignment",
+          task: otherJson,
+          queuedAt: MIGRATED_AT_ISO,
+          deliveryId: TEST_DELIVERY_ID,
+        },
       },
     };
     const v25State = JSON.parse(JSON.stringify({ ...current, version: 25 }));
@@ -963,10 +1006,15 @@ describe("legion state", () => {
     await writeFile(file, JSON.stringify(v25State), "utf8");
 
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(MIGRATED_AT);
+    const randomUuidSpy = vi.spyOn(crypto, "randomUUID").mockReturnValue(TEST_DELIVERY_ID);
     try {
-      expect(await loadState(file, initialState)).toEqual(current);
+      const migrated = await loadState(file, initialState);
+      expect(migrated).toEqual(current);
+      expect(pendingDeliveryId(migrated, plannerToken)).toBe(TEST_DELIVERY_ID);
+      expect(pendingDeliveryId(migrated, architectToken)).toBe(TEST_DELIVERY_ID);
     } finally {
       dateNowSpy.mockRestore();
+      randomUuidSpy.mockRestore();
     }
   });
 
@@ -1001,7 +1049,12 @@ describe("legion state", () => {
       role: "tester",
       sessionId: "ses_tester",
       generation: 2,
-      pendingAssignment: { kind: "catchup", task: catchupTask, queuedAt: MIGRATED_AT_ISO },
+      pendingAssignment: {
+        kind: "catchup",
+        task: catchupTask,
+        queuedAt: MIGRATED_AT_ISO,
+        deliveryId: TEST_DELIVERY_ID,
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp-project",
@@ -1019,10 +1072,10 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
+      expect(migrated.version).toBe(32);
       // The v31 queuedAt backfill and durable-ledger migration preserve the #991 shape and its
       // identity-less locator, so the migrated state equals the current fixture.
-      expect(migrated).toEqual(current);
+      expect(migrated).toMatchObject(current);
       expect(await readFile(`${file}.v26.bak`, "utf8")).toBe(raw);
     } finally {
       dateNowSpy.mockRestore();
@@ -1061,8 +1114,8 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(31);
-      expect(migrated.roles[testerToken]).toEqual({
+      expect(migrated.version).toBe(32);
+      expect(migrated.roles[testerToken]).toMatchObject({
         issue,
         role: "tester",
         pendingAssignment: {
@@ -1071,13 +1124,13 @@ describe("legion state", () => {
           queuedAt: new Date(migrationTimestamp).toISOString(),
         },
       });
-      expect(migrated.roles[plannerToken]).toEqual(raw.roles[plannerToken]);
+      expect(migrated.roles[plannerToken]).toMatchObject(raw.roles[plannerToken]);
       expect(migrated.roles[reviewerToken]).toEqual(raw.roles[reviewerToken]);
       expect(migrated.roles[controllerToken(initialState.project)]).toEqual(
         raw.roles[controllerToken(initialState.project)]
       );
       expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
-      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -1097,7 +1150,56 @@ describe("legion state", () => {
 
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+  });
+
+  it("migrates v31 pending assignments with delivery IDs while preserving existing IDs", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v31-"));
+    const file = path.join(tempDir, "state.json");
+    const testerToken = roleToken(initialState.project, issue, "tester");
+    const plannerToken = roleToken(initialState.project, issue, "planner");
+    const raw = JSON.parse(JSON.stringify(stateWithTree()));
+    raw.version = 31;
+    raw.roles[testerToken] = {
+      issue,
+      role: "tester",
+      pendingAssignment: {
+        kind: "assignment",
+        task: "verify #41",
+        queuedAt: "2026-09-01T00:00:00.000Z",
+      },
+    };
+    raw.roles[plannerToken] = {
+      issue,
+      role: "planner",
+      pendingAssignment: {
+        kind: "catchup",
+        task: '{"type":"catchup-worker"}',
+        queuedAt: "2026-09-01T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000031",
+      },
+    };
+    const rawText = JSON.stringify(raw);
+    await writeFile(file, rawText, "utf8");
+
+    const migrated = await loadState(file, initialState);
+
+    expect(migrated.version).toBe(32);
+    const tester = migrated.roles[testerToken];
+    if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
+    expect(tester.pendingAssignment).toMatchObject({
+      kind: "assignment",
+      task: "verify #41",
+      queuedAt: "2026-09-01T00:00:00.000Z",
+    });
+    expect(tester.pendingAssignment?.deliveryId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+    );
+    const planner = migrated.roles[plannerToken];
+    if (!planner || !("issue" in planner)) throw new Error("planner claim disappeared");
+    expect(planner.pendingAssignment?.deliveryId).toBe("00000000-0000-4000-8000-000000000031");
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+    expect(await readFile(`${file}.v31.bak`, "utf8")).toBe(rawText);
   });
 
   it("loads a retained spawn result with a future response field", async () => {
@@ -1150,6 +1252,7 @@ describe("legion state", () => {
       kind: "assignment",
       task: "verify #41",
       queuedAt: "2026-09-13T17:00:00.000Z",
+      deliveryId: TEST_DELIVERY_ID,
     } as const;
     expect(samePendingTask(existing, next)).toBe(same);
     expect(samePendingTask(undefined, next)).toBeFalse();
@@ -1180,7 +1283,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(migrated).toEqual(current);
     expect(migrated.phases[issue]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
     expect(migrated.phases[otherIssue]).toEqual({
@@ -1217,12 +1320,12 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(migrated.trees).toEqual(current.trees);
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v29.bak`, "utf8")).toBe(raw);
     // Written once, at load: the next boot reads v31 and runs no migration.
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
   });
 
   it("round-trips a tree's kept session file (resumeSessionFile) through save and load", async () => {
@@ -1358,7 +1461,7 @@ describe("legion state", () => {
     // A v24 file walks the whole chain: v24 -> v25 (#993) -> v26 (#991) -> v27 (pane identity)
     // -> v28 (design gate) -> v29 (assignedAt) -> v30 (resumeSessionFile) -> v31
     // (queuedAt and durable spawn requests).
-    expect(migrated.version).toBe(31);
+    expect(migrated.version).toBe(32);
     expect(Object.keys(migrated.prs[prKey] ?? {})).toEqual(Object.keys(current.prs[prKey] ?? {}));
     expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
   });
@@ -1444,7 +1547,7 @@ describe("legion state", () => {
           },
         });
 
-        expect(migrated.version).toBe(31);
+        expect(migrated.version).toBe(32);
         expect(migrated.gates).toEqual({
           "LEGION-1": { artifactId: "art-a", latestVersion: 7, approvedVersion: 7 },
           "LEGION-2": { artifactId: "art-b", latestVersion: 2 },
@@ -1456,7 +1559,7 @@ describe("legion state", () => {
         expect(await readFile(`${file}.v27.bak`, "utf8")).toBe(JSON.stringify(source));
         // The migrated state is on disk at once: the next boot loads the current version and
         // never asks Dispatch again, even with no ordinary save in between.
-        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
         const reloaded = await loadState(file, {
           ...initialState,
           resolveSpecArtifact: async (issue) => {
@@ -1548,14 +1651,14 @@ describe("legion state", () => {
         dateNowSpy.mockRestore();
       }
 
-      expect(migrated.version).toBe(31);
+      expect(migrated.version).toBe(32);
       // #991's step classified the bare string; #981's step left the identity-less locator as it
       // was (both identity fields optional); the design-gate step resolved the gate; v29 added
       // optional assignedAt; v30 added optional resumeSessionFile; and v31 stamped queuedAt and
       // added the empty durable request ledger.
       const claim = migrated.roles[architectToken];
       if (!claim || !("issue" in claim)) throw new Error("architect claim was not migrated");
-      expect(claim.pendingAssignment).toEqual({
+      expect(claim.pendingAssignment).toMatchObject({
         kind: "catchup",
         task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
         queuedAt: MIGRATED_AT_ISO,
@@ -1571,7 +1674,7 @@ describe("legion state", () => {
         "LEGION-1": { artifactId: "art-a", latestVersion: 4, approvedVersion: 4 },
       });
       expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(JSON.stringify(source));
-      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(31);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
     });
   });
 

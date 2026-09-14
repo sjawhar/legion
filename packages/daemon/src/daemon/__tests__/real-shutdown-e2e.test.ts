@@ -8,70 +8,34 @@
 // `closeTree` is the one asking it to exit (proving that self-report path never deadlocks
 // against a real HTTP round trip).
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { roleToken } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
-import type { DaemonConfig } from "../config";
 import { newLegionState } from "../legion-state";
 import { parseProcStatStartTicks } from "../proc-stat";
-import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
+import { ProcessManager } from "../processes";
 import type { TmuxLocator } from "../runtime";
-import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient } from "./ci-fixtures";
+import {
+  CLI_ENTRYPOINT,
+  CLI_FIXTURES_DIR,
+  realDaemonConfig,
+  realProcessManagerDeps,
+  removeScratchDirs,
+  run,
+  scratchDir,
+  waitForSocket,
+} from "./real-tmux-fixture";
 
+const PROJECT = "realshutdown";
 const SESSION = "legion-smoke-T8Shutdown";
 /** The `ProcessManager` under test has `project: "realshutdown"`, so every kill-pane it issues
  * targets exactly this private socket; the fixture's own tmux calls must land on the same server. */
-const TMUX_SOCKET = "legion-realshutdown";
+const TMUX_SOCKET = `legion-${PROJECT}`;
 const tmuxArgv = (...rest: string[]) => ["tmux", "-L", TMUX_SOCKET, ...rest];
-const STUCK_OMP = path.join(
-  import.meta.dir,
-  "..",
-  "..",
-  "cli",
-  "__tests__",
-  "fixtures",
-  "stuck-omp-rpc.ts"
-);
-const SELF_REPORT_OMP = path.join(
-  import.meta.dir,
-  "..",
-  "..",
-  "cli",
-  "__tests__",
-  "fixtures",
-  "self-report-omp-rpc.ts"
-);
-const CLI_ENTRYPOINT = path.join(import.meta.dir, "..", "..", "cli", "index.ts");
-
-const tempDirs: string[] = [];
-
-async function scratchDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "legion-real-shutdown-e2e-"));
-  tempDirs.push(dir);
-  return dir;
-}
-
-async function run(
-  command: string[],
-  options?: { cwd?: string; env?: NodeJS.ProcessEnv }
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(command, {
-    stdout: "pipe",
-    stderr: "pipe",
-    ...(options?.cwd ? { cwd: options.cwd } : {}),
-    ...(options?.env ? { env: options.env } : {}),
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
-}
+const STUCK_OMP = path.join(CLI_FIXTURES_DIR, "stuck-omp-rpc.ts");
+const SELF_REPORT_OMP = path.join(CLI_FIXTURES_DIR, "self-report-omp-rpc.ts");
 
 async function ensureSession(): Promise<void> {
   const listed = await run(tmuxArgv("has-session", "-t", SESSION));
@@ -127,14 +91,6 @@ async function openShimWindow(
   };
 }
 
-async function waitForSocket(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`worker shim socket never appeared at ${target}`);
-}
-
 async function paneAlive(paneId: string): Promise<boolean> {
   const listed = await run(tmuxArgv("list-panes", "-a", "-F", "#{pane_id}"));
   return listed.stdout.split("\n").includes(paneId);
@@ -155,120 +111,9 @@ async function waitForPaneGone(paneId: string, timeoutMs = 5_000): Promise<boole
   }
 }
 
-function config(
-  stateDir: string,
-  port: number,
-  overrides: Partial<DaemonConfig> = {}
-): DaemonConfig {
-  return {
-    project: "realshutdown",
-    legionId: "sjawhar/1",
-    port,
-    runtime: { name: "tmux" },
-    daemonUrl: `http://127.0.0.1:${port}`,
-    bind: "127.0.0.1",
-    envoyUrl: "http://127.0.0.1:9020",
-    natsUrls: ["nats://127.0.0.1:4222"],
-    ompInvocation: "bun",
-    ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
-    admissionCap: 1,
-    workerCap: 5,
-    maxRecursionDepth: 8,
-    lingerHours: 72,
-    maxFixAttempts: 3,
-    resyncIntervalMs: 600_000,
-    workerStopTimeoutSeconds: 1,
-    treeStopTimeoutSeconds: 1,
-    workerBootTimeoutSeconds: 120,
-    workerBootRegistrationDeadlineIntervals: 3,
-    workerRpcTimeoutSeconds: 5,
-    workerIdleRetireSeconds: 600,
-    slowCommandTimeoutSeconds: 300,
-    workerStreamPort: 13371,
-    gates: { design: "off" },
-    githubApps: {},
-    stateDir,
-    ...overrides,
-  };
-}
-
-/** Builds `ProcessManager` deps over a real `TmuxRuntime` on the fixture's private server. `run`
- * and `connectWorkerRpc` default to the real thing; a test that needs a fake supplies its own. */
-function processManagerDeps(
-  cfg: DaemonConfig,
-  state: ReturnType<typeof newLegionState>,
-  commands?: string[][],
-  overrides: {
-    run?: TmuxRuntimeDeps["run"];
-    connectWorkerRpc?: TmuxRuntimeDeps["connectWorkerRpc"];
-  } = {}
-): ProcessManagerDeps {
-  const runner: TmuxRuntimeDeps["run"] =
-    overrides.run ??
-    (commands
-      ? async (command, options) => {
-          commands.push(command);
-          return run(command, options);
-        }
-      : run);
-  const runtime = new TmuxRuntime({
-    tmux: { run: runner, socket: `legion-${state.project}` },
-    project: state.project,
-    stateDir: cfg.stateDir,
-    ompInvocation: cfg.ompInvocation,
-    ompLaunchPrefix: cfg.ompLaunchPrefix,
-    provisioningToken: async () => "installation-token",
-    run: runner,
-    repo: cfg.repo,
-    credentialHelper: "!true",
-    slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
-    connectWorkerRpc:
-      overrides.connectWorkerRpc ??
-      ((socketPath) => import("../worker-rpc").then((m) => m.connectWorkerRpc(socketPath))),
-    workerRpcTimeoutMs: () => cfg.workerRpcTimeoutSeconds * 1000,
-    now: () => Date.now(),
-    issueLocators: (issue) => locatorsForIssue(state, issue),
-  });
-  return {
-    state,
-    saveState: async () => {},
-    config: cfg,
-    runtime,
-    processPath: process.env.PATH ?? "",
-    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
-    credentialHelper: "!true",
-    publishRole: () => {},
-    natsRequest: async () => JSON.stringify({ type: "ack" }),
-    mintControllerCapability: async () => "controller-secret",
-    mintBootToken: async () => "boot-token",
-    mintWorkerBootToken: async () => "worker-boot-token",
-    workerCatchup: {
-      runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
-      baseEnv: {},
-      tokenManager: {
-        getToken: async () => ({
-          token: "worker-token",
-          expiresAt: "2099-01-01T00:00:00.000Z",
-          gitIdentity: {
-            name: "legion-implement[bot]",
-            email: "implement@users.noreply.github.com",
-          },
-        }),
-      },
-      repo: "sjawhar/legion",
-    },
-    now: () => Date.now(),
-    dispatchClient: fakeDispatchClient(),
-    revokeSessionCapability: () => {},
-  };
-}
-
 afterAll(async () => {
   await run(tmuxArgv("kill-server"));
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await removeScratchDirs();
 });
 
 describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
@@ -277,7 +122,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
   // per-token lock closeTree's own stop needs), so it runs unconditionally (not LEGION_E2E-gated)
   // against a real ProcessManager/HTTP daemon with a fake `run`/`connectWorkerRpc`.
   it("does not block closeTree's stop-then-delete for a worker whose /worker/started request is still waiting on its GitHub lease", async () => {
-    const stateDir = await scratchDir();
+    const stateDir = await scratchDir("legion-real-shutdown-e2e");
     const root = "LEGION-9003";
     const state = newLegionState("realshutdown", 1);
     state.issues[root] = {
@@ -327,8 +172,8 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
     const reachedLease = Promise.withResolvers<void>();
     const leaseGate = Promise.withResolvers<void>();
-    const cfg = config(stateDir, 0, { treeStopTimeoutSeconds: 5 });
-    const deps = processManagerDeps(cfg, state, undefined, {
+    const cfg = realDaemonConfig(PROJECT, stateDir, 0, { treeStopTimeoutSeconds: 5 });
+    const deps = realProcessManagerDeps(cfg, state, undefined, {
       run: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
       connectWorkerRpc: async () => fakeClient,
     });
@@ -410,7 +255,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     "kills a real pane wrapping a real worker-shim after its stop timeout, when the wrapped process never reacts to stdin closing",
     async () => {
       await ensureSession();
-      const stateDir = await scratchDir();
+      const stateDir = await scratchDir("legion-real-shutdown-e2e");
       const socketPath = path.join(stateDir, "stuck-tester.sock");
       const opened = await openShimWindow(socketPath, STUCK_OMP, {});
       await waitForSocket(socketPath);
@@ -435,7 +280,11 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       const commands: string[][] = [];
       const workerStopTimeoutSeconds = 1;
       const processes = new ProcessManager(
-        processManagerDeps(config(stateDir, 0, { workerStopTimeoutSeconds }), state, commands)
+        realProcessManagerDeps(
+          realDaemonConfig(PROJECT, stateDir, 0, { workerStopTimeoutSeconds }),
+          state,
+          commands
+        )
       );
 
       const startedAt = Date.now();
@@ -461,7 +310,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     "never kills a real pane whose recorded identity is not the process running in it: the stuck worker's claim clears, the tree closes, and the pane survives",
     async () => {
       await ensureSession();
-      const stateDir = await scratchDir();
+      const stateDir = await scratchDir("legion-real-shutdown-e2e");
       const socketPath = path.join(stateDir, "reissued-tester.sock");
       const opened = await openShimWindow(socketPath, STUCK_OMP, {});
       await waitForSocket(socketPath);
@@ -487,7 +336,11 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       };
       const commands: string[][] = [];
       const processes = new ProcessManager(
-        processManagerDeps(config(stateDir, 0, { workerStopTimeoutSeconds: 1 }), state, commands)
+        realProcessManagerDeps(
+          realDaemonConfig(PROJECT, stateDir, 0, { workerStopTimeoutSeconds: 1 }),
+          state,
+          commands
+        )
       );
 
       try {
@@ -511,7 +364,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     "lets a root's own self-report POST to /process/exit resolve without deadlocking the closeTree that asked it to shut down",
     async () => {
       await ensureSession();
-      const stateDir = await scratchDir();
+      const stateDir = await scratchDir("legion-real-shutdown-e2e");
       const socketPath = path.join(stateDir, "self-report-root.sock");
       const secretFile = path.join(stateDir, "secret.txt");
       const resultFile = path.join(stateDir, "result.txt");
@@ -533,8 +386,8 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
 
       let daemon: LegionApi | undefined;
       try {
-        const cfg = config(stateDir, 0, { treeStopTimeoutSeconds: 5 });
-        const deps = processManagerDeps(cfg, state);
+        const cfg = realDaemonConfig(PROJECT, stateDir, 0, { treeStopTimeoutSeconds: 5 });
+        const deps = realProcessManagerDeps(cfg, state);
         const processes = new ProcessManager(deps);
         const apiDeps: LegionApiDeps = {
           state,
