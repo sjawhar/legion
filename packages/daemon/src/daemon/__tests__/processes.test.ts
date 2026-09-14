@@ -4084,6 +4084,36 @@ describe("ProcessManager", () => {
     expect(lines.filter((line) => line.includes("workspace of")).length).toBe(3);
   });
 
+  it("a runtime that retains its tree volume skips daemon-host workspace cleanup when the tree closes", async () => {
+    // Kubernetes owns one PVC for every workspace in the tree; its retention belongs to
+    // KubernetesRuntime.reconcileOrphans. ProcessManager must close the tree without calling a
+    // host-side jj runner (which has neither this volume nor its workspaces). The sibling test
+    // above proves the true branch removes a done root and child under TmuxRuntime.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    // Kubernetes has no host tmux locator; the tree is already process-free at close.
+    delete state.trees[root].locator;
+    const runtime = new FakeRuntime({ removesWorkspacesOnTreeClose: false });
+    let hostCleanupCalled = false;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      run: async () => {
+        hostCleanupCalled = true;
+        throw new Error("Kubernetes tree close must not run a daemon-host workspace command");
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(hostCleanupCalled).toBe(false);
+    expect(runtime.spawned).toEqual([]);
+  });
+
   it("keeps a parked root's workspace at close — backlog or icebox — running no jj command and logging the status", async () => {
     for (const status of ["backlog", "icebox"] as const) {
       const stateDir = await temporaryDir();
