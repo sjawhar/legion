@@ -377,6 +377,12 @@ func (s *server) storeArtifact(
 		return
 	}
 	evictOnFailure = false
+	if kind == "doc" {
+		// The seeded or replaced text was written inside this transaction, which suppresses
+		// the live settlement the edits path relies on; queue the closer now so the
+		// document's ask blocks are indexed and its block ids repaired.
+		s.deps.Docs.ScheduleSettlement(artifact.ID)
+	}
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
 }

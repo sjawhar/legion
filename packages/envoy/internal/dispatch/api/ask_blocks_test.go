@@ -258,3 +258,63 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 		t.Fatalf("rendered quote miss: status=%d code=%q error=%q", response.Code, errorBody.Code, errorBody.Error)
 	}
 }
+
+// awaitIndexedAskBlock polls the inbox until the ask block with blockID on artifactID is
+// indexed, failing the test when settlement never reaches it.
+func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockID, question string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+		if inbox.Code != http.StatusOK {
+			t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+		}
+		for _, ask := range decodeBody[[]model.Ask](t, inbox) {
+			if ask.BlockID == nil || *ask.BlockID != blockID {
+				continue
+			}
+			if ask.Question != question || ask.State != "open" || ask.BlockArtifact == nil || ask.BlockArtifact.ID != artifactID {
+				t.Fatalf("indexed ask = %#v", ask)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("ask block %q on %s was never indexed", blockID, artifactID)
+}
+
+// A spec written at issue creation never passes through a live edit; its ask blocks must still
+// become asks, or an agent that opens an issue with decisions in the spec gets no inbox rows.
+func TestAskBlocksInCreatedSpecAreIndexed(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Seeded decisions",
+		"Context\n\n:::ask{#seeded-ask urgency=\"med\" multiple=\"false\"}\nShip the seeded decision?\n\n- Ship: Now.\n- Hold: Later.\n:::\n")
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "seeded-ask", "Ship the seeded decision?")
+}
+
+// Uploading a new document version through the artifacts API replaces the text inside the
+// upload's own transaction, which suppresses live settlement; the closer must still run.
+func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Uploaded decisions", "Before\n")
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor":   sessionActor(),
+		"name":    "spec.md",
+		"content": "Before\n\n:::ask{#uploaded-ask urgency=\"high\" multiple=\"false\"}\nShip the uploaded decision?\n\n- Ship: Now.\n- Hold: Later.\n:::\n",
+		"summary": "decisions as ask blocks",
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload spec version: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "uploaded-ask", "Ship the uploaded decision?")
+}
