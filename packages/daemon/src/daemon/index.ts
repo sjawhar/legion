@@ -558,6 +558,8 @@ async function startDaemonLocked(
           saveState: save,
           fetchCiStatusBatch,
           applyEffects: eventPump.applyEffects,
+          reconcileAdmissionDrift: () => processManager.reconcileAdmissionDrift(),
+          isResurrecting: (issue) => processManager.isResurrecting(issue),
           now: deps.now,
         },
         options

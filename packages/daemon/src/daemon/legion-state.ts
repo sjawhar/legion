@@ -81,6 +81,16 @@ export interface TreeState {
    * an active tree's root registration deadline needs re-arming without resolving its architect
    * claim first. */
   readyConfirmedAt?: number;
+  /** The root's OMP session file, kept across a cleared pane so the next launch resumes the same
+   * agent with `--resume` instead of starting fresh -- the tree-level twin of
+   * `WorkerRoleClaim.resumeSessionFile`. Written by `recordRootExit` (a root that exited on its
+   * own: copied from its locator's `ompSessionFile` before the locator is deleted) and by
+   * `resurrectDeadTree` immediately after clearing a root's locator, before it starts a
+   * replacement; read by `spawnRoot`, which resumes whenever it is set whatever its caller asked,
+   * and by `spawnTree` as the last fallback for the resume file. Cleared when `spawnTree` records
+   * a fresh locator; whenever a tree enters `lingering` or `closed`; and when the tree reaches
+   * `launch-failed` (a controller re-admit starts fresh, as before). LEGION-83. */
+  resumeSessionFile?: string;
 }
 
 export interface PrState {
@@ -265,7 +275,7 @@ export function staleQueueEntryReason(state: LegionState, issue: IssueKey): stri
 }
 
 export interface LegionState {
-  version: 29;
+  version: 30;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -386,6 +396,7 @@ const TreeStateSchema = z
     lingerUntil: z.string().optional(),
     launchFailures: z.number().int().nonnegative(),
     readyConfirmedAt: z.number().int().nonnegative().optional(),
+    resumeSessionFile: z.string().optional(),
   })
   .strict();
 const CheckRunRefSchema = z
@@ -498,7 +509,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(29),
+    version: z.literal(30),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -562,7 +573,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 29,
+    version: 30,
     project,
     issues: {},
     trees: {},
@@ -673,6 +684,85 @@ export function owningArchitect(state: LegionState, issue: IssueKey, role?: Legi
     current = state.issues[current]?.parent;
   }
   throw new Error(`No owning architect for ${issue}/${role ?? "issue"}: state has no tree`);
+}
+
+/** What `repairAdmissionDrift` changed: the trees it appended to `admission.active`, the entries
+ * it removed (each with why), and -- when the repaired list is still longer than the cap -- the
+ * occupancy it left in place. */
+export interface AdmissionDriftRepair {
+  added: IssueKey[];
+  removed: Array<{ issue: IssueKey; reason: string }>;
+  overCap?: { active: number; cap: number };
+}
+
+/** Restores the admission invariant in place (LEGION-83): every tree whose status is `active` is
+ * in `admission.active` (appended; pulled out of `admission.queue` if it sits there), and every
+ * `admission.active` entry names an `active` tree -- or a `dead` one, whose slot remains reserved
+ * while its recovery is in flight. The reservation is admission bookkeeping only; it does not
+ * prove a root process is live, so resync separately reports a dead root once no live resurrection
+ * owns it. An entry whose tree is missing, `lingering`, `closed`, `launch-failed`, or `queued`,
+ * and a duplicate of an earlier entry, is removed. Occupancy above `admission.cap` is reported,
+ * never corrected: only a human raises or lowers occupancy by hand, and the queue drains as trees
+ * close. Pure apart from the in-place mutation -- no I/O, no logging; the callers
+ * (`ProcessManager.reconcileAdmission` at boot, `runResync` every interval) log its result
+ * through `describeAdmissionDrift`, so the two cannot disagree on what a violation is. Stops
+ * nothing. */
+export function repairAdmissionDrift(state: LegionState): AdmissionDriftRepair {
+  const admission = state.admission;
+  const added: IssueKey[] = [];
+  const removed: Array<{ issue: IssueKey; reason: string }> = [];
+  const kept = new Set<IssueKey>();
+  for (const issue of admission.active) {
+    const tree = state.trees[issue];
+    if (kept.has(issue)) {
+      removed.push({ issue, reason: "duplicate entry" });
+    } else if (!tree) {
+      removed.push({ issue, reason: "no tree recorded" });
+    } else if (tree.status !== "active" && tree.status !== "dead") {
+      removed.push({ issue, reason: `tree is ${tree.status}` });
+    } else {
+      kept.add(issue);
+    }
+  }
+  for (const tree of Object.values(state.trees)) {
+    if (tree.status !== "active" || kept.has(tree.root)) continue;
+    const queueIndex = admission.queue.indexOf(tree.root);
+    if (queueIndex !== -1) admission.queue.splice(queueIndex, 1);
+    kept.add(tree.root);
+    added.push(tree.root);
+  }
+  // Spliced in place, never reassigned: `ProcessManager` reads `admission.active` by reference.
+  if (added.length > 0 || removed.length > 0) {
+    admission.active.splice(0, admission.active.length, ...kept);
+  }
+  if (admission.active.length > admission.cap) {
+    return { added, removed, overCap: { active: admission.active.length, cap: admission.cap } };
+  }
+  return { added, removed };
+}
+
+/** The operator-facing lines for a repair: one per tree added, one per entry removed, and one
+ * over-cap warning -- identical from boot and from resync (`source` names which). Empty for a
+ * clean repair, so a consistent state logs nothing. */
+export function describeAdmissionDrift(
+  repair: AdmissionDriftRepair,
+  source: "at boot" | "by resync"
+): string[] {
+  const lines = repair.added.map(
+    (issue) =>
+      `[legion] admission drift repaired ${source}: added ${issue} to admission.active (tree is active but held no slot)`
+  );
+  for (const { issue, reason } of repair.removed) {
+    lines.push(
+      `[legion] admission drift repaired ${source}: removed ${issue} from admission.active (${reason})`
+    );
+  }
+  if (repair.overCap) {
+    lines.push(
+      `[legion] admission over cap ${source}: ${repair.overCap.active} active trees against a cap of ${repair.overCap.cap}; nothing is stopped and nothing is promoted until occupancy falls below the cap`
+    );
+  }
+  return lines;
 }
 
 function migrateV5State(state: unknown): unknown {
@@ -1260,6 +1350,15 @@ function migrateV28State(state: unknown): unknown {
   return { ...state, version: 29 };
 }
 
+/** v29 -> v30: `TreeState` gains the optional `resumeSessionFile` (LEGION-83) -- a pure version
+ * bump: every existing tree validates with it absent, and absent is the correct starting value
+ * (no root has yet had its session file kept across a cleared pane). Sits after the v28 -> v29
+ * `assignedAt` bump (LEGION-72), because a deployed daemon already persists version 29 under that
+ * meaning. */
+function migrateV29State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 29) return state;
+  return { ...state, version: 30 };
+}
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1301,17 +1400,19 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV25State,
     migrateV26State,
   ];
-  const state = migrateV28State(
-    await migrateV27State(
-      migrations.reduce((current, migrate) => migrate(current), source as unknown),
-      init.resolveSpecArtifact
+  const state = migrateV29State(
+    migrateV28State(
+      await migrateV27State(
+        migrations.reduce((current, migrate) => migrate(current), source as unknown),
+        init.resolveSpecArtifact
+      )
     )
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 29) {
+  if (version !== 30) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

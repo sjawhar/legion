@@ -3,7 +3,7 @@ import { roleTopic } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
 import type { CheckRunRef } from "../../state/types";
 import { startEventPump } from "../events";
-import type { LegionState } from "../legion-state";
+import { type LegionState, repairAdmissionDrift } from "../legion-state";
 import { type Effect, reduceGithubEvent } from "../reducers";
 import { runResync } from "../resync";
 import {
@@ -97,6 +97,8 @@ async function resyncWith(
     applyEffects: async (effects) => {
       applied.push(effects);
     },
+    reconcileAdmissionDrift: async () => repairAdmissionDrift(state),
+    isResurrecting: () => false,
     now: () => resyncClock,
   });
 }
@@ -684,6 +686,8 @@ it("does not apply a fetched green rollup after a live red settlement advances C
       applyEffects: async (effects) => {
         resyncEffects.push(effects);
       },
+      reconcileAdmissionDrift: async () => repairAdmissionDrift(state),
+      isResurrecting: () => false,
       now: () => 3,
     });
     await fetchStarted.promise;
@@ -749,6 +753,8 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
     applyEffects: async (effects) => {
       resyncEffects.push(effects);
     },
+    reconcileAdmissionDrift: async () => repairAdmissionDrift(state),
+    isResurrecting: () => false,
     now: () => 3,
   });
   await fetchStarted.promise;

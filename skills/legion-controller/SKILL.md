@@ -62,7 +62,8 @@ override a Sami ruling quoted here.
 | New issue created in the Dispatch project (`issue.created`, status `triage`; resync heals misses) | issue key + triage context (incl. pre-existing children) | Triage: `legion({ op: "set_status", issue, status: "todo" })` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
-| Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed) | Verify against fresh state, then heal |
+| Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
+| Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion({ op: "set_status", issue: root, status: "todo" })`; otherwise no action — the event is not held or redelivered |
@@ -124,7 +125,10 @@ Treat a resync report as an anomaly list, not an instruction. For every zero-own
 untriaged-open, or launch-failed issue it names, verify `legion state --json` and the
 current Dispatch issue first. Then heal the verified condition: admit an eligible root, move
 an issue back to its intended status, or use the applicable daemon control path. Do not act
-on stale entries until their source artifact explains the anomaly.
+on stale entries until their source artifact explains the anomaly. An `admission-drift` entry
+needs no healing — the daemon added the tree back to (or removed it from) its admission list in
+the same run; verify only that the same issue does not recur in the next report, and file a
+LEGION issue with both reports if it does.
 
 ## Mentions
 

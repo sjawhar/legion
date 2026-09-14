@@ -1721,6 +1721,7 @@ describe("ProcessManager", () => {
     state.issues[root] = { key: root, title: "Parked root", status: "backlog", children: [] };
     tree(state);
     state.trees[root].status = "lingering";
+    state.trees[root].resumeSessionFile = "/state/trees/legion-42/session.json";
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
     const { manager: processes, state: managedState } = manager(state, {
       dispatchClient: fakeDispatchClient({
@@ -1733,14 +1734,23 @@ describe("ProcessManager", () => {
     await processes.expireLinger(root);
 
     expect(managedState.trees[root]?.status).toBe("closed");
+    expect(managedState.trees[root]?.resumeSessionFile).toBeUndefined();
     expect(statusWrites).toEqual([]);
   });
 
   it("retires a just-opened root pane without a status write when a human parks it during launch", async () => {
     const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Racing root", status: "todo", children: [] };
-    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.trees[root] = {
+      root,
+      generation: 0,
+      status: "active",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
     state.admission.active.push(root);
     const launchStarted = Promise.withResolvers<void>();
     const launchGate = Promise.withResolvers<void>();
@@ -1772,14 +1782,13 @@ describe("ProcessManager", () => {
     const spawning = processes.spawnRoot(root);
     await launchStarted.promise;
     state.issues[root].status = "backlog";
-    state.trees[root].status = "lingering";
-    state.admission.active.splice(state.admission.active.indexOf(root), 1);
     launchGate.resolve();
 
     await spawning;
 
     expect(managedState.trees[root]).toMatchObject({ status: "lingering" });
     expect(managedState.trees[root]?.locator).toBeUndefined();
+    expect(managedState.trees[root]?.resumeSessionFile).toBeUndefined();
     expect(statusWrites).toEqual([]);
     expect(commands).toContainEqual(["tmux", "-L", "legion-omp", "kill-pane", "-t", "%1"]);
   });
@@ -2033,6 +2042,496 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.locator).toBeDefined();
     const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
     expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("keeps a resumed root's admission slot when the root's own exit self-report lands during the daemon's graceful stop, and promotes nothing (LEGION-83)", async () => {
+    // The 09:13 shape: cap 1, one confirmed root whose persisted locator predates pane identity
+    // (never verifies -> probes dead/not-recorded-process -> the stop asks the still-live root to
+    // exit over its own socket), and one never-started issue queued behind it. The root's real
+    // `session_shutdown` hook POSTs `/process/exit` for the CURRENT generation while that stop is
+    // still awaiting the socket close, and `handleProcessExit` routes an open issue to
+    // `markProcessDead`. Before the fix that report released the slot and promoted the queued
+    // issue; the resume then activated the root outside `admission.active`.
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const { panePid: _pid, paneStartTicks: _ticks, ...legacyLocator } = recordedTmuxLocator(state);
+    state.trees[root].locator = { ...legacyLocator, ompSessionFile: sessionFile };
+    state.trees[root].readyConfirmedAt = Date.parse("2026-08-24T00:00:00.000Z");
+    state.admission.active = [root];
+    const queued: IssueKey = "LEGION-45";
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue = [queued];
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.issues[queued] = {
+      key: queued,
+      title: "Queued behind the cap",
+      status: "todo",
+      children: [],
+    };
+    let processes!: ProcessManager;
+    let selfReportSettled = false;
+    const rootClient = fakeWorkerRpcClient();
+    rootClient.shutdown = () => {
+      // The root's own session_shutdown hook: /process/exit for the current generation, answered
+      // before OMP finishes exiting -- only then does the shim's socket close.
+      void processes.markProcessDead(root, state.trees[root]?.generation).then(() => {
+        selfReportSettled = true;
+        rootClient.close();
+      });
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      ({ manager: processes } = manager(state, {
+        config: config(stateDir),
+        connectWorkerRpc: async () => rootClient,
+      }));
+
+      await processes.resurrect(root);
+      await processes.drainSpawns();
+
+      expect(selfReportSettled).toBe(true);
+      expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+      expect(state.trees[root]?.locator).toBeDefined();
+      expect(state.admission.active).toEqual([root]);
+      expect(state.admission.queue).toEqual([queued]);
+      expect(state.trees[queued]).toMatchObject({ status: "queued" });
+      expect(state.trees[queued]?.locator).toBeUndefined();
+      const ignored = errorLog.mock.calls
+        .map(String)
+        .filter((line) => line.includes("exit self-report"));
+      expect(ignored).toHaveLength(1);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("keeps a self-exited root's session file on the tree and resumes it, into a free slot, at the next resurrection (LEGION-83, acceptance 2)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].locator = { ...recordedTmuxLocator(state), ompSessionFile: sessionFile };
+    state.admission.active.push(root);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+      // The root exits on its own (its `/process/exit` on an open issue): dead, slot released.
+      await processes.markProcessDead(root);
+      expect(state.trees[root]).toMatchObject({ status: "dead", resumeSessionFile: sessionFile });
+      expect(state.trees[root]?.locator).toBeUndefined();
+      expect(state.admission.active).toEqual([]);
+
+      // A wake routed to the dead root resurrects it: a slot is free, so it takes one and resumes.
+      await processes.resurrect(root);
+      await processes.drainSpawns();
+
+      expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+      expect(state.trees[root]?.resumeSessionFile).toBeUndefined();
+      expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+      const launch = commands.find(
+        (command) => command[0] === "tmux" && command[3] === "new-window"
+      );
+      expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+      const taken = errorLog.mock.calls
+        .map(String)
+        .filter((line) => line.includes("taking a free"));
+      expect(taken).toHaveLength(1);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("keeps a failed resurrection's session file for the queued retry (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].locator = { ...recordedTmuxLocator(state), ompSessionFile: sessionFile };
+    state.admission.active = [root];
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const launches: string[][] = [];
+    let launchAttempts = 0;
+    const launched = eventCounter();
+    let firstSavedTree:
+      | { status: string; resumeSessionFile?: string; locator?: unknown }
+      | undefined;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        firstSavedTree ??= structuredClone(state.trees[root]);
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        if (command[0] !== "tmux" || command[3] !== "new-window") {
+          return { stdout: "", exitCode: 0 };
+        }
+        launches.push(command);
+        launchAttempts += 1;
+        launched.increment();
+        return launchAttempts === 1
+          ? { stdout: "", stderr: "tmux new-window failed", exitCode: 1 }
+          : { stdout: "@43 %1 12345\n", exitCode: 0 };
+      },
+    });
+
+    await expect(processes.resurrect(root)).rejects.toThrow("tmux new-window failed");
+    expect(firstSavedTree).toMatchObject({ status: "dead", resumeSessionFile: sessionFile });
+    expect(firstSavedTree?.locator).toBeUndefined();
+    expect(state.trees[root]).toMatchObject({ status: "queued", launchFailures: 1 });
+    expect(processes.admit(root)).toBe("queued");
+    await launched.reached(2);
+    await processes.drainSpawns();
+
+    expect(launches).toHaveLength(2);
+    expect(launches[1]?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("persists a mid-resurrection root through boot and resumes it in its reserved slot (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    state.admission.active = [root];
+    const { manager: processes, commands } = manager(
+      state,
+      { config: config(stateDir) },
+      { skipEnableLaunches: true }
+    );
+
+    processes.reconnectRoots();
+    processes.enableLaunches();
+    await processes.reconcileAdmission();
+    await processes.replayHeldRecoveries();
+    await processes.drainSpawns();
+
+    expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+    expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    const launch = commands.find((command) => command[3] === "new-window");
+    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("resumes a persisted mid-resurrection root during resync without releasing its slot (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    state.admission.active = [root];
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    await processes.reconcileAdmissionDrift();
+    await processes.drainSpawns();
+
+    expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+    expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    const launch = commands.find((command) => command[3] === "new-window");
+    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("resumes a persisted dead root that still owns its admission slot when admitted again (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    state.admission.active = [root];
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    expect(processes.admit(root)).toBe("spawned");
+    await processes.drainSpawns();
+
+    expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+    expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    const launch = commands.find((command) => command[3] === "new-window");
+    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("recovers a slotless root from its first resurrection save at boot (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    let persisted: LegionState | undefined;
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      saveState: async () => {
+        persisted ??= structuredClone(state);
+      },
+    });
+
+    await processes.resurrect(root);
+    if (!persisted) throw new Error("resurrection did not persist its recovery state");
+    const { manager: restarted, commands } = manager(
+      persisted,
+      { config: config(stateDir) },
+      { skipEnableLaunches: true }
+    );
+    restarted.reconnectRoots();
+    restarted.enableLaunches();
+    await restarted.reconcileAdmission();
+    await restarted.replayHeldRecoveries();
+    await restarted.drainSpawns();
+
+    expect(persisted.admission).toEqual({ cap: 1, active: [root], queue: [] });
+    expect(persisted.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    const launch = commands.find((command) => command[3] === "new-window");
+    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("adopts a dead legacy child tree at boot instead of replaying it as a root (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 2);
+    tree(state);
+    state.issues[root] = {
+      key: root,
+      title: "Parent",
+      status: "in_progress",
+      children: [child],
+    };
+    state.issues[child] = {
+      key: child,
+      title: "Legacy child root",
+      parent: root,
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[child] = { root: child, generation: 1, status: "dead", launchFailures: 0 };
+    state.admission.active = [root, child];
+    const { manager: processes, commands } = manager(
+      state,
+      { config: config(stateDir, { admissionCap: 2 }) },
+      { skipEnableLaunches: true }
+    );
+
+    expect(processes.adoptOwnerlessChildTrees()).toEqual([{ child, parent: root }]);
+    processes.enableLaunches();
+    processes.reconnectRoots();
+    await processes.reconcileAdmission();
+    await processes.replayHeldRecoveries();
+    await processes.drainSpawns();
+
+    expect(state.trees[child]).toBeUndefined();
+    expect(state.admission).toEqual({ cap: 2, active: [root], queue: [] });
+    expect(
+      commands.some(
+        (command) =>
+          command[3] === "new-window" && tmuxWindowEnvironment(command).LEGION_TREE === child
+      )
+    ).toBe(false);
+  });
+
+  it("replays a dead admitted child with no live ancestor as an orphan root at boot (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = {
+      key: root,
+      title: "Closed parent",
+      status: "done",
+      children: [child],
+    };
+    state.trees[root] = { root, generation: 1, status: "closed", launchFailures: 0 };
+    state.issues[child] = {
+      key: child,
+      title: "Orphaned child root",
+      parent: root,
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[child] = {
+      root: child,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    state.admission.active = [child];
+    const { manager: processes, commands } = manager(
+      state,
+      { config: config(stateDir) },
+      { skipEnableLaunches: true }
+    );
+
+    expect(processes.adoptOwnerlessChildTrees()).toEqual([]);
+    processes.enableLaunches();
+    processes.reconnectRoots();
+    await processes.reconcileAdmission();
+    await processes.replayHeldRecoveries();
+    await processes.drainSpawns();
+
+    expect(state.admission).toEqual({ cap: 1, active: [child], queue: [] });
+    expect(state.trees[child]).toMatchObject({ status: "active", generation: 2 });
+    const launch = commands.find((command) => command[3] === "new-window");
+    expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  it("queues a resurrected root at the head of admission.queue with its session file when the cap is full, and its promotion resumes it (LEGION-83, acceptance 2)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    // The root exited on its own earlier (markProcessDead's shape): dead, no locator, session file
+    // kept, slot gone -- and the slot has since gone to `occupant`, with `waiting` never started.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    const occupant: IssueKey = "LEGION-45";
+    const waiting: IssueKey = "LEGION-46";
+    tree(state, occupant);
+    state.trees[waiting] = { root: waiting, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.active = [occupant];
+    state.admission.queue = [waiting];
+    for (const key of [root, occupant, waiting]) {
+      state.issues[key] = {
+        key,
+        title: key,
+        status: key === waiting ? "todo" : "in_progress",
+        children: [],
+      };
+    }
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+      await processes.resurrect(root);
+
+      expect(state.trees[root]).toMatchObject({
+        status: "queued",
+        generation: 1,
+        resumeSessionFile: sessionFile,
+      });
+      expect(state.admission).toEqual({ cap: 1, active: [occupant], queue: [root, waiting] });
+      expect(commands.some((command) => command[3] === "new-window")).toBe(false);
+      const full = errorLog.mock.calls
+        .map(String)
+        .filter((line) => line.includes("admission is full"));
+      expect(full).toHaveLength(1);
+
+      // The occupant's issue closes: its tree lingers and its slot frees; the queue head is promoted.
+      state.trees[occupant].status = "lingering";
+      await processes.releaseSlot(occupant);
+      await processes.drainSpawns();
+
+      expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+      expect(state.trees[root]?.resumeSessionFile).toBeUndefined();
+      expect(state.admission).toEqual({ cap: 1, active: [root], queue: [waiting] });
+      expect(state.trees[waiting]).toMatchObject({ status: "queued" });
+      const launch = commands.find((command) => command[3] === "new-window");
+      expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("neither spawns nor re-queues a root that is already queued for a slot when another wake reaches it (LEGION-83)", async () => {
+    // A repeated wake for a root already queued at capacity must not open a pane or
+    // enqueue it again; the promotion sweep owns queued roots.
+    const state = newLegionState("omp", 1);
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "queued",
+      launchFailures: 0,
+      resumeSessionFile: "/state/sessions/root.json",
+    };
+    const occupant: IssueKey = "LEGION-45";
+    const waiting: IssueKey = "LEGION-46";
+    tree(state, occupant);
+    state.trees[waiting] = { root: waiting, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.active = [occupant];
+    state.admission.queue = [root, waiting];
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes, commands } = manager(state);
+
+      await processes.resurrect(root);
+
+      expect(state.admission).toEqual({ cap: 1, active: [occupant], queue: [root, waiting] });
+      expect(state.trees[root]).toMatchObject({ status: "queued", generation: 1 });
+      expect(commands.some((command) => command[3] === "new-window")).toBe(false);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("forgets a tree's kept session file when it reaches launch-failed, so a controller re-admit starts fresh (LEGION-83)", async () => {
+    // A kept session file that is what keeps failing (gone from disk: computeResumeArgument's
+    // same-agent refusal) would otherwise fail every controller re-admit the same way, forever.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.admission.active.push(root);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 0,
+      status: "active",
+      launchFailures: 0,
+      resumeSessionFile: path.join(stateDir, "missing-session.json"),
+    };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(processes.spawnRoot(root)).rejects.toThrow(
+          /recorded OMP session file is missing/
+        );
+      }
+      expect(state.trees[root]).toMatchObject({ status: "launch-failed", launchFailures: 3 });
+      expect(state.trees[root]?.resumeSessionFile).toBeUndefined();
+
+      expect(processes.admit(root)).toBe("queued");
+      await processes.reconcileAdmission();
+      await processes.drainSpawns();
+
+      expect(state.trees[root]).toMatchObject({ status: "active", launchFailures: 0 });
+      const launch = commands.find((command) => command[3] === "new-window");
+      expect(launch).toBeDefined();
+      expect(launch?.join(" ")).not.toContain("--resume=");
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("marks a closed tree lingering again when its stale-pane retirement fails, instead of stranding an unreapable locator", async () => {
@@ -2609,6 +3108,150 @@ describe("ProcessManager", () => {
         locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@77" },
       });
       expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`demoted ${root}`));
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("adds an active tree missing from admission.active back at boot, with one log line, and promotes nothing into a slot it holds (LEGION-83, acceptance 3)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state); // active, with a locator: the 09:31 shape once `admission.active` forgets it
+    state.admission.active = [];
+    const queued: IssueKey = "LEGION-45";
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue = [queued];
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.issues[queued] = { key: queued, title: "Queued", status: "todo", children: [] };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+      await processes.reconcileAdmission();
+
+      expect(state.admission).toEqual({ cap: 1, active: [root], queue: [queued] });
+      expect(state.trees[queued]).toMatchObject({ status: "queued" });
+      expect(commands.some((command) => command[3] === "new-window")).toBe(false);
+      const lines = errorLog.mock.calls
+        .map(String)
+        .filter((line) => line.includes("admission drift"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(`added ${root}`);
+      expect(lines[0]).toContain("at boot");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("removes a stale admission.active entry at boot so the freed slot is promoted into (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "lingering";
+    state.admission.active = [root];
+    const queued: IssueKey = "LEGION-45";
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue = [queued];
+    state.issues[root] = { key: root, title: "Root", status: "backlog", children: [] };
+    state.issues[queued] = { key: queued, title: "Queued", status: "todo", children: [] };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes } = manager(state, { config: config(stateDir) });
+
+      await processes.reconcileAdmission();
+      await processes.drainSpawns();
+
+      expect(state.admission).toEqual({ cap: 1, active: [queued], queue: [] });
+      expect(state.trees[queued]).toMatchObject({ status: "active" });
+      expect(state.trees[root]).toMatchObject({ status: "lingering" });
+      const lines = errorLog.mock.calls
+        .map(String)
+        .filter((line) => line.includes("admission drift"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(`removed ${root}`);
+      expect(lines[0]).toContain("tree is lingering");
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("demotes an active tree with no recorded locator even when it also fell out of admission.active, never re-admitting it as a slot with nothing running (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+    state.admission.active = [];
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes } = manager(state, {
+        config: config(stateDir),
+        run: async (command) => {
+          if (command[3] === "has-session") return { stdout: "", exitCode: 0 };
+          if (command[3] === "new-window") return { stdout: "@77 %1 4242\n", exitCode: 0 };
+          return { stdout: "", exitCode: 0 };
+        },
+      });
+
+      await processes.reconcileAdmission();
+
+      // Demoted to queued, then promoted into the free slot with a real locator -- exactly the
+      // in-admission case above, not an "added" repair of a process-less tree.
+      expect(state.admission).toEqual({ cap: 1, active: [root], queue: [] });
+      expect(state.trees[root]).toMatchObject({
+        status: "active",
+        generation: 2,
+        locator: { tmuxWindowId: "@77" },
+      });
+      const logged = errorLog.mock.calls.map(String);
+      expect(logged.some((line) => line.includes(`demoted ${root}`))).toBe(true);
+      expect(logged.some((line) => line.includes("admission drift"))).toBe(false);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("promotes nothing while admission.active exceeds the cap, stops nothing, and warns once (LEGION-83, acceptance 4)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const second: IssueKey = "LEGION-45";
+    const queued: IssueKey = "LEGION-46";
+    tree(state);
+    tree(state, second);
+    state.trees[second].locator = { ...recordedTmuxLocator(state, second), tmuxPaneId: "%5" };
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.active = [root, second]; // the operator raised occupancy by hand (the 09:31 repair)
+    state.admission.queue = [queued];
+    for (const key of [root, second]) {
+      state.issues[key] = { key, title: key, status: "in_progress", children: [] };
+    }
+    state.issues[queued] = { key: queued, title: "Queued", status: "todo", children: [] };
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const {
+        manager: processes,
+        commands,
+        controlRequests,
+      } = manager(state, { config: config(stateDir) });
+
+      await processes.reconcileAdmission();
+
+      expect(state.admission).toEqual({ cap: 1, active: [root, second], queue: [queued] });
+      expect(state.trees[queued]).toMatchObject({ status: "queued" });
+      expect(state.trees[root]).toMatchObject({ status: "active" });
+      expect(state.trees[second]).toMatchObject({ status: "active" });
+      expect(
+        commands.some(
+          (command) =>
+            command[3] === "new-window" ||
+            command[3] === "kill-pane" ||
+            command[3] === "kill-window"
+        )
+      ).toBe(false);
+      expect(controlRequests).toEqual([]);
+      const lines = errorLog.mock.calls.map(String).filter((line) => line.includes("over cap"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("2 active trees");
+      expect(lines[0]).toContain("cap of 1");
     } finally {
       errorLog.mockRestore();
     }
@@ -3850,6 +4493,7 @@ describe("ProcessManager", () => {
     const stateFile = path.join(stateDir, "state.json");
     const state = newLegionState("omp", 1);
     tree(state);
+    state.trees[root].resumeSessionFile = path.join(stateDir, "architect-session.json");
     state.trees[root].locator = {
       ...recordedTmuxLocator(state),
       tmuxPaneId: "%0",
@@ -3887,6 +4531,7 @@ describe("ProcessManager", () => {
     const reloaded = await legionStateLoadState(stateFile, { project: "omp", cap: 1 });
     expect(reloaded.trees[root]?.status).toBe("lingering");
     expect(reloaded.trees[root]?.lingerUntil).toBeString();
+    expect(reloaded.trees[root]?.resumeSessionFile).toBeUndefined();
 
     // The periodic sweep's retry, against the reloaded (post-crash) state: finishes cleanly.
     const { manager: retryProcesses } = manager(reloaded, {
@@ -7018,6 +7663,90 @@ describe("ProcessManager", () => {
     // (`confirmRootReady`), so repeated never-confirmed cycles still escalate to
     // `MAX_LAUNCH_FAILURES` instead of looping forever.
     expect(managedState.trees[root]?.launchFailures).toBe(1);
+  });
+
+  it("keeps an unconfirmed root's admission slot when its exit self-report lands during the deadline's retire, and still resurrects it (LEGION-83)", async () => {
+    // Same self-report, other daemon-requested stop: the registration deadline finds the root
+    // alive but never `/process/ready` and asks it to exit over its socket; the root registered,
+    // so it holds an architect capability and POSTs `/process/exit` for the current generation
+    // before its shim closes. Before the fix `markProcessDead` marked the tree dead and released
+    // the slot; `retireUnconfirmedRoot`'s post-stop re-check then saw a tree that was no longer
+    // `active` and declined to resurrect it -- stranded dead with no slot while the queued issue
+    // took the slot.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    const queued: IssueKey = "LEGION-45";
+    state.issues[queued] = {
+      key: queued,
+      title: "Queued behind the cap",
+      status: "todo",
+      children: [],
+    };
+    state.admission.active.push(root);
+    state.admission.queue.push(queued);
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    let sleepCalls = 0;
+    const firstGate = Promise.withResolvers<void>();
+    let sessionExists = false;
+    const windows = eventCounter();
+    const launchedPids = new Map<string, number>();
+    const gonePanes = new Set<string>();
+    let processes!: ProcessManager;
+    const rootClient = fakeWorkerRpcClient();
+    rootClient.shutdown = () => {
+      void processes.markProcessDead(root, state.trees[root]?.generation).then(() => {
+        // The root exits: its pane is gone from here on, exactly as a real tmux would report.
+        gonePanes.add("%1");
+        rootClient.close();
+      });
+    };
+    ({ manager: processes } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls === 1) {
+          await firstGate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      connectWorkerRpc: async () => rootClient,
+      run: async (command) => {
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") {
+          sessionExists = true;
+          return { stdout: "", exitCode: 0 };
+        }
+        if (command[3] === "new-window") {
+          windows.increment();
+          launchedPids.set(`%${windows.count}`, Number(`1000${windows.count}`));
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
+        }
+        if (command[3] === "list-panes") {
+          const target = command[command.indexOf("-t") + 1] ?? "";
+          return gonePanes.has(target) ? paneGone() : livePanes(command, launchedPids.get(target));
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    }));
+
+    await processes.spawnRoot(root);
+    expect(windows.count).toBe(1);
+
+    // The pane never confirms via `/process/ready`; the deadline elapses with it alive.
+    firstGate.resolve();
+    await windows.reached(2);
+    await processes.drainSpawns();
+
+    expect(state.trees[root]).toMatchObject({ generation: 2, status: "active", launchFailures: 1 });
+    expect(state.admission.active).toEqual([root]);
+    expect(state.admission.queue).toEqual([queued]);
+    expect(state.trees[queued]).toMatchObject({ status: "queued" });
   });
 
   it("a stale root-registration-deadline expiry no-ops once a newer generation has superseded it", async () => {
@@ -11053,20 +11782,20 @@ describe("ProcessManager", () => {
 
     // Removed: queued (OMP-2), its queued grandchild (OMP-7, owned through OMP-2's parent chain
     // once the nearest tree is a live one -- OMP-2's own tree is `queued`, which owns),
-    // launch-failed (OMP-3), active without a locator (OMP-4).
+    // launch-failed (OMP-3), active without a locator (OMP-4), and dead (OMP-5).
     expect(adoptions).toEqual([
       { child: "OMP-2", parent: "OMP-1" },
       { child: "OMP-7", parent: "OMP-2" },
       { child: "OMP-3", parent: "OMP-1" },
       { child: "OMP-4", parent: "OMP-1" },
+      { child: "OMP-5", parent: "OMP-1" },
     ]);
-    // Kept: dead (OMP-5), active with a locator (OMP-6), the lingering legacy tree (OMP-8) and the
-    // queued grandchild under it (OMP-9: its nearest ancestor tree is lingering, so it is an
-    // orphan), and the parentless root (OMP-10).
+    // Kept: active with a locator (OMP-6), the lingering legacy tree (OMP-8) and the queued
+    // grandchild under it (OMP-9: its nearest ancestor tree is lingering, so it is an orphan),
+    // and the parentless root (OMP-10).
     expect(Object.keys(managed.trees).sort()).toEqual([
       "OMP-1",
       "OMP-10",
-      "OMP-5",
       "OMP-6",
       "OMP-8",
       "OMP-9",
@@ -11081,7 +11810,7 @@ describe("ProcessManager", () => {
     expect(logged).toContain(
       `OMP-3's removed root tree still has worker claims with recorded panes (${roleToken("omp", "OMP-3", "planner")})`
     );
-    expect(logged.match(/\(LEGION-57\)/g)).toHaveLength(4);
+    expect(logged.match(/\(LEGION-57\)/g)).toHaveLength(5);
 
     // Idempotent.
     expect(processes.adoptOwnerlessChildTrees()).toEqual([]);
@@ -15835,6 +16564,8 @@ describe("ProcessManager", () => {
               await processes.resurrect(effect.tree);
           }
         },
+        reconcileAdmissionDrift: () => processes.reconcileAdmissionDrift(),
+        isResurrecting: (issue) => processes.isResurrecting(issue),
       },
       { force: true }
     );
@@ -15845,6 +16576,120 @@ describe("ProcessManager", () => {
     expect(resurrectSpy).toHaveBeenCalledWith(root);
     expect(managedState.trees[root]).toMatchObject({ status: "active" });
     expect(statusWrites).toEqual([]);
+  });
+
+  it("promotes a queued root when resync removes a stale active admission entry (LEGION-83)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "lingering";
+    state.admission.active = [root];
+    state.issues[root] = { key: root, title: "Stale root", status: "done", children: [] };
+    const queued: IssueKey = "LEGION-45";
+    state.issues[queued] = { key: queued, title: "Queued root", status: "todo", children: [] };
+    state.trees[queued] = { root: queued, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue = [queued];
+    const { manager: processes, commands } = manager(state, { config: config(stateDir) });
+
+    await runResync(
+      {
+        state,
+        config: {
+          resyncIntervalMs: 600_000,
+          dispatchProject: "LEGSMOKE",
+          maxFixAttempts: 3,
+        },
+        dispatchClient: fakeDispatchClient(),
+        saveState: async () => {},
+        fetchCiStatusBatch: async () => ({}),
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        applyEffects: async () => {},
+        reconcileAdmissionDrift: () => processes.reconcileAdmissionDrift(),
+        isResurrecting: (issue) => processes.isResurrecting(issue),
+      },
+      { force: true }
+    );
+    await processes.drainSpawns();
+
+    expect(state.admission).toEqual({ cap: 1, active: [queued], queue: [] });
+    expect(state.trees[queued]).toMatchObject({ status: "active" });
+    expect(commands.some((command) => command[3] === "new-window")).toBe(true);
+  });
+  it("logs and persists a resync admission addition only when it repairs state (LEGION-83)", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.admission.active = [];
+    let saves = 0;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { manager: processes } = manager(state, {
+        saveState: async () => {
+          saves += 1;
+        },
+      });
+
+      expect(await processes.reconcileAdmissionDrift()).toEqual({ added: [root], removed: [] });
+      expect(state.admission.active).toEqual([root]);
+      expect(saves).toBe(1);
+      expect(
+        errorLog.mock.calls
+          .map(String)
+          .filter((line) => line.includes("admission drift repaired by resync"))
+      ).toHaveLength(1);
+
+      expect(await processes.reconcileAdmissionDrift()).toEqual({ added: [], removed: [] });
+      expect(saves).toBe(1);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("warns without stopping or promoting when resync finds occupancy above the cap (LEGION-83, acceptance 4)", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const second: IssueKey = "LEGION-43";
+    tree(state, second);
+    const waiting: IssueKey = "LEGION-44";
+    state.trees[waiting] = { root: waiting, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.active = [root, second];
+    state.admission.queue = [waiting];
+    let saves = 0;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const {
+        manager: processes,
+        commands,
+        controlRequests,
+      } = manager(state, {
+        saveState: async () => {
+          saves += 1;
+        },
+      });
+
+      expect(await processes.reconcileAdmissionDrift()).toEqual({
+        added: [],
+        removed: [],
+        overCap: { active: 2, cap: 1 },
+      });
+      expect(state.admission).toEqual({ cap: 1, active: [root, second], queue: [waiting] });
+      expect(
+        commands.some(
+          (command) =>
+            command[3] === "new-window" ||
+            command[3] === "kill-pane" ||
+            command[3] === "kill-window"
+        )
+      ).toBe(false);
+      expect(controlRequests).toEqual([]);
+      expect(saves).toBe(0);
+      expect(
+        errorLog.mock.calls
+          .map(String)
+          .filter((line) => line.includes("admission over cap by resync"))
+      ).toHaveLength(1);
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   // `observed` is what the pane itself reports, distinct from the recorded identity every case
