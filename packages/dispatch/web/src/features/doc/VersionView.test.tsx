@@ -39,6 +39,7 @@ function renderVersionView({
       <DocumentRuntime.Provider value={runtime.runtime}>
         <VersionView
           artifactId="artifact-1"
+          asks={[]}
           blockSchema={blockSchema}
           createdAt="2026-09-09T00:00:00Z"
           highlight={highlight}

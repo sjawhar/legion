@@ -17,9 +17,7 @@ import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
-  badgeBlocking,
-  badgeHigh,
-  badgeLow,
+  askBlockPill,
   badgeMed,
   borderStrong,
   calloutInfoBg,
@@ -51,6 +49,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
+import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import {
   buildDispatchReference,
@@ -82,20 +81,6 @@ interface AskOptionDraft {
   id: number;
   label: string;
 }
-
-const askUrgencies = [
-  ["low", "Low"],
-  ["med", "Medium"],
-  ["high", "High"],
-  ["blocking", "Blocking"],
-] as const satisfies readonly (readonly [AskUrgency, string])[];
-
-const URGENCY_BUTTON_STYLES: Record<AskUrgency, string> = {
-  blocking: `${badgeBlocking.bg} ${badgeBlocking.text}`,
-  high: `${badgeHigh.bg} ${badgeHigh.text}`,
-  low: `${badgeLow.bg} ${badgeLow.text}`,
-  med: `${badgeMed.bg} ${badgeMed.text}`,
-};
 
 let nextAskOptionId = 0;
 
@@ -577,19 +562,19 @@ export function Composer({
           <fieldset>
             <legend className={`text-sm font-medium ${textSecondaryOnSurface}`}>Urgency</legend>
             <div className="mt-1 flex flex-wrap gap-1">
-              {askUrgencies.map(([value, label]) => (
+              {ASK_URGENCIES_ASCENDING.map((value) => (
                 <button
                   aria-pressed={urgency === value}
                   className={`rounded-md px-2.5 py-1 text-sm font-medium ${
                     urgency === value
-                      ? URGENCY_BUTTON_STYLES[value]
+                      ? `${askBlockPill[value].bg} ${askBlockPill[value].text}`
                       : `border ${secondaryButtonBorder} ${surfaceRecessedBg} ${secondaryButtonText} ${cardHoverBorder}`
                   }`}
                   key={value}
                   onClick={() => setUrgency(value)}
                   type="button"
                 >
-                  {label}
+                  {URGENCY_LABELS[value]}
                 </button>
               ))}
             </div>

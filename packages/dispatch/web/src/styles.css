@@ -152,6 +152,37 @@ a {
   display: none;
 }
 
+/* A decision block is a card inside prose. Its first/last child would otherwise carry the
+   prose paragraph margins into the card (a 20px gap under a 12px header). */
+.dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :first-child {
+  margin-top: 0;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :last-child {
+  margin-bottom: 0;
+}
+
+/* The card's rows render a decision's options, so the source `- Option: description` list would
+   show every option twice. The list is the only place a human edits the options, so it appears
+   only on the block the caret is inside (`askBlockEditingPlugin` in `features/doc/ask-block.ts`
+   marks it `data-dispatch-ask-editing`) — click into the question to reveal it — and never where
+   nothing can be edited (a read-only render) or once the decision is no longer open. */
+.dispatch-doc .proof-typed-block-ask[data-dispatch-ask-options="rows"]
+  [data-proof-block-content]
+  > ul {
+  display: none;
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  opacity: 0.7;
+}
+
+.dispatch-doc:not([data-read-only="true"])
+  .proof-typed-block-ask[data-dispatch-ask-options="rows"][data-dispatch-ask-state="open"][data-dispatch-ask-editing="true"]
+  [data-proof-block-content]
+  > ul {
+  display: block;
+}
+
 /* On touch screens the library docks the selection bar at the viewport bottom.
    An expanded margin sheet owns that space, so it suppresses the bar. */
 @media (max-width: 1279px) {

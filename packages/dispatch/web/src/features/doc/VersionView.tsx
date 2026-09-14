@@ -3,8 +3,10 @@ import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 
 import { api } from "../../api/client";
-import type { BlockSchema } from "../../api/types";
+import type { Ask, BlockSchema } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
+import { AskBlockCard } from "./AskBlockCard";
+import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
 import { colorForLogin } from "./connection";
 import type { EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
@@ -13,6 +15,8 @@ import { DocumentRuntime } from "./runtime";
 
 export interface VersionViewProps {
   artifactId: string;
+  /** The document's block-indexed asks, so a historical decision block still names its asker. */
+  asks: readonly Ask[];
   blockSchema: BlockSchema | undefined;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
@@ -21,12 +25,14 @@ export interface VersionViewProps {
 
 export function VersionView({
   artifactId,
+  asks,
   blockSchema,
   createdAt,
   highlight,
   version,
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
+  const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [highlightMissing, setHighlightMissing] = useState(false);
   const { createEditor } = useContext(DocumentRuntime);
   const versionQuery = useQuery({
@@ -59,6 +65,7 @@ export function VersionView({
       blockSchema,
       heatMapMode: "hidden",
       readOnly: true,
+      renderBlock: renderTypedBlock,
       user: { color: colorForLogin(user.login), name: user.login },
       ydoc,
     }).then((editor) => {
@@ -67,6 +74,7 @@ export function VersionView({
         editor.destroy();
         return;
       }
+      installAskBlockView(editor.view, setAskBlockHosts);
       const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
@@ -104,6 +112,19 @@ export function VersionView({
       ) : null}
       <article aria-label="Document" className="dispatch-doc" data-read-only="true">
         <div ref={root} />
+        {askBlockHosts.map((host) => {
+          const blockId = String(host.node.attrs.blockId);
+          return (
+            <AskBlockCard
+              ask={asks.find((candidate) => candidate.block_id === blockId)}
+              host={host}
+              key={host.key}
+              onAnswer={() => {}}
+              pending={false}
+              readOnly
+            />
+          );
+        })}
       </article>
     </section>
   );

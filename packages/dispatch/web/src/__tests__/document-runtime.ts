@@ -24,6 +24,8 @@ export interface FakeEditor {
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
+  /** The fake view's props bag, where `setProps` accumulates node views the host installs. */
+  viewProps: Record<string, unknown>;
 }
 
 interface FakeConnection extends DocumentConnection {
@@ -90,6 +92,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       readOnly: options.readOnly ?? false,
       remoteMarks: [],
       root,
+      viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const transaction = {
@@ -126,6 +129,10 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       view: {
         dispatch() {},
         dom: root,
+        props: editor.viewProps,
+        setProps(next: Record<string, unknown>) {
+          Object.assign(editor.viewProps, next);
+        },
         state: { doc: { descendants() {} }, tr: transaction },
       },
     } as unknown as EditorHandle;
