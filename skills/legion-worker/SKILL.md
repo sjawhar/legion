@@ -251,7 +251,7 @@ PR opens, and every later phase keeps it current rather than replacing it:
 ```
 ## Verification
 
-**CI:** `Tests` run <run-id> — jobs lint, pr-title, typecheck, test all success at <head-sha>.
+**CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
 
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
 - Thread <id>: fixed in <commit-sha> — <one line>.
@@ -276,6 +276,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
@@ -301,11 +302,11 @@ Verified the implementer's proof by <re-running its command | driving the same s
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
   Findings about naming, duplication, or wording are batched into the single `Fast-follow`
   line instead of iterating per push.
-- **Rebase only on a real conflict.** Sami, 2026-09-11, verbatim:
+- **Rebase only on a real conflict, except after a base retarget.** Sami, 2026-09-11, verbatim:
   "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
-  The implementer rebases the issue branch only when GitHub reports it `CONFLICTING` or the
-  controller asks because of a conflict — never to pick up `main` or to refresh CI. A single
-  failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
+  The implementer rebases the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
+  because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never rebase to
+  pick up `main` or refresh CI. A single failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
   pushing a new commit. A conflict-forced rebase that leaves the branch's diff unchanged is a
   confirmation, not a new round (see *The unchanged-diff check* below). Before rebasing, record
   the fingerprint at the current tip; after pushing the rebased branch, record it at the new

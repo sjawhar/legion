@@ -35,10 +35,12 @@ symptoms:
 
 LEGION-38 changed one line of `skills/legion-worker/SKILL.md` and one clause of
 `packages/pi-envoy/roles/implementer.md` (PR #1008, commit `cf2b0b9cec03`). The PR-body template's
-`CI:` line had said `` `pr-checks-result` run <run-id> — success at <head-sha> ``; the repository's
-Tests workflow (`.github/workflows/pr-and-main.yaml`, `name: Tests`) has the jobs `pr-title`, `lint`,
-`typecheck`, and `test` and no rollup job of any name. The line now reads
-`` **CI:** `Tests` run <run-id> — jobs lint, pr-title, typecheck, test all success at <head-sha>. ``
+`CI:` line had said `` `pr-checks-result` run <run-id> — success at <head-sha> ``. The repository's
+Tests workflow (`.github/workflows/pr-and-main.yaml`, `name: Tests`) has the jobs `lint`, `typecheck`,
+and `test`; the separate PR Title workflow (`.github/workflows/pr-title.yaml`, `name: PR Title`) has
+the `pr-title` job. The line now reads
+`` **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>. ``
+A body-only or title-only edit does not re-run Tests. Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
 The change is small; what it cost before it was made, and what the round exposed about
 planner-less issues and the reviewer's push, are the durable parts.
 
@@ -65,14 +67,17 @@ tells every later worker to keep paying the explanation and it goes stale on the
 Two checks make the template line verifiable before it is written or reviewed:
 
 ```bash
-# what the workflow defines
+# what each workflow defines
 sed -n '/^jobs:/,$p' .github/workflows/pr-and-main.yaml | sed -n 's/^  \([a-z-]*\):$/\1/p'
-# what a run shows a worker
-gh run view <run-id> --json workflowName,headSha,conclusion,jobs \
+sed -n '/^jobs:/,$p' .github/workflows/pr-title.yaml | sed -n 's/^  \([a-z-]*\):$/\1/p'
+# what each run shows a worker
+gh run view <tests-run-id> --json workflowName,headSha,conclusion,jobs \
+  --jq '"\(.workflowName) \(.headSha) \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
+gh run view <pr-title-run-id> --json workflowName,headSha,conclusion,jobs \
   --jq '"\(.workflowName) \(.headSha) \(.conclusion)", (.jobs[] | "  \(.name): \(.conclusion)")'
 ```
 
-The template's job list must equal the first; a worker fills the line verbatim from the second.
+The template's named jobs must equal their workflows; a worker fills the line verbatim from the two runs.
 The skill and the implementer role prompt are two copies of this rule
 (`skills/legion-worker/SKILL.md` and `packages/pi-envoy/roles/implementer.md`), so the acceptance
 grep covers both: `grep -rn pr-checks-result skills/ packages/pi-envoy/roles/` must exit 1

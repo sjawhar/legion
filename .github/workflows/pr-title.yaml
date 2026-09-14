@@ -1,0 +1,25 @@
+name: PR Title
+
+# This job lives apart from the Tests workflow on purpose (LEGION-90). It is the only job that
+# needs the `edited` event (a renamed pull request must be re-checked), and putting it in Tests
+# made every body edit — a pull request body is edited several times per Legion round — re-run
+# lint, typecheck and test at an unchanged head. `synchronize` stays because a required check
+# needs a run at every head.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a conventional PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s\n' "$TITLE" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
+            echo "PR title is conventional: $TITLE"
+          else
+            echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."
+            exit 1
+          fi
