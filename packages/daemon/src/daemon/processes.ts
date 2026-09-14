@@ -67,6 +67,7 @@ import {
   grantSecretName,
   processSecretNames,
   pruneSecretFiles,
+  type SharedSecretName,
   secretFilePath,
 } from "./secrets";
 import { MAX_LAUNCH_FAILURES, type PromptRetireVerdict, WorkerAdmission } from "./worker-admission";
@@ -75,8 +76,6 @@ import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
 
 const HOUR_MS = 60 * 60 * 1000;
-
-const EXTENSION_PACKAGE = path.resolve(import.meta.dir, "../../../pi-envoy");
 
 /**
  * Wraps a `saveState` rejection that occurs after `spawnTree` has already
@@ -128,6 +127,12 @@ export interface ProcessManagerDeps {
    * (`resolveDaemonEnvironment`), `<state_dir>/bin` first and never a `worker-bin` entry —
    * `credentialProcessEnvironment` prepends the pane's own. */
   processPath: string;
+  /** The directory holding every role prompt (`ROLE_PROMPT_FILES`, resolved and verified at boot by
+   * `resolveDaemonEnvironment`): the checkout's `packages/pi-envoy/roles` on a tmux host,
+   * `/opt/legion/roles` in the worker image. Never a path relative to this module — inside the
+   * compiled `legion` binary that resolves through Bun's virtual `/$bunfs/root` to `/pi-envoy/roles`,
+   * which exists nowhere. */
+  rolePromptsDir: string;
   credentialHelper: string;
   /** Publishes one of the daemon's own notices to a role topic — `worker-queued`,
    * `worker-started`, `worker-died`, `launch-failed`, the controller's `revive-failed`, and a
@@ -3217,7 +3222,7 @@ export class ProcessManager {
     resume: boolean,
     resumeSessionFile?: string
   ): Promise<void> {
-    const promptPath = path.join(EXTENSION_PACKAGE, "roles", "architect-root.md");
+    const promptPath = path.join(this.deps.rolePromptsDir, "architect-root.md");
     const priorSessionFile = resume
       ? (resumeSessionFile ?? tree.locator?.ompSessionFile ?? tree.resumeSessionFile)
       : undefined;
@@ -3272,7 +3277,7 @@ export class ProcessManager {
       role: "architect",
       env,
       launch: { promptPath, addressingPrompt, resumeSessionFile: priorSessionFile },
-      secrets: { LEGION_BOOT_TOKEN: bootToken },
+      secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
     });
     // A newer `spawnRoot` (generation bump) may already have run and finished for this exact
     // tree while this launch was still blocked in `runtime.spawn` -- a park releasing the
@@ -3526,7 +3531,7 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const identity = await this.workerIdentityEnv(role);
-      const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
+      const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
 
       const bootToken = await this.deps.mintWorkerBootToken(
@@ -3571,7 +3576,7 @@ export class ProcessManager {
         role,
         env,
         launch: { promptPath, addressingPrompt, resumeSessionFile },
-        secrets: { LEGION_BOOT_TOKEN: bootToken },
+        secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
       });
       // `closeTree` may have started tearing down this tree while this launch's I/O was in
       // flight above -- its fixed-point stop loop can only stop locators it could already see
@@ -3698,7 +3703,7 @@ export class ProcessManager {
   }
 
   private async spawnController(controllerSecret: string): Promise<void> {
-    const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
+    const promptPath = path.join(this.deps.rolePromptsDir, "controller-root.md");
     const token = controllerToken(this.deps.state.project);
     // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);
@@ -3720,7 +3725,7 @@ export class ProcessManager {
         role: "controller",
         env,
         launch: { promptPath },
-        secrets: { LEGION_CONTROLLER_SECRET: controllerSecret },
+        secrets: { LEGION_CONTROLLER_SECRET: controllerSecret, ...this.sharedProcessSecrets() },
       });
     } finally {
       releaseSecret();
@@ -4046,8 +4051,19 @@ export class ProcessManager {
     };
   }
 
-  /** Tracks every file a pane's role token names (`processSecretNames`) so the steady-state prune
-   * reaps them together once the pane's locator clears. */
+  /** The secrets every process receives beyond its own boot token or controller secret, name →
+   * value, from config: `ENVOY_TOKEN` when the daemon has an Envoy bearer (a listener bound off
+   * loopback requires one from every publisher, the pi-envoy extension included). Delivered
+   * through `SpawnSpec.secrets` — never `env` — so each runtime writes it as a `<NAME>_FILE`
+   * pointer exactly like the boot token. */
+  private sharedProcessSecrets(): Partial<Record<SharedSecretName, string>> {
+    const envoyToken = this.deps.config.envoyToken;
+    return envoyToken === undefined ? {} : { ENVOY_TOKEN: envoyToken };
+  }
+
+  /** Tracks every file a pane's role token names (`processSecretNames`: its own secret, one file
+   * per `SHARED_SECRET_NAMES` entry whether or not this configuration delivers it, its grant file)
+   * so the steady-state prune reaps them together once the pane's locator clears. */
   private trackProcessSecrets(token: string): void {
     for (const name of processSecretNames(token)) this.processSecretFiles.add(name);
   }

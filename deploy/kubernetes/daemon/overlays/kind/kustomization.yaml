@@ -1,0 +1,49 @@
+# The daemon on a local kind cluster, talking to a NATS server and a token-requiring Envoy listener
+# on the machine that runs kind (over the kind docker bridge) and to a Dispatch server — the
+# walkthrough in docs/kubernetes.md, "Running it on kind". Every value below and in legion.yaml is a
+# placeholder to replace before `kubectl apply -k`: the image digest (here and in legion.yaml), the
+# gateway address, the Dispatch project and repository, the two GitHub App ids, and the secrets:
+#   cp secrets/providers.env.example secrets/providers.env   # then fill every value
+#   # and place the two App private keys at secrets/github-app-{implement,review}.pem
+# secrets/ is gitignored except the .example; kustomize refuses to build without the real files,
+# which is the point — nothing here deploys a placeholder secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: legion
+resources:
+  - ../../base
+# The digest of the worker image to run (the job summary of a `Worker Image` workflow run, or
+# `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:sha-<12>`). The same digest is
+# `runtime.kubernetes.image` in legion.yaml; `images:` pins the Deployment.
+images:
+  - name: ghcr.io/sjawhar/legion-worker
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+configMapGenerator:
+  - name: legion-daemon-demo-config
+    behavior: merge
+    files:
+      - legion.yaml
+secretGenerator:
+  # LEGION-24's providers contract (docs/kubernetes.md, "The providers Secret"): the daemon reads
+  # DISPATCH_TOKEN (the Deployment's env) and ENVOY_TOKEN (envoy_token_file) from it; every worker
+  # pod mounts it and the shim exports each key without a NAME_FILE pointer into OMP's environment.
+  - name: legion-demo-providers
+    options:
+      disableNameSuffixHash: true
+    envs:
+      - secrets/providers.env
+  # Daemon-only: the GitHub App private keys. Never in the providers Secret (see above).
+  - name: legion-demo-daemon
+    options:
+      disableNameSuffixHash: true
+    files:
+      - github-app-implement.pem=secrets/github-app-implement.pem
+      - github-app-review.pem=secrets/github-app-review.pem
+patches:
+  # The host's ports on the docker bridge: NATS 14222, Envoy 19020, Dispatch 8766 (the same ones
+  # legion.yaml names). kindnet enforces NetworkPolicy (kind ≥ v0.21), so without this patch the
+  # daemon cannot reach them.
+  - path: networkpolicy-egress.yaml
+    target:
+      kind: NetworkPolicy
+      name: legion-daemon-demo

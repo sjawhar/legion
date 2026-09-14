@@ -31,6 +31,7 @@ function basePodInput(overrides: Partial<PodManifestInput> = {}): PodManifestInp
     pvcName: "legion-legion-24",
     podName: "legion-legion-24-planner-g1",
     secretName: "legion-legion-24-planner-g1",
+    secretKeys: ["LEGION_BOOT_TOKEN"],
     resources: DEFAULT_KUBERNETES_RESOURCES.small,
     env: { A: "1" },
     workspaceDir: "/legion/workspaces/acme/widgets/legion-24",
@@ -260,6 +261,24 @@ describe("buildPodManifest", () => {
     expect(() =>
       buildPodManifest(basePodInput({ ompArgv: ["omp", `--resume=${"y".repeat(200_000)}`] }))
     ).toThrow(/omp argv: argv element #1 \("--resume=yyyy.*…\) is 200009 bytes/);
+  });
+
+  it("projects one boot-volume item per secret key, in the given order", () => {
+    const manifest = buildPodManifest(
+      basePodInput({ secretKeys: ["LEGION_BOOT_TOKEN", "ENVOY_TOKEN"] })
+    );
+    const volumes = manifest.spec.volumes;
+    expect(volumes).toContainEqual({
+      name: "boot",
+      secret: {
+        secretName: "legion-legion-24-planner-g1",
+        defaultMode: 0o440,
+        items: [
+          { key: "LEGION_BOOT_TOKEN", path: "LEGION_BOOT_TOKEN" },
+          { key: "ENVOY_TOKEN", path: "ENVOY_TOKEN" },
+        ],
+      },
+    });
   });
 });
 

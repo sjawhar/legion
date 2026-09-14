@@ -177,14 +177,19 @@ export class KubernetesRuntime implements Runtime {
     if (issue === undefined || tree === undefined || generation === undefined) {
       throw new Error(`spawn ${kind} requires spec.issue, spec.tree, and spec.generation`);
     }
-    const secrets = Object.entries(spec.secrets);
-    const [secret] = secrets;
-    if (!secret || secrets.length !== 1 || secret[0] !== BOOT_TOKEN_KEY) {
-      throw new Error(
-        `kubernetes runtime delivers exactly one secret per process, ${BOOT_TOKEN_KEY}`
-      );
+    // Every secret in the spec but the shared `ENVOY_TOKEN` goes into the per-pod Secret and is
+    // projected into the main container as `<NAME>_FILE` (`podSecrets`); the boot token is the one
+    // the shim itself reads (`--boot-token-file`), so it must be among them. `ENVOY_TOKEN` is the
+    // providers Secret's contract, like `DISPATCH_TOKEN`: every pod mounts that Secret, so its
+    // `ENVOY_TOKEN_FILE` is the mount's own file and the token is never copied per pod — the
+    // deployment (an in-cluster daemon reading `envoy_token_file` from that mount, or an
+    // out-of-cluster kubeconfig daemon whose operator put the same token in the providers Secret)
+    // owns the one copy.
+    const secretNames = Object.keys(spec.secrets);
+    if (!secretNames.includes(BOOT_TOKEN_KEY)) {
+      throw new Error(`kubernetes runtime requires the ${BOOT_TOKEN_KEY} secret`);
     }
-    const validated = { kind, spec, issue, tree, generation, role, bootToken: secret[1] };
+    const validated = { kind, spec, issue, tree, generation, role };
     return serialize(this.spawnQueues, `${issue}:${role}`, () => this.spawnSerialized(validated));
   }
 
@@ -195,7 +200,6 @@ export class KubernetesRuntime implements Runtime {
     tree,
     generation,
     role,
-    bootToken,
   }: {
     kind: "root" | "worker";
     spec: SpawnSpec;
@@ -203,8 +207,8 @@ export class KubernetesRuntime implements Runtime {
     tree: IssueKey;
     generation: number;
     role: LegionRole;
-    bootToken: string;
   }): Promise<Locator> {
+    const { projected, pointers } = podSecrets(spec.secrets);
     const promptText = await this.readFile(spec.launch.promptPath);
     const instructionsText =
       this.deps.deploymentInstructionsFile === undefined
@@ -245,8 +249,9 @@ export class KubernetesRuntime implements Runtime {
       pvcName: pvc,
       podName: name,
       secretName: name,
+      secretKeys: Object.keys(projected),
       resources: config.resources[config.roleProfiles[role]],
-      env: podEnvironment(kind, spec.env, token, workspaceDir),
+      env: podEnvironment(kind, spec.env, token, workspaceDir, pointers),
       workspaceDir,
       repo,
       shimEndpoint: `tcp://${new URL(this.deps.daemonUrl).hostname}:${this.deps.workerStreamPort}`,
@@ -270,7 +275,7 @@ export class KubernetesRuntime implements Runtime {
         name,
         labels,
         stringData: {
-          [BOOT_TOKEN_KEY]: bootToken,
+          ...projected,
           [PROVISION_TOKEN_KEY]: await this.deps.provisioningToken(owner),
         },
       })
@@ -716,14 +721,37 @@ export class KubernetesRuntime implements Runtime {
  *   `DISPATCH_TOKEN` file, whose trimmed contents `resolveDispatchConfig` reads.
  * - `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE`: the issue's working copy on the volume, the
  *   main container's `workingDir`.
- * - `LEGION_BOOT_TOKEN_FILE`: the per-pod Secret's projection (`<NAME>_FILE` contract).
+ * - `<NAME>_FILE` for every secret in the spec (`secretPointers`, from `podSecrets`):
+ *   `LEGION_BOOT_TOKEN_FILE` always, the per-pod Secret's projection into `BOOT_DIR`;
+ *   `ENVOY_TOKEN_FILE` when the daemon has an Envoy bearer — the providers mount's own file.
  * Everything else passes through unchanged.
  */
+/** The per-pod Secret's keys (`projected`) and each secret's `<NAME>_FILE` value (`pointers`):
+ * every spec secret is projected under `BOOT_DIR`, except `ENVOY_TOKEN`, which is the providers
+ * mount's own file (see `spawn`). */
+export function podSecrets(secrets: SpawnSpec["secrets"]): {
+  projected: Record<string, string>;
+  pointers: Record<string, string>;
+} {
+  const projected: Record<string, string> = {};
+  const pointers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(secrets)) {
+    if (name === "ENVOY_TOKEN") {
+      pointers.ENVOY_TOKEN_FILE = `${PROVIDERS_DIR}/ENVOY_TOKEN`;
+      continue;
+    }
+    projected[name] = value;
+    pointers[`${name}_FILE`] = `${BOOT_DIR}/${name}`;
+  }
+  return { projected, pointers };
+}
+
 function podEnvironment(
   kind: "root" | "worker",
   env: Record<string, string | undefined>,
   token: string,
-  workspaceDir: string
+  workspaceDir: string,
+  secretPointers: Record<string, string>
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
@@ -738,6 +766,6 @@ function podEnvironment(
     result.DISPATCH_TOKEN_FILE = `${PROVIDERS_DIR}/DISPATCH_TOKEN`;
   }
   result[kind === "root" ? "LEGION_ROOT_WORKSPACE" : "LEGION_WORKSPACE"] = workspaceDir;
-  result.LEGION_BOOT_TOKEN_FILE = `${BOOT_DIR}/${BOOT_TOKEN_KEY}`;
+  Object.assign(result, secretPointers);
   return result;
 }

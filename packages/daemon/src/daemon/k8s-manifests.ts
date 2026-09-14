@@ -91,7 +91,9 @@ export function podWorkspaceDir(repo: `${string}/${string}`, issue: IssueKey): s
   return `${TREE_MOUNT}/workspaces/${repo}/${issue.toLowerCase()}`;
 }
 
-function k8sResources(resources: RoleResources): Record<string, Record<string, string>> {
+/** A role profile's requests/limits in the API's shape (`ephemeralStorage` → `ephemeral-storage`);
+ * shared with the probe pod (`worker-image-probe.ts`). */
+export function k8sResources(resources: RoleResources): Record<string, Record<string, string>> {
   return {
     requests: {
       cpu: resources.requests.cpu,
@@ -117,6 +119,10 @@ export interface PodManifestInput {
   pvcName: string;
   podName: string;
   secretName: string;
+  /** The per-pod Secret's keys projected into the main container's `BOOT_DIR`, one file each
+   * (`LEGION_BOOT_TOKEN` always; every further secret the daemon delivers, e.g. `ENVOY_TOKEN`).
+   * The provision token is projected for the init container separately. */
+  secretKeys: readonly string[];
   resources: RoleResources;
   /** The main container's final environment (already re-pointed by the runtime). */
   env: Record<string, string>;
@@ -222,7 +228,7 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
           secret: {
             secretName: input.secretName,
             defaultMode: 0o440,
-            items: [{ key: BOOT_TOKEN_KEY, path: BOOT_TOKEN_KEY }],
+            items: input.secretKeys.map((key) => ({ key, path: key })),
           },
         },
         {

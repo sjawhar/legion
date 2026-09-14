@@ -9,7 +9,7 @@
 # credential, gh, handoff, workspace-init, probe-image); the pinned OMP fork build the daemon's default
 # `omp_invocation` names, resolved with mise's github backend exactly as the daemon resolves it;
 # @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and linked into the isolated OMP
-# profile `legion`; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
+# profile `legion`; the role prompts (packages/pi-envoy/roles) at /opt/legion/roles for the in-cluster daemon; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
 # requires it); gh. The last RUN checks every binary runs on the base, proves jj accepts the image's git
 # with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
 # daemon's two plus the session-storage probe) through `legion probe-image` as the runtime user, so a
@@ -109,12 +109,20 @@ COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=cli /out/legion /opt/legion/bin/legion
 COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
+# The role prompts (packages/pi-envoy/roles/*.md — not part of the packed plugin, whose `files` is
+# `dist`): the in-cluster daemon reads each one from its own filesystem and inlines it into the pod
+# command. A daemon run from source finds them beside its own sources; the compiled binary's
+# `import.meta.dir` is Bun's virtual /$bunfs/root (its relative path lands on a nonexistent
+# /pi-envoy/roles), so LEGION_ROLE_PROMPTS_DIR names this copy instead
+# (`resolveRolePromptsDir`, environment.ts — boot refuses if any prompt is missing here).
+COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
 # because OMP's DirResolver derives the profile root from it.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
+    LEGION_ROLE_PROMPTS_DIR=/opt/legion/roles \
     HOME=/home/legion \
     PATH=/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin
 # Numeric uid:gid (user `legion`, created above) so Kubernetes `runAsNonRoot` can verify it from the
@@ -136,7 +144,10 @@ WORKDIR /home/legion
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
 #    single omp invocation after 30 s, so a natives download inside the first probe would read as a
 #    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
-# Any failure fails the build: a broken image never publishes.
+# Any failure fails the build: a broken image never publishes. The in-cluster daemon
+# (deploy/kubernetes/daemon, runtime: kubernetes) re-runs the same command with
+# `--daemon-api-version <N>` in a one-shot pod of this image before it serves — the image's own CLI is
+# the only thing that can read the image plugin's daemon API contract (worker-image-probe.ts).
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; \
     scratch="$(mktemp -d)"; \
@@ -149,6 +160,7 @@ RUN set -eu; \
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
 # `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
-# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts). This ENTRYPOINT therefore only
-# makes `docker run <image> probe-image` and `docker run <image> --help` work.
+# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts); the daemon Deployment runs
+# `legion start <project> --config /etc/legion/legion.yaml` from this same image. This ENTRYPOINT
+# therefore only makes `docker run <image> probe-image` and `docker run <image> --help` work.
 ENTRYPOINT ["legion"]

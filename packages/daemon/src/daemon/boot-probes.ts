@@ -71,7 +71,7 @@ export interface BootProbeOptions {
 
 /** The probe chain was cancelled by the daemon's own teardown — while an attempt was running
  * (the runner killed it on the signal) or while it was waiting to retry. */
-class ProbeAbortedError extends Error {
+export class ProbeAbortedError extends Error {
   constructor(name: string) {
     super(
       `[legion] ${name} probe abandoned: the daemon stopped while it was running or waiting to retry`
@@ -80,7 +80,7 @@ class ProbeAbortedError extends Error {
   }
 }
 
-interface ProbeOutcome {
+export interface ProbeOutcome {
   readonly passed: boolean;
   /** `true` when the failure is a definitive negative (retrying cannot change it). */
   readonly definitive: boolean;
@@ -132,7 +132,7 @@ function killedOutcome(
  * mislead the operator reading the start-up error that follows it. An attempt that *passed* as
  * the signal fired still returns as passed: nothing about the probe's answer changed, and the
  * two-probe chain stops at the next probe's loop-top check before anything is spawned. */
-async function retryBootProbe(
+export async function retryBootProbe(
   name: string,
   attempt: () => Promise<ProbeOutcome>,
   makeError: (detail: string, reason: "definitive" | "exhausted") => Promise<Error>,
@@ -244,12 +244,14 @@ function legionPluginManifestPath(): string {
 
 /**
  * Refuses startup unless the installed plugin was built against this daemon's contract: its
- * manifest's `legion.daemonApiVersion` must equal `LEGION_DAEMON_API_VERSION`
- * (`@legion/contracts`). The number covers two surfaces — the `LegionDaemonApi` HTTP request and
- * response shapes (2 was introduced by LEGION-20 for `stateGate`/`GatesRegister`), and the pane
- * contract (every environment variable the daemon sets on a pane that the plugin reads or
- * writes — the full list, the bump rule, and the contract history live in the constant's doc
- * comment; covered by 2 from LEGION-52). A plugin from before an HTTP shape change (or after a
+ * manifest's `legion.daemonApiVersion` must equal `expectedVersion` — by default
+ * `LEGION_DAEMON_API_VERSION` (`@legion/contracts`), the contract this code speaks; `legion
+ * probe-image --daemon-api-version <N>` passes the in-cluster daemon's instead, since the image's
+ * own CLI is what reads the image's plugin. The number covers two surfaces — the `LegionDaemonApi`
+ * HTTP request and response shapes (2 was introduced by LEGION-20 for `stateGate`/`GatesRegister`),
+ * and the pane contract (every environment variable the daemon sets on a pane that the plugin
+ * reads or writes — the full list, the bump rule, and the contract history live in the constant's
+ * doc comment; covered by 2 from LEGION-52). A plugin from before an HTTP shape change (or after a
  * later one) validates every daemon response against the strict schemas it bundles and fails the
  * controller/architect boot handshake — `daemon.state()` rejects on the first unknown field —
  * with nothing in the daemon's own logs to say why; a plugin from before a pane contract change
@@ -262,19 +264,20 @@ function legionPluginManifestPath(): string {
  * merely "not loaded", sending the operator to `omp plugin list` when the fix is a reinstall).
  */
 export async function verifyLegionPluginContract(
-  readPluginManifest: (manifestPath: string) => Promise<string>
+  readPluginManifest: (manifestPath: string) => Promise<string>,
+  expectedVersion: number = LEGION_DAEMON_API_VERSION
 ): Promise<void> {
   const manifestPath = legionPluginManifestPath();
   const refuse = (packageVersion: string, contractVersion: string): Error =>
     new Error(
-      `[legion] pi-legion-envoy at ${manifestPath} (package ${packageVersion}) speaks daemon API contract ${contractVersion}; this daemon requires ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
+      `[legion] pi-legion-envoy at ${manifestPath} (package ${packageVersion}) speaks daemon API contract ${contractVersion}; this daemon requires ${expectedVersion}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
     );
   let manifest: unknown;
   try {
     manifest = JSON.parse(await readPluginManifest(manifestPath));
   } catch (error) {
     throw new Error(
-      `[legion] pi-legion-envoy manifest at ${manifestPath} could not be read (${error instanceof Error ? error.message : String(error)}); this daemon requires a plugin speaking daemon API contract ${LEGION_DAEMON_API_VERSION}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
+      `[legion] pi-legion-envoy manifest at ${manifestPath} could not be read (${error instanceof Error ? error.message : String(error)}); this daemon requires a plugin speaking daemon API contract ${expectedVersion}. Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the active profile.`
     );
   }
   const record = typeof manifest === "object" && manifest !== null ? manifest : {};
@@ -285,7 +288,7 @@ export async function verifyLegionPluginContract(
     typeof legion === "object" && legion !== null && "daemonApiVersion" in legion
       ? legion.daemonApiVersion
       : undefined;
-  if (contractVersion !== LEGION_DAEMON_API_VERSION) {
+  if (contractVersion !== expectedVersion) {
     throw refuse(
       packageVersion,
       contractVersion === undefined ? "none" : JSON.stringify(contractVersion)

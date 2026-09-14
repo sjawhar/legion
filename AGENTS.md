@@ -80,6 +80,7 @@ legion workspace-init --issue <KEY> --repo <owner>/<repo> [--root /legion] --cre
 | Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
+| In-cluster daemon (Kubernetes) | `deploy/kubernetes/daemon/`, `packages/daemon/src/daemon/worker-image-probe.ts` | Kustomize base + kind overlay; the probe pod. See `docs/kubernetes.md` "In-cluster daemon" and @packages/daemon/src/daemon/AGENTS.md "In-cluster mode" |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 
 ## Conventions

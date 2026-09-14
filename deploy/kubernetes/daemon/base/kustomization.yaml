@@ -1,0 +1,26 @@
+# The Legion daemon as an in-cluster Deployment (LEGION-25), for the example project `demo`.
+# Plain manifests, no Helm: an overlay pins the worker-image digest, supplies the deployment's
+# `legion.yaml` and its two Secrets, and — for another project — patches the four names that carry
+# the project (`legion-daemon-demo`, `legion-demo-providers`, `legion-demo-daemon`,
+# `legion-daemon-demo-state`). See deploy/kubernetes/daemon/overlays/kind and docs/kubernetes.md,
+# "In-cluster daemon".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: legion
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - role.yaml
+  - rolebinding.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+# The daemon's configuration, mounted at /etc/legion. The generated name carries a content hash, so
+# `kubectl apply -k` after a config change rolls the Deployment; the reference in deployment.yaml is
+# rewritten by kustomize.
+configMapGenerator:
+  - name: legion-daemon-demo-config
+    files:
+      - legion.yaml
+      - instructions.md

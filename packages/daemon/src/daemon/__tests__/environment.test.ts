@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../state/fetch";
@@ -10,7 +10,9 @@ import {
   legionCliLauncherScript,
   PANE_ENV_ALLOW_LIST,
   type ResolveDaemonEnvironmentDeps,
+  ROLE_PROMPT_FILES,
   resolveDaemonEnvironment,
+  SOURCE_ROLE_PROMPTS_DIR,
 } from "../environment";
 
 const OMP_PIN = "github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841";
@@ -58,6 +60,7 @@ function dependencies(
       throw new Error(`Unexpected startup command: ${command.join(" ")}`);
     },
     stateDir,
+    runtime: "tmux",
     ...overrides,
   };
 }
@@ -198,6 +201,7 @@ describe("resolveDaemonEnvironment", () => {
           TMUX: "/tmp/tmux-1000/default,1,0",
           SSH_AUTH_SOCK: "/tmp/ssh-x/agent.1",
           MNEMOPI_VEC_WEIGHT: "0.5",
+          ENVOY_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer-envoy_token",
         },
         run: async (command) => {
           if (command.join(" ") === "/tools/mise env --json") {
@@ -205,6 +209,7 @@ describe("resolveDaemonEnvironment", () => {
               stdout: JSON.stringify({
                 PATH: "/full/bin:/usr/bin",
                 CARGO_HOME: "/home/legion/.cargo",
+                ENVOY_TOKEN: "leaked-from-mise",
               }),
               stderr: "",
               exitCode: 0,
@@ -298,7 +303,7 @@ describe("resolveDaemonEnvironment", () => {
       })
     );
 
-    expect(environment.ompInvocation).toBe("/opt/omp/bin/omp");
+    expect(environment).toMatchObject({ runtime: "tmux", ompInvocation: "/opt/omp/bin/omp" });
     expect(environment.paneEnv).not.toHaveProperty("LEGION_OMP_PATH");
     expect(received.map((command) => command.join(" "))).toEqual(["/tools/mise env --json"]);
   });
@@ -435,6 +440,148 @@ describe("resolveDaemonEnvironment", () => {
     await expect(resolveDaemonEnvironment(`mise x ${OMP_PIN} -- omp`, deps)).rejects.toThrow(
       "[legion] Missing required daemon tools: jj (set LEGION_JJ_PATH to an absolute executable path)"
     );
+  });
+
+  describe("runtime: kubernetes", () => {
+    /** The worker image's PATH (`IMAGE_PATH`, k8s-manifests.ts): no mise, no tmux, no OMP on it
+     * that the daemon would probe — the pod's `legion start` resolves only jj, git, and gh. */
+    const IMAGE_PATH = "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin";
+    const kubernetesDependencies = (
+      tools: Record<string, string>,
+      overrides: Partial<ResolveDaemonEnvironmentDeps> = {}
+    ): ResolveDaemonEnvironmentDeps => ({
+      env: { PATH: IMAGE_PATH, HOME: "/home/legion", DISPATCH_TOKEN: "leaked" },
+      resolveExecutable(command, searchPath) {
+        // Every lookup must go through the pane PATH: `<stateDir>/bin` first, then the image's.
+        expect(searchPath).toBe(`${path.join(stateDir, "bin")}${path.delimiter}${IMAGE_PATH}`);
+        return tools[command];
+      },
+      run: async (command) => {
+        throw new Error(`kubernetes mode must run no startup command (ran ${command.join(" ")})`);
+      },
+      stateDir,
+      runtime: "kubernetes",
+      ...overrides,
+    });
+    const imageTools = { jj: "/usr/local/bin/jj", git: "/usr/bin/git", gh: "/usr/local/bin/gh" };
+
+    it("resolves jj, git, and gh from the process PATH with no mise, no tmux, and no OMP invocation", async () => {
+      const environment = await resolveDaemonEnvironment(
+        "mise x omp@1 -- omp",
+        kubernetesDependencies(imageTools)
+      );
+      expect(environment).toEqual({
+        runtime: "kubernetes",
+        commands: imageTools,
+        paneEnv: {
+          PATH: `${path.join(stateDir, "bin")}${path.delimiter}${IMAGE_PATH}`,
+          HOME: "/home/legion",
+        },
+        rolePromptsDir: SOURCE_ROLE_PROMPTS_DIR,
+      });
+      expect("ompInvocation" in environment).toBe(false);
+      expect("tmux" in environment.commands).toBe(false);
+    });
+
+    it("installs the legion CLI launcher under <stateDir>/bin exactly as tmux mode does", async () => {
+      await resolveDaemonEnvironment("mise x omp@1 -- omp", kubernetesDependencies(imageTools));
+      const launcherPath = path.join(stateDir, "bin", "legion");
+      expect((await stat(launcherPath)).mode & 0o777).toBe(0o755);
+      expect(await readFile(launcherPath, "utf8")).toBe(
+        legionCliLauncherScript(process.execPath, process.argv[1], Bun.main)
+      );
+    });
+
+    it("strips an inherited worker-bin entry from the pane PATH", async () => {
+      const inherited = `${path.join(stateDir, "worker-bin")}${path.delimiter}${IMAGE_PATH}`;
+      const environment = await resolveDaemonEnvironment(
+        "mise x omp@1 -- omp",
+        kubernetesDependencies(imageTools, {
+          env: { PATH: inherited, HOME: "/home/legion" },
+        })
+      );
+      expect(environment.paneEnv.PATH).toBe(
+        `${path.join(stateDir, "bin")}${path.delimiter}${IMAGE_PATH}`
+      );
+    });
+
+    it("refuses startup naming the missing tool and its override, and never asks for mise or tmux", async () => {
+      await expect(
+        resolveDaemonEnvironment(
+          "mise x omp@1 -- omp",
+          kubernetesDependencies({ jj: "/usr/local/bin/jj", git: "/usr/bin/git" })
+        )
+      ).rejects.toThrow(
+        "[legion] Missing required daemon tools: gh (set LEGION_GH_PATH to an absolute executable path)"
+      );
+    });
+
+    it("runs daemon subprocesses by absolute path with the pane environment", async () => {
+      const environment = await resolveDaemonEnvironment(
+        "mise x omp@1 -- omp",
+        kubernetesDependencies(imageTools)
+      );
+      const received: Array<{ command: string[]; options: Parameters<CommandRunner>[1] }> = [];
+      const runner = createDaemonRunner(environment, async (command, options) => {
+        received.push({ command, options: options ?? {} });
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+      await runner(["gh", "api", "user"]);
+      expect(received[0]?.command).toEqual(["/usr/local/bin/gh", "api", "user"]);
+      expect(received[0]?.options?.env).toMatchObject({ HOME: "/home/legion" });
+      expect(received[0]?.options?.env).not.toHaveProperty("DISPATCH_TOKEN");
+    });
+  });
+
+  describe("role prompts", () => {
+    it("names the checkout's pi-envoy/roles by default, for both runtimes", async () => {
+      const tmux = await resolveDaemonEnvironment(`mise x ${OMP_PIN} -- omp`, dependencies());
+      expect(tmux.rolePromptsDir).toBe(SOURCE_ROLE_PROMPTS_DIR);
+      for (const file of ROLE_PROMPT_FILES) {
+        expect((await stat(path.join(SOURCE_ROLE_PROMPTS_DIR, file))).isFile()).toBe(true);
+      }
+    });
+
+    it("takes LEGION_ROLE_PROMPTS_DIR from the daemon's own environment when it holds every prompt — the worker image's /opt/legion/roles", async () => {
+      const promptsDir = path.join(stateDir, "roles");
+      await mkdir(promptsDir);
+      for (const file of ROLE_PROMPT_FILES)
+        await writeFile(path.join(promptsDir, file), `# ${file}\n`);
+      const environment = await resolveDaemonEnvironment(
+        `mise x ${OMP_PIN} -- omp`,
+        dependencies({ env: { PATH: "/narrow/bin", LEGION_ROLE_PROMPTS_DIR: promptsDir } })
+      );
+      expect(environment.rolePromptsDir).toBe(promptsDir);
+      // Daemon configuration, like LEGION_OMP_PATH: never part of what a pane inherits.
+      expect(environment.paneEnv).not.toHaveProperty("LEGION_ROLE_PROMPTS_DIR");
+    });
+
+    it("refuses startup naming the directory, every missing prompt, and the override — never a spawn-time ENOENT", async () => {
+      const promptsDir = path.join(stateDir, "roles");
+      await mkdir(promptsDir);
+      for (const file of ROLE_PROMPT_FILES) {
+        if (file !== "architect-root.md" && file !== "tester.md") {
+          await writeFile(path.join(promptsDir, file), `# ${file}\n`);
+        }
+      }
+      await expect(
+        resolveDaemonEnvironment(
+          `mise x ${OMP_PIN} -- omp`,
+          dependencies({ env: { PATH: "/narrow/bin", LEGION_ROLE_PROMPTS_DIR: promptsDir } })
+        )
+      ).rejects.toThrow(
+        `[legion] Role prompts directory ${promptsDir} is missing architect-root.md, tester.md (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)`
+      );
+    });
+
+    it("refuses a relative LEGION_ROLE_PROMPTS_DIR", async () => {
+      await expect(
+        resolveDaemonEnvironment(
+          `mise x ${OMP_PIN} -- omp`,
+          dependencies({ env: { PATH: "/narrow/bin", LEGION_ROLE_PROMPTS_DIR: "roles" } })
+        )
+      ).rejects.toThrow("[legion] LEGION_ROLE_PROMPTS_DIR must be an absolute path (got roles)");
+    });
   });
 });
 

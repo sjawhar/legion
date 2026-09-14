@@ -619,6 +619,28 @@ describe("legion start --check-config", () => {
     expect(config.stateDir).toBe(path.join(dir, "state"));
     expect(config.instructionsPath).toBe(path.join(dir, "ops", "deployment.md"));
   });
+
+  it("checks an in-cluster legion.yaml on a machine without its Secret mounts: envoy_token_file is validated, never read", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
+    const configPath = writeYaml(dir, [
+      ...baseYaml,
+      ...bothAppsYaml,
+      "runtime:",
+      "  kubernetes:",
+      "    namespace: legion",
+      `    image: ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`,
+      "bind: 0.0.0.0",
+      "daemon_url: http://legion-daemon-acme.legion.svc:13370",
+      `envoy_token_file: ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}`,
+    ]);
+
+    await cmdCheckConfig(undefined, configPath, env);
+
+    // The daemon itself still reads it: the same file is a boot refusal naming the key and path.
+    expect(() => loadStartConfig(undefined, configPath, env)).toThrow(
+      `envoy_token_file names ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}, which could not be read: ENOENT`
+    );
+  });
 });
 
 describe("legion handoff complete", () => {
@@ -916,5 +938,86 @@ describe("legion probe-image", () => {
     }
     expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000]);
     expect(attempts).toBe(6);
+  });
+
+  describe("--daemon-api-version", () => {
+    const manifest = JSON.stringify({ version: "0.9.1", legion: { daemonApiVersion: 7 } });
+    const contractDeps = (manifestText: string) => ({
+      env: {},
+      runner: passing,
+      sleep: async () => {},
+      readPluginManifest: async () => manifestText,
+    });
+
+    it("passes and reports the contract when the image plugin's manifest matches the flag", async () => {
+      const lines: string[] = [];
+      const logSpy = spyOn(console, "log").mockImplementation((line: string) => {
+        lines.push(line);
+      });
+      try {
+        await cmdProbeImage("/opt/omp/bin/omp", contractDeps(manifest), {
+          daemonApiVersion: "7",
+        });
+      } finally {
+        logSpy.mockRestore();
+      }
+      expect(lines).toEqual([
+        "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=7",
+      ]);
+    });
+
+    it("exits 1 naming both versions and the manifest path when the image plugin speaks another contract", async () => {
+      await expect(
+        cmdProbeImage("/opt/omp/bin/omp", contractDeps(manifest), { daemonApiVersion: "8" })
+      ).rejects.toEqual(
+        expect.objectContaining({
+          code: 1,
+          message: expect.stringMatching(
+            /pi-legion-envoy at \S*@sjawhar\/pi-legion-envoy\/package\.json \(package 0\.9\.1\) speaks daemon API contract 7; this daemon requires 8/
+          ),
+        })
+      );
+    });
+
+    it.each([
+      "0",
+      "-1",
+      "abc",
+      "1.5",
+      "",
+    ])("refuses %j as a contract version, naming the flag, before any probe runs", async (value) => {
+      let ran = false;
+      await expect(
+        cmdProbeImage(
+          "/opt/omp/bin/omp",
+          {
+            ...contractDeps(manifest),
+            runner: async (command) => {
+              ran = true;
+              return passing(command);
+            },
+          },
+          { daemonApiVersion: value }
+        )
+      ).rejects.toEqual(
+        expect.objectContaining({
+          code: 1,
+          message: expect.stringContaining("--daemon-api-version must be a positive integer"),
+        })
+      );
+      expect(ran).toBe(false);
+    });
+
+    it("never reads the manifest for the contract when the flag is absent", async () => {
+      let manifestReads = 0;
+      await cmdProbeImage("/opt/omp/bin/omp", {
+        ...contractDeps(manifest),
+        readPluginManifest: async () => {
+          manifestReads += 1;
+          return manifest;
+        },
+      });
+      expect(manifestReads).toBe(0);
+    });
   });
 });

@@ -1,0 +1,13 @@
+# The daemon's `state_dir` (/var/lib/legion): state.json, the instance lock, secrets, workspaces,
+# and the image-probe cache. ReadWriteOnce with the Deployment's `Recreate` strategy: the old pod
+# releases the volume (and its flock) before the new one mounts it. No storageClassName: the
+# cluster default; set one in an overlay when the default is not what the daemon should live on.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: legion-daemon-demo-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi

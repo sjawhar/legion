@@ -238,6 +238,7 @@ function processManagerDeps(
     config: cfg,
     runtime,
     processPath: process.env.PATH ?? "",
+    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!true",
     publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),

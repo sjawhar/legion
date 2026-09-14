@@ -283,6 +283,7 @@ describe("KubernetesRuntime.spawn", () => {
         pvcName: "legion-legion-42",
         podName: "legion-legion-42-tester-g1",
         secretName: "legion-legion-42-tester-g1",
+        secretKeys: [BOOT_TOKEN_KEY],
         resources: DEFAULT_KUBERNETES_RESOURCES.large,
         env: POD_ENV,
         workspaceDir: "/legion/workspaces/acme/widgets/legion-42",
@@ -650,16 +651,61 @@ describe("KubernetesRuntime.spawn", () => {
     expect(api.requests).toEqual([]);
   });
 
-  it("refuses a spec that does not name its tree and generation, or that carries more than the boot token", async () => {
+  it("refuses a spec that does not name its tree and generation, or that carries no boot token", async () => {
     const { api, runtime } = harness();
     const { tree: _tree, ...withoutTree } = workerSpec();
     await expect(runtime.spawn("worker", withoutTree)).rejects.toThrow(
       "spawn worker requires spec.issue, spec.tree, and spec.generation"
     );
     await expect(
-      runtime.spawn("worker", workerSpec({ secrets: { LEGION_BOOT_TOKEN: "a", EXTRA: "b" } }))
-    ).rejects.toThrow(/exactly one secret/);
+      runtime.spawn("worker", workerSpec({ secrets: { ENVOY_TOKEN: "a" } }))
+    ).rejects.toThrow(`kubernetes runtime requires the ${BOOT_TOKEN_KEY} secret`);
     expect(api.requests).toEqual([]);
+  });
+
+  it("projects every secret in the spec but ENVOY_TOKEN from the per-pod Secret as its own <NAME>_FILE; ENVOY_TOKEN_FILE is the providers mount's file and the token is never copied per pod", async () => {
+    const { api, runtime } = harness();
+    await runtime.spawn(
+      "worker",
+      workerSpec({
+        secrets: { LEGION_BOOT_TOKEN: BOOT_TOKEN, ENVOY_TOKEN: "envoy-listener-token" },
+      })
+    );
+    const secretCreate = api.requests.find((r) => r.method === "POST" && r.path === "/secrets");
+    expect(secretCreate?.body).toMatchObject({
+      stringData: { LEGION_BOOT_TOKEN: BOOT_TOKEN, LEGION_PROVISION_TOKEN: PROVISION_TOKEN },
+    });
+    expect(JSON.stringify(api.requests)).not.toContain("envoy-listener-token");
+    const podCreate = api.requests.find((r) => r.method === "POST" && r.path === "/pods");
+    expect(podCreate?.body).toEqual(
+      buildPodManifest({
+        project: "omp",
+        tree: issue,
+        issue,
+        role: "tester",
+        generation: 1,
+        namespace: "legion",
+        image: IMAGE,
+        pvcName: "legion-legion-42",
+        podName: "legion-legion-42-tester-g1",
+        secretName: "legion-legion-42-tester-g1",
+        secretKeys: [BOOT_TOKEN_KEY],
+        resources: DEFAULT_KUBERNETES_RESOURCES.large,
+        env: { ...POD_ENV, ENVOY_TOKEN_FILE: `${PROVIDERS_DIR}/ENVOY_TOKEN` },
+        workspaceDir: "/legion/workspaces/acme/widgets/legion-42",
+        repo: "acme/widgets",
+        shimEndpoint: "tcp://172.18.0.1:19371",
+        ompArgv: [
+          "omp",
+          "--mode",
+          "rpc",
+          "--append-system-prompt",
+          "text of /roles/tester.md\n\naddress tester",
+        ],
+        terminationGracePeriodSeconds: 10,
+        workspaceInitLockWaitSeconds: 480,
+      })
+    );
   });
 });
 

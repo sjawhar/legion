@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   controllerToken,
   type IssueKey,
+  LEGION_DAEMON_API_VERSION,
   ROLE_TOPIC_PREFIX,
   roleToken,
   roleTopic,
@@ -27,12 +28,18 @@ import {
 } from "./boot-probes";
 import { createCancellableSleep } from "./cancellable-sleep";
 import { overseerCatchup } from "./catchup";
-import { type DaemonConfig, loadConfig } from "./config";
+import {
+  type DaemonConfig,
+  type KubernetesRuntimeConfig,
+  loadConfig,
+  type RuntimeName,
+} from "./config";
 import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient, specArtifactResolver } from "./dispatch-client";
 import {
   createDaemonRunner,
   type DaemonEnvironment,
+  type DaemonEnvironmentFor,
   type ResolveDaemonEnvironmentDeps,
   resolveDaemonEnvironment,
 } from "./environment";
@@ -60,6 +67,7 @@ import { KubernetesRuntime } from "./runtime-kubernetes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { installWorkerGhShim } from "./worker-bin";
+import { verifyWorkerImage } from "./worker-image-probe";
 import { connectWorkerRpc } from "./worker-rpc";
 import { startWorkerStreamListener, type WorkerStreamListener } from "./worker-stream-listener";
 
@@ -84,10 +92,10 @@ interface DaemonDependencies {
   envoyPublish(topic: string, payloadJson: string, dedupeKey?: string): Promise<void>;
   dispatchClient: DispatchClient;
   tokenManager: Pick<TokenManager, "getToken">;
-  resolveDaemonEnvironment(
+  resolveDaemonEnvironment<R extends RuntimeName>(
     ompInvocation: string,
-    deps: ResolveDaemonEnvironmentDeps
-  ): Promise<DaemonEnvironment>;
+    deps: ResolveDaemonEnvironmentDeps<R>
+  ): Promise<DaemonEnvironmentFor<R>>;
   setTimeout(callback: () => void, delayMs: number): unknown;
   clearTimeout(timer: unknown): void;
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -158,18 +166,32 @@ export function envoyPublishBody(
   };
 }
 
-async function publishToEnvoy(
-  config: DaemonConfig,
+/** One publish to the Envoy listener's `/v1/messages/publish`, with `config.envoyToken` as the
+ * bearer when set (a listener bound off loopback requires one: `ENVOY_API_TOKEN`). A non-2xx
+ * answer is `EnvoyPublishError` carrying the listener's status verbatim, so the role lane's
+ * propagation and the durable lane's fatal stay as they are; a 401/403 additionally logs one line
+ * naming the listener and whether a token went out, since nothing else in the daemon's own log
+ * would say why every role publish is refused. */
+export async function publishToEnvoy(
+  config: Pick<DaemonConfig, "envoyUrl" | "envoyToken">,
   topic: string,
   payloadJson: string,
-  dedupeKey?: string
+  dedupeKey?: string,
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response> = fetch
 ): Promise<void> {
-  const response = await fetch(`${config.envoyUrl}/v1/messages/publish`, {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (config.envoyToken !== undefined) headers.Authorization = `Bearer ${config.envoyToken}`;
+  const response = await fetchImpl(`${config.envoyUrl}/v1/messages/publish`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(envoyPublishBody(topic, payloadJson, dedupeKey)),
   });
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      console.error(
+        `[legion] Envoy listener ${config.envoyUrl} refused the publish to ${topic} (${response.status}) ${config.envoyToken === undefined ? "with no bearer token sent" : "with a bearer token sent"}; the daemon's envoy_token_file (or ENVOY_TOKEN_FILE) must hold the listener's ENVOY_API_TOKEN`
+      );
+    }
     throw new EnvoyPublishError(topic, response.status);
   }
 }
@@ -271,6 +293,23 @@ function abortableSleep(
         });
 }
 
+/** The Kubernetes API client the in-cluster daemon's probe pod and `KubernetesRuntime` share:
+ * tests inject one over a fake API; production resolves credentials from
+ * `runtime.kubernetes.kubeconfig` or the pod's service-account files. Needs only the
+ * `runtime: kubernetes` block, so it runs before any probe or state load. */
+async function connectCluster(
+  kubernetes: KubernetesRuntimeConfig,
+  deps: DaemonDependencies
+): Promise<{ readonly kubernetes: KubernetesRuntimeConfig; readonly client: K8sClient }> {
+  const client =
+    deps.k8sClient ??
+    createK8sClient({
+      ...(await resolveK8sCredentials({ kubeconfig: kubernetes.kubeconfig, env: process.env })),
+      namespace: kubernetes.namespace,
+    });
+  return { kubernetes, client };
+}
+
 async function startDaemonLocked(
   config: DaemonConfig,
   deps: DaemonDependencies,
@@ -278,10 +317,25 @@ async function startDaemonLocked(
   instanceLock: InstanceLock,
   probeAbort: AbortController
 ): Promise<DaemonHandle> {
-  const environment = await deps.resolveDaemonEnvironment(config.ompInvocation, {
-    run: deps.runner,
-    stateDir: config.stateDir,
-  });
+  // Which runtime this daemon boots for, decided once from `config.runtime`: the environment
+  // variant follows the literal, and under kubernetes the API client is created here, before any
+  // probe, because both the probe pod and the runtime below need it and it needs only config and
+  // the service-account files.
+  const resolveEnvironment = <R extends RuntimeName>(runtime: R) =>
+    deps.resolveDaemonEnvironment(config.ompInvocation, {
+      run: deps.runner,
+      stateDir: config.stateDir,
+      runtime,
+    });
+  const boot =
+    config.runtime.name === "kubernetes"
+      ? {
+          runtime: "kubernetes" as const,
+          environment: await resolveEnvironment("kubernetes"),
+          cluster: await connectCluster(config.runtime, deps),
+        }
+      : { runtime: "tmux" as const, environment: await resolveEnvironment("tmux") };
+  const environment: DaemonEnvironment = boot.environment;
   const runner = createDaemonRunner(environment, deps.runner);
   // The `gh` shim every pane's PATH puts first (`ProcessManager.credentialProcessEnvironment`),
   // installed before any pane can launch. An fs failure refuses startup: no pane may launch with a
@@ -306,38 +360,58 @@ async function startDaemonLocked(
           config.stateDir,
           config.legionId
         );
-  // The plugin contract check is a local manifest read — no OMP spawn, no runner — so host load
-  // cannot make it transient: a skewed plugin is a definitive refusal, made here before any state
-  // is loaded or NATS/the API opened, exactly as before. Only the two OMP probes below are
-  // load-sensitive and get the hold-and-retry treatment.
-  await verifyLegionPluginContract(deps.readPluginManifest);
-  // The two boot probes (boot-probes.ts) start here but are awaited only at the launch hold
-  // below, just before the first pane could open: state load, NATS, the API bind, and the worker
-  // reconnect all proceed while a probe is still retrying through host load, so an operator can
-  // read `/legion/v1/state` and the durable lane keeps acking meanwhile. The no-op `catch`
-  // keeps a definitive negative that lands before the hold from becoming an unhandled rejection;
-  // the real handling is at the hold.
+  // The boot probe(s) (boot-probes.ts; worker-image-probe.ts) start here but are awaited only at
+  // the launch hold below, just before the first pane or pod could open: state load, NATS, the API
+  // bind, and the worker reconnect all proceed while a probe is still retrying through host load,
+  // so an operator can read `/legion/v1/state` and the durable lane keeps acking meanwhile. The
+  // no-op `catch` keeps a definitive negative that lands before the hold from becoming an
+  // unhandled rejection; the real handling is at the hold.
   const probeOptions = {
     sleep: abortableSleep(deps.sleep, probeAbort.signal),
     timeoutMs: config.slowCommandTimeoutSeconds * 1000,
     retry: DAEMON_PROBE_RETRY,
     signal: probeAbort.signal,
   };
-  const probes = (async () => {
-    await verifyOmpAgentsCapability(
-      environment.ompInvocation,
-      config.ompLaunchPrefix,
-      runner,
+  let probes: Promise<void>;
+  if (boot.runtime === "kubernetes") {
+    // A daemon in a pod is not the worker image at the configured digest and has no local OMP, so
+    // the two OMP probes and the plugin-contract read all run inside a one-shot pod of that image
+    // (`legion probe-image --daemon-api-version <N>`), remembered per digest and contract in
+    // `<state_dir>/image-probes`. `config.project` is what `newLegionState` seeds `state.project`
+    // from; state is not loaded yet, exactly as for the tmux probes.
+    const { kubernetes, client } = boot.cluster;
+    probes = verifyWorkerImage(
+      {
+        client,
+        project: config.project,
+        namespace: kubernetes.namespace,
+        image: kubernetes.image,
+        resources: kubernetes.resources.small,
+        stateDir: config.stateDir,
+        daemonApiVersion: LEGION_DAEMON_API_VERSION,
+        now: deps.now,
+        log: (line) => console.error(line),
+      },
       probeOptions
     );
-    await verifyLegionPluginLoaded(
-      environment.ompInvocation,
-      config.ompLaunchPrefix,
-      runner,
-      deps.readPluginManifest,
-      probeOptions
-    );
-  })();
+  } else {
+    // The plugin contract check is a local manifest read — no OMP spawn, no runner — so host load
+    // cannot make it transient: a skewed plugin is a definitive refusal, made here before any state
+    // is loaded or NATS/the API opened, exactly as before. Only the two OMP probes below are
+    // load-sensitive and get the hold-and-retry treatment.
+    await verifyLegionPluginContract(deps.readPluginManifest);
+    const { ompInvocation } = boot.environment;
+    probes = (async () => {
+      await verifyOmpAgentsCapability(ompInvocation, config.ompLaunchPrefix, runner, probeOptions);
+      await verifyLegionPluginLoaded(
+        ompInvocation,
+        config.ompLaunchPrefix,
+        runner,
+        deps.readPluginManifest,
+        probeOptions
+      );
+    })();
+  }
   probes.catch(() => {});
   // Both GitHub Apps are proven before state is loaded or anything network-facing opens: the
   // config loader already requires both sections, and this lease proves each key actually mints a
@@ -409,20 +483,11 @@ async function startDaemonLocked(
   // The tmux server's environment tables are a tmux-only concern (`scrubServerEnvironment`
   // below); a pod has no server. Set only when the tmux runtime is the one in use.
   let tmuxRuntime: TmuxRuntime | undefined;
-  if (config.runtime.name === "kubernetes") {
-    const kubernetes = config.runtime;
-    const client =
-      deps.k8sClient ??
-      createK8sClient({
-        ...(await resolveK8sCredentials({ kubeconfig: kubernetes.kubeconfig, env: process.env })),
-        namespace: kubernetes.namespace,
-      });
-    // Under kubernetes the two OMP boot probes above still run against the daemon host's OMP in
-    // this PR; LEGION-25 moves them to a probe pod.
+  if (boot.runtime === "kubernetes") {
     runtime = new KubernetesRuntime({
       project: state.project,
-      config: kubernetes,
-      client,
+      config: boot.cluster.kubernetes,
+      client: boot.cluster.client,
       listener: () => workerStream,
       repo: config.repo,
       provisioningToken,
@@ -441,7 +506,7 @@ async function startDaemonLocked(
       tmux: { run: runner, socket: `legion-${state.project}` },
       project: state.project,
       stateDir: config.stateDir,
-      ompInvocation: environment.ompInvocation,
+      ompInvocation: boot.environment.ompInvocation,
       ompLaunchPrefix: config.ompLaunchPrefix,
       deploymentInstructionsFile,
       statPrompt: deps.statPrompt,
@@ -466,6 +531,7 @@ async function startDaemonLocked(
     config,
     runtime,
     processPath: environment.paneEnv.PATH,
+    rolePromptsDir: environment.rolePromptsDir,
     credentialHelper: daemonCredentialHelper(),
     // Through the listener, never `nats.publish`: a bare payload on a role subject is rejected by
     // the listener's envelope validation and reaches no holder. A direct runtime notice that gets

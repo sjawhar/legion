@@ -1,0 +1,22 @@
+# What every pod the daemon launches dials: `daemon_url` (the API, for `/legion/v1/*`) and the
+# worker-stream port its shim reverse-dials (`legion worker-shim --connect tcp://<host>:13371`).
+# `daemon_url` in legion.yaml must name this Service: http://legion-daemon-demo.legion.svc:13370.
+apiVersion: v1
+kind: Service
+metadata:
+  name: legion-daemon-demo
+  labels:
+    app.kubernetes.io/name: legion-daemon
+    app.kubernetes.io/instance: demo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: legion-daemon
+    app.kubernetes.io/instance: demo
+  ports:
+    - name: api
+      port: 13370
+      targetPort: api
+    - name: worker-stream
+      port: 13371
+      targetPort: worker-stream

@@ -1,0 +1,28 @@
+# Exactly the verbs the daemon's Kubernetes client uses (k8s-client.ts), namespace-scoped — no
+# `watch`, because nothing watches: the runtime and the probe pod poll `get`.
+#   pods: create/get/delete (spawn, probe, stop, the probe pod), list (retire a previous generation,
+#         orphan sweep); pods/log: get (a dead pod's tail, the probe pod's result)
+#   persistentvolumeclaims: get/create (ensure the tree volume), list/patch/delete (retention sweep)
+#   secrets: create/delete (the per-pod Secret) — never get or list: either returns Secret data, and
+#         the orphan sweep names each per-pod Secret from its pod and deletes by name
+#   events: list (why a pod is Pending)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: legion-daemon
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, delete, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
