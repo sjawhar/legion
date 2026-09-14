@@ -25,10 +25,12 @@ func githubEvent(event string) bool {
 	return false
 }
 
-// githubSkip returns true for event types that should NOT be published.
-// Currently all events are published.
-func githubSkip(_ string) bool {
-	return false
+// githubSkip returns true for event types the handler acknowledges with 200 and neither
+// publishes nor records. merge_group is GitHub's merge queue building (`checks_requested`) or
+// tearing down (`destroyed`) a temporary merge commit: it names no pull request head, and
+// nothing in Legion routes on it (LEGION-99). It runs after signature verification.
+func githubSkip(event string) bool {
+	return event == "merge_group"
 }
 
 // githubSenderField extracts a string field from the sender map.

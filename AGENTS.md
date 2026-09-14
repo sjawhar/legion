@@ -125,8 +125,13 @@ way past the gate without a human review — Legion has no operator approve comm
 root architect is told so in its system prompt and adds no approval step. Whether a human must
 approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
 rule: Legion neither reads nor writes it. The merger publishes `READY` to the merge queue, which
-merges under its own authority and the repository's rules. No lifecycle labels exist; GitHub
-issues are never read or written by Legion.
+merges under its own authority and the repository's rules. Every merge into `main` goes through
+GitHub's merge queue: enqueueing a pull request makes GitHub run the `Tests` workflow's `lint`,
+`typecheck`, and `test` jobs (its `merge_group` trigger) on a temporary merge of the pull request
+onto the current `main`, and the pull request lands only if they pass — no rebase and no new
+commit on its branch, and a pull request whose combination with the moved `main` fails is dropped
+from the queue instead of merged. No lifecycle labels exist; GitHub issues are never read or
+written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.

@@ -1,0 +1,27 @@
+{
+  "action": "checks_requested",
+  "merge_group": {
+    "head_sha": "9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f",
+    "head_ref": "refs/heads/gh-readonly-queue/main/pr-1050-7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+    "base_sha": "7f60bbfb57cb2a1d0e9f8a7b6c5d4e3f2a1b0c9d",
+    "base_ref": "refs/heads/main",
+    "head_commit": {
+      "id": "9e1c7d2a4b6f8e0c1d3a5b7c9e1f2a4b6c8d0e2f",
+      "tree_id": "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c",
+      "message": "ci: run lint, typecheck, and test on merge-group commits (LEGION-99) (#1050)",
+      "timestamp": "2026-09-13T20:00:00Z",
+      "author": {"name": "legion-implementer[bot]", "email": "legion-implementer[bot]@users.noreply.github.com"},
+      "committer": {"name": "GitHub", "email": "noreply@github.com"}
+    }
+  },
+  "repository": {
+    "id": 1,
+    "name": "legion",
+    "full_name": "sjawhar/legion",
+    "private": true,
+    "owner": {"login": "sjawhar", "type": "User"},
+    "default_branch": "main"
+  },
+  "installation": {"id": 1, "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uMQ=="},
+  "sender": {"login": "github-merge-queue[bot]", "id": 118344674, "type": "Bot"}
+}
