@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -2312,6 +2312,93 @@ describe("startDaemon", () => {
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
+  });
+  it("removes a done root's workspace when the linger sweep closes its tree: the entry point hands ProcessManager its command runner (LEGION-163)", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const root = "WIDGETS-42";
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[root] = { key: root, title: "Finished root", status: "done", children: [] };
+    // A finished root past its linger deadline whose process is already gone (`recordRootExit`
+    // cleared the locator): the sweep's close has nothing to stop, only the workspace to remove.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "lingering",
+      lingerUntil: "2026-08-23T00:00:00.000Z",
+      launchFailures: 0,
+    };
+    // `removeIssueWorkspace` asks jj only when the shared clone exists (`<clone>/.jj`).
+    const clone = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    await mkdir(path.join(clone, ".jj"), { recursive: true });
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(workspaceDir, { recursive: true });
+    const commands: string[][] = [];
+    const intervals: Array<() => void> = [];
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemonTestDependencies did not supply a runner");
+    // Each `console.error` call joined whole, so a `failed to remove ...` line carries its error.
+    const errorLogs: string[] = [];
+    const consoleError = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorLogs.push(args.map(String).join(" "));
+    });
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    let workspaceDirRemains: boolean | undefined;
+
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          // The daemon runner resolves `jj` to the environment's `/tools/jj` before this fake
+          // sees it (`createDaemonRunner`).
+          runner: async (command, runnerOptions) => {
+            commands.push(command);
+            if (command[0] === "/tools/jj" && command[1] === "workspace" && command[2] === "list") {
+              return { stdout: "default\nwidgets-42\n", stderr: "", exitCode: 0 };
+            }
+            if (command[0] === "/tools/jj" && command[1] === "log") {
+              return { stdout: "aaaa\n", stderr: "", exitCode: 0 };
+            }
+            return baseRunner(command, runnerOptions);
+          },
+          setInterval: (callback) => {
+            intervals.push(callback);
+            return 1 as never;
+          },
+        },
+      });
+
+      // index.ts arms exactly one interval: the linger sweep (`processManager.expireLinger`).
+      expect(intervals).toHaveLength(1);
+      intervals[0]?.();
+      await flushEventLoopUntil(() => state.trees[root]?.status === "closed");
+      workspaceDirRemains = existsSync(workspaceDir);
+    } finally {
+      consoleError.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+
+    expect(state.trees[root]?.status).toBe("closed");
+    expect(errorLogs.filter((line) => line.includes("failed to remove the workspace of"))).toEqual(
+      []
+    );
+    expect(commands).toContainEqual([
+      "/tools/jj",
+      "workspace",
+      "forget",
+      "widgets-42",
+      "--ignore-working-copy",
+      "-R",
+      clone,
+    ]);
+    expect(errorLogs).toContain(
+      `[legion] removed the workspace of ${root} (${workspaceDir}) at the close of tree ${root}: abandoned 1 commit(s) nothing else reached`
+    );
+    expect(workspaceDirRemains).toBeFalse();
   });
   it("refuses to serve an OMP invocation without pi.agents: exits after closing the API and NATS it had opened", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
