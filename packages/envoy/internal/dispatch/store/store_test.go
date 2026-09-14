@@ -182,6 +182,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"comments_artifact_id_fkey",
 		"comments_one_owner",
 		"messages_issue_key_fkey",
+		"messages_issue_or_target",
 		"message_deliveries_pkey",
 		"message_deliveries_message_id_fkey",
 		"message_deliveries_reply_id_fkey",

@@ -10,7 +10,7 @@ import {
 } from "react";
 
 import { ApiError, api } from "../../api/client";
-import type { Agent } from "../../api/types";
+import type { Agent, CreateMessageInput, Message, MessageDeliveryMode } from "../../api/types";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -26,29 +26,86 @@ import {
 } from "../../theme/classes";
 import { type Recipient, RecipientPicker, recipientForRoute } from "./RecipientPicker";
 
-export function ConversationComposer({
-  agents = [],
-  defaultDelivery,
-  envoyError,
-  issueKey,
-  onPickerOpenChange,
-  onSent,
-  recipientSlot,
-  route,
+type DeliveryMode = "btw" | "aside" | "steer";
+
+function DeliveryModeControl({
+  delivery,
+  disabled,
+  onChange,
+  recipient,
 }: {
-  agents?: readonly Agent[];
-  defaultDelivery?: "btw" | "steer";
-  envoyError?: string;
-  issueKey: string;
-  onPickerOpenChange?: (open: boolean) => void;
-  onSent: () => void;
-  recipientSlot?: ReactNode;
-  route?: string | null;
+  delivery: DeliveryMode;
+  disabled: boolean;
+  onChange: (delivery: DeliveryMode) => void;
+  recipient: Recipient;
 }): ReactNode {
+  return (
+    <fieldset className="flex min-h-11 rounded-lg border p-0.5">
+      <legend className="sr-only">Delivery mode</legend>
+      {(["btw", "aside", "steer"] as const).map((mode) => {
+        const supported = mode === "steer" || recipient.capabilities.includes(mode);
+        const label = mode === "btw" ? "BTW" : mode === "aside" ? "Aside" : "Steer";
+        return (
+          <button
+            aria-pressed={delivery === mode}
+            className={`min-h-10 rounded px-3 text-sm font-medium ${
+              delivery === mode ? primaryButtonBg : textMutedOnSurface
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+            disabled={!supported || disabled}
+            key={mode}
+            onClick={() => onChange(mode)}
+            title={supported ? undefined : `${recipient.title} does not advertise ${label}`}
+            type="button"
+          >
+            {label}
+          </button>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+type TargetedMessageInput = {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  readonly target: string;
+};
+
+interface ConversationComposerCommonProps {
+  readonly agents?: readonly Agent[];
+  readonly defaultDelivery?: "btw" | "steer";
+  readonly embedded?: boolean;
+  readonly envoyError?: string;
+  readonly onPickerOpenChange?: (open: boolean) => void;
+  readonly onSent: () => void;
+  readonly recipientSlot?: ReactNode;
+  readonly route?: string | null;
+}
+
+type ConversationComposerProps = ConversationComposerCommonProps &
+  (
+    | { readonly issueKey: string; readonly onSend?: never }
+    | {
+        readonly issueKey?: never;
+        readonly onSend: (input: TargetedMessageInput) => Promise<Message>;
+      }
+  );
+
+export function ConversationComposer(props: ConversationComposerProps): ReactNode {
+  const {
+    agents = [],
+    defaultDelivery,
+    embedded = false,
+    envoyError,
+    onPickerOpenChange,
+    onSent,
+    recipientSlot,
+    route,
+  } = props;
   const queryClient = useQueryClient();
   const [body, setBody] = useState("");
   const [recipient, setRecipient] = useState<Recipient | null>(null);
-  const [delivery, setDelivery] = useState<"btw" | "aside" | "steer">("steer");
+  const [delivery, setDelivery] = useState<DeliveryMode>("steer");
   const [pickerOpen, setPickerOpen] = useState(false);
   const defaultRecipient = useMemo(
     () =>
@@ -80,14 +137,24 @@ export function ConversationComposer({
   }, [defaultDelivery, defaultRecipient, recipient]);
   const guard = useSubmitGuard();
   const mutation = useMutation({
-    mutationFn: (text: string) =>
-      api.createMessage(issueKey, {
+    mutationFn: (text: string) => {
+      if (props.onSend !== undefined) {
+        if (recipient === null) {
+          throw new Error("targeted message composer requires a recipient");
+        }
+        return props.onSend({ body: text, delivery, target: recipient.target });
+      }
+      const input: CreateMessageInput = {
         body: text,
         ...(recipient === null ? {} : { target: recipient.target, delivery }),
-      }),
+      };
+      return api.createMessage(props.issueKey, input);
+    },
     onSuccess: () => {
       setBody("");
-      void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+      if (props.onSend === undefined) {
+        void queryClient.invalidateQueries({ queryKey: ["events", props.issueKey] });
+      }
       onSent();
     },
     onSettled: guard.release,
@@ -113,7 +180,11 @@ export function ConversationComposer({
   return (
     <form
       aria-label="Message composer"
-      className={`${pickerOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`}
+      className={
+        embedded
+          ? `border-t pt-3 ${borderDefault}`
+          : `${pickerOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
+      }
       onSubmit={onSubmit}
     >
       <textarea
@@ -142,28 +213,12 @@ export function ConversationComposer({
           />
         )}
         {recipient === null ? null : (
-          <fieldset className="flex min-h-11 rounded-lg border p-0.5">
-            <legend className="sr-only">Delivery mode</legend>
-            {(["btw", "aside", "steer"] as const).map((mode) => {
-              const supported = mode === "steer" || recipient.capabilities.includes(mode);
-              const label = mode === "btw" ? "BTW" : mode === "aside" ? "Aside" : "Steer";
-              return (
-                <button
-                  aria-pressed={delivery === mode}
-                  className={`min-h-10 rounded px-3 text-sm font-medium ${
-                    delivery === mode ? primaryButtonBg : textMutedOnSurface
-                  } disabled:cursor-not-allowed disabled:opacity-50`}
-                  disabled={!supported || mutation.isPending}
-                  key={mode}
-                  onClick={() => setDelivery(mode)}
-                  title={supported ? undefined : `${recipient.title} does not advertise ${label}`}
-                  type="button"
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </fieldset>
+          <DeliveryModeControl
+            delivery={delivery}
+            disabled={mutation.isPending}
+            onChange={setDelivery}
+            recipient={recipient}
+          />
         )}
         <button
           className={`ml-auto min-h-11 rounded-lg px-4 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}

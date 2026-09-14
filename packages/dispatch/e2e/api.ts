@@ -7,6 +7,7 @@ import type {
   Ask,
   AskRead,
   Comment,
+  CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -333,6 +334,19 @@ export function createMessage(
 ): Promise<{ id: string }> {
   return request<{ id: string }>(
     `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
+    "POST",
+    input,
+    options
+  );
+}
+
+export function createAgentMessage(
+  sessionID: string,
+  input: CreateAgentMessageInput,
+  options: ApiOptions = {}
+): Promise<Message> {
+  return request<Message>(
+    `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
     "POST",
     input,
     options

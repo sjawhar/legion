@@ -38,6 +38,7 @@ var listIssuesQuery = `
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
+	  and (not $6::boolean or i.closed_at is null)
 	group by i.key
 	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
 `
@@ -46,13 +47,14 @@ var listPinnedIssuesQuery = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null)
 	from issues i
-	join user_issue_state s on s.issue_key = i.key and s.login = $6 and s.pinned
+	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
+	  and (not $6::boolean or i.closed_at is null)
 	group by i.key
 	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
 `
@@ -117,7 +119,8 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		updatedSince = &parsed
 	}
 	listQuery := listIssuesQuery
-	arguments := []any{project, status, parent, updatedSince, labels}
+	open := query.Get("open") == "true"
+	arguments := []any{project, status, parent, updatedSince, labels, open}
 	if pinned {
 		listQuery = listPinnedIssuesQuery
 		arguments = append(arguments, login)

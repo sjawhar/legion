@@ -71,7 +71,7 @@ export type DispatchDelivery = {
   readonly attempt: number;
   readonly mode: "btw" | "aside" | "steer";
   readonly messageID: string;
-  readonly issueKey: string;
+  readonly issueKey: string | null;
   readonly body: string;
 };
 
@@ -95,7 +95,7 @@ const DispatchTargetedFrameSchema = z
 const RecoverableDispatchDeliveryFailureSchema = z.object({
   event: z
     .object({
-      issue_key: z.string(),
+      issue_key: z.string().nullable(),
       payload: z.object({ id: z.string(), body: z.string().optional() }).passthrough(),
     })
     .passthrough(),
@@ -371,7 +371,7 @@ export function renderInbound(
         askQuestion = dispatchAskQuestion(frame.event);
         messageReplyPreview = dispatchMessageReplyPreview(frame.event);
         dispatchReply = dispatchCommentReplyWith(frame.event, subject ?? envelope.topic);
-        if (frame.event.type === "message.created" && frame.event.issue_key !== null) {
+        if (frame.event.type === "message.created") {
           const message = MessagePayloadSchema.safeParse(frame.event.payload);
           const requested = DispatchDeliveryRequestSchema.safeParse(frame.delivery);
           if (message.success && requested.success && message.data.id !== undefined) {
@@ -382,7 +382,9 @@ export function renderInbound(
               issueKey: frame.event.issue_key,
               body: message.data.body ?? envelope.payload_summary ?? "",
             };
-            dispatchReply = `dispatch_message(issue="${frame.event.issue_key}", in_reply_to="${message.data.id}", body="...")`;
+            if (frame.event.issue_key !== null) {
+              dispatchReply = `dispatch_message(issue="${frame.event.issue_key}", in_reply_to="${message.data.id}", body="...")`;
+            }
           }
         }
         dispatchEvent = {

@@ -82,7 +82,11 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		return model.Event{}, fmt.Errorf("acquire event commit order lock: %w", err)
 	}
 
-	e.Seq = lastSeq + 1
+	if e.IssueKey == nil && e.ArtifactID == nil && e.ProjectKey == nil {
+		e.Seq = 0
+	} else {
+		e.Seq = lastSeq + 1
+	}
 	e.Notify = b.Notify(e)
 
 	actor, err := json.Marshal(e.Actor)
@@ -127,10 +131,12 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		`, *e.ArtifactID, e.Seq); err != nil {
 			return model.Event{}, fmt.Errorf("advance artifact event sequence: %w", err)
 		}
-	} else if _, err := tx.Exec(ctx, `
-		update projects set last_seq = $2 where key = $1
-	`, *e.ProjectKey, e.Seq); err != nil {
-		return model.Event{}, fmt.Errorf("advance project event sequence: %w", err)
+	} else if e.ProjectKey != nil {
+		if _, err := tx.Exec(ctx, `
+			update projects set last_seq = $2 where key = $1
+		`, *e.ProjectKey, e.Seq); err != nil {
+			return model.Event{}, fmt.Errorf("advance project event sequence: %w", err)
+		}
 	}
 	return e, nil
 }
@@ -146,8 +152,15 @@ func eventOwnerKey(e model.Event) (string, error) {
 	if e.ProjectKey != nil {
 		owners++
 	}
+	if owners == 0 {
+		sessionID, err := agentEventSessionID(e)
+		if err != nil {
+			return "", err
+		}
+		return "agent:" + sessionID, nil
+	}
 	if owners != 1 {
-		return "", fmt.Errorf("event requires exactly one owner")
+		return "", fmt.Errorf("event requires at most one owner")
 	}
 	if e.IssueKey != nil {
 		return "issue:" + *e.IssueKey, nil
@@ -156,6 +169,27 @@ func eventOwnerKey(e model.Event) (string, error) {
 		return "artifact:" + *e.ArtifactID, nil
 	}
 	return "project:" + *e.ProjectKey, nil
+}
+
+func agentEventSessionID(e model.Event) (string, error) {
+	var target string
+	switch payload := e.Payload.(type) {
+	case model.Message:
+		if payload.Target != nil {
+			target = *payload.Target
+		}
+	case model.MessageEventPayload:
+		if payload.Target != nil {
+			target = *payload.Target
+		}
+	case model.MessageDeliveryEventPayload:
+		target = payload.Target
+	}
+	route, err := model.ParseRoute(target)
+	if err != nil || route.Kind != "session" {
+		return "", fmt.Errorf("ownerless event requires session target")
+	}
+	return route.ID, nil
 }
 
 func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error) {
@@ -179,12 +213,14 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 		if err != nil {
 			return 0, fmt.Errorf("lock unlinked artifact for event: %w", err)
 		}
-	default:
+	case e.ProjectKey != nil:
 		err = tx.QueryRow(ctx, `select last_seq from projects where key = $1 for update`, *e.ProjectKey).Scan(&lastSeq)
 		if err != nil {
 			return 0, fmt.Errorf("lock project for event: %w", err)
 		}
 		e.Project = *e.ProjectKey
+	default:
+		return 0, nil
 	}
 	return lastSeq, nil
 }

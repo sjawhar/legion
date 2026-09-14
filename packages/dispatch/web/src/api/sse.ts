@@ -144,6 +144,22 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   if (event.type === "subscription.remove_requested") {
     return [];
   }
+  if (
+    event.issue_key === null &&
+    (event.type === "message.created" ||
+      event.type === "message.delivery" ||
+      event.type === "message.answered")
+  ) {
+    const target = payloadString(event, "target");
+    if (
+      target === undefined ||
+      !target.startsWith("session:") ||
+      target.length === "session:".length
+    ) {
+      throw new Error("issue-less message event is missing its session target");
+    }
+    return [queryKeys.agentMessages(target.slice("session:".length))];
+  }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {
       throw new Error("document event is missing its artifact id");
@@ -257,6 +273,10 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "message.delivery" ||
     event.type === "message.answered"
   ) {
+    const target = payloadString(event, "target");
+    if (target?.startsWith("session:") && target.length > "session:".length) {
+      keys.push(queryKeys.agentMessages(target.slice("session:".length)));
+    }
     keys.push(["messages", event.issue_key], ["artifact"]);
     return keys;
   }

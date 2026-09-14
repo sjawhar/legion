@@ -145,6 +145,10 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
 	assertOpenAskCount(0)
+	openOnly := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&open=true", nil, "alice")
+	if openOnly.Code != http.StatusOK || len(decodeBody[[]model.IssueSummary](t, openOnly)) != 0 {
+		t.Fatalf("open issue list: status=%d body=%s", openOnly.Code, openOnly.Body.String())
+	}
 	if reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
 		"status": "todo",
 	}, "alice"); reopened.Code != http.StatusOK {
@@ -370,7 +374,7 @@ func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
 	}
 
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil, []string{}).Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil, []string{}, false).Scan(&planJSON); err != nil {
 		t.Fatalf("explain list query: %v", err)
 	}
 

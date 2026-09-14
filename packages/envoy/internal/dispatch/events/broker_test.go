@@ -105,7 +105,7 @@ func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 	}
 }
 
-func TestAppendRejectsEventWithoutExactlyOneOwner(t *testing.T) {
+func TestAppendRejectsEventsWithoutAValidOwnerOrAgentTarget(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
@@ -139,9 +139,9 @@ func TestAppendRejectsEventWithoutExactlyOneOwner(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "neither owner",
+			name:  "neither owner nor agent target",
 			event: model.Event{Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{}},
-			want:  "exactly one owner",
+			want:  "ownerless event requires session target",
 		},
 		{
 			name: "both owners",
@@ -152,7 +152,7 @@ func TestAppendRejectsEventWithoutExactlyOneOwner(t *testing.T) {
 				Actor:      model.Actor{Kind: "user", ID: "alice"},
 				Payload:    map[string]any{},
 			},
-			want: "exactly one owner",
+			want: "at most one owner",
 		},
 		{
 			name: "linked artifact",

@@ -730,3 +730,103 @@ func TestCreateMessageAuthenticatesBeforeReadingTheBody(t *testing.T) {
 		t.Fatalf("invalid bearer malformed JSON: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing.T) {
+	sendStatus := http.StatusOK
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			w.WriteHeader(sendStatus)
+			if sendStatus == http.StatusOK {
+				_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"error":"no live session s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+
+	nonHuman := bearerRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Can I send this?", "delivery": "btw", "actor": map[string]any{"kind": "session", "id": "s2"},
+	})
+	if nonHuman.Code != http.StatusForbidden || !strings.Contains(nonHuman.Body.String(), `"code":"HUMAN_ONLY"`) {
+		t.Fatalf("agent-authenticated creation: status=%d body=%s", nonHuman.Code, nonHuman.Body.String())
+	}
+
+	first := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "First question", "delivery": "btw",
+	}, "alice")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first issue-less message: status=%d body=%s", first.Code, first.Body.String())
+	}
+	firstMessage := decodeBody[model.Message](t, first)
+	if firstMessage.Target == nil || *firstMessage.Target != "session:s1" ||
+		len(firstMessage.Deliveries) != 1 || firstMessage.Deliveries[0].State != "sent" {
+		t.Fatalf("first issue-less message = %#v", firstMessage)
+	}
+	var sequence int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select seq from events where issue_key is null order by id limit 1`,
+	).Scan(&sequence); err != nil {
+		t.Fatalf("read issue-less message event sequence: %v", err)
+	}
+	if sequence != 0 {
+		t.Fatalf("issue-less message event sequence = %d, want 0", sequence)
+	}
+
+	sendStatus = http.StatusNotFound
+	failed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Second question", "delivery": "btw",
+	}, "alice")
+	if failed.Code != http.StatusCreated {
+		t.Fatalf("failed issue-less message: status=%d body=%s", failed.Code, failed.Body.String())
+	}
+	failedMessage := decodeBody[model.Message](t, failed)
+	if len(failedMessage.Deliveries) != 1 || failedMessage.Deliveries[0].State != "failed" ||
+		failedMessage.Deliveries[0].Error == nil || *failedMessage.Deliveries[0].Error != "no live session s1" {
+		t.Fatalf("failed issue-less delivery = %#v", failedMessage.Deliveries)
+	}
+
+	sendStatus = http.StatusOK
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+failedMessage.ID+"/deliveries",
+		map[string]any{"delivery": "steer"}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry issue-less delivery: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	retried := decodeBody[model.MessageDelivery](t, retry)
+	if retried.Attempt != 2 || retried.State != "sent" {
+		t.Fatalf("retried issue-less delivery = %#v", retried)
+	}
+
+	reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+failedMessage.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": retried.Attempt, "body": "It is ready.",
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("reply to issue-less message: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+
+	if _, err := database.Pool.Exec(context.Background(),
+		`update messages set created_at = created_at + interval '1 second' where id = $1`, failedMessage.ID,
+	); err != nil {
+		t.Fatalf("order issue-less messages: %v", err)
+	}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list agent messages: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	messages := decodeBody[[]struct {
+		Message model.Message   `json:"message"`
+		Replies []model.Message `json:"replies"`
+	}](t, listed)
+	if len(messages) != 2 || messages[0].Message.ID != failedMessage.ID ||
+		len(messages[0].Message.Deliveries) != 2 || len(messages[0].Replies) != 1 ||
+		messages[0].Replies[0].Body != "It is ready." || messages[1].Message.ID != firstMessage.ID {
+		t.Fatalf("agent messages = %#v", messages)
+	}
+}

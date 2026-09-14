@@ -17,6 +17,7 @@ import type {
   BlockSchema,
   Comment,
   CommentRead,
+  CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -93,6 +94,7 @@ export function isRetryableQueryError(error: unknown): boolean {
 export interface ListIssuesOptions {
   pinned?: boolean;
   project?: string;
+  open?: boolean;
   status?: string;
   parent?: string;
   updated_since?: string;
@@ -330,6 +332,14 @@ export class DispatchApiClient {
 
   createMessage(key: string, input: CreateMessageInput): Promise<Message> {
     return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
+  }
+
+  createAgentMessage(sessionID: string, input: CreateAgentMessageInput): Promise<Message> {
+    return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input);
+  }
+
+  listAgentMessages(sessionID: string): Promise<MessageRead[]> {
+    return this.json<MessageRead[]>(`/api/v1/agents/${pathSegment(sessionID)}/messages`);
   }
 
   createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {
