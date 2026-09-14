@@ -106,7 +106,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   const thread = margin.getByTestId(`thread-${ask.id}`);
 
   // Alice asks back from the same compact composer that can submit her answer.
-  await card.getByRole("button", { name: "Answer in your own words" }).click();
+  await card.getByRole("button", { name: "Add a note or answer in your own words" }).click();
   await card.getByLabel("Your answer").fill("Any blockers first?");
   await card.getByRole("button", { name: "Ask back" }).click();
   await expect(thread.getByText("Any blockers first?")).toBeVisible();

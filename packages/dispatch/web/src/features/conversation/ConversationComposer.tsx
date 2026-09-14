@@ -1,7 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type FormEvent,
-  type KeyboardEvent,
   type ReactNode,
   type SyntheticEvent,
   useEffect,
@@ -12,6 +11,7 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import type { Agent } from "../../api/types";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
@@ -103,12 +103,6 @@ export function ConversationComposer({
     const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight);
     textarea.style.height = `${Math.min(textarea.scrollHeight, 8 * lineHeight)}px`;
   };
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      submit();
-    }
-  };
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     submit();
@@ -128,7 +122,7 @@ export function ConversationComposer({
         disabled={mutation.isPending}
         onChange={(event) => setBody(event.target.value)}
         onInput={resize}
-        onKeyDown={onKeyDown}
+        onKeyDown={(event) => submitOnModifiedEnter(event)}
         rows={1}
         value={body}
       />
@@ -180,7 +174,7 @@ export function ConversationComposer({
         </button>
       </div>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-        Enter to send · Shift+Enter for a new line
+        Ctrl/Cmd+Enter to send · Enter for a new line
       </p>
       {envoyError === undefined ? null : (
         <p className={`mt-2 text-sm ${dangerText}`}>Envoy unreachable: {envoyError}</p>

@@ -28,7 +28,7 @@ function renderComposer(recipientSlot?: ReactNode) {
   );
 }
 
-test("Enter sends a message while Shift+Enter keeps it in the composer", async () => {
+test("Enter keeps a multiline message in the composer while Ctrl+Enter sends it", async () => {
   const originalCreateMessage = api.createMessage;
   const sent: string[] = [];
   let sentCount = 0;
@@ -53,12 +53,14 @@ test("Enter sends a message while Shift+Enter keeps it in the composer", async (
     };
     const field = screen.getByLabelText("Message") as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "line one" } });
-    fireEvent.keyDown(field, { key: "Enter", shiftKey: true });
+    expect(fireEvent.keyDown(field, { key: "Enter" })).toBe(true);
     expect(sent).toEqual([]);
 
-    fireEvent.keyDown(field, { key: "Enter" });
+    fireEvent.change(field, { target: { value: "line one\nline two" } });
+    expect(field.value).toBe("line one\nline two");
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
 
-    await waitFor(() => expect(sent).toEqual(["line one"]));
+    await waitFor(() => expect(sent).toEqual(["line one\nline two"]));
     await waitFor(() => expect(field.value).toBe(""));
     expect(sentCount).toBe(1);
   } finally {
@@ -82,7 +84,7 @@ test("a failed message keeps the draft and can be retried", async () => {
     };
     const field = screen.getByLabelText("Message") as HTMLTextAreaElement;
     fireEvent.change(field, { target: { value: "keep me" } });
-    fireEvent.keyDown(field, { key: "Enter" });
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
 
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't send — boom");
     expect(field.value).toBe("keep me");

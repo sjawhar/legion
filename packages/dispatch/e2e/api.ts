@@ -16,6 +16,7 @@ import type {
   EditAskInput,
   Event,
   Issue,
+  IssueDetails,
   IssueReferences,
   Message,
   MessageDelivery,
@@ -74,8 +75,13 @@ export function createProject(input: CreateProjectInput, login = "alice"): Promi
   return request<Project>("/api/v1/projects", "POST", input, { login });
 }
 
-export function getIssue(key: string, options: ApiOptions = {}): Promise<Issue> {
-  return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "GET", undefined, options);
+export function getIssue(key: string, options: ApiOptions = {}): Promise<IssueDetails> {
+  return request<IssueDetails>(
+    `/api/v1/issues/${encodeURIComponent(key)}`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 export function getIssueEvents(

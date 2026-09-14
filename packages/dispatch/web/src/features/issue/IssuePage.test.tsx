@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
-import type { Ask, InboxRow, IssueDetails, Subscriber } from "../../api/types";
+import type { Ask, InboxRow, IssueDetails, Subscriber, UserIssueState } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/Margin";
 import { IssuePage } from "./IssuePage";
@@ -81,7 +81,8 @@ function issueWithExternalLink(url: string): IssueDetails {
 function stubIssuePage(
   nextIssue: IssueDetails,
   inbox: InboxRow[] = [],
-  subscribers: Subscriber[] = []
+  subscribers: Subscriber[] = [],
+  state: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false }
 ): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
@@ -91,15 +92,15 @@ function stubIssuePage(
   const originalGetIssueSubscribers = api.getIssueSubscribers;
   api.getIssue = async () => nextIssue;
   api.getInbox = async () => inbox;
-  api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
+  api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
   api.listAgents = async () => [];
   api.getIssueSubscribers = async () => subscribers;
   return () => {
     api.getIssue = originalGetIssue;
-    api.getIssueEvents = originalGetIssueEvents;
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
+    api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };
@@ -1194,6 +1195,8 @@ test("IssuePage keeps state actions available while approval awaits", async () =
     await screen.findByRole("heading", { level: 1, name: issue.title });
     const pin = screen.getByRole("button", { name: "Pin issue" });
     expect(pin).not.toBeNull();
+    expect(pin.getAttribute("aria-pressed")).toBe("false");
+    expect(pin.querySelector("path")?.getAttribute("fill")).toBe("none");
 
     const stateActions = screen.getByTestId("issue-state-actions");
     expect(within(stateActions).getByRole("combobox", { name: "Status" })).not.toBeNull();
@@ -1201,6 +1204,21 @@ test("IssuePage keeps state actions available while approval awaits", async () =
     expect(within(stateActions).getByRole("button", { name: "Awaiting approval" })).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Approve" })).not.toBeNull();
     expect(within(stateActions).getByRole("button", { name: "Close issue" })).not.toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage fills and marks the issue pin when it is pinned", async () => {
+  const restore = stubIssuePage(issue, [], [], { dismissed: [], last_read_seq: 0, pinned: true });
+  const view = renderIssuePage("/issues/CORE-1/conversation");
+
+  try {
+    await screen.findByRole("heading", { level: 1, name: issue.title });
+    const pin = screen.getByRole("button", { name: "Unpin issue" });
+    expect(pin.getAttribute("aria-pressed")).toBe("true");
+    expect(pin.querySelector("path")?.getAttribute("fill")).toBe("currentColor");
   } finally {
     view.unmount();
     restore();

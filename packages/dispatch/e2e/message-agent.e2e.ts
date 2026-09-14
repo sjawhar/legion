@@ -85,7 +85,7 @@ test("the Message composer lists live roles and sessions, then sends the selecte
         response.status() === 201
     );
     await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Enter");
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     const request = await sent;
     expect(request.request().postDataJSON()).toMatchObject({
       body: question,
@@ -121,7 +121,7 @@ test("a route preselects its role and displays a bearer reply from another sessi
         response.status() === 201
     );
     await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Enter");
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     const message = (await (await sent).json()) as { id: string };
 
     await createMessage(
@@ -157,7 +157,7 @@ test("a listener rejection leaves a capability-aware retry path that succeeds af
         response.status() === 201
     );
     await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Enter");
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     await sent;
     const card = targetedCard(page, question);
     await expect(card).toContainText("Failed: no live session B");

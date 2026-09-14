@@ -1,6 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createIssueArtifact, createProject, editArtifact, patchIssue } from "./api";
+import {
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  editArtifact,
+  getIssue,
+  patchIssue,
+  resolveAsk,
+} from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -72,10 +80,105 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
 
     const form = ask.locator("form");
     await expect(form).toBeVisible({ timeout: 10_000 });
-    await form.locator('textarea[name="answer"]').fill("Yes.");
-    await form.getByRole("button", { name: "Answer" }).click();
+    const answer = form.locator('textarea[name="answer"]');
+    await answer.fill("Yes.");
+    await answer.press("Enter");
+    await expect(answer).toHaveValue("Yes.\n");
+    await answer.press("Control+Enter");
     await expect(ask).toContainText("Answered by alice");
     await expect(ask).toContainText("Yes.");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a resolved decision block is read-only", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Resolved ask" });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#resolved-decision urgency="med" multiple="false" state="open"}\nShould we ship?\n\n- Ship\n- Hold\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  await expect
+    .poll(
+      async () =>
+        (await getIssue(issue.key)).open_asks.some(
+          (candidate) => candidate.block_id === "resolved-decision"
+        ),
+      { timeout: 10_000 }
+    )
+    .toBe(true);
+  const blockAsk = (await getIssue(issue.key)).open_asks.find(
+    (candidate) => candidate.block_id === "resolved-decision"
+  );
+  if (blockAsk === undefined) {
+    throw new Error("resolved decision ask was not created");
+  }
+  await resolveAsk(
+    blockAsk.id,
+    { kind: "resolved", reason: "The decision is no longer needed." },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="resolved-decision"]');
+    await expect(ask.getByText("Resolved", { exact: true })).toBeVisible();
+    await expect(ask.locator("form")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a failed in-document decision answer identifies the failed block", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Failing ask" });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#failing-decision urgency="med" multiple="false" state="open"}\nShould we ship?\n\n- Ship\n- Hold\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.route("**/api/v1/asks/*/answer", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ error: "simulated failure" }),
+        contentType: "application/json",
+        status: 500,
+      });
+    });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("navigation", { name: "Open decisions" })).toBeVisible();
+    const ask = documentEditor(page).locator('[data-dispatch-ask-block="failing-decision"]');
+    const form = ask.locator("form");
+    await expect(form).toBeVisible({ timeout: 10_000 });
+    const error = page.getByRole("article", { name: "Document" }).getByRole("alert");
+    await expect(error).toHaveCount(0);
+    await form.locator('textarea[name="answer"]').fill("Ship after review.");
+    await form.getByRole("button", { name: "Answer" }).click();
+    await expect(error).toHaveAttribute("data-dispatch-ask-error", "failing-decision");
+    await expect(error).toHaveText("Could not save your answer.");
   } finally {
     await alice.close();
   }

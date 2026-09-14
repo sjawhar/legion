@@ -5,6 +5,7 @@ import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { api } from "../../api/client";
 import type { Ask, AskRead, AskResolution, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
   borderDefault,
   borderStrong,
@@ -167,6 +168,7 @@ export function AskThread({
               disabled={isPending}
               id={replyFieldId}
               onChange={(event) => setBody(event.target.value)}
+              onKeyDown={(event) => submitOnModifiedEnter(event)}
               value={body}
             />
           </label>

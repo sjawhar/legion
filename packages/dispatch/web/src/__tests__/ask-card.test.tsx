@@ -417,7 +417,7 @@ test("AskCard submits on Ctrl+Enter but not on plain Enter", async () => {
   }
 });
 
-test("AskCard submits typed free text without inventing a selected option", async () => {
+test("AskCard submits a selected Other option with free text", async () => {
   const submitted: AnswerAskInput[] = [];
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
@@ -433,6 +433,8 @@ test("AskCard submits typed free text without inventing a selected option", asyn
 
   try {
     const submit = view.getByRole("button", { name: "Answer" });
+    const other = await view.findByRole("radio", { name: "Other" });
+    fireEvent.click(other);
     expect(submit.hasAttribute("disabled")).toBe(true);
     fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Try a hybrid" } });
     expect(submit.hasAttribute("disabled")).toBe(false);
@@ -654,6 +656,7 @@ test("an action-kind ask keeps its age and fixed options in the shared answer fo
     const card = view.getByTestId("ask-ask-1");
     expect(within(card).getByText("Action", { exact: true })).toBeTruthy();
     expect(within(card).getByText("35m", { exact: true })).toBeTruthy();
+    expect(within(card).queryByRole("radio", { name: "Other" })).toBeNull();
     const cannot = await within(card).findByRole("radio", { name: "Can't" });
     fireEvent.click(cannot);
     const answer = within(card).getByRole("button", { name: "Answer" });
@@ -734,6 +737,74 @@ test("AskCard submits selected options alongside a typed note", async () => {
     await waitFor(() =>
       expect(submitted).toEqual([
         { selected: ["Docs"], text: "Also update the wiki", expected_edited_at: null },
+      ])
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard requires text when Other is selected with real multiple options", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const input = ask({ multiple: true, options: [{ label: "Docs" }, { label: "Tests" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("checkbox", { name: "Docs" }));
+    fireEvent.click(view.getByRole("checkbox", { name: "Other" }));
+    const answer = view.getByRole("button", { name: "Answer" });
+    expect(answer.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(view.getByLabelText("Your answer"), {
+      target: { value: "Also update the guide." },
+    });
+    expect(answer.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(answer);
+
+    await waitFor(() =>
+      expect(submitted).toEqual([
+        {
+          selected: ["Docs"],
+          text: "Also update the guide.",
+          expected_edited_at: null,
+        },
+      ])
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard submits a selected single option with added context", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        return answered(input, submission.selected, submission.text ?? null);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "After review." } });
+    fireEvent.click(view.getByRole("button", { name: "Answer" }));
+
+    await waitFor(() =>
+      expect(submitted).toEqual([
+        { selected: ["Ship"], text: "After review.", expected_edited_at: null },
       ])
     );
   } finally {
@@ -1261,7 +1332,7 @@ test("asking back from a document ask posts an artifact comment and keeps the se
   }
 });
 
-test("AskCard compact variant keeps quick options visible and reveals own words on demand", async () => {
+test("AskCard compact variant exposes Other as a quick answer and opens own words", async () => {
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
     <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
@@ -1272,8 +1343,27 @@ test("AskCard compact variant keeps quick options visible and reveals own words 
     expect(await within(card).findByRole("button", { name: "Ship" })).toBeTruthy();
     expect(within(card).queryByLabelText("Your answer")).toBeNull();
 
-    const ownWords = within(card).getByText("Answer in your own words", { exact: true });
-    fireEvent.click(ownWords);
+    fireEvent.click(within(card).getByRole("button", { name: "Other" }));
+    expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard compact variant keeps its note disclosure available after selecting an option", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    const ship = await within(card).findByRole("button", { name: "Ship" });
+    fireEvent.click(ship);
+    expect(ship.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(
+      within(card).getByRole("button", { name: "Add a note or answer in your own words" })
+    );
     expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
   } finally {
     view.unmount();

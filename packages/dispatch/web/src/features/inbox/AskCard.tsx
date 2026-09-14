@@ -4,6 +4,7 @@ import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { copyText } from "../../lib/clipboard";
 import {
   askUrgencyAccent,
@@ -94,6 +95,7 @@ export function AskCard({
     isApproval,
     isSubmitting,
     mutation,
+    otherSelected,
     questionChoice,
     selectRealOption,
     selected,
@@ -102,7 +104,7 @@ export function AskCard({
     setAnswerText,
     setQuestionChoice,
     submit,
-    submitFromKeyboard,
+    toggleOther,
     submitGuard,
     threadQuery,
     trimmedAnswer,
@@ -165,7 +167,7 @@ export function AskCard({
           setAnswerText(event.target.value);
           setQuestionChoice(false);
         }}
-        onKeyDown={submitFromKeyboard}
+        onKeyDown={(event) => submitOnModifiedEnter(event)}
         placeholder={answerPlaceholder}
         rows={2}
         value={answerText}
@@ -346,6 +348,20 @@ export function AskCard({
                   </button>
                 );
               })}
+              {isApproval || isAction ? null : (
+                <button
+                  aria-pressed={otherSelected}
+                  className={`flex min-h-11 items-center gap-2 rounded-full border ${borderDefault} ${cardHoverBorder}`}
+                  disabled={isSubmitting}
+                  onClick={() => {
+                    toggleOther();
+                    setOwnWordsOpen(true);
+                  }}
+                  type="button"
+                >
+                  <Pill tone={otherSelected ? "selected-label" : "label"}>Other</Pill>
+                </button>
+              )}
             </div>
             {selected.length === 0 ? null : (
               <button
@@ -387,6 +403,20 @@ export function AskCard({
                 </label>
               );
             })}
+            {isApproval || isAction ? null : (
+              <label
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
+              >
+                <input
+                  checked={otherSelected}
+                  disabled={isSubmitting}
+                  name={`ask-${displayedAsk.id}`}
+                  onChange={toggleOther}
+                  type={displayedAsk.multiple ? "checkbox" : "radio"}
+                />
+                <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
+              </label>
+            )}
           </fieldset>
         )}
         {isCompact ? (
@@ -398,7 +428,7 @@ export function AskCard({
               onClick={() => setOwnWordsOpen((open) => !open)}
               type="button"
             >
-              Answer in your own words
+              Add a note or answer in your own words
             </button>
             {ownWordsOpen ? (
               <div className="space-y-3 pt-3" id={`${answerFieldId}-disclosure`}>

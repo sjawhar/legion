@@ -321,7 +321,7 @@ test("Conversation coalesces answered asks and toggles activity without remounti
   }
 });
 
-test("Conversation divides unread turns by day, sends with Enter, and jumps to newer turns", async ({
+test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps to newer turns", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -401,7 +401,7 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
       }
     });
     await message.fill("Hello from alice");
-    await message.press("Shift+Enter");
+    await message.press("Enter");
     await expect(message).toHaveValue("Hello from alice\n");
     expect(sentRequests).toBe(0);
     const request = page.waitForRequest(
@@ -409,7 +409,7 @@ test("Conversation divides unread turns by day, sends with Enter, and jumps to n
         candidate.method() === "POST" &&
         candidate.url().endsWith(`/api/v1/issues/${issue.key}/messages`)
     );
-    await message.press("Enter");
+    await message.press("Control+Enter");
     await request;
     const sentTurn = turn(page, "Hello from alice");
     await expect(sentTurn).toBeVisible();
