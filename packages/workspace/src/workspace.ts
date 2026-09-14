@@ -348,7 +348,10 @@ export async function provisionIssueWorkspace(
   // creates the workspace on the bookmark's one commit, or at `main` creating the bookmark when
   // none resolved, and stops before registering anything when the bookmark is conflicted. A
   // workspace that already exists gets no bookmark command here — present or absent, the bookmark
-  // is left exactly as the fetch and the workers left it.
+  // is left exactly as the fetch and the workers left it. The fetch may delete the bookmark
+  // together with its merged remote branch, but it never abandons the branch's commits or rewrites
+  // a workspace's working copy: `git.abandon-unreachable-commits` is `false` in the clone's
+  // per-repo jj settings before every fetch (LEGION-84).
   const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);
@@ -362,6 +365,36 @@ export async function provisionIssueWorkspace(
   );
   try {
     await ensureRepoClone(deps, repoCloneDir, owner, repo, credential.env);
+    // Checked on every provisioning, not only at clone time (the production clone predates this
+    // rule), and before the fetch, the one command it governs: in a clone shared by one workspace
+    // per issue, a commit Git no longer reaches is still somebody's work, so jj's default of
+    // abandoning it (and rebasing the working copy above it) is the wrong rule here. jj keeps a
+    // repo's settings in the user's config directory (`jj config path --repo`:
+    // `~/.config/jj/repos/<config-id>/config.toml`, the id from `<clone>/.jj/repo/config-id`), so
+    // every workspace of the clone and every pane's own jj read it. The read records no operation
+    // and snapshots nothing; the write — in place, not atomic, and parsed by every jj command on
+    // the box at start-up — runs only when the read did not already say `false`, so the steady
+    // state never writes. Neither carries the credential.
+    const setting = await runChecked(deps, [
+      "jj",
+      "config",
+      "get",
+      "git.abandon-unreachable-commits",
+      "-R",
+      repoCloneDir,
+    ]);
+    if (setting.stdout.trim() !== "false") {
+      await runChecked(deps, [
+        "jj",
+        "config",
+        "set",
+        "--repo",
+        "git.abandon-unreachable-commits",
+        "false",
+        "-R",
+        repoCloneDir,
+      ]);
+    }
     await runChecked(deps, ["jj", "git", "fetch", "-R", repoCloneDir], {
       env: credential.env,
     });
