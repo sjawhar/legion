@@ -1,0 +1,43 @@
+{
+  "event": "COMMENT",
+  "reviewId": 5204093382,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1107#pullrequestreview-5204093382",
+  "reviewedHead": "7b49e4606979065d110c932ace5934a7a922ca0e",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1107",
+  "summary": "No correctness finding at 7b49e460. The diff is exactly the plan's four changes (index.ts `run: runner,`; the constructor guard as the first statement naming `deps.config.runtime.name`, with `workspaceCommandRunner`'s own throw left in place; the startDaemon-level test in index.test.ts and the refusal test + Kubernetes companion via `omitRun` in processes.test.ts; one AGENTS.md sentence) plus the four rig one-liners the guard forced. `ProcessManagerDeps.run` stays optional, runtime.ts is untouched, no sweep/retry/LEGION-143 change, no scratch daemon. COMMENT because the head carries `.legion/`; the only remaining work is the `.legion/` deletion push, after which the reviewer approves that head by SHA.",
+  "verifiedOnGitHub": {
+    "ci": "check-runs at 7b49e460: lint, typecheck, test (Tests run 34909984797) and pr-title (runs 34909984817, 34910011849, 34910103190, 34910475252) all success; run 34909731084 at a03931a2 red on the ten rig constructions db7f5e91 fixed",
+    "threads": "GraphQL reviewThreads empty before this review; this review opened no thread (comments: [])",
+    "e2eImplementer": "present; surface index.test.ts startDaemon harness, command, observation, head db7f5e91 (ancestor of 7b49e460), negative control on af232beb",
+    "e2eTester": "present; same surface plus ProcessManager construction, head 7b49e460, two negative controls (run: runner deleted at head -> constructor refusal before the API binds; Kubernetes companion flipped -> same refusal), verification method stated"
+  },
+  "localReruns": "bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163 -> 1 pass, 6 expect() calls; bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-163|retains its tree volume|removes the workspaces of a done root\" -> 3 pass, 16 expect() calls (at 7b49e460 in the shared workspace)",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at 7b49e4606979065d110c932ace5934a7a922ca0e: no blocking or non-blocking findings; one fast-follow wording item (processes.test.ts:622-623 stale `manager()` comment saying ProcessManagerDeps has no run) and notes only (toHaveLength(1) interval pin; workspaceCommandRunner's throw now unreachable, kept per spec; omitRun with an options.run override would drop the override, no caller does)",
+  "judgedObservations": [
+    {
+      "observation": "test.json #38 (implementer negative-control wording)",
+      "decision": "acceptable; no PR-body correction. The PR body's E2E (implementer) negative control names af232beb and does not claim head reproducibility; the `Reproducible at the PR head` sentence exists only in .legion/implement.json, removed by the .legion/ deletion; the tester's line records the head's actual failure mode."
+    },
+    {
+      "observation": "test.json #37 (NATS opened at index.ts:468 before new ProcessManager at :528; a throw there reaches startDaemon's catch at :261-265 which aborts probes and releases the instance lock but does not close NATS)",
+      "decision": "pre-existing shape shared by every throw in that window (both runtime constructors included); out of scope for this fix; note for the architect; legion start exits 1 so the connection dies with the process and the spec's Errors row holds. No LEGION issue filed on this evidence."
+    }
+  ],
+  "fastFollow": "packages/daemon/src/daemon/__tests__/processes.test.ts:622-623 — reword the `manager()` comment (`ProcessManagerDeps` has none) to say the same `run` feeds both TmuxRuntimeDeps.run and ProcessManagerDeps.run; wording only; lands with the next PR that touches manager(), never in the .legion/ deletion push",
+  "nextSteps": "Architect sends the implementer to push the .legion/ deletion (head must differ from 7b49e460 by that deletion alone; the tester's e74270ec and the reviewer's handoff commit ride the push and are removed by the deletion commit). Reviewer then confirms the new head differs only by the deletion and approves it by SHA via the reviews API; no thread to resolve (none opened).",
+  "roundOutcome": "clean",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts",
+      "line": "622-623",
+      "description": "Fast-follow wording only: the `manager()` comment says `ProcessManagerDeps` has no `run`; stale since LEGION-104 and now contradicted by the constructor guard and the helper's own `omitRun` comment at :688. Not a thread; named in the review body's Fast-follow line."
+    }
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T23:59:36.863Z"
+}
