@@ -112,16 +112,16 @@ saw it.
 
 ## A bookmark on an unsnapshotted `@` moves with the next snapshot
 
-Provisioning creates the bookmark with `jj bookmark set legion/X -r @` on the fresh working copy,
-then writes `.omp/config.yml` into it. The next jj command in that workspace snapshots the file,
-rewriting `@`, and **the bookmark moves with the rewrite** (its target is `@`, and `@` was
-rewritten in place). Two consequences:
+Provisioning creates the bookmark with `jj bookmark set legion/X -r @` on a fresh working copy.
+If uncommitted work subsequently accumulates in `@`, the next jj command snapshots it, rewriting
+`@`, and **the bookmark moves with the rewrite** (its target is `@`, and `@` was rewritten in
+place). Two consequences:
 
 1. A test of the fetch-deletion rule must make the pushed commit the bookmark's *final* target:
-   snapshot (`jj status` in the workspace) or advance (`jj new`) **before** pushing, or the later
-   snapshot moves the local bookmark off the pushed commit and the fetch keeps it (rule above).
-   Real workers always leave `@` above the pushed head, so the snapshot step is also the
-   production shape, not a test artefact.
+   snapshot (`jj status` in the workspace) or advance (`jj new`) **before** pushing, or a later
+   snapshot can move the local bookmark off the pushed commit and the fetch keeps it (rule above).
+   Real workers leave `@` above the pushed head, so this is the production shape, not a test
+   artefact.
 2. `jj workspace update-stale` loads the repo **at the workspace's last-recorded operation** and
    snapshots there — a divergent operation — before `Concurrent modification detected, resolving
    automatically`. If the bookmark sat on the unsnapshotted `@` at that recorded operation and the

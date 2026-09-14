@@ -61,12 +61,12 @@ the wrong App back on its commits.
 A phase's work is carved out of the workspace's working-copy commit with `jj split`; both halves
 keep that commit's author, and only the committer becomes the identity running the split. The
 working-copy commit is born under whoever ran `jj workspace add` — the daemon, under its own user
-config — and while provisioning's `.omp/config.yml` sits in the working copy a split never
-empties it, so jj never recreates it. Per-process identity alone therefore fixes the committer
-and leaves every commit in the workspace authored by the daemon operator, for the workspace's
-whole life. Evidence at the time of the fix: `legion/LEGION-42`'s commits were author
-`legion-reviewer[bot]` / committer `legion-implementer[bot]` — the author was whatever the repo
-config said when the daemon ran `workspace add`, inherited by every split since.
+config — and a split preserves that author even when it leaves the original working copy empty.
+Per-process identity alone therefore fixes the committer and can leave every commit in the
+workspace authored by the daemon operator for the workspace's whole life. Evidence at the time of
+the fix: `legion/LEGION-42`'s commits were author `legion-reviewer[bot]` / committer
+`legion-implementer[bot]` — the author was whatever the repo config said when the daemon ran
+`workspace add`, inherited by every split since.
 
 Consequence: the working copy is adopted for the role at the moment the role takes over:
 

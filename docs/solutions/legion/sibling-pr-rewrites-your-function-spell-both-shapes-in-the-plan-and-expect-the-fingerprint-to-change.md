@@ -79,9 +79,10 @@ jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin   # t
 ```
 
 The chain included the tester's and reviewer's local handoff commits (the review App cannot
-push, so they ride on the implementer's next push) and the undescribed working-copy commit
-holding `.omp/config.yml`. Two files conflicted; resolve each in the working copy, then squash
-into the commit that owns the file so the descendants re-apply:
+push, so they ride on the implementer's next push) and an undescribed working-copy commit. In
+this historical rebase, before LEGION-58, that commit held `.omp/config.yml`. Two files
+conflicted; resolve each in the working copy, then squash into the commit that owns the file so
+the descendants re-apply:
 
 ```sh
 jj -R "$LEGION_WORKSPACE" squash --into <task-1 change id> packages/daemon/src/daemon/reducers.ts
@@ -160,17 +161,12 @@ and a rebase on top of it.
 
 ## 6. `jj split` keeps the change id on the *selected* half
 
-After your push, `@` is the undescribed working-copy commit holding `.omp/config.yml`, and it
-is where the next role's jj commands land in the shared workspace. `jj split -m … <path>` gives
-the **selected** paths the original change id and mints a new one for the remainder — so the
-tester's `test: record handoff (round 2)` commit carried what had been *my* `@` change id
-(`oqosmssm`), and my `.omp/config.yml` moved to a fresh id. Nothing is wrong; but track the
-chain by commit id and `jj diff -r <commit> --summary`, never by "my change id", and confirm
-before every push that the only commit touching `.omp/config.yml` is `@`:
-
-```sh
-jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@ & files(".omp/config.yml")' --no-graph -T 'change_id.short() ++ " | " ++ description.first_line() ++ "\n"'
-```
+After your push, `@` is the undescribed working-copy commit where the next role's jj commands
+write. `jj split -m … <path>` gives the **selected** paths the original change id and mints a new
+one for the remainder — so the tester's `test: record handoff (round 2)` commit carried what had
+been *my* `@` change id (`oqosmssm`). Nothing is wrong; track the chain by commit id and
+`jj diff -r <commit> --summary`, never by "my change id". Before every push, confirm `@` is clean
+and `@-` contains exactly the paths the commit describes.
 
 ## Related
 

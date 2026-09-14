@@ -37,7 +37,7 @@ Two regression tests (`retires a ready-time worker whose socket closes after ack
 task … (workerCap 1|2)`) waited for the cold relaunch with `flushEventLoopUntil(() => paneId ===
 "%302")` — a budget of 5000 `setImmediate` ticks, each a few microseconds. The relaunch path does
 real filesystem work: `stat` of the recorded session file, `mkdir`/`writeFile` of the boot-token
-secret file and the workspace `.omp/config.yml`, `mkdir` of the socket dir. Completion of real I/O is
+secret file, workspace provisioning, and `mkdir` of the socket dir. Completion of real I/O is
 not tick-bounded. At loadavg ~110–130 the budget expired mid-relaunch in 2 of 8 whole-file runs,
 always *after* the daemon had logged `respawning …` — the behaviour was correct, the wait was wrong.
 One run also printed `recorded OMP session file is missing`: the test had already failed, `afterAll`

@@ -380,7 +380,7 @@ describe("provisionIssueWorkspace", () => {
     expect(
       (await readdir(path.dirname(repoCloneDir))).filter((entry) => entry.startsWith("widgets."))
     ).toEqual([]);
-    expect(await readFile(path.join(workspaceDir, ".omp", "config.yml"), "utf8")).toBe("");
+    expect(existsSync(path.join(workspaceDir, ".omp", "config.yml"))).toBeFalse();
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
   });
 
@@ -886,11 +886,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
-      // The worker's first jj command snapshots the `.omp/config.yml` provisioning wrote, moving the
-      // bookmark with `@` on the main operation line. Without it, the second provision's
-      // `update-stale` snapshots on a divergent operation (jj loads the repo at the workspace's last
-      // recorded operation), moves the bookmark there too, and the reconciliation conflicts it with
-      // the `sibling-advance` move below — a jj behaviour, not a bookmark this code touched.
+      // Snapshot the initial working copy so later concurrent workspace operations exercise its
+      // recorded jj state.
       await jj(["status"], { cwd: workspaceDir });
       await jj(workspaceAddCommand(siblingDir, "sibling", "main", repoCloneDir).slice(1));
       await jj(["new", "-m", "sibling advancement"], { cwd: siblingDir });
@@ -944,10 +941,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       const firstProvisioning = calls.slice(0, 3);
-      // The worker's work: a file the pushed commit carries. Snapshotting it (together with the
-      // `.omp/config.yml` provisioning wrote) makes that commit the bookmark's final target — jj
-      // deletes a local bookmark on fetch only while it still points where the deleted remote
-      // branch did.
+      // The worker's work is a file the pushed commit carries. Snapshotting it makes that commit
+      // the bookmark's final target — jj deletes a local bookmark on fetch only while it still
+      // points where the deleted remote branch did.
       await writeFile(path.join(workspaceDir, "feature.txt"), "shipped\n", "utf8");
       await jj(["status"], { cwd: workspaceDir });
       await jj(

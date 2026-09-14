@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { controllerToken, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import {
@@ -110,13 +110,6 @@ export function withOmpLaunchPrefix(
 ): string {
   if (launchPrefix.length === 0) return ompInvocation;
   return `${launchPrefix.map(shellPath).join(" ")} ${ompInvocation}`;
-}
-
-/** The controller's working directory carries an empty project-level OMP config so the pane's
- * OMP never picks up some unrelated project's settings from a parent directory. */
-async function writeOmpConfig(directory: string): Promise<void> {
-  await mkdir(path.join(directory, ".omp"), { recursive: true });
-  await writeFile(path.join(directory, ".omp", "config.yml"), "", "utf8");
 }
 
 export interface TmuxRuntimeDeps {
@@ -453,7 +446,7 @@ export class TmuxRuntime implements Runtime {
   ): Promise<TmuxLocator> {
     const controllerDir = path.join(this.deps.stateDir, "controller");
     await (this.deps.statPrompt ?? stat)(spec.launch.promptPath);
-    await writeOmpConfig(controllerDir);
+    await mkdir(controllerDir, { recursive: true });
     const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(spec.launch.promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
     const { socketPath, paneArgv } = await this.preparePane(
       "controller",

@@ -34,15 +34,16 @@ after a conflict, land review rows plus a second merge, push the `.legion/` dele
 revived for this retro. None of the following is about the change; all of it is friction a future
 worker on a long-lived branch can skip.
 
-## 1. `jj new` immediately after every push — or OMP's snapshot makes the pushed change divergent
+## 1. `jj new` immediately after every push — or jj's snapshot makes the pushed change divergent
 
-OMP writes an empty `.omp/config.yml` into the workspace when a session boots, and `.omp/` is
-**not** in `.gitignore`. jj snapshots the working copy on every command, so if `@` is still the
-commit you just pushed, the next jj command amends that commit locally with the untracked file —
-producing a second copy of the same change id (`jj log` marks both `(divergent)`), while the
-remote holds the first copy. On this tree it happened twice (`kulvkspq`: pushed `2c808fbd` vs
-local `e5cf55e3`; `msvksvmx`: pushed `f7761e36` vs local `0f5b4e39`), each time because the
-handoff commit was pushed and the session then went idle with `@` still on it.
+Until LEGION-58 the daemon's workspace provisioning — not OMP — wrote an empty `.omp/config.yml`
+into every issue workspace, and `.omp/` is not in `.gitignore`. jj snapshots the working copy on
+every command, so if `@` is still the commit you just pushed, the next jj command amends that
+commit locally with the untracked file — producing a second copy of the same change id (`jj log`
+marks both `(divergent)`), while the remote holds the first copy. On this tree it happened twice
+(`kulvkspq`: pushed `2c808fbd` vs local `e5cf55e3`; `msvksvmx`: pushed `f7761e36` vs local
+`0f5b4e39`), each time because the handoff commit was pushed and the session then went idle with
+`@` still on it.
 
 Discipline: `jj bookmark set … && jj git push && jj new` as one sequence, so `@` leaves the pushed
 commit before anything can snapshot into it. Recovery when it has already happened: confirm which
@@ -52,9 +53,12 @@ copy is on the remote (`jj log -r 'change_id(<id>)'` with
 `jj abandon <stray commit id>`; never `jj undo`/`jj op restore` in an issue workspace
 (LEGION-45). The `jj split -m … <paths>` habit in
 [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) keeps the file out of your own commits
-but does not prevent this — the snapshot lands after the push. Fix candidate: add `.omp/` to the
-repository `.gitignore` (out of scope for the PR this was learned on; it is a one-line change to
-a shared file that every tree would pick up).
+but does not prevent this — the snapshot lands after the push. Fixed in LEGION-58 by removing the
+write: OMP's project directory is simply the pane's cwd (no marker file), an absent project config
+is read exactly like an empty one, and OMP does not create the file on boot, so in a workspace
+provisioned after that daemon deployed nothing is left for an idle session to snapshot (a tree
+provisioned before it keeps its copy until it closes). `jj new` right after a push is still the
+habit for any other untracked content.
 
 ## 2. `main` moved twice; a merge commit each time, and the conflict was the same bullet list
 

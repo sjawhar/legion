@@ -74,11 +74,11 @@ which the `test` job already installs. Four details that mattered:
   package failed on exactly that. Reproduce the runner before pushing: run the suite with
   `JJ_CONFIG` pointing at an empty file and `XDG_CONFIG_HOME` at an empty directory.
 - **Snapshot before you push or move the bookmark from outside.** `jj status` in the workspace
-  right after the first provision. Provisioning leaves `.omp/config.yml` unsnapshotted on `@`
-  with the bookmark on `@`; the next snapshot rewrites `@` and moves the bookmark with it, so a
-  push before the snapshot leaves the local bookmark off the pushed commit (and the fetch then
-  keeps it), and an external `bookmark set` before it makes the next `update-stale`'s divergent
-  snapshot conflict the bookmark. The comment in the test says why the line is there; keep it.
+  right after the first provision starts from a clean working copy. If later uncommitted content
+  accumulates in `@`, the next snapshot rewrites `@` and moves the bookmark with it, so a push
+  before that snapshot leaves the local bookmark off the pushed commit (and the fetch then keeps
+  it), and an external `bookmark set` before it makes the next `update-stale`'s divergent snapshot
+  conflict the bookmark. The comment in the test says why the line is there; keep it.
 - 60 s per test (`}, 60_000)`): two binaries, one via mise, ~30 subprocesses each.
 
 ## Choose the command so the rejection branch is real

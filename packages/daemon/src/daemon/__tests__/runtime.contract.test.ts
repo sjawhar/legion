@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1010,6 +1010,16 @@ describe("TmuxRuntime", () => {
     });
     expect(await readFile(secretFile, "utf8")).toBe("controller-secret");
     expect((await stat(secretFile)).mode & 0o777).toBe(0o600);
+  });
+
+  it("creates the controller directory without an OMP project config", async () => {
+    const harness = await tmuxHarness();
+
+    await harness.runtime.spawn("controller", harness.makeSpec("controller"));
+
+    const controllerDir = path.join(harness.stateDir, "controller");
+    expect(existsSync(controllerDir)).toBeTrue();
+    expect(existsSync(path.join(controllerDir, ".omp", "config.yml"))).toBeFalse();
   });
 
   it("refuses a spec that does not fit one tmux process", async () => {

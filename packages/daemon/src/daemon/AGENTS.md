@@ -128,25 +128,19 @@ package cannot assume a runner that strips `JJ_USER`/`JJ_EMAIL` from the command
 without the flag a value the repo file holds is hidden whenever a higher layer overrides it — and
 removes a leftover `user.name` or `user.email` once, with a
 `[legion] removing repository-scoped jj …` log line; nothing writes them again. The environment
-settles the committer; the author needs one more step, because jj keeps a rewritten commit's
-author: `jj split`/`jj describe` carve a phase's work out of the issue's working-copy commit, which
-the daemon's own `jj workspace add` created under the daemon's identity and which a split never
-recreates while `.omp/config.yml` sits in it. So every assignment delivery
-(`promptExistingWorker`, the one write of the active phase — a fresh launch's `/worker/ready`, a
-`--resume`, or a live idle worker prompted over its socket; never a catch-up) first adopts the
-working copy for the role (`Runtime.adoptWorkingCopy`, under `slow_command_timeout_seconds`),
-before the prompt frame and before any state write. The command is one shared builder,
-`adoptWorkingCopyCommand` in `@legion/workspace` (`jj metaedit --update-author -r '@ &
-description(exact:"")' -R <workspaceDir>`); where it runs is the runtime's: `TmuxRuntime` runs it on
-the daemon host's workspace under the lease identity's `JJ_USER`/`JJ_EMAIL` pair (the identity
-variables `jj metaedit` reads); `KubernetesRuntime` sends the
-pod's shim an `adopt-working-copy` frame (`jjUser`, `jjEmail`, `timeoutMs` — never a command or a
-path) over the registered worker stream, and `legion worker-shim` runs the same builder in its own
-workspace (`LEGION_WORKSPACE`/`LEGION_ROOT_WORKSPACE`) and answers `adopt-working-copy-result`. The
-pod's init container adopts nothing: it provisions the workspace, and the assignment adopts it. A described working copy is a
-previous phase's work and keeps its author, and a failing adoption — jj's stderr, the runner's
-timeout or abort report, or the shim's `ok: false` — fails the delivery so no worker is prompted
-whose commits would carry the wrong author.
+settles the committer; the author needs one more step, because jj preserves a rewritten
+working-copy commit's author even when the remaining undescribed working copy is empty. The
+daemon's own `jj workspace add` created that working copy under the daemon's identity. So every
+assignment delivery (`promptExistingWorker`, the one write of the active phase — a fresh launch's
+`/worker/ready`, a `--resume`, or a live idle worker prompted over its socket; never a catch-up)
+first adopts the working copy for the role (`Runtime.adoptWorkingCopy`, under
+`slow_command_timeout_seconds`), before the prompt frame and before any state write. The command
+is one shared builder, `adoptWorkingCopyCommand` in `@legion/workspace` (`jj metaedit
+--update-author -r '@ & description(exact:"")' -R <workspaceDir>`); where it runs is the runtime's:
+`TmuxRuntime` runs it on the daemon host's workspace under the lease identity's `JJ_USER`/`JJ_EMAIL`
+pair; `KubernetesRuntime` sends the pod's shim an `adopt-working-copy` frame. A described working
+copy is a previous phase's work and keeps its author, and a failing adoption fails the delivery so
+no worker is prompted whose commits would carry the wrong author.
 
 GitHub lets only the pull request's author or an account with write (push) access to the
 repository resolve a review thread or push to its branch; the review App is neither by design — it

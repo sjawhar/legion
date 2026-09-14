@@ -57,10 +57,8 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
 ```
 
 Not on the issue bookmark `legion/<KEY>`: after the merge it sits on the retro commit plus an
-undescribed working-copy commit that carries the daemon-provisioned, untracked `.omp/config.yml`
-([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md) §1), and the architect's
-instruction is to leave it alone. `jj new` on a fresh parent removes that file from disk — copy it
-aside and restore it, or the pane's extension provisioning is gone until relaunch. One path-scoped
+undescribed working-copy commit (before LEGION-58 it also carried the daemon-provisioned
+`.omp/config.yml`), and the architect's instruction is to leave it alone. One path-scoped
 `jj split` for the code, a new bookmark named for the issue and the slug
 (`legion/<KEY>-<slug>`, here `legion/LEGION-34-cli-tidy`), `jj git push --bookmark <it>` (the
 first push tracks it), then `legion gh -- pr create` with a conventional title that names the parent

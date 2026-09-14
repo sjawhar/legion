@@ -91,10 +91,9 @@ Confirmed again on LEGION-34 without any `undo`: a plain `jj git push` raced ano
 bookmark push, jj's `reconcile divergent operations` re-minted this workspace's working-copy commit
 as a fresh empty one (the old change id went hidden), and the next command refused with the same
 stale-working-copy error. The only content of that commit was the daemon-provisioned, untracked
-`.omp/config.yml`, which `workspace update-stale` removes from disk — copy it aside first and put it
-back after (`cp .omp/config.yml /tmp/…; jj workspace update-stale; cp /tmp/… .omp/config.yml`), or
-the extension's provisioning is gone until the pane relaunches. Nothing tracked was touched; the
-chain and the bookmark were exactly where the push had left them.
+`.omp/config.yml`, which `workspace update-stale` removes from disk (a file LEGION-58 has since
+stopped writing; nothing depended on it). Nothing tracked was touched; the chain and the bookmark
+were exactly where the push had left them.
 
 Since LEGION-45 (#1020) the extension refuses these commands in every phase-worker pane — bash,
 eval, hub, and a worker's `task` subagents — once the pi-envoy release carrying the guard is
