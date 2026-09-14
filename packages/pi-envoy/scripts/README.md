@@ -16,7 +16,7 @@ tmux session disappears and the role stops resolving (404) within 15 seconds.
 ### Usage
 
 ```bash
-packages/pi-envoy/scripts/smoke-delivery.sh
+cd packages/pi-envoy/scripts && ./smoke-delivery.sh
 ```
 
 Env overrides:
@@ -56,7 +56,7 @@ token file when the script holds a bearer), so its reply lands where the script 
 ### Usage
 
 ```bash
-MODE=btw DISPATCH_SMOKE_ISSUE=CORE-1 packages/pi-envoy/scripts/smoke-btw.sh
+cd packages/pi-envoy/scripts && MODE=btw DISPATCH_SMOKE_ISSUE=CORE-1 ./smoke-btw.sh
 ```
 
 Set `MODE=btw` (the default) for an ephemeral reply, or `MODE=steer` to prove the primary-turn

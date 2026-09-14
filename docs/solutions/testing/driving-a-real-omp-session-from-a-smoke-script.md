@@ -27,7 +27,7 @@ symptoms:
 
 # Driving a real omp session from a smoke script
 
-`packages/pi-envoy/scripts/smoke-btw.sh` starts one isolated omp TUI session in tmux and must
+The `smoke-btw.sh` script under `packages/pi-envoy/scripts/` starts one isolated OMP TUI session in tmux and must
 (1) put it into a long-running bash tool call, (2) have it talk to a Dispatch server of the
 script's choosing, and (3) know the exact moment the tool call is blocked so a targeted
 message provably lands mid-turn. Four approaches that look right each failed on this box in

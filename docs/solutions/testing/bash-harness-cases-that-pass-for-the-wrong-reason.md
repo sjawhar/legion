@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "Bash harness cases that pass for the wrong reason: isolate one guard per case, assert the success-only side effect is absent, and give a group-kill fixture a second process"
 category: testing
@@ -11,9 +13,9 @@ tags:
   - code-review
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 problem_type: testing
-component: scripts/smoke/*.test.sh
+component: retired harness tests
 severity: medium
 applies_when:
   - Writing a bash harness case for a function with several guards (`[[ a && b && c ]] || fail`)
@@ -27,7 +29,7 @@ related_issues:
 
 # Bash Harness Cases That Pass for the Wrong Reason
 
-Three new cases in `scripts/smoke/*.test.sh` were green, read correctly, and proved nothing.
+Three new cases in the retired rig's shell harness were green, read correctly, and proved nothing.
 The reviewer of sjawhar/legion#957 found each the same way as in
 `docs/solutions/testing/mutation-proof-probe-tests.md`: mutate the script into the plausible
 bug the case exists to catch and watch the harness stay green. In bash this happens more
@@ -149,21 +151,14 @@ confirm the precondition and the assertion can hold at the same instant for a co
 shaped to make the assertion true? The second kind proves only that the script parses. A ruling
 can be wrong; the fixture is where a wrong ruling gets laundered into a green PASS line.
 
-## Running the mutations in a bash rig
+## Historical mutation evidence
 
-Same discipline as the daemon's TypeScript tests, in shell:
-
-```bash
-cp scripts/smoke/up.sh /tmp/o-up.sh
-sed -i 's/\[\[ "\$LEGION_OMP_PATH" == \/\* \&\& -f/[[ -f/' scripts/smoke/up.sh
-bash scripts/smoke/up.test.sh        # expect: exactly the leading-slash case fails
-cp /tmp/o-up.sh scripts/smoke/up.sh && cmp /tmp/o-up.sh scripts/smoke/up.sh
-```
-
-Check that the `sed` changed something (`cmp` against the copy) — a mutation that did not
-apply is a false "caught". Record each mutation's first failing assertion, not just "fails".
-On #957 the eight mutations (three guards, the `local` mask, the pid-only kill, drop-a-checkpoint,
-add-checkpoint-8, restore-the-mode-guess) each named their own case.
+The retired rig's harness mutations removed one guard at a time, then ran the corresponding case
+and restored the source byte-for-byte. The eight variants — three guard removals, a `local` mask,
+a pid-only kill, a dropped checkpoint, an extra checkpoint, and a restored mode guess — each
+exposed one distinct missing assertion. That operational procedure is suspended with the rig.
+The maintained lesson is to mutate the behavior a test claims to defend, verify the mutation took
+effect, and record the first failing assertion rather than a generic failure.
 
 ## Related
 

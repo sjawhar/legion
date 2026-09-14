@@ -132,13 +132,11 @@ role that can act on it.
 
 ## 5. Process notes from this tree
 
-- **The smoke rig's `envoy` mode is not shareable across trees.** A sibling tree's rig was live
-  against the shared `LEGSMOKE` Dispatch project, and the daemon filters Dispatch events only by
-  project-key prefix, so two `envoy` rigs would cross-admit each other's roots. The README's
-  isolation path — a scratch Dispatch server built from the checkout, publishing into the rig's
-  own NATS, `SMOKE_WEBHOOK_MODE=none SMOKE_DISPATCH_INGRESS=rig` — ran the same daemon, tmux
-  server, listener, and pinned OMP with only the Dispatch server private to the run. Reach for it
-  first when another rig is up; it is not a lesser proof.
+- **The retired rig's shared event feed cross-admitted trees.** A sibling test used the shared
+  Dispatch project, and the daemon filtered events only by project-key prefix. Its separate
+  resources did not isolate the event source. The rig is removed; use the daemon's test harness
+  and real-process fixtures for pre-merge coverage, and record a live observation at the
+  operator's next authorized daemon restart.
 - **A conflict-forced rebase before testing keeps the fingerprint procedure out of the picture.**
   GitHub reported `CONFLICTING` before the tester started; rebasing then (onto LEGION-20's
   design-gate rewrite, six files integrated with main rather than around it) meant no reviewed

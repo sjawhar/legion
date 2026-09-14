@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "Two envoy-mode rigs on the shared LEGSMOKE project cross-admit each other's issues; a branch behind main's plugin contract runs its rig on a dedicated OMP profile built from the branch"
 category: legion
@@ -5,7 +7,7 @@ tags:
   - smoke-rig
   - LEGSMOKE
   - cross-admission
-  - SMOKE_WEBHOOK_MODE
+  - webhook-mode
   - envoy-bridge
   - OMP_PROFILE
   - pi-legion-envoy
@@ -13,7 +15,7 @@ tags:
   - LEGION_DAEMON_API_VERSION
 date: 2026-09-13
 status: active
-module: scripts/smoke, packages/daemon
+module: retired smoke rig, packages/daemon
 related_issues:
   - "LEGION-60"
   - "sjawhar/legion#1030"
@@ -25,8 +27,8 @@ symptoms:
   - "your root issue is moved triage→todo by `legion-daemon:LEGSMOKE` before your own daemon has seen it"
   - "the daemon refuses to start: `pi-legion-envoy … speaks daemon API contract <n>; this daemon requires <m>`"
 applies_when:
-  - Starting a smoke rig with `SMOKE_WEBHOOK_MODE=envoy` while any other LEGSMOKE rig may be live
-  - Running a rig from a branch whose `LEGION_DAEMON_API_VERSION` differs from the plugin installed in the profile you would use
+  - Understanding a historical cross-admission incident or validating daemon/plugin contract compatibility
+  - Designing an isolated test fixture whose event source must not admit unrelated trees
 ---
 
 # Two envoy-mode rigs on the shared LEGSMOKE project cross-admit each other's issues
@@ -47,32 +49,16 @@ filters by project key prefix only; every LEGSMOKE rig shares that prefix. The t
 saw the other direction too: a rig elsewhere relaying production NATS moved its freshly created
 root to `todo` before its own daemon had seen the issue.
 
-This is LEGION-61's problem to solve (the rig has no mode that is both isolated and live). Until
-it lands, the operational rules below are what worked.
+This is LEGION-61's problem to solve: test admission needs an identity that does not share an event
+stream with other trees.
 
-## Running beside another rig
+## Incident containment (retired)
 
-1. **Check first.** `ps -eo pid,args | grep "cli/index.ts start"` and `docker ps` show every live
-   rig daemon and NATS container on the box. If another LEGSMOKE rig is up in `envoy` mode, expect
-   cross-admission both ways and coordinate through Envoy with its owner (role topic
-   `notifications.role.legion-sjawharlegion-legion-<n>-<role>`).
-2. **Prefer `SMOKE_WEBHOOK_MODE=none` plus a hand relay of your own tree's events** over `envoy`
-   mode when another rig is live. The tester's round used `/tmp/legion60-test/inject-issue-event.ts`
-   and `relay-tree.ts` (LEGION-27's recipe) to relay only its own issues' Dispatch events into the rig
-   NATS; nothing outside its tree was touched. In that mode the other direction still bites (the
-   other rig sees your events), so cycle your own issue `backlog→todo` with truthful `issue.updated`
-   relays if the other rig triaged it first.
-3. **If you are already contaminated:** stop your bridge (`kill -TERM` its pid from
-   `${SMOKE_DIR}/envoy-bridge.pid`) so no more foreign events arrive, stop the daemon, excise the
-   foreign trees from `state.json` (`trees`, `issues`, `admission.active/queue`,
-   `workerAdmission.queue`, their `roles`, `phases`, `gates`), kill their tmux windows, and restart
-   in `none` mode. Do not PATCH another rig's issue status; message its owner instead.
-4. **Give every rig its own everything:** `SMOKE_DIR`, `SMOKE_PROJECT`, `NATS_PORT`, `ENVOY_PORT`,
-   `LEGION_DAEMON_PORT` (and its `+1` worker-stream port). Since #1010 the NATS container name is
-   derived per project (`legion-smoke-nats-<slug>`) and `down.sh` tears down only what
-   `${SMOKE_DIR}/legion.yaml` names, so two rigs no longer collide on the container — but ports and
-   directories are still yours to separate. `SMOKE_WORKER_CAP=1` makes a task queue behind a full
-   cap without editing the generated `legion.yaml`.
+The incident arose because every rig bridge subscribed to every Dispatch issue event and the daemon
+filtered only by project-key prefix. An attempted isolated mode relayed only one tree's events, but
+the other rig still received them; cross-admission remained possible. The operational containment
+procedure is suspended with the rig. The durable rule is to scope admission with a test-unique
+identity and to keep every stateful test resource under one fixture owner.
 
 ## A branch behind main's daemon API contract
 
@@ -83,40 +69,20 @@ The daemon refuses to start unless the installed `@sjawhar/pi-legion-envoy` mani
 under a long-lived branch, the `legion` profile's plugin is ahead of the branch, and rebasing to catch
 up is forbidden unless GitHub reports CONFLICTING (Sami, 2026-09-11).
 
-The sanctioned path is a **dedicated OMP profile with the plugin built from the branch**:
-
-```sh
-# build the plugin exactly as the release does
-cd packages/pi-envoy && bun run build && rm -rf dist/skills && cp -r ../../skills dist/skills
-PKG=/tmp/<rig>/pi-legion-envoy && mkdir -p "$PKG" && cp -r dist "$PKG/dist" && cp README.md "$PKG/"
-jq --arg v "<version>-<issue>.<sha>" '.version=$v | .omp.extensions=["dist/envoy.js","dist/legion.js"] | del(.scripts,.devDependencies)' package.json > "$PKG/package.json"
-# a profile that is the legion profile with only that plugin swapped
-P=~/.omp/profiles/<rig>; mkdir -p "$P/agent" "$P/plugins"
-cp ~/.omp/profiles/legion/agent/{config.yml,models.yml,keybindings.yml} "$P/agent/"
-for l in agents hooks prompts WATCHDOG.md; do ln -s "$(readlink -f ~/.omp/profiles/legion/agent/$l)" "$P/agent/$l"; done
-jq --arg f "file:$PKG" '.dependencies["@sjawhar/pi-legion-envoy"]=$f' ~/.omp/profiles/legion/plugins/package.json > "$P/plugins/package.json"
-(cd "$P/plugins" && bun install)
-```
-
-then start the rig with `OMP_PROFILE=<rig> PI_PROFILE=<rig>` in the daemon's environment **and**
-`SMOKE_OMP_LAUNCH_PREFIX="env OMP_PROFILE=<rig> secrets … --"` so every pane the daemon spawns loads
-the same profile (the daemon resolves the plugin root through OMP's `DirResolver`, which reads
-`OMP_PROFILE`). The other profile plugins (secretsd, knives, superpowers, codegraph) come along
-unchanged, which is what makes this the production-like plugin tree the deployment rules require —
-never the Legion extension loaded alone. Remove the profile when the rig is torn down; its OMP
-session transcripts go with it, so copy any you need as evidence first (this retro's implementer
-lost two that way).
+The attempted remediation built a dedicated OMP profile with the plugin from the branch. That exact
+profile-building procedure is suspended because it existed only to launch the retired rig. The
+durable compatibility invariant remains: the installed plugin's `legion.daemonApiVersion` must equal
+the daemon's `LEGION_DAEMON_API_VERSION`; a mismatched contract must fail explicitly rather than
+falling back to a profile or a different build. The daemon test harness and real-process fixtures
+cover pre-merge behavior, and a live observation is recorded for the next authorized restart.
 
 When the contract is *equal* after a rebase — as it was for the tester's round — no dedicated
 profile is needed; check `jq .legion.daemonApiVersion ~/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json`
 against `packages/contracts/src/legion-daemon-api.ts` before deciding.
 
-## Scrub the pane environment before starting a rig from a worker pane
+## Pane-environment lesson
 
-A Legion phase worker's own shell carries `LEGION_*`, `TMUX*`, `JJ_CONFIG`, `GIT_CONFIG_*`, `GH_*`,
-`PI_CODING_AGENT_DIR`, and `OMP_SESSION_ID`. `up.sh` and the daemon strip the secret family, but a
-rig started from inside a pane still inherits the rest; start it with `env -u` for each of those
-(the tester's launcher dropped `LEGION_DAEMON_PORT` by the same scrub and took the default port —
-check the port you meant is the port you got). `DISPATCH_TOKEN` must come from
-`DISPATCH_TOKEN_FILE` via `bash -c 'DISPATCH_TOKEN="$(cat "$0")" … exec bash scripts/smoke/up.sh' "$DISPATCH_TOKEN_FILE"`,
-never pasted.
+A worker shell carries `LEGION_*`, `TMUX*`, `JJ_CONFIG`, `GIT_CONFIG_*`, `GH_*`,
+`PI_CODING_AGENT_DIR`, and `OMP_SESSION_ID`. A supported fixture controls that environment on its
+exact child process. It must not inherit a worker's daemon URL, state directory, credentials, or
+launch prefix and treat the resulting behavior as independent evidence.

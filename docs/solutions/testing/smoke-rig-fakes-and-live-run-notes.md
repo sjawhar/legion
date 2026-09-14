@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "Legion smoke rig: faking tmux -L, real processes for /proc checks, and what a live run actually needs"
 category: testing
@@ -13,17 +15,14 @@ tags:
   - xdg-config-home
 date: 2026-09-11
 status: active
-module: scripts/smoke
+module: retired smoke rig
 problem_type: testing
-component: scripts/smoke
+component: retired smoke harness
 severity: medium
 applies_when:
-  - Editing scripts/smoke/*.sh or their *.test.sh harnesses
-  - Running the rig live to verify a daemon change end to end
-  - A checkpoint inspects another process's argv or environment
-  - A script under harness gains a sibling file it sources by BASH_SOURCE
-  - A harness case must prove that an exported variable wins, or that a default applies when it is unset
-  - Driving a failure variant of the README's start block (a relocated or missing envoy.json)
+  - Reading the historical rig evidence or designing current daemon test fixtures
+  - A fixture inspects another process's argv or environment
+  - A harness case must prove that a controlled environment variable wins or a default applies
 related_issues:
   - "LEGION-6"
   - "sjawhar/legion#923"
@@ -76,15 +75,11 @@ surfaced things the next person touching the rig should not rediscover.
   because `bun` resolves `//packages/…/omp-pin.ts` against the cwd; LEGION-71 pins `repo_root` to
   the harness's `project_root` in the same `sed`, so the harness runs from any directory — see
   `harness-that-sources-a-copy-pins-its-root-fails-closed-on-success-and-proves-absence-with-a-call-log.md`.)
-- **A harness that proves a default must clear the variable the README tells operators to export.**
-  `resolve_webhook_mode`'s two default cases ran bare and inherited `SMOKE_WEBHOOK_MODE` from the
-  caller's shell, so `SMOKE_WEBHOOK_MODE=envoy bash scripts/smoke/up.test.sh` — the shell an
-  operator has right after the README's start block — failed with `expected available webhook
-  forwarding to default to forward mode`. Pre-existing on `main`; fixed in LEGION-40 by
-  `$(unset SMOKE_WEBHOOK_MODE; … resolve_webhook_mode)`, the per-case shape the `DISPATCH_URL`/
-  `DISPATCH_TOKEN` cases already use. Rule: for every variable the README says to `export`, grep
-  the harness for a case whose expected outcome depends on it being absent, and unset it in that
-  case's own subshell. Run the harness once with the README's exports live before calling it green.
+- **A harness that proves a default must clear the setting it is testing.** The retired default
+  cases inherited a former webhook-mode setting from the caller, so the operator-shaped invocation
+  selected a different mode than the bare case. The fix controlled that setting in the child shell.
+  Rule: for every configuration variable a runbook describes, include a fixture whose expected
+  outcome depends on the variable being absent and control it in that fixture.
 - **"An exported variable wins" is proven in a child bash, not with `export` inside `$(…)`.**
   `[[ "$(export DISPATCH_URL=…; resolve_dispatch_config && printf …)" == … ]]` is what the plan
   wrote; shellcheck 0.11.0 flags it SC2030 at the subshell and SC2031 at every later
@@ -97,48 +92,35 @@ surfaced things the next person touching the rig should not rediscover.
   operator's `export` reaches the script. A `local`-scoped wrapper is the other lint-clean shape but
   does not exercise the environment path.
 
-## Live run (what the tester needed beyond the README)
+## Historical live-run findings (procedure suspended)
 
-Three of these were pre-existing rig defects and were fixed by LEGION-10 (sjawhar/legion#957);
-they are kept here as history with the fix named, so nobody re-applies the workaround. A run from
-a Legion pane starts with the scrub in
-`docs/solutions/daemon/config-env-keys-that-panes-also-carry.md` ("Working from a pane"), which
-since LEGION-40 includes `LEGION_OMP_PATH` and the three `DISPATCH_*` variables.
+Three of these were pre-existing rig defects and were fixed by LEGION-10 (sjawhar/legion#957).
+They remain historical evidence; the rig launch procedure must not be recreated.
 
-- **`SMOKE_WEBHOOK_MODE=none` cannot run checkpoints 1–4** despite what the README said then: no
-  Dispatch issue event reaches the rig's isolated NATS and resync's `healStatusDrift` skips keys
-  the daemon never ingested, so the root issue is never tracked. Use `envoy` mode (production
-  NATS → rig NATS bridge). *Fixed in #957:* `checkpoints.sh` now blocks 1–4 and 12 with
-  `SKIPPED-BLOCKED` (exit 3) under `none` and `forward`, and the README says `envoy` is the only
-  mode for them — see `docs/solutions/legion/smoke-rig-modes-gate-checkpoints-and-the-pin-has-one-home.md`.
+- **A mode without Dispatch events could not run checkpoints 1–4.** The daemon never ingested the
+  root issue, so resync skipped it. The configuration gate later blocked those checkpoints before
+  a network request. The durable principle is that an unreachable prerequisite is reported as
+  blocked, not as a test failure.
 - **`LEGION_OMP_PATH` had to point at the rpcfix OMP** production ran with; the rig's pinned mise
   OMP died at its first RPC prompt (`send did not invoke the agent`). *Fixed by LEGION-32 (#983)
   moving the one pin in `packages/daemon/src/daemon/omp-pin.ts` to a release with the fix, and by
   #957 making `up.sh` verify that pin through `mise where` in preflight.* `LEGION_OMP_PATH` is
   now only an explicit override for a non-release build; do not export it for a normal run.
-- **`DISPATCH_TOKEN` is not a secretsd key on this box**; the source is
-  `~/.config/opencode/envoy.json` `.dispatch.token`. *Fixed by LEGION-40:* `up.sh` and
-  `checkpoints.sh` read `.dispatch.serverUrl` / `.dispatch.token` from that file when
-  `DISPATCH_URL` / `DISPATCH_TOKEN` are unset (`scripts/smoke/dispatch-config.sh`), and the
-  README's command blocks no longer name a `secrets DISPATCH_TOKEN` key. Never print the value.
-- **`up.sh ensure_root_issue` 409'd (`POSSIBLE_DUPLICATE`)** against prior smoke roots. *Fixed in
-  #957:* the request carries `force: true`; a disposable near-duplicate per run is the rig's
-  intent. No by-hand creation is needed.
+- **Dispatch credentials came from the local Envoy configuration, not a secretsd key.** The retired
+  configuration helper resolved both URL and token when environment variables were absent; a test
+  that left pane-provided values in place passed through an unintended fallback. A controlled
+  fixture must make the intended source explicit and never print the token.
+- **The former root-issue creation could receive a 409 near-duplicate response.** The case showed
+  why a test's identity must be disposable and its creation contract explicit.
 - An architect that drives Dispatch through `eval` bypasses the `tool_result` subscribe hook, so
   it holds no topic interest and a Dispatch message on the root issue does not wake it —
   checkpoint 3's child-issue assertion may need an operator nudge.
 - After `down.sh` (SIGTERM, no persist with cleared locators) the pane secret files remain under
   `secrets/`; the boot-time prune reaps them on the next start. Expected.
-- **`XDG_CONFIG_HOME` relocates `secrets`' own config too, so a failure variant of the README's
-  start block is driven inside the `secrets … --` wrapper, not around it.** The natural negative
-  control for the envoy.json fallback is `XDG_CONFIG_HOME=/nonexistent` on the README block — but
-  `secrets` reads `$XDG_CONFIG_HOME/secretsd/config.toml`, so set on the outside it fails with
-  `secrets: no secretsd config at …` before `up.sh` ever runs, a failure that looks like the rig's
-  and is not. The LEGION-40 tester's shape: `secrets <keys> -- env XDG_CONFIG_HOME=<dir> bash -c
-  '… exec bash scripts/smoke/up.sh'`, with `SMOKE_DIR` at a path that was never created, proving
-  `error: DISPATCH_URL is unset and <dir>/opencode/envoy.json does not exist; …` with no container
-  started and every port still free. A plain `XDG_CONFIG_HOME=… bash scripts/smoke/checkpoints.sh 1`
-  has no wrapper and needs nothing.
+- **Relocating the configuration home also relocates secretsd's configuration.** A historical
+  failure variant changed only the outer environment and therefore failed before the intended
+  Envoy configuration read. The durable lesson is to identify the layer producing a negative
+  result; an earlier configuration failure is not evidence about a downstream path.
 - The daemon's startup GitHub bot-identity lookup is unauthenticated (60 req/hr per IP); on a
   shared box the rig daemon can die at boot with `GitHub App bot identity lookup failed (403)`
   until the window resets. Pre-existing, needs its own issue.
@@ -146,13 +128,13 @@ since LEGION-40 includes `LEGION_OMP_PATH` and the three `DISPATCH_*` variables.
   pre-upgrade panes this way put real bearer/boot tokens into a transcript (redacted afterwards
   by decision, no rotation). Report only the variable *name*, as checkpoint 13 does
   (`grep -m1 "^${name}="` → `${entry%%=*}`).
-- Negative control for checkpoint 13 on the live rig:
-  `tmux -L legion-<slug> set-environment -g LEGION_BOOT_TOKEN planted` → checkpoint fails naming
-  the variable; `set-environment -g -u LEGION_BOOT_TOKEN` → `CHECKPOINT 13 OK`.
+- **A negative environment control must name the inspected variable, not print its value.** The
+  former live check planted a boot-token variable and asserted the checkpoint identified the name.
+  Current equivalent coverage belongs in the daemon test harness and fixture-owned processes.
 
 ## Related
 
-- `scripts/smoke/README.md` — the operator runbook (attach command, `<1-13>`, "run 13 bare").
+- The removed rig's runbook is suspended; its test-design lessons remain here.
 - `docs/solutions/integration-patterns/secret-file-pointer-precedence.md` — the contract the
   checkpoint verifies.
 - `docs/solutions/testing/bash-harness-cases-that-pass-for-the-wrong-reason.md` — the mutation

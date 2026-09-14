@@ -188,7 +188,7 @@ Set `omp_invocation` in `legion.yaml` or `LEGION_OMP_INVOCATION` to the required
 mise x ${OMP_FORK_PIN} -- omp
 ```
 
-`OMP_FORK_PIN` (`github:sjawhar/oh-my-pi@<version>`) is the repository's one copy of the OMP fork pin: `config.ts` imports it, `scripts/smoke/up.sh` prints it with `bun omp-pin.ts`, and the worker image (`packages/daemon/docker/worker.Dockerfile`) prints it inside the build. Bump it there and nowhere else.
+`OMP_FORK_PIN` (`github:sjawhar/oh-my-pi@<version>`) is the repository's one copy of the OMP fork pin: `config.ts` imports it, and the worker image (`packages/daemon/docker/worker.Dockerfile`) prints it inside the build. Bump it there and nowhere else.
 
 Launch the daemon normally with `bun run ...`, not inside that scoped `mise x` command. At startup it obtains the complete `mise env --json` environment, and resolves absolute `mise`, `jj`, `git`, `gh`, and `tmux` paths. It does **not** resolve the OMP invocation to the pinned tool's install path: every pane and both boot probes run the configured `mise x <tool> -- omp` invocation itself, with `mise` replaced by that absolute path (`resolveOmpInvocation` in `environment.ts`), so mise activates the pinned tool inside the pane — its `bin` first on PATH, its declared environment — exactly as an operator's shell does. Exec'ing `<install dir>/bin/omp` directly skips that activation and runs whatever sits in the directory; `LEGION_OMP_PATH` is the one explicit way to name a direct binary (the Kubernetes worker image, a non-release build under test). It also writes a `legion` CLI launcher to `<state_dir>/bin/legion` (mode 0755, re-execing this same daemon's own runtime/entry — see `legionCliLauncherScript` in `environment.ts`) and prepends `<state_dir>/bin` to that PATH, so `legion state`/`legion gh`/`legion credential`/`legion handoff` on an ambient pane PATH always resolve to a CLI build that matches this daemon, never a stale or unrelated install. All daemon subprocesses use those absolute tool paths; root, worker, and controller panes all receive that same complete, launcher-prepended `PATH`.
 
@@ -205,7 +205,7 @@ Set `instructions` in `legion.yaml` (a path, resolved against `legion.yaml`'s ow
 relative — `legion start --config` passes that directory as the loader's `configDir`) or
 `LEGION_INSTRUCTIONS` (used as given; consulted only when the file omits the key, like every other
 `LEGION_*` override) to a markdown file of the deployment's standing rules — required checks,
-deploy/smoke commands, code-owner expectations, standing Envoy roles to consult, the merge
+deploy and verification commands, code-owner expectations, standing Envoy roles to consult, the merge
 credential. An empty value from either source is rejected at config load. Before loading state,
 opening core NATS, or serving the API, the daemon reads the file once and refuses to start when it
 is missing, unreadable, a directory, or blank (the message names the resolved instructions path),
@@ -218,8 +218,8 @@ parts travel in exactly **one** `--append-system-prompt` argument, joined by bla
 is last-wins (its argv handler assigns `appendSystemPrompt`, on both the production pin
 `18.1.18-sami.20260912-203541` and the repository pin `18.1.18-sami.20260912-104423`), so several
 flags would hand the model only the final fragment — with `instructions` configured, a pane would
-get neither its role prompt nor its addressing line nor the root's gate policy, which is how a
-real architect on the smoke rig skipped an armed gate. The value is one double-quoted shell word:
+get neither its role prompt nor its addressing line nor the root's gate policy, which previously let a
+real architect skip an armed gate. The value is one double-quoted shell word:
 the role prompt and this file are `$(cat …)`-expanded by the pane's shell, never inlined into the
 command, and the addressing text is escaped for the double quotes. `systemPromptArguments` in
 `processes.ts` is the one builder both launch sites use, so they cannot drift. Absent key: no

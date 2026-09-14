@@ -12,7 +12,7 @@ tags:
   - design-review
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 related_issues:
   - "sjawhar/legion#1010"
 ---

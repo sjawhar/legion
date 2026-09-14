@@ -317,9 +317,10 @@ Verified the implementer's proof by <re-running its command | driving the same s
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
-  The proof is the changed behaviour exercised on the surface a user reaches it through — a
-  scratch daemon, a smoke rig, a sandbox repository, a real browser, a devN stack, a local stack
-  with real migrations — with the exact command or run id, what was observed, the head SHA, and
+  The proof is the changed behaviour exercised on the surface a user reaches it through — the daemon's
+  test harness (`packages/daemon/src/daemon/__tests__/`) and real-process fixtures; a live check at the
+  operator's next daemon restart, recorded on the PR; a sandbox repository, a real browser, a devN stack,
+  or a local stack with real migrations — with the exact command or run id, what was observed, the head SHA,
   one negative control. The same proof goes into `.legion/implement.json` as its required `proof`
   array (`legion handoff write --phase implement` refuses a payload without one and names the
   field), and into the PR body, because the reviewer and the merger verify facts on GitHub and

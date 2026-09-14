@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "Any git push from a Legion pane redeems the pane's own grant through the gh-shim credential helper: isolate git with GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM=1, and GIT_ASKPASS before proving another identity's push"
 category: testing

@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "A teardown script keys every destructive action on the rig's own state directory, and tests ownership exactly"
 category: legion
@@ -12,7 +14,7 @@ tags:
   - test-fixtures
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 related_issues:
   - "sjawhar/legion#1010"
 ---
@@ -21,7 +23,7 @@ related_issues:
 
 ## Context
 
-The smoke rig (`scripts/smoke/up.sh` / `down.sh`) let several testers run rigs side by side on
+The retired smoke rig's `up.sh` / `down.sh` let several testers run rigs side by side on
 one machine — separate ports, separate scratch directories — but two things it destroyed were
 still named globally: the NATS container `legion-smoke-nats` (one fixed name for every rig) and
 the tmux server `legion-<slug>` (derived from the `SMOKE_PROJECT` environment variable at

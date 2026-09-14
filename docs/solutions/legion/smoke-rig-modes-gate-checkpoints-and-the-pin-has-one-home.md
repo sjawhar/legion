@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "Smoke rig: a mode without an event feed blocks its checkpoints and never guesses; the OMP pin has one home and the rig verifies it the way the daemon does"
 category: legion
@@ -13,7 +15,7 @@ tags:
   - LEGION-10
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 related_issues:
   - "LEGION-10"
   - "sjawhar/legion#957"
@@ -27,8 +29,8 @@ related_issues:
 
 # Smoke Rig: Modes Gate Checkpoints, and the Pin Has One Home
 
-LEGION-10 (sjawhar/legion#957) made the smoke rig under `scripts/smoke/` start again on this
-machine. Two of its fixes carry rules beyond the rig.
+LEGION-10 (sjawhar/legion#957) once re-enabled the repository smoke rig. Two of its fixes carry
+rules beyond the retired procedure.
 
 ## 1. A mode that lacks an event feed blocks its checkpoints; it never fails them and never guesses
 
@@ -45,36 +47,26 @@ Three rules, all now in `checkpoints.sh` and its harness:
 - **Block, never fail.** A checkpoint the recorded mode cannot reach prints
   `CHECKPOINT <n> SKIPPED-BLOCKED: <reason>` and exits 3, before any network request and before
   its own `require_env`. A false red misleads exactly as a false green does. The reason names
-  the mode and the remedy (`use SMOKE_WEBHOOK_MODE=envoy`); the same sentence appears in
-  `up.sh`'s start-up line, `checkpoints.sh`, the harness assertions and the README, verbatim.
+  the configured mode and its required event source; the same text appeared in the former startup
+  line, checkpoints, harness assertions, and runbook.
 - **Gate the default mode too.** `forward` is what `up.sh` picks whenever `gh webhook forward`
   is installed, so the first human on a normal machine hits the default. A gate that covers
   only the explicit `none` leaves the default path lying.
 - **Never guess a mode.** `stored_webhook_mode` used to fall back to `forward` when
-  `${SMOKE_DIR}/webhook-mode` was absent. Once `forward` gated five checkpoints, a run against a
-  scratch directory `up.sh` never populated printed `SMOKE_WEBHOOK_MODE=forward: …` for a mode
-  nobody recorded or exported — a fabricated fact pointing at a setting that does not exist.
-  It now stops: `no recorded webhook mode at <path>; run up.sh, or export
-  SMOKE_WEBHOOK_MODE=envoy|forward|none`. Repository rule: no silent fallbacks.
+  a scratch directory had no recorded webhook mode. The retired script printed a default for a
+  mode nobody recorded or exported — a fabricated fact pointing at a setting that did not exist.
+  The durable rule remains: an absent configuration record must stop the check and name the
+  missing record rather than inventing a default.
 
 Checkpoints whose gate is something else (8: branch protection; 13: secrets on panes) stay
 out of the mode arm, and the harness proves it — adding `8` to the `none` arm fails a case.
 
-**The gate has a second axis (LEGION-20).** "No Dispatch issue event reaches the rig NATS" is
-true against the shared Dispatch server, whose events arrive only through the `envoy` bridge.
-It is false for the armed-gate exercise, which runs a scratch Dispatch built from the checkout
-with its outbox pointed at the rig's own NATS — the daemon consumed every event, and the tester
-had to flip the recorded webhook mode to `envoy` by hand to get past a block that described a
-problem the rig did not have. `up.sh` now records a third choice beside `webhook-mode` and
-`design-gate`: `${SMOKE_DIR}/dispatch-ingress`, `shared` (default, today's gating) or `rig`
-(a scratch Dispatch feeds the rig NATS itself). Under `rig`, `checkpoints.sh` skips the
-Dispatch-ingress block for 1–4 and 12 and prints which record let it through; under `shared` the
-block stands and its reason names both remedies (`use SMOKE_WEBHOOK_MODE=envoy, or
-SMOKE_DISPATCH_INGRESS=rig …`); an unknown record is refused naming the two values. The
-GitHub-only gate for 5–7 and 9–11 is unchanged whatever the ingress. The rule generalizes the
-three above: every fact a checkpoint gates on is a *recorded choice with a name* — never a
-property inferred from another record (the webhook mode said nothing about where Dispatch
-events came from), and never a default the operator did not make.
+**The gate had a second axis (LEGION-20).** The original shared Dispatch server delivered events
+only through an Envoy bridge, whereas a scratch Dispatch outbox sent events directly to the
+isolated test environment. Treating both sources as one mode created a false block. The retired
+setup recorded Dispatch ingress separately from webhook mode and design-gate state. Its durable
+rule is that every fact a checkpoint gates on must be a *recorded choice with a name*, never a
+property inferred from another record or a default the operator did not make.
 
 ## 2. The OMP pin has one home; a stop-gap rooted in one operator's home directory is not shippable
 
@@ -95,7 +87,7 @@ the headless-worker fix. The fix went through three designs:
    must succeed and `<dir>/bin/omp` must be executable; otherwise it stops naming the exact
    remedy, `mise install <pin>`. It exports nothing to the daemon, which resolves the same pin
    itself. `LEGION_OMP_PATH` remains an explicit operator override (absolute executable path,
-   exported to the daemon only). `grep -rn 'sami.2026' scripts/smoke/` prints nothing.
+   exported to the daemon only); the retired setup carried no second copy of the pin.
 
 Rules:
 
@@ -113,9 +105,9 @@ Rules:
   was true of the system and false of the function. Write the remedy from the code path that
   prints it.
 
-One caveat for whoever runs the rig: `mise where` reads `MISE_DATA_DIR`. From a stripped shell
-(no `MISE_DATA_DIR`, e.g. `bash --norc` inside a kernel) the same pin reports "not installed";
-run `up.sh` from a normal operator shell, as the daemon's own environment does.
+The retired setup depended on `mise where` reading the normal operator environment. This is a
+historical constraint, not an instruction to recreate the setup; the daemon test harness and
+real-process fixtures are the supported pre-merge surface.
 
 ## 3. Branch mechanics, briefly
 
@@ -143,8 +135,8 @@ Recorded here as pointers so this retro does not restate them:
 
 ## Related
 
-- `scripts/smoke/README.md`: the operator runbook these rules are written into (modes table,
-  "Which OMP build the rig runs", Checkpoints).
+- The removed rig's runbook formerly contained the modes table, pin explanation, and checkpoints.
+  Its procedure is suspended; the principles above remain.
 - `docs/solutions/testing/bash-harness-cases-that-pass-for-the-wrong-reason.md`: how the
   harness cases guarding these rules were made to fail for their own reasons.
 - `docs/solutions/testing/smoke-rig-fakes-and-live-run-notes.md`: the LEGION-6 rig notes; its

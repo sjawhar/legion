@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "A bash harness that sources a copy of the script under test: pin the copy's root and run it from /tmp, put the fail-closed form on the success path too, prove 'never calls X' with a call log, and guard an absence check over a glob"
 category: testing
@@ -12,7 +14,7 @@ tags:
   - mutation-testing
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 applies_when:
   - A harness `source`s a stripped copy of the script it tests (`sed '$d' script > copy`)
   - A harness passes from the repository root and you have not run it from another directory
@@ -26,8 +28,8 @@ related_issues:
 
 # A bash harness that sources a copy of the script under test
 
-`scripts/smoke/up.test.sh` tests `up.sh` by writing a copy without its last line (`main "$@"`)
-and `source`-ing it. That shape has four failure modes that all look like a green run. Three
+The retired rig's `up.test.sh` wrote a copy of `up.sh` without its last line (`main "$@"`) and
+`source`d it. That shape has four failure modes that all look like a green run. Three
 were found by the reviewer of sjawhar/legion#957 and fixed in #1029 (LEGION-71); the fourth
 surfaced while fixing them. The method that finds every one of them is the mutation check in
 `bash-harness-cases-that-pass-for-the-wrong-reason.md`: break the thing the case exists to
@@ -53,12 +55,11 @@ grep -Fxq "repo_root=\"${project_root}\"" "${source_dir}/up.sh" || {
 }
 ```
 
-The fixture grep matters: a later edit to `up.sh` that renames the variable would otherwise
-turn the pin into a silent no-op and the harness back into a root-only harness. Rule: a
-harness that sources a copy owns every path variable the copy derives from its own location,
-and the harness is not green until it has passed from a directory that is not the repository
-root (`cd /tmp && bash "$ws/scripts/smoke/up.test.sh"`). That is also the proof form the
-tester quotes.
+The fixture grep matters: a later edit to `up.sh` that renames the variable would otherwise turn
+the pin into a silent no-op and the harness back into a root-only harness. Rule: a harness that
+sources a copy owns every path variable the copy derives from its own location and must run from
+outside the repository root. That was the retired harness's proof form; use an equivalent
+non-root invocation for any maintained fixture.
 
 The related sibling problem — the copied script `source`s a file next to itself by
 `BASH_SOURCE`, so the sibling must be copied beside the copy — is in
