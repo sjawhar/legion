@@ -164,7 +164,7 @@ function config(
     project: "realshutdown",
     legionId: "sjawhar/1",
     port,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: `http://127.0.0.1:${port}`,
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
@@ -202,11 +202,11 @@ function processManagerDeps(
   state: ReturnType<typeof newLegionState>,
   commands?: string[][],
   overrides: {
-    run?: ProcessManagerDeps["run"];
+    run?: TmuxRuntimeDeps["run"];
     connectWorkerRpc?: TmuxRuntimeDeps["connectWorkerRpc"];
   } = {}
 ): ProcessManagerDeps {
-  const runner: ProcessManagerDeps["run"] =
+  const runner: TmuxRuntimeDeps["run"] =
     overrides.run ??
     (commands
       ? async (command, options) => {
@@ -218,6 +218,13 @@ function processManagerDeps(
     tmux: { run: runner, socket: `legion-${state.project}` },
     project: state.project,
     stateDir: cfg.stateDir,
+    ompInvocation: cfg.ompInvocation,
+    ompLaunchPrefix: cfg.ompLaunchPrefix,
+    provisioningToken: async () => "installation-token",
+    run: runner,
+    repo: cfg.repo,
+    credentialHelper: "!true",
+    slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc:
       overrides.connectWorkerRpc ??
       ((socketPath) => import("../worker-rpc").then((m) => m.connectWorkerRpc(socketPath))),
@@ -230,16 +237,13 @@ function processManagerDeps(
     saveState: async () => {},
     config: cfg,
     runtime,
-    ompInvocation: cfg.ompInvocation,
     processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
-    run: runner,
     publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    provisioningToken: async () => "installation-token",
     workerCatchup: {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       baseEnv: {},
@@ -307,6 +311,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       closed: closed.promise,
       runState: "idle" as const,
       negotiate: async () => {},
+      adoptWorkingCopy: async () => {},
       prompt: async () => ({ turnStarted: Promise.resolve(), hasStarted: true, abandonWait() {} }),
       getState: async () => ({}),
       shutdown: () => {

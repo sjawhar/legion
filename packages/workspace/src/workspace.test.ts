@@ -56,7 +56,6 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
 
 const temporaryDirectories: string[] = [];
 const originalMaxRecursionDepth = process.env.LEGION_MAX_RECURSION_DEPTH;
-const extensionPackage = path.resolve(import.meta.dir, "../../pi-envoy");
 
 afterEach(async () => {
   if (originalMaxRecursionDepth === undefined) delete process.env.LEGION_MAX_RECURSION_DEPTH;
@@ -258,7 +257,6 @@ async function realJjRig(command: readonly string[], stateDir: string) {
   const commitOf = async (revision: string, cwd: string = repoCloneDir) =>
     (await jj(["log", "-r", revision, "--no-graph", "-T", "commit_id"], { cwd })).stdout.trim();
   const deps = {
-    extensionPackage,
     repo: "acme/widgets" as const,
     stateDir,
     provisioningToken: async () => "installation-token",
@@ -303,7 +301,6 @@ describe("provisionIssueWorkspace", () => {
     let logged: unknown[][];
     try {
       spec = await provisionIssueWorkspace(issue, {
-        extensionPackage,
         repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
@@ -401,7 +398,6 @@ describe("provisionIssueWorkspace", () => {
     process.env.LEGION_MAX_RECURSION_DEPTH = "11";
 
     const deps = {
-      extensionPackage,
       repo: "acme/widgets" as const,
       stateDir,
       provisioningToken: async () => "installation-token",
@@ -477,7 +473,6 @@ describe("provisionIssueWorkspace", () => {
     try {
       await expect(
         provisionIssueWorkspace(issue, {
-          extensionPackage,
           repo: "acme/widgets",
           stateDir,
           provisioningToken: async () => "installation-token",
@@ -523,7 +518,6 @@ describe("provisionIssueWorkspace", () => {
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
-      extensionPackage,
       repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
@@ -574,7 +568,6 @@ describe("provisionIssueWorkspace", () => {
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
-      extensionPackage,
       repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
@@ -647,7 +640,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
-      extensionPackage,
       repo: "acme/widgets",
       stateDir,
       provisioningToken: async () => "installation-token",
@@ -701,7 +693,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     const deps = {
-      extensionPackage,
       repo: "acme/widgets" as const,
       stateDir,
       provisioningToken: async () => "installation-token",
@@ -756,7 +747,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     let logged: string[];
     try {
       await provisionIssueWorkspace(issue, {
-        extensionPackage,
         repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
@@ -814,7 +804,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
       await provisionIssueWorkspace("WIDGETS-42", {
-        extensionPackage,
         repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
@@ -861,7 +850,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     try {
       await expect(
         provisionIssueWorkspace("WIDGETS-42", {
-          extensionPackage,
           repo: "acme/widgets",
           stateDir,
           provisioningToken: async () => "installation-token",
@@ -1182,7 +1170,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     try {
       await expect(
         provisionIssueWorkspace(issue, {
-          extensionPackage,
           repo: "acme/widgets",
           stateDir,
           provisioningToken: async () => "installation-token",
@@ -1249,7 +1236,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     try {
       await expect(
         provisionIssueWorkspace(issue, {
-          extensionPackage,
           repo: "acme/widgets",
           stateDir,
           provisioningToken: async () => "installation-token",
@@ -1313,7 +1299,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await expect(
       provisionIssueWorkspace(issue, {
-        extensionPackage,
         repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
@@ -1352,7 +1337,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await expect(
       provisionIssueWorkspace(issue, {
-        extensionPackage,
         repo: "acme/widgets",
         stateDir,
         provisioningToken: async () => "installation-token",
@@ -1387,7 +1371,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const cloneTargets: string[] = [];
     let clones = 0;
     const deps = {
-      extensionPackage,
       stateDir,
       repo: "acme/widgets" as const,
       provisioningToken: async () => "installation-token",
@@ -1441,7 +1424,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await expect(
       provisionIssueWorkspace(issue, {
-        extensionPackage,
         stateDir,
         repo: "acme/widgets",
         provisioningToken: async () => "installation-token",
@@ -1473,7 +1455,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       try {
         await expect(
           provisionIssueWorkspace(issue, {
-            extensionPackage,
             stateDir,
             repo: "acme/widgets",
             provisioningToken: async () => "installation-token",
@@ -1521,7 +1502,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     let logged: string[];
     try {
       await provisionIssueWorkspace(issue, {
-        extensionPackage,
         stateDir,
         repo: "acme/widgets",
         provisioningToken: async () => "installation-token",
@@ -1563,7 +1543,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await expect(
       provisionIssueWorkspace(issue, {
-        extensionPackage,
         stateDir,
         repo: "acme/widgets",
         provisioningToken: async () => "installation-token",
@@ -1586,7 +1565,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await expect(
       provisionIssueWorkspace(issue, {
-        extensionPackage,
         stateDir,
         repo: "acme/widgets",
         provisioningToken: async () => "installation-token",

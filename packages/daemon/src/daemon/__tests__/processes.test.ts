@@ -10,6 +10,7 @@ import {
   roleToken,
   roleTopic,
 } from "@legion/contracts";
+import { adoptWorkingCopyCommand } from "@legion/workspace";
 import { spawnCapabilityKey } from "../api/auth";
 import type { DaemonConfig } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
@@ -331,7 +332,7 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     project: "omp",
     legionId: "sjawhar/1",
     port: 13999,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: "http://127.0.0.1:13999",
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
@@ -476,6 +477,11 @@ type RuntimeOverrides = {
   connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
   readProcessCmdline: (pid: number) => Promise<string>;
   readProcessStat: (pid: number) => Promise<string>;
+  run: TmuxRuntimeDeps["run"];
+  statPrompt: NonNullable<TmuxRuntimeDeps["statPrompt"]>;
+  provisioningToken: TmuxRuntimeDeps["provisioningToken"];
+  deploymentInstructionsFile: string;
+  ompInvocation: string;
 };
 
 function manager(
@@ -511,6 +517,10 @@ function manager(
     connectWorkerRpc,
     readProcessCmdline,
     readProcessStat,
+    statPrompt,
+    provisioningToken,
+    deploymentInstructionsFile,
+    ompInvocation,
     ...overrides
   } = options;
   let launchedAnyWindow = false;
@@ -543,7 +553,41 @@ function manager(
   const runs = keyed<string, CallObserver>(callObserver);
   const sleeps = keyed<number, EventCounter>(eventCounter);
   const published = keyed<string, EventCounter>(eventCounter);
-  const injected: Omit<ProcessManagerDeps, "runtime" | "run"> = {
+  // The runtime's command runner (`TmuxRuntimeDeps.run`; `ProcessManagerDeps` has none): observed
+  // from outside the test's own `commandRunner` fake, which keeps working unchanged. Two-ended
+  // (`issued` before the fake, `completed` after it).
+  const run: TmuxRuntimeDeps["run"] = async (command, runnerOptions) => {
+    const observer = runs((command[0] === "tmux" ? command[3] : command[0]) ?? "?");
+    observer.issued.increment();
+    const result = await commandRunner(command, runnerOptions);
+    if (result.exitCode === 0) {
+      if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
+        const cloneDir = command[4];
+        if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
+        await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
+      }
+      if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+        const workspaceDir = command[3];
+        if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+        await mkdir(workspaceDir, { recursive: true });
+      }
+    }
+    // The load-bearing order: `completed` fires AFTER the real `mkdir` the jj fakes perform, so
+    // an awaiter never resumes ahead of that I/O; it fires before the stdout defaulting, which
+    // is pure. The code under test sees the result on its next microtask, which `reached()`'s
+    // one-macrotask deferral covers.
+    observer.completed.increment();
+    if (result.exitCode !== 0) return result;
+    if (
+      command[0] === "tmux" &&
+      (command[3] === "new-window" || command[3] === "new-session") &&
+      result.stdout.trim() === ""
+    ) {
+      return { ...result, stdout: "@42\n" };
+    }
+    return result;
+  };
+  const injected: Omit<ProcessManagerDeps, "runtime"> = {
     state,
     saveState: async () => {},
     config: config("/state"),
@@ -557,9 +601,6 @@ function manager(
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    provisioningToken: async () => "daemon-installation-token",
-    statPrompt: async () => {},
-    ompInvocation: "/opt/oh-my-pi/18.0.3/omp",
     processPath: "/full/bin:/usr/bin",
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
@@ -577,11 +618,12 @@ function manager(
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     dispatchClient: fakeDispatchClient(),
     revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),
+    run,
     ...overrides,
   };
-  // Observed from outside the test's own fakes (`saveState`/`publishRole`/`sleep`/`run` above),
-  // which keep working unchanged. `saveState` and `run` are two-ended (`issued` before the
-  // injected fn, `completed` after it); `sleep` counts when armed and `publishRole` after the fn.
+  // Observed from outside the test's own fakes (`saveState`/`publishRole`/`sleep` above), which
+  // keep working unchanged. `saveState` is two-ended (`issued` before the injected fn,
+  // `completed` after it); `sleep` counts when armed and `publishRole` after the fn.
   const injectedSleep = injected.sleep;
   const deps: Omit<ProcessManagerDeps, "runtime"> = {
     ...injected,
@@ -605,37 +647,6 @@ function manager(
         return injectedSleep(ms);
       },
     }),
-    run: async (command, runnerOptions) => {
-      const observer = runs((command[0] === "tmux" ? command[3] : command[0]) ?? "?");
-      observer.issued.increment();
-      const result = await commandRunner(command, runnerOptions);
-      if (result.exitCode === 0) {
-        if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
-          const cloneDir = command[4];
-          if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
-          await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
-        }
-        if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
-          const workspaceDir = command[3];
-          if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
-          await mkdir(workspaceDir, { recursive: true });
-        }
-      }
-      // The load-bearing order: `completed` fires AFTER the real `mkdir` the jj fakes perform, so
-      // an awaiter never resumes ahead of that I/O; it fires before the stdout defaulting, which
-      // is pure. The code under test sees the result on its next microtask, which `reached()`'s
-      // one-macrotask deferral covers.
-      observer.completed.increment();
-      if (result.exitCode !== 0) return result;
-      if (
-        command[0] === "tmux" &&
-        (command[3] === "new-window" || command[3] === "new-session") &&
-        result.stdout.trim() === ""
-      ) {
-        return { ...result, stdout: "@42\n" };
-      }
-      return result;
-    },
   };
   // Mirrors index.ts: the private server and the secret-file project come from the fixture's
   // `state.project`, never a constant — the live-tmux tests below give each run its own project
@@ -645,9 +656,18 @@ function manager(
   const runtime =
     options.runtime ??
     new TmuxRuntime({
-      tmux: { run: deps.run, socket: `legion-${state.project}` },
+      tmux: { run, socket: `legion-${state.project}` },
       project: state.project,
       stateDir: deps.config.stateDir,
+      ompInvocation: ompInvocation ?? "/opt/oh-my-pi/18.0.3/omp",
+      ompLaunchPrefix: deps.config.ompLaunchPrefix,
+      deploymentInstructionsFile,
+      statPrompt: statPrompt ?? (async () => {}),
+      provisioningToken: provisioningToken ?? (async () => "daemon-installation-token"),
+      run,
+      repo: deps.config.repo,
+      credentialHelper: deps.credentialHelper,
+      slowCommandTimeoutMs: deps.config.slowCommandTimeoutSeconds * 1000,
       connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
       workerRpcTimeoutMs: () => deps.config.workerRpcTimeoutSeconds * 1000,
       now: deps.now,
@@ -957,8 +977,6 @@ describe("ProcessManager", () => {
         "-e",
         "LEGION_ROLE=architect",
         "-e",
-        `LEGION_ROOT_WORKSPACE=${workspace}`,
-        "-e",
         "LEGION_GENERATION=1",
         "-e",
         "LEGION_DAEMON_URL=http://127.0.0.1:13999",
@@ -996,6 +1014,8 @@ describe("ProcessManager", () => {
         "DISPATCH_URL=http://127.0.0.1:18766",
         "-e",
         `DISPATCH_TOKEN_FILE=${path.join(stateDir, "secrets", "dispatch-token")}`,
+        "-e",
+        `LEGION_ROOT_WORKSPACE=${workspace}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(stateDir, "secrets", roleToken("omp", root, "architect"))}`,
         `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`, rootArchitectFragment())}`,
@@ -3811,6 +3831,7 @@ describe("ProcessManager", () => {
           closed: closed.promise,
           runState: "unknown" as const,
           negotiate: async () => {},
+          adoptWorkingCopy: async () => {},
           prompt: async () => ({
             turnStarted: Promise.resolve(),
             hasStarted: true,
@@ -4061,6 +4082,36 @@ describe("ProcessManager", () => {
       `[legion] kept the workspace of ${grandchild} (${dirs[grandchild]}) at the close of tree ${root}: Dispatch status "in_progress"`
     );
     expect(lines.filter((line) => line.includes("workspace of")).length).toBe(3);
+  });
+
+  it("a runtime that retains its tree volume skips daemon-host workspace cleanup when the tree closes", async () => {
+    // Kubernetes owns one PVC for every workspace in the tree; its retention belongs to
+    // KubernetesRuntime.reconcileOrphans. ProcessManager must close the tree without calling a
+    // host-side jj runner (which has neither this volume nor its workspaces). The sibling test
+    // above proves the true branch removes a done root and child under TmuxRuntime.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    tree(state);
+    state.trees[root].status = "lingering";
+    // Kubernetes has no host tmux locator; the tree is already process-free at close.
+    delete state.trees[root].locator;
+    const runtime = new FakeRuntime({ removesWorkspacesOnTreeClose: false });
+    let hostCleanupCalled = false;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      run: async () => {
+        hostCleanupCalled = true;
+        throw new Error("Kubernetes tree close must not run a daemon-host workspace command");
+      },
+    });
+
+    await processes.closeTree(root);
+
+    expect(managedState.trees[root]?.status).toBe("closed");
+    expect(hostCleanupCalled).toBe(false);
+    expect(runtime.spawned).toEqual([]);
   });
 
   it("keeps a parked root's workspace at close — backlog or icebox — running no jj command and logging the status", async () => {
@@ -8617,6 +8668,7 @@ describe("ProcessManager", () => {
       podName: "controller-1",
       podUid: "uid-controller",
       pvcName: "fake-pvc",
+      roleToken: "legion-omp-controller",
     };
     state.controllerLocator = controllerLocator;
     const runtime = new FakeRuntime();
@@ -8745,6 +8797,40 @@ describe("ProcessManager", () => {
     expect(state.controllerLocator).not.toEqual(first);
     expect(logged).toEqual([
       "[legion] treating the controller as dead: pane %9 now runs pid 777 (recorded pid 5 start 6)",
+    ]);
+  });
+
+  it("under a runtime that does not launch the controller, ensureController mints nothing, spawns nothing, writes no state, and logs once across repeated controller-bound events", async () => {
+    // Every controller-bound event under Kubernetes reaches `ensureController`; before, each one
+    // minted a controller capability (a state write) and then threw from the runtime's refusal.
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const runtime = new FakeRuntime({ launchesController: false });
+    let mints = 0;
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      mintControllerCapability: async () => {
+        mints += 1;
+        return "controller-secret";
+      },
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[] = [];
+    try {
+      await processes.ensureController();
+      await processes.ensureController();
+      await processes.ensureController();
+    } finally {
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+      errors.mockRestore();
+    }
+    expect(mints).toBe(0);
+    expect(runtime.spawned).toEqual([]);
+    expect(managedState.controllerLocator).toBeUndefined();
+    expect(managedState.roles[controllerToken("omp")]).toBeUndefined();
+    expect(logged).toEqual([
+      "[legion] the controller is not launched by this runtime (LEGION-25); controller-bound events wait for one started elsewhere",
     ]);
   });
 
@@ -9526,17 +9612,8 @@ describe("ProcessManager", () => {
   // issue's working-copy commit and only refresh the committer, so whoever created that commit —
   // the daemon's own `jj workspace add`, never recreated by a split while `.omp/config.yml` sits in
   // it — would author every commit in the workspace. Delivering an assignment therefore adopts an
-  // undescribed working copy for the role, under the same six variables the pane carries
+  // undescribed working copy for the role, under the JJ_USER/JJ_EMAIL pair of the pane's lease identity
   // (LEGION-44). The recorded command's own env is asserted, never re-derived.
-  const adoptWorkingCopy = (workspaceDir: string) => [
-    "jj",
-    "metaedit",
-    "--update-author",
-    "-r",
-    '@ & description(exact:"")',
-    "-R",
-    workspaceDir,
-  ];
   /** Records every `jj metaedit` the daemon runs, with the command's env and timeout budget and how
    * many prompts the worker had received when it ran (0 = before the assignment frame). */
   function recordingMetaedits(client: FakeWorkerRpcClient) {
@@ -9546,7 +9623,7 @@ describe("ProcessManager", () => {
       timeoutMs: number | undefined;
       promptsBefore: number;
     }> = [];
-    const run: ProcessManagerDeps["run"] = async (command, options) => {
+    const run: TmuxRuntimeDeps["run"] = async (command, options) => {
       if (command[0] === "jj" && command[1] === "metaedit") {
         metaedits.push({
           command,
@@ -9590,9 +9667,12 @@ describe("ProcessManager", () => {
     expect(client.prompts).toEqual(["verify #55"]);
     expect(metaedits).toHaveLength(1);
     expect(metaedits[0]?.command).toEqual(
-      adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
+      adoptWorkingCopyCommand("/state/workspaces/sjawhar/legion/legion-42")
     );
-    expect(metaedits[0]?.env).toMatchObject(HARNESS_IDENTITY_ENV);
+    expect(metaedits[0]?.env).toMatchObject({
+      JJ_USER: HARNESS_GIT_IDENTITY.name,
+      JJ_EMAIL: HARNESS_GIT_IDENTITY.email,
+    });
     // `metaedit` snapshots the working copy: the slow budget, like every other daemon jj command
     // against a working copy, never the runner's generic one.
     expect(metaedits[0]?.timeoutMs).toBe(300_000);
@@ -9629,9 +9709,12 @@ describe("ProcessManager", () => {
     expect(client.prompts).toEqual(["verify #41"]);
     expect(metaedits).toHaveLength(1);
     expect(metaedits[0]?.command).toEqual(
-      adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42")
+      adoptWorkingCopyCommand("/state/workspaces/sjawhar/legion/legion-42")
     );
-    expect(metaedits[0]?.env).toMatchObject(HARNESS_IDENTITY_ENV);
+    expect(metaedits[0]?.env).toMatchObject({
+      JJ_USER: HARNESS_GIT_IDENTITY.name,
+      JJ_EMAIL: HARNESS_GIT_IDENTITY.email,
+    });
     expect(metaedits[0]?.timeoutMs).toBe(300_000);
     expect(metaedits[0]?.promptsBefore).toBe(0);
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
@@ -9640,9 +9723,9 @@ describe("ProcessManager", () => {
     // fails naming the command and why, and the claim is exactly as it was for the next ready
     // attempt. A jj error carries jj's own stderr; a kill by the runner at the budget carries the
     // runner's report (`timedOut`), never a bare `exit 143` with empty detail.
-    const metaeditCommand = adoptWorkingCopy("/state/workspaces/sjawhar/legion/legion-42").join(
-      " "
-    );
+    const metaeditCommand = adoptWorkingCopyCommand(
+      "/state/workspaces/sjawhar/legion/legion-42"
+    ).join(" ");
     for (const [result, expectedMessage] of [
       [
         { stdout: "", stderr: "Error: The working copy is stale\n", exitCode: 1 },
@@ -14614,7 +14697,7 @@ describe("ProcessManager", () => {
    * new pane each time (`%301`, `%302`, …) under the fixture's default process identity, so every
    * recorded pane verifies against `list-panes`. Records every command it is given (a custom
    * `run` replaces `manager()`'s recording runner, so its `commands` stays empty). */
-  function relaunchingTmux(): { run: ProcessManagerDeps["run"]; commands: string[][] } {
+  function relaunchingTmux(): { run: TmuxRuntimeDeps["run"]; commands: string[][] } {
     let panes = 0;
     const commands: string[][] = [];
     return {

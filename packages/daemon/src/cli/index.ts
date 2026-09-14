@@ -35,7 +35,7 @@ import {
   writeLegionEntry,
 } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
-import { pathWithoutWorkerBin } from "../daemon/worker-bin";
+import { installWorkerGhShim, pathWithoutWorkerBin } from "../daemon/worker-bin";
 import {
   readAllHandoffs,
   readMessages,
@@ -52,12 +52,14 @@ import {
   parseRepo,
   resolveAcceptedThreads,
 } from "./review-threads";
+import { readSecretPointer } from "./secret-pointer";
 import {
   cmdWorkerShim,
   cmdWorkerShimConnect,
   defaultWorkerShimDeps,
   resolveWorkerShimTarget,
 } from "./worker-shim";
+import { cmdWorkspaceInit, processEnvRunner } from "./workspace-init";
 
 interface GrantRedemptionDeps {
   env: NodeJS.ProcessEnv;
@@ -98,23 +100,6 @@ function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
   return (
     explicit ?? env.LEGION_DAEMON_URL ?? `http://127.0.0.1:${env.LEGION_DAEMON_PORT ?? "13370"}`
   );
-}
-
-/** The trimmed contents of the 0600 file `variable` (an `X_FILE` pointer the daemon set on this
- * pane) names. A set pointer is authoritative: a missing, unreadable, or empty file is an error
- * naming both the variable and the path, never a fallback to the plain variable. */
-function readSecretPointer(variable: string, file: string): string {
-  let contents: string;
-  try {
-    contents = fs.readFileSync(file, "utf8");
-  } catch (error) {
-    throw new CliError(
-      `${variable} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  const secret = contents.trim();
-  if (!secret) throw new CliError(`${variable} names ${file}, which is empty`);
-  return secret;
 }
 
 /** The grant `legion gh`, `legion credential`, and `legion handoff complete` redeem:
@@ -803,6 +788,11 @@ const workerShimCommand = defineCommand({
       description:
         "File whose trimmed contents are the boot token sent in the hello line (--connect only)",
     },
+    providerEnvDir: {
+      type: "string",
+      description:
+        "Directory of mounted provider secret files, exported into the wrapped OMP process's environment only (--connect only)",
+    },
   },
   run: ({ args }) =>
     runCli(async () => {
@@ -815,14 +805,58 @@ const workerShimCommand = defineCommand({
         socket: args.socket as string | undefined,
         connect: args.connect as string | undefined,
         bootTokenFile: args.bootTokenFile as string | undefined,
+        providerEnvDir: args.providerEnvDir as string | undefined,
       });
       const deps = defaultWorkerShimDeps();
       const exitCode =
         target.mode === "socket"
           ? await cmdWorkerShim(target.socketPath, argv, deps)
-          : await cmdWorkerShimConnect(target.endpoint, target.bootToken, argv, deps);
+          : await cmdWorkerShimConnect(
+              target.endpoint,
+              target.bootToken,
+              argv,
+              deps,
+              target.providerEnv
+            );
       process.exit(exitCode);
     }),
+});
+
+const workspaceInitCommand = defineCommand({
+  meta: {
+    name: "workspace-init",
+    description:
+      "Prepare an issue's working copy on the tree volume (the Kubernetes pod's init container)",
+  },
+  args: {
+    issue: { type: "string", required: true, description: "Dispatch issue key (e.g. LEGION-1)" },
+    repo: { type: "string", required: true, description: "Repository as <owner>/<name>" },
+    root: { type: "string", default: "/legion", description: "Tree volume root directory" },
+    credentialHelper: {
+      type: "string",
+      required: true,
+      description: "Git credential helper command written into the workspace's git config",
+    },
+  },
+  run: ({ args }) =>
+    runCli(() =>
+      cmdWorkspaceInit(
+        {
+          issue: args.issue as string,
+          repo: args.repo as string,
+          root: args.root as string,
+          credentialHelper: args.credentialHelper as string,
+        },
+        {
+          env: process.env,
+          run: processEnvRunner(process.env),
+          installGhShim: installWorkerGhShim,
+          exists: fs.existsSync,
+          mkdir: (p) => fs.promises.mkdir(p, { recursive: true }),
+          log: (line) => console.log(line),
+        }
+      )
+    ),
 });
 
 const stateCommand = defineCommand({
@@ -869,6 +903,7 @@ export const mainCommand = defineCommand({
     threads: threadsCommand,
     credential: credentialCommand,
     "worker-shim": workerShimCommand,
+    "workspace-init": workspaceInitCommand,
     state: stateCommand,
     "probe-image": probeImageCommand,
   },

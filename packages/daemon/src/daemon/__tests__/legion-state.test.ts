@@ -1041,6 +1041,7 @@ describe("legion state", () => {
         podName: "legion-legion-42-tester-g1",
         podUid: "8f0c8d2e-4c1a-4e6b-9c7a-0d1e2f3a4b5c",
         pvcName: "legion-legion-42",
+        roleToken: "legion-omp-legion-42-tester",
         ompSessionFile: "/legion/sessions/tester/session.jsonl",
       },
     };
@@ -1051,6 +1052,13 @@ describe("legion state", () => {
     delete raw.roles[testerToken].locator.podUid;
     await writeFile(file, JSON.stringify(raw), "utf8");
     await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+
+    // The stream claim token is required: without it the runtime could not find the pod's
+    // registered stream, so a locator lacking it is refused naming the field.
+    const withoutToken = JSON.parse(JSON.stringify(current));
+    delete withoutToken.roles[testerToken].locator.roleToken;
+    await writeFile(file, JSON.stringify(withoutToken), "utf8");
+    await expect(loadState(file, initialState)).rejects.toThrow(/locator\.roleToken/);
   });
 
   it("rejects a tmux worker claim whose locator lacks its socket or pane id, naming the claim and the field, while a tree locator may lack both", async () => {

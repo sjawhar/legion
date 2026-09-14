@@ -3,14 +3,10 @@ import {
   type IssueKey,
   LegionDaemonApi,
   type LegionRole,
+  roleToken,
   type SpawnWorkerResponse,
 } from "@legion/contracts";
-import {
-  CapabilityService,
-  type ResolvedWorkerClaim,
-  secretHash,
-  spawnCapabilityKey,
-} from "./api/auth";
+import { CapabilityService, secretHash, spawnCapabilityKey } from "./api/auth";
 import { type RouteContext, requireTree, requireTreeIssue } from "./api/context";
 
 import { GitHubService, type GitHubTokenSource } from "./api/github";
@@ -101,6 +97,15 @@ export interface LegionApiDeps {
   onControllerEvent(payload: { type: string }): Promise<void>;
 }
 
+/** What the worker stream listener needs from a hello's boot token: the claim token to register
+ * the stream under, and whether the token's generation is no longer the current one. A phase
+ * worker's or sub-architect's token resolves through `CapabilityService.resolveWorkerClaim`; a
+ * tree root's through `resolveRootBootToken` to `roleToken(project, tree, "architect")`. */
+export interface ResolvedStreamClaim {
+  token: string;
+  stale: boolean;
+}
+
 export interface LegionApi {
   server: Bun.Server<undefined>;
   mintControllerCapability(): Promise<string>;
@@ -113,9 +118,11 @@ export interface LegionApi {
     expectedSessionId?: string
   ): Promise<string>;
   /** The listener side of the boot-token handshake: resolves a `legion worker-shim --connect`
-   * hello's token to the claim it was minted for — the same lookup `/worker/started` performs —
-   * or `undefined` for a token no claim was ever minted. */
-  resolveWorkerBootToken(bootToken: string): ResolvedWorkerClaim | undefined;
+   * hello's token to the claim token the stream registers under — a phase worker's or
+   * sub-architect's claim (the same lookup `/worker/started` performs), or a tree root's
+   * architect token — and whether its generation is stale; `undefined` for a token nothing
+   * minted. */
+  resolveWorkerBootToken(bootToken: string): ResolvedStreamClaim | undefined;
   revokeSessionCapability(sessionId: string): void;
   stop(): void;
 }
@@ -268,6 +275,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         tree,
         issue: tree,
         role: "architect",
+        generation,
       };
       await save();
       return bootToken;
@@ -277,7 +285,22 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
       auth.registerWorkerBootToken(bootToken, { tree, issue, role, generation, expectedSessionId });
       return bootToken;
     },
-    resolveWorkerBootToken: (bootToken) => auth.resolveWorkerClaim(deps.state, bootToken),
+    resolveWorkerBootToken: (bootToken) => {
+      const worker = auth.resolveWorkerClaim(deps.state, bootToken);
+      if (worker) {
+        return {
+          token: worker.token,
+          stale: worker.boot !== undefined && worker.boot.generation !== worker.claim.generation,
+        };
+      }
+      const root = auth.resolveRootBootToken(deps.state, bootToken);
+      const tree = root ? deps.state.trees[root.tree] : undefined;
+      if (!root || !tree) return undefined;
+      return {
+        token: roleToken(deps.state.project, root.tree, "architect"),
+        stale: root.generation !== undefined && root.generation !== tree.generation,
+      };
+    },
     mintControllerCapability: async () => {
       const secret = randomUUID();
       deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");

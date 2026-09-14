@@ -159,7 +159,7 @@ export function config(): DaemonConfig {
     project: "omp",
     legionId: "acme/1",
     port: 13370,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: "http://127.0.0.1:13370",
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",

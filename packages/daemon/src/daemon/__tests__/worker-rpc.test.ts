@@ -218,6 +218,54 @@ for (const transport of [unixTransport, tcpTransport]) {
       }
     });
 
+    it("adoptWorkingCopy sends the shim frame with the identity and budget, resolves on ok, rejects with the shim's error on ok:false, and refuses a malformed reply", async () => {
+      const sent: Record<string, unknown>[] = [];
+      let reply: "ok" | "error" | "malformed" = "ok";
+      const { shim, connect } = await transport.start((frame, write) => {
+        if (frame.type !== "adopt-working-copy") return;
+        sent.push(frame);
+        if (reply === "ok") write({ id: frame.id, type: "adopt-working-copy-result", ok: true });
+        else if (reply === "error")
+          write({
+            id: frame.id,
+            type: "adopt-working-copy-result",
+            ok: false,
+            error: "Command failed (exit 1): jj metaedit …\nno such revision",
+          });
+        else write({ id: frame.id, type: "response", success: true });
+      });
+      try {
+        const client = await connect();
+        const identity = {
+          jjUser: "legion-implementer[bot]",
+          jjEmail: "implementer@users.noreply.github.com",
+        };
+        await expect(client.adoptWorkingCopy(identity, 300_000)).resolves.toBeUndefined();
+        expect(sent).toHaveLength(1);
+        const { id, ...rest } = sent[0] ?? {};
+        expect(typeof id).toBe("string");
+        expect(rest).toEqual({
+          type: "adopt-working-copy",
+          jjUser: "legion-implementer[bot]",
+          jjEmail: "implementer@users.noreply.github.com",
+          timeoutMs: 300_000,
+        });
+        reply = "error";
+        await expect(client.adoptWorkingCopy(identity, 300_000)).rejects.toThrow(
+          "Command failed (exit 1): jj metaedit …\nno such revision"
+        );
+        reply = "malformed";
+        await expect(client.adoptWorkingCopy(identity, 300_000)).rejects.toThrow(
+          "Worker shim did not confirm the working-copy adoption"
+        );
+        // Each request carries its own id; the shim's answers were correlated by it.
+        expect(new Set(sent.map((frame) => frame.id)).size).toBe(3);
+        client.close();
+      } finally {
+        shim.stop();
+      }
+    });
+
     it("resolves prompt on its acknowledgement with a receipt whose turn has not started; the shim's later agent_start resolves turnStarted", async () => {
       const { shim, connect } = await transport.start((frame, write) => {
         if (frame.type === "prompt") {

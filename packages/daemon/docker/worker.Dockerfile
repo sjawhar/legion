@@ -6,11 +6,14 @@
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the `legion` CLI compiled from this checkout (one binary: legion, worker-shim,
-# credential, gh, handoff, probe-image); the pinned OMP fork build the daemon's default
+# credential, gh, handoff, workspace-init, probe-image); the pinned OMP fork build the daemon's default
 # `omp_invocation` names, resolved with mise's github backend exactly as the daemon resolves it;
 # @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and linked into the isolated OMP
-# profile `legion`; jj; git; gh. The last RUN executes the three launch probes (the daemon's two plus the
-# session-storage probe) through `legion probe-image` as the runtime user, so a broken image never publishes.
+# profile `legion`; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
+# requires it); gh. The last RUN checks every binary runs on the base, proves jj accepts the image's git
+# with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
+# daemon's two plus the session-storage probe) through `legion probe-image` as the runtime user, so a
+# broken image never publishes.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
@@ -88,8 +91,10 @@ RUN --mount=type=secret,id=github_token \
     /opt/omp/bin/omp --version && /opt/tools/jj --version && /opt/tools/gh --version
 
 # ------------------------------------------------------------------------------------------------
-# runtime
-FROM debian:bookworm-slim
+# runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
+# bookworm-backports stop at 2.39.5). The binaries copied in below were built or fetched on bookworm;
+# trixie's newer glibc runs them, and the last RUN proves it.
+FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
@@ -116,18 +121,34 @@ ENV OMP_PROFILE=legion \
 # image alone.
 USER 1000:1000
 WORKDIR /home/legion
-# 1. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
+# 1. Every copied binary runs on this base (they were built or fetched on bookworm; trixie's glibc is
+#    newer, so they do — proven here, not assumed), and git is new enough for jj.
+# 2. jj's git backend must accept the git on this image: `jj git clone` of a scratch bare repository
+#    runs jj's `git fetch --porcelain` subprocess exactly as `legion workspace-init` does in the init
+#    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
+#    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
+#    `legion probe-image` never runs jj, and the daemon host's own git is newer.
+# 3. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
 #    OMP's first run in the image, so it also downloads OMP's native modules (~345 MB) into
 #    /home/legion/.omp/natives/<version>/; this layer ships them and a pod never fetches them.
-# 2. Run the three launch probes: the daemon's two (pi.agents, the plugin load) plus the session-storage
+# 4. Run the three launch probes: the daemon's two (pi.agents, the plugin load) plus the session-storage
 #    setting probe, which only the image runs — so no image ships an OMP that would silently keep a `sql`
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
 #    single omp invocation after 30 s, so a natives download inside the first probe would read as a
-#    definitive "does not expose pi.agents" failure. Step 1 must have already fetched them.
+#    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
 # Any failure fails the build: a broken image never publishes.
-RUN omp plugin install /opt/legion/pi-legion-envoy \
-    && legion probe-image \
-    && rm -rf /home/legion/.omp/profiles/legion/logs
-# Placeholder only: the real entrypoint (provider *_FILE export into the OMP child, shim dial-out) is the
-# Kubernetes runtime's (LEGION-24), which sets the pod command. Override with --entrypoint to run anything else.
-ENTRYPOINT ["legion", "worker-shim"]
+RUN set -eu; \
+    bun --version; omp --version; jj --version; gh --version; git --version; \
+    scratch="$(mktemp -d)"; \
+    git init --quiet --bare "$scratch/origin.git"; \
+    jj git clone "$scratch/origin.git" "$scratch/clone"; \
+    rm -rf "$scratch"; \
+    omp plugin install /opt/legion/pi-legion-envoy; \
+    legion probe-image; \
+    rm -rf /home/legion/.omp/profiles/legion/logs
+# The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
+# command explicitly: the init container runs `legion workspace-init …` and the main container runs
+# `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
+# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts). This ENTRYPOINT therefore only
+# makes `docker run <image> probe-image` and `docker run <image> --help` work.
+ENTRYPOINT ["legion"]

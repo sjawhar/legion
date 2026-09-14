@@ -150,6 +150,30 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     expect(logs).toEqual([]);
   });
 
+  it("registers a tree root's shim under its architect token from a root boot token the API minted", async () => {
+    const { api, state } = startApi();
+    state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+    const bootToken = await api.mintBootToken(root, 1);
+    const file = await tokenFile(`${bootToken}\n`);
+    const logs: string[] = [];
+    const listener = startListener(api, 0, logs);
+    const shim = spawnShim([
+      "--connect",
+      `tcp://127.0.0.1:${listener.port}`,
+      "--boot-token-file",
+      file,
+    ]);
+
+    const client = await listener.awaitRegistration(
+      roleToken(state.project, root, "architect"),
+      10_000
+    );
+    await client.negotiate();
+    client.shutdown();
+    expect(await shim.proc.exited).toBe(0);
+    expect(logs).toEqual([]);
+  });
+
   it("negative control: a token the API never minted is rejected, logged once per dial, and OMP is never spawned", async () => {
     const { api } = startApi();
     const logs: string[] = [];

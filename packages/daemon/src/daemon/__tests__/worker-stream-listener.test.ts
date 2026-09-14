@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { IssueKey } from "@legion/contracts";
-import type { ResolvedWorkerClaim } from "../api/auth";
-import type { WorkerRoleClaim } from "../legion-state";
+import type { ResolvedStreamClaim } from "../api";
 import {
   startWorkerStreamListener,
   type WorkerStreamListener,
@@ -10,8 +8,7 @@ import {
 import { waitFor } from "./ci-fixtures";
 
 const CLAIM_TOKEN = "legion-acme-LEGION-1-tester";
-const claim: WorkerRoleClaim = { issue: "LEGION-1" as IssueKey, role: "tester", generation: 2 };
-const resolvedClaim: ResolvedWorkerClaim = { token: CLAIM_TOKEN, claim, boot: undefined };
+const resolvedClaim: ResolvedStreamClaim = { token: CLAIM_TOKEN, stale: false };
 
 const listeners: WorkerStreamListener[] = [];
 afterEach(() => {
@@ -19,7 +16,7 @@ afterEach(() => {
 });
 
 function start(
-  resolveBootToken: (token: string) => ResolvedWorkerClaim | undefined = (token) =>
+  resolveBootToken: (token: string) => ResolvedStreamClaim | undefined = (token) =>
     token === "tok-1" ? resolvedClaim : undefined,
   options: Partial<WorkerStreamListenerOptions> = {}
 ) {
@@ -140,17 +137,8 @@ describe("WorkerStreamListener", () => {
     expect(shim.lines).toEqual([]);
   });
 
-  it("rejects a hello whose in-memory mint record is a stale generation", async () => {
-    const { listener, logs } = start(() => ({
-      token: CLAIM_TOKEN,
-      claim,
-      boot: {
-        tree: "LEGION-1" as IssueKey,
-        issue: "LEGION-1" as IssueKey,
-        role: "tester",
-        generation: 1,
-      },
-    }));
+  it("rejects a hello whose token's generation is no longer the claim's current one", async () => {
+    const { listener, logs } = start(() => ({ token: CLAIM_TOKEN, stale: true }));
     const shim = await dial(listener.port);
     shim.write(hello("tok-1"));
     await shim.closed;

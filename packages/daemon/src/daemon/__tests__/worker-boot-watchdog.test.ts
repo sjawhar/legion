@@ -66,6 +66,7 @@ function fakeClient(): WorkerRpcClient & { resolveClosed: () => void } {
     closed: promise,
     runState: "unknown",
     negotiate: async () => {},
+    adoptWorkingCopy: async () => {},
     prompt: async () => ({ turnStarted: Promise.resolve(), hasStarted: true, abandonWait() {} }),
     getState: async () => ({}),
     shutdown: () => {},

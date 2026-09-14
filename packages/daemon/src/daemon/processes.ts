@@ -1,4 +1,4 @@
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import {
   controllerToken,
@@ -10,14 +10,12 @@ import {
   type SpawnWorkerResponse,
   sanitizeToken,
 } from "@legion/contracts";
+import type { JjIdentity } from "@legion/workspace";
 import {
-  commandFailure,
   issueWorkspaceDir,
   type ProvisionIssueWorkspaceDeps,
-  provisionIssueWorkspace,
   type RemoveIssueWorkspaceResult,
   removeIssueWorkspace,
-  type WorkspaceSpec,
 } from "@legion/workspace";
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
@@ -122,22 +120,11 @@ export interface ProcessManagerDeps {
   state: LegionState;
   saveState(): Promise<void>;
   config: DaemonConfig;
-  ompInvocation: string;
   /** The `PATH` every spawned process receives: the daemon's resolved tool environment
    * (`resolveDaemonEnvironment`), `<state_dir>/bin` first and never a `worker-bin` entry —
    * `credentialProcessEnvironment` prepends the pane's own. */
   processPath: string;
   credentialHelper: string;
-  run(
-    cmd: string[],
-    options?: CommandRunnerOptions
-  ): Promise<{
-    stdout: string;
-    stderr?: string;
-    exitCode: number;
-    timedOut?: CommandResult["timedOut"];
-    aborted?: CommandResult["aborted"];
-  }>;
   /** Publishes one of the daemon's own notices to a role topic — `worker-queued`,
    * `worker-started`, `worker-died`, `launch-failed`, the controller's `revive-failed`, and a
    * redelivered exception payload. Fire-and-forget: the caller never waits on it, and a failed
@@ -165,8 +152,17 @@ export interface ProcessManagerDeps {
    * and swept. ProcessManager owns the lifecycle around those calls and never reads a
    * runtime-specific locator field itself. */
   runtime: Runtime;
-  provisioningToken(owner: string): Promise<string>;
-  statPrompt?(promptPath: string): Promise<unknown>;
+  /** Daemon-host runner used only when the selected Runtime removes workspaces on tree close. */
+  run?(
+    command: string[],
+    options?: CommandRunnerOptions
+  ): Promise<{
+    stdout: string;
+    stderr?: string;
+    exitCode: number;
+    timedOut?: CommandResult["timedOut"];
+    aborted?: CommandResult["aborted"];
+  }>;
   /** Used to bound the wait for any process's graceful shutdown — a single worker's own
    * retirement, or every process under a closing tree — before it is killed outright.
    * Overridable for tests; defaults to a real timer. */
@@ -187,10 +183,6 @@ export interface ProcessManagerDeps {
   /** Invalidates a session's daemon-minted capability the moment its process is observed dead, so a stale credential file cannot keep minting grants until a respawn overwrites it. */
   revokeSessionCapability(sessionId: string): void;
   now(): number;
-  /** `<state_dir>/deployment-instructions.md`, materialized by `index.ts` at boot when
-   * `config.instructionsPath` is set — the last part of every launched pane's one
-   * `--append-system-prompt` value, as `$(cat <this file>)`. Undefined: no instructions part. */
-  deploymentInstructionsFile?: string;
 }
 
 const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
@@ -219,38 +211,6 @@ export function addressingFragment(
   );
 }
 
-/** Escapes `text` for the inside of a POSIX double-quoted shell word: `\`, `"`, `$`, and `` ` ``
- * are the four characters the shell still interprets there. Used for the inline addressing text
- * that shares one double-quoted `--append-system-prompt` value with the `$(cat …)` fragments. */
-function shellDoubleQuoted(text: string): string {
-  return text.replaceAll(/[\\"$`]/g, (character) => `\\${character}`);
-}
-
-/** The one `--append-system-prompt` argument every daemon-launched OMP process receives. OMP's
- * flag is last-wins (its argv handler assigns `appendSystemPrompt`), so several flags would hand
- * the model only the final fragment — with deployment instructions configured, a pane would get
- * neither its role prompt nor its addressing line nor the root's gate policy. Every fragment is
- * therefore joined into a single value, in order: the packaged role prompt, the addressing
- * fragment (every root and phase worker; the controller has none), then the deployment
- * instructions file when configured, separated by a blank line. The value is one double-quoted
- * shell word: the file-backed fragments are `$(cat <path>)` expanded by the process's own shell —
- * never inlined into the command (size and quoting) — and the addressing text is escaped for the
- * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
- * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch sites
- * cannot drift. */
-function systemPromptArguments(
-  promptPath: string,
-  addressingPrompt: string | undefined,
-  deploymentInstructionsFile: string | undefined
-): string {
-  const fragments = [`$(cat ${shellPath(promptPath)})`];
-  if (addressingPrompt !== undefined) fragments.push(shellDoubleQuoted(addressingPrompt));
-  if (deploymentInstructionsFile !== undefined) {
-    fragments.push(`$(cat ${shellPath(deploymentInstructionsFile)})`);
-  }
-  return `--append-system-prompt "${fragments.join("\n\n")}"`;
-}
-
 /** The one sentence a root architect's system prompt carries after the addressing sentence:
  * whether this project arms the design gate (`config.gates.design`). The daemon's reply to
  * `/process/started` carries the same value, but the extension never shows it to the model, so
@@ -262,20 +222,9 @@ export function designGateFragment(design: "root-issues" | "off"): string {
     : "Design gate policy: `gates.design: root-issues` — this project arms the root design gate; follow the legion-architect skill's approval sequence before any Legion-role spawn.";
 }
 
-/** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
- * invocation shell fragment, so provider credentials or any other launch wrapper are obtained
- * *inside* the pane process rather than carried by the daemon itself — the daemon never exports
- * provider keys to its own environment or to a pane's tmux `-e` argv. Each prefix element is
- * shell-quoted independently. Used for every OMP invocation the daemon builds: spawned
- * root/worker/controller panes (`processes.ts`) and the startup capability probes (`boot-probes.ts`) —
- * one launch path, never duplicated. */
-export function withOmpLaunchPrefix(
-  launchPrefix: readonly string[],
-  ompInvocation: string
-): string {
-  if (launchPrefix.length === 0) return ompInvocation;
-  return `${launchPrefix.map(shellPath).join(" ")} ${ompInvocation}`;
-}
+/** The git `credential.helper` value written into every provisioned clone: this daemon's own
+ * runtime and CLI entrypoint, so `git` inside a pane redeems the pane's grant through `legion
+ * credential`. */
 export function daemonCredentialHelper(
   execPath = process.execPath,
   entrypoint = DAEMON_CLI_ENTRYPOINT
@@ -285,6 +234,7 @@ export function daemonCredentialHelper(
   }
   return `!${shellPath(execPath)} ${shellPath(entrypoint)} credential`;
 }
+
 /** The locators state currently records for `issue`, tree locator first (only when `issue` is a
  * tree root) then every worker claim's in `state.roles` order — the order a runtime that groups
  * an issue's processes together (the tmux runtime's shared window) reads them in. */
@@ -381,6 +331,8 @@ export class ProcessManager {
   private launchesEnabled = false;
   private readonly heldResurrects = new Set<IssueKey>();
   private heldControllerRequest = false;
+  /** `ensureController`'s one log line for a runtime that does not launch the controller. */
+  private loggedControllerNotLaunched = false;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
   /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
@@ -928,10 +880,9 @@ export class ProcessManager {
    * admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a queue promotion) or none at
    * all (`/worker/ready` resuming a worker whose slot was already counted via its locator from
    * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking).
-   * For an `assignment` the issue's working copy is first adopted for the role
-   * (`adoptWorkingCopy`), before the prompt frame and before any state write, so a working copy
-   * that cannot be adopted leaves the worker unprompted and the claim untouched; a rejecting
-   * `adoptWorkingCopy` propagates like a refused prompt, having committed nothing. */
+   * For an `assignment`, the Runtime first adopts the issue's working copy for the role, before
+   * the prompt frame and any state write. A rejected adoption leaves the worker unprompted and the
+   * claim untouched, propagating like a refused prompt. */
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -941,7 +892,14 @@ export class ProcessManager {
     pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
-    if (pending.kind === "assignment") await this.adoptWorkingCopy(issue, role);
+    if (pending.kind === "assignment") {
+      await this.runtime.adoptWorkingCopy(
+        issue,
+        role,
+        await this.workerJjIdentity(role),
+        this.deps.config.slowCommandTimeoutSeconds * 1000
+      );
+    }
     const receipt = await client.prompt(pending.task);
     const outcome = await this.awaitTurnStart(client, receipt);
     if (!outcome.started) {
@@ -2055,6 +2013,17 @@ export class ProcessManager {
       return;
     }
     this.cancelControllerRegistrationDeadline();
+    if (!this.runtime.launchesController) {
+      // Nothing to mint and nothing to spawn: a Kubernetes daemon's controller is not this
+      // runtime's to launch (LEGION-25). Logged once, not per controller-bound event.
+      if (!this.loggedControllerNotLaunched) {
+        this.loggedControllerNotLaunched = true;
+        console.error(
+          "[legion] the controller is not launched by this runtime (LEGION-25); controller-bound events wait for one started elsewhere"
+        );
+      }
+      return;
+    }
     if (!this.launchesEnabled) {
       // Spawning the controller opens a pane. Held for `replayHeldRecoveries()`.
       this.heldControllerRequest = true;
@@ -2994,50 +2963,6 @@ export class ProcessManager {
     });
   }
 
-  private async computeResumeArgument(
-    issue: IssueKey,
-    resumeSessionFile: string | undefined,
-    logVerb: string
-  ): Promise<string> {
-    if (!resumeSessionFile) return "";
-    try {
-      await stat(resumeSessionFile);
-    } catch (error) {
-      if (
-        typeof error !== "object" ||
-        error === null ||
-        !("code" in error) ||
-        error.code !== "ENOENT"
-      ) {
-        throw error;
-      }
-      // Same-agent invariant: a recorded session that has gone missing is a launch failure, never
-      // a silent fresh start that would lose the original agent's context.
-      throw new Error(
-        `Refusing to start ${issue} fresh while ${logVerb}: recorded OMP session file is missing: ${resumeSessionFile}`
-      );
-    }
-    console.info(`[legion] ${logVerb} ${issue} by resuming OMP session ${resumeSessionFile}`);
-    return ` --resume=${shellPath(resumeSessionFile)}`;
-  }
-
-  /** The OMP command every issue process — root architect and phase worker alike — runs inside
-   * its shim: the configured launch prefix and invocation, `--resume` when a recorded session is
-   * being resumed (a missing session file is a launch failure, see `computeResumeArgument`), RPC
-   * mode, and the system-prompt fragments from `systemPromptArguments`. The prompt file is
-   * stat'ed first so a missing role prompt fails before any resume decision or spawn. */
-  private async issueInnerCommand(
-    issue: IssueKey,
-    promptPath: string,
-    addressingPrompt: string,
-    resumeSessionFile: string | undefined,
-    logVerb: string
-  ): Promise<string> {
-    await (this.deps.statPrompt ?? stat)(promptPath);
-    const resumeArgument = await this.computeResumeArgument(issue, resumeSessionFile, logVerb);
-    return `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)}${resumeArgument} --mode rpc ${systemPromptArguments(promptPath, addressingPrompt, this.deps.deploymentInstructionsFile)}`;
-  }
-
   /** The `run` every workspace-package command goes through: the daemon's runner, with `stderr`
    * normalised to a string the package's `commandFailure` can print. Typed as the package's own
    * `run` so both `provisionIssueWorkspace` and `removeIssueWorkspace` accept it unchanged. */
@@ -3045,24 +2970,12 @@ export class ProcessManager {
     command,
     options
   ) => {
-    const result = await this.deps.run(command, options);
+    const run = this.deps.run;
+    if (!run)
+      throw new Error("runtime owns workspace cleanup but ProcessManager has no command runner");
+    const result = await run(command, options);
     return { ...result, stderr: result.stderr ?? "" };
   };
-
-  /** Provisions the jj workspace and credential wiring shared by every issue's process — the
-   * root architect and every phase worker alike. */
-  private async provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
-    const [owner] = this.deps.config.repo.split("/") as [string, string];
-    return provisionIssueWorkspace(issue, {
-      repo: this.deps.config.repo,
-      extensionPackage: EXTENSION_PACKAGE,
-      stateDir: this.deps.config.stateDir,
-      provisioningToken: async () => await this.deps.provisioningToken(owner),
-      credentialHelper: this.deps.credentialHelper,
-      commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
-      run: this.workspaceCommandRunner,
-    });
-  }
 
   /** Removes `issue`'s jj workspace from the shared clone (`removeIssueWorkspace`), under the same
    * runner and slow-command budget as `provisionWorkspace`. Only `removeTreeWorkspaces` calls it. */
@@ -3092,6 +3005,7 @@ export class ProcessManager {
    * `tree.status = "closed"` so a crash mid-removal leaves the tree `lingering` for the sweep to
    * re-run the close and the idempotent removal. */
   private async removeTreeWorkspaces(treeKey: IssueKey, tree: TreeState): Promise<void> {
+    if (this.runtime.removesWorkspacesOnTreeClose === false) return;
     const keptEvery =
       tree.status !== "lingering"
         ? `the tree record is "${tree.status}", not lingering`
@@ -3147,7 +3061,6 @@ export class ProcessManager {
     resume: boolean,
     resumeSessionFile?: string
   ): Promise<void> {
-    const workspace = await this.provisionWorkspace(tree.root);
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "architect-root.md");
     const priorSessionFile = resume
       ? (resumeSessionFile ?? tree.locator?.ompSessionFile)
@@ -3160,7 +3073,6 @@ export class ProcessManager {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
       LEGION_ROLE: "architect",
-      LEGION_ROOT_WORKSPACE: workspace.workspaceDir,
       LEGION_GENERATION: String(generation),
       LEGION_DAEMON_URL: this.deps.config.daemonUrl,
       LEGION_PROJECT: this.deps.state.project,
@@ -3182,13 +3094,6 @@ export class ProcessManager {
       tree.root,
       "architect"
     )} ${designGateFragment(this.deps.config.gates.design)}`;
-    const innerCommand = await this.issueInnerCommand(
-      tree.root,
-      promptPath,
-      addressingPrompt,
-      priorSessionFile,
-      "resurrecting"
-    );
     // Cleared before the process starts, not after `runtime.spawn` resolves: the root is a real
     // OMP process outside this event loop, so a fast root's own `/process/started` +
     // `/process/ready` can land before this continuation even runs again (interleaved with the
@@ -3206,10 +3111,11 @@ export class ProcessManager {
     this.trackProcessSecrets(architectToken);
     const locator = await this.runtime.spawn("root", {
       issue: tree.root,
+      tree: tree.root,
+      generation,
       role: "architect",
-      workspaceDir: workspace.workspaceDir,
       env,
-      innerCommand,
+      launch: { promptPath, addressingPrompt, resumeSessionFile: priorSessionFile },
       secrets: { LEGION_BOOT_TOKEN: bootToken },
     });
     // A newer `spawnRoot` (generation bump) may already have run and finished for this exact
@@ -3458,7 +3364,6 @@ export class ProcessManager {
     // `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);
     try {
-      const workspace = await this.provisionWorkspace(issue);
       const identity = await this.workerIdentityEnv(role);
       const promptPath = path.join(EXTENSION_PACKAGE, "roles", `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
@@ -3474,7 +3379,6 @@ export class ProcessManager {
         LEGION_TREE: treeKey,
         LEGION_ISSUE: issue,
         LEGION_ROLE: role,
-        LEGION_WORKSPACE: workspace.workspaceDir,
         LEGION_GENERATION: String(generation),
         LEGION_DAEMON_URL: this.deps.config.daemonUrl,
         LEGION_PROJECT: this.deps.state.project,
@@ -3490,22 +3394,16 @@ export class ProcessManager {
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
       const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
-      const innerCommand = await this.issueInnerCommand(
-        issue,
-        promptPath,
-        addressingPrompt,
-        resumeSessionFile,
-        "respawning"
-      );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
       this.trackProcessSecrets(token);
       const locator = await this.runtime.spawn("worker", {
         issue,
+        tree: treeKey,
+        generation,
         role,
-        workspaceDir: workspace.workspaceDir,
         env,
-        innerCommand,
+        launch: { promptPath, addressingPrompt, resumeSessionFile },
         secrets: { LEGION_BOOT_TOKEN: bootToken },
       });
       // `closeTree` may have started tearing down this tree while this launch's I/O was in
@@ -3636,11 +3534,7 @@ export class ProcessManager {
   }
 
   private async spawnController(controllerSecret: string): Promise<void> {
-    const controllerDir = path.join(this.deps.config.stateDir, "controller");
     const promptPath = path.join(EXTENSION_PACKAGE, "roles", "controller-root.md");
-    await (this.deps.statPrompt ?? stat)(promptPath);
-    await this.writeOmpConfig(controllerDir);
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.config.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
     const token = controllerToken(this.deps.state.project);
     // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);
@@ -3660,9 +3554,8 @@ export class ProcessManager {
       };
       this.deps.state.controllerLocator = await this.runtime.spawn("controller", {
         role: "controller",
-        workspaceDir: controllerDir,
         env,
-        innerCommand,
+        launch: { promptPath },
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret },
       });
     } finally {
@@ -3686,11 +3579,6 @@ export class ProcessManager {
     } catch (error) {
       console.error("[legion] failed to connect controller shim socket on ready:", error);
     }
-  }
-
-  private async writeOmpConfig(directory: string): Promise<void> {
-    await mkdir(path.join(directory, ".omp"), { recursive: true });
-    await writeFile(path.join(directory, ".omp", "config.yml"), "", "utf8");
   }
 
   /** Revokes a claim's session capability (a no-op if it never had one — never spawned, or
@@ -3918,47 +3806,23 @@ export class ProcessManager {
    * identity there set the author and committer for every other tree's commits (LEGION-44). Root
    * architect and controller panes never commit and carry none of these. */
   private async workerIdentityEnv(role: LegionRole): Promise<Record<string, string>> {
+    return gitIdentityEnv(await this.workerGitIdentity(role));
+  }
+
+  /** The jj half of the same lease identity, for `Runtime.adoptWorkingCopy`: `jj metaedit` reads
+   * `JJ_USER`/`JJ_EMAIL` and nothing else. */
+  private async workerJjIdentity(role: LegionRole): Promise<JjIdentity> {
+    const identity = await this.workerGitIdentity(role);
+    return { jjUser: identity.name, jjEmail: identity.email };
+  }
+
+  private async workerGitIdentity(role: LegionRole): Promise<{ name: string; email: string }> {
     const [owner] = this.deps.config.repo.split("/") as [string, string];
     const lease = await this.deps.workerCatchup.tokenManager.getToken(
       appRoleForLegionRole(role),
       owner
     );
-    return gitIdentityEnv(lease.gitIdentity);
-  }
-
-  /** Makes `issue`'s working-copy commit — the commit every `jj split`/`jj describe` of the phase
-   * about to run carves its work out of — authored by `role`'s App identity. jj keeps a rewritten
-   * commit's author and refreshes only the committer, and the working copy is created by the
-   * daemon's own `jj workspace add` under the daemon's identity and never recreated by a split
-   * while `.omp/config.yml` sits in it; the pane environment alone would therefore leave every
-   * commit in the workspace authored by the daemon for the workspace's whole life. Runs at every
-   * assignment delivery (`promptExistingWorker`) — a fresh launch's `/worker/ready`, a `--resume`,
-   * or a live idle worker prompted over its socket — under the same lease-derived variables the
-   * pane carries and under `slow_command_timeout_seconds`, like every other daemon command that
-   * snapshots a working copy (`metaedit` snapshots it first). `@ & description(exact:"")` touches
-   * only an undescribed working copy: a described one is a previous phase's work and keeps its
-   * author. "Nothing changed." and "No revisions to modify." are exit 0; a failure is the
-   * assignment's failure, so no worker is prompted whose commits would carry the wrong author,
-   * and a kill by the runner is reported as the runner saw it (`commandFailure`: the budget and
-   * wall time, or the abort), never as a bare `exit 143`. */
-  private async adoptWorkingCopy(issue: IssueKey, role: LegionRole): Promise<void> {
-    const command = [
-      "jj",
-      "metaedit",
-      "--update-author",
-      "-r",
-      '@ & description(exact:"")',
-      "-R",
-      issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue),
-    ];
-    const result = await this.deps.run(command, {
-      env: await this.workerIdentityEnv(role),
-      timeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
-    });
-    if (result.exitCode !== 0) {
-      const failure = commandFailure({ ...result, stderr: result.stderr ?? "" }, command);
-      throw new Error(`Could not adopt ${issue}'s working copy for ${role}: ${failure.message}`);
-    }
+    return lease.gitIdentity;
   }
 
   /** The credential environment a root, worker, or controller pane carries for life — never per

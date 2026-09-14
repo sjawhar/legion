@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { controllerToken, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import {
+  issueWorkspaceDir,
+  type JjIdentity,
+  type ProvisionIssueWorkspaceDeps,
+  provisionIssueWorkspace,
+  runAdoptWorkingCopy,
+  type WorkspaceSpec,
+} from "@legion/workspace";
+import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { parseProcStatStartTicks } from "./proc-stat";
 import {
   awaitShutdown,
@@ -12,6 +21,7 @@ import {
   type Runtime,
   type SpawnSpec,
   sameProcess,
+  serialize,
   shellPath,
   type TmuxLocator,
 } from "./runtime";
@@ -53,21 +63,58 @@ function tmuxEnv(env: Record<string, string | undefined>): string[] {
   );
 }
 
-function serialize<T>(
-  queue: Map<string, Promise<unknown>>,
-  key: string,
-  fn: () => Promise<T>
-): Promise<T> {
-  const previous = queue.get(key) ?? Promise.resolve();
-  const gated = previous.then(fn, fn);
-  queue.set(
-    key,
-    gated.then(
-      () => undefined,
-      () => undefined
-    )
-  );
-  return gated;
+/** Escapes `text` for the inside of a POSIX double-quoted shell word: `\`, `"`, `$`, and `` ` ``
+ * are the four characters the shell still interprets there. Used for the inline addressing text
+ * that shares one double-quoted `--append-system-prompt` value with the `$(cat …)` fragments. */
+function shellDoubleQuoted(text: string): string {
+  return text.replaceAll(/[\\"$`]/g, (character) => `\\${character}`);
+}
+
+/** The one `--append-system-prompt` argument every daemon-launched OMP process receives. OMP's
+ * flag is last-wins (its argv handler assigns `appendSystemPrompt`), so several flags would hand
+ * the model only the final fragment — with deployment instructions configured, a pane would get
+ * neither its role prompt nor its addressing line nor the root's gate policy. Every fragment is
+ * therefore joined into a single value, in order: the packaged role prompt, the addressing
+ * fragment (every root and phase worker; the controller has none), then the deployment
+ * instructions file when configured, separated by a blank line. The value is one double-quoted
+ * shell word: the file-backed fragments are `$(cat <path>)` expanded by the process's own shell —
+ * never inlined into the command (size and quoting) — and the addressing text is escaped for the
+ * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
+ * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch
+ * sites cannot drift. `KubernetesRuntime` joins the same fragments, as text, the same way. */
+function systemPromptArguments(
+  promptPath: string,
+  addressingPrompt: string | undefined,
+  deploymentInstructionsFile: string | undefined
+): string {
+  const fragments = [`$(cat ${shellPath(promptPath)})`];
+  if (addressingPrompt !== undefined) fragments.push(shellDoubleQuoted(addressingPrompt));
+  if (deploymentInstructionsFile !== undefined) {
+    fragments.push(`$(cat ${shellPath(deploymentInstructionsFile)})`);
+  }
+  return `--append-system-prompt "${fragments.join("\n\n")}"`;
+}
+
+/** Prepends the configured `omp_launch_prefix` (see `DaemonConfig.ompLaunchPrefix`) to an OMP
+ * invocation shell fragment, so provider credentials or any other launch wrapper are obtained
+ * *inside* the pane process rather than carried by the daemon itself — the daemon never exports
+ * provider keys to its own environment or to a pane's tmux `-e` argv. Each prefix element is
+ * shell-quoted independently. Used for every OMP invocation the daemon builds: spawned
+ * root/worker/controller panes (`runtime-tmux.ts`) and the startup capability probes
+ * (`boot-probes.ts`) — one launch path, never duplicated. */
+export function withOmpLaunchPrefix(
+  launchPrefix: readonly string[],
+  ompInvocation: string
+): string {
+  if (launchPrefix.length === 0) return ompInvocation;
+  return `${launchPrefix.map(shellPath).join(" ")} ${ompInvocation}`;
+}
+
+/** The controller's working directory carries an empty project-level OMP config so the pane's
+ * OMP never picks up some unrelated project's settings from a parent directory. */
+async function writeOmpConfig(directory: string): Promise<void> {
+  await mkdir(path.join(directory, ".omp"), { recursive: true });
+  await writeFile(path.join(directory, ".omp", "config.yml"), "", "utf8");
 }
 
 export interface TmuxRuntimeDeps {
@@ -78,6 +125,35 @@ export interface TmuxRuntimeDeps {
   project: string;
   /** `<stateDir>/workers/<name>.sock` and `<stateDir>/secrets/<token>`. */
   stateDir: string;
+  /** The resolved OMP invocation every pane runs (`environment.ompInvocation`). */
+  ompInvocation: string;
+  /** `config.ompLaunchPrefix`. */
+  ompLaunchPrefix: readonly string[];
+  /** `<state_dir>/deployment-instructions.md` when configured — appended to every launched
+   * pane's system prompt as its last `--append-system-prompt "$(cat <this file>)"` fragment.
+   * Undefined: no fragment. */
+  deploymentInstructionsFile?: string;
+  /** Overridable for tests: the role-prompt existence check (`stat` by default). */
+  statPrompt?(promptPath: string): Promise<unknown>;
+  /** The GitHub App installation token `provisionIssueWorkspace` clones with. */
+  provisioningToken(owner: string): Promise<string>;
+  /** The daemon's command runner, for provisioning commands (`jj`, `git`). */
+  run(
+    cmd: string[],
+    options?: CommandRunnerOptions
+  ): Promise<{
+    stdout: string;
+    stderr?: string;
+    exitCode: number;
+    timedOut?: CommandResult["timedOut"];
+    aborted?: CommandResult["aborted"];
+  }>;
+  /** `config.repo`: the one repository every issue provisions against. */
+  repo: `${string}/${string}`;
+  /** The git `credential.helper` value written into the clone (`daemonCredentialHelper()`). */
+  credentialHelper: string;
+  /** `config.slowCommandTimeoutSeconds * 1000`, the per-command provisioning budget. */
+  slowCommandTimeoutMs: number;
   connectWorkerRpc(socketPath: string, timeoutMs?: number): Promise<WorkerRpcClient>;
   /** The timeout `stop`'s own no-negotiate dial uses. */
   workerRpcTimeoutMs(): number;
@@ -159,9 +235,13 @@ function isProcessGoneError(error: unknown): boolean {
  * splits a new pane into its window.
  */
 export class TmuxRuntime implements Runtime {
+  readonly launchesController = true;
+  readonly removesWorkspacesOnTreeClose = true;
   /** Serializes tmux window creation per issue, so two concurrent spawns never each see "no
    * window yet" and open two. */
   private readonly issueLaunchQueue = new Map<IssueKey, Promise<unknown>>();
+  /** Serializes workspace provisioning per repository clone (see `provisionWorkspace`). */
+  private readonly provisionQueue = new Map<string, Promise<unknown>>();
   /** The pane this runtime most recently opened a fresh window with for an issue, identity
    * included: one more candidate for `probedWindowId`, so a concurrent second spawn on the same
    * issue (or any later one, while every persisted locator still names a window nothing
@@ -173,12 +253,14 @@ export class TmuxRuntime implements Runtime {
   constructor(private readonly deps: TmuxRuntimeDeps) {}
 
   /**
-   * Opens (or splits into) the tmux window for the spec's issue — or the controller's own
-   * window — running `legion worker-shim` around the caller's inner OMP command. Delivers the
-   * spec's one secret as a 0600 file at `<stateDir>/secrets/<role token>` and exports only its
-   * `<NAME>_FILE` path, appended after the spec's own env pairs; the write happens before any
-   * tmux call, so an fs failure is an ordinary launch failure. The caller owns that file's
-   * lifetime (hold/prune) — this method only writes it.
+   * Provisions the issue's working copy (`provisionIssueWorkspace`, on the daemon's disk),
+   * assembles the OMP command from the spec's launch description, then opens (or splits into)
+   * the tmux window for the spec's issue — or the controller's own window — running `legion
+   * worker-shim` around that command. Delivers the spec's one secret as a 0600 file at
+   * `<stateDir>/secrets/<role token>` and exports only its `<NAME>_FILE` path, appended after
+   * the spec's own env pairs; the write happens before any tmux call, so an fs failure is an
+   * ordinary launch failure. The caller owns that file's lifetime (hold/prune) — this method
+   * only writes it.
    */
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const [secret, ...extraSecrets] = Object.entries(spec.secrets);
@@ -193,6 +275,7 @@ export class TmuxRuntime implements Runtime {
       throw new Error(`spawn ${kind} requires a Legion role, not "controller"`);
     }
     return this.spawnIssueProcess(
+      kind,
       spec.issue,
       spec.role,
       spec,
@@ -201,16 +284,128 @@ export class TmuxRuntime implements Runtime {
     );
   }
 
+  /** `--resume=<file>` when a recorded session is being resumed; a missing file is a launch
+   * failure (same-agent invariant), never a silent fresh start. */
+  private async resumeArgument(
+    issue: IssueKey,
+    resumeSessionFile: string | undefined,
+    logVerb: string
+  ): Promise<string> {
+    if (!resumeSessionFile) return "";
+    try {
+      await stat(resumeSessionFile);
+    } catch (error) {
+      if (
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      ) {
+        throw error;
+      }
+      // Same-agent invariant: a recorded session that has gone missing is a launch failure, never
+      // a silent fresh start that would lose the original agent's context.
+      throw new Error(
+        `Refusing to start ${issue} fresh while ${logVerb}: recorded OMP session file is missing: ${resumeSessionFile}`
+      );
+    }
+    console.info(`[legion] ${logVerb} ${issue} by resuming OMP session ${resumeSessionFile}`);
+    return ` --resume=${shellPath(resumeSessionFile)}`;
+  }
+
+  /** The OMP command every issue process — root architect and phase worker alike — runs inside
+   * its shim: the configured launch prefix and invocation, `--resume` when a recorded session is
+   * being resumed (a missing session file is a launch failure, see `resumeArgument`), RPC mode,
+   * and the system-prompt fragments from `systemPromptArguments`. The prompt file is stat'ed
+   * first so a missing role prompt fails before any resume decision or spawn. */
+  private async issueInnerCommand(
+    issue: IssueKey,
+    launch: SpawnSpec["launch"],
+    logVerb: string
+  ): Promise<string> {
+    await (this.deps.statPrompt ?? stat)(launch.promptPath);
+    const resume = await this.resumeArgument(issue, launch.resumeSessionFile, logVerb);
+    return `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} --mode rpc ${systemPromptArguments(launch.promptPath, launch.addressingPrompt, this.deps.deploymentInstructionsFile)}`;
+  }
+
+  /** Provisions the jj workspace and credential wiring shared by every issue's process — the
+   * root architect and every phase worker alike (`@legion/workspace`, on the daemon's disk).
+   * Serialized per repository: every issue of a daemon shares one clone under
+   * `<state_dir>/repos/…`, and two trees admitted in one sweep would otherwise run `jj git clone`
+   * /`fetch` and the `git config` writes against it at once — git's `.git/config` lock refuses
+   * the second writer (`could not lock config file … File exists`), a launch failure that says
+   * nothing about the launch. */
+  private provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
+    const [owner] = this.deps.repo.split("/") as [string, string];
+    return serialize(this.provisionQueue, this.deps.repo, () =>
+      provisionIssueWorkspace(issue, {
+        repo: this.deps.repo,
+        stateDir: this.deps.stateDir,
+        provisioningToken: () => this.deps.provisioningToken(owner),
+        credentialHelper: this.deps.credentialHelper,
+        commandTimeoutMs: this.deps.slowCommandTimeoutMs,
+        run: this.workspaceRun,
+      })
+    );
+  }
+
+  /** `deps.run` as `@legion/workspace` expects it: the daemon's runner may omit `stderr`
+   * (`CommandResult.stderr` is optional on a killed command); the workspace contract requires
+   * it, since `commandFailure` quotes it. */
+  private readonly workspaceRun: ProvisionIssueWorkspaceDeps["run"] = async (command, options) => {
+    const result = await this.deps.run(command, options);
+    return { ...result, stderr: result.stderr ?? "" };
+  };
+
+  /** Runs the shared adoption command (`adoptWorkingCopyCommand`) on the daemon-host workspace
+   * before `ProcessManager` sends an assignment prompt. The Kubernetes runtime sends the same
+   * command to the pod's shim instead, because that workspace only exists on the mounted tree
+   * volume. */
+  async adoptWorkingCopy(
+    issue: IssueKey,
+    role: LegionRole,
+    identity: JjIdentity,
+    timeoutMs: number
+  ): Promise<void> {
+    try {
+      await runAdoptWorkingCopy(
+        this.workspaceRun,
+        issueWorkspaceDir(this.deps.stateDir, this.deps.repo, issue),
+        identity,
+        timeoutMs
+      );
+    } catch (error) {
+      throw new Error(
+        `Could not adopt ${issue}'s working copy for ${role}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   private async spawnIssueProcess(
+    kind: "root" | "worker",
     issue: IssueKey,
     role: LegionRole,
     spec: SpawnSpec,
     token: string,
     secret: [string, string]
   ): Promise<TmuxLocator> {
+    // Today's order, kept: provision, then the prompt stat and session-file stat inside the
+    // command assembly, then the socket, secret file, and tmux argv.
+    const workspace = await this.provisionWorkspace(issue);
+    const innerCommand = await this.issueInnerCommand(
+      issue,
+      spec.launch,
+      kind === "root" ? "resurrecting" : "respawning"
+    );
+    const env = {
+      ...spec.env,
+      [kind === "root" ? "LEGION_ROOT_WORKSPACE" : "LEGION_WORKSPACE"]: workspace.workspaceDir,
+    };
     const { socketPath, paneArgv } = await this.preparePane(
       workerSocketBasename(issue, role),
-      spec,
+      workspace.workspaceDir,
+      env,
+      innerCommand,
       token,
       secret
     );
@@ -259,7 +454,18 @@ export class TmuxRuntime implements Runtime {
     token: string,
     secret: [string, string]
   ): Promise<TmuxLocator> {
-    const { socketPath, paneArgv } = await this.preparePane("controller", spec, token, secret);
+    const controllerDir = path.join(this.deps.stateDir, "controller");
+    await (this.deps.statPrompt ?? stat)(spec.launch.promptPath);
+    await writeOmpConfig(controllerDir);
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(spec.launch.promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
+    const { socketPath, paneArgv } = await this.preparePane(
+      "controller",
+      controllerDir,
+      spec.env,
+      innerCommand,
+      token,
+      secret
+    );
     const session = this.deps.tmux.socket;
     const window = await tmux.openWindow(this.deps.tmux, session, "controller", paneArgv, session);
     const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
@@ -275,19 +481,21 @@ export class TmuxRuntime implements Runtime {
 
   /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
    * fresh shim socket path (its directory made, a stale socket removed), the process's one secret
-   * written as a 0600 file, and the pane argv — the spec's env pairs, the secret's `<NAME>_FILE`
-   * pointer, then the `legion worker-shim --socket <path> -- <inner>` command every Legion OMP
-   * process (root, phase worker, controller) runs inside its pane. */
+   * written as a 0600 file, and the pane argv — the env pairs, the secret's `<NAME>_FILE`
+   * pointer, then the `cd <workspace> && legion worker-shim --socket <path> -- <inner>` command
+   * every Legion OMP process (root, phase worker, controller) runs inside its pane. */
   private async preparePane(
     socketName: string,
-    spec: SpawnSpec,
+    workspaceDir: string,
+    env: Record<string, string | undefined>,
+    innerCommand: string,
     token: string,
     [secretName, secretValue]: [string, string]
   ): Promise<{ socketPath: string; paneArgv: string[] }> {
     const socketPath = await this.prepareSocket(socketName);
-    const shellCommand = `cd ${shellPath(spec.workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${spec.innerCommand}`;
+    const shellCommand = `cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
     const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
-    const pairs = [...tmuxEnv(spec.env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
+    const pairs = [...tmuxEnv(env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
     return { socketPath, paneArgv: [...pairs, shellCommand] };
   }
 

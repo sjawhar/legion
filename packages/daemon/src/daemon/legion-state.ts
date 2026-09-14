@@ -176,6 +176,10 @@ export interface SpawnCapability {
   tree: IssueKey;
   issue: IssueKey;
   role: string;
+  /** The process generation the boot token was minted for. Written by `mintBootToken` so a
+   * root pod re-hello-ing after a daemon restart (the in-memory mint record gone) still has its
+   * generation checked; absent only on a record persisted before it was written. */
+  generation?: number;
 }
 
 /** A controller-bound notification whose text cannot be re-derived from durable state once the
@@ -336,6 +340,9 @@ const TmuxLocatorSchema = z
     ompSessionFile: z.string().optional(),
   })
   .strict();
+/** No persisted state has ever carried a kubernetes locator — only `TmuxRuntime` has written
+ * locators — so `roleToken`, a required field, costs no migration; the discriminated union
+ * already admitted the member. */
 const K8sLocatorSchema = z
   .object({
     runtime: z.literal("kubernetes"),
@@ -343,6 +350,7 @@ const K8sLocatorSchema = z
     podName: z.string().min(1),
     podUid: z.string().min(1),
     pvcName: z.string().min(1),
+    roleToken: z.string().regex(ENVOY_ROLE_TOKEN_PATTERN),
     ompSessionFile: z.string().optional(),
   })
   .strict();
@@ -451,6 +459,7 @@ const SpawnCapabilitySchema = z
     tree: IssueKeySchema,
     issue: IssueKeySchema,
     role: z.string(),
+    generation: z.number().int().nonnegative().optional(),
   })
   .strict();
 const PhaseSchema = z
@@ -1174,6 +1183,21 @@ async function migrateV27State(
   return { ...state, version: 28, gates };
 }
 
+/** One line per validation issue, naming where in the file it sits (`roles.<token>.locator.
+ * roleToken`), so a corrupt record is refused with the field that broke it. A plain `z.union`
+ * (`RoleClaimSchema`) collapses a type failure inside any option to a single `Invalid input`;
+ * its per-option errors are expanded instead, since one of them is the real reason. */
+function describeIssues(issues: z.ZodIssue[]): string[] {
+  return issues.flatMap((issue) => {
+    if (issue.code === z.ZodIssueCode.invalid_union) {
+      return issue.unionErrors.flatMap((error) => describeIssues(error.issues));
+    }
+    return issue.path.length === 0
+      ? [issue.message]
+      : [`${issue.message} at ${issue.path.join(".")}`];
+  });
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1229,8 +1253,7 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
 
   const parsed = LegionStateSchema.safeParse(state);
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((issue) => issue.message).join(", ");
-    throw new Error(`Invalid Legion state: ${issues}`);
+    throw new Error(`Invalid Legion state: ${describeIssues(parsed.error.issues).join(", ")}`);
   }
 
   // Zod v3 infers validated records as partial despite every mapped value being required.

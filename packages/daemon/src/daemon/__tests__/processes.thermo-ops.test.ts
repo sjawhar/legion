@@ -5,7 +5,7 @@ import path from "node:path";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
-import { TmuxRuntime } from "../runtime-tmux";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 
 const now = Date.parse("2026-08-26T00:00:00.000Z");
@@ -15,7 +15,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
     project: "omp",
     legionId: "sjawhar/1",
     port: 13999,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: "http://127.0.0.1:13999",
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
@@ -47,7 +47,7 @@ function daemonConfig(stateDir: string): DaemonConfig {
 
 function manager(
   stateDir: string,
-  run: ProcessManagerDeps["run"]
+  run: TmuxRuntimeDeps["run"]
 ): {
   manager: ProcessManager;
   state: LegionState;
@@ -55,25 +55,22 @@ function manager(
 } {
   const commands: string[][] = [];
   const state = newLegionState("omp", 1);
+  const recordingRun: TmuxRuntimeDeps["run"] = async (command, options) => {
+    commands.push(command);
+    return await run(command, options);
+  };
   const deps: Omit<ProcessManagerDeps, "runtime"> = {
     state,
     saveState: async () => {},
     config: daemonConfig(stateDir),
-    ompInvocation: "/opt/omp",
     processPath: "/usr/bin",
     credentialHelper: "!/opt/legion credential",
-    run: async (command, options) => {
-      commands.push(command);
-      return await run(command, options);
-    },
     publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
     revokeSessionCapability: () => {},
-    provisioningToken: async () => "installation-token",
-    statPrompt: async () => {},
     workerCatchup: {
       repo: "sjawhar/legion",
       baseEnv: {},
@@ -90,9 +87,17 @@ function manager(
     dispatchClient: fakeDispatchClient(),
   };
   const runtime = new TmuxRuntime({
-    tmux: { run: deps.run, socket: `legion-${state.project}` },
+    tmux: { run: recordingRun, socket: `legion-${state.project}` },
     project: state.project,
     stateDir,
+    ompInvocation: "/opt/omp",
+    ompLaunchPrefix: deps.config.ompLaunchPrefix,
+    statPrompt: async () => {},
+    provisioningToken: async () => "installation-token",
+    run: recordingRun,
+    repo: deps.config.repo,
+    credentialHelper: deps.credentialHelper,
+    slowCommandTimeoutMs: deps.config.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc: async () => {
       throw new Error("connectWorkerRpc is not exercised by this fixture");
     },

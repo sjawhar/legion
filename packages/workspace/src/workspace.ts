@@ -40,7 +40,6 @@ export interface ProvisionIssueWorkspaceDeps {
   readonly run: (cmd: string[], opts?: WorkspaceCommandOptions) => Promise<RunResult>;
   readonly provisioningToken: () => Promise<string>;
   readonly credentialHelper: string;
-  readonly extensionPackage: string;
   readonly stateDir: string;
   /** The single GitHub repository every Legion issue provisions against (`DaemonConfig.repo`) —
    * a Dispatch issue key carries no owner/repo of its own. */
@@ -340,6 +339,50 @@ export function issueWorkspaceDir(
 export function sharedCloneDir(stateDir: string, repo: `${string}/${string}`): string {
   const [owner, name] = repo.split("/") as [string, string];
   return path.join(stateDir, "repos", "github.com", owner, name);
+}
+
+/** The jj identity a working-copy adoption runs under: `JJ_USER`/`JJ_EMAIL`, which jj reads over
+ * every config scope. */
+export interface JjIdentity {
+  readonly jjUser: string;
+  readonly jjEmail: string;
+}
+
+/** The one command that makes an issue's working copy the assigned role's: rewrites the author
+ * of the workspace's working-copy commit to the identity in the command's environment
+ * (`JJ_USER`/`JJ_EMAIL`), and only when that commit is undescribed — a described working copy is
+ * a previous phase's work and keeps its author. Both executors -- `TmuxRuntime` on the daemon
+ * host, `legion worker-shim` in a pod's main container -- build it here, so the revset and flags
+ * cannot drift apart. */
+export function adoptWorkingCopyCommand(workspaceDir: string): string[] {
+  return [
+    "jj",
+    "metaedit",
+    "--update-author",
+    "-r",
+    '@ & description(exact:"")',
+    "-R",
+    workspaceDir,
+  ];
+}
+
+/** Runs `adoptWorkingCopyCommand(workspaceDir)` through `run` under `identity` within
+ * `timeoutMs`, and throws `commandFailure`'s report (jj's stderr, or the runner's timeout or
+ * abort report) when it fails. The two executors -- the tmux runtime on the daemon host and
+ * `legion worker-shim` inside a pod -- are this one call; each runner lays the identity over its
+ * own process environment. */
+export async function runAdoptWorkingCopy(
+  run: ProvisionIssueWorkspaceDeps["run"],
+  workspaceDir: string,
+  identity: JjIdentity,
+  timeoutMs: number
+): Promise<void> {
+  const command = adoptWorkingCopyCommand(workspaceDir);
+  const result = await run(command, {
+    env: { JJ_USER: identity.jjUser, JJ_EMAIL: identity.jjEmail },
+    timeoutMs,
+  });
+  if (result.exitCode !== 0) throw commandFailure(result, command);
 }
 
 export async function provisionIssueWorkspace(

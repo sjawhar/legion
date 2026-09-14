@@ -44,6 +44,7 @@ import {
 } from "./events";
 import { buildRoleEnv, TokenManager } from "./github-apps";
 import { acquireInstanceLock, type InstanceLock } from "./instance-lock";
+import { createK8sClient, type K8sClient, resolveK8sCredentials } from "./k8s-client";
 import { designGateOpen, loadState, saveState } from "./legion-state";
 import { createNatsTransport, type NatsTransport } from "./nats-transport";
 import {
@@ -54,6 +55,8 @@ import {
 } from "./processes";
 import { childAdopted } from "./reducers";
 import { runResync } from "./resync";
+import type { Runtime } from "./runtime";
+import { KubernetesRuntime } from "./runtime-kubernetes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
 import { DISPATCH_TOKEN_SECRET, writeSecretFile } from "./secrets";
 import { installWorkerGhShim } from "./worker-bin";
@@ -68,9 +71,12 @@ interface DaemonDependencies {
   createNatsTransport(config: DaemonConfig): Promise<NatsTransport>;
   acquireInstanceLock(stateDir: string): Promise<InstanceLock>;
   runner: CommandRunner;
-  statPrompt: NonNullable<ProcessManagerDeps["statPrompt"]>;
+  statPrompt: NonNullable<TmuxRuntimeDeps["statPrompt"]>;
   readProcessCmdline?: TmuxRuntimeDeps["readProcessCmdline"];
   readProcessStat?: TmuxRuntimeDeps["readProcessStat"];
+  /** Tests inject a client over a fake API server; production resolves credentials
+   * (`resolveK8sCredentials`) from `runtime.kubernetes.kubeconfig` or the in-cluster files. */
+  k8sClient?: K8sClient;
   readPluginManifest(manifestPath: string): Promise<string>;
   /** Publishes a daemon notice through the listener's `POST /v1/messages/publish`. `dedupeKey`
    * becomes the body's `dedupe_key` (`envoyPublishBody`) — set only by `handleException`'s
@@ -217,11 +223,6 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
-  // Refused before the instance lock or anything else is acquired. LEGION-24 replaces this with
-  // runtime selection; until then only the tmux runtime exists.
-  if (config.runtime === "kubernetes") {
-    throw new Error("runtime: kubernetes is not implemented yet");
-  }
   const owner = repoOwner(config.repo);
   const deps = { ...defaultDependencies(config, options.deps), ...options.deps };
   // At most one daemon runs per project: two sharing a durable JetStream
@@ -398,27 +399,74 @@ async function startDaemonLocked(
   // `deps.state.project` throughout), so the private server and the runtime's secret-file
   // names must come from the same value — exactly what the manager derived before the runtime
   // boundary existed.
-  const runtime = new TmuxRuntime({
-    tmux: { run: runner, socket: `legion-${state.project}` },
-    project: state.project,
-    stateDir: config.stateDir,
-    connectWorkerRpc: deps.connectWorkerRpc,
-    workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
-    now: deps.now,
-    sleep: deps.sleep,
-    readProcessCmdline: deps.readProcessCmdline,
-    readProcessStat: deps.readProcessStat,
-    issueLocators: (issue) => locatorsForIssue(state, issue),
-  });
+  const provisioningToken = async (owner: string): Promise<string> =>
+    (await deps.tokenManager.getToken("implement", owner)).token;
+  // Assigned once the API is up (below); the Kubernetes runtime reads it lazily on its first
+  // connect/probe/stop, and no spawn can run before then: the launch hold (`enableLaunches()`)
+  // comes after the listener starts.
+  let workerStream: WorkerStreamListener;
+  let runtime: Runtime;
+  // The tmux server's environment tables are a tmux-only concern (`scrubServerEnvironment`
+  // below); a pod has no server. Set only when the tmux runtime is the one in use.
+  let tmuxRuntime: TmuxRuntime | undefined;
+  if (config.runtime.name === "kubernetes") {
+    const kubernetes = config.runtime;
+    const client =
+      deps.k8sClient ??
+      createK8sClient({
+        ...(await resolveK8sCredentials({ kubeconfig: kubernetes.kubeconfig, env: process.env })),
+        namespace: kubernetes.namespace,
+      });
+    // Under kubernetes the two OMP boot probes above still run against the daemon host's OMP in
+    // this PR; LEGION-25 moves them to a probe pod.
+    runtime = new KubernetesRuntime({
+      project: state.project,
+      config: kubernetes,
+      client,
+      listener: () => workerStream,
+      repo: config.repo,
+      provisioningToken,
+      daemonUrl: config.daemonUrl,
+      workerStreamPort: config.workerStreamPort,
+      workerBootTimeoutMs: config.workerBootTimeoutSeconds * 1000,
+      workerBootRegistrationDeadlineIntervals: config.workerBootRegistrationDeadlineIntervals,
+      workerStopTimeoutMs: config.workerStopTimeoutSeconds * 1000,
+      workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
+      deploymentInstructionsFile,
+      now: deps.now,
+      sleep: deps.sleep,
+    });
+  } else {
+    tmuxRuntime = new TmuxRuntime({
+      tmux: { run: runner, socket: `legion-${state.project}` },
+      project: state.project,
+      stateDir: config.stateDir,
+      ompInvocation: environment.ompInvocation,
+      ompLaunchPrefix: config.ompLaunchPrefix,
+      deploymentInstructionsFile,
+      statPrompt: deps.statPrompt,
+      provisioningToken,
+      run: runner,
+      repo: config.repo,
+      credentialHelper: daemonCredentialHelper(),
+      slowCommandTimeoutMs: config.slowCommandTimeoutSeconds * 1000,
+      connectWorkerRpc: deps.connectWorkerRpc,
+      workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
+      now: deps.now,
+      sleep: deps.sleep,
+      readProcessCmdline: deps.readProcessCmdline,
+      readProcessStat: deps.readProcessStat,
+      issueLocators: (issue) => locatorsForIssue(state, issue),
+    });
+    runtime = tmuxRuntime;
+  }
   const processManager = new ProcessManager({
     state,
     saveState: save,
     config,
     runtime,
-    ompInvocation: environment.ompInvocation,
     processPath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
-    run: runner,
     // Through the listener, never `nats.publish`: a bare payload on a role subject is rejected by
     // the listener's envelope validation and reaches no holder (see `ProcessManagerDeps.publishRole`).
     publishRole: (topic, json, dedupeKey) => {
@@ -432,9 +480,6 @@ async function startDaemonLocked(
     mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
       api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
     revokeSessionCapability: (sessionId) => api.revokeSessionCapability(sessionId),
-    provisioningToken: async (owner) =>
-      (await deps.tokenManager.getToken("implement", owner)).token,
-    statPrompt: deps.statPrompt,
     workerCatchup: {
       runner,
       tokenManager: deps.tokenManager,
@@ -444,7 +489,6 @@ async function startDaemonLocked(
     dispatchClient: deps.dispatchClient,
     now: deps.now,
     sleep: deps.sleep,
-    deploymentInstructionsFile,
   });
 
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
@@ -565,7 +609,6 @@ async function startDaemonLocked(
   );
   // Bound with the API and torn down with it. A bind failure is startup-fatal: stop the API
   // server it would have partnered so nothing half-listens behind the instance lock's release.
-  let workerStream: WorkerStreamListener;
   try {
     workerStream = startWorkerStreamListener({
       hostname: config.bind,
@@ -729,7 +772,9 @@ async function startDaemonLocked(
   // is as fatal as a failed probe: no pane may open into a server this daemon could not inspect.
   try {
     await probes;
-    const removed = await runtime.scrubServerEnvironment(environment.paneEnv);
+    const removed = tmuxRuntime
+      ? await tmuxRuntime.scrubServerEnvironment(environment.paneEnv)
+      : [];
     if (removed.length > 0) {
       console.warn(
         `[legion] removed ${removed.length} variable(s) from the private tmux server environment that panes may not inherit: ${removed.join(", ")}`
