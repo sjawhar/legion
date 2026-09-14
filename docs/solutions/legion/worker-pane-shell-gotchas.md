@@ -48,6 +48,8 @@ related_issues:
   - "sjawhar/legion#1028"
   - "LEGION-84"
   - "sjawhar/legion#1080"
+  - "LEGION-96"
+  - "sjawhar/legion#1086"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -69,6 +71,7 @@ symptoms:
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
   - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
+  - "legion gh -- pr create --repo … --head …: failed to run git: fatal: not a git repository: /home/ubuntu/.local/state/legion/…/.git/worktrees/<workspace>, from inside the workspace"
 ---
 
 # Worker-Pane Shell Gotchas
@@ -84,7 +87,8 @@ and confirmed each as written (the architect filed the §1 harness fix as LEGION
 from LEGION-34 (sjawhar/legion#1003), whose implementer hit §1 again on a pane running the fixed plugin — by copying
 the block into its own command text — and whose new CLI subcommand could only be exercised live from the workspace;
 §14 is from LEGION-40 (sjawhar/legion#1011), whose plan, harness comments, and shipped header comment all named the
-wrong `jq`.
+wrong `jq`; §16 is from LEGION-84 (sjawhar/legion#1080), and its list of which `gh` calls must leave the workspace is
+from LEGION-96 (sjawhar/legion#1086), whose implementer hit it on its first `pr create` the same day.
 None was part of
 the scope of the issue whose workers hit it. Section 1's cause was found by LEGION-12 (pull request #974) and its
 delivery fixed for good by LEGION-54 (pi-envoy 1.20.1): the workarounds are recorded only so a worker still running
@@ -508,7 +512,13 @@ state dir `/home/legion/.local/state/legion/…`). Two consequences a worker mee
   whose `gitdir:` pointer still names the old absolute path; jj is unaffected (its `.jj/repo` pointer is
   relative) but git — and therefore `gh`, which resolves the repository from cwd — is not. Run `legion gh` from
   `/tmp` (or any non-repository directory) with `--repo <owner>/<repo>` and, for `pr create`, `--head <branch>
-  --base main`. `jj git push` still works: it goes through jj.
+  --base main`. `jj git push` still works: it goes through jj. Which calls have to move (verified from a
+  LEGION-96 workspace on 2026-09-14): `pr create --repo … --head … --base main` fails even with every
+  repository flag given — it reads the branch's push state from cwd — and so does any call that omits
+  `--repo` (`pr view <n>`); `pr view <n> --repo …`, `run list --repo …`, `run view <id> --repo …`, and
+  `api …` succeed from inside the workspace, so reads that name the repository can stay where you are. Do not
+  "fix" the pointer: the `.git` file is the shared clone's worktree entry for this workspace, and a worker
+  rewriting it changes what `git` sees in that workspace for every later role on the issue.
 - **Nothing signs.** `/home/legion/.config/jj/config.toml` sets `signing.behavior = "drop"` and the user holds no
   signing key, so every worker commit is unsigned and GitHub shows it Unverified. `jj sign` would fail on a missing
   backend; do not run it, do not write a signing config, and say "commits are unsigned (the worker user's

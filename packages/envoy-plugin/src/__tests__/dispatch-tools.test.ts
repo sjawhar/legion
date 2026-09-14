@@ -1,23 +1,25 @@
 import { expect, spyOn, test } from "bun:test";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { dispatchIssueSubject, dispatchToolSpecs } from "@legion/contracts";
 import { tool } from "@opencode-ai/plugin/tool";
 import { logger } from "../log";
 import initPlugin from "../server";
 
-const expectedDispatchTools = [
-  ["dispatch_issue", ["project", "title"]],
-  ["dispatch_ask", ["issue", "question"]],
-  ["dispatch_edit_ask", ["ask"]],
-  ["dispatch_resolve_ask", ["ask", "kind", "reason"]],
-  ["dispatch_comment", ["issue", "body"]],
-  ["dispatch_suggest", ["issue", "artifact", "quote", "replace_with"]],
-  ["dispatch_message", ["issue", "body"]],
-  ["dispatch_doc_edit", ["issue", "artifact", "ops"]],
-  ["dispatch_doc_read", []],
-  ["dispatch_artifact", ["issue", "name"]],
-  ["dispatch_read", []],
-  ["dispatch_search", ["query"]],
-] as const;
+const requiredArguments: Record<string, readonly string[]> = {
+  dispatch_issue: ["project", "title"],
+  dispatch_ask: ["question"],
+  dispatch_edit_ask: ["ask"],
+  dispatch_resolve_ask: ["ask", "kind", "reason"],
+  dispatch_comment: ["body"],
+  dispatch_suggest: ["quote", "replace_with"],
+  dispatch_message: ["issue", "body"],
+  dispatch_doc_edit: ["ops"],
+  dispatch_doc_read: [],
+  dispatch_request_approval: [],
+  dispatch_artifact: ["name"],
+  dispatch_read: [],
+  dispatch_search: ["query"],
+  dispatch_open_asks: [],
+};
 
 type RegisteredTool = {
   readonly args: Record<string, never>;
@@ -70,9 +72,9 @@ test("registers every native Dispatch tool with its shared schema and executes a
     const tools = hooks.tool as unknown as Record<string, RegisteredTool>;
 
     expect(Object.keys(tools).filter((name) => name.startsWith("dispatch_"))).toEqual(
-      expectedDispatchTools.map(([name]) => name)
+      dispatchToolSpecs.map((spec) => spec.name)
     );
-    for (const [name, required] of expectedDispatchTools) {
+    for (const [name, required] of Object.entries(requiredArguments)) {
       const registered = tools[name];
       expect(registered).toBeDefined();
       const schema = tool.schema.toJSONSchema(tool.schema.object(registered.args), {
