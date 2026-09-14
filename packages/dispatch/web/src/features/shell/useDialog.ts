@@ -1,5 +1,7 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
 
+import { DIALOG_SCOPE, useKeymap, useKeymapScope } from "./keymap";
+
 const focusableSelector = [
   "a[href]",
   "button:not([disabled])",
@@ -38,7 +40,7 @@ const scrollLock = {
   },
 };
 
-// Every open dialog's container. Escape is handled at the document level so it works before
+// Every open dialog's container. Escape is a `dialog`-scope keymap binding so it works before
 // the deferred initial focus has moved into the dialog (the key then lands on whatever was
 // focused before, such as the document editor); only the innermost open dialog closes -
 // innermost by DOM containment, since a picker nested in a sheet runs its effect first.
@@ -68,8 +70,10 @@ export interface DialogHandle<T extends HTMLElement> {
 /**
  * Focus trap, Escape-to-close, focus restoration, and a body scroll lock for an overlay
  * (the search palette, the phone navigation drawer, the phone margin sheet, and the reference
- * picker all use this). Escape is observed on `document` in the capture phase and closes the
- * innermost open dialog, whatever element holds focus; Tab trapping listens on the container.
+ * picker all use this). While open it pushes the `dialog` keymap scope, which masks every page
+ * and global binding, and registers Escape there for the innermost open dialog, whatever
+ * element holds focus; a descendant that owns its Escape (the margin Composer dismissing its
+ * picker) stops propagation before the dispatcher sees it. Tab trapping listens on the container.
  */
 export function useDialog<T extends HTMLElement>({
   initialFocusRef,
@@ -79,6 +83,22 @@ export function useDialog<T extends HTMLElement>({
   const containerRef = useRef<T>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  useKeymapScope(open ? DIALOG_SCOPE : null);
+  useKeymap(
+    DIALOG_SCOPE,
+    open
+      ? [
+          {
+            id: "dialog.close",
+            inEditable: true,
+            keys: "Escape",
+            label: "Close dialog",
+            run: () => onCloseRef.current(),
+            when: () => innermostOpenDialog() === containerRef.current,
+          },
+        ]
+      : []
+  );
 
   useEffect(() => {
     if (!open) {
@@ -104,17 +124,7 @@ export function useDialog<T extends HTMLElement>({
       initial?.focus();
     });
 
-    // Bubble phase on `document`: a descendant that owns its Escape (the margin Composer
-    // dismissing its picker or confirming a discard) stops propagation before this runs,
-    // while a key that lands outside the dialog still reaches it.
     openDialogs.add(container);
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || innermostOpenDialog() !== container) {
-        return;
-      }
-      onCloseRef.current();
-    };
-    document.addEventListener("keydown", handleEscape);
 
     const handleTab = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || container === null) {
@@ -139,7 +149,6 @@ export function useDialog<T extends HTMLElement>({
 
     return () => {
       window.cancelAnimationFrame(initialFocusFrame);
-      document.removeEventListener("keydown", handleEscape);
       openDialogs.delete(container);
       container?.removeEventListener("keydown", handleTab);
       scrollLock.release();

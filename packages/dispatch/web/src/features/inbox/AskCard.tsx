@@ -181,6 +181,7 @@ export function AskCard({
       </span>
       <textarea
         className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+        data-ask-answer=""
         disabled={isSubmitting}
         id={answerFieldId}
         onChange={(event) => {
@@ -412,6 +413,7 @@ export function AskCard({
                 >
                   <input
                     checked={checked}
+                    data-ask-option=""
                     disabled={isSubmitting}
                     name={`ask-${displayedAsk.id}`}
                     onChange={() => selectRealOption(option.label)}

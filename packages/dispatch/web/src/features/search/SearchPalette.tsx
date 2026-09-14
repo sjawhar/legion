@@ -21,6 +21,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
 import { useDialog } from "../shell/useDialog";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
@@ -168,6 +169,22 @@ export function SearchPalette({
   const location = useLocation();
   const navigate = useNavigate();
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open });
+  // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
+  // its own close so pressing it twice still opens and closes.
+  useKeymap(
+    DIALOG_SCOPE,
+    open
+      ? [
+          {
+            id: "search-close",
+            inEditable: true,
+            keys: "$mod+k",
+            label: "Close search",
+            run: onClose,
+          },
+        ]
+      : []
+  );
   const searchText = query.trim();
   const queryEnabled = searchText.length >= 2;
 
