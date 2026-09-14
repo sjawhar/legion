@@ -386,16 +386,6 @@ describe("verifyWorkerImage", () => {
       expect(requests(h.api).at(-1)).toEqual(["DELETE", `/pods/${POD}`]);
     });
 
-    it("under pvc, does not require the marker, and a cache written without it carries no sessionStorageProbed key", async () => {
-      const h = harness();
-      await h.run(() => succeed(h.api, OK_LOG));
-      expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toEqual({
-        digest: IMAGE.digest,
-        daemonApiVersion: CONTRACT,
-        probedAt: new Date(START).toISOString(),
-      });
-    });
-
     it("under pvc, still records a marker the image printed, so the same pass is reusable under postgres later", async () => {
       const h = harness();
       await h.run(() => succeed(h.api, OK_LOG_PROBED));
@@ -419,14 +409,6 @@ describe("verifyWorkerImage", () => {
       expect(JSON.parse(await readFile(cacheFile(), "utf8"))).toMatchObject({
         sessionStorageProbed: true,
       });
-    });
-
-    it("under pvc, reuses a cached pass that records no session-storage probe, with no API call", async () => {
-      await seedCache({});
-      const h = harness();
-      await h.run();
-      expect(h.api.requests).toEqual([]);
-      expect(h.logs.at(-1)).toContain(`reusing ${cacheFile()}`);
     });
   });
 

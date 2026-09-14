@@ -22,8 +22,10 @@ export const PROVIDERS_DIR = "/var/run/legion/providers";
 /** Oh My Pi's own session-store overrides (`session.storage` / `session.sql.dsnFile`, LEGION-80),
  * the two variables `podEnvironment` sets under `session_store: postgres`: the first selects the
  * store (`sql`), the second names a file whose trimmed contents are the Postgres URL — one key of
- * the providers Secret, under `PROVIDERS_DIR`. Defined here, the runtime leaf both `config.ts`
- * (its reserved-key check) and `boot-probes.ts` (its host probe) can import without a cycle. */
+ * the providers Secret, under `PROVIDERS_DIR`. They live here beside the mount path the second one
+ * composes into; `config.ts` (its reserved-key check) and `boot-probes.ts` (its host probe) import
+ * them from this leaf. Not in `boot-probes.ts`: that module value-imports `config.ts` at load, so
+ * `config.ts` importing them back from there would be a load-order cycle. */
 export const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
 export const SESSION_SQL_DSN_FILE_VARIABLE = "OMP_SESSION_SQL_DSN_FILE";
 export const BOOT_DIR = "/var/run/legion/boot";

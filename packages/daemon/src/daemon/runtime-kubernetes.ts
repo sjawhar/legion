@@ -727,7 +727,9 @@ export class KubernetesRuntime implements Runtime {
  * - `OMP_SESSION_STORAGE` / `OMP_SESSION_SQL_DSN_FILE` (only under `session_store: postgres`):
  *   Oh My Pi's own session-store variables; the file is the providers Secret's `session_dsn_secret`
  *   key — the same Secret `DISPATCH_TOKEN_FILE` points into. Every pod of a tree passes through
- *   here, so this is the one place the store shapes a pod.
+ *   here, so this is the one place the store adds to a pod's environment (its other read is
+ *   `spawnSerialized`'s: under postgres the init container is not handed the recorded session to
+ *   stat).
  * - `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE`: the issue's working copy on the volume, the
  *   main container's `workingDir`.
  * - `<NAME>_FILE` for every secret in the spec (`secretPointers`, from `podSecrets`):

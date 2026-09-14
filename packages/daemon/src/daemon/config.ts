@@ -39,9 +39,15 @@ export interface RoleResources {
  * tree — `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE=<providers mount>/<dsnSecretKey>`.
  * A discriminated union, so no reader can see `postgres` without the providers-Secret key that
  * holds its connection URL. */
-export const SESSION_STORES = ["pvc", "postgres"] as const;
-export type SessionStoreName = (typeof SESSION_STORES)[number];
 export type SessionStore = { kind: "pvc" } | { kind: "postgres"; dsnSecretKey: string };
+export type SessionStoreName = SessionStore["kind"];
+/** The names `session_store` accepts, in the order the refusal lists them. Checked against the
+ * union both ways by the compiler (`Record<SessionStoreName, true>` refuses a missing or a stray
+ * key), so a third store cannot be added to one without the other. */
+const SESSION_STORE_NAMES = Object.keys({
+  pvc: true,
+  postgres: true,
+} satisfies Record<SessionStoreName, true>) as SessionStoreName[];
 
 /** `runtime.kubernetes`: the Kubernetes runtime's configuration block, file-only (no
  * `LEGION_KUBERNETES_*` environment keys). Carried by `DaemonConfig.runtime` when its `name` is
@@ -990,8 +996,9 @@ function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRu
 }
 
 /** Kubernetes' own rule for a Secret `data` key — and what keeps `<providers mount>/<key>` a single
- * path segment. */
-const SECRET_DATA_KEY_PATTERN = /^[-._a-zA-Z0-9]+$/;
+ * path segment. The class is named once so the refusal quotes exactly what the pattern tests. */
+const SECRET_DATA_KEY_CLASS = "[-._a-zA-Z0-9]+";
+const SECRET_DATA_KEY_PATTERN = new RegExp(`^${SECRET_DATA_KEY_CLASS}$`);
 
 /** `runtime.kubernetes.session_store` (default `pvc`) with its cross-field key: `postgres`
  * requires `session_dsn_secret`, a Secret data key that is not one of the two variables the pod
@@ -1001,30 +1008,39 @@ const SECRET_DATA_KEY_PATTERN = /^[-._a-zA-Z0-9]+$/;
 function parseSessionStore(storeValue: unknown, keyValue: unknown): SessionStore {
   const storeField = "runtime.kubernetes.session_store";
   const keyField = "runtime.kubernetes.session_dsn_secret";
-  const store = readString(storeValue, storeField) ?? "pvc";
-  if (!SESSION_STORES.some((candidate) => candidate === store)) {
-    throw new Error(`${storeField} must be 'pvc' or 'postgres'`);
-  }
-  const key = readString(keyValue, keyField);
-  if (store === "pvc") {
-    if (key !== undefined) {
-      throw new Error(`${keyField} is not used when ${storeField} is pvc; remove it`);
-    }
-    return { kind: "pvc" };
-  }
-  if (key === undefined) {
-    throw new Error(`${keyField} is required when ${storeField} is postgres`);
-  }
-  const dsnSecretKey = requireNonEmpty(key, keyField);
-  if (!SECRET_DATA_KEY_PATTERN.test(dsnSecretKey)) {
-    throw new Error(`${keyField} must be a Secret data key ([-._a-zA-Z0-9]+)`);
-  }
-  if (dsnSecretKey === SESSION_STORAGE_VARIABLE || dsnSecretKey === SESSION_SQL_DSN_FILE_VARIABLE) {
+  const requested = readString(storeValue, storeField) ?? "pvc";
+  const store = SESSION_STORE_NAMES.find((name) => name === requested);
+  if (store === undefined) {
     throw new Error(
-      `${keyField} must not be ${SESSION_STORAGE_VARIABLE} or ${SESSION_SQL_DSN_FILE_VARIABLE}: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value`
+      `${storeField} must be ${SESSION_STORE_NAMES.map((name) => `'${name}'`).join(" or ")}`
     );
   }
-  return { kind: "postgres", dsnSecretKey };
+  const key = readString(keyValue, keyField);
+  switch (store) {
+    case "pvc":
+      if (key !== undefined) {
+        throw new Error(`${keyField} is not used when ${storeField} is pvc; remove it`);
+      }
+      return { kind: "pvc" };
+    case "postgres": {
+      if (key === undefined) {
+        throw new Error(`${keyField} is required when ${storeField} is postgres`);
+      }
+      const dsnSecretKey = requireNonEmpty(key, keyField);
+      if (!SECRET_DATA_KEY_PATTERN.test(dsnSecretKey)) {
+        throw new Error(`${keyField} must be a Secret data key (${SECRET_DATA_KEY_CLASS})`);
+      }
+      if (
+        dsnSecretKey === SESSION_STORAGE_VARIABLE ||
+        dsnSecretKey === SESSION_SQL_DSN_FILE_VARIABLE
+      ) {
+        throw new Error(
+          `${keyField} must not be ${SESSION_STORAGE_VARIABLE} or ${SESSION_SQL_DSN_FILE_VARIABLE}: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value`
+        );
+      }
+      return { kind: "postgres", dsnSecretKey };
+    }
+  }
 }
 
 function fileString(fields: Record<string, unknown>, key: string): string | undefined {
