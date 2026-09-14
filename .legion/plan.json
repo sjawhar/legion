@@ -1,0 +1,377 @@
+{
+  "taskCount": 4,
+  "independentTasks": 1,
+  "routingHints": {
+    "complexity": "small",
+    "estimatedImplementers": 1
+  },
+  "workflowRecommendation": "One implementer, tasks in order 1 -> 2 -> 3 -> 4 (Task 4 is independent of 3 but trivially short). TDD on every code change: write the test, run it and quote the RED output, make the change, run it GREEN, `jj split` the task's paths into one commit. Skip formatters, linters, and the project-wide suite; run only the two named test commands and `bun run typecheck` in packages/daemon.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract this plan is written against - shared workspace and `jj -R` discipline, RED-first evidence quoted into the handoff, `jj split` per task, the implementer's push (`legion/LEGION-163`) and PR body in the READY format with `Dispatch: LEGION-163`, and an `implement.json` whose `proof` array names the surface, command, observation, head SHA, and negative control written below."
+    ],
+    "test": [
+      "legion-worker: the tester re-runs the implementer's two named test commands at the PR head, drives its own negative control (remove `run: runner,` from index.ts, watch the LEGION-163 test print `runtime owns workspace cleanup but ProcessManager has no command runner`, then `jj -R \"$LEGION_WORKSPACE\" restore packages/daemon/src/daemon/index.ts`), records `implementerProof` and its own `proof` in test.json, and adds the `E2E (tester)` line."
+    ],
+    "review": [
+      "legion-worker: one review per round via the reviews API with the Legion footer; verify CI/Threads/E2E on GitHub, run thermonuclear-deep-review and thermonuclear-code-quality once at the head; check the diff is exactly the four changes (no sweep of closed trees, no retry of failed removals, no type-level Runtime split, no scratch daemon) and that the PR body's negative control quotes the `no command runner` failure from the unfixed code."
+    ]
+  },
+  "spec": "dispatch://LEGION-163/spec version 2 (Summary, Acceptance 1-4, Design, Rejected). Architect ruling carried into this plan: the constructor THROWS; no type-level refusal; the Kubernetes runtime still constructs without `run`.",
+  "summary": "The daemon entry point (`packages/daemon/src/daemon/index.ts`, `startDaemonLocked`) builds `ProcessManager` without `run: runner` since #1031 (`d30f820c`); under the tmux runtime (`TmuxRuntime.removesWorkspacesOnTreeClose = true`) every tree close reaches `ProcessManager.workspaceCommandRunner` (processes.ts ~3129) with `deps.run` undefined and logs `failed to remove the workspace of ... : runtime owns workspace cleanup but ProcessManager has no command runner`. Four changes: (1) pass `run: runner` again; (2) the `ProcessManager` constructor throws when `deps.runtime.removesWorkspacesOnTreeClose` is true and `deps.run` is undefined, naming the runtime (`deps.config.runtime.name`) and the missing runner; (3) a `startDaemon`-level test in index.test.ts that is RED on `af232beb` (today's main) and GREEN after, plus a constructor-refusal test in processes.test.ts with a companion assertion that a retaining runtime constructs without `run`; (4) one sentence in `packages/daemon/src/daemon/AGENTS.md`.",
+  "nonGoals": [
+    "No sweep of workspaces left by trees closed while the wiring was broken (LEGION-104 rejected a second owner of the workspace directories).",
+    "No retry of a failed removal (LEGION-104: logged once, never retried).",
+    "No fix for LEGION-143.",
+    "No type-level Runtime discrimination (`Runtime` stays one interface; `ProcessManagerDeps.run` stays optional).",
+    "No smoke rig or scratch daemon for this issue; the production-like proof is the daemon's own boot path under the test harness (a surface the legion-worker skill names), and acceptance 3 is the live daemon's next tree close after the operator's restart."
+  ],
+  "verifiedByPlanner": {
+    "at": "main = af232beb88fe (the parent of the issue working copy), 2026-09-14",
+    "how": "Prototyped every change below in the workspace, ran the two tests and `bun run typecheck`, then `jj restore`d the four files; the working copy carries only this handoff.",
+    "redOnMain": "bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163  ->  1 fail: expect(received).toEqual(expected) at the `failed to remove` filter: received [\"[legion] failed to remove the workspace of WIDGETS-42 (/tmp/legion-daemon-KnlGct/workspaces/acme/widgets/widgets-42) at the close of tree WIDGETS-42: Error: runtime owns workspace cleanup but ProcessManager has no command runner\"]",
+    "greenWithFix": "same command after adding `run: runner,` to the `new ProcessManager({...})` call in index.ts  ->  1 pass, 6 expect() calls",
+    "constructorTests": "bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-163|retains its tree volume|removes the workspaces of a done root\"  ->  3 pass with the guard and the `omitRun` helper flag",
+    "typecheck": "cd packages/daemon && bun run typecheck  ->  exit 0 with all four changes applied",
+    "setup": "The jj workspace had no node_modules; `cd -- \"$LEGION_WORKSPACE\" && bun install --frozen-lockfile` (about 85 s) was required before any test ran. node_modules is gitignored; nothing to commit."
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "title": "startDaemon-level RED test: the linger sweep's tree close removes a done root's workspace",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/__tests__/index.test.ts (import line 2; new `it` inside `describe(\"startDaemon\")` right after the test `boots the API, intake, and lifecycle timers when OMP emits its capability marker on stdout`, i.e. after its closing `});` at line 2313 on main)"
+        ]
+      },
+      "why": "Spec acceptance 1. Every existing daemon test builds ProcessManager through processes.test.ts's `manager()` helper, which always injects `run`; nothing exercised the entry point's wiring. This test boots through `startDaemon` exactly as the entry point does, loads a state with a lingering `done` root past its linger deadline, fires the single `deps.setInterval` callback (index.ts line 923 - the linger sweep, `processManager.expireLinger`), and asserts the removal ran.",
+      "fixtureNotes": [
+        "Reuses the LEGION-104 fixture shape from processes.test.ts (`removes the workspaces of a done root and its done child ...`, ~line 4847): issue `status: \"done\"`, tree `status: \"lingering\"`, `<stateDir>/repos/github.com/<owner>/<repo>/.jj` created so `removeIssueWorkspace` runs `jj workspace list`, the workspace directory created so its deletion is observable, a fake runner answering `workspace list` with the workspace name and `log` with commit ids.",
+        "The tree carries no `locator`: a finished root whose process already exited (`recordRootExit` clears the locator), so `closeTreeLocked` has nothing to probe or stop and the test isolates the removal leg. `deps.now()` in `daemonTestDependencies` is 2026-08-24T00:00:00Z; `lingerUntil` 2026-08-23 is past.",
+        "index.test.ts's `daemonEnvironment.commands.jj` is `/tools/jj`: `createDaemonRunner` (environment.ts 488) rewrites `jj` to that path before the injected runner sees the command, so match `command[0] === \"/tools/jj\"`. The repo is `acme/widgets`, so the clone is `<stateDir>/repos/github.com/acme/widgets` and the workspace `<stateDir>/workspaces/acme/widgets/widgets-42`.",
+        "`console.error` calls are joined whole (`args.map(String).join(\" \")`) so the `failed to remove ...` line carries its Error text; the `failed to remove` assertion comes FIRST so the RED run prints the guard's message verbatim (that is the quote the handoff and PR body need).",
+        "Boot leaves a lingering tree alone (`reconcileAdmission` demotes only active-no-locator trees; `reconnectRoots` arms deadlines only for active/dead ones), and the linger callback also fires `reconcileOrphans`/`reconcileWorkerAdmission`, which the base runner answers with empty stdout. `flushEventLoopUntil` (already in the file, line 51) waits for `status === \"closed\"`, which the close reaches on RED too (the failure is logged, the close continues), so the test cannot hang on unfixed code."
+      ],
+      "steps": [
+        {
+          "step": "1. Change the `node:fs` import (line 2) to also bring `existsSync`.",
+          "code": [
+            "import { existsSync, readFileSync } from \"node:fs\";"
+          ]
+        },
+        {
+          "step": "2. Insert the test after line 2313 (the `});` closing the lifecycle-timers test).",
+          "code": [
+            "  it(\"removes a done root's workspace when the linger sweep closes its tree: the entry point hands ProcessManager its command runner (LEGION-163)\", async () => {",
+            "    const stateDir = await mkdtemp(path.join(os.tmpdir(), \"legion-daemon-\"));",
+            "    const daemonConfig = config(stateDir);",
+            "    const root = \"WIDGETS-42\";",
+            "    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);",
+            "    state.issues[root] = { key: root, title: \"Finished root\", status: \"done\", children: [] };",
+            "    // A finished root past its linger deadline whose process is already gone (`recordRootExit`",
+            "    // cleared the locator): the sweep's close has nothing to stop, only the workspace to remove.",
+            "    state.trees[root] = {",
+            "      root,",
+            "      generation: 1,",
+            "      status: \"lingering\",",
+            "      lingerUntil: \"2026-08-23T00:00:00.000Z\",",
+            "      launchFailures: 0,",
+            "    };",
+            "    // `removeIssueWorkspace` asks jj only when the shared clone exists (`<clone>/.jj`).",
+            "    const clone = path.join(stateDir, \"repos\", \"github.com\", \"acme\", \"widgets\");",
+            "    await mkdir(path.join(clone, \".jj\"), { recursive: true });",
+            "    const workspaceDir = path.join(stateDir, \"workspaces\", \"acme\", \"widgets\", \"widgets-42\");",
+            "    await mkdir(workspaceDir, { recursive: true });",
+            "    const commands: string[][] = [];",
+            "    const intervals: Array<() => void> = [];",
+            "    const options = daemonTestDependencies(new FakeNats(), [], () => {});",
+            "    const baseRunner = options.deps?.runner;",
+            "    if (!baseRunner) throw new Error(\"daemonTestDependencies did not supply a runner\");",
+            "    // Each `console.error` call joined whole, so a `failed to remove ...` line carries its error.",
+            "    const errorLogs: string[] = [];",
+            "    const consoleError = spyOn(console, \"error\").mockImplementation((...args: unknown[]) => {",
+            "      errorLogs.push(args.map(String).join(\" \"));",
+            "    });",
+            "    let daemon: daemonIndex.DaemonHandle | undefined;",
+            "    let workspaceDirRemains: boolean | undefined;",
+            "",
+            "    try {",
+            "      daemon = await startDaemon(daemonConfig, {",
+            "        deps: {",
+            "          ...options.deps,",
+            "          loadState: async () => state,",
+            "          saveState: async () => {},",
+            "          // The daemon runner resolves `jj` to the environment's `/tools/jj` before this fake",
+            "          // sees it (`createDaemonRunner`).",
+            "          runner: async (command, runnerOptions) => {",
+            "            commands.push(command);",
+            "            if (command[0] === \"/tools/jj\" && command[1] === \"workspace\" && command[2] === \"list\") {",
+            "              return { stdout: \"default\\nwidgets-42\\n\", stderr: \"\", exitCode: 0 };",
+            "            }",
+            "            if (command[0] === \"/tools/jj\" && command[1] === \"log\") {",
+            "              return { stdout: \"aaaa\\n\", stderr: \"\", exitCode: 0 };",
+            "            }",
+            "            return baseRunner(command, runnerOptions);",
+            "          },",
+            "          setInterval: (callback) => {",
+            "            intervals.push(callback);",
+            "            return 1 as never;",
+            "          },",
+            "        },",
+            "      });",
+            "",
+            "      // index.ts arms exactly one interval: the linger sweep (`processManager.expireLinger`).",
+            "      expect(intervals).toHaveLength(1);",
+            "      intervals[0]?.();",
+            "      await flushEventLoopUntil(() => state.trees[root]?.status === \"closed\");",
+            "      workspaceDirRemains = existsSync(workspaceDir);",
+            "    } finally {",
+            "      consoleError.mockRestore();",
+            "      await daemon?.stop();",
+            "      await rm(stateDir, { recursive: true, force: true });",
+            "    }",
+            "",
+            "    expect(state.trees[root]?.status).toBe(\"closed\");",
+            "    expect(errorLogs.filter((line) => line.includes(\"failed to remove the workspace of\"))).toEqual(",
+            "      []",
+            "    );",
+            "    expect(commands).toContainEqual([",
+            "      \"/tools/jj\",",
+            "      \"workspace\",",
+            "      \"forget\",",
+            "      \"widgets-42\",",
+            "      \"--ignore-working-copy\",",
+            "      \"-R\",",
+            "      clone,",
+            "    ]);",
+            "    expect(errorLogs).toContain(",
+            "      `[legion] removed the workspace of ${root} (${workspaceDir}) at the close of tree ${root}: abandoned 1 commit(s) nothing else reached`",
+            "    );",
+            "    expect(workspaceDirRemains).toBeFalse();",
+            "  });"
+          ]
+        },
+        {
+          "step": "3. Run it on the unfixed code and QUOTE the failure into your notes (it becomes the `negativeControl` of your proof and the PR body's `Negative control:`).",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163",
+          "expected": "1 fail. The first failing expectation is the `failed to remove` filter and prints: `[legion] failed to remove the workspace of WIDGETS-42 (<stateDir>/workspaces/acme/widgets/widgets-42) at the close of tree WIDGETS-42: Error: runtime owns workspace cleanup but ProcessManager has no command runner`. If `Cannot find module '@legion/contracts'` appears first, run `bun install --frozen-lockfile` in the workspace and retry."
+        },
+        {
+          "step": "4. Do not commit yet: Task 2 makes it GREEN and commits test and fix together."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "index.ts: pass `run: runner` to ProcessManager again (the defect)",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/index.ts (`new ProcessManager({ ... })` at line 528; `runner` is `createDaemonRunner(environment, deps.runner)` from line 339 and is already handed to `TmuxRuntime` at line 514)"
+        ]
+      },
+      "steps": [
+        {
+          "step": "1. Add one property to the deps object, directly after `runtime,` (line 532).",
+          "code": [
+            "  const processManager = new ProcessManager({",
+            "    state,",
+            "    saveState: save,",
+            "    config,",
+            "    runtime,",
+            "    run: runner,",
+            "    processPath: environment.paneEnv.PATH,",
+            "    rolePromptsDir: environment.rolePromptsDir,",
+            "    // ... unchanged ..."
+          ],
+          "notes": "`runner` is a `CommandRunner` (state/fetch.ts); `ProcessManagerDeps.run` accepts it unchanged (it did at `04d43cbf`, and the planner's `bun run typecheck` with this line passed). Both runtime branches share this one construction, so the Kubernetes branch also receives `run` - harmless, its runtime never calls it."
+        },
+        {
+          "step": "2. Run the Task 1 test again.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163",
+          "expected": "1 pass, 6 expect() calls."
+        },
+        {
+          "step": "3. Commit test and fix as one change.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"fix(daemon): pass the command runner to ProcessManager so tmux tree close removes workspaces (LEGION-163)\" packages/daemon/src/daemon/index.ts packages/daemon/src/daemon/__tests__/index.test.ts"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "ProcessManager constructor refuses a workspace-removing runtime without a runner; refusal test + retaining-runtime companion",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/processes.ts (constructor at line 405; `ProcessManagerDeps.run` doc comment at line 165)",
+          "packages/daemon/src/daemon/__tests__/processes.test.ts (`manager()` helper: its third parameter at line 552 and the `run,` entry of `injected` at line 685; new `it` after the LEGION-104 test `a runtime that retains its tree volume skips daemon-host workspace cleanup when the tree closes`, i.e. after its closing `});` at line 4967 on main)"
+        ]
+      },
+      "why": "Spec acceptance 2, architect ruling: a thrown Error at construction, naming the runtime and the missing runner - never a guard that fires at the first tree close hours after boot. `Runtime` has no name field; `deps.config.runtime.name` (`\"tmux\" | \"kubernetes\"`, `RuntimeConfig` in config.ts) is what the operator selected and what index.ts chose the runtime from, so the message names that. There is no dedicated block of constructor tests in processes.test.ts (`new ProcessManager(` appears only inside `manager()`), so the refusal test sits beside the two LEGION-104 tests that already exercise `removesWorkspacesOnTreeClose`. `manager()` always injects `run` and destructures it out of `options` before spreading `overrides`, so `run: undefined` cannot be passed through it: a third-argument flag `omitRun` is the one helper change.",
+      "steps": [
+        {
+          "step": "1. Write the test first (RED: nothing throws yet). Insert after line 4967.",
+          "code": [
+            "",
+            "  it(\"refuses to construct without a command runner under a runtime that removes workspaces at tree close, and constructs without one under a runtime that keeps them (LEGION-163)\", () => {",
+            "    // The tmux entry point once dropped `run` (#1031) and the gap surfaced only at the first tree",
+            "    // close, hours later, as `runtime owns workspace cleanup but ProcessManager has no command",
+            "    // runner`. Construction is where a missing dependency is refused; `config.runtime.name` names",
+            "    // the runtime the operator selected.",
+            "    expect(() =>",
+            "      manager(",
+            "        newLegionState(\"omp\", 1),",
+            "        { runtime: new FakeRuntime({ removesWorkspacesOnTreeClose: true }) },",
+            "        { omitRun: true }",
+            "      )",
+            "    ).toThrow(",
+            "      \"ProcessManager needs a command runner: the tmux runtime removes workspaces at tree close\"",
+            "    );",
+            "    // Kubernetes retains its tree volume and never runs a host jj command: it constructs as #1031",
+            "    // intended, with no runner at all.",
+            "    const { manager: kubernetesManager } = manager(",
+            "      newLegionState(\"omp\", 1),",
+            "      { runtime: new FakeRuntime({ removesWorkspacesOnTreeClose: false }) },",
+            "      { omitRun: true }",
+            "    );",
+            "    expect(kubernetesManager).toBeInstanceOf(ProcessManager);",
+            "  });"
+          ],
+          "notes": "`FakeRuntime` (./fake-runtime.ts) and `ProcessManager` are already imported in processes.test.ts. `config(\"/state\")`, the helper's default config, has `runtime: { name: \"tmux\" }`, hence `the tmux runtime` in the expected message even under a FakeRuntime."
+        },
+        {
+          "step": "2. Add the `omitRun` flag to `manager()`: replace its third parameter (line 552) and the `run,` line inside `injected` (line 685).",
+          "code": [
+            "function manager(",
+            "  state = newLegionState(\"omp\", 1),",
+            "  options: Partial<ProcessManagerDeps & RuntimeOverrides> = {},",
+            "  {",
+            "    skipEnableLaunches = false,",
+            "    omitRun = false,",
+            "  }: { skipEnableLaunches?: boolean; omitRun?: boolean } = {}",
+            "): {",
+            "",
+            "// ... inside `injected`, in place of the bare `run,` entry (keep `...overrides,` after it):",
+            "    revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),",
+            "    // `omitRun` builds the manager the way the Kubernetes entry point does: no daemon-host runner.",
+            "    ...(omitRun ? {} : { run }),",
+            "    ...overrides,"
+          ]
+        },
+        {
+          "step": "3. Run the new test and watch it fail on the missing throw.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-163\"",
+          "expected": "1 fail: `expect(received).toThrow(expected)` - the function did not throw."
+        },
+        {
+          "step": "4. Add the guard as the first statement of the constructor (line 405), before `this.runtime = deps.runtime;`, and reword the `run` doc comment (line 165).",
+          "code": [
+            "  constructor(private readonly deps: ProcessManagerDeps) {",
+            "    if (deps.runtime.removesWorkspacesOnTreeClose && deps.run === undefined) {",
+            "      throw new Error(",
+            "        `ProcessManager needs a command runner: the ${deps.config.runtime.name} runtime removes workspaces at tree close`",
+            "      );",
+            "    }",
+            "    this.runtime = deps.runtime;",
+            "",
+            "// ProcessManagerDeps.run doc comment (line 165), replacing the one-line comment:",
+            "  /** Daemon-host runner for the workspace commands a tree close runs (`removeTreeWorkspaces`).",
+            "   * Required when the selected Runtime's `removesWorkspacesOnTreeClose` is true (tmux): the",
+            "   * constructor refuses to build without it, naming the runtime, so a boot that dropped the",
+            "   * wiring fails at once rather than at its first tree close (LEGION-163). Optional otherwise",
+            "   * (Kubernetes retains its tree volume and never runs one). */"
+          ],
+          "notes": "Throwing before `WorkerAdmission`/`WorkerBootWatchdog` are built leaves nothing to dispose. Do not touch `workspaceCommandRunner`'s own throw (processes.ts ~3134): it stays as the last line of defence."
+        },
+        {
+          "step": "5. Run the new test and the two LEGION-104 siblings.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-163|retains its tree volume|removes the workspaces of a done root\"",
+          "expected": "3 pass."
+        },
+        {
+          "step": "6. Typecheck the daemon package (the `...(omitRun ? {} : { run })` spread and the guard).",
+          "command": "cd -- \"$LEGION_WORKSPACE/packages/daemon\" && bun run typecheck",
+          "expected": "exit 0."
+        },
+        {
+          "step": "7. Commit.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"fix(daemon): refuse to construct ProcessManager without a runner under a workspace-removing runtime (LEGION-163)\" packages/daemon/src/daemon/processes.ts packages/daemon/src/daemon/__tests__/processes.test.ts"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "AGENTS.md: name the runner as a required ProcessManager dependency under a workspace-removing runtime",
+      "files": {
+        "modify": [
+          "packages/daemon/src/daemon/AGENTS.md (the `api` before any `ProcessManager` call bullet, line 82 on main - the `## Operational invariants` list)"
+        ]
+      },
+      "why": "Spec acceptance 4. The spec offers two anchors; daemon AGENTS.md has no dedicated workspace-removal bullet (LEGION-104 is mentioned only inside the `Workspace clone` bullet at line 70), so the boot-ordering bullet at line 82, which already describes how `startDaemonLocked` constructs `ProcessManager`, is the one a reader looks at. The root AGENTS.md only references this file (`See @packages/daemon/src/daemon/AGENTS.md`); nothing else changes.",
+      "steps": [
+        {
+          "step": "1. Append exactly one sentence to the end of the line-82 bullet (same line, after `... and promotion stays gated.`).",
+          "code": [
+            " `ProcessManagerDeps.run` — the daemon's `createDaemonRunner` runner, `run: runner` in that same `new ProcessManager(...)` call — is a required dependency whenever `runtime.removesWorkspacesOnTreeClose` is true (the tmux runtime, whose tree close removes finished issues' jj workspaces through it, `removeTreeWorkspaces`): the constructor refuses to build without it (`ProcessManager needs a command runner: the tmux runtime removes workspaces at tree close`), so a boot that dropped the wiring fails at once instead of logging `failed to remove the workspace of …` at its first tree close hours later (LEGION-163, the gap #1031 opened after LEGION-104); the Kubernetes runtime retains its tree volume and constructs without one."
+          ]
+        },
+        {
+          "step": "2. Commit.",
+          "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" split -m \"docs(daemon): the runner is a required ProcessManager dependency under a workspace-removing runtime (LEGION-163)\" packages/daemon/src/daemon/AGENTS.md"
+        }
+      ]
+    }
+  ],
+  "acceptanceSurfaces": [
+    {
+      "criterion": "Acceptance 1 - a daemon built exactly as the entry point builds it removes a done root's workspace at tree close under tmux; RED on today's main, GREEN after.",
+      "surface": "The daemon's own boot path: `startDaemon` with injected runner, message bus, clock, and timers (packages/daemon/src/daemon/__tests__/index.test.ts) - the harness surface the legion-worker skill names for daemon changes.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163",
+      "observed": "GREEN: 1 pass; `commands` holds `/tools/jj workspace forget widgets-42 --ignore-working-copy -R <clone>`; `errorLogs` holds `[legion] removed the workspace of WIDGETS-42 (...) at the close of tree WIDGETS-42: abandoned 1 commit(s) nothing else reached`; no `failed to remove` line; the workspace directory is gone.",
+      "negativeControl": "The same test on the unfixed entry point (main `af232beb`, or the PR head with `run: runner,` deleted from index.ts and restored afterwards with `jj -R \"$LEGION_WORKSPACE\" restore packages/daemon/src/daemon/index.ts` once the fix is committed): 1 fail printing `... at the close of tree WIDGETS-42: Error: runtime owns workspace cleanup but ProcessManager has no command runner`.",
+      "skill": "legion-worker (the implementer's `E2E (implementer)` line and `proof` entry; the tester re-runs the command and drives the negative control itself)"
+    },
+    {
+      "criterion": "Acceptance 2 - a ProcessManager under a workspace-removing runtime cannot be constructed without a runner; a retaining runtime still constructs without one.",
+      "surface": "ProcessManager construction under the daemon test harness (packages/daemon/src/daemon/__tests__/processes.test.ts, `manager()` with `omitRun: true` and a `FakeRuntime`).",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/processes.test.ts -t \"LEGION-163|retains its tree volume|removes the workspaces of a done root\"",
+      "observed": "3 pass: the tmux-shaped construction throws `ProcessManager needs a command runner: the tmux runtime removes workspaces at tree close`; the retaining-runtime construction returns a ProcessManager; the two LEGION-104 removal tests still pass.",
+      "negativeControl": "Run the refusal test before Task 3 step 4 (guard absent): 1 fail, `toThrow` - nothing thrown.",
+      "skill": "legion-worker / test-driven-development"
+    },
+    {
+      "criterion": "Acceptance 3 - the live daemon's next tree close removes the workspace (LEGION-104 acceptance 7, carried here).",
+      "surface": "Production: the sjawhar/legion daemon after the operator restarts it on the merged fix; its log, the shared clone, another workspace's `jj log`.",
+      "command": "After the restart, at the next tree close (the linger sweep or a `done` root): quote the daemon log line `[legion] removed the workspace of <KEY> (<dir>) at the close of tree <ROOT>: abandoned <n> commit(s) nothing else reached`; run `jj workspace list -R <clone>` and confirm the issue's workspace is absent; confirm the directory is gone; run `jj log` in another workspace and confirm the issue's commits are gone.",
+      "observed": "To be recorded by the implementer on the PR (`Production:` line + one footer comment) and on the issue (`dispatch_message`), replacing `pending`.",
+      "negativeControl": "The LEGION-6 close of 2026-09-14 23:00:27Z on the pre-fix daemon: `failed to remove the workspace of LEGION-6 ... no command runner`, `legion-6` still listed, directory present (spec, `What happens`).",
+      "skill": "legion-worker (`After the queue merges, the implementer verifies in production`), constrained by the deployment instructions: the restart is the operator session's step - report it to the architect by `envoy_publish` and to the issue by a plain `dispatch_message` naming the restart; never a `dispatch_ask` to Sami. `Production:` stays `pending the operator's daemon restart on the merged fix` until then."
+    },
+    {
+      "criterion": "Acceptance 4 - AGENTS.md names the runner as a required dependency of ProcessManager under a runtime that removes workspaces.",
+      "surface": "The docs diff.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --from main@origin --to @ packages/daemon/src/daemon/AGENTS.md",
+      "observed": "One added sentence in the `api` before any `ProcessManager` call bullet.",
+      "negativeControl": "n/a (documentation)",
+      "skill": "legion-worker"
+    }
+  ],
+  "integration": {
+    "commits": "Three `jj split` commits in task order (Task 2 carries Task 1's test), plus the handoff commit (`implement: record handoff`).",
+    "push": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" bookmark set legion/LEGION-163 && jj -R \"$LEGION_WORKSPACE\" git push --bookmark legion/LEGION-163  (before pushing, check `jj -R \"$LEGION_WORKSPACE\" log -r 'main@origin..@' -T 'author.email() ++ \" | \" ++ committer.email() ++ \" \" ++ description.first_line() ++ \"\\n\"'` shows the implementer App on every commit you made)",
+    "pullRequest": "`legion gh -- pr create` with the body in the READY format; it MUST contain the line `Dispatch: LEGION-163`. Title suggestion: `fix(daemon): pass the command runner to ProcessManager so tmux tree close removes workspaces (LEGION-163)`. Tier suggestion for the READY packet: T2 bug fix.",
+    "prBodyE2EImplementer": "**E2E (implementer):** the daemon's boot path under its test harness (`startDaemon` with injected runner/bus/timers, `packages/daemon/src/daemon/__tests__/index.test.ts`) — ran `bun test packages/daemon/src/daemon/__tests__/index.test.ts -t LEGION-163` at head <sha>: 1 pass; the linger sweep's close recorded `/tools/jj workspace forget widgets-42 …` and logged `removed the workspace of WIDGETS-42 …`. Negative control: the same test on `af232beb` (before `run: runner`) fails with `failed to remove the workspace of WIDGETS-42 (…) at the close of tree WIDGETS-42: Error: runtime owns workspace cleanup but ProcessManager has no command runner`.",
+    "prBodyProduction": "**Production:** pending the operator's daemon restart on the merged fix; then the next tree close's `removed the workspace of <KEY>` line, `jj workspace list -R <clone>`, the absent directory, another workspace's `jj log` (LEGION-104 acceptance 7).",
+    "implementHandoffProof": "Two entries in `proof`: acceptance 1 (surface, command, observed, headSha, negativeControl exactly as in `acceptanceSurfaces[0]`) and acceptance 2 (as in `acceptanceSurfaces[1]`). `legion handoff write --phase implement` refuses a payload without `proof`.",
+    "ci": "The PR's `Tests` workflow (lint, typecheck, test) runs the whole suite; the implementer runs only the two named test commands and `bun run typecheck` in packages/daemon locally. If a single CI job fails, `legion gh -- run rerun <run-id> --failed`; never push to refresh CI. Rebase only if GitHub reports CONFLICTING.",
+    "reviewFocus": "Exactly four changes; the RED quote in the PR body; the guard is in the constructor (not `workspaceCommandRunner`); `ProcessManagerDeps.run` stays optional; the Kubernetes companion assertion; no sweep, no retry, no LEGION-143."
+  },
+  "concerns": [
+    "Acceptance 3 depends on the operator restarting the live daemon on the merged fix. Under the deployment instructions (Sami answers no asks; only the operator session touches the daemon checkout), the implementer should report the restart step to the architect (`envoy_publish`) and on the issue (`dispatch_message`), not open a `dispatch_ask` to Sami; the architect coordinates the operator. `Production:` stays `pending` until the restart and the next tree close.",
+    "The issue workspace had no `node_modules`; `bun install --frozen-lockfile` (about 85 s, gitignored output) is needed before any test runs. Every later role on this workspace inherits it.",
+    "processes.test.ts has no dedicated constructor-test block (`new ProcessManager(` appears only inside `manager()`); the refusal test is placed beside the two LEGION-104 `removesWorkspacesOnTreeClose` tests, and `manager()` gains one third-argument flag, `omitRun`, because the helper always injects `run` and destructures it out of `options` before spreading overrides.",
+    "Daemon AGENTS.md has no workspace-removal bullet (LEGION-104 appears only inside the `Workspace clone` bullet), so the sentence goes into the `api`-before-`ProcessManager` boot bullet as the spec allows.",
+    "The error names the runtime by `deps.config.runtime.name` (\"tmux\"/\"kubernetes\") because the `Runtime` interface has no name and the entry point selects the runtime from that same field; under a `FakeRuntime` in tests the message still says `tmux` (the fixture config's name)."
+  ],
+  "schemaVersion": 1,
+  "phase": "plan",
+  "completed": "2026-09-14T23:32:50.862Z"
+}
