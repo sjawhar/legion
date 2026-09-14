@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/opencode-legion-envoy",
-  "version": "1.21.0",
+  "version": "1.21.1",
   "type": "module",
   "main": "dist/src/server.js",
   "exports": {
