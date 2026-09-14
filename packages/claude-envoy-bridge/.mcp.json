@@ -2,11 +2,10 @@
   "mcpServers": {
     "envoy": {
       "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--silent", "channel"],
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js"
+      ],
       "env": {
-        "ENVOY_NATS_URL": "${ENVOY_NATS_URL}",
-        "ENVOY_URL": "${ENVOY_URL}",
-        "ENVOY_SESSION_ID": "${ENVOY_SESSION_ID}",
         "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
       }
     }

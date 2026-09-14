@@ -1,0 +1,18 @@
+{
+  "description": "Envoy: summarise this session's open Dispatch asks when a session starts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/open-asks-hook.js"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

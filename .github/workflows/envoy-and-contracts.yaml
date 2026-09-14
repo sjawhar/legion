@@ -232,13 +232,20 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      # The committed dist/ bundle is compared byte for byte, and bundler output
+      # differs across Bun releases, so this job runs the pinned version.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
         working-directory: packages/claude-envoy-bridge
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
+        working-directory: packages/claude-envoy-bridge
+      - name: Check the committed bundle is fresh
+        run: bun run check-dist
         working-directory: packages/claude-envoy-bridge
       - name: Test Claude Envoy plugin
         run: bun run test

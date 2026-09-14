@@ -8,6 +8,11 @@ export interface ChannelInboundMessage {
   readonly reply?: string
   /** The event already reached the channel queue; direct request-reply still needs its receipt. */
   readonly duplicate?: true
+  /**
+   * The topic the envelope itself names. It differs from `subject` when the listener forwarded
+   * a lane (a role topic) onto the direct subject and is waiting for a receipt.
+   */
+  readonly envelopeTopic?: string
 }
 
 export interface ChannelTopicSubscription extends AsyncIterable<ChannelInboundMessage> {
@@ -53,13 +58,14 @@ interface Following {
 const DeliveryIdentity = z.object({
   event_id: z.string().min(1).optional(),
   dedupe_key: z.string().min(1).optional(),
+  topic: z.string().min(1).optional(),
 })
 
 const decoder = new TextDecoder()
 const SEEN_KEYS_LIMIT = 1_000
 const DEFAULT_DRAIN_TIMEOUT_MS = 1_000
 
-function deliveryIdentity(data: Uint8Array): string | undefined {
+function deliveryIdentity(data: Uint8Array): z.infer<typeof DeliveryIdentity> | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(decoder.decode(data))
@@ -67,8 +73,7 @@ function deliveryIdentity(data: Uint8Array): string | undefined {
     return undefined
   }
   const identity = DeliveryIdentity.safeParse(parsed)
-  if (!identity.success) return undefined
-  return identity.data.event_id ?? identity.data.dedupe_key
+  return identity.success ? identity.data : undefined
 }
 
 function report(what: string, error: unknown): void {
@@ -101,12 +106,19 @@ export function createChannelForwarder(
       for await (const message of subscription) {
         try {
           const identity = deliveryIdentity(message.data)
-          if (identity !== undefined && seen.has(identity)) {
-            await options.deliver({ ...message, duplicate: true })
-            continue
-          }
-          if (identity !== undefined) remember(identity)
-          await options.deliver(message)
+          const key = identity?.event_id ?? identity?.dedupe_key
+          const duplicate = key !== undefined && seen.has(key)
+          if (key !== undefined && !duplicate) remember(key)
+          // A nats.js Msg exposes subject/data/reply through prototype getters,
+          // which an object spread would silently drop; copy the fields by name.
+          await options.deliver({
+            subject: message.subject,
+            data: message.data,
+            // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
+            ...(message.reply ? { reply: message.reply } : {}),
+            ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
+            ...(duplicate ? { duplicate: true } : {}),
+          })
         } catch (error) {
           report(`could not deliver a message on ${message.subject}`, error)
         }

@@ -1,25 +1,37 @@
 import { expect, test } from "bun:test"
 import { dispatchToolSpecs } from "@legion/contracts"
-import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
+import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
 import {
-  channelToolDefinitions,
-  executeEnvoyTool,
   type ChannelSession,
   type ChannelToolRuntime,
+  channelToolDefinitions,
+  executeEnvoyTool,
 } from "../src/envoy-channel-server"
+import { SessionIdentity } from "../src/session-identity"
 
-function sessionWith(followed: string[]): ChannelSession {
+function sessionWith(followed: string[], announced: string[] = []): ChannelSession {
   return {
-    delivery: { enqueue: async () => undefined, inbox: () => [] },
+    delivery: {
+      enqueue: async () => undefined,
+      announce: async (content) => {
+        announced.push(content)
+      },
+      inbox: () => [],
+    },
+    topics: () => ["notifications.agent.ses_claude", ...followed],
     follow: async (topics) => {
-      followed.push(...topics)
+      const fresh = topics.filter((topic) => !followed.includes(topic))
+      followed.push(...fresh)
+      return fresh
     },
     unfollow: async () => [],
     rememberRole: async () => undefined,
     shutdown: async () => undefined,
   }
 }
+
+const identity = new SessionIdentity("ses_claude", process.cwd())
 
 test("declares every shared Envoy tool including the bounded inbox and shared Dispatch tools", () => {
   const definitions = channelToolDefinitions(true)
@@ -52,12 +64,7 @@ test("sends Envoy messages through the shared transport", async () => {
     },
   })
   const followed: string[] = []
-  const runtime: ChannelToolRuntime = {
-    sessionId: "ses_claude",
-    directory: process.cwd(),
-    client,
-    session: sessionWith(followed),
-  }
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith(followed) }
 
   const result = await executeEnvoyTool(runtime, "envoy_send", {
     session_id: "ses_receiver",
@@ -107,11 +114,11 @@ test("keeps Dispatch asks on Dispatch and follows their returned event topic", a
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
   const followed: string[] = []
+  const announced: string[] = []
   const runtime: ChannelToolRuntime = {
-    sessionId: "ses_claude",
-    directory: process.cwd(),
+    identity,
     client: {} as EnvoyClient,
-    session: sessionWith(followed),
+    session: sessionWith(followed, announced),
   }
 
   try {
@@ -125,8 +132,54 @@ test("keeps Dispatch asks on Dispatch and follows their returned event topic", a
       details: { issue: "DSP-3", topic: "notifications.dispatch.issue.DSP-3.>", ask: "ask-3" },
     })
     expect(followed).toEqual(["notifications.dispatch.issue.DSP-3.>"])
+    expect(announced).toEqual([
+      "Subscribed to DSP-3 (every event on this issue reaches you; envoy_unsubscribe notifications.dispatch.issue.DSP-3.> to stop).",
+    ])
+
+    await executeEnvoyTool(runtime, "dispatch_ask", {
+      issue: "DSP-3",
+      question: "Approve the channel?",
+    })
+
+    expect(announced).toHaveLength(1)
   } finally {
     server.stop(true)
     process.env = previous
   }
+})
+
+test("envoy_list reports the union of live NATS subscriptions and registry interests", async () => {
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async () =>
+      Response.json({
+        session_id: "ses_claude",
+        machine_id: "devbox",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_claude", "notifications.dispatch.issue.DSP-9.>"],
+      }),
+  })
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client,
+    session: sessionWith(["notifications.dispatch.issue.DSP-3.>"]),
+  }
+
+  const result = await executeEnvoyTool(runtime, "envoy_list", {})
+
+  expect(result).toEqual({
+    session_id: "ses_claude",
+    machine_id: "devbox",
+    dir: "/tmp",
+    topics: [
+      "notifications.agent.ses_claude",
+      "notifications.dispatch.issue.DSP-9.>",
+      "notifications.dispatch.issue.DSP-3.>",
+    ],
+    interests: [
+      { topic: "notifications.agent.ses_claude", source: "both" },
+      { topic: "notifications.dispatch.issue.DSP-9.>", source: "registry" },
+      { topic: "notifications.dispatch.issue.DSP-3.>", source: "live" },
+    ],
+  })
 })

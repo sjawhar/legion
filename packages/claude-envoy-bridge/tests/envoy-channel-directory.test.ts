@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
 import {
-  executeEnvoyTool,
   type ChannelSession,
   type ChannelToolRuntime,
+  executeEnvoyTool,
 } from "../src/envoy-channel-server"
+import { SessionIdentity } from "../src/session-identity"
 
 const session: ChannelSession = {
-  delivery: { enqueue: async () => undefined, inbox: () => [] },
-  follow: async () => undefined,
+  delivery: { enqueue: async () => undefined, announce: async () => undefined, inbox: () => [] },
+  topics: () => [],
+  follow: async () => [],
   unfollow: async () => [],
   rememberRole: async () => undefined,
   shutdown: async () => undefined,
@@ -16,8 +18,7 @@ const session: ChannelSession = {
 
 test("reports the Claude project directory rather than the package launch directory", async () => {
   const runtime: ChannelToolRuntime = {
-    sessionId: "ses_claude",
-    directory: "/work/project",
+    identity: new SessionIdentity("ses_claude", "/work/project"),
     client: {} as EnvoyClient,
     session,
   }

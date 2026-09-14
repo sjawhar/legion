@@ -11,6 +11,7 @@ function envelope(eventId: string): string {
     event_id: eventId,
     dedupe_key: `delivery-${eventId}`,
     source: "github",
+    topic: THREAD,
     payload_summary: `event ${eventId}`,
   })
 }
@@ -19,13 +20,18 @@ test("delivers each event id once even when concrete and wildcard subscriptions 
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
   const received: string[] = []
+  const subjects: string[] = []
+  const envelopeTopics: Array<string | undefined> = []
   const second = Promise.withResolvers<void>()
   const forwarder = createChannelForwarder(connection, {
     deliver: async (message) => {
       if (message.duplicate) return
+      // Real nats.js messages: subject, data, and the envelope topic must all survive.
+      subjects.push(message.subject)
+      envelopeTopics.push(message.envelopeTopic)
       received.push(new TextDecoder().decode(message.data))
       if (received.length === 2) second.resolve()
-    }
+    },
   })
 
   try {
@@ -37,6 +43,8 @@ test("delivers each event id once even when concrete and wildcard subscriptions 
     await second.promise
 
     expect(received).toEqual([envelope("evt-1"), envelope("evt-2")])
+    expect(subjects).toEqual([COMMENT, COMMENT])
+    expect(envelopeTopics).toEqual([THREAD, THREAD])
   } finally {
     await forwarder.close()
     await broker.stop()
