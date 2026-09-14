@@ -752,6 +752,41 @@ describe("TmuxRuntime", () => {
     });
   });
 
+  it("delivers spec.env.PATH through the pane shell command, never as a -e pair tmux would discard (LEGION-91)", async () => {
+    const harness = await tmuxHarness();
+    const panePath = `${path.join(harness.stateDir, "worker-bin")}:/full/bin:/usr/bin`;
+    await harness.runtime.spawn("worker", {
+      ...harness.makeSpec("tester"),
+      env: { LEGION_ROLE: "tester", PATH: panePath, UNSET: undefined },
+    });
+    const launch = harness.server.commands.find((cmd) => cmd[3] === "new-window");
+    if (!launch) throw new Error("no new-window");
+    // Every other variable still rides -e; PATH rides none.
+    expect(launch).toContain("LEGION_ROLE=tester");
+    expect(launch.some((part) => part.startsWith("PATH="))).toBe(false);
+    // The pane shell exports it before anything else runs, so worker-shim and OMP inherit it.
+    expect(launch.at(-1)).toBe(
+      `export PATH=${panePath} && ${shimCommand(workspaceFor(harness.stateDir), socketFor(harness.stateDir, "tester-9e2fb104"), ompCommand("tester"))}`
+    );
+  });
+
+  it("single-quotes a PATH the shell would otherwise split", async () => {
+    const harness = await tmuxHarness();
+    await harness.runtime.spawn("worker", {
+      ...harness.makeSpec("tester"),
+      env: { PATH: "/state dir/worker-bin:/usr/bin" },
+    });
+    const launch = harness.server.commands.find((cmd) => cmd[3] === "new-window");
+    expect(
+      launch
+        ?.at(-1)
+        ?.startsWith(
+          "export PATH='/state dir/worker-bin:/usr/bin' && cd " +
+            `${workspaceFor(harness.stateDir)} && `
+        )
+    ).toBe(true);
+  });
+
   it("opens a fresh window when no recorded pane verifies, leaves every recorded locator's window alone, and splits later spawns into the fresh one", async () => {
     const harness = await tmuxHarness();
     const root = await harness.runtime.spawn("root", harness.makeSpec("architect"));
