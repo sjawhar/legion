@@ -257,3 +257,137 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
     emptyInbox.mockRestore();
   }
 });
+
+test("Inbox narrows to one agent's asks from ?agent and clears back to the whole inbox", async () => {
+  const fromPlanner = issueAsk({ id: "ask-planner", question: "Planner question" });
+  const plannerWaits = issueAsk({
+    id: "ask-planner-waits",
+    last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+    question: "Planner waits on alice",
+  });
+  const fromReviewer = issueAsk({
+    author: { id: "reviewer-session", kind: "session", origin: { session_title: "Reviewer" } },
+    id: "ask-reviewer",
+    question: "Reviewer question",
+  });
+  const rows = [fromPlanner, plannerWaits, fromReviewer];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
+    edits: [],
+    replies: [],
+  }));
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([
+    {
+      capabilities: [],
+      dir: "/w",
+      last_activity: null,
+      last_seen: Date.now(),
+      machine_id: "m",
+      open_asks: 2,
+      roles: [],
+      session_id: "session-1",
+      title: "Planner",
+    },
+  ]);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/?agent=session-1"]}>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("Planner question");
+    expect(screen.getByText("Planner waits on alice")).toBeTruthy();
+    expect(screen.queryByText("Reviewer question")).toBeNull();
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+    ).toEqual(["Waiting on you", "Waiting on agents"]);
+    const chip = await screen.findByRole("link", { name: "Clear agent filter" });
+    expect(chip.textContent).toBe("Asks from Planner · clear");
+    expect(chip.getAttribute("href")).toBe("/");
+    // The whole-inbox banner would contradict the filtered list (and its link clears the filter).
+    expect(screen.queryByText(/Blocked on you:/)).toBeNull();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer", async () => {
+  const fromPlanner = issueAsk({ id: "ask-planner", question: "Planner question" });
+  const plannerWaits = issueAsk({
+    id: "ask-planner-waits",
+    last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+    question: "Planner waits on alice",
+  });
+  const rows = [fromPlanner, plannerWaits];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
+    edits: [],
+    replies: [],
+  }));
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/?agent=session-1&section=needs-you"]}>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("Planner question");
+    expect(screen.queryByText("Planner waits on alice")).toBeNull();
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+    ).toEqual(["Waiting on you"]);
+    // No live agent carries the title, so the chip falls back to the asks' author label.
+    expect(screen.getByRole("link", { name: "Clear agent filter" }).textContent).toBe(
+      "Asks from session-1 waiting on you · clear"
+    );
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("Inbox filtered to an agent with no open asks says so and still offers to clear", async () => {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([issueAsk()]);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: issueAsk(),
+    edits: [],
+    replies: [],
+  });
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
+  const view = render(
+    <MemoryRouter initialEntries={["/?agent=idle-session"]}>
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
+    expect(within(emptyState).getByText("No open asks from idle-session")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Clear agent filter" }).getAttribute("href")).toBe("/");
+    expect(screen.queryByText("Which approach?")).toBeNull();
+  } finally {
+    view.unmount();
+    listAgents.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});

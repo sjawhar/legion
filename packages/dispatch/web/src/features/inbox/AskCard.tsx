@@ -1,11 +1,11 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
+import { CopyButton } from "../../components/CopyButton";
 import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
-import { copyText } from "../../lib/clipboard";
 import {
   askUrgencyAccent,
   badgeBlocking,
@@ -15,7 +15,6 @@ import {
   borderDefault,
   card,
   cardHoverBorder,
-  dangerText,
   inlineWarningText,
   inputClasses,
   linkHoverText,
@@ -25,7 +24,6 @@ import {
   primaryButtonEnabledHoverBg,
   quoteAccentBorder,
   quoteBodyText,
-  successText,
   surfaceBg,
   textMutedOnSurface,
   textPrimaryOnSurface,
@@ -114,26 +112,12 @@ export function AskCard({
     createReply: reply,
     getAskThread: getThread,
   });
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const isCompact = variant === "compact";
-  const tmuxTarget =
-    displayedAsk.author.kind === "session" ? displayedAsk.author.origin?.tmux : undefined;
+  const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
+  const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
+  const tmuxTarget = sessionAuthor?.origin?.tmux;
   const hasUrgencyNotch = displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high";
-  useEffect(() => {
-    if (copyStatus !== "copied") {
-      return;
-    }
-    const timeout = window.setTimeout(() => setCopyStatus("idle"), 1500);
-    return () => window.clearTimeout(timeout);
-  }, [copyStatus]);
-
-  const handleTmuxCopy = async () => {
-    if (tmuxTarget === undefined) {
-      return;
-    }
-    setCopyStatus((await copyText(tmuxTarget)) ? "copied" : "failed");
-  };
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
@@ -263,49 +247,34 @@ export function AskCard({
         <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
           <MarkdownBody markdown={displayedAsk.question} />
         </div>
-        <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
-          {actorLabel(displayedAsk.author)} ·{" "}
-          {isAction ? (
-            <time dateTime={displayedAsk.created_at}>{formatAskAge(displayedAsk.created_at)}</time>
-          ) : (
-            <Timestamp at={displayedAsk.created_at} />
+        <p className={`mt-1 flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnSurface}`}>
+          <span>{actorLabel(displayedAsk.author)}</span>
+          {sessionAuthor === undefined ? null : (
+            <CopyButton value={sessionAuthor.id} what="session ID">
+              ID
+            </CopyButton>
           )}
+          {sessionTitle === undefined || sessionTitle === "" ? null : (
+            <CopyButton value={sessionTitle} what="session title">
+              title
+            </CopyButton>
+          )}
+          <span className="inline-flex items-center gap-x-1">
+            <span aria-hidden="true">·</span>
+            {isAction ? (
+              <time dateTime={displayedAsk.created_at}>
+                {formatAskAge(displayedAsk.created_at)}
+              </time>
+            ) : (
+              <Timestamp at={displayedAsk.created_at} />
+            )}
+          </span>
           {tmuxTarget === undefined ? null : (
-            <>
-              {" · "}
-              <button
-                aria-label={`Copy tmux target ${tmuxTarget}`}
-                className={`inline-flex max-w-full items-center gap-1 align-baseline font-mono text-xs font-medium select-text ${linkText} ${linkHoverText}`}
-                onClick={() => void handleTmuxCopy()}
-                title={`Copy tmux target ${tmuxTarget}`}
-                type="button"
-              >
-                <span>{tmuxTarget}</span>
-                <svg aria-hidden="true" className="size-3 shrink-0" fill="none" viewBox="0 0 20 20">
-                  <rect
-                    height="10"
-                    rx="1"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    width="8"
-                    x="7"
-                    y="7"
-                  />
-                  <path
-                    d="M5 13H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v1"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                  />
-                </svg>
-              </button>
-            </>
-          )}
-          {copyStatus === "idle" ? null : (
-            <span
-              aria-live="polite"
-              className={`ml-1 text-xs font-medium ${copyStatus === "copied" ? successText : dangerText}`}
-            >
-              {copyStatus === "copied" ? "Copied" : "Copy failed - select the text"}
+            <span className="inline-flex items-center gap-x-1">
+              <span aria-hidden="true">·</span>
+              <CopyButton value={tmuxTarget} what="tmux target">
+                {tmuxTarget}
+              </CopyButton>
             </span>
           )}
         </p>

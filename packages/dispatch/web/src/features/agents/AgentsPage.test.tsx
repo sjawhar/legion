@@ -141,6 +141,11 @@ function card(region: HTMLElement, name: string): HTMLElement {
   return result;
 }
 
+/** Cards collapse by default; the title button toggles the conversation and composer. */
+function expand(agentCard: HTMLElement, name: string): void {
+  fireEvent.click(within(agentCard).getByRole("button", { name }));
+}
+
 test("Agents lists live session activity and capability-aware actions", async () => {
   const page = renderAgents();
 
@@ -154,6 +159,7 @@ test("Agents lists live session activity and capability-aware actions", async ()
       within(pageRegion).getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeTruthy();
     const reviewer = card(pageRegion, "Reviewer");
+    expand(reviewer, "Reviewer");
     expect(
       (within(reviewer).getByRole("button", { name: /^BTW$/ }) as HTMLButtonElement).disabled
     ).toBe(true);
@@ -164,6 +170,80 @@ test("Agents lists live session activity and capability-aware actions", async ()
       (within(reviewer).getByRole("button", { name: /^Steer$/ }) as HTMLButtonElement).disabled
     ).toBe(false);
   } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents collapses every card by default and expands each one independently", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(page.listAgentMessages).not.toHaveBeenCalled();
+    const planner = card(region, "Planner");
+    const toggle = within(planner).getByRole("button", { name: "Planner" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    expand(planner, "Planner");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(within(planner).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    await waitFor(() => expect(page.listAgentMessages).toHaveBeenCalledWith("planner-session"));
+    const reviewer = card(region, "Reviewer");
+    expect(within(reviewer).queryByRole("textbox", { name: "Message" })).toBeNull();
+
+    expand(reviewer, "Reviewer");
+    expect(within(region).getAllByRole("textbox", { name: "Message" })).toHaveLength(2);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    expand(planner, "Planner");
+    expect(within(planner).queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(within(reviewer).getByRole("textbox", { name: "Message" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents ask pills open the Inbox narrowed to that agent; zero counts stay text", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expect(within(planner).getByRole("link", { name: "Needs you 2" }).getAttribute("href")).toBe(
+      "/?agent=planner-session&section=needs-you"
+    );
+    expect(within(planner).getByRole("link", { name: "Open asks 2" }).getAttribute("href")).toBe(
+      "/?agent=planner-session"
+    );
+    const reviewer = card(region, "Reviewer");
+    expect(within(reviewer).getByText("Open asks 0", { exact: true })).toBeTruthy();
+    expect(within(reviewer).queryByRole("link")).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents cards copy the session ID and title", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async () => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const page = renderAgents();
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    fireEvent.click(
+      within(planner).getByRole("button", { name: "Copy session ID planner-session" })
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("planner-session"));
+    expect(await within(planner).findByText("Copied", { exact: true })).toBeTruthy();
+    fireEvent.click(within(planner).getByRole("button", { name: "Copy session title Planner" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("Planner"));
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
     page.view.unmount();
     page.restore();
   }
@@ -262,6 +342,7 @@ test("Agents sends without an issue through the agent message route", async () =
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
+    expand(planner, "Planner");
     await waitFor(() =>
       expect(
         (within(planner).getByRole("button", { name: "BTW" }) as HTMLButtonElement).disabled
@@ -303,6 +384,7 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
+    expand(planner, "Planner");
     fireEvent.click(within(planner).getByRole("button", { name: "Choose issue" }));
     await waitFor(() =>
       expect(within(planner).getByRole("combobox", { name: "Issue" })).toBeTruthy()
@@ -338,6 +420,7 @@ test("Agents loads only open issues when an optional picker is opened", async ()
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
+    expand(planner, "Planner");
     expect(page.listIssues).not.toHaveBeenCalled();
     fireEvent.click(within(planner).getByRole("button", { name: "Choose issue" }));
     await waitFor(() => expect(page.listIssues).toHaveBeenCalledWith({ open: true }));
@@ -381,7 +464,10 @@ test("Agents renders each targeted message and its reply beneath the matching ca
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    const conversation = within(planner).getByRole("list", { name: "Conversation with Planner" });
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
     await expect(within(conversation).findByText("Can this ship?")).resolves.toBeTruthy();
     await expect(within(conversation).findByText("Yes, it can.")).resolves.toBeTruthy();
     expect(within(conversation).getByText("Answered by Planner")).toBeTruthy();
@@ -411,7 +497,8 @@ test("Agents retain targeted-message retries and attempt history", async () => {
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    const retry = within(planner).getByRole("button", { name: "Send normally" });
+    expand(planner, "Planner");
+    const retry = await within(planner).findByRole("button", { name: "Send normally" });
     expect(within(planner).getByRole("button", { name: "Ask BTW again" })).toBeTruthy();
     fireEvent.click(retry);
     await waitFor(() =>

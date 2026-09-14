@@ -13,6 +13,7 @@ import {
   getIssueEvents,
   patchIssue,
 } from "./api";
+import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -31,7 +32,9 @@ test.beforeEach(async () => {
   }
 });
 
-test("ask cards show urgency accents and copy tmux targets", async ({ browser }, testInfo) => {
+test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Urgency accents" });
   const tmuxSession = {
@@ -48,6 +51,7 @@ test("ask cards show urgency accents and copy tmux targets", async ({ browser },
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
+  const copied = await recordClipboard(page);
   try {
     await page.goto("/");
     if (testInfo.project.name === "iphone") {
@@ -67,8 +71,23 @@ test("ask cards show urgency accents and copy tmux targets", async ({ browser },
     }
 
     const blockingCard = page.getByTestId(`ask-${blocking.id}`);
-    await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
+    // Session identifiers come first; the tmux target keeps its lower-priority last slot.
+    const copyButtons = blockingCard.getByRole("button", { name: /^Copy / });
+    await expect(copyButtons).toHaveCount(3);
+    expect(
+      await copyButtons.evaluateAll((buttons) => buttons.map((button) => button.ariaLabel))
+    ).toEqual([
+      "Copy session ID e2e-session",
+      "Copy session title e2e-session-title",
+      "Copy tmux target dev:4.7",
+    ]);
+    await blockingCard.getByRole("button", { name: "Copy session ID e2e-session" }).click();
     await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();
+    await blockingCard
+      .getByRole("button", { name: "Copy session title e2e-session-title" })
+      .click();
+    await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
+    await expect.poll(copied).toEqual(["e2e-session", "e2e-session-title", "dev:4.7"]);
     if (testInfo.project.name === "iphone") {
       await page.locator("main").screenshot({ path: testInfo.outputPath("askcard-390.png") });
     } else {

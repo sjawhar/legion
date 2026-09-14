@@ -1,22 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { queryKeys } from "../../api/query-keys";
 import type { Agent, MessageRead } from "../../api/types";
+import { CopyButton } from "../../components/CopyButton";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
+import { PinButton } from "../../components/PinButton";
 import {
   borderDefault,
   card,
   connectionDotConnecting,
   dangerText,
+  disclosureButtonText,
   inputClasses,
   liveDotBg,
   offlineDotBg,
-  primaryButtonBg,
-  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -29,6 +31,7 @@ import { TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { MarkdownBody } from "../refs/MarkdownBody";
+import { buildInboxPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { userPreferenceStorageKey } from "../shell/userPreference";
@@ -48,24 +51,6 @@ function FreshnessDot({ agent }: { agent: Agent }): ReactNode {
       <span aria-hidden className={`h-2.5 w-2.5 rounded-full ${status.dot}`} />
       <span className="sr-only">{status.label}</span>
     </span>
-  );
-}
-
-function PinIcon({ pinned }: { pinned: boolean }): ReactNode {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-4 w-4"
-      fill={pinned ? "currentColor" : "none"}
-      viewBox="0 0 16 16"
-    >
-      <path
-        d="M5 2.5h6v3l1.5 2v1H9v4.75L8 14.5l-1-1.25V8.5H3.5v-1L5 5.5z"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.25"
-      />
-    </svg>
   );
 }
 
@@ -247,6 +232,58 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
   );
 }
 
+function ChevronIcon({ expanded }: { expanded: boolean }): ReactNode {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`h-4 w-4 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+      fill="none"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M4 6l4 4 4-4"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
+/** An ask-count pill; with a count it links to the Inbox narrowed to this agent's asks. */
+function AskCountPill({
+  agent,
+  count,
+  section,
+  selected = false,
+  title,
+  wording,
+}: {
+  agent: Agent;
+  count: number;
+  section?: "needs-you";
+  selected?: boolean;
+  title: string;
+  wording: string;
+}): ReactNode {
+  const pill = (
+    <LabelPill selected={selected}>
+      {wording} {count}
+    </LabelPill>
+  );
+  if (count === 0) return pill;
+  return (
+    <Link
+      className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
+      title={title}
+      to={buildInboxPath({ agent: agent.session_id, section })}
+    >
+      {pill}
+    </Link>
+  );
+}
+
 function AgentRow({
   agent,
   needsYou,
@@ -260,62 +297,95 @@ function AgentRow({
 }): ReactNode {
   const label = agentLabel(agent);
   const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
 
   return (
-    <article className={`rounded-xl border p-4 ${card} ${borderDefault}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-2">
+    <article className={`rounded-xl border ${card} ${borderDefault}`}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
+        <div className="flex min-w-0 flex-auto flex-wrap items-center gap-x-2 md:flex-nowrap">
           <FreshnessDot agent={agent} />
-          <div className="min-w-0">
-            <h2 className={`truncate text-base font-semibold ${textPrimaryOnCanvas}`} title={label}>
-              {label}
-            </h2>
-            <p className={`truncate text-sm ${textMutedOnCanvas}`} title={machineAndDir}>
-              {machineAndDir}
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {needsYou === 0 ? null : <LabelPill selected>Needs you {needsYou}</LabelPill>}
-          <LabelPill>Open asks {agent.open_asks}</LabelPill>
-          <button
-            aria-label={pinned ? `Unpin ${label}` : `Pin ${label}`}
-            aria-pressed={pinned}
-            className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg ${
-              pinned
-                ? `${primaryButtonBg} ${primaryButtonEnabledHoverBg}`
-                : `${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`
-            }`}
-            onClick={onPin}
-            title={pinned ? "Unpin agent" : "Pin agent"}
-            type="button"
-          >
-            <PinIcon pinned={pinned} />
-          </button>
-        </div>
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        {agent.roles.map((role) => (
-          <LabelPill key={role}>{role}</LabelPill>
-        ))}
-        {agent.capabilities.map((capability) => (
-          <span className={textMutedOnCanvas} key={capability}>
-            {capability}
-          </span>
-        ))}
-        <span className={`ml-auto ${textMutedOnCanvas}`}>
-          {agent.last_activity === null ? (
-            "No dispatch activity"
-          ) : (
-            <Timestamp at={agent.last_activity} />
+          <h2 className={`max-w-56 shrink-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
+            <button
+              aria-controls={detailsId}
+              aria-expanded={expanded}
+              className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
+              onClick={() => setExpanded((open) => !open)}
+              title={label}
+              type="button"
+            >
+              <span className="min-w-0 truncate">{label}</span>
+              <span className={disclosureButtonText}>
+                <ChevronIcon expanded={expanded} />
+              </span>
+            </button>
+          </h2>
+          <CopyButton value={agent.session_id} what="session ID">
+            ID
+          </CopyButton>
+          {agent.title.trim() === "" ? null : (
+            <CopyButton value={agent.title} what="session title">
+              title
+            </CopyButton>
           )}
-        </span>
+          <span
+            className={`order-last min-w-0 basis-full truncate text-xs md:order-none md:flex-1 md:basis-0 ${textMutedOnCanvas}`}
+            title={machineAndDir}
+          >
+            {machineAndDir}
+          </span>
+          {agent.roles.map((role) => (
+            <LabelPill key={role}>{role}</LabelPill>
+          ))}
+        </div>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <span className={`text-xs ${textMutedOnCanvas}`}>
+            {agent.last_activity === null ? (
+              "No dispatch activity"
+            ) : (
+              <Timestamp at={agent.last_activity} />
+            )}
+          </span>
+          {needsYou === 0 ? null : (
+            <AskCountPill
+              agent={agent}
+              count={needsYou}
+              section="needs-you"
+              selected
+              title={`Asks from ${label} waiting on you`}
+              wording="Needs you"
+            />
+          )}
+          <AskCountPill
+            agent={agent}
+            count={agent.open_asks}
+            title={`Open asks from ${label}`}
+            wording="Open asks"
+          />
+          <PinButton
+            label={pinned ? `Unpin ${label}` : `Pin ${label}`}
+            onClick={onPin}
+            pinned={pinned}
+            title={pinned ? "Unpin agent" : "Pin agent"}
+          />
+        </div>
       </div>
-      <AgentMessageList agent={agent} />
-      <AgentMessageComposer agent={agent} />
-      <p className={`mt-2 text-xs ${textMutedOnCanvas}`}>
-        Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
-      </p>
+      {expanded ? (
+        <div className={`border-t px-4 pb-4 ${borderDefault}`} id={detailsId}>
+          <div
+            className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
+          >
+            {agent.capabilities.map((capability) => (
+              <span key={capability}>{capability}</span>
+            ))}
+            <span>
+              Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
+            </span>
+          </div>
+          <AgentMessageList agent={agent} />
+          <AgentMessageComposer agent={agent} />
+        </div>
+      ) : null}
     </article>
   );
 }

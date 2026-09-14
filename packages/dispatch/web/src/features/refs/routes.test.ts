@@ -2,11 +2,13 @@ import { expect, test } from "bun:test";
 
 import {
   buildDispatchReference,
+  buildInboxPath,
   buildIssuePath,
   buildProjectPath,
   isLegacyLogPath,
   issueTabForRoute,
   parseDispatchReference,
+  parseInboxSearch,
   parseIssuePath,
   parseProjectPath,
 } from "./routes";
@@ -187,4 +189,16 @@ test("a dashed key is never a project route and a bare project is never an issue
   expect(parseProjectPath("/projects/CORE-1")).toBeUndefined();
   expect(parseIssuePath("/issues/CORE")).toBeUndefined();
   expect(parseDispatchReference("dispatch://CORE")).toBeUndefined();
+});
+
+test("inbox agent filters round-trip through the query string and ignore unknown sections", () => {
+  expect(buildInboxPath()).toBe("/");
+  expect(buildInboxPath({ agent: "s 1", section: "needs-you" })).toBe(
+    "/?agent=s+1&section=needs-you"
+  );
+  expect(parseInboxSearch("?agent=s+1&section=needs-you")).toEqual({
+    agent: "s 1",
+    section: "needs-you",
+  });
+  expect(parseInboxSearch("?agent=&section=later")).toEqual({});
 });

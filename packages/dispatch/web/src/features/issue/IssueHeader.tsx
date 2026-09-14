@@ -12,6 +12,8 @@ import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type { Artifact, Issue, IssueDetails, UserIssueState, UserState } from "../../api/types";
+import { CopyButton } from "../../components/CopyButton";
+import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -34,8 +36,6 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
-  primaryButtonBg,
-  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -224,11 +224,14 @@ export function IssueHeader({
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex min-w-0 grow basis-full flex-col gap-2 sm:flex-row sm:items-start 2xl:basis-auto">
-          <p
-            className={`self-start shrink-0 rounded-md px-2.5 py-1.5 font-mono text-sm font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
-          >
-            {issue.key}
-          </p>
+          <div className="flex shrink-0 items-center gap-1 self-start">
+            <p
+              className={`rounded-md px-2.5 py-1.5 font-mono text-sm font-semibold ${badgePrimary.bg} ${badgePrimary.text}`}
+            >
+              {issue.key}
+            </p>
+            <CopyButton value={issue.key} what="issue key" />
+          </div>
           <div className="flex min-w-0 flex-1 items-start gap-2">
             {editingTitle ? (
               <input
@@ -279,28 +282,12 @@ export function IssueHeader({
                 {drafts.title}
               </h1>
             )}
-            <button
-              aria-label={state.pinned ? "Unpin issue" : "Pin issue"}
-              aria-pressed={state.pinned}
-              className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg md:min-h-8 md:min-w-8 ${
-                state.pinned
-                  ? `${primaryButtonBg} ${primaryButtonEnabledHoverBg}`
-                  : `${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`
-              }`}
+            <PinButton
               disabled={updateState.isPending}
+              label={state.pinned ? "Unpin issue" : "Pin issue"}
               onClick={() => pinGuard.guard(() => updateState.mutate(!state.pinned))}
-              title={state.pinned ? "Unpin issue" : "Pin issue"}
-              type="button"
-            >
-              <svg aria-hidden="true" className="h-4 w-4" fill="none" viewBox="0 0 24 24">
-                <path
-                  d="M8 4h8l-1 6 3 3H6l3-3-1-6Zm4 9v7"
-                  fill={state.pinned ? "currentColor" : "none"}
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-              </svg>
-            </button>
+              pinned={state.pinned}
+            />
           </div>
         </div>
         <div

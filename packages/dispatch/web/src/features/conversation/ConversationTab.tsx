@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
+import { PinButton } from "../../components/PinButton";
 import {
   checkboxAccent,
   dangerText,
@@ -85,7 +86,7 @@ function Avatar({ author }: { author: Author }): ReactNode {
   );
 }
 
-function PinButton({
+function TurnPin({
   disabled,
   onPin,
   pinned,
@@ -95,15 +96,14 @@ function PinButton({
   pinned: boolean;
 }): ReactNode {
   return (
-    <button
-      aria-label={pinned ? "Unpin" : "Pin"}
-      className={`min-h-11 min-w-11 shrink-0 text-sm ${linkText} ${linkHoverText} disabled:cursor-not-allowed disabled:opacity-50`}
+    <PinButton
+      className="self-start"
       disabled={disabled}
+      label={pinned ? "Unpin" : "Pin"}
       onClick={onPin}
-      type="button"
-    >
-      {pinned ? "Unpin" : "Pin"}
-    </button>
+      pinned={pinned}
+      quiet
+    />
   );
 }
 
@@ -156,7 +156,7 @@ function MessageTurn({
         )}
         <EventBody event={item.event} />
       </div>
-      <PinButton disabled={disabled} onPin={onPin} pinned={pinned} />
+      <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
     </li>
   );
 }
@@ -654,7 +654,7 @@ export function ConversationTab({
                 <div className="min-w-0 flex-1">
                   <AskCard ask={item.ask} thread="collapsed" />
                 </div>
-                <PinButton disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
+                <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>
             );
           }

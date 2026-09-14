@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
@@ -9,8 +9,9 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { dangerText, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
+import { useAgents } from "../conversation/useAgents";
 import { actorLabel } from "../refs/actor";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 
@@ -71,11 +72,28 @@ function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
   );
 }
 
+function AskSection({ asks, title }: { asks: readonly InboxRow[]; title: string }): ReactNode {
+  if (asks.length === 0) return null;
+  return (
+    <section>
+      <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>{title}</h2>
+      <ul className="space-y-3">
+        {asks.map((ask) => (
+          <InboxItem ask={ask} key={ask.id} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function Inbox(): ReactNode {
+  const { search } = useLocation();
+  const filter = parseInboxSearch(search);
   const inbox = useQuery({
     queryKey: ["inbox"],
     queryFn: () => api.getInbox(),
   });
+  const { titles } = useAgents(filter.agent !== undefined);
 
   if (inbox.isPending) {
     return <LoadingSkeleton label="Loading your inbox" />;
@@ -83,49 +101,56 @@ export function Inbox(): ReactNode {
   if (inbox.isError) {
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
-  if (inbox.data.length === 0) {
-    return <EmptyState label="Inbox empty state" message="Nothing needs you" />;
+
+  const agent = filter.agent;
+  const fromAgent =
+    agent === undefined
+      ? inbox.data
+      : inbox.data.filter((ask) => ask.author.kind === "session" && ask.author.id === agent);
+  const shown = filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent;
+  // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
+  const liveTitle = agent === undefined ? undefined : titles.get(agent)?.trim();
+  const agentTitle =
+    liveTitle !== undefined && liveTitle !== ""
+      ? liveTitle
+      : fromAgent[0] === undefined
+        ? agent
+        : actorLabel(fromAgent[0].author);
+  const chip =
+    agent === undefined ? null : (
+      <Link
+        aria-label="Clear agent filter"
+        className="inline-flex min-h-11 items-center rounded-full"
+        to={buildInboxPath()}
+      >
+        <LabelPill selected>
+          Asks from {agentTitle}
+          {filter.section === "needs-you" ? " waiting on you" : ""} · clear
+        </LabelPill>
+      </Link>
+    );
+
+  if (shown.length === 0) {
+    return (
+      <div className="space-y-6">
+        {chip}
+        <EmptyState
+          label="Inbox empty state"
+          message={agent === undefined ? "Nothing needs you" : `No open asks from ${agentTitle}`}
+        />
+      </div>
+    );
   }
 
-  const waiting = waitingOnYou(inbox.data);
-  const waitingIDs = new Set(waiting.map((ask) => ask.id));
-  const remaining = inbox.data.filter((ask) => !waitingIDs.has(ask.id));
-  const waitingOnAgents = remaining.filter((ask) => ask.last_reply?.author.kind === "user");
-  const needsYou = remaining.filter((ask) => ask.last_reply?.author.kind !== "user");
+  const waiting = waitingOnYou(shown);
+  const waitingOnAgents = shown.filter((ask) => ask.last_reply?.author.kind === "user");
 
   return (
     <div className="space-y-6">
-      <BlockedOnYou asks={inbox.data} />
-      {waiting.length === 0 ? null : (
-        <section>
-          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Waiting on you</h2>
-          <ul className="space-y-3">
-            {waiting.map((ask) => (
-              <InboxItem ask={ask} key={ask.id} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {needsYou.length === 0 ? null : (
-        <section>
-          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Needs you</h2>
-          <ul className="space-y-3">
-            {needsYou.map((ask) => (
-              <InboxItem ask={ask} key={ask.id} />
-            ))}
-          </ul>
-        </section>
-      )}
-      {waitingOnAgents.length === 0 ? null : (
-        <section>
-          <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>Waiting on agents</h2>
-          <ul className="space-y-3">
-            {waitingOnAgents.map((ask) => (
-              <InboxItem ask={ask} key={ask.id} />
-            ))}
-          </ul>
-        </section>
-      )}
+      {chip}
+      {agent === undefined ? <BlockedOnYou asks={inbox.data} /> : null}
+      <AskSection asks={waiting} title="Waiting on you" />
+      <AskSection asks={waitingOnAgents} title="Waiting on agents" />
     </div>
   );
 }
