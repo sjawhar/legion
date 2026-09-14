@@ -343,7 +343,12 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         expect(t.state.workerAdmission.queue).toEqual([]);
         expect(claimOf(t).pendingAssignment).toBeUndefined();
         expect(claimOf(t).promptFailures).toBe(0);
-        expect(t.state.phases[t.root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+        expect(t.state.phases[t.root]).toEqual({
+          phase: "tester",
+          sessionId: "ses_tester",
+          // The rig runs on the real clock; the stamp's exact value is the daemon's Date.now().
+          assignedAt: expect.any(String),
+        });
         expect(await promptLogLines(t.promptLog)).toEqual(["verify #41"]);
         expect(t.publications.filter((json) => json === workerStarted(t.root))).toHaveLength(1);
         expect(await paneAlive(t.opened.tmuxPaneId)).toBe(true);
@@ -435,7 +440,12 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         expect(await waitUntil(() => t.state.workerAdmission.queue.length === 0, 4_000)).toBe(true);
         expect(claimOf(t).pendingAssignment).toBeUndefined();
         expect(claimOf(t).promptFailures).toBe(0);
-        expect(t.state.phases[t.root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+        expect(t.state.phases[t.root]).toEqual({
+          phase: "tester",
+          sessionId: "ses_tester",
+          // The rig runs on the real clock; the stamp's exact value is the daemon's Date.now().
+          assignedAt: expect.any(String),
+        });
         expect(t.publications.filter((json) => json === workerStarted(t.root))).toHaveLength(1);
         expect(await promptLogLines(t.promptLog)).toEqual(["verify #41"]);
         expect(infoLog.mock.calls.map((call) => String(call[0]))).toContainEqual(

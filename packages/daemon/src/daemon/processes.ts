@@ -1007,9 +1007,10 @@ export class ProcessManager {
    * start (`commitLateStart`), so the two can never drift. This is the one place a new active
    * phase is written (`state.phases[issue]`, which `phase/complete` and `routeActive` read;
    * `phase/complete` itself only deletes, restores, or marks that record completed), and it is
-   * written only for an architect `assignment` -- a `catchup` prompt is recovery plumbing and
-   * leaves the phase exactly as it was, so a relaunched worker whose phase already finished never
-   * becomes the active phase again. Clears the claim's `pendingAssignment`, resets
+   * written only for an architect `assignment` -- stamped with `assignedAt`, the ISO time of this
+   * delivery, so the completion route's refusal log can say when the record it refused against
+   * was created -- a `catchup` prompt is recovery plumbing and leaves the phase exactly as it
+   * was, so a relaunched worker whose phase already finished never becomes the active phase again. Clears the claim's `pendingAssignment`, resets
    * `promptFailures` and deletes `promptRetires` (a started turn confirms this worker is
    * responsive again — neither the prompt count nor the relaunch-cycle count from a prior failure
    * may carry into a future one; this is the only place `promptRetires` is ever cleared), runs the
@@ -1028,7 +1029,11 @@ export class ProcessManager {
     afterPrompt?: () => void
   ): Promise<void> {
     if (pending.kind === "assignment") {
-      this.deps.state.phases[issue] = { phase: role, sessionId };
+      this.deps.state.phases[issue] = {
+        phase: role,
+        sessionId,
+        assignedAt: new Date(this.deps.now()).toISOString(),
+      };
     }
     const claim = this.deps.state.roles[token];
     if (claim && "issue" in claim) {

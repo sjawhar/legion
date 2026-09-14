@@ -143,6 +143,14 @@ export class CapabilityService {
     return grant;
   }
 
+  /** The grant record as this daemon holds it, expired or not, or `undefined` for a grant id it
+   * does not know. Read-only, for `/phase/complete`'s refusal log to say whether a 403 was an
+   * expired grant or one this daemon never held (never minted, revoked with its session, or minted
+   * before this daemon started); it authorizes nothing — `resolveGrant` is the only gate. */
+  peekGrant(grantId: string): Grant | undefined {
+    return this.grants.get(grantId);
+  }
+
   setCapability(sessionId: string, capability: SessionCapability): void {
     this.capabilities.set(sessionId, capability);
   }

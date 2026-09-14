@@ -5105,6 +5105,87 @@ describe("ProcessManager", () => {
     expect(state.phases[child]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
   });
 
+  it("keeps the mid-turn reviewer as the active phase through its own role-lane exceptions and a misrouted wake for the finished implementer, relaunching nothing (LEGION-27)", async () => {
+    // The LEGION-27 sequence (2026-09-13 05:37 UTC, pull request #981 round 3): the reviewer is the
+    // active phase and mid-turn — `legion handoff complete` runs inside the worker's own turn —
+    // while the same issue's implementer has finished and been idle-retired (locator cleared,
+    // resumeSessionFile kept). Two delivery exceptions arrive for the reviewer's role (a live but
+    // busy holder), then a wake misrouted to the finished implementer's role finds no holder, so
+    // `resumeWorker` runs for both roles. Before #991 the daemon relaunched the implementer and its
+    // registration overwrote `phases[issue]`, so the reviewer's completion 409'd; now nothing may
+    // move: no prompt reaches the busy reviewer, no pane opens, the retired claim stays retired,
+    // and the record keeps the reviewer's session and its assignment time.
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const reviewerToken = roleToken("omp", root, "reviewer");
+    const implementerToken = roleToken("omp", root, "implementer");
+    state.roles[reviewerToken] = {
+      issue: root,
+      role: "reviewer",
+      sessionId: "ses_reviewer",
+      generation: 2,
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%5",
+        socketPath: "/state/workers/reviewer.sock",
+        ompSessionFile: "/state/sessions/reviewer.jsonl",
+      },
+    };
+    const retiredImplementer: WorkerRoleClaim = {
+      issue: root,
+      role: "implementer",
+      sessionId: "ses_implementer",
+      generation: 1,
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      resumeSessionFile: "/state/sessions/implementer.jsonl",
+    };
+    state.roles[implementerToken] = structuredClone(retiredImplementer);
+    const assigned = {
+      phase: "reviewer",
+      sessionId: "ses_reviewer",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    };
+    state.phases[root] = structuredClone(assigned);
+    const reviewerClient = fakeWorkerRpcClient();
+    reviewerClient.setRunStateSilently("running");
+    const stateDir = await temporaryDir();
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async (socketPath) => {
+        if (socketPath === "/state/workers/reviewer.sock") return reviewerClient;
+        throw new Error("dead shim socket");
+      },
+    });
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    try {
+      await processes.handleException({
+        ...exception(reviewerToken),
+        reason: "delivery_failed",
+      });
+      await processes.handleException({
+        ...exception(reviewerToken),
+        reason: "delivery_failed",
+      });
+      await processes.handleException(exception(implementerToken));
+    } finally {
+      infoSpy.mockRestore();
+    }
+
+    // Nothing was injected into the reviewer's turn, no pane was opened for anyone, the retired
+    // implementer is exactly as retired as before, and the phase record is byte-for-byte the
+    // assignment that created it. (The reviewer's own catch-up may sit queued behind its busy
+    // turn — that is incidental and not pinned here.)
+    expect(reviewerClient.prompts).toEqual([]);
+    expect(commands.some((command) => command[0] === "tmux")).toBeFalse();
+    expect(state.roles[implementerToken]).toEqual(retiredImplementer);
+    expect(state.phases[root]).toEqual(assigned);
+  });
+
   it("retires a relaunched worker at worker/ready when its only queued prompt is a bystander's catch-up, freeing its cap slot and promoting a spawn already queued behind it, while an assignment in the same position is delivered", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "tester-session.jsonl");
@@ -5232,7 +5313,11 @@ describe("ProcessManager", () => {
     if (!reviewer || !("issue" in reviewer)) throw new Error("reviewer claim disappeared");
     expect(reviewer.pendingAssignment).toBeUndefined();
     expect(reviewer.locator).toBeDefined();
-    expect(managedState.phases[root]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "reviewer",
+      sessionId: "ses_reviewer",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("confirms the boot before the ready-time bystander retire, so a StopFailed leaves a confirmed live claim the next spawn_worker probes instead of queueing behind a boot forever", async () => {
@@ -5325,7 +5410,11 @@ describe("ProcessManager", () => {
     const prompted = managedState.roles[token];
     if (!prompted || !("issue" in prompted)) throw new Error("tester claim disappeared");
     expect(prompted.pendingAssignment).toBeUndefined();
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("delivers a sub-architect's queued catch-up at worker/ready whatever the child's active phase, without touching it", async () => {
@@ -5432,7 +5521,11 @@ describe("ProcessManager", () => {
     expect(client.prompts).toEqual(["verify #41"]);
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(claim.pendingAssignment).toBeUndefined();
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("drops a queued catch-up at promotion instead of relaunching a retired worker that is no longer the active phase, while a queued assignment still launches", async () => {
@@ -9977,7 +10070,11 @@ describe("ProcessManager", () => {
     // re-prompted with a repeat assignment (the architect requested changes, or reassigned it a
     // second time) becomes the issue's active phase again, or its eventual
     // `legion handoff complete` 409s forever against a phase no route ever restored.
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   // jj keeps a rewritten commit's author: `jj split`/`jj describe` carve a phase's work out of the
@@ -10089,7 +10186,11 @@ describe("ProcessManager", () => {
     });
     expect(metaedits[0]?.timeoutMs).toBe(300_000);
     expect(metaedits[0]?.promptsBefore).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
 
     // A working copy that cannot be adopted is never prompted: nothing is written, the ready call
     // fails naming the command and why, and the claim is exactly as it was for the next ready
@@ -11401,7 +11502,11 @@ describe("ProcessManager", () => {
     // The promoted-by-prompt path delivers the architect's assignment exactly as a fresh launch
     // or a direct /worker/ready resume does, and that delivery is the one write of
     // `phases[issue]` — otherwise phase/complete 409s forever for a worker promoted this way.
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications).toContainEqual({
       subject: architectTopic,
       json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
@@ -12795,7 +12900,11 @@ describe("ProcessManager", () => {
     // Same as the resumed-live-socket branch: delivering the architect's assignment from
     // `pendingAssignment` at ready is the one write of `phases[issue]`, or the worker's eventual
     // `handoff complete` 409s against a phase this delivery path never restored.
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("resets launchFailures once worker/ready durably confirms a claim with no pending assignment", async () => {
@@ -12945,7 +13054,11 @@ describe("ProcessManager", () => {
     // stay exactly as the successful prompt left them, never rolled back.
     expect(claim.pendingAssignment).toBeUndefined();
     expect(claim.promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
   });
 
   it("reconnects to every worker claim with a locator on daemon start", async () => {
@@ -14484,7 +14597,11 @@ describe("ProcessManager", () => {
     const claim = testerClaim(managedState, token);
     expect(claim.pendingAssignment).toBeUndefined();
     expect(claim.promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
     // The bound was never reached: its wait is still pending, unfired.
     expect(clock.pending.filter((wait) => wait.ms === 5_000)).toHaveLength(1);
@@ -14555,7 +14672,11 @@ describe("ProcessManager", () => {
     const claim = testerClaim(managedState, token);
     expect(claim.pendingAssignment).toBeUndefined();
     expect(claim.promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
     expect(client.prompts).toEqual(["verify #41"]);
     expect(infoLines).toContainEqual(
@@ -14837,7 +14958,11 @@ describe("ProcessManager", () => {
       expect(delivered.pendingAssignment).toBeUndefined();
       expect(delivered.promptFailures).toBe(0);
       expect(delivered.promptRetires).toBeUndefined();
-      expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      expect(managedState.phases[root]).toEqual({
+        phase: "tester",
+        sessionId: "ses_tester",
+        assignedAt: "2026-08-24T00:00:00.000Z",
+      });
       // Only the relaunch published worker-started: a ready-time delivery answers the boot, it
       // publishes nothing (the architect's spawn already answered `spawned`).
       expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
@@ -14933,7 +15058,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(testerClaim(managedState, token).pendingAssignment).toBeUndefined();
     expect(testerClaim(managedState, token).promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
   });
 
@@ -15061,7 +15190,11 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([]);
     expect(testerClaim(managedState, token).pendingAssignment).toBeUndefined();
     expect(testerClaim(managedState, token).promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
   });
 
@@ -15285,7 +15418,11 @@ describe("ProcessManager", () => {
     const claim = testerClaim(managedState, token);
     expect(claim.pendingAssignment).toBeUndefined();
     expect(claim.promptFailures).toBe(0);
-    expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(managedState.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-08-24T00:00:00.000Z",
+    });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
     expect(publications.filter((p) => p.json === workerQueuedJson)).toHaveLength(0);
     expect(client.prompts).toEqual(["verify #41"]);
