@@ -47,9 +47,17 @@ The same fetch also **abandons the branch's commits that no other bookmark reach
 live workspace's working copy** (`Abandoned 1 commits that are no longer reachable … Rebased 1
 descendant commits`) and rebases that working copy onto the fork point; the workspace is stale
 (`The working copy is stale (not updated since operation …)`) until `jj workspace update-stale`,
-which then removes the abandoned commits' files. Pre-existing, independent of the bookmark rule,
-re-filed as its own issue (the fix would be `git.abandon-unreachable-commits = false` on the
-shared clone — a policy decision, not this package's). Do not fix it inside provisioning.
+which then removes the abandoned commits' files. Pre-existing and independent of the bookmark rule;
+decided in LEGION-84: before every fetch, provisioning reads `jj config get
+git.abandon-unreachable-commits -R <clone>` and, only when that does not print `false`, runs `jj
+config set --repo git.abandon-unreachable-commits false -R <clone>`; the fetch then deletes the
+bookmark and nothing else (`jj op log --op-diff` shows only the local and remote bookmark sections).
+Three more facts, both binaries: `config get` and `config set --repo` each record no operation and
+do not snapshot the clone's working copy; `config set` rewrites the file in place (same inode), so
+the read-first guard is what keeps the steady state from writing a file every jj command parses; and
+a repo's settings live at `~/.config/jj/repos/<config-id>/config.toml` (`$XDG_CONFIG_HOME`, the id
+from `<clone>/.jj/repo/config-id`), not inside the clone — under another `HOME` the same `jj config
+get` prints the default `true` with `Per-repo config not found. Generating an empty one.`
 
 ## Three ways to read one bookmark, five states
 

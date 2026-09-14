@@ -856,6 +856,8 @@ describe("ProcessManager", () => {
       status: "active",
     });
     expect(commands).toEqual([
+      ["jj", "config", "get", "git.abandon-unreachable-commits", "-R", repo],
+      ["jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", repo],
       ["jj", "git", "fetch", "-R", repo],
       [
         "jj",

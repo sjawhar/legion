@@ -152,6 +152,47 @@ function resolveBookmarkCommand(bookmark: string, repoCloneDir: string): string[
     repoCloneDir,
   ];
 }
+/** The read provisioning runs after the clone step and before every fetch: the clone's per-repo
+ * `git.abandon-unreachable-commits` setting (LEGION-84). */
+function readKeepUnreachableCommitsCommand(repoCloneDir: string): string[] {
+  return ["jj", "config", "get", "git.abandon-unreachable-commits", "-R", repoCloneDir];
+}
+/** The write that follows the read only when it did not print `false`: with the setting `false`,
+ * the fetch that deletes a merged branch's bookmark leaves its commits and every working copy
+ * alone (LEGION-84). */
+function writeKeepUnreachableCommitsCommand(repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "config",
+    "set",
+    "--repo",
+    "git.abandon-unreachable-commits",
+    "false",
+    "-R",
+    repoCloneDir,
+  ];
+}
+/** The `jj workspace add` provisioning runs: the workspace's directory and name, the revision it is
+ * created at (a commit id when the bookmark resolved, `main` when nothing did), against the clone. */
+function workspaceAddCommand(
+  workspaceDir: string,
+  workspaceName: string,
+  revision: string,
+  repoCloneDir: string
+): string[] {
+  return [
+    "jj",
+    "workspace",
+    "add",
+    workspaceDir,
+    "--name",
+    workspaceName,
+    "--revision",
+    revision,
+    "-R",
+    repoCloneDir,
+  ];
+}
 
 const JJ_BINARIES = [
   { name: "local Sami JJ", command: ["jj"] },
@@ -252,10 +293,15 @@ describe("provisionIssueWorkspace", () => {
       errorSpy.mockRestore();
     }
 
-    const [clone, fetch] = calls;
-    if (!clone || !fetch) throw new Error("Provisioning did not clone and fetch the repository");
+    const [clone, read, write, fetch] = calls;
+    if (!clone || !read || !write || !fetch) {
+      throw new Error("Provisioning did not clone and fetch the repository");
+    }
     const cloneEnv = provisioningEnv(clone);
     expect(provisioningEnv(fetch)).toEqual(cloneEnv);
+    // The credential reaches the clone and the fetch, never the settings read or write.
+    expect(read.opts?.env).toBeUndefined();
+    expect(write.opts?.env).toBeUndefined();
     expect(existsSync(cloneEnv.GIT_ASKPASS)).toBeFalse();
     expect(calls.map((call) => call.cmd)).toEqual([
       [
@@ -265,21 +311,12 @@ describe("provisionIssueWorkspace", () => {
         "https://github.com/acme/widgets",
         expect.stringMatching(new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`)),
       ],
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ],
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -291,9 +328,19 @@ describe("provisionIssueWorkspace", () => {
     expect(logged).toEqual([]);
     // Every provisioning command runs under the slow budget, not the runner's generic default.
     expect(calls.map((call) => call.opts?.timeoutMs)).toEqual(calls.map(() => commandTimeoutMs));
-    // Provisioning reads the clone's jj config (the identity probes) and never sets a key in it.
+    // Provisioning reads the clone's jj config (the identity probes) and never sets an identity
+    // key in it; the one key it does set is `git.abandon-unreachable-commits` (LEGION-84).
     expect(
-      calls.some(({ cmd }) => cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "set")
+      calls.some(
+        ({ cmd }) =>
+          cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "set" && cmd.includes("user.name")
+      )
+    ).toBeFalse();
+    expect(
+      calls.some(
+        ({ cmd }) =>
+          cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "set" && cmd.includes("user.email")
+      )
     ).toBeFalse();
     expect(existsSync(path.join(repoCloneDir, ".jj"))).toBeTrue();
     expect(
@@ -417,21 +464,12 @@ describe("provisionIssueWorkspace", () => {
     }
 
     expect(calls.map((call) => call.cmd)).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
-      [
-        "jj",
-        "workspace",
-        "add",
-        workspaceDir,
-        "--name",
-        "widgets-42",
-        "--revision",
-        commit,
-        "-R",
-        repoCloneDir,
-      ],
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -649,11 +687,13 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       workspaceDir,
       bookmark: "legion/WIDGETS-42",
     });
-    const fetch = calls[1];
+    const fetch = calls[3];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
     expect(calls.map((call) => call.cmd)).toEqual([
       ["jj", "workspace", "update-stale"],
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -707,7 +747,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
+    // Every `jj config` command, pinned: the LEGION-84 read and write (the fake runner answers the
+    // read with empty stdout, so the write always follows), then the identity probes and unsets —
+    // any other identity write in provisioning fails this list.
     expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
       identityProbe(repoCloneDir, "user.email"),
@@ -757,7 +802,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     } finally {
       errorSpy.mockRestore();
     }
+    // Every `jj config` command, pinned: the LEGION-84 read and write (the fake runner answers the
+    // read with empty stdout, so the write always follows), then the identity probes and unset —
+    // any other identity write in provisioning fails this list.
     expect(calls.filter((cmd) => cmd[0] === "jj" && cmd[1] === "config")).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       identityProbe(repoCloneDir, "user.name"),
       ["jj", "config", "unset", "--repo", "-R", repoCloneDir, "user.name"],
       identityProbe(repoCloneDir, "user.name"),
@@ -817,17 +867,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       // recorded operation), moves the bookmark there too, and the reconciliation conflicts it with
       // the `sibling-advance` move below — a jj behaviour, not a bookmark this code touched.
       await jj(["status"], { cwd: workspaceDir });
-      await jj([
-        "workspace",
-        "add",
-        siblingDir,
-        "--name",
-        "sibling",
-        "--revision",
-        "main",
-        "-R",
-        repoCloneDir,
-      ]);
+      await jj(workspaceAddCommand(siblingDir, "sibling", "main", repoCloneDir).slice(1));
       await jj(["new", "-m", "sibling advancement"], { cwd: siblingDir });
       await jj(["bookmark", "set", "sibling-advance"], { cwd: siblingDir });
       await jj(
@@ -867,10 +907,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     // default on a loaded host.
   }, 60_000);
 
-  test("leaves the bookmark missing after its merged pull request's branch is deleted", async () => {
+  test("leaves the bookmark missing but the workspace intact after its merged pull request's branch is deleted", async () => {
     for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
-      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, deps } = await realJjRig(
+      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps } = await realJjRig(
         command,
         stateDir
       );
@@ -878,14 +918,18 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
-      // Snapshot the `.omp/config.yml` provisioning wrote, so the commit pushed below is the
-      // bookmark's final target: jj deletes a local bookmark on fetch only while it still points
-      // where the deleted remote branch did.
+      const firstProvisioning = calls.slice(0, 3);
+      // The worker's work: a file the pushed commit carries. Snapshotting it (together with the
+      // `.omp/config.yml` provisioning wrote) makes that commit the bookmark's final target — jj
+      // deletes a local bookmark on fetch only while it still points where the deleted remote
+      // branch did.
+      await writeFile(path.join(workspaceDir, "feature.txt"), "shipped\n", "utf8");
       await jj(["status"], { cwd: workspaceDir });
       await jj(
         ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
         { cwd: repoCloneDir }
       );
+      const pushedCommit = await commitOf(bookmark);
       // GitHub deletes the branch when the pull request merges.
       const deleted = await runCommand([
         SYSTEM_GIT,
@@ -902,24 +946,40 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         workspaceDir,
         bookmark,
       });
+      // What the resumed worker finds: a working copy that is not stale, its pushed commit still
+      // beneath it, its file still on disk, and the bookmark gone with its remote branch. Before
+      // this change the fetch printed `Abandoned 1 commits that are no longer reachable`, rebased
+      // the working copy onto the fork point, and `jj status` here failed with `The working copy
+      // is stale`.
+      const status = await jj(["status"], { cwd: workspaceDir });
+      expect(status.stderr, name).not.toContain("stale");
       expect(
-        calls.filter((cmd) => cmd.includes("bookmark")),
+        (
+          await jj(["log", "-r", "ancestors(@)", "--no-graph", "-T", 'commit_id ++ "\n"'], {
+            cwd: workspaceDir,
+          })
+        ).stdout.split("\n"),
         name
-      ).toEqual([]);
+      ).toContain(pushedCommit);
+      expect(existsSync(path.join(workspaceDir, "feature.txt")), name).toBeTrue();
       expect((await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout, name).toBe(
         ""
       );
-
-      // LEGION-28 was re-prompted twice after its merge: the next resume finds the bookmark still
-      // gone and, through its own `update-stale`, a usable working copy — the fetch above abandoned
-      // the merged branch's commits and left the workspace stale until then.
-      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toMatchObject({
-        workspaceDir,
-      });
-      expect((await jj(["bookmark", "list", bookmark], { cwd: repoCloneDir })).stdout, name).toBe(
-        ""
-      );
-      await jj(["status"], { cwd: workspaceDir });
+      // The clone's first provisioning read the setting (jj's default, `true`), wrote it once, and
+      // only then fetched; this one finds `false` and only reads it before the fetch. No bookmark
+      // command runs in either.
+      expect(firstProvisioning, name).toEqual([
+        readKeepUnreachableCommitsCommand(repoCloneDir),
+        writeKeepUnreachableCommitsCommand(repoCloneDir),
+        ["jj", "git", "fetch", "-R", repoCloneDir],
+      ]);
+      expect(calls, name).toEqual([
+        ["jj", "workspace", "update-stale"],
+        readKeepUnreachableCommitsCommand(repoCloneDir),
+        ["jj", "git", "fetch", "-R", repoCloneDir],
+        ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
+        ...identityProbeCommands(repoCloneDir),
+      ]);
     }
   }, 60_000);
 
@@ -1051,12 +1111,13 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           provisionIssueWorkspace("WIDGETS-42", deps),
           `${name}, attempt ${attempt}`
         ).rejects.toThrow(`Bookmark ${bookmark} is conflicted (${conflictedTargets.join(", ")})`);
-        // The resolution is the last command: nothing was added, so nothing exists or is
-        // registered for the next resume to adopt.
+        // The resolution is the last command (the settings read — already `false` from the first
+        // provisioning, so no write — and the fetch precede it): nothing was added, so nothing
+        // exists or is registered for the next resume to adopt.
         expect(
           calls.map((cmd) => cmd[1]),
           `${name}, attempt ${attempt}`
-        ).toEqual(["git", "log"]);
+        ).toEqual(["config", "git", "log"]);
         expect(existsSync(workspaceDir), `${name}, attempt ${attempt}`).toBeFalse();
         expect(
           (await jj(["workspace", "list", "-R", repoCloneDir])).stdout,
@@ -1115,29 +1176,19 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
-    const fetch = calls[0];
+    const fetch = calls[2];
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
-    const addAt = (revision: string) => [
-      "jj",
-      "workspace",
-      "add",
-      workspaceDir,
-      "--name",
-      "widgets-42",
-      "--revision",
-      revision,
-      "-R",
-      repoCloneDir,
-    ];
     expect(calls.map((call) => call.cmd)).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAt(commit),
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAt(commit),
+      workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -1190,26 +1241,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       errorSpy.mockRestore();
     }
 
-    const addAtMain = [
-      "jj",
-      "workspace",
-      "add",
-      workspaceDir,
-      "--name",
-      "widgets-42",
-      "--revision",
-      "main",
-      "-R",
-      repoCloneDir,
-    ];
     expect(calls.map((call) => call.cmd)).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAtMain,
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
-      addAtMain,
+      workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -1255,6 +1296,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     // The resolution is the last command: no prune, no add, nothing registered for the next
     // resume to adopt.
     expect(calls.map((call) => call.cmd)).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
     ]);
@@ -1291,6 +1334,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     );
     // Nothing is guessed from a failed resolution: no prune, no add, no bookmark command.
     expect(calls.map((call) => call.cmd)).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
     ]);
@@ -1493,5 +1538,41 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
             : { exitCode: 0, stdout: "", stderr: "" },
       })
     ).rejects.toThrow(`Command failed (exit 1): jj git fetch -R ${repoCloneDir}\nfatal: x`);
+  });
+
+  test("stops before the fetch when the settings write fails", async () => {
+    const stateDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const calls: string[][] = [];
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+
+    await expect(
+      provisionIssueWorkspace(issue, {
+        extensionPackage,
+        stateDir,
+        repo: "acme/widgets",
+        provisioningToken: async () => "installation-token",
+        credentialHelper,
+        commandTimeoutMs,
+        run: async (cmd) => {
+          calls.push(cmd);
+          // The read answers jj's default; the write that follows cannot land.
+          if (cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "get") {
+            return { exitCode: 0, stdout: "true\n", stderr: "" };
+          }
+          return cmd[0] === "jj" && cmd[1] === "config" && cmd[2] === "set"
+            ? { exitCode: 1, stdout: "", stderr: "Config error: cannot write" }
+            : { exitCode: 0, stdout: "", stderr: "" };
+        },
+      })
+    ).rejects.toThrow(
+      `Command failed (exit 1): ${writeKeepUnreachableCommitsCommand(repoCloneDir).join(" ")}\nConfig error: cannot write`
+    );
+    // The fetch is the destructive step: nothing ran after the failed write.
+    expect(calls).toEqual([
+      readKeepUnreachableCommitsCommand(repoCloneDir),
+      writeKeepUnreachableCommitsCommand(repoCloneDir),
+    ]);
   });
 });
