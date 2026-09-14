@@ -10,6 +10,12 @@ export class HttpError extends Error {
   }
 }
 
+/** The `error` body of the 403 `/gh-token` response gives a non-controller grant that carries
+ * `merge: true`. `legion gh` presents that daemon message with its HTTP status; this constant is
+ * shared by the token route and its direct tests. */
+export const MERGE_AUTHORITY_REFUSED =
+  "Only the controller may merge; publish READY to the controller";
+
 /** Raised by `publishToEnvoy` (`../index.ts`) for a non-2xx Envoy response. `status` carries
  * Envoy's own HTTP status verbatim so callers can distinguish "no live session holds this role"
  * (404) from a genuine delivery failure without parsing the error message. */
@@ -44,10 +50,13 @@ export interface ContractSchema<T = unknown> {
       };
 }
 
-/** Rejects a body the route's contract does not accept with a 400 that names every offending
- * field (`version: Invalid input: expected number, received undefined`) or, for an unknown key on
- * a strict object, the key itself under `<body>` — so a caller sending a retired field learns
- * which one, instead of a bare "invalid request". */
+/** Rejects a body the route's contract does not accept with a 400 that names each issue zod
+ * reports: an offending field (`version: Invalid input: expected number, received undefined`) or,
+ * for an unknown key on a strict object, the key itself under `<body>` — so a caller sending a
+ * retired field learns which one, instead of a bare "invalid request". A `z.union` schema (the
+ * two forms of `/grants`) is the exception: zod reports a body that matches neither branch as one
+ * top-level `invalid_union` issue, `<body>: Invalid input`, and the per-branch details are not
+ * printed — operator-facing only, since the plugin never composes a half form. */
 export function validateContractRequest(
   schema: ContractSchema,
   body: Record<string, unknown>

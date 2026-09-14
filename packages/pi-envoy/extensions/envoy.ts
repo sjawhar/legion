@@ -45,6 +45,12 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import {
+  type LegionRoleClaim,
+  type LegionRoleClaimInstance,
+  legionRoleClaimBridge,
+  type RoleRegainReason,
+} from "../src/legion/role-claim-bridge";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
@@ -89,71 +95,6 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   return entry.data.role === null || typeof entry.data.role === "string";
 }
 
-type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
-
-/**
- * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —
- * the listener no longer named this session and a soft claim landed; `"reregistered"` — the
- * claim itself survived, but this session had been unreachable (a registry outage), so the
- * listener may have answered "no holder" for it meanwhile.
- */
-export type RoleRegainReason = "reclaimed" | "reregistered";
-
-type LegionRoleRegained = (role: string, reason: RoleRegainReason) => Promise<void>;
-
-type LegionRoleClaimReady = {
-  readonly promise: Promise<LegionRoleClaim>;
-  resolve(value: LegionRoleClaim): void;
-};
-
-interface LegionRoleClaimBridge {
-  readonly ready: LegionRoleClaimReady;
-  claim?: LegionRoleClaim;
-  regained?: LegionRoleRegained;
-}
-
-interface GlobalLegionRoleClaimBridgeStore {
-  [key: symbol]: LegionRoleClaimBridge | undefined;
-}
-
-// A process-wide symbol bridges legion.ts's `claimEnvoyRole` import to the
-// one envoyExtension(pi) instance OMP actually ran, since each manifest entry
-// loads as its own module instance with its own module-scope state.
-const LEGION_ROLE_CLAIM_BRIDGE = Symbol.for("legion.pi-envoy.role-claim-bridge");
-
-function legionRoleClaimBridge(): LegionRoleClaimBridge {
-  const store = globalThis as unknown as GlobalLegionRoleClaimBridgeStore;
-  let bridge = store[LEGION_ROLE_CLAIM_BRIDGE];
-  if (bridge === undefined) {
-    const ready = Promise.withResolvers<LegionRoleClaim>();
-    bridge = { ready };
-    store[LEGION_ROLE_CLAIM_BRIDGE] = bridge;
-  }
-  return bridge;
-}
-
-export async function claimEnvoyRole(
-  sessionID: string,
-  role: string,
-  context?: SessionContext
-): Promise<void> {
-  const bridge = legionRoleClaimBridge();
-  const claim = bridge.claim ?? (await bridge.ready.promise);
-  await claim(sessionID, role, context);
-}
-
-/**
- * Registers the hook the heartbeat fires after it re-establishes this session as `role`'s live
- * holder (see `reassertRole`). legion.ts re-runs the role's daemon ready call from it. Last
- * registration wins, exactly like `claimEnvoyRole`'s bridge slot — so legion.ts calls this only
- * from the paths that establish a Legion identity, never at extension setup, or a `task`
- * subagent's identity-less instance would replace the holder's listener.
- */
-export function onEnvoyRoleRegained(
-  listener: (role: string, reason: RoleRegainReason) => Promise<void>
-): void {
-  legionRoleClaimBridge().regained = listener;
-}
 function resolveSkillsDirectory(): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -812,8 +753,13 @@ export default function envoyExtension(pi: PiApi): void {
     await registerSession();
     await setEnvoyRole(role);
   };
-  bridge.claim = claim;
-  bridge.ready.resolve(claim);
+  const claimInstance: LegionRoleClaimInstance = {
+    claim,
+    // The manager's id, already moved by the time any session event is dispatched; the module
+    // `sessionID` follows only once this instance's own rebind has run.
+    sessionID: () => activeSessionContext?.sessionManager.getSessionId() ?? sessionID,
+  };
+  bridge.instances.push(claimInstance);
 
   pi.on("session_start", async (_event, context) => {
     const previousSessionID = sessionID;
@@ -913,6 +859,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    const bound = bridge.instances.indexOf(claimInstance);
+    if (bound !== -1) bridge.instances.splice(bound, 1);
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {

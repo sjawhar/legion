@@ -46,6 +46,7 @@ import {
 } from "../handoff/ledger";
 import { type CommandRunner, defaultRunner } from "../state/fetch";
 import { CliError } from "./errors";
+import { isGhMergeIntent } from "./gh-merge-intent";
 import {
   type Fetch,
   githubGraphql,
@@ -140,18 +141,6 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
   return completion.promise;
 }
 
-/** True when the forwarded `gh` argv would merge a PR: a `pr … merge` subcommand invocation (the
- * non-flag tokens contain `pr` followed later by `merge` — `gh pr merge`'s own flags like
- * `--repo <value>` insert extra non-flag tokens between them without changing the subcommand), or
- * a raw REST `gh api` call whose path token ends in `/merge`. No Legion worker role ever merges a
- * PR directly; the merge queue does that under its own PAT. */
-function isPrMergeInvocation(args: string[]): boolean {
-  const positional = args.filter((arg) => !arg.startsWith("-"));
-  const prIndex = positional.indexOf("pr");
-  if (prIndex !== -1 && positional.slice(prIndex + 1).includes("merge")) return true;
-  return positional.includes("api") && positional.some((token) => token.endsWith("/merge"));
-}
-
 /** The `gh issue` verbs that write to a GitHub issue. Reads (`view`, `list`, `status`) are not
  * listed: a read is not a public action. */
 const GITHUB_ISSUE_WRITE_VERBS: Record<string, true> = {
@@ -214,7 +203,7 @@ function ghApiMethod(args: string[]): string {
  * again, so the shim refuses the write itself, exactly as it refuses `pr merge`.
  *
  * Refused: an `issue` subcommand invocation whose later non-flag tokens include one of
- * `GITHUB_ISSUE_WRITE_VERBS` (the positional filter from `isPrMergeInvocation`, so
+ * `GITHUB_ISSUE_WRITE_VERBS` (the positional filter from `isGhMergeIntent`, so
  * `issue --repo <value> comment 5` is caught), and a raw `gh api` call with a positional token on
  * an `/issues` path whose effective method (`ghApiMethod`) is not GET.
  *
@@ -225,7 +214,7 @@ function ghApiMethod(args: string[]): string {
  * Two accepted over-refusals, both by design: editing or deleting a pull-request *conversation*
  * comment by raw API (`repos/o/r/issues/comments/<id>` — GitHub serves those from the issues
  * endpoint; use `gh pr comment --edit-last`), and a non-GET call whose flag *value* happens to
- * contain `/issues/` — the same imprecision `isPrMergeInvocation` accepts for `/merge`. A flag
+ * contain `/issues/` — the same imprecision `isGhMergeIntent` accepts for `/merge`. A flag
  * value equal to a verb (`issue list --search close`) is likewise refused: a GitHub-issue read
  * Legion never performs. */
 function isGitHubIssueWriteInvocation(args: string[]): boolean {
@@ -244,16 +233,31 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-/** Redeems the pane's grant for a GitHub App token: the App of the role running the command,
- * chosen by `appRoleForLegionRole` (`daemon/github-apps.ts`) — the command never picks one. */
-async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
+/** Redeems the pane's grant for a GitHub App token. `merge: true` is a guardrail against
+ * `legion gh` misuse: the daemon accepts it only for a controller grant, but worker grants and
+ * controller grants can both redeem the implement App token. The repository's branch protection
+ * remains the rule that prevents a raw token from merging outside the controller's READY gates. */
+async function redeemGitHubToken(deps: GrantRedemptionDeps, merge = false): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) }),
   });
   if (!response.ok) {
-    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status})`);
+    const body = await response.text();
+    let message = body;
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "error" in parsed &&
+        typeof parsed.error === "string"
+      ) {
+        message = parsed.error;
+      }
+    } catch {}
+    throw new CliError(`Unable to redeem LEGION_GRANT (${response.status}): ${message}`);
   }
   const payload = LegionDaemonApi.GitHubToken.response.safeParse(await response.json());
   if (!payload.success) {
@@ -263,15 +267,12 @@ async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
 }
 
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
-  if (isPrMergeInvocation(args)) {
-    throw new CliError("Legion workers never merge; publish READY to the merge queue");
-  }
   if (isGitHubIssueWriteInvocation(args)) {
     throw new CliError(
       `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || "the Dispatch issue"}`
     );
   }
-  const token = await redeemGitHubToken(deps);
+  const token = await redeemGitHubToken(deps, isGhMergeIntent(args));
   const childEnv = buildGitHubTokenEnv(token, deps.env);
   // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
   if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);

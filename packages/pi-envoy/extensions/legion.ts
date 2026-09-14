@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { controllerToken, type LegionRole } from "@legion/contracts";
+import type { GrantResponse, LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -9,10 +9,10 @@ import { connect, type NatsConnection, StringCodec, type Subscription } from "na
 import {
   classifySession,
   generation,
-  requiredControllerCapability,
   requiredEnvironment,
   requiredSecret,
 } from "../src/legion/classify";
+import { createControllerSession } from "../src/legion/controller-session";
 import {
   handleLegionControlDirective,
   type LegionControlDirective,
@@ -33,7 +33,11 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import { claimEnvoyRole, onEnvoyRoleRegained, type RoleRegainReason } from "./envoy";
+import {
+  claimEnvoyRole,
+  onEnvoyRoleRegained,
+  type RoleRegainReason,
+} from "../src/legion/role-claim-bridge";
 
 interface LegionCapability {
   readonly kind: "root-architect" | "phase-worker";
@@ -110,8 +114,28 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
   }
 };
 
+async function wrapBashWithGrant(
+  mint: () => Promise<GrantResponse>
+): Promise<ToolCallEventResult | undefined> {
+  const grantFile = process.env.LEGION_GRANT_FILE;
+  if (grantFile === undefined || grantFile.trim() === "") {
+    return {
+      block: true,
+      reason:
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+    };
+  }
+  try {
+    const grant = await mint();
+    await writeGrantFile(grantFile, grant.grantId);
+    return undefined;
+  } catch (error) {
+    return { block: true, reason: messageFor(error) };
+  }
+}
+
 async function persistedTranscript(
-  context: SessionContext
+  context: CommandContext | SessionContext
 ): Promise<{ readonly sessionFile: string; readonly agentId: string }> {
   await context.sessionManager.ensureOnDisk();
   const sessionFile = context.sessionManager.getSessionFile();
@@ -373,8 +397,6 @@ export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url, instance });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
   const defaults = envoyDefaultsFromEnvironment(process.env);
-  let controllerSessionID: string | undefined;
-  let controllerCapability: string | undefined;
   let controlConnection: NatsConnection | undefined;
   let controlSubscription: Subscription | undefined;
   const controlCodec = StringCodec();
@@ -453,7 +475,7 @@ export default function legionExtension(pi: PiApi): void {
    *    queues a state-derived catch-up on the live worker's own socket, and `/worker/ready` is a
    *    no-op once the boot is confirmed. No listener is registered for it.
    * The listener is registered only by the two paths that establish an identity
-   * (`claimController`, `bootstrapRoot`), never at extension setup: OMP binds every extension
+   * (`controllerSession.claim`, `bootstrapRoot`), never at extension setup: OMP binds every
    * factory again for each in-process `task` subagent, and an identity-less instance writing the
    * bridge's single slot would replace the holder's listener. Never throws: after a definitive
    * 4xx or an exhausted retry budget the daemon's held work stays undelivered until the listener
@@ -475,23 +497,18 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
-  const claimController = async (context: CommandContext | SessionContext): Promise<void> => {
-    const sessionID = context.sessionManager.getSessionId();
-    const daemon = createLegionDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
-    const secret = controllerCapability ?? requiredControllerCapability(process.env);
-    controllerCapability = secret;
-    const { project } = await daemon.state();
-    const token = controllerToken(project);
-    await claimEnvoyRole(sessionID, token, "setInterval" in context ? context : undefined);
-    await daemon.controllerReady({ secret, sessionId: sessionID });
-    controllerSessionID = sessionID;
-    onEnvoyRoleRegained(async (role, reason) => {
-      if (role !== token) return;
-      await rerunReadyAfterRegain("controller/ready", role, reason, () =>
-        daemon.controllerReady({ secret, sessionId: sessionID })
-      );
-    });
-  };
+  const controllerSession = createControllerSession(
+    async (context) => {
+      const persisted = await persistedTranscript(context);
+      // The daemon pane's own transcript (isSubagentSession's ensureOnDisk already persisted it):
+      // record it so the controller's own `task` subagents are recognised even when the
+      // transcript is not a file on disk. A hand-started takeover never reaches here.
+      recordBootstrappedSession(persisted.sessionFile);
+      return persisted;
+    },
+    checkSubagentSession,
+    rerunReadyAfterRegain
+  );
 
   const reclaimArchitect = async (): Promise<void> => {
     if (capability === undefined || capability.kind !== "root-architect") {
@@ -753,18 +770,9 @@ export default function legionExtension(pi: PiApi): void {
     if (await checkSubagentSession(context)) return;
     const classification = classifySession(process.env);
     switch (classification.kind) {
-      case "controller": {
-        const sessionID = context.sessionManager.getSessionId();
-        if (controllerSessionID === undefined || controllerSessionID === sessionID) {
-          // isSubagentSession's ensureOnDisk above already persisted this session, so its
-          // transcript path is known; record it so the controller's own `task` subagents are
-          // recognised even when the transcript is not a file on disk.
-          const sessionFile = context.sessionManager.getSessionFile();
-          if (sessionFile !== undefined) recordBootstrappedSession(sessionFile);
-          await claimController(context);
-        }
+      case "controller":
+        await controllerSession.handleSessionStart(context);
         return;
-      }
       case "phase-worker":
         await bootstrapWorker(
           context,
@@ -780,6 +788,12 @@ export default function legionExtension(pi: PiApi): void {
         return;
     }
   });
+
+  // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
+  // navigation carries no reason, and every one of them can leave the pane on a new session id.
+  pi.on("session_switch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
+  pi.on("session_branch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
+  pi.on("session_tree", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     logger.debug("legion tool_call hook", {
@@ -860,11 +874,26 @@ export default function legionExtension(pi: PiApi): void {
     }
     if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
       return undefined;
+    // The shared wrapper mints through the caller's client, then writes the grant to the pane's
+    // `LEGION_GRANT_FILE`, which `legion` reads ahead of `LEGION_GRANT`. The host writes a hook's
+    // revised `input` back into the assistant message (text the model imitates — LEGION-12), and a
+    // plugin that replaces the bash tool may drop `env` (secretsd's legacy shim, LEGION-52), so the
+    // grant travels through neither and the tool call's input is never rewritten. GH_CONFIG_DIR and
+    // the emptied GitHub keys are on the pane from the daemon. The daemon names the grant file on
+    // every pane it launches; a pane without one was launched by a daemon older than this plugin,
+    // and minting for it would only produce a grant nothing could read. A blank value (an
+    // operator's own export) is the same absence.
     if (active === undefined) {
-      // A worker (root or phase) whose own boot handshake has not completed
-      // yet has no capability to mint a grant with. The controller is
-      // exempt: the daemon also sets LEGION_ROLE=controller on its process,
-      // but a controller never claims a Legion role here.
+      // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
+      // authenticated by the controller capability) and is wrapped exactly like a worker. The
+      // client is recovery-less: no recovery token exists for the controller.
+      if (controllerSession.isClaimedSession(sessionID)) {
+        return wrapBashWithGrant(() => controllerSession.mintGrant(sessionID));
+      }
+      // A worker (root or phase) whose own boot handshake has not completed yet has no
+      // capability to mint a grant with, so it is blocked. A controller that has not yet
+      // claimed (the daemon also sets LEGION_ROLE=controller on its process) is not: nothing
+      // here can mint for it until `controllerSession.claim` runs, and a wrong secret is what blocks it.
       if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
         return {
           block: true,
@@ -873,34 +902,14 @@ export default function legionExtension(pi: PiApi): void {
       }
       return undefined;
     }
-    // The daemon names the grant file on every pane it launches; a pane without one was launched
-    // by a daemon older than this plugin, and minting for it would only produce a grant nothing
-    // could read. A blank value (an operator's own export) is the same absence.
-    const grantFile = process.env.LEGION_GRANT_FILE;
-    if (grantFile === undefined || grantFile.trim() === "") {
-      return {
-        block: true,
-        reason:
-          "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
-      };
-    }
-    try {
-      const grant = await roleDaemon().grant({
+    return wrapBashWithGrant(() =>
+      roleDaemon().grant({
         tree: active.tree,
         issue: active.issue,
         sessionId: sessionID,
         secret: active.secret,
-      });
-      // The host writes a hook's revised `input` back into the assistant message (text the model
-      // imitates — LEGION-12), and a plugin that replaces the bash tool may drop `env` (secretsd's
-      // legacy shim, LEGION-52). The grant therefore travels through neither: it is written to
-      // the pane's LEGION_GRANT_FILE, which `legion` reads first. GH_CONFIG_DIR, the shim-first
-      // PATH, and the emptied GitHub keys are on the pane from the daemon.
-      await writeGrantFile(grantFile, grant.grantId);
-      return undefined;
-    } catch (error) {
-      return { block: true, reason: messageFor(error) };
-    }
+      })
+    );
   });
 
   pi.on("session_shutdown", async (_event, context) => {
@@ -961,6 +970,10 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-claim-controller", {
     description: "Claim the Legion controller role and register daemon authority for this session",
-    handler: async (_args, context) => claimController(context),
+    // Inside the daemon pane (the `LEGION_CONTROLLER` marker) this is the manual override for a
+    // lost claim, and the pane's own transcript is the right resume target. From a hand-started
+    // session it is an interactive takeover: the role and recorded session id move to this session,
+    // while the daemon pane's recorded transcript does not (see `controllerSession.claim`).
+    handler: async (_args, context) => controllerSession.claim(context),
   });
 }

@@ -42,8 +42,13 @@ design and, more usefully, the two alternatives that were rejected and why.
 
 ## The gate
 
-- `packages/contracts/src/legion-daemon-api.ts` exports `LEGION_DAEMON_API_VERSION` (an integer; `2` since the design gate's `register_gate` request and gate record changed shape), a
-  plain integer beside the schemas it versions.
+- `packages/contracts/src/legion-daemon-api.ts` exports `LEGION_DAEMON_API_VERSION` (an integer:
+  `2` when the design gate's `register_gate` request and gate record changed shape, LEGION-20;
+  `3` for `ENVOY_TOKEN_FILE` on every pane, LEGION-25; `4` for durable `spawn_worker` requests,
+  LEGION-102; `5` when the controller handshake changed — `controllerLocator.ompSessionFile`,
+  `/controller/ready`'s session file, `/grants`' controller form, and the merge flag on
+  `/gh-token` only — `/git-credential` rejects it, LEGION-16), a plain integer beside the schemas
+  it versions.
 - `packages/pi-envoy/package.json` carries `"legion": { "daemonApiVersion": <the same integer> }`;
   `packages/pi-envoy/src/legion/daemon-api-version.test.ts` pins the two equal, so a bump on
   one side without the other fails the plugin's own suite.
@@ -138,7 +143,11 @@ automatic could have caught it: `daemon-api-version.test.ts` pins the two number
 - **A serial number claimed on a long-lived branch is re-checked against main at every rebase.**
   Two branches that each change a shape will both bump 1 → 2; see
   `docs/solutions/legion/schema-bump-branch-rechecks-mains-version-at-every-rebase.md`,
-  where the same thing happened to the state version on this branch.
+  where the same thing happened to the state version on this branch. It then happened to this
+  number: LEGION-16 (#961) had also taken 2 for the controller handshake, and after rebasing over
+  #975 its tester found main's plugin release at contract 2 passing a daemon whose shapes differed.
+  LEGION-16 renumbered to 3 and main's 1.23.x/1.24.0 plugin releases are refused by name — and
+  then, after LEGION-25 and LEGION-102 landed at 3 and 4, renumbered again to 5.
 
 ## The number covers the pane contract too (LEGION-52)
 

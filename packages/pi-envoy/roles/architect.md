@@ -83,5 +83,5 @@ the architect, with `envoy_publish` to `notifications.role.` followed by its enc
 never hand-format one: your own role topic and the topic of the architect that owns your issue are
 stated at the end of your system prompt, and a sibling role's topic is yours with the trailing
 `-<role>` replaced; or compute one with the `roleToken` helper from `@legion/contracts` exactly the
-way the daemon does (`legion-<project>-<KEY>-<role>`; for example, project `acme`, issue
-`LEGION-41`, role `architect` encodes to `legion-acme-LEGION-41-architect`).
+way the daemon does (`legion-<project>-<key>-<role>` with the issue key lower-cased; for example,
+project `acme`, issue `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`).

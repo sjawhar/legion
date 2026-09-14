@@ -38,7 +38,7 @@ which App a role acts as, and they disagreed:
 
 | function | where | used by | mapping |
 | --- | --- | --- | --- |
-| `appRoleForLegionRole(role)` | `api/github.ts` | `/gh-token`, `/git-credential`, the `/worker/started` git-identity lease | `reviewer → review`, every other role → implement |
+| `appRoleForLegionRole(role)` | `github-apps.ts` | `/gh-token`, `/git-credential`, the `/worker/started` git-identity lease | `reviewer → review`, every other role → implement |
 | `modeToRole(mode)` over `MODE_TO_ROLE` | `github-apps.ts` | the worker catch-up (`catchup.ts`), through its own `WORKER_MODE: Record<LegionRole, string>` | `test/plan/architect/review → review`, `implement/merge → implement` |
 
 The credential routes used the first, so a tester's `legion gh` ran as `legion-implementer[bot]`:
@@ -62,8 +62,8 @@ const APP_ROLE_FOR_LEGION_ROLE: Record<LegionRole, GitHubAppRole> = {
   merger: "implement",
 };
 
-export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
-  return APP_ROLE_FOR_LEGION_ROLE[role];
+export function appRoleForLegionRole(role: LegionRole | "controller"): GitHubAppRole {
+  return role === "controller" ? "implement" : APP_ROLE_FOR_LEGION_ROLE[role];
 }
 ```
 
@@ -90,7 +90,7 @@ the CI reads (`createCiStatusFetcher`), and the first of the two boot leases. A 
 never pick its own App.
 
 `github-apps.test.ts` pins the whole table (`Object.fromEntries(LEGION_ROLES.map(…))` equals the
-expected record) plus the one line the bug was about: `appRoleForLegionRole("tester") === "review"`.
+expected record) plus the one line the bug was about: `appRoleForLegionRole("tester") === "review".
 
 ## Both Apps are required — at config load *and* at boot
 

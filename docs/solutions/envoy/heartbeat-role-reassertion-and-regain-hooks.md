@@ -139,7 +139,7 @@ is gated; the controller has no such gate. Reviewer reproduction: boot the contr
 second `legionExtension(createPi().pi)` plus a subagent-transcript `session_start`, remove the
 claim → `/controller/ready` count stays 1.
 
-Fix: register from the two paths that establish an identity — `claimController` after
+Fix: register from the two paths that establish an identity — `controllerSession.claim` after
 `controllerReady` succeeds, `bootstrapRoot` after its `process/ready` — never at setup. A
 subagent instance never reaches either path. This repairs the *regained* slot only:
 `bridge.claim` is still assigned at factory setup on `main`, so `/legion-claim-controller` and

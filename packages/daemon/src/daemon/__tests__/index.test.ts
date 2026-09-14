@@ -1884,10 +1884,12 @@ describe("startDaemon", () => {
         (command) => command[0]?.endsWith("/tmux") && command[3] === "new-window"
       );
       if (!controllerLaunch) throw new Error("controller spawn did not open a tmux window");
-      // One flag, both fragments inside it (OMP's flag is last-wins): the packaged controller
-      // prompt, a blank line, then the materialized instructions.
+      // The controller pane runs interactive OMP (no `--mode rpc`, no shim). One flag, both
+      // fragments inside it (OMP's flag is last-wins): the packaged controller prompt, a blank
+      // line, then the materialized instructions.
+      expect(controllerLaunch.at(-1)).not.toContain("--mode rpc");
       expect(controllerLaunch.at(-1)).toEndWith(
-        ` --mode rpc --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)\n\n$(cat ${materialized})"`
+        ` --append-system-prompt "$(cat ${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/controller-root.md)\n\n$(cat ${materialized})"`
       );
       expect(controllerLaunch.at(-1)?.split("--append-system-prompt ")).toHaveLength(2);
     } finally {
@@ -1974,64 +1976,6 @@ describe("startDaemon", () => {
         topic: roleTopic(controller),
         payload: resyncPayload,
       });
-    } finally {
-      await first?.stop();
-      await second?.stop();
-      await rm(stateDir, { recursive: true, force: true });
-    }
-  });
-  it("accepts controller/ready even when the controller's shim socket is unreachable", async () => {
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
-    const daemonConfig = config(stateDir);
-    const firstNats = new FakeNats();
-    const secondNats = new FakeNats();
-    const publications: Array<{ topic: string; payload: unknown }> = [];
-    let controllerSecret: string | undefined;
-    let first: daemonIndex.DaemonHandle | undefined;
-    let second: daemonIndex.DaemonHandle | undefined;
-
-    try {
-      first = await startDaemon(
-        daemonConfig,
-        daemonTestDependencies(firstNats, publications, (secret) => {
-          controllerSecret = secret;
-        })
-      );
-      const controller = controllerToken(daemonConfig.project);
-      firstNats.emit(
-        `notifications.envoy.exceptions.notifications.role.${controller}`,
-        controllerException(daemonConfig.project)
-      );
-      await first.drain();
-      expect(controllerSecret).toBeString();
-      await first.stop();
-      first = undefined;
-
-      const secondOptions = daemonTestDependencies(secondNats, publications, () => {});
-      second = await startDaemon(daemonConfig, {
-        deps: {
-          ...secondOptions.deps,
-          connectWorkerRpc: async () => {
-            throw new Error("ECONNREFUSED: controller shim socket unreachable");
-          },
-        },
-      });
-
-      const ready = await fetch(
-        `http://127.0.0.1:${second.server.port}/legion/v1/controller/ready`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            secret: controllerSecret,
-            sessionId: "ses-controller",
-          }),
-        }
-      );
-
-      // A shim connect failure must never block /controller/ready from accepting the role: the
-      // socket connect is best-effort (see markControllerReady's doc comment).
-      expect(ready.status).toBe(200);
     } finally {
       await first?.stop();
       await second?.stop();

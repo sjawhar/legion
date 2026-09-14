@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { JjIdentity } from "@legion/workspace";
@@ -7,9 +8,11 @@ import { probeWorkerSocket, type SocketProbeResult, type WorkerRpcClient } from 
 /** The daemon CLI every spawned process's `legion worker-shim` wrapper re-executes. */
 export const DAEMON_CLI_ENTRYPOINT = path.resolve(import.meta.dir, "../cli/index.ts");
 
-/** Where a tmux-runtime process lives: its window, its pane, the shim socket it listens on, and
- * the identity of the process the pane was opened with. `tmuxPaneId`/`socketPath` are optional
- * only for records predating those fields; every locator the tmux runtime writes carries both. */
+/** Where a tmux-runtime process lives: its window, its pane, the shim socket a shim-bridged
+ * process listens on, and the identity of the process the pane was opened with. Every locator the
+ * tmux runtime writes carries a pane id and that identity; `socketPath` is absent for the
+ * controller's interactive pane by design, and `tmuxPaneId`/`socketPath` are otherwise optional
+ * only for records predating the fields. */
 export interface TmuxWindowLocator {
   tmuxSession: string;
   tmuxWindowId: string;
@@ -244,4 +247,31 @@ export function probeWorker(
 
 export function shellPath(value: string): string {
   return /[^A-Za-z0-9_./:-]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+
+/** The same-agent invariant every resume shares: a recorded OMP session file that has gone
+ * missing is a launch failure, never a silent fresh start that would lose the original agent's
+ * context. `subject` names the process in the refusal (an issue key, or the controller's role
+ * token). The tmux runtime applies it inside `spawn` for every process; `ProcessManager` applies
+ * it to the controller before minting a capability, so a refusal there mutates nothing. */
+export async function assertResumeSessionFile(
+  subject: string,
+  resumeSessionFile: string,
+  logVerb: string
+): Promise<void> {
+  try {
+    await stat(resumeSessionFile);
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+    throw new Error(
+      `Refusing to start ${subject} fresh while ${logVerb}: recorded OMP session file is missing: ${resumeSessionFile}`
+    );
+  }
 }

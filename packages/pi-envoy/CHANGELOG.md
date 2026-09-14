@@ -10,7 +10,7 @@
 
 ### Changed
 
-- `legion.daemonApiVersion` is 4. Contract 3 added the `ENVOY_TOKEN_FILE` pane contract (LEGION-25); contract 4 adds the `spawn_worker` request ID and `workerAdmission` state response (LEGION-102). Install this release before starting a daemon that requires contract 4.
+- `legion.daemonApiVersion` is 5. Contract 3 added the `ENVOY_TOKEN_FILE` pane contract (LEGION-25); contract 4 adds the `spawn_worker` request ID and `workerAdmission` state response (LEGION-102); contract 5 adds the interactive controller's resumable transcript, grant form, and merge-intent authority (LEGION-16). Install this release before starting a daemon that requires contract 5.
 
 ### Fixed
 

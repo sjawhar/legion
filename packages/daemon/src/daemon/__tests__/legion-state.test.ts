@@ -129,7 +129,7 @@ describe("legion state", () => {
 
   it("initializes empty v31 state with a valid project and admission capacity", () => {
     expect(newLegionState(initialState.project, initialState.cap)).toEqual({
-      version: 32,
+      version: 33,
       project: "omp",
       issues: {},
       trees: {},
@@ -512,7 +512,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(migrated.controllerPendingNotices).toEqual([]);
     expect(migrated.gates).toEqual({});
   });
@@ -630,7 +630,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(migrated.controllerPendingNotices).toEqual([notice]);
     expect(migrated.gates).toEqual({});
   });
@@ -697,7 +697,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       expect(migrated.roles[confirmedToken]).toEqual({
         ...current.roles[confirmedToken],
         readyConfirmedAt: migrationTimestamp,
@@ -766,7 +766,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       expect(migrated.trees[confirmedIssue]).toEqual({
         ...current.trees[confirmedIssue],
         readyConfirmedAt: migrationTimestamp,
@@ -822,19 +822,19 @@ describe("legion state", () => {
       tmuxSession: "legion-omp-project",
       tmuxWindowId: "@7",
       tmuxPaneId: "%9",
-      socketPath: "/state/workers/controller.sock",
     };
     // The v23 file: the same state, every locator predating the discriminant.
     const v23State = JSON.parse(JSON.stringify({ ...current, version: 23 }));
     delete v23State.trees[issue].locator.runtime;
     delete v23State.roles[implementerToken].locator.runtime;
     delete v23State.controllerLocator.runtime;
+    v23State.controllerLocator.socketPath = "/state/workers/controller.sock";
     const raw = JSON.stringify(v23State);
     await writeFile(file, raw, "utf8");
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(migrated.trees[issue]?.locator?.runtime).toBe("tmux");
     expect(migrated.controllerLocator?.runtime).toBe("tmux");
     const claim = migrated.roles[implementerToken];
@@ -899,7 +899,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       expect(migrated.roles[implementerToken]).toEqual(current.roles[implementerToken]);
       expect(migrated.roles[testerToken]).toEqual(current.roles[testerToken]);
       expect(migrated.roles[reviewerToken]).toEqual(current.roles[reviewerToken]);
@@ -960,7 +960,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       expect(migrated).toEqual(current);
       expect(pendingDeliveryId(migrated, implementerToken)).toBe(TEST_DELIVERY_ID);
       expect(pendingDeliveryId(migrated, testerToken)).toBe(TEST_DELIVERY_ID);
@@ -1040,7 +1040,6 @@ describe("legion state", () => {
       tmuxSession: "legion-omp-project",
       tmuxWindowId: "@7",
       tmuxPaneId: "%9",
-      socketPath: "/state/workers/controller.sock",
     };
     const testerToken = roleToken(initialState.project, issue, "tester");
     const catchupTask = JSON.stringify({ type: "catchup-worker", unhandled: [] });
@@ -1065,6 +1064,7 @@ describe("legion state", () => {
     };
     const v26State = JSON.parse(JSON.stringify({ ...current, version: 26 }));
     delete v26State.roles[testerToken].pendingAssignment.queuedAt;
+    v26State.controllerLocator.socketPath = "/state/workers/controller.sock";
     const raw = JSON.stringify(v26State);
     await writeFile(file, raw, "utf8");
 
@@ -1072,7 +1072,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       // The v31 queuedAt backfill and durable-ledger migration preserve the #991 shape and its
       // identity-less locator, so the migrated state equals the current fixture.
       expect(migrated).toMatchObject(current);
@@ -1114,7 +1114,7 @@ describe("legion state", () => {
     try {
       const migrated = await loadState(file, initialState);
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       expect(migrated.roles[testerToken]).toMatchObject({
         issue,
         role: "tester",
@@ -1130,7 +1130,7 @@ describe("legion state", () => {
         raw.roles[controllerToken(initialState.project)]
       );
       expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
-      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
     } finally {
       dateNowSpy.mockRestore();
     }
@@ -1150,7 +1150,7 @@ describe("legion state", () => {
 
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v30.bak`, "utf8")).toBe(rawText);
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
   });
 
   it("migrates v31 pending assignments with delivery IDs while preserving existing IDs", async () => {
@@ -1184,7 +1184,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     const tester = migrated.roles[testerToken];
     if (!tester || !("issue" in tester)) throw new Error("tester claim disappeared");
     expect(tester.pendingAssignment).toMatchObject({
@@ -1198,8 +1198,78 @@ describe("legion state", () => {
     const planner = migrated.roles[plannerToken];
     if (!planner || !("issue" in planner)) throw new Error("planner claim disappeared");
     expect(planner.pendingAssignment?.deliveryId).toBe("00000000-0000-4000-8000-000000000031");
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
     expect(await readFile(`${file}.v31.bak`, "utf8")).toBe(rawText);
+  });
+
+  it("migrates v32 state to v33 by stripping the controller locator's socketPath and keeping its runtime tag, leaving every pending delivery ID alone", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v32-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const workerToken = roleToken(initialState.project, issue, "implementer");
+    current.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp-project",
+      tmuxWindowId: "@7",
+      tmuxPaneId: "%9",
+      ompSessionFile: "/state/controller.jsonl",
+    };
+    current.roles[workerToken] = {
+      ...current.roles[workerToken],
+      issue,
+      role: "implementer",
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement controller",
+        queuedAt: "2026-09-14T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000032",
+      },
+    };
+    const rawText = JSON.stringify({
+      ...current,
+      version: 32,
+      controllerLocator: {
+        ...current.controllerLocator,
+        socketPath: "/state/workers/controller.sock",
+      },
+    });
+    await writeFile(file, rawText, "utf8");
+
+    const stripped: Array<{ tmuxSession?: string; tmuxPaneId?: string }> = [];
+    const migrated = await loadState(file, {
+      ...initialState,
+      onHeadlessControllerStripped: (locator) => stripped.push(locator),
+    });
+
+    expect(migrated.version).toBe(33);
+    expect(migrated).toEqual(current);
+    expect(pendingDeliveryId(migrated, workerToken)).toBe("00000000-0000-4000-8000-000000000032");
+    expect(await readFile(`${file}.v32.bak`, "utf8")).toBe(rawText);
+    // The upgrade warning fires exactly once, naming the pane the operator must kill by hand.
+    expect(stripped).toEqual([{ tmuxSession: "legion-omp-project", tmuxPaneId: "%9" }]);
+    // Loading the migrated (v33, socketless) file again strips nothing and stays silent.
+    await loadState(file, {
+      ...initialState,
+      onHeadlessControllerStripped: (locator) => stripped.push(locator),
+    });
+    expect(stripped).toHaveLength(1);
+  });
+
+  it("migrates v32 state without a controller locator to v33 unchanged", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-v32-no-controller-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    delete current.controllerLocator;
+    await writeFile(file, JSON.stringify({ ...current, version: 32 }), "utf8");
+
+    const stripped: unknown[] = [];
+    expect(
+      await loadState(file, {
+        ...initialState,
+        onHeadlessControllerStripped: (locator) => stripped.push(locator),
+      })
+    ).toEqual(current);
+    expect(stripped).toEqual([]);
   });
 
   it("loads a retained spawn result with a future response field", async () => {
@@ -1283,7 +1353,7 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(migrated).toEqual(current);
     expect(migrated.phases[issue]).toEqual({ phase: "reviewer", sessionId: "ses_reviewer" });
     expect(migrated.phases[otherIssue]).toEqual({
@@ -1320,12 +1390,12 @@ describe("legion state", () => {
 
     const migrated = await loadState(file, initialState);
 
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(migrated.trees).toEqual(current.trees);
     expect(migrated).toEqual(current);
     expect(await readFile(`${file}.v29.bak`, "utf8")).toBe(raw);
     // Written once, at load: the next boot reads v31 and runs no migration.
-    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
   });
 
   it("round-trips a tree's kept session file (resumeSessionFile) through save and load", async () => {
@@ -1342,7 +1412,7 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
-  it("round-trips a tmux locator's recorded process identity on a tree, a worker claim, and the controller", async () => {
+  it("round-trips a tmux locator's recorded process identity on a tree and worker, with a socketless controller", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-identity-"));
     const file = path.join(tempDir, "state.json");
     const current = stateWithTree();
@@ -1371,7 +1441,7 @@ describe("legion state", () => {
       tmuxPaneId: "%9",
       panePid: 5000,
       paneStartTicks: 123,
-      socketPath: "/state/workers/controller.sock",
+      ompSessionFile: "/state/controller.jsonl",
     };
     await saveState(file, current);
     expect(await loadState(file, initialState)).toEqual(current);
@@ -1461,7 +1531,7 @@ describe("legion state", () => {
     // A v24 file walks the whole chain: v24 -> v25 (#993) -> v26 (#991) -> v27 (pane identity)
     // -> v28 (design gate) -> v29 (assignedAt) -> v30 (resumeSessionFile) -> v31
     // (queuedAt and durable spawn requests).
-    expect(migrated.version).toBe(32);
+    expect(migrated.version).toBe(33);
     expect(Object.keys(migrated.prs[prKey] ?? {})).toEqual(Object.keys(current.prs[prKey] ?? {}));
     expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(raw);
   });
@@ -1547,7 +1617,7 @@ describe("legion state", () => {
           },
         });
 
-        expect(migrated.version).toBe(32);
+        expect(migrated.version).toBe(33);
         expect(migrated.gates).toEqual({
           "LEGION-1": { artifactId: "art-a", latestVersion: 7, approvedVersion: 7 },
           "LEGION-2": { artifactId: "art-b", latestVersion: 2 },
@@ -1559,7 +1629,7 @@ describe("legion state", () => {
         expect(await readFile(`${file}.v27.bak`, "utf8")).toBe(JSON.stringify(source));
         // The migrated state is on disk at once: the next boot loads the current version and
         // never asks Dispatch again, even with no ordinary save in between.
-        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+        expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
         const reloaded = await loadState(file, {
           ...initialState,
           resolveSpecArtifact: async (issue) => {
@@ -1651,7 +1721,7 @@ describe("legion state", () => {
         dateNowSpy.mockRestore();
       }
 
-      expect(migrated.version).toBe(32);
+      expect(migrated.version).toBe(33);
       // #991's step classified the bare string; #981's step left the identity-less locator as it
       // was (both identity fields optional); the design-gate step resolved the gate; v29 added
       // optional assignedAt; v30 added optional resumeSessionFile; and v31 stamped queuedAt and
@@ -1674,8 +1744,39 @@ describe("legion state", () => {
         "LEGION-1": { artifactId: "art-a", latestVersion: 4, approvedVersion: 4 },
       });
       expect(await readFile(`${file}.v24.bak`, "utf8")).toBe(JSON.stringify(source));
-      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(32);
+      expect(JSON.parse(await readFile(file, "utf8")).version).toBe(33);
     });
+  });
+
+  it("rejects a current-version controller locator that carries a shim socket, naming the field", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-controller-socket-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    current.controllerLocator = {
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@7",
+      tmuxPaneId: "%9",
+    };
+    await saveState(file, current);
+    expect(await loadState(file, initialState)).toEqual(current);
+
+    // The same locator with the socket a pre-v33 headless controller had: a v33 file must never
+    // carry it (the migration strips it), so an unmigrated or hand-edited one fails at load.
+    await writeFile(
+      file,
+      JSON.stringify({
+        ...current,
+        controllerLocator: {
+          ...current.controllerLocator,
+          socketPath: "/state/workers/controller.sock",
+        },
+      }),
+      "utf8"
+    );
+    await expect(loadState(file, initialState)).rejects.toThrow(
+      "Invalid Legion state: controller locator carries a shim socket; the controller pane has none"
+    );
   });
 
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {

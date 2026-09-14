@@ -404,11 +404,15 @@ Verified the implementer's proof by <re-running its command | driving the same s
   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`,
   whose output is quoted in READY (an empty output is quoted as
   `no file changes above the approved head`); then the same with `'~docs/solutions'` appended,
-  which must print nothing. Then it publishes `READY #<n> at <tip-sha>` naming the approved
-  head, the tip, and that summary, plus the PR body's gate facts, to the merge queue's role
-  (`notifications.role.pr-queue`) with `envoy_publish`. The READY packet names both the
-  implementer's and the tester's `E2E` lines; a missing one is reported to the architect instead
-  of published. The merger never merges; the queue merges under its own authority.
+  which must print nothing. Then it publishes
+  `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
+  `packages/pi-envoy/roles/merger.md` defines) with that summary and the PR body's gate facts to
+  the project's controller topic (the merge queue, named in the `Legion addressing` line at the
+  end of the system prompt) with `envoy_publish`; on a 404 no-holder it publishes the same `READY`
+  to the architect's topic and stays idle. The READY packet names both the implementer's and the
+  tester's `E2E` lines; a missing one is reported to the architect instead of published. The
+  merger never merges; the controller verifies the
+  gates against live GitHub and merges under its own authority.
 - **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the

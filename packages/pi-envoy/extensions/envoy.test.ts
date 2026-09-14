@@ -10,6 +10,7 @@ import {
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 
 type ToolResult = {
@@ -942,7 +943,7 @@ describe("envoy OMP extension", () => {
           session_id: "ses_before",
           machine_id: "test",
           dir: "/tmp",
-          topics: ["notifications.agent.ses_before", "notifications.role.pr-queue"],
+          topics: ["notifications.agent.ses_before", "notifications.role.release-captain"],
         });
       }
       // The new id has no registry row yet — exactly the post-branch state.
@@ -965,14 +966,14 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    await roleTool?.execute("", { role: "pr-queue" });
-    expect(roleClaims).toEqual([{ session_id: "ses_before", role: "pr-queue" }]);
+    await roleTool?.execute("", { role: "release-captain" });
+    expect(roleClaims).toEqual([{ session_id: "ses_before", role: "release-captain" }]);
 
     await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after"));
 
     expect(roleClaims).toEqual([
-      { session_id: "ses_before", role: "pr-queue" },
-      { session_id: "ses_after", role: "pr-queue" },
+      { session_id: "ses_before", role: "release-captain" },
+      { session_id: "ses_after", role: "release-captain" },
     ]);
   });
 
@@ -1021,14 +1022,14 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before_memory"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    await roleTool?.execute("", { role: "pr-queue" });
-    expect(roleClaims).toEqual([{ session_id: "ses_before_memory", role: "pr-queue" }]);
+    await roleTool?.execute("", { role: "release-captain" });
+    expect(roleClaims).toEqual([{ session_id: "ses_before_memory", role: "release-captain" }]);
 
     await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_memory"));
 
     expect(roleClaims).toEqual([
-      { session_id: "ses_before_memory", role: "pr-queue" },
-      { session_id: "ses_after_memory", role: "pr-queue" },
+      { session_id: "ses_before_memory", role: "release-captain" },
+      { session_id: "ses_after_memory", role: "release-captain" },
     ]);
   });
 
@@ -1070,7 +1071,7 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_outgoing"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    await roleTool?.execute("", { role: "pr-queue" });
+    await roleTool?.execute("", { role: "release-captain" });
     await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext("ses_fresh"));
     await roleTool?.execute("", { role: "reviewer" });
     await fixture.handlers.get("session_switch")?.(
@@ -1091,7 +1092,7 @@ describe("envoy OMP extension", () => {
     // not what the outgoing process remembered (reviewer) or what a stale
     // listener row for the loaded id says (reviewer).
     expect(roleClaims).toEqual([
-      { session_id: "ses_outgoing", role: "pr-queue" },
+      { session_id: "ses_outgoing", role: "release-captain" },
       { session_id: "ses_fresh", role: "reviewer" },
       { session_id: "ses_loaded", role: "sre" },
     ]);
@@ -1143,7 +1144,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("automatic reclaim is a soft claim: a live holder's 409 is honoured, an explicit claim stays hard", async () => {
-    // The parent of a /fork: its transcript still records `pr-queue`, but the
+    // The parent of a /fork: its transcript still records `release-captain`, but the
     // fork moved the live claim to the child. The listener arbitrates: the
     // extension sends soft:true and the listener answers 409 with the holder.
     const roleClaims: { readonly session_id: string; readonly soft: boolean | undefined }[] = [];
@@ -1158,8 +1159,8 @@ describe("envoy OMP extension", () => {
         if (body.soft === true) {
           return Response.json(
             {
-              error: "role pr-queue is held by ses_fork_child",
-              role: "pr-queue",
+              error: "role release-captain is held by ses_fork_child",
+              role: "release-captain",
               holder: "ses_fork_child",
             },
             { status: 409 }
@@ -1182,7 +1183,7 @@ describe("envoy OMP extension", () => {
       sessionManager: {
         ...sessionContext("ses_fork_parent").sessionManager,
         getBranch: () => [
-          { type: "custom", customType: "envoy-role-claim", data: { role: "pr-queue" } },
+          { type: "custom", customType: "envoy-role-claim", data: { role: "release-captain" } },
         ],
       },
     };
@@ -1192,12 +1193,12 @@ describe("envoy OMP extension", () => {
     // the role afterwards.
     expect(roleClaims).toEqual([{ session_id: "ses_fork_parent", soft: true }]);
     const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    const refused = await unsubscribe?.execute("", { topics: ["notifications.role.pr-queue"] });
+    const refused = await unsubscribe?.execute("", { topics: ["notifications.role.release-captain"] });
     expect(refused?.content[0]?.text).toBe("Unsubscribed: (none)");
 
     // The user's explicit envoy_role_set is a hard claim and takes it.
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    await roleTool?.execute("", { role: "pr-queue" });
+    await roleTool?.execute("", { role: "release-captain" });
     expect(roleClaims).toEqual([
       { session_id: "ses_fork_parent", soft: true },
       { session_id: "ses_fork_parent", soft: undefined },
@@ -2089,7 +2090,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-reassert"
     );
     const regained: { readonly role: string; readonly reason: string }[] = [];
@@ -2151,7 +2152,7 @@ describe("envoy OMP extension", () => {
       if (url.pathname === "/v1/interests/subscribe") registrations += 1;
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-quiet"
     );
     const regained: unknown[] = [];
@@ -2185,7 +2186,7 @@ describe("envoy OMP extension", () => {
   });
 
   test("a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role", async () => {
-    const role = "pr-queue";
+    const role = "release-captain";
     const roleClaims: Record<string, unknown>[] = [];
     let roleReads = 0;
     globalThis.fetch = async (input, init) => {
@@ -2213,7 +2214,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-409"
     );
     const regained: unknown[] = [];
@@ -2292,7 +2293,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-outage-regain"
     );
     const regained: { readonly role: string; readonly reason: string }[] = [];
@@ -2375,7 +2376,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-hung-hook"
     );
     let hookCalls = 0;
@@ -2435,7 +2436,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-role-read-failure"
     );
     const regained: unknown[] = [];
@@ -2507,7 +2508,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension, onEnvoyRoleRegained } = await import(
+    const { default: envoyExtension } = await import(
       "./envoy.ts?heartbeat-late-regain"
     );
     const regained: { readonly role: string; readonly reason: string }[] = [];

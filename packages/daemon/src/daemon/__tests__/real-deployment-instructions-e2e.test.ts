@@ -1,9 +1,10 @@
 // Real-tmux, real-shell E2E for the system-prompt argument: a real `ProcessManager` launches the
-// controller pane through a real `legion worker-shim` inside a real tmux server, and the wrapped
-// "OMP" (`argv-recorder-omp.ts`) records the argv the pane's shell actually handed it after the
-// `$(cat …)` expansions. A mocked `run` can only prove the command string; this proves the process
-// receives exactly ONE `--append-system-prompt` (OMP's flag is last-wins) whose value is the role
-// prompt, a blank line, then the materialized deployment instructions.
+// controller pane — an interactive OMP session run bare in its pane, no `legion worker-shim` —
+// inside a real tmux server, and the stand-in "OMP" (`argv-recorder-omp.ts`) records the argv
+// the pane's shell actually handed it after the `$(cat …)` expansions. A mocked `run` can only
+// prove the command string; this proves the process receives exactly ONE `--append-system-prompt`
+// (OMP's flag is last-wins) whose value is the role prompt, a blank line, then the materialized
+// deployment instructions.
 import { afterAll, describe, expect, it } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -106,12 +107,16 @@ afterAll(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe("real deployment instructions fragment (tmux + worker-shim, no mocks)", () => {
+describe("real deployment instructions fragment (real tmux, the controller's bare interactive pane, no mocks)", () => {
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "hands the launched process one --append-system-prompt value: the role prompt, then the materialized header + file content",
     async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "legion-real-instructions-e2e-"));
       tempDirs.push(dir);
+      // The controller pane runs the stand-in bare (no shim keeps the pane open), so it must
+      // outlive the daemon's owner marker and identity read: the tmux server this test starts
+      // inherits this process's environment and hands it to the pane. `afterAll` kills the server.
+      process.env.ARGV_RECORDER_LINGER_MS = "60000";
       const stateDir = path.join(dir, "state");
       await mkdir(stateDir);
       const source = path.join(dir, "ops", "deployment.md");
@@ -185,8 +190,9 @@ describe("real deployment instructions fragment (tmux + worker-shim, no mocks)",
           tmuxSession: TMUX_SOCKET,
         });
 
-        // `spawnController` runs the pane as `cd <state_dir>/controller && … worker-shim -- <omp>`,
-        // so the recorder's cwd — where it drops argv.json — is that controller directory.
+        // `spawnController` runs the pane as `cd <state_dir>/controller && <omp …>` (bare: no
+        // `legion worker-shim`), so the recorder's cwd — where it drops argv.json — is that
+        // controller directory.
         const record = path.join(stateDir, "controller", "argv.json");
         await waitForFile(record);
         const argv = JSON.parse(await readFile(record, "utf8")) as string[];
@@ -197,12 +203,15 @@ describe("real deployment instructions fragment (tmux + worker-shim, no mocks)",
         const prompts = argv.flatMap((arg, index) =>
           arg === "--append-system-prompt" ? [argv[index + 1]] : []
         );
-        expect(argv.slice(0, 2)).toEqual(["--mode", "rpc"]);
+        // An interactive session: no `--mode rpc`; the role prompt is the first argument and the
+        // deployment-instructions fragment the last.
+        expect(argv).not.toContain("--mode");
+        expect(argv[0]).toBe("--append-system-prompt");
         expect(prompts).toEqual([
           `${strip(await readFile(CONTROLLER_PROMPT, "utf8"))}\n\n# Deployment instructions (${cfg.legionId})\n\n${strip(content)}`,
         ]);
-        expect(argv).toHaveLength(4);
-        expect(argv.at(-2)).toBe("--append-system-prompt");
+        // Exactly the one flag and its value: nothing else reaches the interactive session's argv.
+        expect(argv).toHaveLength(2);
       } finally {
         processes.dispose();
       }

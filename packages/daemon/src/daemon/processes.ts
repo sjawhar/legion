@@ -57,6 +57,7 @@ import {
 } from "./ready-delivery";
 import { MAX_RESENDS, ResendLedger } from "./resend-ledger";
 import {
+  assertResumeSessionFile,
   awaitShutdown,
   boundedWait,
   DAEMON_CLI_ENTRYPOINT,
@@ -227,12 +228,12 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the addressing fragment every root and phase-worker process gets in its system prompt,
- * so the model can address the architect that owns its issue (and derive a sibling's topic)
- * without hand-encoding a `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built
- * token silently misses. `architectIssue` is the issue whose architect owns the launched process
- * (`owningArchitect`, LEGION-86): the child itself for a worker on a child with a claimed
- * sub-architect, the root otherwise, and the parent for a sub-architect; the root passes its own
- * key. */
+ * so the model can address the architect that owns its issue, the project's controller (the merge
+ * queue a merger publishes READY to), and derive a sibling's topic without hand-encoding a
+ * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses.
+ * `architectIssue` is the issue whose architect owns the launched process (`owningArchitect`,
+ * LEGION-86): the child itself for a worker on a child with a claimed sub-architect, the root
+ * otherwise, and the parent for a sub-architect; the root passes its own key. */
 export function addressingFragment(
   project: string,
   architectIssue: IssueKey,
@@ -241,10 +242,11 @@ export function addressingFragment(
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
   const architectTopic = roleTopic(roleToken(project, architectIssue, "architect"));
+  const controllerTopic = roleTopic(controllerToken(project));
   return (
     `Legion addressing: your role topic is \`${ownTopic}\`; the architect that owns your issue is ` +
-    `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
-    "`-<role>` replaced."
+    `\`${architectTopic}\`; the project's controller (merge queue) is \`${controllerTopic}\`; ` +
+    "a sibling role on your issue is your topic with the trailing `-<role>` replaced."
   );
 }
 
@@ -312,6 +314,9 @@ export class ProcessManager {
    * generation a worker's socket ever closes, for the process's lifetime. */
   private readonly reconnectAttempted = new Set<string>();
   private controllerSpawn?: Promise<void>;
+  /** A fast first controller ready may precede the runtime's locator. Kept in memory only while
+   * that spawn is in flight, then copied onto the locator or discarded with a failed spawn. */
+  private pendingControllerReady?: { sessionId: string; ompSessionFile: string };
   /** Set while a bounded wait for the controller to claim its role is in flight (see
    * `ensureController`'s doc comment). Bound to the exact locator observed when armed, by
    * reference: the expiry callback only ever acts if `controllerLocator` is still this same
@@ -2214,7 +2219,7 @@ export class ProcessManager {
         tree.status = "launch-failed";
         // A controller re-admit of a launch-failed tree starts fresh, as it did before a tree
         // remembered a session file: a file that is what keeps failing (gone from disk, see
-        // `computeResumeArgument`) would otherwise fail every re-admit the same way.
+        // `assertResumeSessionFile`) would otherwise fail every re-admit the same way.
         delete tree.resumeSessionFile;
         const queueIndex = this.deps.state.admission.queue.indexOf(issue);
         if (queueIndex !== -1) this.deps.state.admission.queue.splice(queueIndex, 1);
@@ -2323,8 +2328,10 @@ export class ProcessManager {
     }
     if (!this.controllerSpawn) {
       this.controllerSpawn = (async () => {
-        const controllerSecret = await this.deps.mintControllerCapability();
-        await this.spawnController(controllerSecret);
+        // `spawnController` reads the recorded transcript before opening the replacement pane and
+        // again after the runtime returns, so a fast new pane can update its resume target through
+        // `/controller/ready` while the spawn awaits.
+        await this.spawnController();
         const freshLocator = this.deps.state.controllerLocator;
         if (freshLocator) this.armControllerRegistrationDeadline(freshLocator);
       })().finally(() => {
@@ -2332,6 +2339,15 @@ export class ProcessManager {
       });
     }
     await this.controllerSpawn;
+  }
+
+  /** Records a first controller transcript that arrived before its runtime locator existed. */
+  stashControllerReady(sessionId: string, ompSessionFile: string): boolean {
+    if (this.controllerSpawn === undefined || this.deps.state.controllerLocator !== undefined) {
+      return false;
+    }
+    this.pendingControllerReady = { sessionId, ompSessionFile };
+    return true;
   }
 
   /** Arms a bounded wait for `locator` to be claimed, unless one is already armed (for this or
@@ -2725,11 +2741,16 @@ export class ProcessManager {
    * a `/controller/ready` landing during that probe's own await must still win over this
    * stale-timeout decision, never be raced by it. A `state.controllerLocator` that no longer
    * matches `locator` by reference is the same "superseded" case caught above, checked again
-   * directly against live state for good measure. On a failed stop/kill, logs and leaves the
-   * locator exactly as it was -- clearing it and spawning a second controller over a process that
-   * never actually stopped would orphan that process with nothing tracking it; a later
-   * `ensureController` call re-observes this same stuck locator and re-arms a fresh wait for it
-   * instead.
+   * directly against live state for good measure. A pane found already dead here (it hung past
+   * the deadline, then exited on its own) is resurrected at once; a pane still alive but never
+   * claimed is killed first -- the controller pane has no shim socket to ask, so the stop is the
+   * direct pane kill. On a failed kill, logs and leaves the locator exactly as it was -- clearing
+   * it and spawning a second controller onto a pane that never actually stopped would orphan that
+   * pane with nothing tracking it; a later `ensureController` call re-observes this same stuck
+   * locator and re-arms a fresh wait for it instead. In both the dead and the killed case the
+   * locator is left in place for `ensureController`: its own probe (pure, see `controllerAlive`)
+   * finds the pane dead and `spawnController` resumes the session file it recorded, then
+   * replaces the locator once the new pane exists.
    */
   private async retireAndRespawnStuckController(
     locator: NonNullable<LegionState["controllerLocator"]>
@@ -2740,18 +2761,18 @@ export class ProcessManager {
     if (this.deps.state.roles[token]) return;
     const stillAlive = await this.controllerAlive();
     if (this.deps.state.roles[token]) return;
-    if (!stillAlive) return;
     if (this.deps.state.controllerLocator !== locator) return;
-    try {
-      await this.stopProcess(token, locator, this.workerStopTimeoutMs);
-    } catch (error) {
-      console.error(
-        "[legion] failed to stop a stuck controller process; leaving it in place rather than orphaning it:",
-        error
-      );
-      return;
+    if (stillAlive) {
+      try {
+        await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
+      } catch (error) {
+        console.error(
+          "[legion] failed to stop a stuck controller pane; leaving it in place rather than orphaning it:",
+          error
+        );
+        return;
+      }
     }
-    delete this.deps.state.controllerLocator;
     await this.ensureController();
   }
 
@@ -3932,12 +3953,36 @@ export class ProcessManager {
     }
   }
 
-  private async spawnController(controllerSecret: string): Promise<void> {
+  /** Opens the controller's tmux window running an interactive OMP session — no `--mode rpc`,
+   * no `legion worker-shim`, no socket: the pane is a live TUI Sami can attach to. Reads the
+   * previous pane's `ompSessionFile` from state before opening the replacement, so a respawn keeps
+   * the conversation; no recorded file starts fresh and logs it. A recorded
+   * file that has gone missing refuses (same-agent invariant, `assertResumeSessionFile`) before
+   * anything is mutated: the dead pane's locator, and with it the recorded file, stays exactly as
+   * it was and the controller capability is not rotated, so every later call refuses again with
+   * the same honest log instead of silently starting fresh — the controller has no launch-failure
+   * counter and never escalates; an operator restores the file or clears the locator (stop the
+   * daemon, delete `controllerLocator` from the state file, start it). The prior pane was observed
+   * dead and its grants were revoked before this call, so its claim is cleared immediately before
+   * `runtime.spawn`: any ready callback that authenticates while the new pane opens is the new
+   * pane's and must survive. A launch failure retains the dead locator and transcript but not its
+   * stale claim. */
+  private async spawnController(): Promise<void> {
     const promptPath = path.join(this.deps.rolePromptsDir, "controller-root.md");
     const token = controllerToken(this.deps.state.project);
-    // Held until the locator is in state (or the launch failed) — see `holdProcessSecret`.
+    const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile;
+    if (resumeSessionFile === undefined) {
+      console.info("[legion] starting the controller fresh: no OMP session file is recorded");
+    } else {
+      await assertResumeSessionFile(token, resumeSessionFile, "resurrecting the controller");
+    }
+    // Held from before `trackProcessSecrets` below until the locator swap (or the failed
+    // launch's `finally`), so a `persist()` from another launch in that window cannot prune the
+    // file — see `holdProcessSecret`; the mint's own `save()` is a raw state write and never
+    // prunes. On a respawn the dead incarnation's locator also covers the file until the swap.
     const releaseSecret = this.holdProcessSecret(token);
     try {
+      const controllerSecret = await this.deps.mintControllerCapability();
       // Tracked before the runtime writes it — see `spawnTree`.
       this.trackProcessSecrets(token);
       const env = {
@@ -3945,47 +3990,41 @@ export class ProcessManager {
         LEGION_ROLE: "controller",
         LEGION_DAEMON_URL: this.deps.config.daemonUrl,
         LEGION_PROJECT: this.deps.state.project,
+        // Every daemon-launched pane carries its state directory (`legion state` reads it); the
+        // credential keys below are what `legion gh --` needs.
+        LEGION_STATE_DIR: this.deps.config.stateDir,
         ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
         ENVOY_URL: this.deps.config.envoyUrl,
         ...this.credentialProcessEnvironment(token),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
-      this.deps.state.controllerLocator = await this.runtime.spawn("controller", {
+      // The prior pane was observed dead before this spawn began. Clear only its stale claim
+      // before awaiting the runtime: a `/controller/ready` that can authenticate after the fresh
+      // capability was minted belongs to the new pane and remains present after this await.
+      delete this.deps.state.roles[token];
+      const locator = await this.runtime.spawn("controller", {
         role: "controller",
         env,
-        launch: { promptPath },
+        launch: { promptPath, resumeSessionFile },
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret, ...this.sharedProcessSecrets() },
       });
+      // A fast new pane can post `/controller/ready` during runtime.spawn. If this is the first
+      // controller, the route has no locator to update and stashes its transcript here; otherwise
+      // it updates the dead locator. In either case, copy the new pane's transcript onto its locator.
+      const pendingReady = this.pendingControllerReady;
+      this.pendingControllerReady = undefined;
+      const ompSessionFile =
+        pendingReady?.ompSessionFile ?? this.deps.state.controllerLocator?.ompSessionFile;
+      this.deps.state.controllerLocator = {
+        ...locator,
+        ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+      };
     } finally {
+      this.pendingControllerReady = undefined;
       releaseSecret();
     }
     await this.persist();
-  }
-
-  /** Connects the controller's shim socket on `/controller/ready`, exactly as `markTreeReady`
-   * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
-   * connect failure (listener race, stale socket, RPC timeout) must never block
-   * `/controller/ready` from accepting the role — the daemon holds no events to replay here
-   * either. A failed connect is retried for exactly one `READY_DELIVERY_RETRY_DELAYS_MS` cycle
-   * (LEGION-39), each attempt re-checking that the recorded controller is still the same process
-   * and the daemon still running; exhaustion logs and stops — nothing is retired, no counter moves
-   * — and the next `spawnWorker`/`workerReady`/reconnect/probe that touches the socket reconnects.
-   * Never rejects. Settles only when the cycle ends, so `handleControllerReady` detaches it. */
-  async markControllerReady(): Promise<void> {
-    const startLocator = this.deps.state.controllerLocator;
-    if (!startLocator) return;
-    const token = controllerToken(this.deps.state.project);
-    await this.connectOnReady(
-      "controller shim connect",
-      "[legion] failed to connect controller shim socket on ready:",
-      token,
-      startLocator,
-      () =>
-        sameProcess(this.deps.state.controllerLocator, startLocator)
-          ? undefined
-          : "the controller's process was replaced"
-    );
   }
 
   /** Revokes a claim's session capability (a no-op if it never had one — never spawned, or
@@ -4047,10 +4086,11 @@ export class ProcessManager {
    * client this manager is deliberately closing. Everything past that — the runtime's own
    * graceful attempt when nothing was cached, and the kill itself — is `Runtime.stop`'s;
    * `skipGraceful` (the caller already confirmed nothing live is there to ask) skips straight to
-   * it. A `ProcessStopFailed` from the runtime (it could not confirm the process stopped) is
-   * rethrown as `StopFailed` for this token; every other error passes through unchanged. The
-   * caller must never treat the process as stopped, or its claim/locator as safe to delete, when
-   * it cannot confirm that.
+   * it, and so does a locator with no socket at all (the controller's interactive pane). A
+   * `ProcessStopFailed` from the runtime (it could not confirm the process stopped) is rethrown
+   * as `StopFailed` for this token; every other error passes through unchanged. The caller must
+   * never treat the process as stopped, or its claim/locator as safe to delete, when it cannot
+   * confirm that.
    */
   private async stopProcess(
     token: string,
@@ -4117,8 +4157,8 @@ export class ProcessManager {
   /** The daemon-configured `worker_rpc_timeout_seconds` (default 5), in milliseconds -- the
    * timeout every runtime dial and `probeWorker` call in this file uses for a single
    * worker RPC request (`negotiate_protocol`/`get_state`/`prompt`), including each attempt of the
-   * background connect-and-deliver `markTreeReady`/`workerReady`/`markControllerReady` kick off
-   * after `/process/ready`/`/worker/ready`/`/controller/ready` already responded. It is a
+   * background connect-and-deliver `markTreeReady`/`workerReady` kick off after
+   * `/process/ready`/`/worker/ready` already responded. It is a
    * per-attempt budget: a ready-time connect or first prompt that times out is retried on the
    * fixed `ReadyDeliveryRetrier.run` backoff, so it is never
    * raised to ride out host load. */
@@ -4126,16 +4166,18 @@ export class ProcessManager {
     return this.deps.config.workerRpcTimeoutSeconds * 1000;
   }
 
-  /** Probes the controller's recorded locator for liveness through the runtime, clearing the
-   * locator on a dead verdict (a dead controller's record must never keep `ensureController`
-   * from spawning a fresh one). A controller that is present but not the recorded process -- a
-   * pane id reissued to another role's OMP, or a legacy record with no identity to verify -- is
-   * logged once with both identities and asked to shut down over its own role-scoped socket
-   * first (`stopProcess`, its destroy step refused on this same verdict), so a still-live legacy
-   * controller exits cleanly instead of running beside its replacement until the sweep reaps
-   * it, and a stranger's process is never killed. An `unknown` verdict is refused exactly as
-   * `probe` refuses it for a tree — never treated as dead, which would delete the record of a
-   * possibly-live controller and spawn a second one beside it. */
+  /** Probes the controller's recorded locator for liveness through the runtime. A pure probe,
+   * like `probe` for roots: a dead verdict returns `false` and leaves the locator — and the
+   * `ompSessionFile` it records — untouched for `spawnController` to resume and then replace. A
+   * controller that is present but not the recorded process -- a pane id reissued to another
+   * role's OMP, or a legacy record with no identity to verify -- is logged once with both
+   * identities and treated as dead; nothing is asked to shut down, because the interactive
+   * controller pane has no shim socket (`migrateV32State` strips the one a pre-v33 headless
+   * controller had), and a stranger's process is never killed: the runtime's own kill gate
+   * refuses it. Once the replacement's locator is in state, such a pane is an unrecorded window
+   * `reconcileOrphans` reaps once it has been idle past the grace period. An `unknown` verdict is
+   * refused exactly as `probe` refuses it for a tree — never treated as dead, which would spawn a
+   * second controller beside a possibly-live one. */
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
@@ -4143,21 +4185,7 @@ export class ProcessManager {
     if (result.status === "alive") return true;
     if (result.reason === "not-recorded-process") {
       console.error(`[legion] treating the controller as dead: ${result.detail}`);
-      try {
-        await this.stopProcess(
-          controllerToken(this.deps.state.project),
-          locator,
-          this.workerStopTimeoutMs,
-          { refuseKill: true }
-        );
-      } catch (error) {
-        console.error(
-          "[legion] failed to stop the controller's recorded process before replacing it:",
-          error
-        );
-      }
     }
-    delete this.deps.state.controllerLocator;
     return false;
   }
 

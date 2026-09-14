@@ -47,7 +47,7 @@ the last explicit method, remember whether any body flag appeared, return
 ## The endpoint side: match the path token, not the flag values
 
 `isGitHubIssueWriteInvocation` combines the method with the same positional filter
-`isPrMergeInvocation` uses — drop every token that starts with `-`, then test what is left:
+`isGhMergeIntent` uses — drop every token that starts with `-`, then test what is left:
 
 - `api` is a positional, some positional matches `/\/issues(?:[/?]|$)/`, and the effective method is
   not GET → a write to an issues endpoint. The regex covers `repos/o/r/issues` (create),

@@ -66,7 +66,7 @@ release, a copied template, a role prompt from another branch) still hits the re
 
 Legion has exactly one such boundary for GitHub: `legion gh` in `packages/daemon/src/cli/index.ts`
 (`cmdGh`), which every pane's `gh` shim (`<state_dir>/worker-bin/gh`) execs. It already refused
-`pr merge` and raw `gh api …/merge` (`isPrMergeInvocation`). LEGION-78 added the sibling
+`pr merge` and raw `gh api …/merge` (`isGhMergeIntent`). LEGION-78 added the sibling
 `isGitHubIssueWriteInvocation` beside it — every `issue` write verb, and any raw `gh api` call to
 an `/issues` path whose effective method is not GET
 ([how that classification works](../github-api/classify-a-raw-gh-api-call-as-a-write-by-its-effective-method.md)) —

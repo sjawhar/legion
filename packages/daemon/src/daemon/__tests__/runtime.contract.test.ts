@@ -691,11 +691,11 @@ describe("TmuxRuntime", () => {
   /** The inner OMP command the runtime assembles from `makeSpec(role)`'s launch description: the
    * invocation, RPC mode, and the one double-quoted `--append-system-prompt` word --
    * `$(cat <prompt>)`, then the addressing text, separated by a blank line (`systemPromptArguments`'
-   * format; OMP's flag is last-wins, so one argument carries every fragment; the controller has
-   * no addressing fragment). */
+   * format; OMP's flag is last-wins, so one argument carries every fragment; the controller is
+   * interactive — no RPC mode — and has no addressing fragment). */
   const ompCommand = (role: LegionRole | "controller"): string =>
     role === "controller"
-      ? `omp --mode rpc --append-system-prompt "$(cat /roles/controller-root.md)"`
+      ? `omp --append-system-prompt "$(cat /roles/controller-root.md)"`
       : `omp --mode rpc --append-system-prompt "$(cat /roles/${role}.md)\n\naddress ${role}"`;
 
   it("sameProcess treats a reissued pane -- same id, other pid or start ticks -- as a different process", async () => {
@@ -746,6 +746,7 @@ describe("TmuxRuntime", () => {
       tmuxArgv("set-option", "-t", "legion-omp", "@legion_owner", "legion-omp"),
       tmuxArgv(
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id} #{pane_id} #{pane_pid}",
@@ -1259,16 +1260,16 @@ describe("TmuxRuntime", () => {
     );
   });
 
-  it("spawns the controller into its own window with the controller socket and one file per secret", async () => {
+  it("spawns the controller into its own window running the inner command bare — no worker-shim, no socket — with one file per secret", async () => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("controller", harness.makeSpec("controller"));
     const secretFile = path.join(harness.stateDir, "secrets", "legion-omp-controller");
     const envoyTokenFile = `${secretFile}-envoy_token`;
-    const socketPath = socketFor(harness.stateDir, "controller");
     const window = harness.server.commands.find((c) => c[3] === "new-window");
     expect(window).toEqual(
       tmuxArgv(
         "new-window",
+        "-d",
         "-P",
         "-F",
         "#{window_id} #{pane_id} #{pane_pid}",
@@ -1282,18 +1283,22 @@ describe("TmuxRuntime", () => {
         `LEGION_CONTROLLER_SECRET_FILE=${secretFile}`,
         "-e",
         `ENVOY_TOKEN_FILE=${envoyTokenFile}`,
-        shimCommand(path.join(harness.stateDir, "controller"), socketPath, ompCommand("controller"))
+        `cd ${path.join(harness.stateDir, "controller")} && ${ompCommand("controller")}`
       )
     );
+    // An interactive OMP terminal session: nothing listens for the daemon, so the locator carries
+    // no socket and no socket file was prepared.
     expect(locator).toEqual({
       runtime: "tmux",
       tmuxSession: "legion-omp",
       tmuxWindowId: "@42",
       tmuxPaneId: "%1",
-      socketPath,
       panePid: 12345,
       paneStartTicks: startTicksOf(12345),
     });
+    expect(
+      await stat(socketFor(harness.stateDir, "controller")).catch(() => undefined)
+    ).toBeUndefined();
     expect(await readFile(secretFile, "utf8")).toBe("controller-secret");
     expect((await stat(secretFile)).mode & 0o777).toBe(0o600);
     expect(await readFile(envoyTokenFile, "utf8")).toBe("envoy-token");

@@ -1705,7 +1705,7 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 	defer cleanup()
 
 	reg, _ := coldRegistry(t, conn)
-	const role = "pr-queue"
+	const role = "release-captain"
 	if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {
 		t.Fatalf("seed A: %v", err)
 	}
