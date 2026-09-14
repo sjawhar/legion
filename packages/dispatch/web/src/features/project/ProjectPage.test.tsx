@@ -184,3 +184,76 @@ test("keeps the issue view preference separate for each signed-in user", async (
     window.localStorage.removeItem(bobStorageKey);
   }
 });
+
+test("the Icebox & Done toggle lives in Board view only and persists per signed-in user", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const edgesKey = "dispatch.project.board-edges:alice";
+  window.localStorage.setItem(viewKey, "board");
+
+  const first = renderPage("/projects/CORE", undefined, "alice");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    const toggle = await screen.findByRole("button", { name: "Show Icebox & Done" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle.classList.contains("min-h-11")).toBe(true);
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("button", { name: "Hide Icebox & Done" }).getAttribute("aria-pressed")
+    ).toBe("true");
+    expect(window.localStorage.getItem(edgesKey)).toBe("shown");
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(screen.queryByRole("button", { name: /Icebox & Done/ })).toBeNull();
+  } finally {
+    first.getInbox.mockRestore();
+    first.view.unmount();
+    first.getMyState.mockRestore();
+    first.listIssues.mockRestore();
+    first.listProjectArtifacts.mockRestore();
+    first.listProjects.mockRestore();
+    first.whoAmI.mockRestore();
+  }
+
+  window.localStorage.setItem(viewKey, "board");
+  const second = renderPage("/projects/CORE", undefined, "alice");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(
+      (await screen.findByRole("button", { name: "Hide Icebox & Done" })).getAttribute(
+        "aria-pressed"
+      )
+    ).toBe("true");
+  } finally {
+    second.getInbox.mockRestore();
+    second.view.unmount();
+    second.getMyState.mockRestore();
+    second.listIssues.mockRestore();
+    second.listProjectArtifacts.mockRestore();
+    second.listProjects.mockRestore();
+    second.whoAmI.mockRestore();
+  }
+
+  const bob = renderPage("/projects/CORE", undefined, "bob");
+  try {
+    window.localStorage.setItem("dispatch.project.issue-view:bob", "board");
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.click(screen.getByRole("button", { name: "Board" }));
+    expect(
+      (await screen.findByRole("button", { name: "Show Icebox & Done" })).getAttribute(
+        "aria-pressed"
+      )
+    ).toBe("false");
+  } finally {
+    bob.getInbox.mockRestore();
+    bob.view.unmount();
+    bob.getMyState.mockRestore();
+    bob.listIssues.mockRestore();
+    bob.listProjectArtifacts.mockRestore();
+    bob.listProjects.mockRestore();
+    bob.whoAmI.mockRestore();
+    window.localStorage.removeItem(viewKey);
+    window.localStorage.removeItem(edgesKey);
+    window.localStorage.removeItem("dispatch.project.issue-view:bob");
+    window.localStorage.removeItem("dispatch.project.board-edges:bob");
+  }
+});

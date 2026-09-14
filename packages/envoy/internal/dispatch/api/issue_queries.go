@@ -40,7 +40,7 @@ var listIssuesQuery = `
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
 	group by i.key
-	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
+	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
 
 var listPinnedIssuesQuery = `
@@ -56,7 +56,7 @@ var listPinnedIssuesQuery = `
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
 	group by i.key
-	order by ` + issueStatusCase + `, i.priority asc nulls last, i.rank asc, i.created_at asc
+	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
 
 const (

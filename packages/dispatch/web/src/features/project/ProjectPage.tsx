@@ -21,7 +21,7 @@ import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { userPreferenceStorageKey } from "../shell/userPreference";
+import { type UserPreference, userPreferenceStorageKey } from "../shell/userPreference";
 import { DocumentList } from "./DocumentList";
 import { IssueBoard } from "./IssueBoard";
 import { IssueList } from "./IssueList";
@@ -35,6 +35,12 @@ const tabs: readonly TabDefinition<ProjectTab>[] = [
 
 type IssueView = "list" | "board";
 
+function storedPreference(login: string | undefined, preference: UserPreference): string | null {
+  return login === undefined
+    ? null
+    : window.localStorage.getItem(userPreferenceStorageKey(login, preference));
+}
+
 export function ProjectPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
@@ -44,21 +50,23 @@ export function ProjectPage(): ReactNode {
   });
   const login = whoAmI.data?.login;
   const [issueView, setIssueView] = useState<IssueView>(() =>
-    login !== undefined &&
-    window.localStorage.getItem(userPreferenceStorageKey(login, "project.issue-view")) === "board"
-      ? "board"
-      : "list"
+    storedPreference(login, "project.issue-view") === "board" ? "board" : "list"
+  );
+  const [showEdges, setShowEdges] = useState(
+    () => storedPreference(login, "project.board-edges") === "shown"
   );
   useEffect(() => {
     if (login === undefined) {
       return;
     }
-    setIssueView(
-      window.localStorage.getItem(userPreferenceStorageKey(login, "project.issue-view")) === "board"
-        ? "board"
-        : "list"
-    );
+    setIssueView(storedPreference(login, "project.issue-view") === "board" ? "board" : "list");
+    setShowEdges(storedPreference(login, "project.board-edges") === "shown");
   }, [login]);
+  const savePreference = (preference: UserPreference, value: string) => {
+    if (login !== undefined) {
+      window.localStorage.setItem(userPreferenceStorageKey(login, preference), value);
+    }
+  };
 
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
@@ -145,12 +153,7 @@ export function ProjectPage(): ReactNode {
                 key={view}
                 onClick={() => {
                   setIssueView(view);
-                  if (login !== undefined) {
-                    window.localStorage.setItem(
-                      userPreferenceStorageKey(login, "project.issue-view"),
-                      view
-                    );
-                  }
+                  savePreference("project.issue-view", view);
                 }}
                 type="button"
               >
@@ -158,6 +161,21 @@ export function ProjectPage(): ReactNode {
               </button>
             ))}
           </fieldset>
+        ) : null}
+        {activeTab === "issues" && issueView === "board" ? (
+          <button
+            aria-pressed={showEdges}
+            className={`order-7 min-h-11 shrink-0 rounded-xl border px-3 text-sm font-medium md:order-4 md:min-h-9 md:px-2 ${borderDefault} ${
+              showEdges ? surfaceMutedStrongBg : surfaceMutedBg
+            } ${textSecondaryOnCanvas}`}
+            onClick={() => {
+              setShowEdges(!showEdges);
+              savePreference("project.board-edges", showEdges ? "hidden" : "shown");
+            }}
+            type="button"
+          >
+            {showEdges ? "Hide Icebox & Done" : "Show Icebox & Done"}
+          </button>
         ) : null}
       </header>
       <div
@@ -172,7 +190,7 @@ export function ProjectPage(): ReactNode {
           issueView === "list" ? (
             <IssueList login={login} project={route.project} />
           ) : (
-            <IssueBoard project={route.project} />
+            <IssueBoard project={route.project} showEdges={showEdges} />
           )
         ) : null}
       </div>
