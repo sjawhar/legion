@@ -42,6 +42,16 @@ agent's `envoy.json` to set the GitHub OAuth callback origin: the value must
 be the exact URL humans type in their browser, and the GitHub App callback is
 `<DISPATCH_SERVER_URL>/auth/callback`.
 
+### Finding a route
+
+The tools cover the everyday surface. For anything else, ask the server: `GET /api/v1` (no
+credential) returns every route as `{method, path, auth, description}` sorted by path — `auth`
+is `public`, `any` (a human or a bearer), `human` (a bearer gets `403 HUMAN_ONLY`), or `bearer`.
+A path Dispatch does not serve under `/api` or `/v1` answers
+`404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every
+route"}`; when you see that, you typed the path wrong — read the index rather than guessing. Every
+`/api/v1` error body carries a `code`; branch on the code, never on the text.
+
 ## Writing a spec
 
 A spec has two readers: the human who decides reads the top; the implementer who builds reads the
@@ -395,7 +405,10 @@ dispatch_message({
 delivery can post its answer automatically; use this call when the frame asks the primary agent to
 reply. `dispatch_message` itself never carries `target` or `delivery`: agent-to-agent traffic goes
 through Envoy or the hub. A bearer that targets over HTTP names its own session in `actor`
-(`{kind: "session", id}`), and the card shows that session as the author.
+(`{kind: "session", id}`), and the card shows that session as the author. `GET /api/v1/agents`
+(any authenticated caller) lists live sessions with their capabilities (`aside`, `btw`, `steer`);
+target only a session that advertises the mode you want. Sending to a session with no issue
+(`POST /api/v1/agents/{session_id}/messages`) stays human-only.
 
 ## What comes back
 

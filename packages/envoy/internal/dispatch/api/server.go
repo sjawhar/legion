@@ -127,7 +127,8 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 }
 
 type server struct {
-	deps Deps
+	deps       Deps
+	routeIndex []routeIndexEntry
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
@@ -137,89 +138,14 @@ type queryer interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// Register mounts every native-workspace route on mux.
+// Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
+// same table answers GET /api/v1.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
-	mux.HandleFunc("GET /api/v1/schema/blocks", s.getBlockSchema)
-	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
-	mux.HandleFunc("POST /api/v1/projects", s.createProject)
-	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts", s.listProjectArtifacts)
-	mux.HandleFunc("POST /api/v1/projects/{key}/artifacts", s.uploadProjectArtifact)
-	mux.HandleFunc("GET /api/v1/settings/repo-projects", s.listRepoProjects)
-	mux.HandleFunc("PUT /api/v1/settings/repo-projects/{owner}/{repo}", s.putRepoProject)
-	mux.HandleFunc("DELETE /api/v1/settings/repo-projects/{owner}/{repo}", s.deleteRepoProject)
-	mux.HandleFunc("GET /api/v1/me/agent-tokens", s.listAgentTokens)
-	mux.HandleFunc("POST /api/v1/me/agent-tokens", s.createAgentToken)
-	mux.HandleFunc("DELETE /api/v1/me/agent-tokens/{id}", s.revokeAgentToken)
-	mux.HandleFunc("GET /api/v1/issues", s.listIssues)
-	mux.HandleFunc("POST /api/v1/issues", s.createIssue)
-	mux.HandleFunc("GET /api/v1/issues/resolve", s.resolveIssue)
-	mux.HandleFunc("GET /api/v1/issues/{key}", s.getIssue)
-	mux.HandleFunc("PATCH /api/v1/issues/{key}", s.patchIssue)
-	mux.HandleFunc("GET /api/v1/issues/{key}/events", s.listIssueEvents)
-	mux.HandleFunc("GET /api/v1/issues/{key}/references", s.getIssueReferences)
-	mux.HandleFunc("GET /api/v1/issues/{key}/subscribers", s.listIssueSubscribers)
-	mux.HandleFunc("DELETE /api/v1/issues/{key}/subscribers/{session_id}", s.unsubscribeIssueSession)
-	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts", s.listArtifacts)
-	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts", s.uploadArtifact)
-	mux.HandleFunc("POST /api/v1/issues/{key}/messages", s.createMessage)
-	mux.HandleFunc("GET /api/v1/issues/{key}/messages/{id}", s.getMessage)
-	mux.HandleFunc("POST /api/v1/messages/{id}/deliveries", s.createDelivery)
-	mux.HandleFunc("POST /api/v1/messages/{id}/reply", s.replyMessage)
-	mux.HandleFunc("GET /api/v1/inbox", s.listInbox)
-	mux.HandleFunc("GET /api/v1/search", s.search)
-	mux.HandleFunc("GET /api/v1/agents", s.listAgents)
-	mux.HandleFunc("GET /api/v1/agents/{session_id}/messages", s.listAgentMessages)
-	mux.HandleFunc("POST /api/v1/agents/{session_id}/messages", s.createAgentMessage)
-	mux.HandleFunc("POST /api/v1/issues/{key}/asks", s.createAsk)
-	mux.HandleFunc("GET /api/v1/issues/{key}/asks", s.listIssueAsks)
-	mux.HandleFunc("GET /api/v1/asks/open", s.listOpenAsks)
-	mux.HandleFunc("GET /api/v1/asks/{id}", s.getAsk)
-	mux.HandleFunc("PATCH /api/v1/asks/{id}", s.editAsk)
-	mux.HandleFunc("POST /api/v1/asks/{id}/answer", s.answerAsk)
-	mux.HandleFunc("POST /api/v1/asks/{id}/resolve", s.resolveAsk)
-	mux.HandleFunc("GET /api/v1/issues/{key}/comments", s.listComments)
-	mux.HandleFunc("POST /api/v1/issues/{key}/comments", s.createComment)
-	mux.HandleFunc("POST /api/v1/comments/{id}/resolve", s.resolveComment)
-	mux.HandleFunc("POST /api/v1/comments/{id}/reopen", s.reopenComment)
-	mux.HandleFunc("GET /api/v1/comments/{id}", s.getComment)
-	mux.HandleFunc("POST /api/v1/comments/{id}/accept", s.acceptComment)
-	mux.HandleFunc("PATCH /api/v1/comments/{id}", s.editComment)
-	mux.HandleFunc("POST /api/v1/comments/{id}/reject", s.rejectComment)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/asks", s.listArtifactAsks)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/asks", s.createArtifactAsk)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/comments", s.listArtifactComments)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/comments", s.createArtifactComment)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/events", s.listArtifactEvents)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/references", s.getArtifactReferences)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/subscribers", s.listArtifactSubscribers)
-	mux.HandleFunc("DELETE /api/v1/artifacts/{id}/subscribers/{session_id}", s.unsubscribeArtifactSession)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}", s.getArtifact)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/reviews", s.listArtifactReviews)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/reviews", s.createArtifactReview)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/approval-requests", s.requestArtifactApproval)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/blocks", s.getArtifactBlocks)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/text", s.getArtifactText)
-	mux.HandleFunc("GET /api/v1/artifacts/{id}/versions/{number}", s.getArtifactVersion)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/versions", s.createNamedVersion)
-	mux.HandleFunc("POST /api/v1/artifacts/{id}/edits", s.editArtifact)
-	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}", s.getArtifact)
-	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/text", s.getArtifactText)
-	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/blocks", s.getArtifactBlocks)
-	mux.HandleFunc("GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}", s.getArtifactVersion)
-	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts/{slug}/versions", s.createNamedVersion)
-	mux.HandleFunc("POST /api/v1/issues/{key}/artifacts/{slug}/edits", s.editArtifact)
-	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}", s.getArtifact)
-	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/text", s.getArtifactText)
-	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}", s.getArtifactVersion)
-	mux.HandleFunc("GET /api/v1/projects/{key}/artifacts/{slug}/blocks", s.getArtifactBlocks)
-	mux.HandleFunc("POST /api/v1/projects/{key}/artifacts/{slug}/versions", s.createNamedVersion)
-	mux.HandleFunc("POST /api/v1/projects/{key}/artifacts/{slug}/edits", s.editArtifact)
-	mux.HandleFunc("GET /api/v1/me/state", s.getUserState)
-	mux.HandleFunc("PUT /api/v1/me/issues/{key}/state", s.putUserState)
-	mux.HandleFunc("GET /api/v1/events", s.streamEvents)
-	if deps.TestHooksEnabled {
-		mux.HandleFunc("POST /api/v1/events/_test/disconnect", s.disconnectAllStreams)
+	routes := s.routes()
+	s.routeIndex = routeIndexEntries(routes)
+	for _, route := range routes {
+		mux.HandleFunc(route.Method+" "+route.Pattern, route.Handler)
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)

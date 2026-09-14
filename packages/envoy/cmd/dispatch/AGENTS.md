@@ -68,11 +68,22 @@ The GitHub proxy needs the resolved user's stored GitHub token. Without one it
 returns `503 GITHUB_TOKEN_UNAVAILABLE`.
 ## Routes
 
+The `/api/v1` routes are one table, `api/routes_table.go` (`routes()`): `Register` mounts it and
+`GET /api/v1` (public) serves it as `{routes: [{method, path, auth, description}], docs}` sorted by
+path then method. Add a route by adding a row — never a `mux.HandleFunc` line — and bump the pinned
+count in `api/routes_table_test.go`. `auth` is `public`, `any` (user or bearer), `human`, or
+`bearer`; it describes the check the handler makes, the handler still enforces it. An unknown path
+under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
+`routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
+/api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back
+to the SPA shell.
+
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.
 
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
+| `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
 | `/auth/start` | GET | public | Start GitHub OAuth. |
 | `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
 | `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
@@ -92,8 +103,8 @@ the table says human only.
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
 | `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; matching `If-None-Match` returns `304`. |
-| `/api/v1/inbox` | GET | user or bearer | List open asks, newest first. |
-| `/api/v1/agents` | GET | human only | List live Envoy sessions, newest first. `api/agents.go` proxies the listener through `internal/dispatch/envoy`; unavailable listener responses are `503 ENVOY_UNAVAILABLE`. |
+| `/api/v1/inbox` | GET | human only | List open asks, newest first. |
+| `/api/v1/agents` | GET | user or bearer | List live Envoy sessions with their `capabilities`, newest first, so a session can pick a target that advertises the delivery mode it wants. `api/agents.go` proxies the listener through `internal/dispatch/envoy`; unavailable listener responses are `503 ENVOY_UNAVAILABLE`. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. |

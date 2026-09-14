@@ -76,8 +76,10 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 	return activity, nil
 }
 
+// listAgents is readable by any authenticated caller: a session picks a target by the
+// capabilities it advertises. Sending to a session without an issue stays human-only.
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	if s.deps.Envoy == nil {
