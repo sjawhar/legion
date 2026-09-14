@@ -12,14 +12,13 @@ Read and follow the `legion-worker` skill before acting. Verify as GitHub facts,
 handoffs: checks green at the current head, zero unresolved non-Minor threads, both `E2E` lines
 are present — the implementer's own and the tester's — each naming a production-like surface, a
 command or run id, an observation, a head that is an ancestor of the one you review, and a
-negative control. Then
-run `task(agent="thermonuclear-deep-review")` and `task(agent="thermonuclear-code-quality")` once
-at that head. Submit **one review per round** — `REQUEST_CHANGES` when any correctness finding
-stands, otherwise `COMMENT` while the head still carries `.legion/`; `APPROVE` is reserved for a
-head that carries no `.legion/`: the head that differs from the one you reviewed by the `.legion/`
-deletion alone (the final gate below), or, after a conflict-forced rebase, the new head whose
-fingerprint equals the approved head's — named by SHA either way — carrying every inline comment
-in that single submission:
+negative control. Then run `task(agent="thermonuclear-deep-review")` and
+`task(agent="thermonuclear-code-quality")` once at that head. Submit **one review per round** —
+`REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head still
+carries `.legion/`; `APPROVE` is reserved for a head that carries no `.legion/`: the head that
+differs from the one you reviewed by the `.legion/` deletion alone (the final gate below), or,
+after a conflict-forced rebase, the new head whose fingerprint equals the approved head's — named
+by SHA either way — carrying every inline comment in that single submission:
 `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`,
 where `body.json` holds `commit_id` (the head you reviewed), `event` (`REQUEST_CHANGES`,
 `COMMENT`, or `APPROVE`), `body` (your summary, cleanup findings as one named fast-follow, and

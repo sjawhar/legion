@@ -63,10 +63,11 @@ undescribed working-copy commit (before LEGION-58 it also carried the daemon-pro
 (`legion/<KEY>-<slug>`, here `legion/LEGION-34-cli-tidy`), `jj git push --bookmark <it>` (the
 first push tracks it), then `legion gh -- pr create` with a conventional title that names the parent
 issue (`refactor(cli): … (LEGION-34 fast-follow)`), `Dispatch: <KEY>` in the body, a link to the
-parent PR, and the READY-format Verification block — `Threads: none`, `Thermo` and `E2E` left for
-the reviewer and tester, `Fast-follow: none`, `Chain: not stacked`. The handoff file goes on this
-new branch; the phase lifecycle (tester, reviewer, `.legion/` deletion, approval by SHA, retro,
-merger) runs on it exactly as on the parent.
+parent PR, and the READY-format Verification block — `Threads: none`, `Thermo` left for the
+reviewer, the `E2E (implementer)` line written by the implementer when the pull request opens and
+the `E2E (tester)` line by the tester, `Fast-follow: none`, `Chain: not stacked`. The handoff file
+goes on this new branch; the phase lifecycle (tester, reviewer, `.legion/` deletion, approval by
+SHA, retro, merger) runs on it exactly as on the parent.
 
 ## Registering with the merge queue at open
 

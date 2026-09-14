@@ -280,6 +280,25 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
+**A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
+as the exact command or run id, what was observed, the head SHA, and one negative control —
+a deliberately broken input and the refusal or failure it produced. The surface is
+**production-like** — the repository's real-process test harness and fixtures, a sandbox
+repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
+has the resource the change touches — and each `E2E` line carries a **link** to that run,
+screenshot, or e2e; the merge queue does not approve a user-facing change without it, and a
+green unit suite is not it. A unit or integration test is a regression lock, never proof of a
+criterion. Sami, 2026-09-13, verbatim: "They need to test everything in a production-like
+environment before merging, and it is the agent that develops the feature that is responsible
+for doing that. If there's anything blocking that, we need to fix it: if it's infrastructure, we
+need to fix it; if it's tooling, we need to develop it; if it's skills, we need to fix the skills
+... it should not require deploying to production to realize your feature doesn't work."
+Evidence for the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on
+inspection (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six
+deploy slots died on code first executed after merge, including a production-only ECS bootstrap
+the whole staging gate never ran. The implementer's proof and the tester's proof below are both
+this proof.
+
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
   thread gets its own line naming the fixing commit or the reason it isn't a defect. The
   reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
@@ -319,40 +338,23 @@ Verified the implementer's proof by <re-running its command | driving the same s
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
-  The proof is the changed behaviour exercised on the surface a user reaches it through — the daemon's
-  test harness (`packages/daemon/src/daemon/__tests__/`) and real-process fixtures; a live check at the
-  operator's next daemon restart, recorded on the PR; a sandbox repository, a real browser, a devN stack,
-  or a local stack with real migrations — with the exact command or run id, what was observed, the head SHA,
-  one negative control. The same proof goes into `.legion/implement.json` as its required `proof`
-  array (`legion handoff write --phase implement` refuses a payload without one and names the
-  field), and into the PR body, because the reviewer and the merger verify facts on GitHub and
-  never from a handoff. A unit or integration test is a regression lock, never proof of a
-  criterion.
+  The proof is the one defined above. It goes into `.legion/implement.json` as the required `proof`
+  array (`legion handoff write --phase implement` refuses a payload without one, or with a blank or
+  whitespace-only field, and names the field), and into the PR body, because the reviewer and the
+  merger verify facts on GitHub and never from a handoff.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
-  the implementer's command or drives the same surface independently, records the verdict in
-  `.legion/test.json` as `implementerProof` (`{verdict, how}`), and records its own proof beside
-  it. A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
+  the implementer's command or drives the same surface independently, and records the verdict in
+  `.legion/test.json` as `implementerProof` (`{verdict, how}`).
+  A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
   the architect return the issue to the implementer — the agent that developed the change owns
-  proving it. The tester's own proof names the real surface a user reaches the criterion
-  through, the exact command or run id, what was observed, the head SHA, and one negative
-  control — a deliberately broken input and the refusal or failure it produced. The surface is
-  **production-like** — a devN stack, staging, or a local stack with real migrations, one that
-  has the resource the change touches — and each `E2E` line carries a **link** to that run,
-  screenshot, or e2e; the merge queue does not approve a user-facing change without it, and a
-  green unit suite is not it. Sami, 2026-09-13, verbatim: "They need to test everything in a
-  production-like environment before merging, and it is the agent that develops the feature
-  that is responsible for doing that. If there's anything blocking that, we need to fix it: if
-  it's infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's
-  skills, we need to fix the skills ... it should not require deploying to production to
-  realize your feature doesn't work." A code path whose first execution is after merge — a
+  proving it (`legion handoff write --phase test` refuses a rejected verdict, or `failed > 0`,
+  with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
+  above — as the `E2E (tester)` line and the `proof` array `legion handoff write --phase test`
+  requires whenever you report no failure. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
   until the implementer has executed it against a devN stack; if no surface can reach it, the
-  tester names that missing surface as the blocker instead of passing the phase. Evidence for
-  the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on inspection
-  (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six deploy
-  slots died on code first executed after merge, including a production-only ECS bootstrap the
-  whole staging gate never ran. Environment or
+  tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
   re-pasted into the PR body each round. After a conflict-forced rebase, compute the
@@ -536,10 +538,10 @@ and, for the implementer, until the push has too. This is the committed copy the
 reads after revival. It is removed once, at the end of a clean review: the implementer pushes
 that deletion at the reviewer's direction. No other phase removes it — and once it is gone
 (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout; jj warns on
-stderr), this gate no longer applies: a later rebase, bare-gate re-check, confirmation, or retro
-writes no `.legion/<phase>.json`, commits no handoff, and reports with `legion handoff complete`
-alone (below). Recreating `.legion/` after its deletion changes the approved head and restarts
-the review loop this rule exists to end.
+stderr), this gate no longer applies: a later rebase, bare-gate re-check, confirmation, retro, or
+the post-merge production check writes no `.legion/<phase>.json`, commits no handoff, and reports
+with `legion handoff complete` alone (below). Recreating `.legion/` after its deletion changes the
+approved head and restarts the review loop this rule exists to end.
 
 ## Completion: report to the architect, then stay
 
