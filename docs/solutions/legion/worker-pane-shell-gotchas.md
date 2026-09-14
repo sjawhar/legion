@@ -423,10 +423,10 @@ Two things that bit the same runs. First, §1's copied credential block: a comma
 call — and a `jj git push` through the credential helper fails as `could not read Username for
 'https://github.com'`, which looks like a broken helper and is not. Running the command from the eval kernel's
 `tool.bash` bridge, with the shell in a script file (`bash /tmp/<issue>-step.sh`), keeps the model's own transcript
-out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, every edit of the PR
-body re-runs the whole `Tests` workflow (`pull_request: types: [opened, edited, reopened, synchronize]` in
-`.github/workflows/pr-and-main.yaml`), so paste command output into the body once per round, after that round's last
-push, never per fact; the `CI:` line cites the `Tests` run id at the head
+out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, a body-only
+PR edit re-runs only the `PR Title` workflow (`pull_request: types: [opened, edited, reopened, synchronize]`
+in `.github/workflows/pr-title.yaml`). The Tests workflow does not subscribe to `edited`; the `CI:` line cites
+the distinct Tests and PR Title run ids at the head
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).
 
 **Two corrections from LEGION-78 (sjawhar/legion#1015), where the branch made `legion gh` refuse a command the
