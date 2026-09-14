@@ -83,14 +83,14 @@ is cheap enough (40 s here) that it was re-run anyway.
 
 ## 5. jj housekeeping specific to a rebased worker branch
 
-- The extension's uncommitted `.omp/config.yml` lives in the empty working-copy commit. Two
-  rebases of the chain made that change divergent (two empty siblings of the head). Neither is
-  under the bookmark and neither holds tracked content; `jj edit <one of them>` puts the working
-  copy back on the tip. The worker skill forbids `jj abandon`, so leave the other in place and note
-  it in the handoff.
+- Before LEGION-58 the daemon-provisioned `.omp/config.yml` lived in the empty working-copy
+  commit. Two rebases of the chain made that change divergent (two empty siblings of the head).
+  Neither is under the bookmark and neither holds tracked content; `jj edit <one of them>` puts the
+  working copy back on the tip. The worker skill forbids `jj abandon`, so leave the other in place
+  and note it in the handoff.
 - After every `jj split` or `jj squash` that rewrites the head, re-run
   `jj bookmark set legion/<KEY> -r @- --allow-backwards` before pushing; the bookmark otherwise
-  points at the working-copy commit that carries `.omp/config.yml`.
+  points at the undescribed working-copy commit, which `jj git push` refuses.
 - A reviewer's locally committed handoff sits above origin in the shared workspace (the review App
   cannot push). It rides along on the implementer's next push; confirm it is an ancestor of your
   commit with `jj log` before building on it, and mention it in the push summary.

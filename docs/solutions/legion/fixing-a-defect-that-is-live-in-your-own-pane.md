@@ -68,8 +68,8 @@ commits you made (the skill's pre-push check says exactly this since this issue)
 conflict inside a rebased chain without `jj edit`. It leaves `@` on the (now empty) scratch
 child of that commit, not on your working-copy commit at the tip; `legion handoff write` then
 writes into the wrong place. Return with `jj edit <your own working-copy change id>` — the
-undescribed commit holding only `.omp/config.yml`, never a described commit or another role's —
-and the empty scratch commit is abandoned automatically. Record the detour in the handoff.
+undescribed working-copy commit, never a described commit or another role's — and the empty
+scratch commit is abandoned automatically. Record the detour in the handoff.
 
 ## Take the docs fast-follow before the `.legion/` deletion
 

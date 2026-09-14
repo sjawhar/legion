@@ -943,7 +943,7 @@ describe("ProcessManager", () => {
     state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
     await processes.spawnRoot(root);
 
-    expect(await readFile(path.join(workspace, ".omp", "config.yml"), "utf8")).toBe("");
+    expect(existsSync(path.join(workspace, ".omp", "config.yml"))).toBeFalse();
     expect(state.trees[root]).toMatchObject({
       generation: 1,
       status: "active",
@@ -10078,11 +10078,11 @@ describe("ProcessManager", () => {
   });
 
   // jj keeps a rewritten commit's author: `jj split`/`jj describe` carve a phase's work out of the
-  // issue's working-copy commit and only refresh the committer, so whoever created that commit —
-  // the daemon's own `jj workspace add`, never recreated by a split while `.omp/config.yml` sits in
-  // it — would author every commit in the workspace. Delivering an assignment therefore adopts an
-  // undescribed working copy for the role, under the JJ_USER/JJ_EMAIL pair of the pane's lease identity
-  // (LEGION-44). The recorded command's own env is asserted, never re-derived.
+  // issue's working-copy commit and only refresh the committer. The daemon's `jj workspace add`
+  // created it under the daemon's identity, so jj preserves that author even when a split leaves
+  // the remaining undescribed working copy empty. The runtime adopts that copy for the role under
+  // the JJ_USER/JJ_EMAIL pair of the pane's lease identity (LEGION-44). The recorded command's
+  // own env is asserted, never re-derived.
   /** Records every `jj metaedit` the daemon runs, with the command's env and timeout budget and how
    * many prompts the worker had received when it ran (0 = before the assignment frame). */
   function recordingMetaedits(client: FakeWorkerRpcClient) {

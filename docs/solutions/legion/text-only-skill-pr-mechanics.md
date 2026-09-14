@@ -31,15 +31,15 @@ symptoms:
 Learned on LEGION-18 (sjawhar/legion#953), nine text fixes to `skills/*/SKILL.md`,
 `packages/pi-envoy/roles/*.md`, and two `AGENTS.md` files. Nothing here is about the fixes
 themselves; it is about how a Legion worker lands and verifies a documentation-only change.
-Pane mechanics (stacked grants, `.omp/config.yml`, bookmark placement, a reviewer's unpushed
-commit) are in [worker-pane-shell-gotchas.md](worker-pane-shell-gotchas.md).
+Pane mechanics (stacked grants, bookmark placement, a reviewer's unpushed commit) are in
+[worker-pane-shell-gotchas.md](worker-pane-shell-gotchas.md).
 
 ## 1. Two path-scoped commits that touch the same file: sequence the edits
 
 Workers commit with `jj -R "$LEGION_WORKSPACE" split -m '…' <paths…>`, never a whole-working-copy
-commit (the daemon-provisioned `.omp/config.yml` sits untracked in every issue workspace). Path
-scoping is all-or-nothing per file: if two planned commits both touch `skills/legion-worker/SKILL.md`,
-`jj split … skills/legion-worker/SKILL.md` takes every hunk in that file into the first commit.
+commit. Path scoping is all-or-nothing per file: if two planned commits both touch
+`skills/legion-worker/SKILL.md`, `jj split … skills/legion-worker/SKILL.md` takes every hunk in that
+file into the first commit.
 
 Do the edits in commit order and split between them: apply commit A's hunks, `jj split` A's paths,
 then apply commit B's hunks, `jj split` B's paths. If you have already batched all edits (LEGION-18

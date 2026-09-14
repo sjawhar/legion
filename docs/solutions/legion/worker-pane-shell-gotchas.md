@@ -213,10 +213,9 @@ an assignment says "run the root suite", run the daemon package's suite and say 
 
 ## 3. `jj split` leaves the bookmark on the empty working copy
 
-Workers commit with `jj split -m '…' <explicit paths>` so the extension-provisioned, uncommitted `.omp/config.yml`
-never enters a commit. After a split the issue bookmark sits on the **remaining** half — the new, undescribed working
-copy — not on the commit you just described. `jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark
-backwards or sideways`). Before every push:
+Workers commit with `jj split -m '…' <explicit paths>` (the worker skill's completion gate). After a split the issue
+bookmark sits on the **remaining** half — the new, undescribed working copy — not on the commit you just described.
+`jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push:
 
 ```bash
 jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards
@@ -390,9 +389,10 @@ deployed the pane's `legion` has no `threads` subcommand, see §13; a worker on 
 existed on any branch), is §3 of that same note; the tester completion's status write is
 verdict-blind (`phaseCompleteStatus` in `api/routes/workers.ts` returns `needs_review` for a tester whatever it
 found), so a FAIL is carried by the tester's comment and the architect's own `set_status in_progress` seconds later —
-a sibling architect reading Dispatch status alone will see `needs_review` flash by; the daemon-provisioned untracked
-`.omp/config.yml` that every path-scoped commit must leave out is [text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md) §1
-and is filed as LEGION-58.
+a sibling architect reading Dispatch status alone will see `needs_review` flash by. The daemon-provisioned
+`.omp/config.yml` that every path-scoped commit once had to leave out is gone since LEGION-58 (provisioning no longer
+writes it; OMP needed nothing from it — absent and empty parse the same, `{}`) for every workspace provisioned after
+the daemon that carries it was deployed; a tree provisioned before that keeps its copy until it closes, and its workers keep the path-scoped habit.
 
 ## 13. The pane's `legion` is the deployed daemon's build: a new CLI subcommand is exercised live from the workspace (from LEGION-34)
 

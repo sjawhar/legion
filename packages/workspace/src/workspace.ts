@@ -275,12 +275,6 @@ async function createWorkspace(
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
 
-async function writeOmpConfig(workspaceDir: string): Promise<void> {
-  const ompDir = path.join(workspaceDir, ".omp");
-  await mkdir(ompDir, { recursive: true });
-  await writeFile(path.join(ompDir, "config.yml"), "", "utf8");
-}
-
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
  * workspace is the one config file every workspace of the clone shares, so a value there applies
  * to every tree at once. A pane's commits are unaffected — identity rides each pane's environment
@@ -497,7 +491,6 @@ export async function provisionIssueWorkspace(
     "false",
   ]);
   await removeRepoScopedIdentity(deps, repoCloneDir);
-  await writeOmpConfig(workspaceDir);
 
   return { repoCloneDir, workspaceDir, bookmark };
 }

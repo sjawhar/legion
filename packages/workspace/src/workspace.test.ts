@@ -55,12 +55,8 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
 }
 
 const temporaryDirectories: string[] = [];
-const originalMaxRecursionDepth = process.env.LEGION_MAX_RECURSION_DEPTH;
 
 afterEach(async () => {
-  if (originalMaxRecursionDepth === undefined) delete process.env.LEGION_MAX_RECURSION_DEPTH;
-  else process.env.LEGION_MAX_RECURSION_DEPTH = originalMaxRecursionDepth;
-
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -295,7 +291,6 @@ describe("provisionIssueWorkspace", () => {
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const bookmark = "legion/WIDGETS-42";
     const calls: RunCall[] = [];
-    process.env.LEGION_MAX_RECURSION_DEPTH = "11";
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     let spec: WorkspaceSpec;
     let logged: unknown[][];
@@ -380,7 +375,7 @@ describe("provisionIssueWorkspace", () => {
     expect(
       (await readdir(path.dirname(repoCloneDir))).filter((entry) => entry.startsWith("widgets."))
     ).toEqual([]);
-    expect(await readFile(path.join(workspaceDir, ".omp", "config.yml"), "utf8")).toBe("");
+    expect(existsSync(path.join(workspaceDir, ".omp", "config.yml"))).toBeFalse();
     expect(spec).toEqual({ repoCloneDir, workspaceDir, bookmark });
   });
 
@@ -395,7 +390,6 @@ describe("provisionIssueWorkspace", () => {
     // Neither clone returns before both callers are inside `jj git clone`: both have passed the
     // "already cloned?" check and hold a temporary destination, so two clones always run.
     const bothCloning = Promise.withResolvers<void>();
-    process.env.LEGION_MAX_RECURSION_DEPTH = "11";
 
     const deps = {
       repo: "acme/widgets" as const,
@@ -466,7 +460,6 @@ describe("provisionIssueWorkspace", () => {
     const bookmark = "legion/WIDGETS-42";
     const commit = "3f2a9c1e5b7d4a6c8e0f1a2b3c4d5e6f7a8b9c0d";
     const calls: RunCall[] = [];
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     let logged: unknown[][];
@@ -515,7 +508,6 @@ describe("provisionIssueWorkspace", () => {
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
       repo: "acme/widgets",
@@ -565,7 +557,6 @@ describe("provisionIssueWorkspace", () => {
         ).exitCode
       ).toBe(0);
     }
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
       repo: "acme/widgets",
@@ -637,7 +628,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect((await runCommand([SYSTEM_GIT, "init", "--bare", gitDir])).exitCode).toBe(0);
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     await mkdir(workspaceDir, { recursive: true });
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
     await provisionIssueWorkspace(issue, {
       repo: "acme/widgets",
@@ -689,7 +679,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const calls: RunCall[] = [];
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     const deps = {
@@ -883,14 +872,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       );
       const siblingDir = path.join(stateDir, "sibling");
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
-      // The worker's first jj command snapshots the `.omp/config.yml` provisioning wrote, moving the
-      // bookmark with `@` on the main operation line. Without it, the second provision's
-      // `update-stale` snapshots on a divergent operation (jj loads the repo at the workspace's last
-      // recorded operation), moves the bookmark there too, and the reconciliation conflicts it with
-      // the `sibling-advance` move below — a jj behaviour, not a bookmark this code touched.
+      // Snapshot the initial working copy so later concurrent workspace operations exercise its
+      // recorded jj state.
       await jj(["status"], { cwd: workspaceDir });
       await jj(workspaceAddCommand(siblingDir, "sibling", "main", repoCloneDir).slice(1));
       await jj(["new", "-m", "sibling advancement"], { cwd: siblingDir });
@@ -940,14 +925,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         stateDir
       );
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       const firstProvisioning = calls.slice(0, 3);
-      // The worker's work: a file the pushed commit carries. Snapshotting it (together with the
-      // `.omp/config.yml` provisioning wrote) makes that commit the bookmark's final target — jj
-      // deletes a local bookmark on fetch only while it still points where the deleted remote
-      // branch did.
+      // The worker's work is a file the pushed commit carries. Snapshotting it makes that commit
+      // the bookmark's final target — jj deletes a local bookmark on fetch only while it still
+      // points where the deleted remote branch did.
       await writeFile(path.join(workspaceDir, "feature.txt"), "shipped\n", "utf8");
       await jj(["status"], { cwd: workspaceDir });
       await jj(
@@ -1016,7 +999,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         stateDir
       );
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       // The worker's shape: the pushed head carries the bookmark, `@` is new work on top of it.
@@ -1058,7 +1040,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         ).stdout
           .split("\n")
           .filter((line) => line.startsWith(`point bookmark ${bookmark}`)).length;
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await jj(["status"], { cwd: workspaceDir });
@@ -1092,7 +1073,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       const stateDir = path.join(await temporaryDirectory(), "state");
       const { repoCloneDir, workspaceDir, calls, jj, deps } = await realJjRig(command, stateDir);
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await jj(["new", "-m", "later work"], { cwd: workspaceDir });
@@ -1161,7 +1141,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const commit = "3f2a9c1e5b7d4a6c8e0f1a2b3c4d5e6f7a8b9c0d";
     const calls: RunCall[] = [];
     let workspaceAddAttempts = 0;
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     await mkdir(workspaceDir, { recursive: true });
     await rm(workspaceDir, { recursive: true });
@@ -1227,7 +1206,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const gitDir = path.join(repoCloneDir, ".git");
     const calls: RunCall[] = [];
     let workspaceAddAttempts = 0;
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     await mkdir(workspaceDir, { recursive: true });
     await rm(workspaceDir, { recursive: true });
@@ -1294,7 +1272,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       "4e4bde478a1d5f6e7a8b9c0d1e2f3a4b5c6d7e8f",
     ];
     const calls: RunCall[] = [];
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     await expect(
@@ -1332,7 +1309,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
     const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
     const calls: RunCall[] = [];
-    process.env.LEGION_MAX_RECURSION_DEPTH = "8";
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
     await expect(
@@ -1600,7 +1576,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       );
       const workspaceB = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-43");
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
       // Provisioning itself writes `git.abandon-unreachable-commits = false` before every fetch
       // (LEGION-84), so the fetch below that deletes the merged branch's bookmark keeps A's
       // commits — the removal, not the fetch, is what makes them leave B's log.
@@ -1726,7 +1701,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       );
       const workspaceB = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-43");
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await provisionIssueWorkspace("WIDGETS-43", deps);
@@ -1785,7 +1759,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         stateDir
       );
       const bookmark = "legion/WIDGETS-42";
-      process.env.LEGION_MAX_RECURSION_DEPTH = "8";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await jj(["status"], { cwd: workspaceDir });
