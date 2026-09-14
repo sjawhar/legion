@@ -15,6 +15,7 @@ module: packages/daemon
 related_issues:
   - "LEGION-59"
   - "sjawhar/legion#998"
+  - "LEGION-82"
 symptoms:
   - "an issue's Dispatch history shows testing right after retro"
   - "a child issue reads todo → needs_review → retro, never in_progress"
@@ -37,7 +38,7 @@ The daemon's lifecycle writes all go through `writeStatus` (`dispatch-client.ts`
 
 | transition | writer | where |
 | --- | --- | --- |
-| admission → `in_progress` | `spawnTree`, for `tree.root` | `processes.ts` |
+| first admission → `in_progress` | `spawnTree` with `resume: false`, for `tree.root` — a resurrection (`resume: true`, from `resurrectDeadTree`) relaunches the same session and writes nothing (LEGION-82) | `processes.ts` |
 | release → `todo` | `/waves/release` (architect capability) | `api/routes/issues.ts` |
 | implementer completion → `testing` (only from `in_progress`) | `phaseCompleteStatus` | `api/routes/workers.ts` |
 | tester completion → `needs_review`; reviewer completion → `retro` or `in_progress` (changes requested) | `phaseCompleteStatus` | `api/routes/workers.ts` |

@@ -1926,7 +1926,42 @@ describe("ProcessManager", () => {
 
     expect(managedState.trees[root]).toMatchObject({ status: "active" });
     expect(managedState.trees[root]?.locator).toBeDefined();
-    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(statusWrites).toEqual([]);
+  });
+
+  it("resurrects a dead root at retro without writing any Dispatch status: a resume is not an admission", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    // Past `in_progress`: the status a merged issue sits at while its held-for-verification
+    // implementer waits. A resurrection here must not move it.
+    state.issues[root] = { key: root, title: "Root", status: "retro", children: [] };
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const {
+      manager: processes,
+      state: managedState,
+      commands,
+    } = manager(state, {
+      config: config(stateDir),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+    });
+
+    await processes.resurrect(root);
+
+    expect(statusWrites).toEqual([]);
+    expect(managedState.trees[root]).toMatchObject({ generation: 2, status: "active" });
+    expect(managedState.trees[root]?.locator).toBeDefined();
+    const launch = commands.find((c) => c[0] === "tmux" && c[3] === "new-window");
+    expect(launch?.at(-1)).toContain(`--resume=${sessionFile}`);
   });
 
   it("marks a closed tree lingering again when its stale-pane retirement fails, instead of stranding an unreapable locator", async () => {
@@ -15335,7 +15370,7 @@ describe("ProcessManager", () => {
     expect(resurrectSpy).toHaveBeenCalledTimes(1);
     expect(resurrectSpy).toHaveBeenCalledWith(root);
     expect(managedState.trees[root]).toMatchObject({ status: "active" });
-    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(statusWrites).toEqual([]);
   });
 
   // `observed` is what the pane itself reports, distinct from the recorded identity every case

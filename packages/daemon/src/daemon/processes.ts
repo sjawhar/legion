@@ -3199,7 +3199,13 @@ export class ProcessManager {
     // continuation is preserved and this call is a harmless no-op wait: `stillUnconfirmed`
     // checks `readyConfirmedAt` itself before ever probing.
     this.armRootRegistrationDeadline(tree.root, generation);
-    await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");
+    // Only a first admission moves the issue to `in_progress`. A resurrection (`resume`) relaunches
+    // the same recorded session onto a fresh pane after the lifecycle may already have moved the
+    // issue on (`testing`, `needs_review`, `retro`, or a human's `todo`); it writes no status, so
+    // later phase completions keep acting on the true one.
+    if (!resume) {
+      await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");
+    }
   }
 
   private issueDepth(issue: IssueKey): number {
