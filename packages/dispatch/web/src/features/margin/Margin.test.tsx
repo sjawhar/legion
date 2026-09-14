@@ -555,7 +555,9 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
     expect(await within(needsYou).findByText(unanchoredAsk.question)).toBeTruthy();
     expect(within(needsYou).getAllByRole("time")).toHaveLength(1);
     expect(within(needsYou).queryByLabelText("Your answer")).toBeNull();
-    expect(within(needsYou).getByText("Answer in your own words", { exact: true })).toBeTruthy();
+    expect(
+      within(needsYou).getByText("Add a note or answer in your own words", { exact: true })
+    ).toBeTruthy();
     const shipOption = await within(needsYou).findByRole("button", { name: "Ship" });
     fireEvent.click(shipOption);
     expect(shipOption.getAttribute("aria-pressed")).toBe("true");

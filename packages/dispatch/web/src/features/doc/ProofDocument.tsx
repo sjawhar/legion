@@ -15,6 +15,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { copyText } from "../../lib/clipboard";
 import {
   badgeBlocking,
@@ -158,7 +159,10 @@ const renderTypedBlock: HostBlockRenderer = (node) => {
         : `Option ${blankOption} has no label`);
   const malformed = malformedReason !== undefined;
   const blockId = String(node.attrs.blockId);
-  const answered = node.attrs.state === "answered";
+  const state = String(node.attrs.state);
+  const open = state === "open";
+  const answered = state === "answered";
+  const closedLabel = state === "resolved" ? "Resolved" : "Closed";
   return [
     "section",
     {
@@ -180,8 +184,12 @@ const renderTypedBlock: HostBlockRenderer = (node) => {
           ]
         : ["strong", {}, "Decision"],
       malformed ? "" : ["span", { class: "text-sm" }, String(node.attrs.urgency)],
-      !malformed && answered
-        ? ["span", { class: "text-sm" }, `Answered by ${String(node.attrs.answered_by)}`]
+      !malformed && !open
+        ? [
+            "span",
+            { class: "text-sm" },
+            answered ? `Answered by ${String(node.attrs.answered_by)}` : closedLabel,
+          ]
         : "",
     ],
     malformed ? ["p", { class: `mb-2 text-sm font-medium ${dangerText}` }, malformedReason] : "",
@@ -201,8 +209,10 @@ const renderTypedBlock: HostBlockRenderer = (node) => {
           { class: `mt-3 text-sm ${textMutedOnSurface}` },
           "Fix the block text; the decision re-activates once it parses.",
         ]
-      : answered
-        ? ["p", { class: "mt-3 text-sm" }, String(node.attrs.answer ?? "Answered")]
+      : !open
+        ? answered
+          ? ["p", { class: "mt-3 text-sm" }, String(node.attrs.answer ?? "Answered")]
+          : ""
         : [
             "form",
             { class: "mt-3 grid gap-2", "data-dispatch-ask-form": blockId },
@@ -401,10 +411,15 @@ export function ProofDocument({
     queryFn: () =>
       owner.kind === "issue" ? api.listIssueAsks(owner.key) : api.listArtifactAsks(artifact.id),
   });
+  const [blockAnswerError, setBlockAnswerError] = useState<string | undefined>(undefined);
   const answerBlockAsk = useMutation({
     mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text: string }) =>
       api.answerAsk(ask.id, answerAskInput(ask, selected, text)),
+    onError: (_error, { ask }) => {
+      setBlockAnswerError(ask.block_id ?? undefined);
+    },
     onSuccess: () => {
+      setBlockAnswerError(undefined);
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });
       if (owner.kind === "issue") {
@@ -470,6 +485,7 @@ export function ProofDocument({
       .getAll("selected")
       .filter((value): value is string => typeof value === "string");
     const text = String(data.get("answer") ?? "");
+    setBlockAnswerError(undefined);
     answerBlockAsk.mutate({ ask, selected, text });
   };
   const openBlockAsks = (asksQuery.data ?? [])
@@ -774,8 +790,8 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: delegates to the rendered <a> elements,
-      which are already keyboard-operable — Enter on a focused link fires a click that bubbles here. */}
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: link clicks bubble here while the capture
+      handler reserves textarea key events for form entry and submission. */}
       <article
         aria-label="Document"
         className="dispatch-doc relative"
@@ -801,9 +817,42 @@ export function ProofDocument({
           event.preventDefault();
           navigate(isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route));
         }}
+        onKeyDownCapture={(event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLTextAreaElement)) {
+            return;
+          }
+          if (
+            event.key === "Enter" &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.nativeEvent.isComposing
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            const start = target.selectionStart ?? target.value.length;
+            const end = target.selectionEnd ?? start;
+            target.setRangeText("\n", start, end, "end");
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            return;
+          }
+          if (submitOnModifiedEnter(event, () => target.form?.requestSubmit())) {
+            event.stopPropagation();
+          }
+        }}
         onSubmit={submitBlockAnswer}
       >
         <div ref={root} />
+        {blockAnswerError === undefined ? null : (
+          <p
+            className={`pointer-events-none absolute right-3 z-20 text-sm ${dangerText}`}
+            data-dispatch-ask-error={blockAnswerError}
+            role="alert"
+            style={{ top: `${blockPlacements.get(blockAnswerError)?.top ?? 0}px` }}
+          >
+            Could not save your answer.
+          </p>
+        )}
         {blockReferencesQuery.data?.some(
           (block) => block.references.comments + block.references.asks > 0
         ) ? (

@@ -67,7 +67,7 @@ test("BTW sends an ephemeral question and shows its answer live in both readers"
         response.status() === 201
     );
     await alicePage.getByRole("textbox", { name: "Message" }).fill(question);
-    await alicePage.getByRole("textbox", { name: "Message" }).press("Enter");
+    await alicePage.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     const message = (await (await created).json()) as { id: string };
     const card = targetedCard(alicePage, question);
     await expect(card).toContainText("Asking planner (BTW) ·");
@@ -116,7 +116,7 @@ test("a failed BTW attempt remains retryable until a reply lands", async ({ brow
         response.status() === 201
     );
     await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Enter");
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     const message = (await (await initial).json()) as { id: string };
     const card = targetedCard(page, question);
     await expect(card).toContainText("Failed: no live session s1");

@@ -172,7 +172,8 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   );
   await alicePage.goto("/");
   const textOnlyCard = alicePage.getByTestId(`ask-${textOnlyAsk.id}`);
-  // A typed answer is the text-only option; no separate choice is required.
+  // Select Other before entering the alternative answer, so the decision records no real option.
+  await textOnlyCard.getByRole("radio", { name: "Other" }).check();
   await textOnlyCard
     .getByLabel("Your answer")
     .fill("Neither option fits; going with a third path.");

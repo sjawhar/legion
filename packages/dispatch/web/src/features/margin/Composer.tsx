@@ -14,6 +14,7 @@ import {
 import { ApiError, api } from "../../api/client";
 import type { AskOption, AskUrgency } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeBlocking,
@@ -446,11 +447,8 @@ export function Composer({
       setPickerOpen(true);
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      if (canSubmit) {
-        submitGuard.guard(() => save.mutate(currentDraft()));
-      }
+    if (submitOnModifiedEnter(event)) {
+      return;
     }
   };
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -541,6 +539,7 @@ export function Composer({
               setReplacement(event.target.value);
               setConfirmingDiscard(false);
             }}
+            onKeyDown={(event) => submitOnModifiedEnter(event)}
             ref={replacementTextarea}
             value={replacement}
           />

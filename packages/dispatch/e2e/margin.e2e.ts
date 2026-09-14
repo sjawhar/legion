@@ -691,7 +691,7 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await setSheet(alicePage, testInfo.project.name, true);
     const aliceCard = marginCard(alicePage, ask.id);
     await expect(aliceCard).toContainText("brown");
-    await aliceCard.getByRole("button", { name: "Answer in your own words" }).click();
+    await aliceCard.getByRole("button", { name: "Add a note or answer in your own words" }).click();
     await aliceCard.getByLabel("Your answer").fill("Because it is precise.");
     await aliceCard.getByRole("button", { exact: true, name: "Answer" }).click();
     await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });

@@ -4,6 +4,7 @@ import { type ReactNode, useId, useRef, useState } from "react";
 import { api, type CreateArtifactReviewInput } from "../../api/client";
 import type { Artifact, ArtifactApproval } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
+import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   backdrop40,
@@ -143,6 +144,13 @@ function RequestChangesDialog({
               disabled={saving}
               id={reasonId}
               onChange={(event) => setReason(event.target.value)}
+              onKeyDown={(event) =>
+                submitOnModifiedEnter(event, () => {
+                  if (trimmed !== "" && !saving) {
+                    onSubmit(trimmed);
+                  }
+                })
+              }
               ref={textareaRef}
               value={reason}
             />

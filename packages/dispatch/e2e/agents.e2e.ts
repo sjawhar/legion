@@ -88,7 +88,7 @@ test("Agents shows live status and sends a targeted BTW from a selected issue", 
         response.status() === 201
     );
     await page.getByRole("textbox", { name: "Message" }).fill(body);
-    await page.getByRole("textbox", { name: "Message" }).press("Enter");
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
     const request = await sent;
     expect(request.request().postDataJSON()).toMatchObject({
       body,

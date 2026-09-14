@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type KeyboardEvent, useId, useState } from "react";
+import { type FormEvent, useId, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -32,6 +32,7 @@ export function useAskAnswerForm({
   // ask id never collide when a responsive transition briefly renders both.
   const answerFieldId = `${useId()}-answer`;
   const [selected, setSelected] = useState<string[]>([]);
+  const [otherSelected, setOtherSelected] = useState(false);
   const [answerText, setAnswerText] = useState("");
   const [questionChoice, setQuestionChoice] = useState(false);
   const [justAnswered, setJustAnswered] = useState<Ask | null>(null);
@@ -60,6 +61,7 @@ export function useAskAnswerForm({
       if (error instanceof ApiError && error.code === "ASK_EDITED") {
         setAskChanged(true);
         setSelected([]);
+        setOtherSelected(false);
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
         void threadQuery.refetch();
       }
@@ -115,7 +117,9 @@ export function useAskAnswerForm({
     : isAction
       ? selected.length > 0 && (!selected.includes("Can't") || trimmedAnswer !== "")
       : hasOptions
-        ? selected.length > 0 || trimmedAnswer !== ""
+        ? otherSelected
+          ? trimmedAnswer !== ""
+          : selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer)
         : trimmedAnswer !== "";
   const answerPlaceholder =
     isApproval && selected.includes("Request changes")
@@ -143,6 +147,23 @@ export function useAskAnswerForm({
       return;
     }
     setSelected([label]);
+    setOtherSelected(false);
+  };
+
+  const toggleOther = () => {
+    setQuestionChoice(false);
+    if (displayedAsk.multiple) {
+      setOtherSelected((current) => {
+        const next = !current;
+        if (!next) {
+          setAnswerText("");
+        }
+        return next;
+      });
+      return;
+    }
+    setSelected([]);
+    setOtherSelected(true);
   };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -151,6 +172,7 @@ export function useAskAnswerForm({
     if (
       !isApproval &&
       !isAction &&
+      !otherSelected &&
       selected.length === 0 &&
       isQuestionShapedAnswer(trimmedAnswer)
     ) {
@@ -163,12 +185,6 @@ export function useAskAnswerForm({
     const text = answerText.trim();
     if (text === "") return;
     submitGuard.guard(() => clarification.mutate(text));
-  };
-  const submitFromKeyboard = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
   };
   const completed = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
 
@@ -186,6 +202,7 @@ export function useAskAnswerForm({
     isApproval,
     isSubmitting,
     mutation,
+    otherSelected,
     questionChoice,
     selectRealOption,
     selected,
@@ -195,7 +212,7 @@ export function useAskAnswerForm({
     setQuestionChoice,
     submitGuard,
     submit,
-    submitFromKeyboard,
+    toggleOther,
     threadQuery,
     trimmedAnswer,
   };
