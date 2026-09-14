@@ -299,15 +299,14 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
     await priority.selectOption("0");
     await expect(priority).toHaveValue("0");
     await expect.poll(() => getIssue(p0Issue.key)).toMatchObject({ priority: 0 });
-    await page.goto("/");
-    for (const ask of [p2Ask, p0Ask]) {
-      const card = page.getByTestId(`ask-${ask.id}`);
-      await card.getByLabel("Your answer").fill(`Clarify ${ask.id}`);
-      await card.getByRole("button", { name: "Ask back" }).click();
-    }
+    await Promise.all([
+      createComment(p2Issue.key, { ask_id: p2Ask.id, body: `Clarify ${p2Ask.id}` }),
+      createComment(p0Issue.key, { ask_id: p0Ask.id, body: `Clarify ${p0Ask.id}` }),
+    ]);
 
-    await page.reload();
+    await page.goto("/");
     const waitingOnAgents = page.getByRole("heading", { name: "Waiting on agents" }).locator("..");
+    await expect(waitingOnAgents).toBeVisible();
     await expect(waitingOnAgents.getByTestId(`ask-${p0Ask.id}`)).toBeVisible();
     await expect(waitingOnAgents.getByTestId(`ask-${p2Ask.id}`)).toBeVisible();
     expect(
