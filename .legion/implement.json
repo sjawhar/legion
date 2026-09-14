@@ -1,0 +1,95 @@
+{
+  "filesChanged": [
+    "packages/daemon/src/daemon/config.ts",
+    "packages/daemon/src/daemon/k8s-manifests.ts",
+    "packages/daemon/src/daemon/boot-probes.ts",
+    "packages/daemon/src/daemon/runtime-kubernetes.ts",
+    "packages/daemon/src/daemon/runtime.ts",
+    "packages/daemon/src/daemon/worker-image-probe.ts",
+    "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/config.test.ts",
+    "packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts",
+    "packages/daemon/src/daemon/__tests__/runtime.contract.test.ts",
+    "packages/daemon/src/daemon/__tests__/index.test.ts",
+    "packages/daemon/src/daemon/__tests__/worker-image-probe.test.ts",
+    "docs/kubernetes.md"
+  ],
+  "summary": "runtime.kubernetes.session_store (pvc, the default, or postgres) with session_dsn_secret. Under postgres every pod of a tree gets OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key> from the one podEnvironment seam; the resume path keeps ompSessionFile and --resume under both stores; affinity and the sessions subPath mount are unchanged; the worker-image probe requires session-storage=probed in the probe pod's log under postgres and records sessionStorageProbed in its cache. Main head at start: af232beb88fe097951f4d50661a8588e85b9845d; branch legion/LEGION-81 rebased onto it (plan commit f65baa766fa8). No smoke rig, scratch daemon, kind cluster, NATS container, or tmux server was started (Sami, 2026-09-13 19:00Z). Proof is the daemon's own suite plus the pull request's CI.",
+  "proof": [
+    {
+      "criterion": "1 — session_store pvc|postgres (default pvc); postgres requires session_dsn_secret; every refusal names the field; session_store under runtime: tmux is refused naming the field",
+      "surface": "the daemon's config loader (resolveDaemonConfig/loadConfigFromFile) through packages/daemon/src/daemon/__tests__/config.test.ts, plus the pull request's CI (no rig by order)",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/config.test.ts -t \"selects the postgres session store\" && bun test packages/daemon/src/daemon/__tests__/config.test.ts -t \"refuses session_store under the tmux runtime\"",
+      "observed": "pass: config.runtime.sessionStore is { kind: \"postgres\", dsnSecretKey: \"SESSION_DSN\" } with the two keys and { kind: \"pvc\" } by default or when named; `runtime: tmux` + top-level `session_store: postgres` throws 'Unknown config key \"session_store\"' and `runtime: { tmux: { session_store: postgres } }` throws the mapping rule. Whole file: 105 pass, 0 fail.",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "bun test packages/daemon/src/daemon/__tests__/config.test.ts -t \"refuses\" — `session_store: postgres` without the key → 'runtime.kubernetes.session_dsn_secret is required when runtime.kubernetes.session_store is postgres'; `sqlite` → \"must be 'pvc' or 'postgres'\"; `1` → 'must be a string'; `''` → 'must not be empty'; `sub/dir` → 'must be a Secret data key ([-._a-zA-Z0-9]+)'; `OMP_SESSION_STORAGE` / `OMP_SESSION_SQL_DSN_FILE` → the shadowing refusal; the key under pvc → 'is not used when … is pvc; remove it' (35 pass, 0 fail)"
+    },
+    {
+      "criterion": "2 — under postgres every pod of a tree (root architect and phase worker) carries OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key>; the init container carries neither; under pvc neither is present",
+      "surface": "KubernetesRuntime.spawn against the fake Kubernetes API (createFakeK8sApi), the manifests exactly as the daemon would POST them, in packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts, plus CI",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"adds OMP_SESSION_STORAGE=sql\"",
+      "observed": "pass: the worker pod's main-container env equals the pvc pod's env plus exactly {OMP_SESSION_STORAGE: sql, OMP_SESSION_SQL_DSN_FILE: /var/run/legion/providers/SESSION_DSN}; the root architect pod carries both; neither init container has an OMP_SESSION_* name",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"creates the PVC, the Secret, and the Pod in that order\" — under pvc the POSTed pod equals buildPodManifest(env: POD_ENV) by deep equality, which contains neither variable (pass)"
+    },
+    {
+      "criterion": "3 — the locator field stays ompSessionFile; a postgres pod is resumed from it with --resume as the second OMP argument, the same image, the same two storage variables, and no HOME/OMP_PROFILE override on either generation",
+      "surface": "KubernetesRuntime.spawn generation 1 then generation 2 with launch.resumeSessionFile against the fake Kubernetes API, in runtime-kubernetes.test.ts, plus CI",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"resumes a pod from ompSessionFile\"",
+      "observed": "pass: gen-2 command carries ['omp', '--resume=/home/legion/.omp/profiles/legion/agent/sessions/-legion-workspaces-acme-widgets-legion-42/2026-09-13T15-00-00-000Z_01a09bb2.jsonl'] after the shim's `--`; gen-2 image equals gen-1 image; neither pod's env names HOME or OMP_PROFILE; both carry the two variables; the gen-2 init container has no LEGION_RESUME_SESSION_FILE (the transcript is a database row it cannot stat); the log carries '[legion] respawning LEGION-42 by resuming OMP session <file>'. The pvc resume test ('passes --resume as the second OMP argument, tells the init container where the session file is on the volume…') is unchanged and green.",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"refuses, before any API call, to resume\" — a recorded session path outside the pod's sessions directory is refused before any API call (pass); and a pod spawned without resumeSessionFile carries no --resume (the exact-manifest test's ompArgv)"
+    },
+    {
+      "criterion": "4 — pods under postgres keep the tree node-affinity requirement (and the sessions subPath mount); docs say why",
+      "surface": "the POSTed pod manifest under postgres in runtime-kubernetes.test.ts and the exact manifest snapshot in k8s-manifests.test.ts, plus CI; docs/kubernetes.md '### Why pods stay node-affine' for review on the pull request",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"keeps the tree affinity term\" && bun test packages/daemon/src/daemon/__tests__/k8s-manifests.test.ts -t \"matches the exact acceptance snapshot\"",
+      "observed": "pass: pod.spec.affinity equals podAffinity.requiredDuringSchedulingIgnoredDuringExecution[{labelSelector.matchLabels[legion.dev/tree]=LEGION-42, topologyKey kubernetes.io/hostname}] under postgres; the main container mounts {tree, /home/legion/.omp/profiles/legion/agent/sessions, subPath sessions}; the pvc snapshot is byte-identical to main's",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "the affinity assertion is the exact block from k8s-manifests.test.ts's snapshot: a store-dependent affinity or mount list would fail it; the whole k8s-manifests.test.ts file (buildPodManifest untouched) is green"
+    },
+    {
+      "criterion": "6 — a pod whose connection file is unreadable/blank or whose Postgres is unreachable fails its boot and the daemon counts a launch failure through its existing path (no new daemon code)",
+      "surface": "KubernetesRuntime.probe on a Failed pod against the fake API (the path a refused Oh My Pi boot takes: exit 1 → pod Failed → gone with the log tail quoted → ProcessManager launch failure), plus LEGION-80's fork-side refusal tests and boot-probes.test.ts",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/runtime-kubernetes.test.ts -t \"Failed pod\" && bun test packages/daemon/src/daemon/__tests__/boot-probes.test.ts",
+      "observed": "pass: 'reports a Failed pod gone and quotes the failed init container's log tail' and 'quotes the main container's log tail when a Failed pod's init container succeeded' (2 pass); boot-probes.test.ts green (part of the 360-test named run)",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "the same probe reports a Running pod alive (runtime-kubernetes.test.ts's probe cases) — only a Failed pod is gone with its log tail"
+    },
+    {
+      "criterion": "7 — under postgres the worker-image probe refuses a Succeeded probe pod whose log lacks session-storage=probed (definitive, naming session_store); under pvc the marker is not required; the cache records sessionStorageProbed and a cached pass is reused under postgres only with it",
+      "surface": "verifyWorkerImage against the fake Kubernetes API with a fake probe-pod log, in packages/daemon/src/daemon/__tests__/worker-image-probe.test.ts (the OK_LOG_PROBED fixture is built from the imported SESSION_STORAGE_PROBE_MARK), plus CI",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/worker-image-probe.test.ts -t \"session_store\"",
+      "observed": "6 pass: under postgres a log with the marker passes and the cache file equals {digest, daemonApiVersion: 7, probedAt, sessionStorageProbed: true}; under postgres a log without it rejects with '[legion] worker image sha256:… failed its probe: pod legion-probe-demo-0123456789ab Succeeded without printing session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting) — log tail: probe-image: OK (/opt/omp/bin/omp) daemon-api-version=7', writes no cache, and the last request is DELETE /pods/<name>; under pvc a marker-less log passes and the cache has no sessionStorageProbed key; under pvc a marker is still recorded and that cache is reused under postgres with no API call; under postgres a cache without the flag is ignored ('it records no session-storage probe, and this daemon runs session_store: postgres'), the pod runs, and the cache is rewritten with the flag; under pvc the same cache is reused with no API call",
+      "headSha": "db79d820f7b2da751f47fd541e43ea0246aa28e8",
+      "negativeControl": "'under pvc, does not require the marker' — the same marker-less OK line that postgres refuses passes under pvc, so the refusal is the store's, not the log's; and the pre-existing contract cases (a bare OK, another contract) still refuse first"
+    }
+  ],
+  "acceptance5": "BLOCKED BY ORDER (Sami, 2026-09-13 19:00Z: no smoke rig, no kind cluster) — not run. The exact commands the tester records without running are the plan handoff's testPlan[\"5\"] (kind create cluster --name legion-81; a postgres:16 container on the kind network; the kind overlay with SESSION_DSN in providers.env and session_store: postgres / session_dsn_secret: SESSION_DSN in legion.yaml; kubectl apply -k; the daemon log line 'probe pod … passed: probe-image: OK … session-storage=probed'; an admitted issue's architect pod showing both OMP_SESSION_* variables via kubectl exec env; one omp_session_files row; delete the pod and see 'resurrecting <KEY> by resuming OMP session <path>' with generation g2 carrying --resume=<path>; the negative control of removing SESSION_DSN from the Secret → a Failed pod quoting 'OMP_SESSION_SQL_DSN_FILE names /var/run/legion/providers/SESSION_DSN, which could not be read'; teardown).",
+  "trickyParts": [
+    "config.ts cannot value-import boot-probes.ts: boot-probes.ts:57 computes IMAGE_PROBE_TIMEOUT_MS from config.ts's DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS at module top level, so the cycle config → boot-probes → config throws a TDZ ReferenceError whenever config.ts loads first (proved with a two-file Bun repro before deciding). Both Oh My Pi variable names therefore live in k8s-manifests.ts (a runtime leaf: only type imports from config/k8s-client) and boot-probes.ts imports SESSION_STORAGE_VARIABLE from there — one definition on main, no cycle.",
+    "The init container's LEGION_RESUME_SESSION_FILE stat would fail every postgres resume (the transcript is a database row, not a file in the volume's sessions/ directory): the runtime now passes resumeSessionFile to buildPodManifest only under pvc, while --resume still reaches OMP under both stores. Read at the pinned fork tag v18.1.21-sami.20260914-080519, packages/coding-agent/src/session/session-manager.ts #setSessionFile: an explicit --resume path with no entries 'start[s] fresh but keep[s] the requested path' — so under postgres the same-agent invariant has no stat-equivalent without a database query, which nothing in the pod path makes today. Reported to the architect.",
+    "The OK line's suffix order on main is `probe-image: OK (<omp>) session-storage=probed daemon-api-version=<N>` (cmdProbeImage); the marker check is `includes`, never a full-line match, and the daemon-api-version regex (`daemon-api-version=(\\d+)$`) is unaffected because the marker precedes it.",
+    "buildPodManifest appends LEGION_TERMINATION_GRACE_SECONDS to the main env, so the 'nothing else changes' proof compares the postgres pod's env against a pvc pod's env from a second harness rather than against the POD_ENV fixture."
+  ],
+  "deviations": [
+    "Architect brief item 2 said SESSION_STORAGE_VARIABLE is exported from boot-probes.ts on main: it is not (a bare `const` at boot-probes.ts:394); and importing it into config.ts from boot-probes.ts would be the module cycle above. Both names are defined once in k8s-manifests.ts beside PROVIDERS_DIR (the plan's own task-3 placement) and boot-probes.ts imports the first; no second copy exists on main.",
+    "Under session_store: postgres the runtime does not hand the init container LEGION_RESUME_SESSION_FILE (see trickyParts). The plan's 'init container untouched / init env unchanged under postgres' assumption would have pinned a broken resume; the spec's acceptance 3 ('resurrection uses it under both stores') needs this for a real postgres pod to start at all. This is the one behaviour beyond 'the two variables' and it is a correctness fix, not scope growth.",
+    "The three commits are grouped as config+runtime (acceptance 1–4), probe (acceptance 7), docs — instead of the plan's four — so every commit typechecks on its own: KubernetesRuntimeConfig.sessionStore is a required field, and its test fixtures (runtime-kubernetes.test.ts, runtime.contract.test.ts, index.test.ts) must change in the same commit that adds it.",
+    "Verification commands: the repository's typecheck and lint are the daemon package's own scripts (`cd packages/daemon && bunx tsc --noEmit` — TS 5.9.3 — and `bunx biome check src/` — @biomejs/biome 2.x). From the workspace root, `bunx tsc --noEmit -p packages/daemon` resolves a global TypeScript 6 that rejects tsconfig's `baseUrl`, and `bunx biome` resolves an unrelated `biome@0.3.3` that checks nothing and exits 0; both would have misreported a clean tree.",
+    "Commit identity: the daemon's adoptWorkingCopy did not re-author this workspace's empty working-copy commit for the implementer at assignment delivery (its author was still the planner's review App when my first split ran), and for a stretch of this session the pane's bash tool was unreachable ('Unable to connect'), so tests and jj splits ran through the eval kernel, whose environment carries neither the pane's JJ_USER/JJ_EMAIL nor LEGION_*; jj then fell back to a user-scope config on this box that names the implementer App under a different numeric email (3202636+legion-implementer[bot]). Once the pane shell answered again, `jj metaedit --update-author` from the pane environment (exactly the adoption step) put the leased identity — legion-implementer[bot] <271566630+legion-implementer[bot]@users.noreply.github.com> — in both columns of every commit I made; no `user.name`/`user.email` was set in any scope. Reported to the architect."
+  ],
+  "openQuestions": [
+    "Under session_store: postgres, what guards the same-agent invariant when the recorded row is gone? The pinned Oh My Pi starts fresh at the requested path; the init container cannot stat a row; the daemon never connects to the database by the standing constraint. Architect's call whether a child issue gives `legion workspace-init` (or the shim) a row-existence check — it would need the DSN in the init container and a schema coupling to omp_session_files."
+  ],
+  "verification": {
+    "typecheck": "cd packages/daemon && bunx tsc --noEmit → exit 0",
+    "lint": "cd packages/daemon && bunx biome check src/ → Checked 167 files. No fixes applied.",
+    "tests": "bun test config.test.ts runtime-kubernetes.test.ts k8s-manifests.test.ts runtime.contract.test.ts worker-image-probe.test.ts boot-probes.test.ts cli/__tests__/index.test.ts → 360 pass, 0 fail at db79d820f7b2da751f47fd541e43ea0246aa28e8; bun test packages/daemon/src/daemon/__tests__/index.test.ts -t kubernetes → 4 pass, 0 fail"
+  },
+  "tddRecord": "Every production change followed a watched failure: config (11 fail: Unknown config key), runtime (2 fail: variables absent), probe (4 fail: no refusal / no cache flag). The affinity test and the tmux-clause test passed before the change and are kept as pins of acceptance 4 and 1's structural clause.",
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-15T00:27:27.364Z"
+}
