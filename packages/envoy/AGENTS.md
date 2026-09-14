@@ -135,17 +135,23 @@ provide a field.
 Any authenticated caller — a browser session or a bearer naming its session in `actor` — can
 create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
 `delivery: "btw" | "aside" | "steer"`; a bearer-authored targeted message is authored by that
-session, never by a human. Dispatch resolves a role holder and checks the selected
-session's capabilities for every attempt, then makes the synchronous listener send; `POST
-/api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same callers, same
-`actor` rule for bearers). The targeted session alone
-uses `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary
-agent reply uses `dispatch_message({ in_reply_to })` on the same open issue.
+session, never by a human. A human may also create an issue-less, session-targeted message with
+`POST /api/v1/agents/{session_id}/messages` `{body, delivery}`, and
+`GET /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored
+targeted roots newest first with their deliveries and reply chains. Dispatch resolves a role holder
+and checks the selected session's capabilities for every attempt, then makes the synchronous
+listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
+callers, same `actor` rule for bearers). The targeted session alone uses
+`POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary agent
+reply uses `dispatch_message({ in_reply_to })` on the same open issue.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
-`message.answered` events for the Conversation card. The outbox always publishes the base issue
-topic envelope, but targeted `message.created` skips bound-route and author fan-out because the
-synchronous listener call records the sent or failed attempt instead of blind republishing.
+`message.answered` events for the Conversation card. Issue-less targeted-message events have no
+issue owner, use sequence `0`, and reach their recipient through the synchronous listener send;
+the outbox marks them published without republishing an agent-topic envelope, while the browser
+receives them through the server's SSE stream. They are excluded from global `/search` and issue
+reference closures. Targeted issue `message.created` skips bound-route and author fan-out because
+the synchronous listener call records the sent or failed attempt instead of blind republishing.
 
 When `ENVOY_API_TOKEN` is set, `/v1` requires its matching bearer token, and a non-loopback listener refuses to start without it unless `ENVOY_API_ALLOW_UNAUTHENTICATED=1` is the temporary Fargate transition flag.
 

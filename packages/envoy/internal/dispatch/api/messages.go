@@ -29,6 +29,11 @@ type createMessageInput struct {
 	Actor     *model.Actor `json:"actor"`
 }
 
+type messageRead struct {
+	Message model.Message   `json:"message"`
+	Replies []model.Message `json:"replies"`
+}
+
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
@@ -46,94 +51,133 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if strings.TrimSpace(input.Body) == "" {
-		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "message body is required")
-		return
-	}
-	if length := len16(input.Body); length > maxMessageBody16 {
-		capExceeded(w, "body", length, maxMessageBody16)
-		return
-	}
-	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
-	if err != nil {
-		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, err.Error())
-		return
-	}
-	if input.Urgency != nil && !validMessageUrgency(*input.Urgency) {
-		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "urgency must be one of low, med, high, blocking")
-		return
-	}
-
-	tx, err := s.begin(r.Context())
+	delivery, err := validateCreateMessage(&input)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
 	issueKey := r.PathValue("key")
-	if err := s.requireOpenIssue(r.Context(), tx, issueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	replyBody, err := messageReplyBody(r.Context(), tx, issueKey, input.InReplyTo)
+	message, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusCreated, message)
+}
+
+func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Body     string `json:"body"`
+		Delivery string `json:"delivery"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	target := "session:" + r.PathValue("session_id")
+	messageInput := createMessageInput{Body: input.Body, Target: &target, Delivery: &input.Delivery}
+	delivery, err := validateCreateMessage(&messageInput)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	message, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, message)
+}
+
+func (s *server) createStoredMessage(
+	ctx context.Context,
+	issueKey *string,
+	input createMessageInput,
+	delivery string,
+	actor model.Actor,
+) (model.Message, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return model.Message{}, err
+	}
+	defer tx.Rollback(ctx)
+	if issueKey != nil {
+		if err := s.requireOpenIssue(ctx, tx, *issueKey); err != nil {
+			return model.Message{}, err
+		}
+	}
+	replyBody, err := messageReplyBody(ctx, tx, issueKey, input.InReplyTo)
+	if err != nil {
+		return model.Message{}, err
 	}
 	author, err := json.Marshal(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Message{}, err
 	}
-	var message model.Message
-	var authorRaw []byte
-	if err := tx.QueryRow(r.Context(), `
+	message, err := scanMessage(tx.QueryRow(ctx, `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		values ($1, $2, $3, $4, $5)
 		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
-	`, issueKey, author, input.Body, target, input.InReplyTo).Scan(
-		&message.ID, &message.IssueKey, &authorRaw, &message.Body, &message.Target, &message.InReplyTo, &message.CreatedAt,
-	); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
+	if err != nil {
+		return model.Message{}, err
 	}
-	if err := json.Unmarshal(authorRaw, &message.Author); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	message.Deliveries = []model.MessageDelivery{}
-	if err := refs.Replace(r.Context(), tx, "message", message.ID, message.Body, s.deps.ServerURL); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if message.IssueKey != nil {
+		if err := refs.Replace(ctx, tx, "message", message.ID, message.Body, s.deps.ServerURL); err != nil {
+			return model.Message{}, err
+		}
 	}
 	eventType := "message.created"
 	if message.InReplyTo != nil {
 		eventType = "message.answered"
 	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(issueKey).event(
-		eventType,
-		actor,
-		model.MessageEventPayload{Message: message, ReplyBody: replyBody},
+	event, err := s.appendEvent(ctx, tx, messageEvent(
+		message, eventType, actor, model.MessageEventPayload{Message: message, ReplyBody: replyBody},
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Message{}, err
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if err := tx.Commit(ctx); err != nil {
+		return model.Message{}, err
 	}
 	s.publish(event)
-
-	if target != nil {
-		attempt, err := s.deliverMessage(r.Context(), message, delivery, input.Urgency, actor)
+	if message.Target != nil {
+		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return model.Message{}, err
 		}
 		message.Deliveries = []model.MessageDelivery{attempt}
 	}
-	writeJSON(w, http.StatusCreated, message)
+	return message, nil
+}
+
+func messageEvent(message model.Message, eventType string, actor model.Actor, payload any) model.Event {
+	if message.IssueKey != nil {
+		return issueOwner(*message.IssueKey).event(eventType, actor, payload)
+	}
+	return model.Event{Type: eventType, Actor: actor, Payload: payload}
+}
+
+func validateCreateMessage(input *createMessageInput) (string, error) {
+	if strings.TrimSpace(input.Body) == "" {
+		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
+	}
+	if length := len16(input.Body); length > maxMessageBody16 {
+		return "", errorf(http.StatusBadRequest, "CAP_EXCEEDED", "body length %d exceeds limit %d", length, maxMessageBody16)
+	}
+	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
+	if err != nil {
+		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "%s", err)
+	}
+	input.Target = target
+	if input.Urgency != nil && !validMessageUrgency(*input.Urgency) {
+		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "urgency must be one of low, med, high, blocking")
+	}
+	return delivery, nil
 }
 
 func validMessageUrgency(value string) bool {
@@ -162,18 +206,18 @@ func validateMessageDelivery(target *string, delivery *string) (*string, string,
 	return &canonical, *delivery, nil
 }
 
-func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey string, inReplyTo *string) (string, error) {
+func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey *string, inReplyTo *string) (string, error) {
 	if inReplyTo == nil {
 		return "", nil
 	}
-	if strings.TrimSpace(*inReplyTo) == "" {
+	if issueKey == nil || strings.TrimSpace(*inReplyTo) == "" {
 		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
 	}
 	if _, err := uuid.Parse(*inReplyTo); err != nil {
 		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
 	}
 	var parentBody string
-	if err := tx.QueryRow(ctx, `select body from messages where id = $1 and issue_key = $2`, *inReplyTo, issueKey).Scan(&parentBody); err != nil {
+	if err := tx.QueryRow(ctx, `select body from messages where id = $1 and issue_key = $2`, *inReplyTo, *issueKey).Scan(&parentBody); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
 		}
@@ -235,8 +279,10 @@ func (s *server) deliverMessage(
 	if err := tx.QueryRow(ctx, `select target from messages where id = $1 for update`, message.ID).Scan(&target); err != nil {
 		return model.MessageDelivery{}, err
 	}
-	if err := s.requireOpenIssue(ctx, tx, message.IssueKey); err != nil {
-		return model.MessageDelivery{}, err
+	if message.IssueKey != nil {
+		if err := s.requireOpenIssue(ctx, tx, *message.IssueKey); err != nil {
+			return model.MessageDelivery{}, err
+		}
 	}
 	route, err := model.ParseRoute(target)
 	if err != nil {
@@ -255,7 +301,7 @@ func (s *server) deliverMessage(
 			Event    model.Event `json:"event"`
 			Delivery any         `json:"delivery"`
 		}{
-			Event:    issueOwner(message.IssueKey).event("message.created", message.Author, model.MessageEventPayload{Message: message}),
+			Event:    messageEvent(message, "message.created", message.Author, model.MessageEventPayload{Message: message}),
 			Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
 		})
 		if err != nil {
@@ -294,10 +340,10 @@ func (s *server) deliverMessage(
 	`, message.ID, attemptNumber, delivery, targetSession, envelopeID, state, attempt.Error).Scan(&attempt.CreatedAt); err != nil {
 		return model.MessageDelivery{}, err
 	}
-	event, err := s.appendEvent(ctx, tx, issueOwner(message.IssueKey).event("message.delivery", actor,
+	event, err := s.appendEvent(ctx, tx, messageEvent(message, "message.delivery", actor,
 		model.MessageDeliveryEventPayload{
 			MessageID: message.ID, Attempt: attemptNumber, Delivery: delivery, SessionID: targetSession,
-			Title: title, State: state, Error: deliveryError,
+			Target: target, Title: title, State: state, Error: deliveryError,
 		}))
 	if err != nil {
 		return model.MessageDelivery{}, err
@@ -407,9 +453,11 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
 		return
 	}
-	if err := s.requireOpenIssue(r.Context(), tx, message.IssueKey); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if message.IssueKey != nil {
+		if err := s.requireOpenIssue(r.Context(), tx, *message.IssueKey); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	var attempt model.MessageDelivery
 	if err := tx.QueryRow(r.Context(), `
@@ -427,7 +475,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if attempt.ReplyID != nil {
-		reply, err := s.loadMessage(r.Context(), tx, message.IssueKey, *attempt.ReplyID)
+		reply, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -462,10 +510,10 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, issueOwner(message.IssueKey).event("message.delivery", actor,
+		event, err := s.appendEvent(r.Context(), tx, messageEvent(message, "message.delivery", actor,
 			model.MessageDeliveryEventPayload{
 				MessageID: message.ID, Attempt: input.Attempt, Delivery: attempt.Delivery, SessionID: attempt.SessionID,
-				State: "failed", Error: *attempt.Error,
+				Target: messageTarget(message), State: "failed", Error: *attempt.Error,
 			}))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -484,26 +532,20 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var reply model.Message
-	var authorRaw []byte
-	if err := tx.QueryRow(r.Context(), `
-		insert into messages (issue_key, author, body, in_reply_to)
-		values ($1, $2, $3, $4)
+	reply, err := scanMessage(tx.QueryRow(r.Context(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		values ($1, $2, $3, $4, $5)
 		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
-	`, message.IssueKey, author, *input.Body, message.ID).Scan(
-		&reply.ID, &reply.IssueKey, &authorRaw, &reply.Body, &reply.Target, &reply.InReplyTo, &reply.CreatedAt,
-	); err != nil {
+	`, message.IssueKey, author, *input.Body, message.Target, message.ID))
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := json.Unmarshal(authorRaw, &reply.Author); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	reply.Deliveries = []model.MessageDelivery{}
-	if err := refs.Replace(r.Context(), tx, "message", reply.ID, reply.Body, s.deps.ServerURL); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if reply.IssueKey != nil {
+		if err := refs.Replace(r.Context(), tx, "message", reply.ID, reply.Body, s.deps.ServerURL); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if _, err := tx.Exec(r.Context(), `
 		update message_deliveries set reply_id = $3 where message_id = $1 and attempt = $2
@@ -511,8 +553,11 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(message.IssueKey).event(
-		"message.answered", actor, model.MessageEventPayload{Message: reply, ReplyBody: truncateRunes(message.Body, maxMessageReplyPreview16)},
+	event, err := s.appendEvent(r.Context(), tx, messageEvent(
+		reply,
+		"message.answered",
+		actor,
+		model.MessageEventPayload{Message: reply, ReplyBody: truncateRunes(message.Body, maxMessageReplyPreview16)},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -524,6 +569,20 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, reply)
+}
+
+func messageIssueKey(message model.Message) string {
+	if message.IssueKey == nil {
+		return ""
+	}
+	return *message.IssueKey
+}
+
+func messageTarget(message model.Message) string {
+	if message.Target == nil {
+		return ""
+	}
+	return *message.Target
 }
 
 func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
@@ -545,10 +604,62 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Message model.Message   `json:"message"`
-		Replies []model.Message `json:"replies"`
-	}{Message: message, Replies: replies})
+	writeJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies})
+}
+
+func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	sessionID := strings.TrimSpace(r.PathValue("session_id"))
+	if sessionID == "" {
+		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "session id is required")
+		return
+	}
+	target := "session:" + sessionID
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select m.id::text, m.issue_key, m.author, m.body, m.target, m.in_reply_to::text, m.created_at
+		from messages m
+		where m.in_reply_to is null
+		  and (
+			m.target = $1
+			or exists (
+				select 1 from message_deliveries d
+				where d.message_id = m.id and d.session_id = $2
+			)
+		  )
+		order by m.created_at desc, m.id desc
+		limit 50
+	`, target, sessionID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	result := []messageRead{}
+	for rows.Next() {
+		message, err := scanMessage(rows)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		message.Deliveries, err = s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, message.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		replies, err := s.loadMessageReplyChain(r.Context(), s.deps.Store.Pool, message.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		result = append(result, messageRead{Message: message, Replies: replies})
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string) (model.Message, error) {

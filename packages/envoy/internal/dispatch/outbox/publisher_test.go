@@ -341,7 +341,7 @@ func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.MessageEventPayload{
-			Message:   model.Message{ID: replyID, IssueKey: "T-1", Body: "Looks great, ship it.", InReplyTo: &rootID},
+			Message:   model.Message{ID: replyID, IssueKey: new("T-1"), Body: "Looks great, ship it.", InReplyTo: &rootID},
 			ReplyBody: "Draft done.",
 		},
 	})
@@ -703,7 +703,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 			seedIssue(t, database, "T-1", &tc.route)
 			event := appendEvent(t, database, broker, model.Event{
 				IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-				Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Route this update"},
+				Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Route this update"},
 			})
 			publisher := &recordingPublisher{}
 			stop := run(t, database, publisher, broker)
@@ -734,7 +734,7 @@ func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
 		Payload: model.Message{
-			ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Target this update", Target: &target,
+			ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Target this update", Target: &target,
 		},
 	})
 	publisher := &recordingPublisher{}
@@ -758,11 +758,11 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	silent := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"), Type: "message.created",
 		Actor:   model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
-		Payload: model.Message{ID: "d7657c0d-71b9-43d5-8783-a5d98f7812e0", IssueKey: "T-1", Body: "Agent-only update"},
+		Payload: model.Message{ID: "d7657c0d-71b9-43d5-8783-a5d98f7812e0", IssueKey: new("T-1"), Body: "Agent-only update"},
 	})
 	notifying := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Notify listeners"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Notify listeners"},
 	})
 	publisher := &recordingPublisher{}
 	stop := run(t, database, publisher, broker)
@@ -857,7 +857,7 @@ func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
 	seedIssue(t, database, "T-1", &route)
 	event := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Retry role delivery"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Retry role delivery"},
 	})
 	publisher := &recordingPublisher{failTopic: "notifications.role.legion-controller-x"}
 	stop := run(t, database, publisher, broker)
@@ -924,7 +924,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: "T-1", Body: "Retry me"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Retry me"},
 	})
 	publisher := &recordingPublisher{failures: 1, attempt: make(chan struct{}, 1)}
 	stop := run(t, database, publisher, broker)
@@ -955,14 +955,14 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 			IssueKey: new("T-1"),
 			Type:     "message.created",
 			Actor:    model.Actor{Kind: "session", ID: "worker"},
-			Payload:  model.Message{ID: "message", IssueKey: "T-1", Body: "poison"},
+			Payload:  model.Message{ID: "message", IssueKey: new("T-1"), Body: "poison"},
 		})
 	}
 	valid := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"),
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "session", ID: "worker"},
-		Payload:  model.Message{ID: "valid", IssueKey: "T-1", Body: "deliver"},
+		Payload:  model.Message{ID: "valid", IssueKey: new("T-1"), Body: "deliver"},
 	})
 	publisher := &recordingPublisher{failures: batchSize}
 
@@ -993,7 +993,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 		IssueKey: new("T-1"),
 		Type:     "message.created",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
-		Payload:  model.Message{ID: "message-1", IssueKey: "T-1", Body: "Retry me"},
+		Payload:  model.Message{ID: "message-1", IssueKey: new("T-1"), Body: "Retry me"},
 	})
 	publisher := &blockingFailPublisher{started: make(chan struct{}), release: make(chan struct{})}
 	stop := run(t, database, publisher, broker)
@@ -1011,6 +1011,42 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if calls := publisher.calls.Load(); calls > 70 {
 		t.Fatalf("overflowed subscription caused %d scans, want a bounded number before retry interval", calls)
+	}
+}
+
+func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	target := "session:planner-session"
+	created := appendEvent(t, database, broker, model.Event{
+		Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.MessageEventPayload{Message: model.Message{
+			ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", Body: "Review this", Target: &target,
+		}},
+	})
+	delivery := appendEvent(t, database, broker, model.Event{
+		Type: "message.delivery", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.MessageDeliveryEventPayload{
+			MessageID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", Attempt: 1, Delivery: "btw", SessionID: "planner-session", Target: target, State: "sent",
+		},
+	})
+	answered := appendEvent(t, database, broker, model.Event{
+		Type: "message.answered", Actor: model.Actor{Kind: "session", ID: "planner-session"},
+		Payload: model.MessageEventPayload{Message: model.Message{
+			ID: "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b", Body: "Ready.", Target: &target,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "ownerless message publication settlement", func() bool {
+		return publishedAt(t, database, created.ID) != nil &&
+			publishedAt(t, database, delivery.ID) != nil &&
+			publishedAt(t, database, answered.ID) != nil
+	})
+	if items := publisher.all(); len(items) != 0 {
+		t.Fatalf("issue-less messages published %d NATS envelopes, want 0: %#v", len(items), items)
 	}
 }
 

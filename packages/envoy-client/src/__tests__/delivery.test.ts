@@ -184,6 +184,35 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("renders an issue-less targeted BTW with a delivery reply address", () => {
+    const frame = JSON.parse(targetedDispatchPayload) as {
+      event: { issue_key: string | null; payload: { issue_key: string | null; target: string } };
+    };
+    frame.event.issue_key = null;
+    frame.event.payload.issue_key = null;
+    frame.event.payload.target = `session:${reader}`;
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          topic: `notifications.agent.${reader}`,
+          payload: JSON.stringify(frame),
+        })
+      ),
+      reader,
+      `notifications.agent.${reader}`
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(rendered.delivery).toMatchObject({
+      attempt: 1,
+      mode: "btw",
+      messageID: "message-1",
+      issueKey: null,
+    });
+    expect(decoded.envoy.reply_with).toBeUndefined();
+  });
+
   test("keeps rendering a targeted Dispatch message when its payload grows", () => {
     const extendedPayload = JSON.parse(targetedDispatchPayload) as {
       event: { payload: Record<string, unknown> };

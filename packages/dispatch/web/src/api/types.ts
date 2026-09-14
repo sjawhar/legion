@@ -38,6 +38,7 @@ export type {
   Comment,
   CommentEventPayload,
   CommentRead,
+  CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,

@@ -96,7 +96,7 @@ func scan(ctx context.Context, deps Deps) {
 
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key), e.seq,
+		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
 		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
 		from events e
@@ -212,6 +212,9 @@ func retryDelay(attempts int) time.Duration {
 }
 
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
+	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
+		return nil
+	}
 	item, err := envelope(event, slug)
 	if err != nil {
 		return err
@@ -444,7 +447,7 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	} else if event.Project != "" {
 		topic = "notifications.dispatch.project." + event.Project + "." + event.Type
 	} else {
-		return contracts.Envelope{}, fmt.Errorf("event requires exactly one owner")
+		return contracts.Envelope{}, fmt.Errorf("event requires an owner")
 	}
 	eventID := fmt.Sprintf("dispatch-%d", event.ID)
 	item := contracts.Envelope{

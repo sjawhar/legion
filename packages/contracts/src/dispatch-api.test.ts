@@ -340,7 +340,7 @@ test("parses a message reply's in_reply_to and reply_body preview", () => {
 test("accepts complete targeted-message payloads while ignoring future fields", () => {
   const payload = {
     id: "message-1",
-    issue_key: "DSP-1",
+    issue_key: null,
     author: { id: "alice", kind: "user" },
     body: "Can this ship?",
     target: "session:ses_target",

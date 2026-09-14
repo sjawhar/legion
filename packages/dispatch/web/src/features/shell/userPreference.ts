@@ -1,4 +1,5 @@
 export type UserPreference =
+  | "agents.pinned"
   | "project.issue-filters"
   | "project.issue-view"
   | "shell.margin"

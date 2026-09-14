@@ -179,6 +179,42 @@ test("message events refresh the affected issue messages, artifact references, a
   ]);
 });
 
+test("issue-less agent messages refresh only that agent conversation", () => {
+  const invalidated: unknown[][] = [];
+  applyEventInvalidations(
+    {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    },
+    event(
+      "message.delivery",
+      { target: "session:planner-session" },
+      { artifact_id: null, issue_key: null }
+    )
+  );
+
+  expect(invalidated).toEqual([["agents", "planner-session", "messages"]]);
+});
+
+test("issue-targeted session messages refresh that agent conversation", () => {
+  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
+    const invalidated: unknown[][] = [];
+    applyEventInvalidations(
+      {
+        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+          invalidated.push([...queryKey]);
+          return Promise.resolve();
+        },
+      },
+      event(type, { target: "session:planner-session" })
+    );
+
+    expect(invalidated).toContainEqual(["agents", "planner-session", "messages"]);
+  }
+});
+
 test("comment thread events refresh artifact references and the inbox", () => {
   for (const type of [
     "comment.created",

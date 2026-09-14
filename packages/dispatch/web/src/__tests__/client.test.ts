@@ -226,6 +226,7 @@ test("API client encodes list filters and artifact version query parameters", as
 
   await api.listIssues({
     pinned: true,
+    open: true,
     project: "CORE",
     status: "in progress",
     parent: "CORE-1",
@@ -239,7 +240,7 @@ test("API client encodes list filters and artifact version query parameters", as
   await api.resolveIssue("owner/repo#42");
 
   expect(stub.requests.map(({ path }) => path)).toEqual([
-    "/api/v1/issues?pinned=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z&label=frontend&label=docs",
+    "/api/v1/issues?pinned=true&open=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z&label=frontend&label=docs",
     "/api/v1/issues/CORE-1/events?after=3&limit=20",
     "/api/v1/issues/CORE-1/events?before=40&order=desc",
     "/api/v1/issues/CORE-1/events?ids=42%2C10",
@@ -390,6 +391,8 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.acceptComment("comment-1");
   await api.rejectComment("comment-1");
   await api.createMessage("CORE-1", { body: "Ready" });
+  await api.createAgentMessage("planner-session", { body: "Ready?", delivery: "btw" });
+  await api.listAgentMessages("planner-session");
   await api.listArtifacts("CORE-1");
   await api.listAgents();
   await api.uploadArtifact(
@@ -429,6 +432,8 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/comments/comment-1/accept"],
     ["POST", "/api/v1/comments/comment-1/reject"],
     ["POST", "/api/v1/issues/CORE-1/messages"],
+    ["POST", "/api/v1/agents/planner-session/messages"],
+    ["GET", "/api/v1/agents/planner-session/messages"],
     ["GET", "/api/v1/issues/CORE-1/artifacts"],
     ["GET", "/api/v1/agents"],
     ["POST", "/api/v1/issues/CORE-1/artifacts"],

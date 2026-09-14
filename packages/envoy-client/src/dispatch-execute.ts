@@ -991,17 +991,18 @@ export async function executeDispatchTool(
     }
     case "dispatch_message": {
       const inReplyTo = messageInReplyTo(args);
-      const message = await client.message(issue(), {
+      const issueKey = issue();
+      const message = await client.message(issueKey, {
         body: stringArg(args, "body"),
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
         actor,
       });
-      const messageRef = `dispatch://${message.issue_key}/message/${message.id}`;
+      const messageRef = `dispatch://${issueKey}/message/${message.id}`;
       return {
         text: `Posted message ${message.id} (${messageRef})`,
         details: {
-          issue: message.issue_key,
-          topic: dispatchIssueSubject(message.issue_key, ">"),
+          issue: issueKey,
+          topic: dispatchIssueSubject(issueKey, ">"),
           message: message.id,
         },
       };

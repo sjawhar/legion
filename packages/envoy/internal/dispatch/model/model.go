@@ -420,10 +420,10 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 }
 
-// Message is a short issue update, optionally threaded under another message.
+// Message is a short update, optionally linked to an issue and threaded under another message.
 type Message struct {
 	ID         string            `json:"id"`
-	IssueKey   string            `json:"issue_key"`
+	IssueKey   *string           `json:"issue_key"`
 	Author     Actor             `json:"author"`
 	Body       string            `json:"body"`
 	Target     *string           `json:"target"`
@@ -458,6 +458,7 @@ type MessageDeliveryEventPayload struct {
 	Attempt   int    `json:"attempt"`
 	Delivery  string `json:"delivery"`
 	SessionID string `json:"session_id"`
+	Target    string `json:"target"`
 	Title     string `json:"title"`
 	State     string `json:"state"`
 	Error     string `json:"error,omitempty"`

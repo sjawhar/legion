@@ -18,8 +18,6 @@ import {
   surfaceMutedHoverBg,
   surfaceMutedStrongBg,
   textMutedOnCanvas,
-  textMutedOnSurface,
-  textPrimaryOnSurface,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -42,6 +40,7 @@ import {
   visibleConversationItems,
 } from "./conversation-model";
 import { ReaderPosition } from "./ReaderPosition";
+import { TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity } from "./use-show-activity";
 import { useAgents } from "./useAgents";
@@ -189,10 +188,8 @@ function TargetedMessageTurn({
     delivery === undefined
       ? undefined
       : agents.find((agent) => agent.session_id === delivery.payload.session_id);
-  const title = delivery?.payload.title || target?.title || item.event.payload.target || "agent";
-  const failed = delivery?.payload.state === "failed";
-  const isBtw = delivery?.payload.delivery === "btw";
-  const canBtw = target?.capabilities.includes("btw") !== false;
+  const targetName =
+    delivery?.payload.title || target?.title || item.event.payload.target || "agent";
   const answer = item.answer;
   const asker = resolveAuthor(item.author, titles);
   const answerAuthor =
@@ -201,74 +198,40 @@ function TargetedMessageTurn({
       : resolveAuthor(answer.payload.author ?? answer.actor, titles).label;
 
   return (
-    <li
-      aria-current={current ? "true" : undefined}
-      className={`my-2 rounded-lg border p-3 ${surfaceMutedHoverBg} ${secondaryButtonBorder}`}
-      data-event-seq={item.lastSeq}
-      data-turn={item.id}
-      ref={register}
-    >
-      <div className="flex gap-3">
-        <Avatar author={asker} />
-        <div className="min-w-0 flex-1">
+    <TargetedMessageCard
+      answer={
+        answer === undefined
+          ? undefined
+          : { author: answerAuthor ?? "agent", body: <EventBody event={answer} /> }
+      }
+      body={
+        <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
             <span className="font-semibold">{asker.label}</span>
             <Timestamp at={item.at} />
           </p>
           <EventBody event={item.event} />
-        </div>
-      </div>
-      <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
-        {answer !== undefined
-          ? `Answered by ${answerAuthor}`
-          : failed
-            ? `Failed: ${delivery?.payload.error ?? "delivery failed"}`
-            : isBtw
-              ? `Asking ${title} (BTW) ·`
-              : `Sent to ${title} (${delivery?.payload.delivery ?? "steer"})`}
-        {answer === undefined && isBtw && !failed ? (
-          <Timestamp at={delivery?.created_at ?? item.at} />
-        ) : null}
-      </p>
-      {answer === undefined ? null : (
-        <div className="mt-2">
-          <EventBody event={answer} />
-        </div>
-      )}
-      {item.deliveries.length > 1 ? (
-        <div className={`mt-2 flex flex-col gap-1 text-xs ${textMutedOnSurface}`}>
-          {item.deliveries.slice(0, -1).map((attempt) => (
-            <span key={attempt.id}>
-              Attempt {attempt.payload.attempt}:{" "}
-              {attempt.payload.state === "failed"
-                ? `Failed: ${attempt.payload.error ?? "delivery failed"}`
-                : `Sent to ${attempt.payload.title} (${attempt.payload.delivery})`}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      {answer === undefined && !isClosed ? (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-            disabled={retry.isPending || !canBtw}
-            onClick={() => retry.mutate("btw")}
-            title={canBtw ? undefined : `${title} does not advertise BTW`}
-            type="button"
-          >
-            Ask BTW again
-          </button>
-          <button
-            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-            disabled={retry.isPending}
-            onClick={() => retry.mutate("steer")}
-            type="button"
-          >
-            Send normally
-          </button>
-        </div>
-      ) : null}
-    </li>
+        </>
+      }
+      canBtw={target?.capabilities.includes("btw") !== false}
+      current={current}
+      deliveries={item.deliveries.map((attempt) => ({
+        attempt: attempt.payload.attempt,
+        createdAt: attempt.created_at,
+        delivery: attempt.payload.delivery,
+        error: attempt.payload.error,
+        state: attempt.payload.state,
+        targetName: attempt.payload.title,
+      }))}
+      header={<Avatar author={asker} />}
+      isClosed={isClosed}
+      lastSeq={item.lastSeq}
+      onRetry={retry.mutate}
+      register={register}
+      retrying={retry.isPending}
+      targetName={targetName}
+      turnID={item.id}
+    />
   );
 }
 

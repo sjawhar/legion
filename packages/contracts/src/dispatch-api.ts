@@ -381,7 +381,7 @@ export interface MessageDelivery {
 
 export interface Message {
   readonly id: string;
-  readonly issue_key: string;
+  readonly issue_key: string | null;
   readonly author: Actor;
   readonly body: string;
   readonly target: string | null;
@@ -400,6 +400,7 @@ export interface MessageDeliveryEventPayload {
   readonly attempt: number;
   readonly delivery: MessageDeliveryMode;
   readonly session_id: string;
+  readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
   readonly error?: string;
@@ -820,6 +821,12 @@ export interface CreateMessageInput {
   readonly actor?: Actor;
 }
 
+/** A human-targeted message sent directly from an agent card, without an issue owner. */
+export interface CreateAgentMessageInput {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+}
+
 interface CreateArtifactOptions {
   readonly name: string;
   readonly summary?: string;
@@ -1040,7 +1047,7 @@ export const MessageEventPayloadSchema = z.object({
 
 export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
   id: z.string(),
-  issue_key: z.string(),
+  issue_key: z.string().nullable(),
   author: z.object({ kind: z.string(), id: z.string() }),
   body: z.string(),
   target: z.string(),
@@ -1054,6 +1061,7 @@ export const MessageDeliveryEventPayloadSchema = z.object({
   attempt: z.number().int().positive().optional(),
   delivery: z.enum(["btw", "aside", "steer"]).optional(),
   session_id: z.string().optional(),
+  target: z.string().optional(),
   title: z.string().optional(),
   state: z.enum(["sent", "failed"]).optional(),
   error: z.string().optional(),
