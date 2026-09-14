@@ -21,6 +21,8 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { referenceRouteFromHref } from "../refs/RefLink";
+import { referenceTriggerProps } from "../refs/RefPreview";
 import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
 import { useDialog } from "../shell/useDialog";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
@@ -96,6 +98,7 @@ function ResultOption({
 }): ReactNode {
   const segments = snippetSegments(result.snippet);
   let segmentStart = 0;
+  const route = referenceRouteFromHref(result.href);
 
   return (
     <div
@@ -113,6 +116,7 @@ function ResultOption({
       }}
       role="option"
       tabIndex={-1}
+      {...(route === undefined ? undefined : referenceTriggerProps(route))}
     >
       {active ? (
         <div

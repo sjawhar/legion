@@ -13,6 +13,7 @@ import {
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { primarySpec } from "../../api/issue-cache";
 import type { Artifact, Ask, Event } from "../../api/types";
 import {
   borderDefault,
@@ -416,7 +417,7 @@ function useMarginSheet(): MarginSheetModel {
   const visibleArtifact =
     documentRoute === undefined
       ? routeArtifactSlug === undefined
-        ? issue.data?.artifacts.find((artifact) => artifact.id === issue.data?.primary_artifact_id)
+        ? primarySpec(issue.data)
         : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
       : documentArtifact.data;
   const {

@@ -17,6 +17,7 @@ import {
 import { useAgents } from "../conversation/useAgents";
 import { PriorityControl } from "../issue/PriorityControl";
 import { actorLabel } from "../refs/actor";
+import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskCard } from "./AskCard";
@@ -66,6 +67,7 @@ function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
               className={`flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
               data-inbox-owner=""
               to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
+              {...referenceTriggerProps({ key: owner, kind: "issue" })}
             >
               <span className="font-semibold">{owner}</span>
               <span>{title}</span>
@@ -77,6 +79,11 @@ function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
             data-inbox-owner=""
             to={buildProjectPath({
               item: { id: ask.id, kind: "ask" },
+              kind: "document",
+              project: ask.document.project,
+              slug: ask.document.slug,
+            })}
+            {...referenceTriggerProps({
               kind: "document",
               project: ask.document.project,
               slug: ask.document.slug,

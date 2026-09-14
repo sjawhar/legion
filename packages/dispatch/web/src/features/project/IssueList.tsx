@@ -23,6 +23,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { PriorityControl } from "../issue/PriorityControl";
+import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { userPreferenceStorageKey } from "../shell/userPreference";
@@ -39,6 +40,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
         <Link
           className={`min-w-0 flex-1 text-sm ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issue.key, kind: "issue" })}
+          {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
         >
           <span className="font-semibold">{issue.key}</span>
           <span className={`ml-2 ${textPrimaryOnCanvas}`}>{issue.title}</span>
@@ -68,6 +70,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
           <Link
             className={`rounded-full border ${borderDefault} ${linkText} ${cardHoverBorder}`}
             to={buildIssuePath({ key: issue.parent, kind: "issue" })}
+            {...referenceTriggerProps({ key: issue.parent, kind: "issue" })}
           >
             <Pill>{issue.parent}</Pill>
           </Link>

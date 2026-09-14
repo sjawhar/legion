@@ -1,15 +1,15 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import * as Y from "yjs";
 
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/Margin";
 import type { MarkPlacement } from "../margin/useMarginItems";
+import { RefPreviewHost } from "../refs/RefPreview";
 import { colorForLogin } from "./connection";
 import { type DocumentToolbar, ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
@@ -123,6 +123,7 @@ function renderProofDocument({
               user={{ kind: "user", login: "alice" }}
               version={next.version ?? version}
             />
+            <RefPreviewHost />
           </MarginProvider>
         </DocumentRuntime.Provider>
       </QueryClientProvider>
@@ -253,7 +254,7 @@ test("ProofDocument highlights a routed search term again after route and docume
   }
 });
 
-test("ProofDocument sets a hover title and navigates in-app for a dispatch:// link", async () => {
+test("ProofDocument opens a hover card for a dispatch:// link in the live editor and navigates in-app", async () => {
   const issue: IssueDetails = {
     artifacts: [],
     children: [],
@@ -277,7 +278,7 @@ test("ProofDocument sets a hover title and navigates in-app for a dispatch:// li
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const { connections, editors, sync, view } = renderProofDocument();
+  const { editors, sync, view } = renderProofDocument();
 
   try {
     sync();
@@ -293,21 +294,20 @@ test("ProofDocument sets a hover title and navigates in-app for a dispatch:// li
       root.innerHTML =
         '<p><a href="" data-dispatch-href="dispatch://CORE-1">dispatch://CORE-1</a></p>';
     });
-    // A live-document mutation is what the effect actually observes; it re-scans root for
-    // dispatch:// anchors afterward, which is how it picks up the one just inserted above.
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+    // Triggers are delegated document-wide, so an anchor inserted after mount is one too:
+    // keyboard focus opens the card at once, with the target's title once fetched.
     act(() => {
-      const fragment = connections[0]?.doc.getXmlFragment("prosemirror");
-      const paragraph = new Y.XmlElement("paragraph");
-      paragraph.insert(0, [new Y.XmlText(" ")]);
-      fragment?.insert(fragment.length, [paragraph]);
+      anchor.focus();
     });
-
-    const anchor = await waitFor(() => {
-      const found = root.querySelector("a");
-      if (found === null) throw new Error("anchor not attached yet");
-      return found;
+    const card = await screen.findByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Ship the release"));
+    expect(anchor.getAttribute("aria-describedby")).toBe(card.id);
+    act(() => {
+      anchor.blur();
     });
-    await waitFor(() => expect(anchor.title).toBe("Ship the release"));
+    expect(screen.queryByRole("tooltip")).toBeNull();
 
     fireEvent.click(anchor);
     expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");

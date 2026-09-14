@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import type { IssueDetails } from "../../api/types";
 import { badgeLow, card, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
+import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 
 export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
@@ -17,6 +18,7 @@ export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
           <Link
             className={`font-medium ${linkText} ${linkHoverText}`}
             to={buildIssuePath({ key: child.key, kind: "issue" })}
+            {...referenceTriggerProps({ key: child.key, kind: "issue" })}
           >
             {child.key} · {child.title}
           </Link>
