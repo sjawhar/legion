@@ -1,0 +1,77 @@
+{
+  "verdict": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 5,
+  "round": 1,
+  "reviewEvent": "COMMENT",
+  "reviewId": 5204229810,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1106#pullrequestreview-5204229810",
+  "headReviewed": "9f55687ad326a2398d149cf4a4b621a6e80a1f2e",
+  "codeHead": "835daf83511b025aae8cb38e9a2634518e68ede9",
+  "branchBase": "7a1785815c1e",
+  "gateFacts": {
+    "ci": "All 14 checks SUCCESS at 9f55687a: Tests run 34909311415 (lint, typecheck, test); PR Title runs 34909311378, 34910444145, 34911366470; Legion Envoy and Contracts run 34909311300 (eight jobs). Run 34909117770 at code head 835daf83 failed only its dispatch job on a Postgres deadlock in the Playwright fixture TRUNCATE (files this PR does not touch; same job green at the head; LEGION-168). Not a finding.",
+    "mergeable": "MERGEABLE; no rebase (fork point is the branch base 7a178581).",
+    "threads": "0 reviews and 0 threads before this one; this review opened no inline threads.",
+    "e2eImplementer": "present: branch CLI in /tmp scratch workspaces + package suites; command, observation, head 835daf83 (ancestor), negative control; no rig",
+    "e2eTester": "present: same surfaces + PR CI; states how the implementer's proof was verified (re-ran all seven proof commands verbatim); no rig",
+    "dispatchLine": "Dispatch: LEGION-131 on line 1",
+    "fastFollow": "none (this PR is LEGION-53's fast-follow)"
+  },
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at code head 835daf83: zero Critical, zero Important correctness findings.",
+  "specJudgement": [
+    "Acceptance 1: nonEmpty = z.string().trim().min(1) on all six Proof fields and implementerProof.how; blank, whitespace-only, and second-entry (proof.1.surface) refusals probed.",
+    "Acceptance 2: both failures refines refuse and name failures; rejected-with-one-failure accepted; a missing or malformed implementerProof aborts before the refines so handoff.implementerProof.verdict is never dereferenced on undefined (zod 4.3.6).",
+    "Acceptance 3: phase: expected one of architect|plan|implement|test|review for unknown, missing, and numeric phase; keyed on invalid_union at path phase, which only the discriminated union emits; other fields still render as their own path.",
+    "Acceptance 4: .passthrough() once on baseHandoffSchema (six nested-object catchalls remain); preserved through .extend(), the three .refine() clauses, and z.discriminatedUnion; per-phase round-trip test proves it.",
+    "Acceptance 5: all 41 plan testerChecks at expected counts; Step one and closing paragraphs of planner/tester/reviewer/merger byte-identical to 7a178581 (hunks touch body paragraphs only; legion.test.ts drift guard 60/60); no orphaned fragments; one-line anchors intact.",
+    "Acceptance 6: solutions doc lines 69-70 name E2E (implementer) and E2E (tester); stale sentence count 0.",
+    "Acceptance 7: duplicated halves removed; daemon src/handoff + cli handoff test + src/knowledge 71 pass; contracts 114 pass.",
+    "HANDOFF_SCHEMA_VERSION = 1; packages/daemon/src/daemon untouched from the branch base (0 files)."
+  ],
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "skills/legion-retro/SKILL.md",
+      "description": "Step 1 (line 48) still lists the Legion-specific packages/daemon/src/daemon/__tests__/ and 'a live check at the operator's next daemon restart' as example surfaces while the worker skill's single definition is repository-neutral and drops the restart surface (implementer deviation 4). Out of the spec's contract (LEGION-53 item d is the template line; item e is the worker skill's two bullets); retro runs after approval and gates nothing. Accepted in place; the architect decides whether to carry it forward."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/handoff-schema.ts",
+      "description": "Line 230: the failed refine passes on === 0 while its message says failed > 0; failed: -1 is refused with a misdescribing message. First refine uses > 0. Cosmetic, accepted in place."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/handoff/ledger.ts",
+      "description": ".trim() is a transform: write persists the raw payload, read returns trimmed values. Per the spec's Design; no caller compares the two. Accepted in place."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-worker/SKILL.md",
+      "description": "Lines 493-495 list two write refusals as examples; the list is now partial. Never claims completeness. Accepted in place."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-worker/SKILL.md, skills/legion-retro/SKILL.md",
+      "description": "Two added lines exceed 100 columns: a deliberate one-line grep anchor and a template line inside a code fence. Accepted."
+    }
+  ],
+  "forDeletionPush": [
+    "PR body only: extend 'For the person deploying' with the whitespace-only proof field case (a pre-change handoff with such a field now reads as missing naming proof.<i>.<field>).",
+    "PR body only: Threads line becomes '1 review (COMMENT), 0 threads opened'."
+  ],
+  "nextStep": "The architect sends the implementer to push the .legion/ deletion (test.json 76d85aa5 and this review.json ride that push and are deleted by it). I then approve the head whose tree differs from 9f55687a's by the removal of .legion/ alone, naming it by SHA.",
+  "standingOrder": "No smoke rig, scratch daemon, NATS container, or tmux server started for this review; the only commands run were legion gh reads, jj reads, bun test in three packages, and one throwaway bun probe importing the workspace's handoff-schema.ts.",
+  "learningsInjected": [
+    "legion/text-only-skill-pr-mechanics.md",
+    "legion/worker-pane-shell-gotchas.md",
+    "legion/fast-follow-pr-mechanics-and-queue-registration.md"
+  ],
+  "learningsHelpful": [
+    "legion/worker-pane-shell-gotchas.md"
+  ],
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-15T00:20:03.602Z"
+}
