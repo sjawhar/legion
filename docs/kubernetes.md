@@ -212,10 +212,21 @@ With `postgres` on, the daemon adds exactly two variables to every pod it opens 
 architect, a sub-architect, each phase worker — in the one place a pod's environment is shaped
 (`podEnvironment`, `runtime-kubernetes.ts`): `OMP_SESSION_STORAGE=sql` and
 `OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key>`. Nothing else about the pod changes: same
-image, same volume and mounts, same init container (which never runs Oh My Pi and does not see the
-Secret), same `--resume` argument on a replacement. `HOME` and `OMP_PROFILE` come only from the image's
-own environment and the daemon never overrides them, which is what lets a replacement pod open the
-same row (its key embeds the home-relative sessions root).
+image, same volume and mounts, same `--resume` argument on a replacement. The init container never runs
+Oh My Pi and does not see the Secret; under `postgres` it also omits the recorded-session check it runs
+under `pvc` (`LEGION_RESUME_SESSION_FILE`), because the transcript is a database row it cannot look for.
+`HOME` and `OMP_PROFILE` come only from the image's own environment and the daemon never overrides them,
+which is what lets a replacement pod open the same row (its key embeds the home-relative sessions root).
+
+When that row is missing — the database lost it, or the connection string now points at another
+database — Oh My Pi does not refuse: it starts a fresh session with a **new** session id at that path.
+The daemon refuses it instead. Every relaunch of a root, a sub-architect, or a phase worker mints its boot
+token with the session id the previous generation registered, and the registration route
+(`/process/started` for a root, `/worker/started` for the rest) answers a different id with
+`409 Worker respawn must resume the same agent session`; the extension exits the process on that answer,
+the pod ends, the daemon counts a launch failure, and the role ends in `worker-died` (a root:
+`launch-failed`) at the bound — never a fresh agent under the old role or tree. A first launch, which
+resumes nothing, records no expectation and is accepted as before.
 
 Name the key so that nothing reads it — `SESSION_DSN` is a good choice. The pod's worker shim exports
 every key of the providers Secret into Oh My Pi's process environment under the key's own name, as it
@@ -369,8 +380,10 @@ the path if it is not there after provisioning — the pod goes `Failed`, the da
 failure, exactly as tmux does. A volume replaced or a `sessions/` directory removed by hand therefore
 fails the respawn loudly instead of quietly starting a new agent under the old role token. Under
 `session_store: postgres` the transcript is a database row, not a file on the volume, so the init
-container is not asked to check for one; `--resume=<row path>` still reaches OMP, which opens the row
-(see [Session store](#session-store)).
+container omits that check; `--resume=<row path>` still reaches OMP, which opens the row — and when the
+row is gone, starts a fresh session with a new id that the daemon then refuses to register (`409 Worker
+respawn must resume the same agent session`), so the pod exits and the launch failure is counted (see
+[Selecting the store](#selecting-the-store)).
 
 **On kind, let the node pull the image from GHCR by digest** (the package is public; a fresh node
 pulled the 377 MB image in about 10 s). Do not `kind load docker-image` a digest-only reference: kind
