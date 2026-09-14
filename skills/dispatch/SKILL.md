@@ -10,7 +10,9 @@ decide, never a log of your work. The transcript is your scratch pad; progress a
 goes through a `dispatch_*` tool.
 
 The server enforces high signal: an ask question is at most 800 characters with at most eight options; comment and message bodies are at
-most 2,000 characters; an artifact is at most 25 MiB. It refuses over-limit input; it never truncates it. GitHub threads and markers no
+most 2,000 characters; an artifact is at most 25 MiB. It refuses over-limit input with the number to trim (`question is 50 characters over
+the 800-character limit (850/800)`); it never truncates it. A tool call with several problems is refused once, every problem listed
+(`<tool> was not called: N problems`), so one corrected call lands. GitHub threads and markers no
 longer exist.
 
 ## Writing for the human
@@ -273,7 +275,8 @@ within one textblock; split changes that span separate blocks into separate oper
 insert anchor is a quote, `"start"`, `"end"`, or `"heading:Title"`. Ordinary inserts create a sibling block before or after the quote or
 heading's enclosing document block; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no
 header or delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected,
-and deleting a cell's quoted text removes only that text.
+and deleting a cell's quoted text removes only that text. A `find` or quote anchor tolerates inline Markdown (`**bold**`, `` `code` ``)
+and a leading `# ` selects a heading by its text; a miss names the three nearest blocks so the next quote lands.
 
 Use `replace` for inline continuation. Use zero-based `occurrence` for a repeated target; re-read a missing or ambiguous target before
 retrying. Pass `summary` to name the version when recording a decision.
@@ -400,7 +403,7 @@ It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 char
 
 A human — or any bearer caller over HTTP, such as a test rig — can target the issue message at a
 live Envoy session or role as **BTW**, **Aside**, or **Steer**. The incoming Dispatch frame names
-the issue and includes a `reply_with` instruction; reply on the same open issue with the existing
+the issue and includes a `reply_with` hint (`{ tool, args }`, ready to issue on any host); reply on the same open issue with the existing
 tool, never a new targeted send:
 
 ```ts
@@ -458,7 +461,11 @@ dispatch://PROJECT/artifact/<document-ref>/ask/<id>
 dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 ```
 
-A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records.
+A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records. `dispatch_read` also
+accepts the dashboard URL of an issue, spec, artifact, ask, comment, or project document on the configured server (it maps to the
+`dispatch://` form above), and an ask or comment id may be a unique prefix of at least 8 hex characters; a message id is always the
+full uuid. A non-uuid id on `GET /asks/{id}`, `/comments/{id}`, or `/issues/{key}/messages/{id}` is a 400 `ASK_ID_INPUT` /
+`COMMENT_ID_INPUT` / `MESSAGE_ID_INPUT`, never a 500.
 
 ## Before / after
 

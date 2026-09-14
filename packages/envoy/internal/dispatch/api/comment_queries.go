@@ -69,7 +69,7 @@ func commentHasOwner(comment model.Comment, owner owner) bool {
 }
 
 func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "comment") {
 		return
 	}
 	comment, err := s.loadComment(r.Context(), s.deps.Store.Pool, r.PathValue("id"))

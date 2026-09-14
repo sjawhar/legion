@@ -3,6 +3,8 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -20,17 +22,34 @@ type Range struct {
 var ErrTargetNotFound = errors.New("pmdoc: target not found")
 var ErrTargetSpansBlocks = errors.New("pmdoc: target spans textblocks")
 
-// ErrQuoteNotFound reports a quote miss with the closest rendered textblock.
-// It unwraps ErrTargetNotFound so callers can preserve their existing miss handling.
+// ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
+// document order among equals. It unwraps ErrTargetNotFound so callers can preserve their
+// existing miss handling.
 type ErrQuoteNotFound struct {
-	Nearest string
+	Nearest []string
 }
 
 func (e *ErrQuoteNotFound) Error() string {
-	return fmt.Sprintf("%s; nearest block: %q", ErrTargetNotFound, e.Nearest)
+	return fmt.Sprintf("%s; nearest blocks: %s", ErrTargetNotFound, QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return ErrTargetNotFound }
+
+// QuoteBlocks renders nearest-block candidates as `"a" | "b" | "c"` for error text.
+func QuoteBlocks(blocks []string) string {
+	quoted := make([]string, len(blocks))
+	for index, block := range blocks {
+		quoted[index] = fmt.Sprintf("%q", block)
+	}
+	return strings.Join(quoted, " | ")
+}
+
+// nearestBlockCount is how many candidate blocks a quote miss names.
+const nearestBlockCount = 3
+
+// atxHeadingMarker is the `# ` … `###### ` prefix a quote may carry to mean "the heading
+// whose text follows"; the level is not matched, only the heading-ness.
+var atxHeadingMarker = regexp.MustCompile(`^#{1,6} +`)
 
 // Candidate gives one matching range and enough surrounding document text to
 // disambiguate it.
@@ -57,12 +76,17 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 		return Range{}, err
 	}
 	text := buildFlattenedText(doc)
-	matches := exactQuoteMatches(text, quote)
-	if len(matches) == 0 {
-		matches = normalizedQuoteMatches(text, quote)
-	}
-	if len(matches) == 0 {
-		matches = markdownQuoteMatches(text, quote)
+	var matches []quoteMatch
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		matches = headingQuoteMatches(doc, text, quote[len(marker):])
+	} else {
+		matches = exactQuoteMatches(text, quote)
+		if len(matches) == 0 {
+			matches = normalizedQuoteMatches(text, quote)
+		}
+		if len(matches) == 0 {
+			matches = markdownQuoteMatches(text, quote)
+		}
 	}
 	if len(matches) == 0 {
 		return Range{}, quoteNotFound(doc, quote)
@@ -358,28 +382,65 @@ func markupInRange(marks []inlineMarkup, span range16) inlineMarkup {
 }
 
 func quoteNotFound(doc *Node, quote string) error {
-	if rendered, marked := renderedMarkdownQuote(quote); marked {
+	if marker := atxHeadingMarker.FindString(quote); marker != "" {
+		quote = quote[len(marker):]
+	} else if rendered, marked := renderedMarkdownQuote(quote); marked {
 		quote = rendered.value
 	}
-	return &ErrQuoteNotFound{Nearest: nearestBlock(doc, quote)}
+	return &ErrQuoteNotFound{Nearest: nearestBlocks(doc, quote, nearestBlockCount)}
 }
 
-func nearestBlock(doc *Node, quote string) string {
-	bestPrefix := -1
-	nearest := ""
+// nearestBlocks ranks every textblock by the length of its common prefix with quote and
+// returns the top `limit` (ties keep document order), each trimmed to 80 runes.
+func nearestBlocks(doc *Node, quote string, limit int) []string {
+	type ranked struct {
+		text   string
+		prefix int
+	}
+	var candidates []ranked
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		if !isTextblock(node.Type) {
-			return true
-		}
-		candidate := textContent(node)
-		prefix := commonPrefixLength(quote, candidate)
-		if prefix > bestPrefix {
-			bestPrefix = prefix
-			nearest = candidate
+		if isTextblock(node.Type) {
+			candidate := textContent(node)
+			candidates = append(candidates, ranked{text: candidate, prefix: commonPrefixLength(quote, candidate)})
 		}
 		return true
 	})
-	return firstRunes(nearest, 80)
+	sort.SliceStable(candidates, func(left, right int) bool {
+		return candidates[left].prefix > candidates[right].prefix
+	})
+	nearest := make([]string, 0, limit)
+	for _, candidate := range candidates[:min(limit, len(candidates))] {
+		nearest = append(nearest, firstRunes(candidate.text, 80))
+	}
+	return nearest
+}
+
+// headingQuoteMatches returns the text range of every heading whose rendered text equals
+// title, so a quote written with its ATX marker (`## Title`) selects headings only.
+func headingQuoteMatches(doc *Node, text flattenedText, title string) []quoteMatch {
+	if title == "" {
+		return nil
+	}
+	candidates := exactQuoteMatches(text, title)
+	if len(candidates) == 0 {
+		candidates = normalizedQuoteMatches(text, title)
+	}
+	if len(candidates) == 0 {
+		candidates = markdownQuoteMatches(text, title)
+	}
+	var matches []quoteMatch
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type != "heading" {
+			return true
+		}
+		for _, match := range candidates {
+			if pos+1 <= match.From && match.To <= end-1 {
+				matches = append(matches, match)
+			}
+		}
+		return true
+	})
+	return matches
 }
 
 func textContent(node *Node) string {

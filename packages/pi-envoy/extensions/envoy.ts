@@ -35,6 +35,7 @@ import {
   EnvoyToolOperation,
   envoyToolSpecs,
   type MessageMetadataArguments,
+  parseEnvoyToolArguments,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import {
@@ -935,12 +936,15 @@ export default function envoyExtension(pi: PiApi): void {
     }
   });
 
+  // Every tool validates its own arguments inside execute (one refusal naming every
+  // problem); the host's schema check is bypassed so it cannot pre-empt that with its own wording.
   for (const spec of envoyToolSpecs) {
     pi.registerTool({
       name: spec.name,
       label: spec.name,
       description: spec.description,
       parameters: schemaFor(pi, spec.operation),
+      lenientArgValidation: true,
       execute: async (_id, parameters) => execute(spec.operation, parameters),
     });
   }
@@ -952,6 +956,7 @@ export default function envoyExtension(pi: PiApi): void {
         label: spec.name,
         description: spec.description,
         parameters: dispatchToolSchema(spec, zodSchemaApi(pi.zod)),
+        lenientArgValidation: true,
         execute: async (_id, params, signal, _onUpdate, context) => {
           try {
             const result = await executeDispatchTool({
@@ -1037,9 +1042,12 @@ export default function envoyExtension(pi: PiApi): void {
 
   async function execute(
     operation: EnvoyToolOperation,
-    parameters: Record<string, unknown>
+    rawParameters: Record<string, unknown>
   ): Promise<ToolResult> {
     try {
+      // The host hands raw arguments through (lenientArgValidation); this is the one
+      // refusal, naming every problem, before anything reaches the listener.
+      const parameters: Record<string, unknown> = parseEnvoyToolArguments(operation, rawParameters);
       switch (operation) {
         case EnvoyToolOperation.subscribe: {
           const added: string[] = [];

@@ -449,13 +449,13 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	tooLong := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": strings.Repeat("a", 801), "actor": sessionActor(),
 	})
-	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), "question") || !strings.Contains(tooLong.Body.String(), "801") || !strings.Contains(tooLong.Body.String(), "800") {
+	if tooLong.Code != http.StatusBadRequest || !strings.Contains(tooLong.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLong.Body.String(), "question is 1 characters over the 800-character limit (801/800)") {
 		t.Fatalf("question cap: status=%d body=%s", tooLong.Code, tooLong.Body.String())
 	}
 	tooManyOptions := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Options", "options": []map[string]string{{"label": "1"}, {"label": "2"}, {"label": "3"}, {"label": "4"}, {"label": "5"}, {"label": "6"}, {"label": "7"}, {"label": "8"}, {"label": "9"}}, "actor": sessionActor(),
 	})
-	if tooManyOptions.Code != http.StatusBadRequest || !strings.Contains(tooManyOptions.Body.String(), `"code":"CAP_EXCEEDED"`) {
+	if tooManyOptions.Code != http.StatusBadRequest || !strings.Contains(tooManyOptions.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooManyOptions.Body.String(), "options is 1 over the 8-item limit (9/8)") {
 		t.Fatalf("options cap: status=%d body=%s", tooManyOptions.Code, tooManyOptions.Body.String())
 	}
 	blankOption := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
@@ -515,13 +515,13 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": strings.Repeat("a", 2001), "actor": sessionActor(),
 	})
-	if tooLongComment.Code != http.StatusBadRequest || !strings.Contains(tooLongComment.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongComment.Body.String(), "body") {
+	if tooLongComment.Code != http.StatusBadRequest || !strings.Contains(tooLongComment.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongComment.Body.String(), "body is 1 characters over the 2000-character limit (2001/2000)") {
 		t.Fatalf("comment cap: status=%d body=%s", tooLongComment.Code, tooLongComment.Body.String())
 	}
 	tooLongMessage := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
 		"body": strings.Repeat("a", 2001), "actor": sessionActor(),
 	})
-	if tooLongMessage.Code != http.StatusBadRequest || !strings.Contains(tooLongMessage.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongMessage.Body.String(), "body") {
+	if tooLongMessage.Code != http.StatusBadRequest || !strings.Contains(tooLongMessage.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongMessage.Body.String(), "body is 1 characters over the 2000-character limit (2001/2000)") {
 		t.Fatalf("message cap: status=%d body=%s", tooLongMessage.Code, tooLongMessage.Body.String())
 	}
 }

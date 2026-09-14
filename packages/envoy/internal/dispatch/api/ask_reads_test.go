@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type askIdentity struct {
@@ -308,6 +310,25 @@ func TestListOpenAsksRejectsInvalidSelectors(t *testing.T) {
 		response := sessionRequest(t, handler, http.MethodGet, target, nil)
 		if response.Code != http.StatusBadRequest {
 			t.Errorf("%s: status=%d body=%s, want 400", target, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Short ids", "A spec")
+	for _, test := range []struct {
+		target string
+		code   string
+		text   string
+	}{
+		{target: "/api/v1/asks/7430fab3", code: "ASK_ID_INPUT", text: "ask id must be a full uuid"},
+		{target: "/api/v1/comments/7430fab3", code: "COMMENT_ID_INPUT", text: "comment id must be a full uuid"},
+		{target: "/api/v1/issues/" + issue.Key + "/messages/7430fab3", code: "MESSAGE_ID_INPUT", text: "message id must be a full uuid"},
+	} {
+		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || !strings.Contains(response.Body.String(), test.text) {
+			t.Errorf("%s: status=%d body=%s, want 400 %s", test.target, response.Code, response.Body.String(), test.code)
 		}
 	}
 }

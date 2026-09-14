@@ -47,8 +47,17 @@ envoy:
   expects_reply: required
   re: agent-message-1
   supersedes: agent-message-0
-  reply_with: "envoy_send(session_id=\"01a0bbbb-cccc-7ddd-eeee-0123456789ab\", message=\"...\")"
-  reply_role: "envoy_publish(topic=\"notifications.role.legion-reviewer\", message=\"...\")"
+  reply_with:
+    tool: envoy_send
+    args:
+      session_id: 01a0bbbb-cccc-7ddd-eeee-0123456789ab
+      in_reply_to: agent-message-2
+      message: ...
+  reply_role:
+    tool: envoy_publish
+    args:
+      topic: notifications.role.legion-reviewer
+      message: ...
   summary: Deployment needs confirmation.
   message: "Confirm the listener health check passed.\n\nThen publish the release."
   note: body names session 01a0cccc-dddd-7eee-ffff-0123456789ab; the sender is 01a0bbbb-cccc-7ddd-eeee-0123456789ab
@@ -62,7 +71,10 @@ envoy:
 - `by` is the expiry deadline, when the sender supplied one.
 - `urgency` is the sender's priority classification.
 - `expects_reply` states whether a reply is `none`, `optional`, or `required`.
-- `re` names the delivery this message replies to.
+- `re` names the delivery this message replies to. A Dispatch frame names it as a `dispatch://`
+  ref — the ask (`dispatch://KEY/ask/<id>`, or `dispatch://PROJECT/artifact/<slug>/ask/<id>` for a
+  document ask) or the message (`dispatch://KEY/message/<id>`) — never the quoted text; the
+  question head, when there is one, is `dispatch.question`.
 - `supersedes` names an earlier delivery this one replaces.
 - `reply_with` is the direct-reply call for the sender.
 - `reply_role` is the role-publish reply call when the sender has a role.

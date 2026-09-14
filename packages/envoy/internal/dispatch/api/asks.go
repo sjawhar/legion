@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -32,14 +31,14 @@ func validateAskQuestion(question string) error {
 		return errorf(http.StatusBadRequest, "INVALID_ASK", "ask question is required")
 	}
 	if length := len16(question); length > maxAskQuestion16 {
-		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "question length %d exceeds limit %d", length, maxAskQuestion16)
+		return capExceededError("question", length, maxAskQuestion16)
 	}
 	return nil
 }
 
 func validateAskOptions(options []model.AskOption) error {
 	if len(options) > maxAskOptions {
-		return errorf(http.StatusBadRequest, "CAP_EXCEEDED", "options length %d exceeds limit %d", len(options), maxAskOptions)
+		return countExceededError("CAP_EXCEEDED", "options", len(options), maxAskOptions)
 	}
 	seen := make(map[string]struct{}, len(options))
 	for index := range options {
@@ -265,8 +264,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
-		writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask id must be a UUID")
+	if !requireUUIDPath(w, r, "ask") {
 		return
 	}
 	if input.Question != nil {
@@ -571,7 +569,7 @@ func parseAskListState(r *http.Request) (string, error) {
 }
 
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "ask") {
 		return
 	}
 	ask, err := s.loadAsk(r.Context(), s.deps.Store.Pool, r.PathValue("id"))

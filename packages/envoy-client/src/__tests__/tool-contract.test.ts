@@ -5,8 +5,10 @@ import {
   envoyToolSpecs,
   MessageMetadataSchema,
   messageMetadataShape,
+  parseEnvoyToolArguments,
   toMessageMetadata,
 } from "../tool-contract";
+import { ToolInputError } from "../tool-input-errors";
 
 const schemaApi = zodSchemaApi(z);
 
@@ -149,5 +151,29 @@ describe("message metadata", () => {
         message: 'Invalid option: expected one of "low"|"med"|"high"|"blocking"',
       }),
     ]);
+  });
+
+  test("refuses an Envoy tool call once with every problem named", () => {
+    const failure = (() => {
+      try {
+        parseEnvoyToolArguments("send", { session_id: "s1", expects_reply: "no", msg: "hi" });
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    })();
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "message is required (string)",
+      'expects_reply must be one of none|optional|required; got "no"',
+      'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+    ]);
+    expect(failure.message).toContain("envoy_send was not called: 3 problems");
+  });
+
+  test("returns the typed arguments of a valid Envoy tool call", () => {
+    expect(
+      parseEnvoyToolArguments("publish", { topic: "t", message: "m", urgency: "high" })
+    ).toEqual({ topic: "t", message: "m", urgency: "high" });
   });
 });

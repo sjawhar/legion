@@ -167,7 +167,7 @@ func validateCreateMessage(input *createMessageInput) (string, error) {
 		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
 	if length := len16(input.Body); length > maxMessageBody16 {
-		return "", errorf(http.StatusBadRequest, "CAP_EXCEEDED", "body length %d exceeds limit %d", length, maxMessageBody16)
+		return "", capExceededError("body", length, maxMessageBody16)
 	}
 	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
 	if err != nil {
@@ -586,7 +586,7 @@ func messageTarget(message model.Message) string {
 }
 
 func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
+	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
 		return
 	}
 	message, err := s.loadMessage(r.Context(), s.deps.Store.Pool, r.PathValue("key"), r.PathValue("id"))

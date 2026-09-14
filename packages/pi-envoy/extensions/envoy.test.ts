@@ -770,6 +770,49 @@ describe("envoy OMP extension", () => {
     expect(actual.error.message).toBe(expected.error.message);
   });
 
+  test("registers every Envoy and Dispatch tool with lenient host validation so execute is the one error surface", async () => {
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const { default: envoyExtension } = await import("./envoy.ts?lenient-arg-validation");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+
+    expect(fixture.tools.length).toBeGreaterThan(envoyToolSpecs.length);
+    expect(fixture.tools.filter((tool) => tool.lenientArgValidation !== true)).toEqual([]);
+  });
+
+  test("refuses an Envoy tool call once with every problem, before reaching the listener", async () => {
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests += 1;
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?envoy-tool-one-pass");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    requests = 0;
+    const send = fixture.tools.find((tool) => tool.name === "envoy_send");
+    if (send === undefined) throw new Error("envoy_send was not registered");
+
+    const result = await send.execute("", {
+      session_id: "ses_target",
+      message: "hello",
+      expects_reply: "no",
+      urgent: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toBe(
+      [
+        "envoy_send was not called: 2 problems",
+        '- expects_reply must be one of none|optional|required; got "no"',
+        '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at',
+      ].join("\n")
+    );
+    expect(requests).toBe(0);
+  });
+
   test("surfaces a missing target session as an envoy_send tool error", async () => {
     globalThis.fetch = async (input) => {
       if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
@@ -1513,7 +1556,9 @@ describe("envoy OMP extension", () => {
     const result = await sessionsTool.execute("", { machine: 42 });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toBe("machine must be a string");
+    expect(result.content[0]?.text).toBe(
+      "envoy_sessions was not called: 1 problem\n- machine must be a string, not 42"
+    );
     expect(requests).toEqual([]);
   });
 
@@ -1650,7 +1695,10 @@ describe("envoy OMP extension", () => {
         from: "ses_peer",
         at: "1970-01-01T00:00:00Z",
         id: "evt-peer-message",
-        reply_with: 'envoy_send(session_id="ses_peer", message="...")',
+        reply_with: {
+          tool: "envoy_send",
+          args: { session_id: "ses_peer", in_reply_to: "evt-peer-message", message: "..." },
+        },
         summary: "hello from a peer",
       },
     });
@@ -1734,7 +1782,10 @@ describe("envoy OMP extension", () => {
       from: "ses_omp",
       at: "1970-01-01T00:00:00Z",
       id: "evt-self-echo",
-      reply_with: 'envoy_send(session_id="ses_omp", message="...")',
+      reply_with: {
+        tool: "envoy_send",
+        args: { session_id: "ses_omp", in_reply_to: "evt-self-echo", message: "..." },
+      },
       summary: "note to self",
     });
   });

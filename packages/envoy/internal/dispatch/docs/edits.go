@@ -24,13 +24,13 @@ func invalidOp(field string) error {
 	return &ErrInvalidOp{Field: field}
 }
 
-// ErrQuoteNotFound explains how document edit quotes are matched.
+// ErrQuoteNotFound explains how document edit quotes are matched and names the closest blocks.
 type ErrQuoteNotFound struct {
-	Nearest string
+	Nearest []string
 }
 
 func (e *ErrQuoteNotFound) Error() string {
-	return fmt.Sprintf("quote not found; quotes match the block text as rendered (no markdown markers); nearest block: %q", e.Nearest)
+	return fmt.Sprintf(`quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "start", or "end" as insert anchors); nearest blocks: %s`, pmdoc.QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }

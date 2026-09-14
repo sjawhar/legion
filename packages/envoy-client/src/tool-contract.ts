@@ -6,6 +6,7 @@ import {
   zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
+import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 import type { MessageMetadataInput } from "./transport";
 
 const DELIVERY_CONTRACT =
@@ -44,8 +45,11 @@ export function messageMetadataShape<Element extends SchemaNode<Element>>(
   return {
     in_reply_to: schema.string().optional(),
     supersedes: schema.string().optional(),
-    urgency: schema.enum(URGENCY_VALUES).optional(),
-    expects_reply: schema.enum(EXPECTS_REPLY_VALUES).optional(),
+    urgency: schema.enum(URGENCY_VALUES).describe("low | med | high | blocking").optional(),
+    expects_reply: schema
+      .enum(EXPECTS_REPLY_VALUES)
+      .describe("none | optional | required")
+      .optional(),
     expires_at: schema.number({ int: true }).optional(),
   };
 }
@@ -217,3 +221,22 @@ export const envoyToolSpecs = [
     requiresSubscriptionCapability: false,
   },
 ] as const satisfies readonly ToolSpec[];
+
+/**
+ * Validates an Envoy tool call on real zod in one pass and returns its typed arguments,
+ * or throws a `ToolInputError` naming every problem. Hosts register the tools with
+ * lenient argument validation, so this is the single place a bad call is refused.
+ */
+export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
+  operation: Operation,
+  parameters: Record<string, unknown>
+): ToolArgumentsByOperation[Operation] {
+  const spec = envoyToolSpecs.find((candidate) => candidate.operation === operation);
+  if (spec === undefined) throw new Error(`missing Envoy tool specification for ${operation}`);
+  const schema = z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape).strict();
+  const parsed = schema.safeParse(parameters, { reportInput: true });
+  if (!parsed.success) {
+    throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema));
+  }
+  return parsed.data as ToolArgumentsByOperation[Operation];
+}

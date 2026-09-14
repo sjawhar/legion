@@ -150,7 +150,10 @@ export interface PiEventContract {
   readonly agent_start: { readonly event: unknown; readonly result: undefined };
   readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
-  readonly session_stop: { readonly event: SessionStopEvent; readonly result: SessionStopEventResult };
+  readonly session_stop: {
+    readonly event: SessionStopEvent;
+    readonly result: SessionStopEventResult;
+  };
   readonly input: { readonly event: InputEvent; readonly result: undefined };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
@@ -175,6 +178,11 @@ export interface RegisteredTool {
   readonly label: string;
   readonly description: string;
   readonly defaultInactive?: boolean;
+  /**
+   * Hand the raw arguments to `execute` when the host's own schema validation fails, so
+   * the tool refuses a bad call once with every problem in its own words.
+   */
+  readonly lenientArgValidation?: boolean;
   readonly parameters: unknown;
   readonly execute: (
     id: string,

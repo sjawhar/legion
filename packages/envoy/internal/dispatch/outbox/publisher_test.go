@@ -89,6 +89,7 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 			Question: "Should the dispatcher publish this answer?",
 			Urgency:  "blocking",
 			State:    "answered",
+			Answer:   &model.AskAnswer{User: "alice", Selected: []string{"Keep the limits"}, Text: new("No, agents are stuffing too much text into asks.")},
 		},
 	})
 	publisher := &recordingPublisher{}
@@ -115,7 +116,7 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	if payload.ID != event.ID || payload.Seq != event.Seq || payload.Type != event.Type || payload.Actor != event.Actor {
 		t.Fatalf("payload event = %#v, want id=%d seq=%d type=%q actor=%#v", payload, event.ID, event.Seq, event.Type, event.Actor)
 	}
-	if item.PayloadSummary != "T-1 ask answered: Should the dispatcher publish this answer?" {
+	if item.PayloadSummary != "T-1 ask answered: Keep the limits - No, agents are stuffing too much text into asks." {
 		t.Fatalf("payload summary = %q", item.PayloadSummary)
 	}
 	if err := item.Validate(); err != nil {

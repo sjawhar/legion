@@ -27,6 +27,7 @@ the native Dispatch tool suite:
 
 ## Critical conventions
 
+- `src/tool-schema.ts` — `zodSchemaApi(z).string({ max })` emits `is N characters over the M-character limit (L/M)` (the field name is prepended by `formatZodIssues` in `@legion/envoy-client/tool-input-errors`); the OMP `pi.zod` facade ignores the message, which is why hosts register every tool with `lenientArgValidation` and let `executeDispatchTool` refuse a bad call once with every problem listed.
 - `src/dispatch-tools.ts` is the source of the fourteen native Dispatch tools:
   `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,

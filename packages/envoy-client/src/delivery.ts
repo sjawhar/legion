@@ -21,6 +21,7 @@ import {
 } from "@legion/contracts";
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
+import { askAnswerText, textHead } from "./ask-answer";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -106,7 +107,7 @@ const RecoverableDispatchDeliveryFailureSchema = z.object({
 
 export type DeliveryEnvelope = Pick<
   InboundEnvelope,
-  "source" | "source_session" | "payload" | "sender"
+  "source" | "source_session" | "payload" | "sender" | "event_id"
 >;
 
 export type RenderInboundResult = {
@@ -125,9 +126,22 @@ export function senderLabel(envelope: DeliveryEnvelope): string {
   return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
 }
 
-export function replyWith(envelope: DeliveryEnvelope): string | undefined {
+/** A ready-to-issue tool call any host can act on (OMP devices and the Claude bridge's MCP tools share these names). */
+export interface ReplyHint {
+  readonly tool: string;
+  readonly args: Readonly<Record<string, string>>;
+}
+
+export function replyWith(envelope: DeliveryEnvelope): ReplyHint | undefined {
   if (envelope.source !== "agent" || envelope.source_session === undefined) return undefined;
-  return `envoy_send(session_id="${envelope.source_session}", message="...")`;
+  return {
+    tool: "envoy_send",
+    args: {
+      session_id: envelope.source_session,
+      ...(envelope.event_id === undefined ? {} : { in_reply_to: envelope.event_id }),
+      message: "...",
+    },
+  };
 }
 
 // Dispatch event payloads follow the wire contract: issue.* carries the Issue,
@@ -162,21 +176,27 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "message.answered": MessagePayloadSchema,
   "child.status": ChildStatusPayloadSchema,
 };
+function topicDocument(
+  topic: string | undefined
+): { readonly project: string; readonly slug: string } | undefined {
+  if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) !== true) return undefined;
+  const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
+  return project !== undefined && project !== "" && slug !== undefined && slug !== ""
+    ? { project, slug }
+    : undefined;
+}
+
 function dispatchOwner(event: DispatchEvent, topic: string | undefined): string {
   if (event.issue_key !== null) return event.issue_key;
-  if (topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true) {
-    const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
-    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
-      return `${project} / ${slug}`;
-    }
-  }
+  const document = topicDocument(topic);
+  if (document !== undefined) return `${document.project} / ${document.slug}`;
   return event.artifact_id ?? "unknown";
 }
 
 function dispatchCommentReplyWith(
   event: DispatchEvent,
   topic: string | undefined
-): string | undefined {
+): ReplyHint | undefined {
   if (event.type !== "comment.created") return undefined;
   const comment = CommentPayloadSchema.safeParse(event.payload);
   if (!comment.success || comment.data.id === undefined) return undefined;
@@ -184,9 +204,12 @@ function dispatchCommentReplyWith(
   const reply = comment.data.ask_id;
   const thread =
     reply === undefined || reply === null || reply === "" ? "reply_to" : "reply_to_ask";
-  const threadID = thread === "reply_to" ? comment.data.id : reply;
+  const threadID = thread === "reply_to" ? comment.data.id : String(reply);
   if (event.issue_key !== null) {
-    return `dispatch_comment(issue="${event.issue_key}", ${thread}="${threadID}", body="...")`;
+    return {
+      tool: "dispatch_comment",
+      args: { issue: event.issue_key, [thread]: threadID, body: "..." },
+    };
   }
 
   let project = comment.data.project_key;
@@ -196,7 +219,24 @@ function dispatchCommentReplyWith(
   }
   if (project === undefined || project === "" || artifact === undefined || artifact === "")
     return undefined;
-  return `dispatch_comment(project="${project}", artifact="${artifact}", ${thread}="${threadID}", body="...")`;
+  return {
+    tool: "dispatch_comment",
+    args: { project, artifact, [thread]: threadID, body: "..." },
+  };
+}
+
+// An answered ask reads answer-first: the question head and the answer rendering sit
+// directly under `dispatch:`, before the payload.
+function dispatchAskAnswer(
+  event: DispatchEvent
+): { readonly question: string; readonly answer: string } | undefined {
+  if (event.type !== "ask.answered") return undefined;
+  const ask = AskPayloadSchema.safeParse(event.payload);
+  if (!ask.success) return undefined;
+  return {
+    question: textHead(ask.data.question ?? ""),
+    answer: askAnswerText(ask.data.answer),
+  };
 }
 
 function dispatchPayload(event: DispatchEvent): unknown {
@@ -206,24 +246,49 @@ function dispatchPayload(event: DispatchEvent): unknown {
   return parsed.success ? parsed.data : event.payload;
 }
 
-// A comment.created reply to an ask carries the question text (ask_question)
-// alongside the id-shaped in_reply_to, so the TOON's "re:" line reads as a
-// question, not an opaque UUID.
+// A comment.created reply to an ask carries the question text (ask_question) alongside
+// the ask id, so the frame names the question head under `dispatch:` the way an answered
+// ask does; `re:` stays the ask's ref.
 function dispatchAskQuestion(event: DispatchEvent): string | undefined {
   if (event.type !== "comment.created") return undefined;
   const parsed = CommentPayloadSchema.safeParse(event.payload);
-  return parsed.success && parsed.data.ask_question !== "" ? parsed.data.ask_question : undefined;
+  return parsed.success && parsed.data.ask_question !== undefined && parsed.data.ask_question !== ""
+    ? textHead(parsed.data.ask_question)
+    : undefined;
 }
 
-// A message.created reply to another message carries a 160-character preview of the
-// parent's body (reply_body) alongside the id-shaped in_reply_to, so the TOON's "re:"
-// line reads as a snippet, not an opaque UUID.
-function dispatchMessageReplyPreview(event: DispatchEvent): string | undefined {
-  if (event.type !== "message.created") return undefined;
-  const parsed = MessagePayloadSchema.safeParse(event.payload);
-  return parsed.success && parsed.data.reply_body !== undefined && parsed.data.reply_body !== ""
-    ? parsed.data.reply_body
-    : undefined;
+// The thread a correlated frame continues, as a dispatch:// ref rather than the text it
+// names: the ask an ask.* event or an ask reply (comment.created with ask_id) belongs to,
+// or the message a message.* reply answers. A document-owned ask's ref needs the document
+// slug, which only the comment payload or a document topic carries; a frame without either
+// keeps the bare id Dispatch correlated it with, as does a frame of any other type.
+function dispatchReplyRef(
+  event: DispatchEvent,
+  topic: string | undefined,
+  inReplyTo: string
+): string {
+  let kind: "ask" | "message";
+  let document = topicDocument(topic);
+  if (event.type.startsWith("ask.")) {
+    kind = "ask";
+  } else if (event.type.startsWith("message.")) {
+    kind = "message";
+  } else if (event.type === "comment.created") {
+    const comment = CommentPayloadSchema.safeParse(event.payload);
+    if (!comment.success || comment.data.ask_id === undefined || comment.data.ask_id === null) {
+      return inReplyTo;
+    }
+    kind = "ask";
+    const { project_key: project, artifact_slug: slug } = comment.data;
+    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
+      document = { project, slug };
+    }
+  } else {
+    return inReplyTo;
+  }
+  if (event.issue_key !== null) return `dispatch://${event.issue_key}/${kind}/${inReplyTo}`;
+  if (document === undefined) return inReplyTo;
+  return `dispatch://${document.project}/artifact/${document.slug}/${kind}/${inReplyTo}`;
 }
 
 // A Dispatch bus frame's JSON payload either matches the wire contract documented
@@ -331,12 +396,11 @@ export function renderInbound(
   let dispatchEvent: unknown;
   let dispatchActor: DispatchEvent["actor"] | undefined;
   let dispatchIssue: string | undefined;
-  let dispatchReply: string | undefined;
+  let dispatchReply: ReplyHint | undefined;
   let delivery: DispatchDelivery | undefined;
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
-  let askQuestion: string | undefined;
-  let messageReplyPreview: string | undefined;
+  let inReplyTo = envelope.in_reply_to;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     if (envelope.payload === undefined) {
@@ -370,8 +434,11 @@ export function renderInbound(
             envelope,
           };
         }
-        askQuestion = dispatchAskQuestion(frame.event);
-        messageReplyPreview = dispatchMessageReplyPreview(frame.event);
+        const answered = dispatchAskAnswer(frame.event);
+        const question = answered?.question ?? dispatchAskQuestion(frame.event);
+        if (inReplyTo !== undefined) {
+          inReplyTo = dispatchReplyRef(frame.event, subject ?? envelope.topic, inReplyTo);
+        }
         dispatchReply = dispatchCommentReplyWith(frame.event, subject ?? envelope.topic);
         if (frame.event.type === "message.created") {
           const message = MessagePayloadSchema.safeParse(frame.event.payload);
@@ -385,7 +452,10 @@ export function renderInbound(
               body: message.data.body ?? envelope.payload_summary ?? "",
             };
             if (frame.event.issue_key !== null) {
-              dispatchReply = `dispatch_message(issue="${frame.event.issue_key}", in_reply_to="${message.data.id}", body="...")`;
+              dispatchReply = {
+                tool: "dispatch_message",
+                args: { issue: frame.event.issue_key, in_reply_to: message.data.id, body: "..." },
+              };
             }
           }
         }
@@ -408,6 +478,8 @@ export function renderInbound(
             : { issue_key: frame.event.issue_key }),
           type: frame.event.type,
           actor: frame.event.actor,
+          ...(question === undefined ? {} : { question }),
+          ...(answered === undefined ? {} : { answer: answered.answer }),
           payload: dispatchPayload(frame.event),
         };
         dispatchActor = frame.event.actor;
@@ -477,15 +549,16 @@ export function renderInbound(
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
     ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),
-    ...(envelope.in_reply_to === undefined
-      ? {}
-      : { re: askQuestion ?? messageReplyPreview ?? envelope.in_reply_to }),
+    ...(inReplyTo === undefined ? {} : { re: inReplyTo }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),
     ...(role === undefined
       ? {}
       : {
-          reply_role: `envoy_publish(topic="notifications.role.${role}", message="...")`,
+          reply_role: {
+            tool: "envoy_publish",
+            args: { topic: `notifications.role.${role}`, message: "..." },
+          },
         }),
     ...(dispatchRendered
       ? { dispatch: dispatchEvent }

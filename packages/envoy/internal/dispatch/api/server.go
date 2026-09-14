@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -332,8 +333,33 @@ func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Act
 	return actor, true
 }
 
+// capExceededError names how far a text field is over its cap so one trim lands:
+// "<field> is N characters over the M-character limit (L/M)". Lengths are UTF-16 units (len16).
+func capExceededError(field string, length, limit int) *apiError {
+	return errorf(http.StatusBadRequest, "CAP_EXCEEDED",
+		"%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
+}
+
+// countExceededError is capExceededError for item counts (options, labels).
+func countExceededError(code, field string, count, limit int) *apiError {
+	return errorf(http.StatusBadRequest, code,
+		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
+}
+
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
-	writeError(w, "CAP_EXCEEDED", http.StatusBadRequest, fmt.Sprintf("%s length %d exceeds limit %d", field, length, limit))
+	err := capExceededError(field, length, limit)
+	writeError(w, err.code, err.status, err.message)
+}
+
+// requireUUIDPath rejects a non-uuid `{id}` path value with 400 <KIND>_ID_INPUT before it
+// reaches a uuid column (where pgx would surface it as a 500). kind is "ask", "comment", or "message".
+func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
+		return false
+	}
+	return true
 }
 
 func len16(value string) int {

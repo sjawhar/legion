@@ -106,9 +106,10 @@ describe("inbound delivery policy", () => {
   });
 
   test("offers a reply hint only for an agent envelope with a source session", () => {
-    expect(replyWith(envelope({ source: "agent", source_session: "ses_agent" }))).toBe(
-      'envoy_send(session_id="ses_agent", message="...")'
-    );
+    expect(replyWith(envelope({ source: "agent", source_session: "ses_agent" }))).toEqual({
+      tool: "envoy_send",
+      args: { session_id: "ses_agent", in_reply_to: "event-1", message: "..." },
+    });
     expect(replyWith(envelope({ source: "agent" }))).toBeUndefined();
     expect(replyWith(envelope({ source: "human", source_session: "ses_human" }))).toBeUndefined();
     expect(replyWith(envelope({ source: "human" }))).toBeUndefined();
@@ -133,6 +134,8 @@ describe("renderInbound dispatch events", () => {
         issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
+        question: "Which API?",
+        answer: "JSON - Use JSON HTTP.",
         payload: {
           id: "ask-1",
           opened_event_id: 7,
@@ -143,6 +146,21 @@ describe("renderInbound dispatch events", () => {
         },
       },
     });
+    // The answer is the first thing the asker reads: before the payload, in the TOON text.
+    expect(rendered.content.indexOf("answer: JSON - Use JSON HTTP.")).toBeLessThan(
+      rendered.content.indexOf("payload:")
+    );
+  });
+
+  test("shows the ask's ref as 're:' when an answered ask is correlated to its ask id", () => {
+    const correlated = JSON.parse(dispatchEvent("ask.answered", answeredAsk)) as Record<
+      string,
+      unknown
+    >;
+    const rendered = renderInbound(JSON.stringify({ ...correlated, in_reply_to: "ask-1" }), reader);
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+    expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
+    expect(rendered.content).not.toContain("re: Which API?");
   });
 
   test("does not offer a reply hint for an ask.opened event", () => {
@@ -172,9 +190,10 @@ describe("renderInbound dispatch events", () => {
       actor: { kind: "user", id: "alice" },
       payload: { body: "Can this ship?" },
     });
-    expect(decoded.envoy.reply_with).toBe(
-      'dispatch_message(issue="CORE-1", in_reply_to="message-1", body="...")'
-    );
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_message",
+      args: { issue: "CORE-1", in_reply_to: "message-1", body: "..." },
+    });
     expect(rendered.delivery).toEqual({
       attempt: 1,
       mode: "btw",
@@ -255,6 +274,8 @@ describe("renderInbound dispatch events", () => {
         issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
+        question: "Which API?",
+        answer: "Neither; let's do a third thing.",
         payload: {
           id: "ask-1",
           opened_event_id: 7,
@@ -461,7 +482,7 @@ describe("renderInbound dispatch events", () => {
     expect(rendered).toMatchObject({ skip: true, content: "" });
   });
 
-  test("renders a comment.created reply to an ask as 're: <question>', not the raw ask id", () => {
+  test("renders a comment.created reply to an ask as 're: <ask ref>' with the question head under dispatch", () => {
     const askID = "ask-1";
     const raw = JSON.stringify(
       envelope({
@@ -485,13 +506,15 @@ describe("renderInbound dispatch events", () => {
     );
 
     const decoded = decode(renderInbound(raw, reader).content) as {
-      envoy: Record<string, unknown>;
+      envoy: Record<string, unknown> & { dispatch: Record<string, unknown> };
     };
 
-    expect(decoded.envoy.re).toBe("Which API should we ship?");
-    expect(decoded.envoy.reply_with).toBe(
-      'dispatch_comment(issue="DSP-1", reply_to_ask="ask-1", body="...")'
-    );
+    expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
+    expect(decoded.envoy.dispatch.question).toBe("Which API should we ship?");
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-1", reply_to_ask: "ask-1", body: "..." },
+    });
   });
 
   test("gives ordinary comment events a reply_to hint", () => {
@@ -499,17 +522,19 @@ describe("renderInbound dispatch events", () => {
       renderInbound(dispatchEvent("comment.created", { ...comment, ask_id: null }), reader).content
     ) as { envoy: Record<string, unknown> };
 
-    expect(decoded.envoy.reply_with).toBe(
-      'dispatch_comment(issue="DSP-1", reply_to="comment-1", body="...")'
-    );
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-1", reply_to: "comment-1", body: "..." },
+    });
   });
 
-  test("gives document-owned ask comments a project document reply hint", () => {
+  test("gives document-owned ask comments a project document reply hint and ask ref", () => {
     const raw = JSON.stringify(
       envelope({
         event_id: "dispatch-document-comment",
         source: "dispatch",
         topic: "notifications.agent.session-asker",
+        in_reply_to: "ask-1",
         payload: JSON.stringify({
           id: 3,
           issue_key: null,
@@ -534,9 +559,11 @@ describe("renderInbound dispatch events", () => {
       envoy: Record<string, unknown>;
     };
 
-    expect(decoded.envoy.reply_with).toBe(
-      'dispatch_comment(project="CORE", artifact="design-notes", reply_to_ask="ask-1", body="...")'
-    );
+    expect(decoded.envoy.re).toBe("dispatch://CORE/artifact/design-notes/ask/ask-1");
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_comment",
+      args: { project: "CORE", artifact: "design-notes", reply_to_ask: "ask-1", body: "..." },
+    });
   });
 
   test("a human reply on a still-open ask reaches the agent with the ask's state", () => {
@@ -572,7 +599,7 @@ describe("renderInbound dispatch events", () => {
     expect(decoded.envoy.dispatch.payload.ask_state).toBe("open");
   });
 
-  test("renders a message.created reply as 're: <preview>', not the raw message id", () => {
+  test("renders a message.created reply as 're: <message ref>', not the parent's text", () => {
     const rootID = "message-1";
     const raw = JSON.stringify(
       envelope({
@@ -604,10 +631,11 @@ describe("renderInbound dispatch events", () => {
     );
 
     const decoded = decode(renderInbound(raw, reader).content) as {
-      envoy: Record<string, unknown>;
+      envoy: Record<string, unknown> & { dispatch: { payload: Record<string, unknown> } };
     };
 
-    expect(decoded.envoy.re).toBe("Ship the build tonight.");
+    expect(decoded.envoy.re).toBe("dispatch://DSP-1/message/message-1");
+    expect(decoded.envoy.dispatch.payload.reply_body).toBe("Ship the build tonight.");
   });
 
   test("types each Dispatch event's nested payload by its wire-contract schema", () => {
@@ -779,7 +807,7 @@ describe("renderInbound dispatch events", () => {
       const decoded = decode(renderInbound(dispatchEvent(type, payload), reader).content) as {
         envoy: { dispatch: Record<string, unknown> };
       };
-      expect(decoded.envoy.dispatch).toEqual({
+      expect(decoded.envoy.dispatch).toMatchObject({
         owner: "DSP-1",
         issue_key: "DSP-1",
         type,
@@ -970,8 +998,17 @@ describe("renderInbound non-dispatch envelopes", () => {
         "  expects_reply: required",
         "  re: agent-message-1",
         "  supersedes: agent-message-0",
-        `  reply_with: "envoy_send(session_id=\\"${sender}\\", message=\\"...\\")"`,
-        '  reply_role: "envoy_publish(topic=\\"notifications.role.legion-reviewer\\", message=\\"...\\")"',
+        "  reply_with:",
+        "    tool: envoy_send",
+        "    args:",
+        `      session_id: ${sender}`,
+        "      in_reply_to: agent-message-2",
+        "      message: ...",
+        "  reply_role:",
+        "    tool: envoy_publish",
+        "    args:",
+        "      topic: notifications.role.legion-reviewer",
+        "      message: ...",
         "  summary: First paragraph.",
       ].join("\n")
     );
