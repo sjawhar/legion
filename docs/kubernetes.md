@@ -220,13 +220,15 @@ which is what lets a replacement pod open the same row (its key embeds the home-
 
 When that row is missing — the database lost it, or the connection string now points at another
 database — Oh My Pi does not refuse: it starts a fresh session with a **new** session id at that path.
-The daemon refuses it instead. Every relaunch of a root, a sub-architect, or a phase worker mints its boot
-token with the session id the previous generation registered, and the registration route
-(`/process/started` for a root, `/worker/started` for the rest) answers a different id with
-`409 Worker respawn must resume the same agent session`; the extension exits the process on that answer,
-the pod ends, the daemon counts a launch failure, and the role ends in `worker-died` (a root:
-`launch-failed`) at the bound — never a fresh agent under the old role or tree. A first launch, which
-resumes nothing, records no expectation and is accepted as before.
+The daemon refuses it instead. Every relaunch that passes `--resume` — a phase worker's or sub-architect's
+respawn, a root's resurrection — mints its boot token with the session id the previous generation
+registered, and the registration route (`/process/started` for a root, `/worker/started` for the rest)
+answers a different id with `409 Worker respawn must resume the same agent session`; the extension exits
+the process on that answer, the pod ends, the daemon counts a launch failure, and — because the resumed
+path stays on the tree's or claim's locator — the next relaunch resumes the same path and expects the
+same session, until the role ends in `worker-died` (a root: `launch-failed`) at the bound — never a fresh
+agent under the old role or tree. A first launch, and a root re-admitted after `launch-failed`, resume
+nothing, record no expectation, and are accepted as before.
 
 Name the key so that nothing reads it — `SESSION_DSN` is a good choice. The pod's worker shim exports
 every key of the providers Secret into Oh My Pi's process environment under the key's own name, as it

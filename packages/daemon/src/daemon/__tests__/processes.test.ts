@@ -3969,6 +3969,103 @@ describe("ProcessManager", () => {
     expect(minted).toEqual([{ generation: 2, expectedSessionId: "ses_root_original" }]);
   });
 
+  it("keeps resuming the same session and expecting the same agent on every resurrection after a resumed root never registers, ending launch-failed at the bound with no further launch (review round 1)", async () => {
+    // The registration deadline's own retry (`retireUnconfirmedRoot` → `escalateOrRetryUnconfirmedRoot`
+    // → `resurrect`) is what runs after a resumed root is refused 409 and exits without ever
+    // reaching `/process/started`. Each deadline is gated here through `sleep`, one per launched
+    // generation; the fixture's `list-panes` answers every probe gone.
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.admission.active.push(root);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    state.roles[roleToken("omp", root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root_original",
+    };
+    const gates = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let sleepCalls = 0;
+    const minted: Array<{ generation: number; expectedSessionId: string | undefined }> = [];
+    const launches: string[] = [];
+    const windows = eventCounter();
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      sleep: async () => {
+        sleepCalls += 1;
+        const gate = gates[sleepCalls - 1];
+        if (gate) {
+          await gate.promise;
+          return;
+        }
+        await new Promise<void>(() => {});
+      },
+      mintBootToken: async (_tree, generation, expectedSessionId) => {
+        minted.push({ generation, expectedSessionId });
+        return `boot-gen-${generation}`;
+      },
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          windows.increment();
+          launches.push(command.at(-1) ?? "");
+          return {
+            stdout: `@4${windows.count} %${windows.count} 1000${windows.count}\n`,
+            exitCode: 0,
+          };
+        }
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    // Generation 2: the resurrection under test. Its pane never registers.
+    await processes.resurrect(root);
+    expect(managedState.trees[root]?.locator).toMatchObject({ ompSessionFile: sessionFile });
+
+    // Deadline 1 elapses on the never-registered pane: launchFailures 1, generation 3 launched.
+    gates[0]?.resolve();
+    await windows.reached(2);
+    await processes.drainSpawns();
+    expect(managedState.trees[root]).toMatchObject({ generation: 3, launchFailures: 1 });
+    // Deadline 2: launchFailures 2, generation 4 launched.
+    gates[1]?.resolve();
+    await windows.reached(3);
+    await processes.drainSpawns();
+    expect(managedState.trees[root]).toMatchObject({ generation: 4, launchFailures: 2 });
+    // Deadline 3: the bound. No generation 5.
+    gates[2]?.resolve();
+    await waitFor(() => managedState.trees[root]?.status === "launch-failed");
+    await processes.drainSpawns();
+
+    expect(minted).toEqual([
+      { generation: 2, expectedSessionId: "ses_root_original" },
+      { generation: 3, expectedSessionId: "ses_root_original" },
+      { generation: 4, expectedSessionId: "ses_root_original" },
+    ]);
+    expect(launches).toHaveLength(3);
+    for (const launch of launches) expect(launch).toContain(`--resume=${sessionFile}`);
+    expect(managedState.trees[root]).toMatchObject({
+      status: "launch-failed",
+      generation: 4,
+      launchFailures: 3,
+    });
+    // A later re-admission starts fresh: the bound is what ends the resume, never a lost path.
+    expect(managedState.trees[root]?.resumeSessionFile).toBeUndefined();
+    expect(managedState.trees[root]?.locator).toBeUndefined();
+  });
+
   it("mints no expected session for a launch that resumes nothing, even when a stale architect claim survives (a launch-failed re-admit starts fresh)", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

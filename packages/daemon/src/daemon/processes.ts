@@ -3612,9 +3612,19 @@ export class ProcessManager {
       }
       return;
     }
-    tree.locator = locator;
-    // The fresh locator's `ompSessionFile` (written at `/process/started`) is the resume source from
-    // here; the copy kept across the cleared pane has done its job.
+    // The resumed path is pinned onto the fresh locator exactly as `launchWorker` pins it onto a
+    // respawned claim's: the runtime's locator carries no `ompSessionFile` (only `/process/started`
+    // writes one), so a generation that never registers — a 409-refused root that exits — would
+    // otherwise leave the tree with no path, and the deadline's own retry would launch fresh and
+    // accept a new agent under this tree. Pinned, every retry re-resumes this path and re-mints
+    // the recorded session as its expectation, until `escalateOrRetryUnconfirmedRoot` turns the
+    // tree `launch-failed` at the bound. `/process/started` overwrites it with what registered.
+    tree.locator = {
+      ...locator,
+      ...(priorSessionFile !== undefined ? { ompSessionFile: priorSessionFile } : {}),
+    };
+    // The locator is the resume source from here; the copy kept across the cleared pane has done
+    // its job.
     delete tree.resumeSessionFile;
     tree.status = "active";
     // Armed only once a real locator exists to probe against -- `readyConfirmedAt` was already
