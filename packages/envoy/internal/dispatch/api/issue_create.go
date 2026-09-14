@@ -291,6 +291,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A seeded spec never passed through a live edit, so nothing has queued the document
+	// closer that indexes its ask blocks and repairs block ids; queue it now that the
+	// transaction is durable.
+	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
 	writeJSON(w, http.StatusCreated, issue)
 }
