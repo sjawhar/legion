@@ -106,6 +106,8 @@ const natsState = {
   controls: new Map<string, SubscriptionControls>(),
   controlsByTopic: new Map<string, SubscriptionControls[]>(),
   published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],
+  onPublish: undefined as ((subject: string) => void) | undefined,
+  failPublishes: 0,
   connectedNames: [] as string[],
   failConnects: 0,
   drainHangs: false,
@@ -135,7 +137,14 @@ mock.module("nats", () => ({
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
       },
-      publish: (subject: string, data?: Uint8Array) => natsState.published.push({ subject, data }),
+      publish: (subject: string, data?: Uint8Array) => {
+        if (natsState.failPublishes > 0) {
+          natsState.failPublishes -= 1;
+          throw new Error("PUBLISH_FAILED");
+        }
+        natsState.published.push({ subject, data });
+        natsState.onPublish?.(subject);
+      },
       subscribe: (topic: string) => {
         let active = true;
         const queue: {
@@ -255,6 +264,8 @@ afterEach(() => {
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   natsState.connectedNames.length = 0;
   natsState.published.length = 0;
+  natsState.onPublish = undefined;
+  natsState.failPublishes = 0;
   natsState.subscriptions.clear();
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
@@ -2578,12 +2589,14 @@ describe("envoy OMP extension", () => {
     const registrations: unknown[] = [];
     const replies: unknown[] = [];
     const replyPosted = Promise.withResolvers<void>();
+    const calls: string[] = [];
     globalThis.fetch = async (input, init) => {
       const path = new URL(input.toString()).pathname;
       if (path === "/v1/interests/subscribe") {
         registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
       }
       if (path === "/api/v1/messages/message-1/reply") {
+        calls.push(`fetch ${path}`);
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         replyPosted.resolve();
       }
@@ -2601,6 +2614,7 @@ describe("envoy OMP extension", () => {
     envoyExtension({
       ...fixture.pi,
       askEphemeral: async ({ prompt }) => {
+        calls.push("askEphemeral");
         asked.push(prompt);
         return { replyText: "Yes, ship it." };
       },
@@ -2608,6 +2622,7 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_target"));
     const agent = natsState.controls.get("notifications.agent.ses_target");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
+    natsState.onPublish = (subject) => calls.push(`publish ${subject}`);
     agent.push(
       JSON.stringify({
         event_id: "dispatch-btw",
@@ -2619,7 +2634,8 @@ describe("envoy OMP extension", () => {
         payload_summary: "Can this ship?",
         payload: targetedDispatchPayload,
         trace_id: "dispatch-btw",
-      })
+      }),
+      "_INBOX.btw"
     );
     await replyPosted.promise;
 
@@ -2633,6 +2649,13 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(registrations).toMatchObject([{ capabilities: ["aside", "btw"] }]);
+    // The receipt precedes the ephemeral question and the Dispatch reply: the
+    // listener's window is not spent waiting on the host or on Dispatch.
+    expect(calls).toEqual([
+      "publish _INBOX.btw",
+      "askEphemeral",
+      "fetch /api/v1/messages/message-1/reply",
+    ]);
   });
 
   test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
@@ -3549,15 +3572,16 @@ describe("envoy OMP extension", () => {
         "the redelivery repairs the failed injection",
         "retry-after-failure"
       );
-      controls?.push(envelope);
+      controls?.push(envelope, "_INBOX.failed");
       await failedInjection.promise;
-      controls?.push(envelope);
+      controls?.push(envelope, "_INBOX.retried");
       controls?.push(
         forwardedRoleEnvelope(
           "legion-controller",
           "the following message proves the pump continued",
           "after-retry"
-        )
+        ),
+        "_INBOX.after"
       );
       await followingDelivery.promise;
 
@@ -3568,6 +3592,13 @@ describe("envoy OMP extension", () => {
         expect.stringContaining("evt-retry-after-failure"),
         expect.any(Error)
       );
+      // The failed attempt was acknowledged before its injection threw: the receipt does
+      // not depend on injection, and the unrecorded dedupe key lets the re-send inject.
+      expect(natsState.published.map((message) => message.subject)).toEqual([
+        "_INBOX.failed",
+        "_INBOX.retried",
+        "_INBOX.after",
+      ]);
     } finally {
       warning.mockRestore();
     }
@@ -3597,19 +3628,27 @@ describe("envoy OMP extension", () => {
       "only the first delivery injects",
       "dedupe-after-success"
     );
-    controls.push(envelope);
-    controls.push(envelope);
+    controls.push(envelope, "_INBOX.first");
+    controls.push(envelope, "_INBOX.duplicate");
     controls.push(
       forwardedRoleEnvelope(
         "legion-controller",
         "the next unique delivery proves the duplicate was skipped",
         "after-dedupe"
-      )
+      ),
+      "_INBOX.next"
     );
     await deliveryAfterDuplicate.promise;
 
     expect(fixture.messages).toHaveLength(2);
     expect(fixture.messages[0]).toContain("only the first delivery injects");
+    // The duplicate is acknowledged — the listener must not report it undelivered —
+    // without a second injection.
+    expect(natsState.published.map((message) => message.subject)).toEqual([
+      "_INBOX.first",
+      "_INBOX.duplicate",
+      "_INBOX.next",
+    ]);
   });
 
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
@@ -3630,14 +3669,25 @@ describe("envoy OMP extension", () => {
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
-  test("acknowledges an agent-subject request after steering injection", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+  test("acknowledges an agent-subject request before any Dispatch call or the injection", async () => {
+    // The listener waits two seconds for this receipt and reports a miss as a failed
+    // delivery, which the daemon answers by re-sending the message (LEGION-101). The
+    // receipt therefore precedes every other step of deliver(); the recorded call
+    // sequence is the proof — a fetch recorded here would be a Dispatch call made
+    // before the acknowledgement.
+    const calls: string[] = [];
+    let recording = false;
+    globalThis.fetch = async (input, init) => {
+      if (recording) calls.push(`fetch ${new URL(input.toString()).pathname}`);
+      return responseWithRegistration(input, init, []);
+    };
     const { default: envoyExtension } = await import("./envoy.ts?agent-receipt");
     const fixture = createPi();
     const injected = Promise.withResolvers<void>();
     envoyExtension({
       ...fixture.pi,
       sendMessage: (message, options) => {
+        calls.push("sendMessage");
         fixture.pi.sendMessage(message, options);
         injected.resolve();
       },
@@ -3645,16 +3695,62 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt"));
     const controls = natsState.controls.get("notifications.agent.ses_receipt");
     if (controls === undefined) throw new Error("agent subject was not subscribed");
+    natsState.onPublish = (subject) => calls.push(`publish ${subject}`);
+    recording = true;
 
     controls.push(
       forwardedRoleEnvelope("legion-controller", "receipt event", "agent-receipt"),
       "_INBOX.receipt"
     );
     await injected.promise;
-    await Promise.resolve();
-    await Promise.resolve();
 
-    expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.receipt"]);
+    expect(calls).toEqual(["publish _INBOX.receipt", "sendMessage"]);
+    expect(fixture.messages[0]).toContain("receipt event");
+  });
+
+  test("a failed receipt publish is logged with the event id and the message is still injected", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?receipt-publish-failure");
+    const fixture = createPi();
+    const secondDelivery = Promise.withResolvers<void>();
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (fixture.messages.length === 2) secondDelivery.resolve();
+      },
+    });
+    try {
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt_fail"));
+      const controls = natsState.controls.get("notifications.agent.ses_receipt_fail");
+      if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+      natsState.failPublishes = 1;
+      controls.push(
+        forwardedRoleEnvelope("legion-controller", "receipt lost", "receipt-lost"),
+        "_INBOX.lost"
+      );
+      controls.push(
+        forwardedRoleEnvelope("legion-controller", "receipt kept", "receipt-kept"),
+        "_INBOX.kept"
+      );
+      await secondDelivery.promise;
+
+      // The message whose receipt could not be published is still injected — the
+      // acknowledgement is best-effort, the local delivery is not — and the pump
+      // acknowledges the next one normally.
+      expect(fixture.messages[0]).toContain("receipt lost");
+      expect(fixture.messages[1]).toContain("receipt kept");
+      expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.kept"]);
+      expect(warning).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("evt-receipt-lost"),
+        expect.any(Error)
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {

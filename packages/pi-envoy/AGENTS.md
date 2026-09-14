@@ -11,9 +11,12 @@ inbound renderer: it produces a tolerant TOON block and never exposes raw envelo
 Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
 attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
 are routed by the listener: this extension receives a receipt-backed request on its direct agent
-subject instead of subscribing to a role subject itself. The agent pump replies after it accepts the
-envelope, so the listener can turn a claimed-but-deaf holder into a `delivery_failed` exception after
-two seconds.
+subject instead of subscribing to a role subject itself. The agent pump replies the moment the
+envelope is decoded — before the inbox update, any Dispatch call, or the session injection — so the
+listener's two-second receipt window measures decoding, not the host's turn: a claimed-but-deaf
+holder still becomes a `delivery_failed` exception, and a busy one no longer does (LEGION-101). A
+frame that cannot be decoded is still never acknowledged, and a receipt that fails to publish is
+logged while delivery continues.
 
 ## Daemon contract
 
