@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "A scratch-daemon rig (own team, state dir, ports, tmux server, short window) proves a lifecycle change end to end when unit tests cannot"
 category: testing
@@ -42,7 +44,7 @@ A second Legion daemon that shares nothing with the live one except the machine:
 | `state_dir` | `/tmp/legion30-rig/daemon` | its own `state.json`, secrets, workspaces, sockets |
 | `port` / `worker_stream_port` | 19570 / 19571 | the live daemon holds 13370/13371 |
 | tmux | `tmux -L legion-sjawhar3030` | the private server name is the project slug; the operator idle sweep (`retire-idle-workers.py`) only kills panes it finds on the *live* server's socket, so the rig's panes are invisible to it |
-| NATS + Envoy listener | isolated NATS on 14322, listener built from the PR head on 19120, `scripts/smoke/envoy-bridge.ts` for Dispatch events | no role-lane traffic reaches the live listener |
+| NATS + Envoy listener | isolated NATS on 14322, listener built from the PR head on 19120, a test bridge for Dispatch events | no role-lane traffic reaches the live listener |
 | Dispatch project | `LEGSMOKE`, one root issue | real issue events, nothing in the production project |
 | the knob under test | `worker_idle_retire_seconds: 90` | a 600 s default makes a proof take an hour; 90 s keeps the whole run under 20 minutes |
 

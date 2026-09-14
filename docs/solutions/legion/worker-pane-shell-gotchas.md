@@ -224,29 +224,15 @@ push` is refused with `remote: Repository not found.` (not the REST API's `Resou
 `../legion/one-role-keyed-table-decides-which-github-app-acts.md`). Verify with `jj log` that the commit is an
 ancestor before building on it.
 
-## 4. The box's global git credential helper hangs; the rig daemon's clone dies at the runner timeout
+## 4. The box's global git credential helper can make a test daemon clone time out
 
-`~/.gitconfig` on the rig box sets `credential.helper = !gh auth git-credential`. When `gh` blocks on the D-Bus secret
-service (observed 30–90 s, and an 8 s probe timing out), any git operation the smoke-rig daemon runs *through the
-global config* — its first `jj git clone` of the workspace — is killed at the 30 s runner timeout: `launchFailures 1`,
-the tree re-queued, a half-written clone directory left behind. Legion's own credential path (`legion credential`,
-configured per workspace) is unaffected; only the daemon's global-config fallback hits it.
+`~/.gitconfig` can set `credential.helper = !gh auth git-credential`. When `gh` blocks on the
+D-Bus secret service, a test daemon that falls back to global git configuration can time out while
+cloning a workspace and leave an incomplete directory. Legion's configured credential path remains
+the supported path; do not use a global-configuration fallback for current test fixtures.
 
-Workaround used by the LEGION-21 and LEGION-22 testers: run the rig daemon with
-`GIT_CONFIG_GLOBAL=<helper-free copy of ~/.gitconfig>` from its first boot (copy `~/.gitconfig`, drop the
-`[credential]` section). If the clone already died, remove the half-written workspace directory before restarting;
-admission reconciliation re-spawns the tree on boot. Diagnose with `timeout 8 git credential fill <<<$'protocol=https\nhost=github.com'`
-— a hang, not a prompt, is the symptom.
-
-## 5. Smoke-rig root issues: create them only once the daemon and bridge are live
-
-`up.sh` in `envoy` mode creates the root Dispatch issue **after** the daemon and the envoy bridge report ready, for a
-reason: the bridge relays live NATS traffic only, and `reduceIssueUpdated` ignores keys the daemon has never seen.
-A root created by hand before `RIG READY` (e.g. to dodge `ensure_root_issue`'s `POSSIBLE_DUPLICATE` 409 against earlier
-smoke roots) never enters the daemon's state and the controller never triages it; checkpoints 1–4 then wait forever.
-Create it after `RIG READY` with `force: true` and write the key to `${SMOKE_DIR}/root-issue`, or ice the stray one
-and create another. The rig is single-occupancy (shared ports 19370/19371/19020/14222, shared `LEGSMOKE` project,
-shared private tmux server): message the other worker before `up.sh` and run `down.sh` when finished.
+Diagnose the helper independently with `timeout 8 git credential fill <<<$'protocol=https\nhost=github.com'`:
+a hang, rather than a prompt, is the signature.
 
 ## 6. `legion handoff write` rejects the ledger's own fields
 
@@ -456,7 +442,7 @@ plugin release built from the merged commit is installed — a release step, unl
 
 In the bash tool's own shell, `type jq` answers `jq is a shell builtin` and `jq --version` prints `jaq 2.3.0`
 (`type -a jq` lists the mise install and shim behind it). That builtin exists nowhere else: a child `bash` — `bash -c`,
-`bash scripts/smoke/up.sh`, every `*.test.sh` harness, every script a pane's daemon or an operator runs — resolves
+the retired rig's startup invocation, every `*.test.sh` harness, every script a pane's daemon or an operator runs — resolves
 `jq` through `PATH` to `/home/ubuntu/.mise/installs/jq/1.8.2/jq` (`jq-1.8.2`; `/usr/bin/jq` is `jq-1.7`). So an
 expression checked interactively in the tool shell was checked against jaq, and the script's behaviour is jq's.
 LEGION-40's plan recorded "`jq` on this box's PATH is jaq 2.3.0", the harness and the shipped `dispatch-config.sh`

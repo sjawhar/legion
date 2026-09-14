@@ -11,7 +11,7 @@ tags:
   - fake-binaries
 date: 2026-09-13
 status: active
-module: scripts/smoke
+module: retired smoke rig
 applies_when:
   - A script or daemon calls an external tool (`mise`, `gh`, `secrets`, `jj`, `docker`) and reports its failure to an operator
   - You are about to write `cmd 2>/dev/null || fail "<one remedy>"`
@@ -26,7 +26,7 @@ related_issues:
 
 ## The shape that sends operators after the wrong fix
 
-`scripts/smoke/up.sh` verified the pinned Oh My Pi build in preflight with:
+The retired rig's startup script verified the pinned Oh My Pi build in preflight with:
 
 ```bash
 install_dir="$(mise where "$omp_pin" 2>/dev/null)" ||
@@ -103,7 +103,6 @@ when the tool is known to be noisy there.
 ## Related
 
 - `../testing/harness-that-sources-a-copy-pins-its-root-fails-closed-on-success-and-proves-absence-with-a-call-log.md`
-  — the harness cases (fake mise knobs `SMOKE_MISE_WHERE_FAILS` and `SMOKE_MISE_CONFIG_ERROR`)
-  that pin the four properties above.
+  — the retired harness cases that used fake mise failure knobs to pin the four properties above.
 - `../testing/fake-cli-on-path-outputs-from-files-and-a-call-log.md` — building a fake CLI whose
   stderr and exit are fixture-driven, for wrappers tested from Bun.

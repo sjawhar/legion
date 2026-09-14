@@ -58,7 +58,7 @@ The rebase itself was correct — fingerprint unchanged, head green, `MERGEABLE`
    runs before reading `mergeable`. Other branches pushed in the same window got runs; this
    one did not. That asymmetry *is* the diagnosis.
 4. **The tester runs from a pristine export, not the shared checkout.** From round 5 onward the
-   LEGION-41 tester ran every command from a `git archive <head>` export whose `scripts/smoke/*`
+   LEGION-41 tester ran every command from a `git archive <head>` export whose retired-rig file
    hashes were checked against `jj file show -r <head>`. A concurrent jj operation cannot move an
    export. This is the tester-side half of rule 1.
 

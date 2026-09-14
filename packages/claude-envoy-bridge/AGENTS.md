@@ -27,7 +27,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Session identity | `src/claude-session.ts` | `CLAUDE_CODE_SESSION_ID`, or explicit `ENVOY_SESSION_ID` for QA. |
 | Outbound transport | `src/envoy-client.ts` | Envoy listener HTTP client. |
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
-| Manual channel smoke | `scripts/smoke-channel.sh` | Real dev-flag smoke; documented and deliberately excluded from CI. |
+| Manual channel smoke | `smoke-channel.sh` | Real dev-flag smoke; documented and deliberately excluded from CI. |
 
 ## Critical conventions
 

@@ -1,3 +1,5 @@
+> **Suspended 2026-09-13.** Sami: "Please shutdown the goddamn legion smoke. It's pointless and it has led to destructive actions twice now." The rig this entry describes no longer exists; keep the learning, not the procedure.
+
 ---
 title: "One exhaustive role-keyed table decides which GitHub App a Legion role acts as; both Apps are required at config load and proven at boot; the review App's real permission set and what a tester's verdict artifact is"
 category: legion

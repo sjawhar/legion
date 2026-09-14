@@ -123,18 +123,16 @@ tr '\0' '\n' < /proc/$pid/environ | grep -c -e PRIVATE_KEY -e FOO_SECRET   # 0 (
 tr '\0' '\n' < /proc/$pid/environ | cut -d= -f1 | sort                     # names only
 ```
 
-The smoke rig's checkpoint 13 runs that over the server and every recorded pane, plus any name in
-`SMOKE_CANARY_ENV`: plant `FOO_SECRET=canary` in the daemon's environment at `up.sh` and prove it
-reaches nothing. Two stronger shapes: fork the private server by hand *before* the daemon boots
-with the stale variables in its environment (the production shape — an older daemon's server
-still carrying the keys) and read the boot log's `removed N variable(s) …` line; attach once from
-a shell carrying a fake `SSH_AUTH_SOCK`, restart, and check the session table is markers only.
-Note that a server forked by hand fails checkpoint 13 on its own pid by construction (its
-fork-time environ is the planted one); run 13 against a daemon-forked server for the green line.
-Two harness traps from writing that checkpoint: `$PPID` inside a command substitution names a
-subshell that has already exited, so the harness inspects long-lived `env -u … sleep` processes
-it started itself; and the harness must `-u` every inspected name from its *own* shell first,
-because a worker pane's shell legitimately carries `LEGION_BOOT_TOKEN_FILE` and friends.
+The daemon test harness exercises that check over the server and every recorded pane, with a
+fixture-owned sentinel variable such as `FOO_SECRET=canary` planted in the daemon environment to
+prove it reaches nothing. Two stronger shapes: fork the private server before the daemon boots
+with stale variables and read the boot log's `removed N variable(s) …` line; attach once from a
+shell carrying a fake `SSH_AUTH_SOCK`, restart, and check the session table is markers only.
+The fixture's server must be daemon-forked for the green line. A manually forked server retains
+its own inherited environment by construction. Two harness traps apply: `$PPID` inside a command
+substitution names a subshell that has already exited, so inspect long-lived processes the
+harness starts itself; and the harness must remove every inspected name from its own shell first,
+because a worker pane's shell legitimately carries `LEGION_BOOT_TOKEN_FILE` and related values.
 
 ## Related
 

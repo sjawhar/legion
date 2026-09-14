@@ -1,7 +1,6 @@
 # Legion on Kubernetes
 
-This runbook grows with the LEGION-19 tree. This page currently covers the worker image (LEGION-23);
-the in-cluster daemon (LEGION-25) and the kind smoke (LEGION-26) add their sections beside it.
+This runbook covers the worker image and the in-cluster daemon.
 
 ## Worker image
 

@@ -22,14 +22,11 @@ related_issues:
 
 ## What happened
 
-LEGION-32 replaced the OMP fork pin. A repository grep for the old version found one copy outside
-the changed file: `scripts/smoke/README.md:73`. That file was open in LEGION-10's pull request #957,
-whose architect had asked on LEGION-32 that `scripts/smoke/` be left alone because "#957 already
-moves the version string in `scripts/smoke/README.md`". The LEGION-32 spec repeated the claim; the
-implementer fetched #957's diff, saw a `-`/`+` pair for line 73, and wrote in the PR body that #957
-"rewrites that exact line".
-
-It did not. At #957's head `37b17c5a` the `+` side of that hunk re-added line 73 with the *same* old
+LEGION-32 replaced the OMP fork pin. A repository grep for the old version found one copy in the
+then-active rig's README. That file was open in LEGION-10's pull request #957, whose architect
+had asked on LEGION-32 that the rig be left alone because #957 rewrote the exact line. The
+implementer fetched #957's diff, saw the matching `-`/`+` pair, and incorrectly recorded it as
+evidence. At #957's head `37b17c5a` the `+` side of that hunk re-added line 73 with the *same* old
 string `18.1.15-sami.20260908-220934` — the hunk existed because the paragraph around it changed. The
 tester caught it with `legion gh -- pr diff 957`; the reviewer required the PR body corrected before
 approval. The PR passed through one head where a load-bearing scope justification was false.

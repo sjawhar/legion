@@ -34,7 +34,6 @@ one line. The work was the proof.
 | consumer | how it reads the pin |
 | --- | --- |
 | `packages/daemon/src/daemon/config.ts` | imports `DEFAULT_OMP_INVOCATION` (`mise x ${OMP_FORK_PIN} -- omp`) |
-| `scripts/smoke/up.sh` | runs `bun packages/daemon/src/daemon/omp-pin.ts` and embeds the line it prints |
 | `packages/daemon/docker/worker.Dockerfile` | the `cli` stage runs the same `bun` command into `/out/omp-pin`; the `tools` stage `mise x "$pin" -- omp --version` / `mise where`; the last runtime step runs `legion probe-image` |
 | `.github/workflows/worker-image.yaml` | `pull_request.paths` names `omp-pin.ts`, so a PR that touches it builds the image |
 

@@ -96,8 +96,8 @@ that were made -- never the sentence around them.
 
 ## Proving it
 
-The unit tests pin the contract; the proof that mattered ran on a real tmux server: a throwaway
-`scripts/smoke` rig with its own state dir, slug, ports and NATS container (never the deployment's
+The unit tests pin the contract; the proof that mattered ran on a real tmux server in an isolated
+test environment with its own state dir, slug, ports and NATS container (never the deployment's
 `legion-<project>` server), a `main` daemon's v-old state upgraded under live identity-less panes,
 then `kill-server` and stranger `sleep` panes on the recorded ids. Every stranger pid was alive after
 every transition, the decision lines named the stranger pids, and root and controller resurrected

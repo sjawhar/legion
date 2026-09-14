@@ -100,7 +100,7 @@ consent preconfigured and must not depend on local dialogs.
 
 ## Manual smoke
 
-`scripts/smoke-channel.sh` is a real manual smoke, never a CI step. It starts an isolated,
+`smoke-channel.sh` is a real manual smoke, never a CI step. It starts an isolated,
 interactive Claude Code session with the development-channel flag, waits for its Envoy
 registration, sends an actual direct Envoy event, and asserts the model writes the unique payload
 before checking teardown. It requires a live Envoy listener, NATS, Claude authentication, a
@@ -109,7 +109,7 @@ configured model, an organization that enables channels, and an installed plugin
 ```bash
 ENVOY_NATS_URL=nats://envoy-nats:4222 \
   CLAUDE_CHANNEL_ENTRY=plugin:claude-envoy-bridge@<marketplace> \
-  packages/claude-envoy-bridge/scripts/smoke-channel.sh
+  bash -c 'cd packages/claude-envoy-bridge/scripts && ./smoke-channel.sh'
 ```
 
 Use `CLAUDE_BIN` or `ENVOY_URL` to select a different Claude binary or listener. For source-tree
