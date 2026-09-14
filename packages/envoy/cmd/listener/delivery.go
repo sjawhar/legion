@@ -34,7 +34,14 @@ func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string
 }
 
 type listenerDeliveryHandlerConfig struct {
-	client            *bus.Client
+	client *bus.Client
+	// forwardRole delivers a role-lane envelope to the holder's agent subject and
+	// waits for its empty receipt. main.go wires client.RequestCoreTo.
+	// bus.ErrReceiptTimeout means the forward was flushed to the server and no
+	// receipt arrived inside timeout; any other error — a raw nats.ErrTimeout
+	// from the flush included — means the forward is not known to have reached
+	// the holder.
+	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -279,7 +286,12 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // currently holds the role, forwarding it over core NATS request-reply so
 // the sender learns immediately whether the holder received it. Every
 // branch ACKs: role lanes have no durable transit to retry against, so a
-// failed forward is reported via a delivery exception instead of a NAK.
+// failed forward is reported via a delivery exception instead of a NAK. A
+// forward that reached the server and drew no receipt from the live holder
+// inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
+// receipt_timeout; a forward not known to have left this process — the flush
+// timed out or failed, the publish failed — is delivery_failed like a stale
+// holder; no claim is no_holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		message.finalize(false)
@@ -362,7 +374,20 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	forwarded := item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	if err := cfg.client.RequestCoreTo(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+		if errors.Is(err, bus.ErrReceiptTimeout) {
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "receipt_timeout",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
+				},
+				exceptionReason: "receipt_timeout",
+				clearAttempt:    true,
+			})
+			message.finalize(false)
+			return
+		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",

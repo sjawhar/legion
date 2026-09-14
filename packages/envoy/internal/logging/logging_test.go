@@ -56,6 +56,20 @@ func TestLoggerOutputsValidJSON(t *testing.T) {
 	}
 }
 
+func TestNewWithWriterWritesToTheGivenWriter(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewWithWriter("test-machine", &buf)
+	logger.DeliveryLog(slog.LevelWarn, "captured", "ses_1", "notifications.role.x", "evt_1", "receipt_timeout")
+
+	var logEntry map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &logEntry); err != nil {
+		t.Fatalf("log output is not valid JSON: %v\nOutput: %s", err, buf.String())
+	}
+	if logEntry["msg"] != "captured" || logEntry["delivery_status"] != "receipt_timeout" || logEntry["machine_id"] != "test-machine" {
+		t.Fatalf("unexpected log entry: %s", buf.String())
+	}
+}
+
 func TestDeliveryLogIncludesDeliveryFields(t *testing.T) {
 	// Capture stderr
 	oldStderr := os.Stderr

@@ -993,6 +993,152 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 	}
 }
 
+func TestPublishHandler_DedupeKeySelection(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	const topic = "notifications.github.example-org.example-repo.dedupe-key"
+	probe, err := client.Conn.SubscribeSync(topic)
+	if err != nil {
+		t.Fatalf("subscribe topic probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	minted := func(key string) bool { return strings.HasPrefix(key, "publish.") && len(key) > len("publish.") }
+	cases := []struct {
+		name string
+		body string
+		want func(key string) bool
+	}{
+		{"explicit dedupe_key is used verbatim", `{"topic":"` + topic + `","message":"hello","dedupe_key":"publish.abc"}`, func(key string) bool { return key == "publish.abc" }},
+		{"empty dedupe_key is absent", `{"topic":"` + topic + `","message":"hello","dedupe_key":""}`, minted},
+		{"idempotency_key keeps the publish prefix", `{"topic":"` + topic + `","message":"hello","idempotency_key":"k1"}`, func(key string) bool { return key == "publish.k1" }},
+		{"neither mints a key", `{"topic":"` + topic + `","message":"hello"}`, minted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body)))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response contracts.Envelope
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if !tc.want(response.DedupeKey) {
+				t.Fatalf("response dedupe_key = %q", response.DedupeKey)
+			}
+			message, err := probe.NextMsg(5 * time.Second)
+			if err != nil {
+				t.Fatalf("read published envelope: %v", err)
+			}
+			var wire contracts.Envelope
+			if err := json.Unmarshal(message.Data, &wire); err != nil {
+				t.Fatalf("decode wire envelope: %v", err)
+			}
+			if wire.DedupeKey != response.DedupeKey || wire.EventID != response.EventID {
+				t.Fatalf("wire envelope dedupe_key %q event %q; response %q %q", wire.DedupeKey, wire.EventID, response.DedupeKey, response.EventID)
+			}
+		})
+	}
+}
+
+func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
+	client := setupPublishTestClient(t)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client})
+	const topic = "notifications.github.example-org.example-repo.dedupe-key-conflict"
+	probe, err := client.Conn.SubscribeSync(topic)
+	if err != nil {
+		t.Fatalf("subscribe topic probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response apiError
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode 400 body: %v", err)
+	}
+	if response.Error == "" || len(response.Expected) != 2 || response.Expected[0] != "dedupe_key" || response.Expected[1] != "idempotency_key" {
+		t.Fatalf("400 body = %+v, want expected [dedupe_key idempotency_key]", response)
+	}
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("a rejected publish must publish nothing: %v", err)
+	}
+}
+
+// The role arbiter drops an envelope whose dedupe_key already carries the
+// forward prefix (it is how a forwarded copy is kept out of the arbiter), so a
+// caller who supplies one would get a 200 for a message that vanishes: no
+// forward, no exception, no log line. The prefix is reserved at the API.
+func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	for _, topic := range []string{
+		"notifications.github.example-org.example-repo.reserved-prefix",
+		contracts.RoleTopicPrefix + "reserved-prefix-unheld",
+	} {
+		t.Run(topic, func(t *testing.T) {
+			probe, err := client.Conn.SubscribeSync(topic)
+			if err != nil {
+				t.Fatalf("subscribe topic probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode 400 body: %v", err)
+			}
+			if response.Error != "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix || len(response.Expected) != 1 || response.Expected[0] != "dedupe_key" {
+				t.Fatalf("400 body = %+v", response)
+			}
+			if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("a rejected publish must publish nothing: %v", err)
+			}
+		})
+	}
+}
+
+// The mutual-exclusion rule is publish's alone: send ignores dedupe_key as it
+// ignores any field it does not read, so a body carrying both keys is still a
+// send keyed by its idempotency_key (LEGION-108, architect ruling).
+func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	recorder := httptest.NewRecorder()
+	sendHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response contracts.Envelope
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.DedupeKey != "agent.ses_target.k1" {
+		t.Fatalf("send dedupe_key = %q, want agent.ses_target.k1", response.DedupeKey)
+	}
+}
+
 func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	mux := http.NewServeMux()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -669,9 +670,20 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	return c.Conn.Publish(subject, data)
 }
 
+// ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
+// flush both succeeded and no empty receipt arrived before the deadline: the
+// forward is known to have reached the server, and whoever holds the subject
+// did not acknowledge it in time. A flush that fails or times out — a
+// reconnecting or stalled connection still buffering the forward — is returned
+// as the client's own error, never this one, because that forward is not known
+// to have left this process.
+var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
+
 // RequestCoreTo delivers item directly to subject and waits for an empty
 // receiver receipt. Agent subjects are captured by the notification stream,
 // whose non-empty JetStream publish acknowledgement is not a receiver receipt.
+// The flush is bounded by the same window as the receipt wait, so the call
+// never outlives timeout by the client's default 10 s flush.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -692,16 +704,23 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
 		return err
 	}
-	if err := c.Conn.Flush(); err != nil {
-		return err
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("bus: request window of %s elapsed before the forward was flushed", timeout)
+	}
+	if err := c.Conn.FlushTimeout(remaining); err != nil {
+		return fmt.Errorf("bus: flush forward: %w", err)
 	}
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nats.ErrTimeout
+			return ErrReceiptTimeout
 		}
 		response, err := receipt.NextMsg(remaining)
 		if err != nil {
+			if errors.Is(err, nats.ErrTimeout) {
+				return ErrReceiptTimeout
+			}
 			return err
 		}
 		if len(response.Data) == 0 && response.Header == nil {

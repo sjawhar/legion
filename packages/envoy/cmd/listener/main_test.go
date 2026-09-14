@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -630,7 +632,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 }
 
-func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
+func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -667,7 +669,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","source":"agent"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
 	publishHandler(&state).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -676,7 +678,121 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsDeliveryFailed(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
 		t.Fatalf("decode published envelope: %v", err)
 	}
-	assertDeliveryException(t, exceptionProbe, published, "delivery_failed")
+	exception := assertDeliveryException(t, exceptionProbe, published, "receipt_timeout")
+	t.Logf("captured exception envelope payload: %s", exception.Payload)
+	if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("one publish produced a second exception (or probe failed): %v", err)
+	}
+	logs := harness.logs.String()
+	line := ""
+	for _, candidate := range strings.Split(logs, "\n") {
+		if strings.Contains(candidate, `"msg":"listener role receipt timed out"`) {
+			line = candidate
+			break
+		}
+	}
+	if line == "" || !strings.Contains(line, `"delivery_status":"receipt_timeout"`) || !strings.Contains(line, `"event_id":"`+published.EventID+`"`) {
+		t.Fatalf("listener log does not name receipt_timeout for %s:\n%s", published.EventID, logs)
+	}
+	t.Logf("listener log line: %s", line)
+}
+
+func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "slow-holder"
+	roleTopic := contracts.RoleTopicPrefix + role
+	if err := harness.sessions.Put("ses_slow", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register slow holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_slow", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var acknowledge atomic.Bool
+	forwards := make(chan contracts.Envelope, 8)
+	responder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_slow"), func(message *natsgo.Msg) {
+		var forwarded contracts.Envelope
+		if err := json.Unmarshal(message.Data, &forwarded); err == nil {
+			forwards <- forwarded
+		}
+		if acknowledge.Load() && message.Reply != "" {
+			_ = message.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe holder responder: %v", err)
+	}
+	t.Cleanup(func() { _ = responder.Unsubscribe() })
+	coreSubscription, err := harness.client.Conn.Subscribe(contracts.RoleTopicPrefix+">", harness.coreHandler)
+	if err != nil {
+		t.Fatalf("subscribe role arbiter: %v", err)
+	}
+	t.Cleanup(func() { _ = coreSubscription.Unsubscribe() })
+	exceptionProbe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + roleTopic)
+	if err != nil {
+		t.Fatalf("subscribe exception lane: %v", err)
+	}
+	t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush subscriptions: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
+	publish := func(what string) contracts.Envelope {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, body = %s", what, recorder.Code, recorder.Body.String())
+		}
+		var published contracts.Envelope
+		if err := json.NewDecoder(recorder.Body).Decode(&published); err != nil {
+			t.Fatalf("%s: decode: %v", what, err)
+		}
+		if published.DedupeKey != "publish.resend-1" {
+			t.Fatalf("%s: dedupe_key = %q, want publish.resend-1", what, published.DedupeKey)
+		}
+		return published
+	}
+	expectForward := func(what string, want contracts.Envelope) {
+		t.Helper()
+		select {
+		case forwarded := <-forwards:
+			if forwarded.EventID != want.EventID || forwarded.DedupeKey != roleForwardDedupePrefix+"publish.resend-1" {
+				t.Fatalf("%s: holder received event %q dedupe %q, want %q with the forward prefix", what, forwarded.EventID, forwarded.DedupeKey, want.EventID)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: holder received no forward", what)
+		}
+	}
+	expectNoException := func(what string) {
+		t.Helper()
+		if _, err := exceptionProbe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+			t.Fatalf("%s: unexpected exception (or probe failed): %v", what, err)
+		}
+	}
+
+	// 1. The holder swallows the forward: receipt_timeout, attempt cache cleared.
+	first := publish("first publish")
+	expectForward("first publish", first)
+	assertDeliveryException(t, exceptionProbe, first, "receipt_timeout")
+
+	// 2. Same dedupe_key after the timeout: forwarded again; the holder now acknowledges.
+	acknowledge.Store(true)
+	second := publish("re-publish after receipt_timeout")
+	expectForward("re-publish after receipt_timeout", second)
+	expectNoException("re-publish after receipt_timeout")
+
+	// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded, no exception.
+	publish("re-publish after delivery")
+	select {
+	case forwarded := <-forwards:
+		t.Fatalf("re-publish after delivery: holder received %q; the listener must skip a delivered dedupe_key", forwarded.EventID)
+	case <-time.After(250 * time.Millisecond):
+	}
+	expectNoException("re-publish after delivery")
+	if !strings.Contains(harness.logs.String(), `"msg":"listener role dedupe skip"`) {
+		t.Fatalf("expected a dedupe skip log line:\n%s", harness.logs.String())
+	}
 }
 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
@@ -2082,6 +2198,103 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	}
 }
 
+func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "forward-publish-error"
+	if err := harness.sessions.Put("ses_unreachable", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_unreachable", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var forwards atomic.Int32
+	cfg := harness.config
+	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		forwards.Add(1)
+		return errors.New("nats: connection closed")
+	}
+	handler := coreNATSDeliveryHandler(cfg)
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-publish-error")
+	item.Payload = `{"type":"worker-queued"}`
+	data := marshalListenerEnvelope(t, item)
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+	handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+
+	if got := forwards.Load(); got != 2 {
+		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear the attempt cache", got)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
+		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
+	}
+}
+
+// The reason is chosen by which error the forward returns, not by the fact that
+// it failed: only bus.ErrReceiptTimeout (the forward left this process and drew
+// no receipt) is receipt_timeout. A raw nats.ErrTimeout is what the client's
+// flush returns while a reconnecting or stalled connection still buffers the
+// forward, and that forward is not known to have reached anyone.
+func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		forwardErr error
+		reason     string
+		logMessage string
+	}{
+		{"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
+		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+		{"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
+		{"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			harness := newListenerDeliveryHarness(t, nil)
+			role := fmt.Sprintf("forward-error-kind-%d", i)
+			sessionID := fmt.Sprintf("ses_error_kind_%d", i)
+			if err := harness.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+				t.Fatalf("register holder: %v", err)
+			}
+			if _, err := harness.registry.SetRole(sessionID, "test-machine", role, false); err != nil {
+				t.Fatalf("claim role: %v", err)
+			}
+			cfg := harness.config
+			cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr }
+			handler := coreNATSDeliveryHandler(cfg)
+			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
+			item.Payload = `{"type":"worker-queued"}`
+			probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+			if err != nil {
+				t.Fatalf("subscribe exception probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush exception probe: %v", err)
+			}
+
+			handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+			assertDeliveryException(t, probe, item, tc.reason)
+
+			logs := harness.logs.String()
+			if !strings.Contains(logs, `"msg":"`+tc.logMessage+`"`) || !strings.Contains(logs, `"delivery_status":"`+map[string]string{"delivery_failed": "failed", "receipt_timeout": "receipt_timeout"}[tc.reason]+`"`) {
+				t.Fatalf("log does not carry %q for %s:\n%s", tc.logMessage, tc.reason, logs)
+			}
+			if tc.reason == "delivery_failed" && strings.Contains(logs, "receipt_timeout") {
+				t.Fatalf("a forward that never left this process must not be logged as a receipt timeout:\n%s", logs)
+			}
+		})
+	}
+}
+
 func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -2370,6 +2583,28 @@ type listenerDeliveryHarness struct {
 	metrics     *metrics.Registry
 	handler     natsgo.MsgHandler
 	coreHandler natsgo.MsgHandler
+	// logs captures every listener log line the harness's delivery handlers write.
+	logs *lockedBuffer
+	// config is the handler configuration the harness built; a test copies it,
+	// overrides one seam (forwardRole), and builds its own handler from the copy.
+	config listenerDeliveryHandlerConfig
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) listenerDeliveryHarness {
@@ -2396,15 +2631,22 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		deliverer.HTTPClient = &http.Client{Transport: transport}
 	}
 	met := metrics.New()
+	logs := &lockedBuffer{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("listener log:\n%s", logs.String())
+		}
+	})
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
+		forwardRole:       client.RequestCoreTo,
 		registry:          registry,
 		sessions:          sessions,
 		machineID:         "test-machine",
 		deliverer:         &deliverer,
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
-		logger:            logging.New("test"),
+		logger:            logging.NewWithWriter("test", logs),
 		messagesReceived:  met.NewCounter("test_messages_received", "test"),
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
@@ -2417,6 +2659,8 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		metrics:     met,
 		handler:     jetStreamDeliveryHandler(deliveryConfig),
 		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
+		logs:        logs,
+		config:      deliveryConfig,
 	}
 }
 
@@ -2465,7 +2709,7 @@ func marshalListenerEnvelope(t *testing.T, item contracts.Envelope) []byte {
 	return data
 }
 
-func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) {
+func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original contracts.Envelope, reason string) contracts.Envelope {
 	t.Helper()
 	message, err := probe.NextMsg(5 * time.Second)
 	if err != nil {
@@ -2524,6 +2768,7 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 	if payload.SourceSession != original.SourceSession {
 		t.Fatalf("exception source session = %q, want %q", payload.SourceSession, original.SourceSession)
 	}
+	return exception
 }
 
 func TestHealthzConsumerLag(t *testing.T) {

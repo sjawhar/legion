@@ -70,20 +70,25 @@ state even while an interest registration or cleanup request is delayed or unava
 `notifications.role.<role>` is a live, exactly-one-holder lane. The listener's core-NATS
 queue subscriber resolves the current live role holder at delivery time, then sends a
 receipt-backed request with the original role topic to `notifications.agent.<session_id>`.
-The extension's agent pump replies after accepting that envelope. If no receipt arrives within
-two seconds, delivery fails and Envoy emits its `delivery_failed` exception. A role claimant
-does not subscribe directly to its role subject, and a role message is not retained for a future
-claimant.
+The extension's agent pump replies after accepting that envelope. The outcome is one of three
+exception reasons: `no_holder` when no session claims the role; `delivery_failed` when a claim
+exists but the message is not known to have reached the holder (the holder lookup failed, the
+holder's registration is stale, or the publish or the flush to the server failed or timed out);
+`receipt_timeout` when the message was forwarded and flushed to the server and the registered,
+live holder sent no receipt inside the two-second window (`bus.ErrReceiptTimeout`, which the
+client returns from the receipt wait alone — never from the flush, whose own timeout is the same
+`nats.ErrTimeout` value). A role claimant does not subscribe directly to its role subject, and a
+role message is not retained for a future claimant.
 
-When a control delivery has no live holder or fails, Envoy emits an envelope on
-`notifications.envoy.exceptions.<original-topic>`. The exception payload preserves the
-original delivery fields:
+When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
+envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves
+the original delivery fields:
 
 | Field | Meaning |
 | --- | --- |
 | `original_topic` | Original envelope topic |
 | `event_id` | Original envelope event ID |
-| `reason` | `no_holder` or `delivery_failed` |
+| `reason` | `no_holder`, `delivery_failed`, or `receipt_timeout` (defined above) |
 | `payload_summary`, `payload` | Original human summary and distinct machine payload |
 | `dedupe_key` | Original envelope dedupe key |
 | `source`, `source_session` | Original envelope source fields |
