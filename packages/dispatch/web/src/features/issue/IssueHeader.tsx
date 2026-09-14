@@ -11,16 +11,12 @@ import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
-import type { Artifact, Issue, IssueDetails, UserIssueState, UserState } from "../../api/types";
+import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
-  badgeBlocking,
-  badgeHigh,
-  badgeLow,
-  badgeMed,
   badgePrimary,
   bgTransparent,
   borderDefault,
@@ -55,10 +51,10 @@ import { openIssueStatuses, statusLabel } from "../project/board-model";
 import { buildIssuePath } from "../refs/routes";
 import { GitHubLink } from "./GitHubLink";
 import { IssueLabels } from "./IssueLabels";
+import { PriorityControl } from "./PriorityControl";
 import { SubscribedAgents } from "./SubscribedAgents";
-import { useIssueDrafts } from "./useIssueDrafts";
+import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 
-const priorityPills = [badgeBlocking, badgeHigh, badgeMed, badgeLow] as const;
 const closedIssueStatuses = [...openIssueStatuses, "done"] as const;
 
 export function IssueHeader({
@@ -96,24 +92,7 @@ export function IssueHeader({
     },
   });
   const updateIssue = useMutation({
-    mutationFn: (input: Partial<Pick<Issue, "priority" | "route" | "status" | "title">>) =>
-      api.patchIssue(issue.key, input),
-    onMutate: async (input) => {
-      await queryClient.cancelQueries({ queryKey: ["issue", issue.key] });
-      const previous = queryClient.getQueryData<IssueDetails>(["issue", issue.key]);
-      const priority = input.priority;
-      if (priority !== undefined) {
-        queryClient.setQueryData<IssueDetails>(["issue", issue.key], (current) =>
-          current === undefined ? undefined : { ...current, priority }
-        );
-      }
-      return { previous };
-    },
-    onError: (_error, _input, context) => {
-      if (context?.previous !== undefined) {
-        queryClient.setQueryData<IssueDetails>(["issue", issue.key], context.previous);
-      }
-    },
+    mutationFn: (input: IssueUpdateInput) => api.patchIssue(issue.key, input),
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
@@ -150,7 +129,6 @@ export function IssueHeader({
   const showApprovalActions =
     documentArtifact?.approval !== undefined &&
     (documentArtifact.approval.state !== "draft" || approvalRequestOpen);
-  const priorityPill = issue.priority === null ? badgeLow : priorityPills[issue.priority];
   const pinGuard = useSubmitGuard();
   const updateState = useMutation({
     mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
@@ -315,23 +293,11 @@ export function IssueHeader({
               ))}
             </select>
           </label>
-          <select
-            aria-label="Priority"
-            className={`min-h-11 shrink-0 appearance-none rounded-full border px-2 py-2 text-sm font-semibold outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${borderDefault} ${priorityPill.bg} ${priorityPill.text}`}
+          <PriorityControl
             disabled={isClosed || updateIssue.isPending}
-            onChange={(event) =>
-              drafts.requestPrioritySubmit(
-                event.target.value === "" ? null : (Number(event.target.value) as 0 | 1 | 2 | 3)
-              )
-            }
-            value={issue.priority ?? ""}
-          >
-            <option value="">Priority</option>
-            <option value="0">P0</option>
-            <option value="1">P1</option>
-            <option value="2">P2</option>
-            <option value="3">P3</option>
-          </select>
+            issueKey={issue.key}
+            priority={issue.priority}
+          />
           {documentArtifact === undefined ? null : (
             <ApprovalChip
               artifact={documentArtifact}

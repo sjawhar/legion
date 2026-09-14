@@ -24,7 +24,7 @@ import { Link } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
-import { AttentionBadge, PriorityBadge } from "../../components/Badge";
+import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill, Pill, StatusPill } from "../../components/Pill";
@@ -42,6 +42,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { PriorityControl } from "../issue/PriorityControl";
 import { buildIssuePath } from "../refs/routes";
 import {
   type BoardColumn,
@@ -123,7 +124,11 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <StatusPill>{statusLabel(issue.status as IssueStatus)}</StatusPill>
-        <PriorityBadge priority={issue.priority} />
+        <PriorityControl
+          disabled={issue.status === "done"}
+          issueKey={issue.key}
+          priority={issue.priority}
+        />
         {(issue.labels ?? []).map((label) => (
           <LabelPill key={label}>{label}</LabelPill>
         ))}

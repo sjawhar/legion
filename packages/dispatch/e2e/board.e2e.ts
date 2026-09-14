@@ -1,12 +1,17 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
-import { createIssue, createProject, patchIssue } from "./api";
+import { createIssue, createProject, getIssue, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** The visible priority tag inside a card or row - the `<select>` options carry the same text. */
+function priorityBadge(scope: Locator, label: string): Locator {
+  return scope.locator("span", { hasText: new RegExp(`^${label}$`) });
+}
 
 test("project board persists reordering and lets humans move cards through every status", async ({
   browser,
@@ -163,25 +168,84 @@ test("project board persists reordering and lets humans move cards through every
   }
 });
 
-test("project list and board cards show an issue priority", async ({ browser }) => {
+test("project list rows and board cards set an issue's priority in place", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Prioritized card" });
   await patchIssue(issue.key, { priority: 1 });
+  const unset = await createIssue({ project: "CORE", title: "Unprioritized card" });
 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
     await page.goto("/projects/CORE");
-    await expect(
-      page.getByRole("list", { name: "triage issues" }).getByText("P1", { exact: true })
-    ).toBeVisible();
+    const listRow = page.getByRole("listitem", { name: `${issue.key} Prioritized card` });
+    const listControl = listRow.getByLabel(`Priority of ${issue.key}`);
+    await expect(priorityBadge(listRow, "P1")).toBeVisible();
+    // The badge stays small; the tap target around it is 44 px on a phone (32 px from md).
+    const listBox = await listControl.boundingBox();
+    expect(listBox?.height ?? 0).toBeGreaterThanOrEqual(
+      testInfo.project.name === "iphone" ? 44 : 32
+    );
+    const listPatch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+    );
+    await listControl.selectOption("3");
+    expect((await listPatch).postDataJSON()).toEqual({ priority: 3 });
+    await expect(priorityBadge(listRow, "P3")).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 3 });
 
     await page.getByRole("button", { name: "Board" }).click();
-    await expect(
-      page
-        .getByRole("article", { name: `${issue.key} Prioritized card` })
-        .getByText("P1", { exact: true })
-    ).toBeVisible();
+    const card = page.getByRole("article", { name: `${issue.key} Prioritized card` });
+    await expect(priorityBadge(card, "P3")).toBeVisible();
+    const cardControl = card.getByLabel(`Priority of ${issue.key}`);
+    await cardControl.focus();
+    const cardPatch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+    );
+    await cardControl.selectOption("2");
+    expect((await cardPatch).postDataJSON()).toEqual({ priority: 2 });
+    await expect(priorityBadge(card, "P2")).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
+    // Using the control neither followed the card's link nor dragged the card.
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    await expect(card).not.toHaveClass(/opacity-50/);
+    await expect(page.getByRole("region", { name: "Triage" }).getByRole("article")).toHaveText([
+      /Prioritized card/,
+      /Unprioritized card/,
+    ]);
+
+    const unsetCard = page.getByRole("article", { name: `${unset.key} Unprioritized card` });
+    await expect(priorityBadge(unsetCard, "Priority")).toBeVisible();
+    const unsetPatch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${unset.key}`
+    );
+    await unsetCard.getByLabel(`Priority of ${unset.key}`).selectOption("0");
+    expect((await unsetPatch).postDataJSON()).toEqual({ priority: 0 });
+    await expect(priorityBadge(unsetCard, "P0")).toBeVisible();
+
+    // Tab reaches the control right after the card's Reorder handle, so a keyboard shortcut can
+    // focus it too; the screenshot shows the focus ring on the badge.
+    await page.getByRole("button", { name: `Reorder ${unset.key}` }).focus();
+    await page.keyboard.press("Tab");
+    await expect(unsetCard.getByLabel(`Priority of ${unset.key}`)).toBeFocused();
+    const shot = testInfo.outputPath(`board-priority-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`board priority (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    await page.reload();
+    await expect(priorityBadge(card, "P2")).toBeVisible();
+    await expect(priorityBadge(unsetCard, "P0")).toBeVisible();
   } finally {
     await context.close();
   }

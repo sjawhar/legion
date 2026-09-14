@@ -4,12 +4,12 @@ import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
-import { PriorityBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { dangerText, linkHoverText, linkText, textMutedOnCanvas } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
+import { PriorityControl } from "../issue/PriorityControl";
 import { actorLabel } from "../refs/actor";
 import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
 import { AskCard } from "./AskCard";
@@ -65,7 +65,9 @@ function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
           </Link>
         )}
         <InboxRowChip ask={ask} />
-        <PriorityBadge priority={ask.priority} />
+        {ask.issue_key === null ? null : (
+          <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+        )}
       </div>
       <AskCard ask={ask} />
     </li>

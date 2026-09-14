@@ -4,7 +4,7 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
-import { AttentionBadge, PriorityBadge } from "../../components/Badge";
+import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill, Pill } from "../../components/Pill";
@@ -22,6 +22,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { PriorityControl } from "../issue/PriorityControl";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { userPreferenceStorageKey } from "../shell/userPreference";
@@ -55,7 +56,11 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <PriorityBadge priority={issue.priority} />
+        <PriorityControl
+          disabled={issue.status === "done"}
+          issueKey={issue.key}
+          priority={issue.priority}
+        />
         {(issue.labels ?? []).map((label) => (
           <LabelPill key={label}>{label}</LabelPill>
         ))}
