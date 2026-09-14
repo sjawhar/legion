@@ -2188,6 +2188,112 @@ describe("Legion HTTP API", () => {
     });
   });
 
+  it("accepts the mid-turn reviewer's completion after the finished implementer's relaunch registered, keeping the assignment time on the record until then (LEGION-27)", async () => {
+    // The completion half of the LEGION-27 sequence (processes.test.ts holds the recovery half):
+    // the reviewer is the active phase, still inside the turn that runs `legion handoff complete`,
+    // when the pane a pre-#991 daemon's own recovery relaunched for the finished implementer
+    // registers through /worker/started. That registration must leave the reviewer's record —
+    // role, session, and the time its assignment was delivered — exactly as written, so the
+    // completion that follows is accepted, clears the record, and reaches the architect, and no
+    // refusal is logged.
+    await start();
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const infoSpy = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const reviewerToken = roleToken(state.project, root, "reviewer");
+      const implementerToken = roleToken(state.project, root, "implementer");
+      state.roles[reviewerToken] = {
+        issue: root,
+        role: "reviewer",
+        generation: 1,
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%1",
+          socketPath: "/state/workers/reviewer.sock",
+        },
+      };
+      const reviewerBoot = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
+      if (!reviewerBoot) throw new Error("worker boot token was not minted");
+      const reviewerStarted = await json<{ secret: string }>("/legion/v1/worker/started", {
+        tree: root,
+        issue: root,
+        role: "reviewer",
+        bootToken: reviewerBoot,
+        sessionId: "ses_reviewer",
+        agentId: "agt_reviewer",
+        ompSessionFile: "/tmp/reviewer.json",
+      });
+      expect(reviewerStarted.response.status).toBe(200);
+      // The architect's assignment reached the reviewer (the one write of the phase, stamped).
+      const assigned = {
+        phase: "reviewer",
+        sessionId: "ses_reviewer",
+        assignedAt: "2026-09-13T05:20:00.000Z",
+      };
+      state.phases[root] = { ...assigned };
+
+      // The finished implementer, relaunched with --resume: a new generation, the same agent.
+      state.roles[implementerToken] = {
+        issue: root,
+        role: "implementer",
+        generation: 2,
+        expectedSessionId: "ses_implementer",
+        resumeSessionFile: "/tmp/implementer.json",
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%2",
+          socketPath: "/state/workers/implementer.sock",
+          ompSessionFile: "/tmp/implementer.json",
+        },
+      };
+      const implementerBoot = await api?.mintWorkerBootToken(
+        root,
+        root,
+        "implementer",
+        2,
+        "ses_implementer"
+      );
+      if (!implementerBoot) throw new Error("worker boot token was not minted");
+      const implementerStarted = await json("/legion/v1/worker/started", {
+        tree: root,
+        issue: root,
+        role: "implementer",
+        bootToken: implementerBoot,
+        sessionId: "ses_implementer",
+        agentId: "agt_implementer",
+        ompSessionFile: "/tmp/implementer.json",
+      });
+      expect(implementerStarted.response.status).toBe(200);
+      expect(state.phases[root]).toEqual(assigned);
+
+      const grantId = await mintGrant(root, "ses_reviewer", reviewerStarted.body.secret);
+      const complete = await json("/legion/v1/phase/complete", {
+        grantId,
+        summary: "Round 3 reviewed",
+      });
+
+      expect(complete.response.status).toBe(200);
+      expect(state.phases[root]).toBeUndefined();
+      expect(publications).toContainEqual({
+        topic: roleTopic(roleToken(state.project, root, "architect")),
+        payload: JSON.stringify({
+          type: "phase-complete",
+          issue: root,
+          role: "reviewer",
+          summary: "Round 3 reviewed",
+        }),
+      });
+      expect(refusalLines(errorSpy)).toEqual([]);
+    } finally {
+      infoSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
   it("rejects worker/started with a fresh 409 when the claim's generation changes while its GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();
     const leaseGate = Promise.withResolvers<void>();
@@ -3146,6 +3252,21 @@ describe("Legion HTTP API", () => {
     return grant.body.grantId;
   }
 
+  /** Every `[legion] phase/complete refused …` line a `console.error` spy saw, one string per
+   * call (LEGION-72): the refusal log is the one place a 403/404/409 from that route says what
+   * the grant named and what the daemon held. */
+  function refusalLines(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls
+      .map((call) => call.map(String).join(" "))
+      .filter((line) => line.startsWith("[legion] phase/complete refused "));
+  }
+
+  /** How a refusal line names a grant: the first twelve hex characters of its `secretHash`, the
+   * hash claims keep for boot tokens — never the id, which is the credential itself. */
+  function grantRef(grantId: string): string {
+    return `grant ${secretHash(grantId).toString("hex").slice(0, 12)}`;
+  }
+
   it("publishes phase-complete to the tree's architect, clears the phase, and keeps the worker's role claim", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
@@ -3779,7 +3900,7 @@ describe("Legion HTTP API", () => {
     expect(dispatch.statusWrites).toEqual([]);
   });
 
-  it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase", async () => {
+  it("rejects a duplicate phase/complete once the architect has reassigned the issue to a later phase, logging one refusal line naming the grant's side and the record it refused against", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -3810,29 +3931,160 @@ describe("Legion HTTP API", () => {
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
     const body = { grantId, summary: "Verified the acceptance criteria" };
 
-    const first = await json("/legion/v1/phase/complete", body);
-    expect(first.response.status).toBe(200);
-    expect(state.phases[root]).toBeUndefined();
+    // The last statement before `try`: a setup failure above never leaves a swallowing spy behind.
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = await json("/legion/v1/phase/complete", body);
+      expect(first.response.status).toBe(200);
+      expect(state.phases[root]).toBeUndefined();
+      expect(refusalLines(errorSpy)).toEqual([]);
 
-    // The architect reassigns the same issue to a later phase (a fresh worker/started call for a
-    // different role would set exactly this); the tester's own claim never changes. Grants are
-    // read-only, reusable-until-expiry tokens, so the same grantId is still valid here.
-    state.phases[root] = { phase: "implementer", sessionId: "ses_implementer" };
+      // The architect reassigns the same issue to a later phase (the delivery of that assignment
+      // through spawn_worker writes exactly this record, stamped with its delivery time), and that
+      // implementer has since finished with no architect live to receive it (the route's own 202
+      // record, `completed` stamped on the same record). The tester's own claim never changes.
+      // Grants are read-only, reusable-until-expiry tokens, so the same grantId is still valid.
+      const reassigned = {
+        phase: "implementer",
+        sessionId: "ses_implementer",
+        assignedAt: "2026-09-13T05:20:00.000Z",
+        completed: { summary: "Implemented", at: "2026-09-13T05:36:58.000Z" },
+      };
+      state.phases[root] = { ...reassigned };
 
-    const duplicate = await json<{ error: string }>("/legion/v1/phase/complete", body);
+      const duplicate = await json<{ error: string }>("/legion/v1/phase/complete", body);
 
-    expect(duplicate.response.status).toBe(409);
-    expect(duplicate.body.error).toBe("Phase for WIDGETS-1 is no longer owned by this worker");
-    expect(state.phases[root]).toEqual({ phase: "implementer", sessionId: "ses_implementer" });
-    expect(
-      publications.filter(
-        (publication) =>
-          publication.topic === roleTopic(roleToken(state.project, root, "architect"))
-      )
-    ).toHaveLength(1);
+      expect(duplicate.response.status).toBe(409);
+      expect(duplicate.body.error).toBe("Phase for WIDGETS-1 is no longer owned by this worker");
+      expect(state.phases[root]).toEqual(reassigned);
+      expect(
+        publications.filter(
+          (publication) =>
+            publication.topic === roleTopic(roleToken(state.project, root, "architect"))
+        )
+      ).toHaveLength(1);
+      // One line, both sides: what the grant named, whose claim the role holds, and the record
+      // the completion was refused against — enough to tell this (an assignment moved the phase
+      // on) from a grant problem without the body or a second read of state. The grant is named
+      // by its hash prefix only: the id is the credential `legion gh` redeems for another 60 s.
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line.startsWith("[legion] phase/complete refused 409 ")).toBe(true);
+      expect(line).toContain("Phase for WIDGETS-1 is no longer owned by this worker");
+      expect(line).toContain(grantRef(grantId));
+      expect(line).not.toContain(grantId);
+      expect(line).toContain("issue WIDGETS-1 role tester session ses_tester");
+      expect(line).toContain(`claim ${token}: session ses_tester`);
+      expect(line).toContain(
+        "phases[WIDGETS-1]: role implementer session ses_implementer assignedAt 2026-09-13T05:20:00.000Z completed 2026-09-13T05:36:58.000Z"
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
-  it("rejects phase/complete with an expired grant", async () => {
+  it("rejects phase/complete with an expired grant, logging one refusal line that names the expiry and prints a pre-v29 record's assignedAt as unknown", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+    expect(started.response.status).toBe(200);
+    // A record persisted before v29: no assignedAt, never backfilled.
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const mintedAt = now;
+    const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      now += 60_001;
+      const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+        grantId,
+        summary: "smoke",
+      });
+
+      expect(complete.response.status).toBe(403);
+      expect(complete.body.error).toBe("Invalid or expired grant");
+      expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      expect(publications).toEqual([]);
+      // The body cannot tell an expired grant from one this daemon never held; the log does, and
+      // still names the claim and the record so an operator sees the completion was otherwise
+      // sound (same worker, same phase) and only the grant's 60 s ran out.
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line.startsWith("[legion] phase/complete refused 403 ")).toBe(true);
+      expect(line).toContain("Invalid or expired grant");
+      expect(line).toContain(grantRef(grantId));
+      expect(line).not.toContain(grantId);
+      expect(line).toContain("issue WIDGETS-1 role tester session ses_tester");
+      expect(line).toContain(`expired ${new Date(mintedAt + 60_000).toISOString()}`);
+      expect(line).toContain(`claim ${token}: session ses_tester`);
+      expect(line).toContain(
+        "phases[WIDGETS-1]: role tester session ses_tester assignedAt unknown"
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects phase/complete with a grant this daemon never minted, logging one refusal line that names only the grant's hash prefix — never the caller-supplied bytes — and nothing else", async () => {
+    await start();
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    // On this branch the id is whatever an unauthenticated caller sent — here a second, forged
+    // refusal line embedded after a newline. The hash bounds it to twelve hex characters.
+    const grantId =
+      "00000000-0000-4000-8000-000000000000\n[legion] phase/complete refused 200 forged: grant deadbeef";
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+        grantId,
+        summary: "smoke",
+      });
+
+      expect(complete.response.status).toBe(403);
+      expect(complete.body.error).toBe("Invalid or expired grant");
+      expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      // A grant the daemon does not hold (never minted, revoked with its session, or minted before
+      // this daemon started) names no issue, so there is no claim or record to look up.
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line.startsWith("[legion] phase/complete refused 403 ")).toBe(true);
+      expect(line).toContain("Invalid or expired grant");
+      expect(line).toContain(`${grantRef(grantId)} unknown`);
+      expect(line).toContain("nothing else to name");
+      expect(line).not.toContain("\n");
+      expect(line).not.toContain("00000000-0000-4000-8000-000000000000");
+      expect(line).not.toContain("forged");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects phase/complete with 404 when no tree contains the grant's issue any more, logging one refusal line with no claim and no record to name", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -3861,20 +4113,38 @@ describe("Legion HTTP API", () => {
     expect(started.response.status).toBe(200);
     state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
+    // The tree closed and was pruned between the mint and the redeem: its record, its role claims
+    // and its phase are gone, while the in-memory grant (60 s) still resolves.
+    delete state.trees[root];
+    delete state.roles[token];
+    delete state.phases[root];
 
-    now += 60_001;
-    const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
-      grantId,
-      summary: "smoke",
-    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+        grantId,
+        summary: "smoke",
+      });
 
-    expect(complete.response.status).toBe(403);
-    expect(complete.body.error).toBe("Invalid or expired grant");
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
-    expect(publications).toEqual([]);
+      expect(complete.response.status).toBe(404);
+      expect(complete.body.error).toBe("No Legion tree contains issue WIDGETS-1");
+      expect(publications).toEqual([]);
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line.startsWith("[legion] phase/complete refused 404 ")).toBe(true);
+      expect(line).toContain("No Legion tree contains issue WIDGETS-1");
+      expect(line).toContain(grantRef(grantId));
+      expect(line).not.toContain(grantId);
+      expect(line).toContain("issue WIDGETS-1 role tester session ses_tester");
+      expect(line).toContain(`claim ${token}: none`);
+      expect(line).toContain("phases[WIDGETS-1]: none");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
-  it("rejects phase/complete when the grant's session no longer matches the worker's claim", async () => {
+  it("rejects phase/complete when the grant's session no longer matches the worker's claim, logging one refusal line that names both sessions", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -3901,7 +4171,11 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/tester.json",
     });
     expect(started.response.status).toBe(200);
-    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    };
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
     // A respawn between minting the grant and redeeming it moves the claim onto a new session;
     // the grant is still unexpired, but it no longer names the worker that currently owns the role.
@@ -3909,15 +4183,40 @@ describe("Legion HTTP API", () => {
     if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
     claim.sessionId = "ses_tester_respawned";
 
-    const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
-      grantId,
-      summary: "smoke",
-    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const complete = await json<{ error: string }>("/legion/v1/phase/complete", {
+        grantId,
+        summary: "smoke",
+      });
 
-    expect(complete.response.status).toBe(409);
-    expect(complete.body.error).toBe("Grant does not match the worker currently holding this role");
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
-    expect(publications).toEqual([]);
+      expect(complete.response.status).toBe(409);
+      expect(complete.body.error).toBe(
+        "Grant does not match the worker currently holding this role"
+      );
+      expect(state.phases[root]).toEqual({
+        phase: "tester",
+        sessionId: "ses_tester",
+        assignedAt: "2026-09-13T05:20:00.000Z",
+      });
+      expect(publications).toEqual([]);
+      // The grant's session and the claim's current one side by side: the line says which
+      // session redeemed and which one the role now belongs to.
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line.startsWith("[legion] phase/complete refused 409 ")).toBe(true);
+      expect(line).toContain("Grant does not match the worker currently holding this role");
+      expect(line).toContain(grantRef(grantId));
+      expect(line).not.toContain(grantId);
+      expect(line).toContain("issue WIDGETS-1 role tester session ses_tester");
+      expect(line).toContain(`claim ${token}: session ses_tester_respawned`);
+      expect(line).toContain(
+        "phases[WIDGETS-1]: role tester session ses_tester assignedAt 2026-09-13T05:20:00.000Z"
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("marks the phase completed and returns 202 when the architect has no live holder, without dropping the completion", async () => {
@@ -3951,7 +4250,11 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/tester.json",
     });
     expect(started.response.status).toBe(200);
-    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    };
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
 
     const complete = await json("/legion/v1/phase/complete", { grantId, summary: "smoke" });
@@ -3963,6 +4266,7 @@ describe("Legion HTTP API", () => {
     expect(state.phases[root]).toEqual({
       phase: "tester",
       sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
       completed: { summary: "smoke", at: new Date(now).toISOString() },
     });
     expect(state.roles[token]).toMatchObject({ issue: root, role: "tester", generation: 1 });
@@ -4075,17 +4379,32 @@ describe("Legion HTTP API", () => {
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
     const body = { grantId, summary: "Verified the acceptance criteria" };
 
-    const [first, second] = await Promise.all([
-      json<{ error: string }>("/legion/v1/phase/complete", body),
-      json<{ error: string }>("/legion/v1/phase/complete", body),
-    ]);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const [first, second] = await Promise.all([
+        json<{ error: string }>("/legion/v1/phase/complete", body),
+        json<{ error: string }>("/legion/v1/phase/complete", body),
+      ]);
 
-    const statuses = [first.response.status, second.response.status].sort();
-    expect(statuses).toEqual([200, 409]);
-    const rejected = first.response.status === 409 ? first : second;
-    expect(rejected.body.error).toBe(`Phase for ${root} is no longer owned by this worker`);
-    expect(publications).toHaveLength(1);
-    expect(state.phases[root]).toBeUndefined();
+      const statuses = [first.response.status, second.response.status].sort();
+      expect(statuses).toEqual([200, 409]);
+      const rejected = first.response.status === 409 ? first : second;
+      expect(rejected.body.error).toBe(`Phase for ${root} is no longer owned by this worker`);
+      expect(publications).toHaveLength(1);
+      expect(state.phases[root]).toBeUndefined();
+      // The loser's refusal line is what tells this apart from a reassigned phase in the log: the
+      // same 409 body, but the record side reads `none` — the winner had already cleared it.
+      const lines = refusalLines(errorSpy);
+      expect(lines).toHaveLength(1);
+      const line = lines[0] ?? "";
+      expect(line).toContain(`refused 409 Phase for ${root} is no longer owned by this worker`);
+      expect(line).toContain(grantRef(grantId));
+      expect(line).not.toContain(grantId);
+      expect(line).toContain(`claim ${token}: session ses_tester`);
+      expect(line).toContain(`phases[${root}]: none`);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("rejects phase/complete with 502 and leaves the phase intact when Envoy publish fails for a reason other than no-holder, then succeeds idempotently on retry", async () => {
@@ -4121,14 +4440,22 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/tester.json",
     });
     expect(started.response.status).toBe(200);
-    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    };
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
     const body = { grantId, summary: "Verified the acceptance criteria" };
 
     const failed = await json("/legion/v1/phase/complete", body);
 
     expect(failed.response.status).toBe(502);
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(state.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    });
     expect(publications).toEqual([]);
 
     failPublish = false;
@@ -4181,7 +4508,11 @@ describe("Legion HTTP API", () => {
       ompSessionFile: "/tmp/tester.json",
     });
     expect(started.response.status).toBe(200);
-    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    };
     const grantId = await mintGrant(root, "ses_tester", started.body.secret);
     const body = { grantId, summary: "Verified the acceptance criteria" };
 
@@ -4189,7 +4520,11 @@ describe("Legion HTTP API", () => {
     const failed = await json("/legion/v1/phase/complete", body);
 
     expect(failed.response.status).toBe(500);
-    expect(state.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+    expect(state.phases[root]).toEqual({
+      phase: "tester",
+      sessionId: "ses_tester",
+      assignedAt: "2026-09-13T05:20:00.000Z",
+    });
 
     failSave = false;
     const retried = await json("/legion/v1/phase/complete", body);

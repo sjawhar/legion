@@ -17,7 +17,7 @@ import {
   type WorkerRoleClaim,
 } from "../../legion-state";
 import { sameProcess } from "../../runtime";
-import { equalSecretHash, secretHash, spawnCapabilityKey } from "../auth";
+import { equalSecretHash, type Grant, secretHash, spawnCapabilityKey } from "../auth";
 import { type RouteContext, rootForIssue, treeContains } from "../context";
 import {
   EnvoyPublishError,
@@ -394,13 +394,62 @@ export async function handleWorkerReady(
   return Response.json(validateContractResponse(LegionDaemonApi.WorkerReady.response, {}));
 }
 
+/** Logs one refusal line with the grant and current claim/phase, then returns its HttpError.
+ * Log only the first twelve hex characters of the grant ID's hash: the ID is a bearer
+ * credential and, for an unknown grant, may contain arbitrary unauthenticated input.
+ * Unknown grants provide no issue context. Missing pre-v29 assignment times remain unknown;
+ * never fabricate a timestamp. Logging must not change the refusal's status or message. */
+function refusePhaseComplete(
+  state: LegionState,
+  status: number,
+  message: string,
+  grantId: string,
+  grant: Grant | undefined,
+  now: number
+): HttpError {
+  const grantRef = `grant ${secretHash(grantId).toString("hex").slice(0, 12)}`;
+  let detail: string;
+  if (!grant) {
+    detail = `${grantRef} unknown (never minted, revoked with its session, or minted before this daemon started); nothing else to name`;
+  } else {
+    const token = roleToken(state.project, grant.issue, grant.role);
+    const claim = state.roles[token];
+    let claimSide: string;
+    if (!claim) {
+      claimSide = "none";
+    } else if (!("issue" in claim)) {
+      claimSide = "not a worker claim";
+    } else if (claim.sessionId === undefined) {
+      claimSide = "no session yet";
+    } else {
+      claimSide = `session ${claim.sessionId}`;
+    }
+    const phase = state.phases[grant.issue];
+    const phaseSide = !phase
+      ? "none"
+      : `role ${phase.phase} session ${phase.sessionId} assignedAt ${phase.assignedAt ?? "unknown"}${
+          phase.completed ? ` completed ${phase.completed.at}` : ""
+        }`;
+    detail =
+      `${grantRef} issue ${grant.issue} role ${grant.role} session ${grant.sessionId}` +
+      `${grant.expiresAt <= now ? ` expired ${new Date(grant.expiresAt).toISOString()}` : ""}; ` +
+      `claim ${token}: ${claimSide}; phases[${grant.issue}]: ${phaseSide}`;
+  }
+  console.error(`[legion] phase/complete refused ${status} ${message}: ${detail}`);
+  return new HttpError(status, message);
+}
+
 /**
  * A worker reports its phase done. Authenticates like `legion gh`/`legion credential`: a
  * short-lived grant (`LEGION_GRANT`) resolved via `ctx.auth.resolveGrant` — never a live session
  * secret in the request body. Verifies the claim for (issue, grant.role) still belongs to the
  * grant's session, and that the issue's active phase still belongs to this exact worker (a
  * retained worker resumed for a later reassignment keeps the same sessionId, so a duplicate/late
- * completion from a superseded phase is rejected on the phase check alone). The phase is captured
+ * completion from a superseded phase is rejected on the phase check alone). Every refusal — the
+ * 403 for a grant that does not resolve, the 404 for an issue in no tree, and the two 409s — logs
+ * exactly one `[legion] phase/complete refused …` line through `refusePhaseComplete`, naming the
+ * grant's side and the daemon's (the claim's current session and the `phases[issue]` record with
+ * its `assignedAt`), since the body alone cannot say which side moved. The phase is captured
  * and cleared synchronously, before the publish `await`, so a second concurrent completion for
  * the same phase always finds it already gone and 409s instead of both publishing. Publishes to
  * the architect that owns the issue next (`owningArchitect`, LEGION-86: the child's claimed
@@ -409,36 +458,53 @@ export async function handleWorkerReady(
  * the captured phase and returns 502, so the worker retries and — since neither the phase nor the
  * claim moved — the retry is exactly idempotent. A missing architect holder never drops the
  * completion either: state (the source of truth) records it as `phases[issue].completed` instead
- * of clearing the phase, so `overseerCatchup` replays it on the owning architect's next catch-up
- * (a sub-architect owner is resumed best-effort right here so that catch-up happens; a root owner
- * is resurrected by the resync probe) and `routeActive` treats the issue as having no active
- * phase until the next assignment (a fresh `spawn_worker` write) replaces this record. Either
- * way, if the save itself fails, the in-memory phase is restored before rethrowing (500) so a
- * retry redoes the whole attempt. The worker's role claim is never touched: the same agent stays
- * claimed and resumes for its next assignment. A missing holder is not a worker-facing failure:
- * the response is 202 instead of the normal 200, so a caller can tell delivery was uncertain
- * without treating it as an error.
+ * of clearing the phase — keeping the record's original `assignedAt` — so `overseerCatchup`
+ * replays it on the owning architect's next catch-up (a sub-architect owner is resumed best-effort
+ * right here so that catch-up happens; a root owner is resurrected by the resync probe) and
+ * `routeActive` treats the issue as having no active phase until the next assignment (a fresh
+ * `spawn_worker` write) replaces this record. Either way, if the save itself fails, the in-memory
+ * phase is restored before rethrowing (500) so a retry redoes the whole attempt. The worker's role
+ * claim is never touched: the same agent stays claimed and resumes for its next assignment. A
+ * missing holder is not a worker-facing failure: the response is 202 instead of the normal 200,
+ * so a caller can tell delivery was uncertain without treating it as an error.
  */
 export async function handlePhaseComplete(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
-  const grant = ctx.auth.resolveGrant(body);
+  const grantId = requiredString(body, "grantId");
+  let grant: Grant;
+  try {
+    grant = ctx.auth.resolveGrant(body);
+  } catch (error) {
+    if (!(error instanceof HttpError) || error.status !== 403) throw error;
+    // Same status and body; the log alone tells an expired grant from one this daemon never held.
+    throw refusePhaseComplete(
+      ctx.deps.state,
+      403,
+      error.message,
+      grantId,
+      ctx.auth.peekGrant(grantId),
+      ctx.now()
+    );
+  }
   const summary = requiredString(body, "summary");
+  const refuse = (status: number, message: string) =>
+    refusePhaseComplete(ctx.deps.state, status, message, grantId, grant, ctx.now());
   const tree = rootForIssue(ctx.deps.state, grant.issue);
-  if (!tree) throw new HttpError(404, `No Legion tree contains issue ${grant.issue}`);
+  if (!tree) throw refuse(404, `No Legion tree contains issue ${grant.issue}`);
   const owner = owningArchitect(ctx.deps.state, grant.issue, grant.role);
   const token = roleToken(ctx.deps.state.project, grant.issue, grant.role);
   const claim = ctx.deps.state.roles[token];
   if (!claim || !("issue" in claim) || claim.sessionId !== grant.sessionId) {
-    throw new HttpError(409, "Grant does not match the worker currently holding this role");
+    throw refuse(409, "Grant does not match the worker currently holding this role");
   }
   const phase = ctx.deps.state.phases[grant.issue];
   if (!phase || phase.phase !== grant.role || phase.sessionId !== grant.sessionId) {
     // The issue's active phase has already moved on to a later worker (a retained but superseded
     // worker reporting a duplicate/late completion must never clear a newer phase it no longer
     // owns). This is distinct from a stale grant: the worker's own claim is fine.
-    throw new HttpError(409, `Phase for ${grant.issue} is no longer owned by this worker`);
+    throw refuse(409, `Phase for ${grant.issue} is no longer owned by this worker`);
   }
 
   // Capture and clear the phase synchronously, before the publish await below.
@@ -476,9 +542,10 @@ export async function handlePhaseComplete(
   }
 
   if (noHolder) {
+    // The captured record as it was — `assignedAt` only if it had one, so a record persisted
+    // before v29 never gains an explicit undefined key — with this completion stamped on it.
     ctx.deps.state.phases[grant.issue] = {
-      phase: phase.phase,
-      sessionId: phase.sessionId,
+      ...phase,
       completed: { summary, at: new Date(ctx.now()).toISOString() },
     };
   }

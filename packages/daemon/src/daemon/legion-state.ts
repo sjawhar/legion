@@ -265,7 +265,7 @@ export function staleQueueEntryReason(state: LegionState, issue: IssueKey): stri
 }
 
 export interface LegionState {
-  version: 28;
+  version: 29;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -280,9 +280,20 @@ export interface LegionState {
   /** FIFO role tokens waiting for a running-worker slot (config.workerCap); the currently-running
    * set is derived from live RPC frames and kept in-memory by ProcessManager, never persisted. */
   workerAdmission: { queue: string[] };
+  /** The issue's active phase, keyed by issue. Written in exactly one place — the delivery of an
+   * architect assignment (`promptExistingWorker`, kind `assignment`), which stamps `assignedAt`
+   * (ISO) with the delivery time — and marked `completed` by `/phase/complete` when no architect is
+   * live to receive the completion. `assignedAt` is absent on a record persisted before v29 and is
+   * never backfilled: the refusal log prints it as `unknown`. */
   phases: Record<
     IssueKey,
-    { phase: string; sessionId: string; completed?: { summary: string; at: string } } | undefined
+    | {
+        phase: string;
+        sessionId: string;
+        assignedAt?: string;
+        completed?: { summary: string; at: string };
+      }
+    | undefined
   >;
   controllerCapabilityHash?: string;
   controllerPendingNotices: ControllerPendingNotice[];
@@ -475,6 +486,7 @@ const PhaseSchema = z
   .object({
     phase: z.string(),
     sessionId: z.string(),
+    assignedAt: z.string().optional(),
     completed: z.object({ summary: z.string(), at: z.string() }).strict().optional(),
   })
   .strict();
@@ -486,7 +498,7 @@ const ControllerPendingNoticeSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(28),
+    version: z.literal(29),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -550,7 +562,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 28,
+    version: 29,
     project,
     issues: {},
     trees: {},
@@ -1238,6 +1250,16 @@ function describeIssues(issues: z.ZodIssue[]): string[] {
   });
 }
 
+/** v28 -> v29: `phases[issue]` records gain an optional `assignedAt` (the ISO time the architect
+ * assignment that created the record was delivered); existing records validate as-is with the
+ * field absent, so a v28-or-older record is exactly one that may lack it. A pure version bump:
+ * nothing is backfilled — a fabricated timestamp would be worse than `assignedAt unknown` in the
+ * completion route's refusal log. */
+function migrateV28State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 28) return state;
+  return { ...state, version: 29 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1279,15 +1301,17 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV25State,
     migrateV26State,
   ];
-  const state = await migrateV27State(
-    migrations.reduce((current, migrate) => migrate(current), source as unknown),
-    init.resolveSpecArtifact
+  const state = migrateV28State(
+    await migrateV27State(
+      migrations.reduce((current, migrate) => migrate(current), source as unknown),
+      init.resolveSpecArtifact
+    )
   );
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 28) {
+  if (version !== 29) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

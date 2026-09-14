@@ -802,7 +802,11 @@ describe("startDaemon", () => {
       if (!claim || !("issue" in claim)) throw new Error("tester claim disappeared");
       expect(claim.pendingAssignment).toBeUndefined();
       expect(claim.promptFailures).toBe(0);
-      expect(state.phases[issue]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      expect(state.phases[issue]).toEqual({
+        phase: "tester",
+        sessionId: "ses_tester",
+        assignedAt: "2026-08-24T00:00:00.000Z",
+      });
       // Prompted in place: no pane was opened for it.
       expect(
         commands.filter(
