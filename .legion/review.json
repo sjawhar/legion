@@ -1,87 +1,147 @@
 {
-  "summary": "LEGION-81 review round 1 at 8caa02e35aa52361ef442cb67b65342d6723066c (PR #1108): REQUEST_CHANGES, review 5204613409, one blocking thread https://github.com/sjawhar/legion/pull/1108#discussion_r4011129435. The root's same-agent expectation (corrective round 1, finding 3.1) holds for exactly one relaunch: spawnTree writes the runtime's locator (no ompSessionFile — only /process/started writes it) and deletes tree.resumeSessionFile, so a --resume generation that is refused 409 and exits never registers and leaves the tree with no session file; the registration deadline's retry (escalateOrRetryUnconfirmedRoot → resurrect → resurrectDeadTree) then reads no file, spawnRoot(tree, true, undefined) launches without --resume and mints no expectation, the fresh agent registers, and /process/ready resets launchFailures — a fresh architect under the old tree, never launch-failed. Reproduced against the processes.test.ts harness at this head: minted [{gen 2, ses_root_original}, {gen 3, undefined}], launches [--resume, fresh]. Workers are unaffected (launchWorker pins ompSessionFile onto the fresh locator). Fix named in the thread: pin priorSessionFile onto tree.locator in spawnTree exactly as launchWorker does, plus a test for the second resurrection and the bound. Everything else is clean: CI green at the head (Tests 34916147816; Legion Envoy and Contracts 34916147829; PR Title 34916147807/34916318324), both E2E lines present, contract untouched (5 both sides vs the fork point), fingerprint a2b1461a… matching the tester, round-0 hunks identical across the rebase, DRY bar met, docs matching the code except the sentences the finding falsifies. GitHub now reports the PR CONFLICTING (main moved by #1109 and pi-envoy v1.35.1 on CHANGELOG.md/AGENTS.md), so the corrective push is a conflict-forced rebase.",
-  "headSha": "8caa02e35aa52361ef442cb67b65342d6723066c",
+  "summary": "LEGION-81 review round 2 at ab52833e8f8c43262ced7093be9fc97d7e51b3b2 (PR #1108): CLEAN pending the .legion/ deletion — COMMENT review 5204809289 (no APPROVE: the head carries .legion/). The round-1 blocking thread (discussion_r4011129435) is fixed in 8d6273bb: spawnTree pins priorSessionFile onto the fresh tree locator as ompSessionFile before deleting resumeSessionFile (the launchWorker mirror), so a resumed root refused 409 and exited leaves its path on the tree and every deadline retry re-resumes and re-mints the recorded session until launch-failed; the new deadline-path test proves three mints, three --resume launches, launch-failed at launchFailures 3, no fourth launch, and my round-1 reproduction now yields [--resume, --resume]; recordRootExit and the daemon AGENTS.md /process/started restart sentence hold. Accepted: reply posted (discussion_r4011310411); isResolved pending the implementer's `legion threads resolve`. The non-blocking commit a0bccaf4 landed every round-1 item with no behaviour change (verified: refusal text byte-identical and still pinned; RegExp identical to the literal; no test pinned the old log text; 31 probe tests with the pvc no-marker pass and cache reuse still covered). Nothing else moved: fp(8caa02e3) = fp(3d6f0789) = a2b1461a… (the conflict-forced rebase alone), fp(ab52833e) = 3c1e82de… by design; exactly the ten round-2 files differ; contracts and the plugin manifest untouched vs the fork point (5 = main's). CI green at the head after one runner flake (LEGION-174, a LEGION-16 real-tmux test this branch does not touch; attempt 2 success with no code change). Thermo on the round-2 commits: no blocking findings either side; six nits batched as the named fast-follow. Next: the implementer resolves the thread and pushes the .legion/ deletion alone; I approve that head by SHA.",
+  "headSha": "ab52833e8f8c43262ced7093be9fc97d7e51b3b2",
   "review": {
-    "id": 5204613409,
-    "url": "https://github.com/sjawhar/legion/pull/1108#pullrequestreview-5204613409",
-    "event": "REQUEST_CHANGES"
+    "id": 5204809289,
+    "url": "https://github.com/sjawhar/legion/pull/1108#pullrequestreview-5204809289",
+    "event": "COMMENT"
   },
-  "verdict": "changes_requested",
-  "critical": 1,
+  "verdict": "approved",
+  "verdictNote": "approved = the reviewed content is clean; the GitHub event is COMMENT because the head carries .legion/. The APPROVE goes on the deletion head by SHA on the next assignment.",
+  "critical": 0,
   "important": 0,
-  "minor": 9,
+  "minor": 6,
   "keyFindings": [
     {
-      "severity": "blocking",
-      "file": "packages/daemon/src/daemon/processes.ts:3491 (spawnTree; the loss is at :3615-3618)",
-      "description": "A resumed root's session file does not survive a refused generation: the fresh locator carries no ompSessionFile and resumeSessionFile is deleted, so the next resurrection launches without --resume and mints no expectedSessionId; a fresh agent is accepted under the old tree after one deadline cycle and /process/ready resets launchFailures. Contradicts spec acceptance 3 / Errors, docs/kubernetes.md, and the daemon AGENTS.md /process/started restart sentence. Fix: tree.locator = { ...locator, ...(priorSessionFile !== undefined ? { ompSessionFile: priorSessionFile } : {}) } before delete tree.resumeSessionFile, mirroring launchWorker (:3855-3858); test the second resurrection re-mints and re-resumes, and that three cycles end in launch-failed. Thread https://github.com/sjawhar/legion/pull/1108#discussion_r4011129435"
-    },
-    {
-      "severity": "non-blocking",
-      "file": "packages/pi-envoy/extensions/legion.ts:60-78; packages/pi-envoy/AGENTS.md registration-refusal bullet",
-      "description": "exitOnRegistrationRefusal exits on every 409 at the two routes (Stale process generation, Stale worker generation, TreeClosingError too), which is right, but the comment, the log line ('exiting for the daemon to respawn'), and the AGENTS bullet ('exactly two statuses … 409 (the same-agent rule …)') describe only the same-agent rule."
-    },
-    {
-      "severity": "non-blocking",
-      "file": "packages/daemon/src/daemon/k8s-manifests.ts:25-26 (and the daemon AGENTS.md k8s-manifests row)",
-      "description": "The placement comment justifies the two variable constants with a cycle argument that overstates: config.ts would also have been cycle-free (boot-probes.ts already value-imports config.ts; the cycle exists only if the constants live in boot-probes.ts). Placement beside PROVIDERS_DIR is fine; reword the reason."
-    },
-    {
-      "severity": "non-blocking",
-      "file": "packages/daemon/src/daemon/runtime-kubernetes.ts:729-730",
-      "description": "podEnvironment's doc says 'the one place the store shapes a pod' while spawnSerialized:266 also reads the store to drop the init container's LEGION_RESUME_SESSION_FILE; say 'the one place the store adds to a pod's environment'."
-    },
-    {
-      "severity": "non-blocking",
-      "file": "packages/daemon/src/daemon/__tests__/worker-image-probe.test.ts (session_store describe)",
-      "description": "'under pvc, reuses a cached pass that records no session-storage probe' duplicates the pre-existing cache-hit test; 'under pvc, does not require the marker, and a cache written without it carries no sessionStorageProbed key' duplicates the baseline and pins key-absence over false (an implementation choice; the read side treats anything but true as unconfirmed)."
+      "severity": "resolved",
+      "file": "packages/daemon/src/daemon/processes.ts (spawnTree, the locator write)",
+      "description": "Round-1 blocking finding fixed in 8d6273bb: tree.locator = { ...locator, ...(priorSessionFile !== undefined ? { ompSessionFile: priorSessionFile } : {}) } before delete tree.resumeSessionFile. Verified by the new processes.test.ts case (deadline path, three cycles to launch-failed) and by re-running my round-1 reproduction. Accepted: posted on discussion_r4011129435 (reply discussion_r4011310411)."
     },
     {
       "severity": "nit",
-      "file": "packages/daemon/src/daemon/config.ts (SESSION_STORES, SECRET_DATA_KEY_PATTERN)",
-      "description": "SESSION_STORES tuple beside the SessionStore union's literal kinds is two sources of truth for the store names (and .some() does not narrow); the regex is retyped in its own error message."
+      "file": "packages/daemon/src/daemon/__tests__/processes.test.ts (the new test)",
+      "description": "Title carries '(review round 1)' — provenance belongs in the commit message. The toMatchObject({ ompSessionFile }) right after the first resurrect asserts the pin itself; the three --resume launches and mints already prove the contract."
     },
     {
       "severity": "nit",
-      "file": "docs/kubernetes.md (Selecting the store, the missing-row paragraph)",
-      "description": "'Every relaunch of a root, a sub-architect, or a phase worker mints its boot token with the session id the previous generation registered' — for a root it is every relaunch that passes --resume; name the launch-failed re-admit beside the first launch in the exemption sentence."
+      "file": "packages/daemon/src/daemon/processes.ts (spawnTree pin, launchWorker pin)",
+      "description": "The two-line comment kept above delete tree.resumeSessionFile restates the new seven-line one. The two pin sites use different guards (!== undefined vs truthiness) while the comment says 'exactly as' — align one. A shared helper would be weightless abstraction; do not add one."
     },
     {
       "severity": "nit",
-      "file": "packages/daemon/src/daemon/api/http.ts:23",
-      "description": "SAME_AGENT_REFUSAL reads 'Worker respawn' for a root refusal; optional role-neutral text (touches two tests and two doc lines)."
+      "file": "packages/daemon/src/daemon/config.ts (SESSION_STORE_NAMES)",
+      "description": "Object.keys({...} satisfies Record<SessionStoreName, true>) as SessionStoreName[] is a fourth shape beside the file's three as-const tuples; defensible (the one check a tuple cannot express: a union kind missing from the list is a compile error), flagged as convention drift. Alternative: an as-const tuple with satisfies readonly SessionStoreName[]."
     },
     {
       "severity": "record",
       "file": "PR body",
-      "description": "'contract stays 4' is stale (main carries 5; the branch bumps nothing). Thermo slot, Threads, and Fast-follow updated by the reviewer at 8caa02e3."
+      "description": "Thermo slot carries round 1 and round 2; Threads line records my Accepted: reply with isResolved pending the implementer's resolve run; Fast-follow names 'LEGION-81 round-2 nits'. 'contract stays 4' was corrected by the implementer to main's 5 in round 2."
     }
   ],
   "verified": {
-    "ci": "Tests 34916147816 (lint, typecheck, test) success; Legion Envoy and Contracts 34916147829 (pi-envoy success, other jobs skipped); PR Title 34916147807 and 34916318324 success — all at 8caa02e3, read from GitHub check-runs.",
-    "threads": "0 before this review; 1 unresolved after it (discussion_r4011129435).",
-    "e2e": "E2E (implementer) and E2E (tester) both present in the PR body with surface, commands, observations, head, negative control; tester's line states how it verified the implementer's.",
-    "mergeable": "GitHub reports CONFLICTING / DIRTY at review time (main moved: #1109 and pi-envoy v1.35.1 touch packages/pi-envoy/CHANGELOG.md and AGENTS.md); the architect's brief said MERGEABLE — main moved after the tester's round.",
-    "fingerprint": "a2b1461a9ab896bed85f48a5cd91be3aa9dd47a427db4d94150372fc97f054ad at 8caa02e3 (fork point 923d3af0), equal to the implementer's and tester's; the seven round-0 daemon source files' hunks identical at fork points af232beb (70c46b13) and 923d3af0 (8caa02e3).",
-    "contract": "packages/contracts and packages/pi-envoy/package.json untouched vs the fork point; LEGION_DAEMON_API_VERSION 5 and legion.daemonApiVersion 5 — no bump, correct.",
-    "localChecks": "cd packages/daemon && bunx tsc --noEmit && bunx biome check src/ → clean (172 files); cd packages/pi-envoy && bun run typecheck && bun run lint → clean (21 files); targeted tests: processes 3, api 8, worker-image-probe + runtime-kubernetes 81, config 23, legion.test.ts 6 — all pass. No rig, daemon, cluster, or container was started."
+    "head": "ab52833e8f8c43262ced7093be9fc97d7e51b3b2, MERGEABLE (mergeStateStatus BLOCKED = awaiting review), base main; fork point bc5438e2; main@origin has since moved to 73a526e3 (pi-envoy v1.36.0) with no conflict reported.",
+    "ci": "Tests 34918799387 — attempt 1 test job failed on real-deployment-instructions-e2e.test.ts (tmux window ownership marker failed: server exited unexpectedly; LEGION-174; none of that test's files are on this branch), attempt 2 lint/typecheck/test success, same head_sha; Legion Envoy and Contracts 34918799384 (changes, pi-envoy success; six package jobs skipped); PR Title 34918799388 and three re-triggers success.",
+    "threads": "One thread (discussion_r4011129435): opener comment (mine), implementer's fix reply, my Accepted: reply 4011310411. isResolved false at handoff time — the implementer's legion threads resolve runs before the deletion push; the merger runs it again before READY.",
+    "e2e": "E2E (implementer) round-2 line and E2E (tester) round-3 line (issuecomment-5673575898) present with surfaces, commands, observations, negative controls; the tester states how it verified the implementer's proof (verified).",
+    "fingerprint": "fp(8caa02e3) = fp(3d6f0789) = a2b1461a9ab896bed85f48a5cd91be3aa9dd47a427db4d94150372fc97f054ad (rebase alone unchanged); fp(ab52833e) = 3c1e82de77e8f7d9f89cfe1e339cfe7131e19cb214ec73908bd943138841ac09 (changed by design; equals implementer's and tester's).",
+    "nothingElseMoved": "jj diff --from 3d6f0789 --to ab52833e --summary: exactly docs/kubernetes.md, daemon AGENTS.md, processes.test.ts, worker-image-probe.test.ts, config.ts, k8s-manifests.ts, processes.ts, runtime-kubernetes.ts, pi-envoy AGENTS.md, legion.ts, plus .legion/implement.json — the union of 8d6273bb and a0bccaf4. Every branch file's hunks byte-identical at fork points 923d3af0 (8caa02e3) and bc5438e2 (3d6f0789): 26 same, 0 DIFF. packages/contracts and packages/pi-envoy/package.json untouched vs bc5438e2.",
+    "localChecks": "processes.test.ts -t 'keeps resuming the same session|mints a resurrected root|mints no expected session' 3 pass; config.test.ts session_store cases 24 pass; worker-image-probe.test.ts 31 pass; pi-envoy legion.test.ts same-agent/500/403 cases 6 pass; cd packages/daemon && bunx tsc --noEmit && bunx biome check src/ clean (172 files); cd packages/pi-envoy && bun run typecheck && bun run lint clean (21 files). Scratch reproduction (two direct resurrect calls, list-panes gone) → minted [{2, ses_root_original}, {3, ses_root_original}], launches [RESUME, RESUME]; scratch file removed. No rig, daemon, container, tmux server, or cluster was started."
   },
   "thermo": {
-    "head": "8caa02e35aa52361ef442cb67b65342d6723066c",
-    "deepReview": "1 blocking (the same-agent expectation survives one relaunch), 1 non-blocking (409 scope wording in exitOnRegistrationRefusal), 1 nit (SAME_AGENT_REFUSAL says Worker respawn for a root); no findings on the /process/started ordering, parseSessionStore, --resume under postgres, the probe-cache matrix, or the extension's never-return.",
-    "codeQuality": "No blocking findings; DRY bar met (one SessionStore seam, two variables written only in podEnvironment, names and marker defined once and imported, one SAME_AGENT_REFUSAL, one exitOnRegistrationRefusal, 'issue' in narrowing matches the file's convention, ProbePodOutcome local intersection is the right shape); non-blocking comment and test tidy-ups listed in keyFindings."
+    "head": "ab52833e8f8c43262ced7093be9fc97d7e51b3b2",
+    "scope": "the two round-2 commits 8d6273bb and a0bccaf4; round-0/1 content is byte-identical to the 8caa02e3 pass and was not re-audited",
+    "deepReview": "no blocking findings; verified: sameProcess compares tmux paneId/panePid/paneStartTicks or k8s podUid only (never ompSessionFile), both locator schemas take ompSessionFile optionally, api/state.ts already exposes it for trees, removeTreeProcess deletes by reference so the pinned object is the one held, the tmux assertResumeSessionFile runs inside runtime.spawn before the locator write, the resumeSessionFile ?? locator.ompSessionFile ?? tree.resumeSessionFile precedence is unaffected, the test fails first at the pin assertion without the fix, SESSION_STORE_NAMES refuses a missing and a stray key at compile time, the refusal text and RegExp are byte-identical, both deleted probe tests are duplicates. 1 nit (test title provenance). Out-of-scope observation: spawnTree's lingering/human-parked branch writes the runtime locator unpinned — a close path, resumeSessionFile is cleared by linger/close anyway; not a finding.",
+    "codeQuality": "no blocking findings; the pin is the minimal launchWorker mirror (a shared helper would be weightless); every reworded comment accurate; the deleted tests redundant with the remaining baseline cases. 5 nits: guard divergence between the two pin sites, the redundant two-line comment, the SESSION_STORE_NAMES shape vs the file's tuple convention, the test title tag, the pin assertion at the first resurrect."
   },
-  "judgements": {
-    "dry": "Met. Placement of the two variable names in k8s-manifests.ts is acceptable (beside PROVIDERS_DIR, the mount they compose); the implementer's reason why not boot-probes.ts (TDZ cycle with config.ts) is correct; the implied 'only here is cycle-free' is not, since config.ts would have worked too — a comment fix, not a move.",
-    "sameAgent": "Minting the root expectation only on an actual --resume is right (a launch-failed re-admit must start fresh; the negative control defends it). The 409 sits before token consumption and any write. Not persisting expectedSessionId for roots is sound as reasoning (/process/started reads only the in-memory mint), but the AGENTS.md sentence 'the resurrection that follows re-mints with the recorded session' is false until the locator fix lands, for the same reason as the blocking finding. Extension: 403/409 exit and 5xx/transport propagation are defended by tests at both routes.",
-    "tests": "Defend observable contracts (refusal + no state change + token reuse; env equality against a pvc pod; the cache reuse matrix; exit codes and propagation). The HOME/OMP_PROFILE absence pin is spec-mandated (acceptance 3) and kept. Only the probe-cache key-absence pin is an implementation pin; two probe-cache tests duplicate existing paths.",
-    "docs": "docs/kubernetes.md Selecting the store / Why pods stay node-affine / The image guard and the daemon and pi-envoy AGENTS.md rows match the code, except the sentences the blocking finding falsifies (which become true once the fix lands) and the wording precisions listed. CHANGELOG line follows the package's Unreleased → Fixed convention.",
-    "production": "The postgres path is reachable only by a Kubernetes daemon with session_store: postgres, which no deployment runs: that half of the production check can only be a statement plus the merged worker image's probe-image line carrying session-storage=probed. The same-agent half is runtime-independent: after the dogfood tmux daemon restarts on the merged commit, the implementer can drive a real root resurrection and record the daemon's 'resurrecting <KEY> by resuming OMP session …' line followed by a 200 /process/started from the recorded session. A real 409 negative control is not drivable without breaking a live session; the Production line should say so.",
-    "recordNotes": "The implement handoff still carries round 0's stale openQuestions entry (answered by the spec) — clear it in the corrective handoff write. The rebase comment's footer carries the implementer's real session id now."
-  },
-  "nextRound": "Re-review after the corrective push: verify the thread's fix and test at the new head, answer the thread with Accepted:/Still open:, re-run thermo only if the fingerprint changed (it will: a source fix), one review. If clean: COMMENT (the head carries .legion/), report to the architect for the .legion/ deletion push, then APPROVE that head by SHA.",
-  "round": 1,
+  "nextRound": "Approve the .legion/ deletion head by SHA once it differs from ab52833e by that deletion alone (jj diff --from ab52833e --to <new head> --summary shows only D .legion/*; fingerprint 3c1e82de… unchanged by construction) and the thread shows isResolved: true in gh api graphql. No handoff write on that head (recreating .legion/ would change the approved head). A conflict-forced rebase after approval is a confirmation by fingerprint, never a re-review.",
+  "round": 2,
+  "history": [
+    {
+      "summary": "LEGION-81 review round 1 at 8caa02e35aa52361ef442cb67b65342d6723066c (PR #1108): REQUEST_CHANGES, review 5204613409, one blocking thread https://github.com/sjawhar/legion/pull/1108#discussion_r4011129435. The root's same-agent expectation (corrective round 1, finding 3.1) holds for exactly one relaunch: spawnTree writes the runtime's locator (no ompSessionFile — only /process/started writes it) and deletes tree.resumeSessionFile, so a --resume generation that is refused 409 and exits never registers and leaves the tree with no session file; the registration deadline's retry (escalateOrRetryUnconfirmedRoot → resurrect → resurrectDeadTree) then reads no file, spawnRoot(tree, true, undefined) launches without --resume and mints no expectation, the fresh agent registers, and /process/ready resets launchFailures — a fresh architect under the old tree, never launch-failed. Reproduced against the processes.test.ts harness at this head: minted [{gen 2, ses_root_original}, {gen 3, undefined}], launches [--resume, fresh]. Workers are unaffected (launchWorker pins ompSessionFile onto the fresh locator). Fix named in the thread: pin priorSessionFile onto tree.locator in spawnTree exactly as launchWorker does, plus a test for the second resurrection and the bound. Everything else is clean: CI green at the head (Tests 34916147816; Legion Envoy and Contracts 34916147829; PR Title 34916147807/34916318324), both E2E lines present, contract untouched (5 both sides vs the fork point), fingerprint a2b1461a… matching the tester, round-0 hunks identical across the rebase, DRY bar met, docs matching the code except the sentences the finding falsifies. GitHub now reports the PR CONFLICTING (main moved by #1109 and pi-envoy v1.35.1 on CHANGELOG.md/AGENTS.md), so the corrective push is a conflict-forced rebase.",
+      "headSha": "8caa02e35aa52361ef442cb67b65342d6723066c",
+      "review": {
+        "id": 5204613409,
+        "url": "https://github.com/sjawhar/legion/pull/1108#pullrequestreview-5204613409",
+        "event": "REQUEST_CHANGES"
+      },
+      "verdict": "changes_requested",
+      "critical": 1,
+      "important": 0,
+      "minor": 9,
+      "keyFindings": [
+        {
+          "severity": "blocking",
+          "file": "packages/daemon/src/daemon/processes.ts:3491 (spawnTree; the loss is at :3615-3618)",
+          "description": "A resumed root's session file does not survive a refused generation: the fresh locator carries no ompSessionFile and resumeSessionFile is deleted, so the next resurrection launches without --resume and mints no expectedSessionId; a fresh agent is accepted under the old tree after one deadline cycle and /process/ready resets launchFailures. Contradicts spec acceptance 3 / Errors, docs/kubernetes.md, and the daemon AGENTS.md /process/started restart sentence. Fix: tree.locator = { ...locator, ...(priorSessionFile !== undefined ? { ompSessionFile: priorSessionFile } : {}) } before delete tree.resumeSessionFile, mirroring launchWorker (:3855-3858); test the second resurrection re-mints and re-resumes, and that three cycles end in launch-failed. Thread https://github.com/sjawhar/legion/pull/1108#discussion_r4011129435"
+        },
+        {
+          "severity": "non-blocking",
+          "file": "packages/pi-envoy/extensions/legion.ts:60-78; packages/pi-envoy/AGENTS.md registration-refusal bullet",
+          "description": "exitOnRegistrationRefusal exits on every 409 at the two routes (Stale process generation, Stale worker generation, TreeClosingError too), which is right, but the comment, the log line ('exiting for the daemon to respawn'), and the AGENTS bullet ('exactly two statuses … 409 (the same-agent rule …)') describe only the same-agent rule."
+        },
+        {
+          "severity": "non-blocking",
+          "file": "packages/daemon/src/daemon/k8s-manifests.ts:25-26 (and the daemon AGENTS.md k8s-manifests row)",
+          "description": "The placement comment justifies the two variable constants with a cycle argument that overstates: config.ts would also have been cycle-free (boot-probes.ts already value-imports config.ts; the cycle exists only if the constants live in boot-probes.ts). Placement beside PROVIDERS_DIR is fine; reword the reason."
+        },
+        {
+          "severity": "non-blocking",
+          "file": "packages/daemon/src/daemon/runtime-kubernetes.ts:729-730",
+          "description": "podEnvironment's doc says 'the one place the store shapes a pod' while spawnSerialized:266 also reads the store to drop the init container's LEGION_RESUME_SESSION_FILE; say 'the one place the store adds to a pod's environment'."
+        },
+        {
+          "severity": "non-blocking",
+          "file": "packages/daemon/src/daemon/__tests__/worker-image-probe.test.ts (session_store describe)",
+          "description": "'under pvc, reuses a cached pass that records no session-storage probe' duplicates the pre-existing cache-hit test; 'under pvc, does not require the marker, and a cache written without it carries no sessionStorageProbed key' duplicates the baseline and pins key-absence over false (an implementation choice; the read side treats anything but true as unconfirmed)."
+        },
+        {
+          "severity": "nit",
+          "file": "packages/daemon/src/daemon/config.ts (SESSION_STORES, SECRET_DATA_KEY_PATTERN)",
+          "description": "SESSION_STORES tuple beside the SessionStore union's literal kinds is two sources of truth for the store names (and .some() does not narrow); the regex is retyped in its own error message."
+        },
+        {
+          "severity": "nit",
+          "file": "docs/kubernetes.md (Selecting the store, the missing-row paragraph)",
+          "description": "'Every relaunch of a root, a sub-architect, or a phase worker mints its boot token with the session id the previous generation registered' — for a root it is every relaunch that passes --resume; name the launch-failed re-admit beside the first launch in the exemption sentence."
+        },
+        {
+          "severity": "nit",
+          "file": "packages/daemon/src/daemon/api/http.ts:23",
+          "description": "SAME_AGENT_REFUSAL reads 'Worker respawn' for a root refusal; optional role-neutral text (touches two tests and two doc lines)."
+        },
+        {
+          "severity": "record",
+          "file": "PR body",
+          "description": "'contract stays 4' is stale (main carries 5; the branch bumps nothing). Thermo slot, Threads, and Fast-follow updated by the reviewer at 8caa02e3."
+        }
+      ],
+      "verified": {
+        "ci": "Tests 34916147816 (lint, typecheck, test) success; Legion Envoy and Contracts 34916147829 (pi-envoy success, other jobs skipped); PR Title 34916147807 and 34916318324 success — all at 8caa02e3, read from GitHub check-runs.",
+        "threads": "0 before this review; 1 unresolved after it (discussion_r4011129435).",
+        "e2e": "E2E (implementer) and E2E (tester) both present in the PR body with surface, commands, observations, head, negative control; tester's line states how it verified the implementer's.",
+        "mergeable": "GitHub reports CONFLICTING / DIRTY at review time (main moved: #1109 and pi-envoy v1.35.1 touch packages/pi-envoy/CHANGELOG.md and AGENTS.md); the architect's brief said MERGEABLE — main moved after the tester's round.",
+        "fingerprint": "a2b1461a9ab896bed85f48a5cd91be3aa9dd47a427db4d94150372fc97f054ad at 8caa02e3 (fork point 923d3af0), equal to the implementer's and tester's; the seven round-0 daemon source files' hunks identical at fork points af232beb (70c46b13) and 923d3af0 (8caa02e3).",
+        "contract": "packages/contracts and packages/pi-envoy/package.json untouched vs the fork point; LEGION_DAEMON_API_VERSION 5 and legion.daemonApiVersion 5 — no bump, correct.",
+        "localChecks": "cd packages/daemon && bunx tsc --noEmit && bunx biome check src/ → clean (172 files); cd packages/pi-envoy && bun run typecheck && bun run lint → clean (21 files); targeted tests: processes 3, api 8, worker-image-probe + runtime-kubernetes 81, config 23, legion.test.ts 6 — all pass. No rig, daemon, cluster, or container was started."
+      },
+      "thermo": {
+        "head": "8caa02e35aa52361ef442cb67b65342d6723066c",
+        "deepReview": "1 blocking (the same-agent expectation survives one relaunch), 1 non-blocking (409 scope wording in exitOnRegistrationRefusal), 1 nit (SAME_AGENT_REFUSAL says Worker respawn for a root); no findings on the /process/started ordering, parseSessionStore, --resume under postgres, the probe-cache matrix, or the extension's never-return.",
+        "codeQuality": "No blocking findings; DRY bar met (one SessionStore seam, two variables written only in podEnvironment, names and marker defined once and imported, one SAME_AGENT_REFUSAL, one exitOnRegistrationRefusal, 'issue' in narrowing matches the file's convention, ProbePodOutcome local intersection is the right shape); non-blocking comment and test tidy-ups listed in keyFindings."
+      },
+      "judgements": {
+        "dry": "Met. Placement of the two variable names in k8s-manifests.ts is acceptable (beside PROVIDERS_DIR, the mount they compose); the implementer's reason why not boot-probes.ts (TDZ cycle with config.ts) is correct; the implied 'only here is cycle-free' is not, since config.ts would have worked too — a comment fix, not a move.",
+        "sameAgent": "Minting the root expectation only on an actual --resume is right (a launch-failed re-admit must start fresh; the negative control defends it). The 409 sits before token consumption and any write. Not persisting expectedSessionId for roots is sound as reasoning (/process/started reads only the in-memory mint), but the AGENTS.md sentence 'the resurrection that follows re-mints with the recorded session' is false until the locator fix lands, for the same reason as the blocking finding. Extension: 403/409 exit and 5xx/transport propagation are defended by tests at both routes.",
+        "tests": "Defend observable contracts (refusal + no state change + token reuse; env equality against a pvc pod; the cache reuse matrix; exit codes and propagation). The HOME/OMP_PROFILE absence pin is spec-mandated (acceptance 3) and kept. Only the probe-cache key-absence pin is an implementation pin; two probe-cache tests duplicate existing paths.",
+        "docs": "docs/kubernetes.md Selecting the store / Why pods stay node-affine / The image guard and the daemon and pi-envoy AGENTS.md rows match the code, except the sentences the blocking finding falsifies (which become true once the fix lands) and the wording precisions listed. CHANGELOG line follows the package's Unreleased → Fixed convention.",
+        "production": "The postgres path is reachable only by a Kubernetes daemon with session_store: postgres, which no deployment runs: that half of the production check can only be a statement plus the merged worker image's probe-image line carrying session-storage=probed. The same-agent half is runtime-independent: after the dogfood tmux daemon restarts on the merged commit, the implementer can drive a real root resurrection and record the daemon's 'resurrecting <KEY> by resuming OMP session …' line followed by a 200 /process/started from the recorded session. A real 409 negative control is not drivable without breaking a live session; the Production line should say so.",
+        "recordNotes": "The implement handoff still carries round 0's stale openQuestions entry (answered by the spec) — clear it in the corrective handoff write. The rebase comment's footer carries the implementer's real session id now."
+      },
+      "nextRound": "Re-review after the corrective push: verify the thread's fix and test at the new head, answer the thread with Accepted:/Still open:, re-run thermo only if the fingerprint changed (it will: a source fix), one review. If clean: COMMENT (the head carries .legion/), report to the architect for the .legion/ deletion push, then APPROVE that head by SHA.",
+      "round": 1
+    }
+  ],
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-15T01:38:40.830Z"
+  "completed": "2026-09-15T02:19:53.790Z"
 }
