@@ -61,7 +61,7 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
       body: JSON.stringify({ headerHeight: desktopMetrics[0], specificationY: desktopMetrics[1] }),
       contentType: "application/json",
     });
-    await page.screenshot({ path: "/tmp/specchrome-1770.png" });
+    await page.screenshot({ path: testInfo.outputPath("specchrome-1770.png") });
     expect(desktopMetrics[0]).toBeLessThanOrEqual(96);
 
     await page.setViewportSize({ width: 1280, height: 800 });
@@ -76,7 +76,7 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
     });
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({ path: "/tmp/specchrome-390.png" });
+    await page.screenshot({ path: testInfo.outputPath("specchrome-390.png") });
 
     const form = ask.locator("form");
     await expect(form).toBeVisible({ timeout: 10_000 });
@@ -186,7 +186,7 @@ test("a failed in-document decision answer identifies the failed block", async (
 
 test("malformed decision with a blank option label disables the answer form", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Malformed ask" });
   const malformed = await createIssueArtifact(
@@ -214,7 +214,7 @@ test("malformed decision with a blank option label disables the answer form", as
     await expect(ask.locator("form")).toHaveCount(0);
     await expect(ask.locator("li:empty")).toHaveCount(0);
     await expect(ask.getByRole("listitem")).toHaveCount(2);
-    await page.screenshot({ path: "/tmp/specchrome-malformed-1280.png" });
+    await page.screenshot({ path: testInfo.outputPath("specchrome-malformed-1280.png") });
   } finally {
     await alice.close();
   }

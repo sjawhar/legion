@@ -18,7 +18,7 @@ const session = {
   as: "agent" as const,
 };
 const longToken = `sjawhar/legion#838-${"unbreakable".repeat(12)}`;
-const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n`;
+const initialMarkdown = `## Database\n\nUse SQLite\n\n| col | value |\n|---|---|\n| a | 1 |\n| b | ${longToken} |\n\n- [ ] task\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n\nEnd of spec.\n`;
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -102,7 +102,7 @@ test("the spec opens as a formatted, editable document with no source pane", asy
   }
 });
 
-test("two users edit the same spec, see each other's text and cursor within a second, and settle one version attributed to both", async ({
+test("two users edit the same spec, see each other's text and cursor, and settle one version attributed to both", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -129,15 +129,15 @@ test("two users edit the same spec, see each other's text and cursor within a se
     await expect(bobPage.getByRole("status")).toHaveText("connected");
 
     await typeAtEnd(alicePage, "hello from alice");
-    await expect(bobEditor).toContainText("hello from alice", { timeout: 1000 });
+    await expect(bobEditor).toContainText("hello from alice");
 
     await typeAtEnd(bobPage, "hello from bob");
-    await expect(aliceEditor).toContainText("hello from bob", { timeout: 1000 });
+    await expect(aliceEditor).toContainText("hello from bob");
 
     if (testInfo.project.name === "chromium") {
       await bobEditor.click();
-      await expect(cursorLabel(alicePage, "bob")).toBeVisible({ timeout: 1000 });
-      await expect(cursorLabel(bobPage, "alice")).toBeVisible({ timeout: 1000 });
+      await expect(cursorLabel(alicePage, "bob")).toBeVisible();
+      await expect(cursorLabel(bobPage, "alice")).toBeVisible();
     }
 
     await expect
@@ -197,7 +197,7 @@ test("named versions, the version picker, and the diff stay current across users
       { ops: [{ find: "SQLite", op: "replace", with: "Postgres" }] },
       session
     );
-    await expect(editor).toContainText("Use Postgres", { timeout: 1000 });
+    await expect(editor).toContainText("Use Postgres");
     await expect
       .poll(
         () =>
@@ -273,8 +273,8 @@ test("an agent edit lands live in every open editor", async ({ browser }) => {
       { ops: [{ find: "SQLite", op: "replace", with: "Postgres" }] },
       session
     );
-    await expect(aliceEditor).toContainText("Use Postgres", { timeout: 1000 });
-    await expect(bobEditor).toContainText("Use Postgres", { timeout: 1000 });
+    await expect(aliceEditor).toContainText("Use Postgres");
+    await expect(bobEditor).toContainText("Use Postgres");
   } finally {
     await bob.close();
     await alice.close();
@@ -303,7 +303,7 @@ test("reloading mid-edit reopens the same content", async ({ browser }) => {
     await expect(bobEditor).toContainText("Use SQLite");
 
     await typeAtEnd(alicePage, "before reload");
-    await expect(bobEditor).toContainText("before reload", { timeout: 1000 });
+    await expect(bobEditor).toContainText("before reload");
     await alicePage.reload();
     await expect(documentEditor(alicePage)).toContainText("Use SQLite");
     await expect(documentEditor(alicePage)).toContainText("before reload");

@@ -108,10 +108,10 @@ test("Agents orders activity, pins a card, and holds an issue-less BTW conversat
     await expect(conversation).toContainText("The implementation is ready.");
 
     if (testInfo.project.name === "chromium") {
-      await page.screenshot({ path: "/tmp/agents-1280.png", fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath("agents-1280.png"), fullPage: true });
     }
     if (testInfo.project.name === "iphone") {
-      await page.screenshot({ path: "/tmp/agents-390.png", fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath("agents-390.png"), fullPage: true });
     }
   } finally {
     await alice.close();

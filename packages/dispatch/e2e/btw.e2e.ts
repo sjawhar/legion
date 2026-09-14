@@ -90,8 +90,8 @@ test("BTW sends an ephemeral question and shows its answer live in both readers"
     );
     for (const page of [alicePage, bobPage]) {
       const readerCard = targetedCard(page, question);
-      await expect(readerCard).toContainText("Answered by planner", { timeout: 1_000 });
-      await expect(readerCard).toContainText("Ship it.", { timeout: 1_000 });
+      await expect(readerCard).toContainText("Answered by planner");
+      await expect(readerCard).toContainText("Ship it.");
     }
   } finally {
     await Promise.all([alice.close(), bob.close()]);

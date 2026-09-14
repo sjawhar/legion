@@ -70,9 +70,9 @@ test("ask cards show urgency accents and copy tmux targets", async ({ browser },
     await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
     await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();
     if (testInfo.project.name === "iphone") {
-      await page.locator("main").screenshot({ path: "/tmp/askcard-390.png" });
+      await page.locator("main").screenshot({ path: testInfo.outputPath("askcard-390.png") });
     } else {
-      await page.screenshot({ fullPage: true, path: "/tmp/askcard-1280.png" });
+      await page.screenshot({ fullPage: true, path: testInfo.outputPath("askcard-1280.png") });
     }
   } finally {
     await alice.close();

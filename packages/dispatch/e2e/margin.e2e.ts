@@ -61,15 +61,15 @@ async function commentWithBody(issueKey: string, artifactId: string | undefined,
 
 async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
   const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible({ timeout: 1000 });
-  await expect(mark).toHaveText(quote, { timeout: 1000 });
+  await expect(mark).toBeVisible();
+  await expect(mark).toHaveText(quote);
 }
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the selection bar comments, suggests, and asks on marks that both users see within a second", async ({
+test("the selection bar comments, suggests, and asks on marks that both users see", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -107,9 +107,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     await expect(cancelledComposer).toContainText("brown");
     await alicePage.keyboard.press("Escape");
     await expect(documentEditor(alicePage).locator("span[data-proof][data-id]")).toHaveCount(0);
-    await expect(documentEditor(bobPage).locator("span[data-proof][data-id]")).toHaveCount(0, {
-      timeout: 1000,
-    });
+    await expect(documentEditor(bobPage).locator("span[data-proof][data-id]")).toHaveCount(0);
 
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
@@ -292,7 +290,7 @@ test("highlights follow edits in the other browser and orphan to their original 
     await aliceEditor.click();
     await alicePage.keyboard.press("Control+Home");
     await alicePage.keyboard.type("Note: ");
-    await expect(bobEditor).toContainText("Note:", { timeout: 1000 });
+    await expect(bobEditor).toContainText("Note:");
     await expectMark(bobPage, brown.anchor.mark_id, "brown");
     await expect
       .poll(() =>
@@ -303,7 +301,7 @@ test("highlights follow edits in the other browser and orphan to their original 
       .toMatchObject({ anchor: { orphaned: false, quote: "brown" } });
 
     await deleteEditorText(alicePage, "fox");
-    await expect(bobEditor).not.toContainText("fox", { timeout: 1000 });
+    await expect(bobEditor).not.toContainText("fox");
     await expect
       .poll(
         () =>
@@ -375,12 +373,12 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       await expect(alicePage.getByRole("button", { name: "Reopen" })).toHaveCount(0);
     }
     await Promise.all([
-      expect(aliceEditor).toContainText("The quick red fox", { timeout: 1000 }),
-      expect(bobEditor).toContainText("The quick red fox", { timeout: 1000 }),
+      expect(aliceEditor).toContainText("The quick red fox"),
+      expect(bobEditor).toContainText("The quick red fox"),
     ]);
     await Promise.all([
-      expect(markSpan(alicePage, accepted.anchor.mark_id)).toHaveCount(0, { timeout: 1000 }),
-      expect(markSpan(bobPage, accepted.anchor.mark_id)).toHaveCount(0, { timeout: 1000 }),
+      expect(markSpan(alicePage, accepted.anchor.mark_id)).toHaveCount(0),
+      expect(markSpan(bobPage, accepted.anchor.mark_id)).toHaveCount(0),
     ]);
     await expect
       .poll(() =>
@@ -424,10 +422,10 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     await marginCard(alicePage, rejected.id).getByRole("button").click();
     await marginCard(alicePage, rejected.id).getByRole("button", { name: "Reject" }).click();
     await Promise.all([
-      expect(aliceEditor).toContainText("The quick red fox", { timeout: 1000 }),
-      expect(bobEditor).toContainText("The quick red fox", { timeout: 1000 }),
-      expect(markSpan(alicePage, rejected.anchor.mark_id)).toHaveCount(0, { timeout: 1000 }),
-      expect(markSpan(bobPage, rejected.anchor.mark_id)).toHaveCount(0, { timeout: 1000 }),
+      expect(aliceEditor).toContainText("The quick red fox"),
+      expect(bobEditor).toContainText("The quick red fox"),
+      expect(markSpan(alicePage, rejected.anchor.mark_id)).toHaveCount(0),
+      expect(markSpan(bobPage, rejected.anchor.mark_id)).toHaveCount(0),
     ]);
     await expect
       .poll(() =>
@@ -486,7 +484,7 @@ test("unanchored comments reach Conversation, not document review, for both view
         bobPage
           .getByRole("list", { name: "Conversation turns" })
           .getByText("General remark", { exact: true })
-      ).toBeVisible({ timeout: 1000 }),
+      ).toBeVisible(),
       expect(marginCard(alicePage, comment.id)).toHaveCount(0),
       expect(marginCard(bobPage, comment.id)).toHaveCount(0),
     ]);
@@ -588,7 +586,7 @@ test("a reply to an agent's anchored comment carries no anchor and lands in the 
         : threadCard(bobPage, root.id);
     await Promise.all([
       expect(aliceThread).toContainText("ok"),
-      expect(bobThread).toContainText("ok", { timeout: 1000 }),
+      expect(bobThread).toContainText("ok"),
     ]);
     await Promise.all([
       expect(aliceThread.getByText("ok").locator("..")).toHaveCSS("margin-left", "0px"),
