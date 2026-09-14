@@ -292,6 +292,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     config: cfg,
     runtime,
     processPath: process.env.PATH ?? "",
+    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!true",
     publishRole: (_subject, json) => {
       publications.push(json);

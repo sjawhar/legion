@@ -1,0 +1,44 @@
+# The in-cluster daemon's legion.yaml (mounted at /etc/legion/legion.yaml). Every path below is a
+# container path; every `.example` host is a placeholder an overlay replaces (the kind overlay is
+# a complete one). Keys a tmux daemon needs and this one must not carry: `omp_invocation` and
+# `omp_launch_prefix` — there is no mise, tmux, or local OMP in the pod; workers run the digest
+# below, and provider keys reach them from the providers Secret.
+project: demo
+runtime:
+  kubernetes:
+    namespace: legion
+    # The same digest deployment.yaml runs the daemon from; the probe pod runs it too. An overlay
+    # sets both (`images:` for the Deployment, this key for the pods and the probe).
+    image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+# Reachable by the pods it launches: the Service, on the pod network.
+bind: 0.0.0.0
+daemon_url: http://legion-daemon-demo.legion.svc:13370
+port: 13370
+worker_stream_port: 13371
+# The PVC (deployment.yaml).
+state_dir: /var/lib/legion
+# The ConfigMap's second file.
+instructions: /etc/legion/instructions.md
+# The Envoy listener, bound off loopback and requiring ENVOY_API_TOKEN: the same token, from the
+# providers Secret, is the daemon's bearer here and every pod's ENVOY_TOKEN_FILE.
+envoy_url: http://envoy-listener.example:9020
+envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN
+nats_urls:
+  - nats://nats.example:4222
+# DISPATCH_TOKEN comes from the providers Secret through the Deployment's env.
+dispatch_url: https://dispatch.example
+dispatch_project: DEMO
+repos:
+  - acme/widgets
+gates:
+  design: root-issues
+# App private keys from the daemon-only Secret (legion-demo-daemon), never the providers Secret:
+# every worker pod mounts that one, and the shim exports each of its files without a NAME_FILE
+# pointer into the OMP child's environment.
+github_apps:
+  implement:
+    app_id: "1"
+    private_key_command: cat /var/run/legion/daemon/github-app-implement.pem
+  review:
+    app_id: "2"
+    private_key_command: cat /var/run/legion/daemon/github-app-review.pem

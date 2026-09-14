@@ -19,16 +19,17 @@ import {
   DEFAULT_ROLE_PROFILES,
   type GitHubAppRole,
 } from "../config";
-import type { DaemonEnvironment } from "../environment";
+import type { DaemonEnvironment, resolveDaemonEnvironment } from "../environment";
 import { parseImageDigestRef } from "../image-ref";
 import * as daemonIndex from "../index";
 import { createK8sClient } from "../k8s-client";
 import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
+import { imageProbeCachePath, PROBE_CONTAINER, probePodName } from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
-import { createFakeK8sApi } from "./fake-k8s-api";
+import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
 
 const { startDaemon } = daemonIndex;
@@ -198,7 +199,7 @@ function daemonTestDependencies(
         }
         return { stdout: "", stderr: "", exitCode: 0 };
       },
-      resolveDaemonEnvironment: async () => daemonEnvironment,
+      resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
       connectWorkerRpc: async (): Promise<WorkerRpcClient> => {
         const closed = Promise.withResolvers<void>();
         return {
@@ -292,7 +293,16 @@ const validLegionPluginManifest = JSON.stringify({
   legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION },
 });
 
+/** The injected `resolveDaemonEnvironment`: one fixed environment whatever runtime literal the
+ * daemon asks for. The production resolver's variant follows the literal; a fixture stands in for
+ * that guarantee, so the cast is the fixture's promise, not a check. */
+const environmentResolver =
+  (environment: DaemonEnvironment): typeof resolveDaemonEnvironment =>
+  async () =>
+    environment as never;
+
 const daemonEnvironment: DaemonEnvironment = {
+  runtime: "tmux",
   commands: {
     jj: "/tools/jj",
     git: "/tools/git",
@@ -301,6 +311,7 @@ const daemonEnvironment: DaemonEnvironment = {
   },
   ompInvocation: "/tools/omp",
   paneEnv: { PATH: "/full/bin:/usr/bin" },
+  rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
 };
 
 describe("envoyPublishBody", () => {
@@ -318,6 +329,86 @@ describe("envoyPublishBody", () => {
     const keyless = daemonIndex.envoyPublishBody("notifications.role.x", "{}");
     expect(keyless).toEqual({ topic: "notifications.role.x", message: "{}", payload: "{}" });
     expect("dedupe_key" in keyless).toBeFalse();
+  });
+});
+
+describe("publishToEnvoy", () => {
+  const { publishToEnvoy } = daemonIndex;
+  const recordingFetch = (status: number) => {
+    const requests: Request[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+      requests.push(new Request(String(input), init));
+      return new Response(status === 200 ? "{}" : "unauthorized", { status });
+    };
+    return { requests, fetchImpl };
+  };
+
+  it("sends the configured Envoy token as a bearer on the listener publish", async () => {
+    const { requests, fetchImpl } = recordingFetch(200);
+    const daemonConfig = { ...config("/tmp/unused"), envoyToken: "listener-token" };
+    await publishToEnvoy(
+      daemonConfig,
+      "notifications.role.x",
+      '{"type":"ping"}',
+      undefined,
+      fetchImpl
+    );
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("http://127.0.0.1:9020/v1/messages/publish");
+    expect(requests[0]?.headers.get("Authorization")).toBe("Bearer listener-token");
+    expect(requests[0]?.headers.get("Content-Type")).toBe("application/json");
+    await expect(requests[0]?.json()).resolves.toEqual({
+      topic: "notifications.role.x",
+      message: '{"type":"ping"}',
+      payload: '{"type":"ping"}',
+    });
+  });
+
+  it("sends no Authorization header when no token is configured (tmux, unchanged)", async () => {
+    const { requests, fetchImpl } = recordingFetch(200);
+    await publishToEnvoy(config("/tmp/unused"), "notifications.role.x", "{}", undefined, fetchImpl);
+    expect(requests[0]?.headers.has("Authorization")).toBe(false);
+  });
+
+  it.each([
+    [401, "listener-token", "with a bearer token sent"],
+    [403, "listener-token", "with a bearer token sent"],
+    [401, undefined, "with no bearer token sent"],
+  ])("keeps EnvoyPublishError on %i and logs one line naming the listener URL and whether a token was sent (%s)", async (status, envoyToken, sent) => {
+    const { fetchImpl } = recordingFetch(status);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failure = await publishToEnvoy(
+        { ...config("/tmp/unused"), envoyToken },
+        "notifications.role.x",
+        "{}",
+        undefined,
+        fetchImpl
+      ).then(
+        () => undefined,
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(EnvoyPublishError);
+      expect(failure).toMatchObject({ topic: "notifications.role.x", status });
+      expect(errorSpy.mock.calls.map((call) => String(call[0]))).toEqual([
+        `[legion] Envoy listener http://127.0.0.1:9020 refused the publish to notifications.role.x (${status}) ${sent}; the daemon's envoy_token_file (or ENVOY_TOKEN_FILE) must hold the listener's ENVOY_API_TOKEN`,
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("does not log for a non-auth failure", async () => {
+    const { fetchImpl } = recordingFetch(404);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        publishToEnvoy(config("/tmp/unused"), "notifications.role.x", "{}", undefined, fetchImpl)
+      ).rejects.toMatchObject({ status: 404 });
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
@@ -471,7 +562,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -644,7 +735,7 @@ describe("startDaemon", () => {
               expect(started).toBeFalse();
             })();
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
           // No real process exists behind the fake tmux's pid 4242; the identity check's last step
@@ -767,7 +858,7 @@ describe("startDaemon", () => {
             return { stdout: "", stderr: "", exitCode: 0 };
           },
           connectWorkerRpc: async () => client,
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -1005,7 +1096,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -1206,7 +1297,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -1394,7 +1485,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           readPluginManifest: async () => validLegionPluginManifest,
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
@@ -1591,7 +1682,7 @@ describe("startDaemon", () => {
             stderr: "",
             exitCode: 0,
           }),
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
@@ -2078,7 +2169,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
@@ -2150,7 +2241,7 @@ describe("startDaemon", () => {
                   exitCode: 0,
                 }
               : { stdout: "", stderr: "", exitCode: 0 },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
           readPluginManifest: async () => validLegionPluginManifest,
@@ -2292,7 +2383,7 @@ describe("startDaemon", () => {
           loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
           saveState: async () => {},
           createNatsTransport: async () => new FakeNats(),
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readProcessStat: fakeProcStat,
           envoyPublish: async () => {},
@@ -2419,7 +2510,7 @@ describe("startDaemon", () => {
           loadState: async () => newLegionState(daemonConfig.project, daemonConfig.admissionCap),
           saveState: async () => {},
           createNatsTransport: async () => new FakeNats(),
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
@@ -2601,7 +2692,7 @@ describe("startDaemon", () => {
             exitCode: 0,
           };
         },
-        resolveDaemonEnvironment: async () => daemonEnvironment,
+        resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
         statPrompt: async () => {},
         readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
@@ -2670,7 +2761,7 @@ describe("startDaemon", () => {
               exitCode: 0,
             };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
@@ -2780,7 +2871,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
@@ -2870,7 +2961,7 @@ describe("startDaemon", () => {
             }
             return { stdout: "", stderr: "", exitCode: 0 };
           },
-          resolveDaemonEnvironment: async () => daemonEnvironment,
+          resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
           statPrompt: async () => {},
           readPluginManifest: async () => validLegionPluginManifest,
           envoyPublish: async () => {},
@@ -3056,7 +3147,7 @@ describe("startDaemon", () => {
                 exitCode: 0,
               }
             : { stdout: "", stderr: "", exitCode: 0 },
-        resolveDaemonEnvironment: async () => daemonEnvironment,
+        resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
         statPrompt: async () => {},
         readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
@@ -3128,7 +3219,7 @@ describe("startDaemon", () => {
               return { stdout: "", stderr: "LEGION_PLUGIN_LOADED=yes\n", exitCode: 0 };
             },
             dispatchClient: fakeDispatchClient(),
-            resolveDaemonEnvironment: async () => daemonEnvironment,
+            resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
             readPluginManifest: async () => manifest,
             tokenManager: {
               getToken: async () => ({
@@ -3175,7 +3266,7 @@ describe("startDaemon", () => {
                   }
                 : { stdout: "", stderr: "", exitCode: 0 },
             dispatchClient: fakeDispatchClient(),
-            resolveDaemonEnvironment: async () => daemonEnvironment,
+            resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
             readPluginManifest: async () => {
               throw new Error("ENOENT: no such file or directory");
             },
@@ -3212,7 +3303,7 @@ describe("startDaemon", () => {
                 exitCode: 0,
               }
             : { stdout: "", stderr: "", exitCode: 0 },
-        resolveDaemonEnvironment: async () => daemonEnvironment,
+        resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
         statPrompt: async () => {},
         readProcessStat: fakeProcStat,
         readPluginManifest: async () => validLegionPluginManifest,
@@ -3288,7 +3379,7 @@ describe("startDaemon", () => {
               exitCode: 0,
             }
           : { stdout: "", stderr: "", exitCode: 0 },
-      resolveDaemonEnvironment: async () => daemonEnvironment,
+      resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
       readPluginManifest: async () => validLegionPluginManifest,
       statPrompt: async () => {},
       readProcessStat: fakeProcStat,
@@ -3425,6 +3516,11 @@ describe("startDaemon", () => {
     }
   });
 
+  const WORKER_IMAGE = parseImageDigestRef(
+    `ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`
+  );
+  const PROBE_POD = probePodName("acme1", WORKER_IMAGE.digest);
+
   function kubernetesConfig(stateDir: string): DaemonConfig {
     return {
       ...config(stateDir),
@@ -3433,7 +3529,7 @@ describe("startDaemon", () => {
       runtime: {
         name: "kubernetes",
         namespace: "legion",
-        image: parseImageDigestRef(`ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`),
+        image: WORKER_IMAGE,
         treeVolume: "20Gi",
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
@@ -3441,22 +3537,78 @@ describe("startDaemon", () => {
     };
   }
 
-  it("refuses to start under runtime: kubernetes with neither a kubeconfig nor in-cluster credentials, naming both, and releases the lock", async () => {
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
-    const daemonConfig = kubernetesConfig(stateDir);
-    try {
-      await expect(startDaemon(daemonConfig, daemonDeps(daemonConfig))).rejects.toThrow(
-        "runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token does not exist: the daemon runs neither in a pod nor with a kubeconfig"
-      );
-      // The instance lock was released: a tmux daemon on the same state directory starts.
-      const daemon = await startDaemon(config(stateDir), daemonDeps(config(stateDir)));
-      await daemon.stop();
-    } finally {
-      await rm(stateDir, { recursive: true, force: true });
-    }
-  });
+  /** What `resolveDaemonEnvironment` yields inside the worker image: jj/git/gh, no tmux, no OMP. */
+  const kubernetesEnvironment: DaemonEnvironment = {
+    runtime: "kubernetes",
+    commands: { jj: "/usr/local/bin/jj", git: "/usr/bin/git", gh: "/usr/local/bin/gh" },
+    paneEnv: { PATH: "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin" },
+    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
+  };
 
-  it("under runtime: kubernetes, admits a queued root as a pod through the injected API client and never touches tmux", async () => {
+  /** Boot deps for a daemon in a pod: the fake API is the cluster, every poll sleep lets `onPoll`
+   * move the probe pod the way a real kubelet would, and the daemon must never read a local
+   * plugin manifest (the image's CLI reads the image's). */
+  function kubernetesDeps(
+    fakeApi: FakeK8sApi,
+    onPoll: (pod: string) => void
+  ): {
+    options: daemonIndex.DaemonStartOptions;
+    commands: string[][];
+    manifestReads: () => number;
+  } {
+    const commands: string[][] = [];
+    let manifestReads = 0;
+    const base = daemonTestDependencies(new FakeNats(), [], () => {});
+    const baseRunner = base.deps?.runner;
+    if (!baseRunner) throw new Error("test dependencies carry no runner");
+    return {
+      commands,
+      manifestReads: () => manifestReads,
+      options: {
+        deps: {
+          ...base.deps,
+          resolveDaemonEnvironment: environmentResolver(kubernetesEnvironment),
+          readPluginManifest: async () => {
+            manifestReads += 1;
+            return validLegionPluginManifest;
+          },
+          runner: async (command, runnerOptions) => {
+            commands.push(command);
+            return baseRunner(command, runnerOptions);
+          },
+          sleep: async () => {
+            if (fakeApi.pods.get(PROBE_POD)?.status?.phase === "Pending") onPoll(PROBE_POD);
+          },
+          k8sClient: createK8sClient({
+            server: "https://fake",
+            namespace: "legion",
+            fetch: fakeApi.fetch,
+          }),
+        },
+      },
+    };
+  }
+
+  function passProbe(fakeApi: FakeK8sApi, pod: string): void {
+    fakeApi.setPhase(pod, "Succeeded");
+    fakeApi.logs.set(
+      `${pod}/${PROBE_CONTAINER}`,
+      `probe-image: OK (/opt/omp/bin/omp) daemon-api-version=${LEGION_DAEMON_API_VERSION}\n`
+    );
+  }
+
+  /** `metadata.name` of a posted pod body, read with runtime narrowing (the fake records bodies as
+   * `unknown`). */
+  function postedPodName(body: unknown): string | undefined {
+    if (typeof body !== "object" || body === null || !("metadata" in body)) return undefined;
+    const { metadata } = body;
+    if (typeof metadata !== "object" || metadata === null || !("name" in metadata)) {
+      return undefined;
+    }
+    return typeof metadata.name === "string" ? metadata.name : undefined;
+  }
+
+  it("under runtime: kubernetes, runs the probe pod once under the launch hold, admits nothing until it passes, caches the pass, and never reads a local plugin manifest or probes a local OMP", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = kubernetesConfig(stateDir);
     const issue = "WIDGETS-42";
@@ -3468,28 +3620,31 @@ describe("startDaemon", () => {
       namespace: "legion",
       now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     });
-    const commands: string[][] = [];
-    const options = daemonTestDependencies(new FakeNats(), [], () => {});
-    const baseRunner = options.deps?.runner;
-    if (!baseRunner) throw new Error("test dependencies carry no runner");
+    let podsWhenProbePassed: string[] | undefined;
+    const { options, commands, manifestReads } = kubernetesDeps(fakeApi, (pod) => {
+      // The moment the probe completes, no other pod may exist yet: the hold is on.
+      podsWhenProbePassed = [...fakeApi.pods.keys()];
+      passProbe(fakeApi, pod);
+    });
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
       daemon = await startDaemon(daemonConfig, {
-        deps: {
-          ...options.deps,
-          loadState: async () => state,
-          saveState: async () => {},
-          runner: async (command, runnerOptions) => {
-            commands.push(command);
-            return baseRunner(command, runnerOptions);
-          },
-          k8sClient: createK8sClient({
-            server: "https://fake",
-            namespace: "legion",
-            fetch: fakeApi.fetch,
-          }),
-        },
+        deps: { ...options.deps, loadState: async () => state, saveState: async () => {} },
       });
+      expect(podsWhenProbePassed).toEqual([PROBE_POD]);
+      const podPosts = fakeApi.requests
+        .map((r, index) => ({ ...r, index }))
+        .filter((r) => r.method === "POST" && r.path === "/pods");
+      expect(podPosts.map((r) => postedPodName(r.body))).toEqual([
+        PROBE_POD,
+        "legion-widgets-42-architect-g1",
+      ]);
+      const probeDelete = fakeApi.requests.findIndex(
+        (r) => r.method === "DELETE" && r.path === `/pods/${PROBE_POD}`
+      );
+      expect(probeDelete).toBeGreaterThan(podPosts[0]?.index ?? Number.NaN);
+      expect(probeDelete).toBeLessThan(podPosts[1]?.index ?? Number.NaN);
+      expect(fakeApi.pods.has(PROBE_POD)).toBe(false);
       expect(state.admission.active).toEqual([issue]);
       expect(state.trees[issue]?.status).toBe("active");
       expect(state.trees[issue]?.locator).toMatchObject({
@@ -3499,11 +3654,98 @@ describe("startDaemon", () => {
         pvcName: "legion-widgets-42",
         roleToken: roleToken(daemonConfig.project, issue, "architect"),
       });
-      expect(fakeApi.requests.map((r) => [r.method, r.path])).toContainEqual(["POST", "/pods"]);
-      expect(fakeApi.pods.has("legion-widgets-42-architect-g1")).toBe(true);
+      expect(
+        JSON.parse(await readFile(imageProbeCachePath(stateDir, WORKER_IMAGE.digest), "utf8"))
+      ).toMatchObject({ digest: WORKER_IMAGE.digest, daemonApiVersion: LEGION_DAEMON_API_VERSION });
+      expect(manifestReads()).toBe(0);
+      expect(commands.filter((command) => command[0] === "sh")).toEqual([]);
       expect(commands.filter((command) => command[0]?.endsWith("/tmux"))).toEqual([]);
     } finally {
       await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under runtime: kubernetes, a restart with the digest cached at this contract creates no probe pod", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = kubernetesConfig(stateDir);
+    const cacheFile = imageProbeCachePath(stateDir, WORKER_IMAGE.digest);
+    await mkdir(path.dirname(cacheFile), { recursive: true });
+    await writeFile(
+      cacheFile,
+      JSON.stringify({
+        digest: WORKER_IMAGE.digest,
+        daemonApiVersion: LEGION_DAEMON_API_VERSION,
+        probedAt: "2026-08-23T00:00:00.000Z",
+      })
+    );
+    const fakeApi = createFakeK8sApi({
+      namespace: "legion",
+      now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    });
+    const { options } = kubernetesDeps(fakeApi, () => {
+      throw new Error("no probe pod may be polled when the cache holds this digest");
+    });
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, options);
+      expect(fakeApi.requests.filter((r) => r.method === "POST")).toEqual([]);
+      expect(errorSpy.mock.calls.map((call) => String(call[0]))).toContainEqual(
+        `[legion] worker image ${WORKER_IMAGE.digest} passed its probe at 2026-08-23T00:00:00.000Z (daemon API contract ${LEGION_DAEMON_API_VERSION}); reusing ${cacheFile}`
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under runtime: kubernetes, a failed probe pod refuses startup naming the digest and quoting its log, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = kubernetesConfig(stateDir);
+    const fakeApi = createFakeK8sApi({
+      namespace: "legion",
+      now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    });
+    const mismatch = `[legion] pi-legion-envoy at /home/legion/.omp/profiles/legion/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json (package 0.9.0) speaks daemon API contract ${LEGION_DAEMON_API_VERSION - 1}; this daemon requires ${LEGION_DAEMON_API_VERSION}.`;
+    const { options } = kubernetesDeps(fakeApi, (pod) => {
+      fakeApi.setPhase(pod, "Failed");
+      fakeApi.logs.set(`${pod}/${PROBE_CONTAINER}`, `${mismatch}\n`);
+    });
+    try {
+      await expect(startDaemon(daemonConfig, options)).rejects.toThrow(
+        `[legion] worker image ${WORKER_IMAGE.digest} failed its probe: pod ${PROBE_POD} Failed — log tail: ${mismatch}`
+      );
+      expect(fakeApi.pods.has(PROBE_POD)).toBe(false);
+      await expect(stat(imageProbeCachePath(stateDir, WORKER_IMAGE.digest))).rejects.toThrow();
+      // The instance lock was released: a tmux daemon on the same state directory starts.
+      const daemon = await startDaemon(config(stateDir), daemonDeps(config(stateDir)));
+      await daemon.stop();
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to start under runtime: kubernetes with neither a kubeconfig nor in-cluster credentials, naming both, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = kubernetesConfig(stateDir);
+    const options = daemonDeps(daemonConfig);
+    try {
+      await expect(
+        startDaemon(daemonConfig, {
+          deps: {
+            ...options.deps,
+            resolveDaemonEnvironment: environmentResolver(kubernetesEnvironment),
+          },
+        })
+      ).rejects.toThrow(
+        "runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token does not exist: the daemon runs neither in a pod nor with a kubeconfig"
+      );
+      // The instance lock was released: a tmux daemon on the same state directory starts.
+      const daemon = await startDaemon(config(stateDir), daemonDeps(config(stateDir)));
+      await daemon.stop();
+    } finally {
       await rm(stateDir, { recursive: true, force: true });
     }
   });

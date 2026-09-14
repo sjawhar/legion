@@ -11,7 +11,8 @@ import { LEGION_ROLES } from "./legion-roles";
  * controller/architect boot handshake silently. And the pane contract — every environment
  * variable the daemon sets on a pane that the plugin reads or writes: `LEGION_GRANT_FILE`,
  * `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
- * `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`, and
+ * `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`,
+ * `ENVOY_TOKEN_FILE` (the listener bearer, when the daemon has one), and
  * the `LEGION_*` identity variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/
  * `LEGION_GENERATION`/`LEGION_WORKSPACE`/`LEGION_STATE_DIR`/`LEGION_CONTROLLER` (set in
  * `processes.ts`'s three pane environments and the runtime's `<NAME>_FILE` pointer; read in
@@ -29,9 +30,12 @@ import { LEGION_ROLES } from "./legion-roles";
  * LEGION-52, also covering the pane contract including the credential file (`LEGION_GRANT_FILE`,
  * LEGION-54); plugin release 1.23.0 is the first to declare 2. Releases 1.14.0 through 1.22.2
  * declare 1 and are refused as `speaks daemon API contract 1`; releases before 1.14.0 have no
- * field and are refused as `contract none`.
+ * field and are refused as `contract none`. 3 — LEGION-25: `ENVOY_TOKEN_FILE` on every pane and
+ * pod when the daemon has an Envoy bearer (`envoy_token_file`); the plugin's bundled
+ * `@legion/envoy-client` reads it ahead of `ENVOY_TOKEN`. A contract-2 plugin on a daemon with
+ * `envoy_token_file` set would ignore the file and have every listener call answered 401.
  */
-export const LEGION_DAEMON_API_VERSION = 2;
+export const LEGION_DAEMON_API_VERSION = 3;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);

@@ -14,6 +14,7 @@ import {
   IMAGE_PROBE_RETRY,
   IMAGE_PROBE_TIMEOUT_MS,
   SESSION_STORAGE_PROBE_MARK,
+  verifyLegionPluginContract,
   verifyLegionPluginLoaded,
   verifyOmpAgentsCapability,
   verifySessionStorageSetting,
@@ -347,16 +348,35 @@ export async function cmdHandoffComplete(
  * from an older image's bare `probe-image: OK`. The worker image build runs this as its last
  * step; a failure is the daemon's own probe message, exit 1, so a broken image never publishes.
  * The retry is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no
- * supervisor and must finish. */
+ * supervisor and must finish. With `--daemon-api-version <N>` — how the in-cluster daemon runs it,
+ * in a one-shot pod of the worker image (`worker-image-probe.ts`) — the image's own installed
+ * plugin manifest is also checked against `<N>` after the probes pass, exactly as a tmux daemon
+ * checks its host's (`verifyLegionPluginContract`): the daemon container is not the image its
+ * workers run, so only the image's CLI can read the image's plugin. A mismatch exits 1 naming both
+ * versions, and the success line ends with `daemon-api-version=<N>`. */
 export async function cmdProbeImage(
   omp: string | undefined,
-  deps: ProbeImageCommandDeps
+  deps: ProbeImageCommandDeps,
+  flags: { daemonApiVersion?: string } = {}
 ): Promise<void> {
   const ompPath = omp ?? deps.env.LEGION_OMP_PATH;
   if (!ompPath) {
     throw new CliError(
       "probe-image: set LEGION_OMP_PATH (or pass --omp) to the OMP executable to probe"
     );
+  }
+  let expectedContract: number | undefined;
+  if (flags.daemonApiVersion !== undefined) {
+    expectedContract = Number(flags.daemonApiVersion);
+    if (
+      !/^\d+$/.test(flags.daemonApiVersion) ||
+      !Number.isSafeInteger(expectedContract) ||
+      expectedContract < 1
+    ) {
+      throw new CliError(
+        `--daemon-api-version must be a positive integer (got ${JSON.stringify(flags.daemonApiVersion)})`
+      );
+    }
   }
   const options = {
     sleep: deps.sleep,
@@ -367,10 +387,15 @@ export async function cmdProbeImage(
     await verifyOmpAgentsCapability(ompPath, [], deps.runner, options);
     await verifyLegionPluginLoaded(ompPath, [], deps.runner, deps.readPluginManifest, options);
     await verifySessionStorageSetting(ompPath, [], deps.runner, options);
+    if (expectedContract !== undefined) {
+      await verifyLegionPluginContract(deps.readPluginManifest, expectedContract);
+    }
   } catch (error) {
     throw new CliError(error instanceof Error ? error.message : String(error));
   }
-  console.log(`probe-image: OK (${ompPath}) ${SESSION_STORAGE_PROBE_MARK}`);
+  console.log(
+    `probe-image: OK (${ompPath}) ${SESSION_STORAGE_PROBE_MARK}${expectedContract === undefined ? "" : ` daemon-api-version=${expectedContract}`}`
+  );
 }
 
 async function readStdin(): Promise<string> {
@@ -425,6 +450,7 @@ export function loadStartConfig(
     env,
     configFile,
     cliOverrides: project ? { legionId: project } : undefined,
+    resolveSecrets: options.resolveSecrets,
   }).config;
 }
 
@@ -878,15 +904,26 @@ const probeImageCommand = defineCommand({
     description: "Run the daemon's OMP boot probes against this image's OMP executable",
     hidden: true,
   },
-  args: { omp: { type: "string", description: "OMP executable (default: $LEGION_OMP_PATH)" } },
+  args: {
+    omp: { type: "string", description: "OMP executable (default: $LEGION_OMP_PATH)" },
+    "daemon-api-version": {
+      type: "string",
+      description:
+        "Also require this image's pi-legion-envoy plugin to speak this daemon API contract (the in-cluster daemon's probe pod passes its own)",
+    },
+  },
   run: ({ args }) =>
     runCli(() =>
-      cmdProbeImage(args.omp as string | undefined, {
-        env: process.env,
-        runner: defaultRunner,
-        sleep: (ms) => Bun.sleep(ms),
-        readPluginManifest: (manifestPath) => fs.promises.readFile(manifestPath, "utf8"),
-      })
+      cmdProbeImage(
+        args.omp as string | undefined,
+        {
+          env: process.env,
+          runner: defaultRunner,
+          sleep: (ms) => Bun.sleep(ms),
+          readPluginManifest: (manifestPath) => fs.promises.readFile(manifestPath, "utf8"),
+        },
+        { daemonApiVersion: args["daemon-api-version"] as string | undefined }
+      )
     ),
 });
 

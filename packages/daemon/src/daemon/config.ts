@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { type ImageDigestRef, parseImageDigestRef } from "./image-ref";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
+import { readSecretPointer } from "./secrets";
 
 export const GITHUB_APP_ROLES = ["implement", "review"] as const;
 export type GitHubAppRole = (typeof GITHUB_APP_ROLES)[number];
@@ -94,6 +95,17 @@ export interface DaemonConfig {
    * daemon must be reachable by its pods. */
   bind: string;
   envoyUrl: string;
+  /**
+   * Bearer for every request the daemon makes to the Envoy listener (`publishToEnvoy`), and the
+   * `ENVOY_TOKEN` secret every root, worker, and controller it spawns receives as a 0600 file
+   * (`ENVOY_TOKEN_FILE`). Resolved at load from `envoy_token_file` (a relative path is resolved
+   * against the config file's directory) or `ENVOY_TOKEN_FILE` — the file's trimmed contents; a
+   * set-but-missing, unreadable, or blank file refuses startup naming the key and the path — or,
+   * lower in precedence, the `ENVOY_TOKEN` environment value. Required under `runtime:
+   * kubernetes`, where the listener is bound off loopback and refuses unauthenticated calls;
+   * optional under tmux, where an unset token changes nothing.
+   */
+  envoyToken?: string;
   /**
    * Optional dispatch service base URL (no `/mcp` suffix), passed through to
    * spawned session environments as DISPATCH_URL so the native dispatch tool
@@ -216,6 +228,12 @@ export interface ResolveDaemonConfigOptions {
   env?: Record<string, string | undefined>;
   configFile?: LoadedConfigFile;
   cliOverrides?: Partial<DaemonConfig>;
+  /** When false, an `envoy_token_file` / `ENVOY_TOKEN_FILE` pointer is validated as a path but the
+   * file is never read — `envoyToken` becomes the same "(not executed)" placeholder
+   * `loadGitHubApps` uses for an unexecuted key command — so `legion start --check-config` can
+   * validate an in-cluster `legion.yaml` on a machine that has no `/var/run/legion/...` mount.
+   * Defaults to true (the daemon always reads the real token). */
+  resolveSecrets?: boolean;
 }
 
 export interface ResolveDaemonConfigResult {
@@ -290,6 +308,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   daemon_url: null,
   bind: null,
   envoy_url: null,
+  envoy_token_file: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
@@ -1026,6 +1045,13 @@ export function loadConfigFromFile(
   if (bind !== undefined) fields.bind = requireNonEmpty(bind, "bind");
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
+  const envoyTokenFile = readString(config.envoy_token_file, "envoy_token_file");
+  if (envoyTokenFile !== undefined) {
+    const tokenPath = requireNonEmpty(envoyTokenFile, "envoy_token_file");
+    fields.envoyTokenFile = path.isAbsolute(tokenPath)
+      ? tokenPath
+      : path.resolve(configDir, tokenPath);
+  }
   if (config.dispatch_mcp_url !== undefined) {
     throw new Error(
       "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
@@ -1231,6 +1257,33 @@ export function resolveDaemonConfig(
     env.ENVOY_URL,
     DEFAULT_ENVOY_URL
   );
+  // The file pointer (`envoy_token_file`, then `ENVOY_TOKEN_FILE`) outranks the plain
+  // `ENVOY_TOKEN` value, and a pointer that is set must work: it is never skipped for the value.
+  const envoyTokenFile = resolveValue(
+    undefined,
+    fileString(fields, "envoyTokenFile"),
+    env.ENVOY_TOKEN_FILE,
+    undefined
+  );
+  let envoyToken = opts.cliOverrides?.envoyToken;
+  if (envoyToken === undefined) {
+    if (envoyTokenFile.value !== undefined) {
+      envoyToken =
+        (opts.resolveSecrets ?? true)
+          ? readSecretPointer(
+              envoyTokenFile.source === "env" ? "ENVOY_TOKEN_FILE" : "envoy_token_file",
+              envoyTokenFile.value
+            )
+          : "(not executed)";
+    } else if (env.ENVOY_TOKEN !== undefined && env.ENVOY_TOKEN.trim().length > 0) {
+      envoyToken = env.ENVOY_TOKEN.trim();
+    }
+  }
+  if (runtime.value === "kubernetes" && envoyToken === undefined) {
+    throw new Error(
+      "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
+    );
+  }
   const dispatchUrl = resolveValue(
     undefined,
     fileString(fields, "dispatchUrl"),
@@ -1534,6 +1587,7 @@ export function resolveDaemonConfig(
       daemonUrl: resolvedDaemonUrl,
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
+      envoyToken,
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
       dispatchProject: resolvedDispatchProject,

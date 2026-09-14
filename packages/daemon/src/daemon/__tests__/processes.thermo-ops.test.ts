@@ -64,6 +64,7 @@ function manager(
     saveState: async () => {},
     config: daemonConfig(stateDir),
     processPath: "/usr/bin",
+    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!/opt/legion credential",
     publishRole: () => {},
     natsRequest: async () => JSON.stringify({ type: "ack" }),

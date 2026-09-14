@@ -21,11 +21,13 @@ logged while delivery continues.
 ## Daemon contract
 
 `package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
-speaks (currently 2). It covers the `LegionDaemonApi` HTTP request and response shapes the
+speaks (currently 3). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
 `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
-`LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`, and
+`LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_NATS_URL`, `ENVOY_URL`,
+`ENVOY_TOKEN_FILE` (the listener bearer, read by `@legion/envoy-client` ahead of `ENVOY_TOKEN`;
+contract 3, LEGION-25), and
 the `LEGION_*` identity variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/
 `LEGION_WORKSPACE`/`LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant

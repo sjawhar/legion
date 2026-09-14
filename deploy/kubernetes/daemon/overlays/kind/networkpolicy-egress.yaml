@@ -1,0 +1,12 @@
+- op: add
+  path: /spec/egress/1/ports/-
+  value:
+    port: 14222
+- op: add
+  path: /spec/egress/1/ports/-
+  value:
+    port: 19020
+- op: add
+  path: /spec/egress/1/ports/-
+  value:
+    port: 8766

@@ -1,16 +1,22 @@
-import { accessSync, constants, realpathSync } from "node:fs";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { LEGION_ROLES } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
+import type { RuntimeName } from "./config";
 import { shellPath } from "./runtime";
 import { pathWithoutWorkerBin } from "./worker-bin";
 
-const REQUIRED_DAEMON_TOOLS = ["jj", "git", "gh", "tmux"] as const;
-type DaemonTool = (typeof REQUIRED_DAEMON_TOOLS)[number];
+/** The tools every daemon runs by absolute path. `tmux` exists only under the tmux runtime: a
+ * daemon in a pod (`runtime: kubernetes`) has no terminal multiplexer and no local OMP to probe. */
+const KUBERNETES_DAEMON_TOOLS = ["jj", "git", "gh"] as const;
+const TMUX_DAEMON_TOOLS = [...KUBERNETES_DAEMON_TOOLS, "tmux"] as const;
+type KubernetesDaemonTool = (typeof KUBERNETES_DAEMON_TOOLS)[number];
+type DaemonTool = (typeof TMUX_DAEMON_TOOLS)[number];
 
 type ResolveExecutable = (command: string, searchPath?: string) => string | undefined;
 
-export interface ResolveDaemonEnvironmentDeps {
+export interface ResolveDaemonEnvironmentDeps<R extends RuntimeName = RuntimeName> {
   readonly env?: NodeJS.ProcessEnv;
   readonly resolveExecutable?: ResolveExecutable;
   readonly run: CommandRunner;
@@ -19,16 +25,90 @@ export interface ResolveDaemonEnvironmentDeps {
    * spawned pane's ambient `legion` resolves to a CLI that matches this daemon instead of
    * whatever (if anything) happens to be installed on the operator's own PATH. */
   readonly stateDir: string;
+  /** `config.runtime.name`: which tools this daemon needs and where its environment comes from
+   * (tmux: `mise env`; kubernetes: the pod's own PATH). The literal decides which
+   * `DaemonEnvironment` variant `resolveDaemonEnvironment` returns. */
+  readonly runtime: R;
 }
 
 export interface FullMiseEnvironment extends NodeJS.ProcessEnv {
   readonly PATH: string;
 }
 
-export interface DaemonEnvironment {
+/** Every role prompt the daemon hands a process as the first part of its system prompt
+ * (`processes.ts`): the root architect's and the controller's, then one per `LegionRole` — a
+ * sub-architect on a child issue runs `architect.md`. `resolveRolePromptsDir` proves each exists
+ * at boot, so a missing prompt is a named startup refusal rather than the first spawn's ENOENT. */
+export const ROLE_PROMPT_FILES: readonly string[] = [
+  "architect-root.md",
+  "controller-root.md",
+  ...LEGION_ROLES.map((role) => `${role}.md`),
+];
+
+/** The checkout's own copy, `packages/pi-envoy/roles`: what a daemon run from source (every tmux
+ * host today) reads. Resolved relative to this module, so it is only meaningful when the daemon
+ * runs from its source tree — inside the compiled `legion` binary `import.meta.dir` is Bun's
+ * virtual `/$bunfs/root`, so this resolves to `/pi-envoy/roles`, a path that exists nowhere (the
+ * first spawn's `ENOENT` on round 1), which is why the worker image sets `LEGION_ROLE_PROMPTS_DIR`
+ * (`/opt/legion/roles`, `worker.Dockerfile`) instead. */
+export const SOURCE_ROLE_PROMPTS_DIR = path.resolve(import.meta.dir, "../../../pi-envoy/roles");
+
+/** The tmux daemon's resolved tools, the pinned OMP launch fragment it probes and every pane runs,
+ * and the complete `mise env` environment (allow-listed, launcher-prepended) it hands to panes. */
+export interface TmuxDaemonEnvironment {
+  readonly runtime: "tmux";
   readonly commands: Record<DaemonTool, string>;
   readonly ompInvocation: string;
   readonly paneEnv: FullMiseEnvironment;
+  /** The directory holding every `ROLE_PROMPT_FILES` entry — see `resolveRolePromptsDir`. */
+  readonly rolePromptsDir: string;
+}
+
+/** The in-cluster daemon's: jj, git, and gh from the image's own PATH — no mise, no tmux, and no
+ * OMP invocation, since the pod probes the worker image in a probe pod (`worker-image-probe.ts`)
+ * rather than a local OMP, and its child processes are only the runner's own tool calls. */
+export interface KubernetesDaemonEnvironment {
+  readonly runtime: "kubernetes";
+  readonly commands: Record<KubernetesDaemonTool, string>;
+  readonly paneEnv: FullMiseEnvironment;
+  readonly rolePromptsDir: string;
+}
+
+export type DaemonEnvironment = TmuxDaemonEnvironment | KubernetesDaemonEnvironment;
+/** The variant `resolveDaemonEnvironment` returns for a runtime literal. */
+export type DaemonEnvironmentFor<R extends RuntimeName> = Extract<
+  DaemonEnvironment,
+  { runtime: R }
+>;
+
+/** Where the role prompts live: `LEGION_ROLE_PROMPTS_DIR` from the daemon's own environment (daemon
+ * configuration like `LEGION_OMP_PATH`, never inherited by a pane), else the checkout's
+ * `SOURCE_ROLE_PROMPTS_DIR`. Every `ROLE_PROMPT_FILES` entry must be a file there; the refusal
+ * names the directory, each missing prompt, and the override. Under kubernetes the runtime reads
+ * each prompt from this daemon's own filesystem and inlines it into the pod command
+ * (`runtime-kubernetes.ts`); under tmux the pane's shell `$(cat)`s the path, so the directory must
+ * be one the panes share with the daemon — on a tmux host it always is. */
+function resolveRolePromptsDir(env: NodeJS.ProcessEnv): string {
+  const configured = env.LEGION_ROLE_PROMPTS_DIR;
+  if (configured !== undefined && !path.isAbsolute(configured)) {
+    throw new Error(
+      `[legion] LEGION_ROLE_PROMPTS_DIR must be an absolute path (got ${configured})`
+    );
+  }
+  const directory = configured ?? SOURCE_ROLE_PROMPTS_DIR;
+  const missing = ROLE_PROMPT_FILES.filter((file) => {
+    try {
+      return !statSync(path.join(directory, file)).isFile();
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `[legion] Role prompts directory ${directory} is missing ${missing.join(", ")} (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)`
+    );
+  }
+  return directory;
 }
 
 function defaultResolveExecutable(command: string, searchPath?: string): string | undefined {
@@ -283,7 +363,7 @@ export function legionCliLauncherScript(
 
 /** Writes the `legion` CLI launcher (mode 0755, no secrets) to `<stateDir>/bin/legion` and
  * returns that directory, so callers can prepend it to a pane's PATH. */
-async function installLegionCliLauncher(stateDir: string): Promise<string> {
+export async function installLegionCliLauncher(stateDir: string): Promise<string> {
   const binDir = path.join(stateDir, "bin");
   await mkdir(binDir, { recursive: true });
   const launcherPath = path.join(binDir, "legion");
@@ -293,8 +373,35 @@ async function installLegionCliLauncher(stateDir: string): Promise<string> {
   return binDir;
 }
 
+/** Resolves each of `tools` by its `LEGION_<TOOL>_PATH` override or on `searchPath`; one error
+ * names every missing tool and its override. */
+function resolveRequiredTools<T extends string>(
+  tools: readonly T[],
+  env: NodeJS.ProcessEnv,
+  searchPath: string,
+  resolveExecutable: ResolveExecutable
+): Record<T, string> {
+  const missing: string[] = [];
+  const commands = {} as Record<T, string>;
+  for (const tool of tools) {
+    const resolved = resolveConfiguredOrFound(tool, env, searchPath, resolveExecutable);
+    if (resolved) commands[tool] = resolved;
+    else missing.push(tool);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `[legion] Missing required daemon tools: ${missing
+        .map(
+          (tool) => `${tool} (set LEGION_${tool.toUpperCase()}_PATH to an absolute executable path)`
+        )
+        .join(", ")}`
+    );
+  }
+  return commands;
+}
+
 /**
- * Resolves all commands before the daemon owns state or accepts work. mise env
+ * Resolves all commands before the daemon owns state or accepts work. Under tmux, mise env
  * restores the user's complete tool environment; every daemon child then gets
  * explicit tool paths and that same PATH instead of the launcher context. Also installs the
  * `legion` CLI launcher (see `legionCliLauncherScript`) and prepends its directory to the pane
@@ -305,13 +412,54 @@ async function installLegionCliLauncher(stateDir: string): Promise<string> {
  * would carry worker-bin twice once `ProcessManager.credentialProcessEnvironment` prepends its own.
  * Stripped here, at the daemon boundary, where the rest of the daemon's own environment is
  * reduced to `PANE_ENV_ALLOW_LIST` (`paneEnvironment`).
+ *
+ * Under kubernetes the daemon is a pod of the worker image: no mise (`mise env` is never run), no
+ * tmux, and no local OMP to resolve — `ompInvocation` is ignored. The same launcher is installed,
+ * the same allow-list reduces the pod's own environment, and the same strip applies to its PATH;
+ * jj, git, and gh must be on it (the image's `/usr/local/bin`), each overridable by
+ * `LEGION_<TOOL>_PATH` exactly as under tmux.
  */
-export async function resolveDaemonEnvironment(
+export async function resolveDaemonEnvironment<R extends RuntimeName>(
   ompInvocation: string,
-  deps: ResolveDaemonEnvironmentDeps
-): Promise<DaemonEnvironment> {
+  deps: ResolveDaemonEnvironmentDeps<R>
+): Promise<DaemonEnvironmentFor<R>> {
   const env = deps.env ?? process.env;
   const resolveExecutable = deps.resolveExecutable ?? defaultResolveExecutable;
+  const rolePromptsDir = resolveRolePromptsDir(env);
+  // `deps.runtime` is the literal that picks the variant; the cast states what the branch below
+  // guarantees and what the caller's `R` already named.
+  const environment: DaemonEnvironment =
+    deps.runtime === "kubernetes"
+      ? await kubernetesDaemonEnvironment(deps.stateDir, env, resolveExecutable, rolePromptsDir)
+      : await tmuxDaemonEnvironment(ompInvocation, deps, env, resolveExecutable, rolePromptsDir);
+  return environment as DaemonEnvironmentFor<R>;
+}
+
+async function kubernetesDaemonEnvironment(
+  stateDir: string,
+  env: NodeJS.ProcessEnv,
+  resolveExecutable: ResolveExecutable,
+  rolePromptsDir: string
+): Promise<KubernetesDaemonEnvironment> {
+  const legionBinDir = await installLegionCliLauncher(stateDir);
+  const paneEnv = paneEnvironment(env, {
+    PATH: `${legionBinDir}${path.delimiter}${pathWithoutWorkerBin(env.PATH ?? "")}`,
+  });
+  return {
+    runtime: "kubernetes",
+    commands: resolveRequiredTools(KUBERNETES_DAEMON_TOOLS, env, paneEnv.PATH, resolveExecutable),
+    paneEnv,
+    rolePromptsDir,
+  };
+}
+
+async function tmuxDaemonEnvironment(
+  ompInvocation: string,
+  deps: ResolveDaemonEnvironmentDeps,
+  env: NodeJS.ProcessEnv,
+  resolveExecutable: ResolveExecutable,
+  rolePromptsDir: string
+): Promise<TmuxDaemonEnvironment> {
   const mise = resolveConfiguredOrFound("mise", env, env.PATH, resolveExecutable);
   if (!mise) {
     throw new Error(
@@ -325,27 +473,14 @@ export async function resolveDaemonEnvironment(
     ...miseEnv,
     PATH: `${legionBinDir}${path.delimiter}${pathWithoutWorkerBin(miseEnv.PATH)}`,
   };
-  const missing: string[] = [];
-  const commands = {} as Record<DaemonTool, string>;
-  for (const tool of REQUIRED_DAEMON_TOOLS) {
-    const resolved = resolveConfiguredOrFound(tool, env, paneEnv.PATH, resolveExecutable);
-    if (resolved) commands[tool] = resolved;
-    else missing.push(tool);
-  }
-  if (missing.length > 0) {
-    throw new Error(
-      `[legion] Missing required daemon tools: ${missing
-        .map(
-          (tool) => `${tool} (set LEGION_${tool.toUpperCase()}_PATH to an absolute executable path)`
-        )
-        .join(", ")}`
-    );
-  }
+  const commands = resolveRequiredTools(TMUX_DAEMON_TOOLS, env, paneEnv.PATH, resolveExecutable);
 
   return {
+    runtime: "tmux",
     commands,
     ompInvocation: resolveOmpInvocation(ompInvocation, mise, env, resolveExecutable),
     paneEnv,
+    rolePromptsDir,
   };
 }
 
@@ -354,9 +489,9 @@ export function createDaemonRunner(
   environment: DaemonEnvironment,
   runner: CommandRunner
 ): CommandRunner {
+  const commands: Partial<Record<DaemonTool, string>> = environment.commands;
   return (command, options) => {
-    const tool = command[0] as DaemonTool;
-    const executable = environment.commands[tool];
+    const executable = commands[command[0] as DaemonTool];
     const resolvedCommand = executable ? [executable, ...command.slice(1)] : command;
     const resolvedOptions: CommandRunnerOptions = {
       ...options,

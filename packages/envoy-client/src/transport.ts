@@ -1,6 +1,7 @@
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./defaults";
+import { readSecretFile } from "./secret-file";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
@@ -212,10 +213,21 @@ export type EnvoyClient = {
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
 };
 
+/** The listener bearer, resolved once per client: `ENVOY_TOKEN_FILE` — how the Legion daemon
+ * delivers it to every pane and pod, a 0600 file whose trimmed contents are the token — ahead of
+ * the plain `ENVOY_TOKEN`. A pointer that is set must resolve: a missing, unreadable, or blank
+ * file is an error naming the variable and the path, never a fall-through to `ENVOY_TOKEN` or to
+ * unauthenticated calls. Neither set: no `Authorization` header (a loopback listener). */
+function resolveEnvoyToken(env: NodeJS.ProcessEnv): string | undefined {
+  const { ENVOY_TOKEN_FILE: file, ENVOY_TOKEN: plain } = env;
+  if (file !== undefined && file !== "") return readSecretFile("ENVOY_TOKEN_FILE", file);
+  return plain || undefined;
+}
+
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const { ENVOY_TOKEN: apiToken } = process.env;
+  const apiToken = resolveEnvoyToken(process.env);
 
   const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;

@@ -1,0 +1,107 @@
+# One daemon per project. `Recreate`: exactly one daemon may hold the state directory's instance
+# lock (instance-lock.ts), and the ReadWriteOnce volume mounts on one node at a time. The container
+# is the worker image — it already carries the `legion` CLI and the jj/git/gh the daemon runs — so
+# the image below is what the overlay pins by digest, the same digest `legion.yaml`'s
+# `runtime.kubernetes.image` names for the pods the daemon launches.
+#
+# Labels: `app.kubernetes.io/name` + `app.kubernetes.io/instance` (the project), never
+# `legion.dev/project` — that label is the runtime's ownership marker for the pods the daemon
+# launches, and its orphan sweep (`reconcileOrphans`, grace 0 at boot) deletes every pod carrying it
+# that no recorded locator names. A daemon pod labelled that way deletes itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legion-daemon-demo
+  labels:
+    app.kubernetes.io/name: legion-daemon
+    app.kubernetes.io/instance: demo
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: legion-daemon
+      app.kubernetes.io/instance: demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: legion-daemon
+        app.kubernetes.io/instance: demo
+    spec:
+      serviceAccountName: legion-daemon
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: daemon
+          # Pinned by digest in the overlay (`images:`); the zero digest here is not deployable.
+          image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          command: [legion, start, demo, --config, /etc/legion/legion.yaml]
+          env:
+            # The one secret the daemon reads from its environment (config.ts reads only
+            # DISPATCH_TOKEN, never a file, and strips it from every child it spawns). The same key
+            # the providers Secret carries for worker pods.
+            - name: DISPATCH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: legion-demo-providers
+                  key: DISPATCH_TOKEN
+          ports:
+            - name: api
+              containerPort: 13370
+            - name: worker-stream
+              containerPort: 13371
+          # The state page answers throughout boot — while the probe pod runs and retries — so a
+          # healthy daemon waiting out a slow image pull is never restarted for it. No readiness
+          # probe: the Service exists for pods and the operator's port-forward, not for load
+          # balancing, and a definitive probe failure exits the process (the Deployment restarts it).
+          livenessProbe:
+            httpGet:
+              path: /legion/v1/state
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/legion
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/legion
+            # Dispatch/Envoy tokens and provider keys — the Secret every worker pod mounts too
+            # (`envoy_token_file` points here).
+            - name: providers
+              mountPath: /var/run/legion/providers
+              readOnly: true
+            # Daemon-only: the GitHub App private keys `github_apps.*.private_key_command` reads.
+            # Never in the providers Secret — every worker pod mounts that one and the shim exports
+            # each of its files without a NAME_FILE pointer into the OMP child's environment, and a
+            # worker must never hold an App private key.
+            - name: daemon-secrets
+              mountPath: /var/run/legion/daemon
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: legion-daemon-demo-config
+        - name: state
+          persistentVolumeClaim:
+            claimName: legion-daemon-demo-state
+        - name: providers
+          secret:
+            secretName: legion-demo-providers
+            defaultMode: 0440
+        - name: daemon-secrets
+          secret:
+            secretName: legion-demo-daemon
+            defaultMode: 0440

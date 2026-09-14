@@ -1,0 +1,43 @@
+# Who reaches the daemon and where it may dial. Enforced by any CNI that implements NetworkPolicy —
+# kind's kindnet has since kind v0.21 (kube-network-policies), so the kind run exercises it too.
+#
+# Ingress: the pods this daemon launches (`legion.dev/project: demo`) on both ports. The
+# operator's path — `kubectl port-forward` for the state page and, from LEGION-25 Part B, the
+# operator-launched controller — goes through the API server and kubelet, which NetworkPolicy does
+# not govern; an ingress controller or VPN-side client is cluster-specific and belongs in an
+# overlay as one more `from` entry.
+#
+# Egress, by consumer: DNS; TCP 443 for GitHub, Dispatch, and model endpoints (Dispatch on a
+# non-443 port is an overlay addition); NATS 4222 and the Envoy listener 9020 (the role lanes and
+# every role publish); the Kubernetes API (443 or 6443, cluster-specific) for the pods, PVCs,
+# Secrets, and events in role.yaml. The addresses are deployment-specific — CIDRs go in the
+# overlay when the CNI enforces them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: legion-daemon-demo
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: legion-daemon
+      app.kubernetes.io/instance: demo
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              legion.dev/project: demo
+      ports:
+        - port: 13370
+        - port: 13371
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 443
+        - port: 6443
+        - port: 4222
+        - port: 9020

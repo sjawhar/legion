@@ -665,6 +665,7 @@ function manager(
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
     processPath: "/full/bin:/usr/bin",
+    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
       repo: "sjawhar/legion",
@@ -1388,6 +1389,7 @@ describe("ProcessManager", () => {
     const inheritedWorkerBin = path.join(stateDir, "worker-bin");
     const environment = await resolveDaemonEnvironment("mise x omp@1 -- omp", {
       stateDir,
+      runtime: "tmux",
       env: { PATH: "/narrow/bin" },
       resolveExecutable: (command) =>
         command === "mise"
@@ -1414,6 +1416,7 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
       config: config(stateDir),
       processPath: environment.paneEnv.PATH,
+      rolePromptsDir: environment.rolePromptsDir,
       run: async (command) => {
         commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
@@ -1594,6 +1597,101 @@ describe("ProcessManager", () => {
       "legion-omp-controller-grant",
     ]);
   });
+  it("delivers a configured Envoy token to every process as a second 0600 file with its own ENVOY_TOKEN_FILE pointer, pruned with the pane's boot-token file", async () => {
+    const stateDir = await temporaryDir();
+    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
+    await mkdir(workspace, { recursive: true });
+    let sessionExists = false;
+    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
+      config: config(stateDir, { envoyToken: "envoy-listener-token" }),
+      run: async (command) => {
+        commands.push(command);
+        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+        if (command[3] === "new-session") sessionExists = true;
+        if (command[3] === "new-window") {
+          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
+        }
+        if (command[3] === "split-window") {
+          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+
+    const dir = path.join(stateDir, "secrets");
+    const architectToken = roleToken("omp", root, "architect");
+    const testerToken = roleToken("omp", root, "tester");
+    const launches = commands.filter(
+      (c) => c[0] === "tmux" && (c[3] === "new-window" || c[3] === "split-window")
+    );
+    for (const command of launches) {
+      for (const part of command) expect(part).not.toContain("envoy-listener-token");
+    }
+    const [controller, architect, tester] = launches.map(tmuxWindowEnvironment);
+    if (!controller || !architect || !tester) throw new Error("missing launches");
+    expect(controller).toMatchObject({
+      LEGION_CONTROLLER_SECRET_FILE: path.join(dir, "legion-omp-controller"),
+      ENVOY_TOKEN_FILE: path.join(dir, "legion-omp-controller-envoy_token"),
+    });
+    expect(architect).toMatchObject({
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, architectToken),
+      ENVOY_TOKEN_FILE: path.join(dir, `${architectToken}-envoy_token`),
+    });
+    expect(tester).toMatchObject({
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, testerToken),
+      ENVOY_TOKEN_FILE: path.join(dir, `${testerToken}-envoy_token`),
+    });
+    for (const environment of [controller, architect, tester]) {
+      expect(environment.ENVOY_TOKEN).toBeUndefined();
+      if (!environment.ENVOY_TOKEN_FILE) throw new Error("pointer missing");
+      expect((await stat(environment.ENVOY_TOKEN_FILE)).mode & 0o777).toBe(0o600);
+      expect(await readFile(environment.ENVOY_TOKEN_FILE, "utf8")).toBe("envoy-listener-token");
+    }
+
+    await processes.markProcessDead(root);
+    expect(await stat(path.join(dir, `${architectToken}-envoy_token`)).catch(() => undefined)).toBe(
+      undefined
+    );
+    expect(await readFile(path.join(dir, `${testerToken}-envoy_token`), "utf8")).toBe(
+      "envoy-listener-token"
+    );
+    await processes.closeTree(root);
+    expect((await readdir(dir)).sort()).toEqual([
+      "legion-omp-controller",
+      "legion-omp-controller-envoy_token",
+    ]);
+  });
+  it("puts a configured Envoy token in every SpawnSpec's secrets and never in its env, on any runtime", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+    state.admission.active.push(root);
+    const runtime = new FakeRuntime();
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { envoyToken: "envoy-listener-token" }),
+      runtime,
+    });
+    await processes.ensureController();
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "verify #41");
+    expect(runtime.spawned.map((spawn) => [spawn.kind, spawn.spec.secrets])).toEqual([
+      [
+        "controller",
+        { LEGION_CONTROLLER_SECRET: "controller-secret", ENVOY_TOKEN: "envoy-listener-token" },
+      ],
+      ["root", { LEGION_BOOT_TOKEN: "boot-token", ENVOY_TOKEN: "envoy-listener-token" }],
+      ["worker", { LEGION_BOOT_TOKEN: "worker-boot-token", ENVOY_TOKEN: "envoy-listener-token" }],
+    ]);
+    for (const spawn of runtime.spawned) {
+      expect(spawn.spec.env).not.toHaveProperty("ENVOY_TOKEN");
+      expect(spawn.spec.env).not.toHaveProperty("ENVOY_TOKEN_FILE");
+      expect(JSON.stringify(spawn.spec.env)).not.toContain("envoy-listener-token");
+    }
+  });
   it("reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -1648,6 +1746,48 @@ describe("ProcessManager", () => {
     expect((await readdir(dir)).sort()).toEqual(
       [roleToken("omp", root, "architect"), "dispatch-token"].sort()
     );
+  });
+  it("keeps a surviving pane's -envoy_token file across a restart that dropped envoy_token_file, and reaps it with the pane's other files once its locator clears", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/dead-tester.sock",
+      },
+    };
+    // A previous daemon had an Envoy token and handed this pane ENVOY_TOKEN_FILE; the pane still
+    // reads that file on every listener call. This daemon boots with no envoy_token_file.
+    const dir = path.join(stateDir, "secrets");
+    await mkdir(dir, { recursive: true });
+    for (const name of [token, `${token}-envoy_token`, `${token}-grant`, "dispatch-token"]) {
+      await writeFile(path.join(dir, name), `secret-${name}`, { mode: 0o600 });
+    }
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    await processes.pruneSecretFiles();
+    expect((await readdir(dir)).sort()).toEqual(
+      [token, `${token}-envoy_token`, `${token}-grant`, "dispatch-token"].sort()
+    );
+
+    await processes.reconnectWorkers();
+
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
+    expect(claim.locator).toBeUndefined();
+    expect(await readdir(dir)).toEqual(["dispatch-token"]);
   });
   it("writes the tree's Dispatch status to in_progress on a successful spawn, then to done on close", async () => {
     const stateDir = await temporaryDir();
@@ -3919,6 +4059,27 @@ describe("ProcessManager", () => {
     expect(launch?.at(-1)).toBe(
       `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
     );
+  });
+
+  it("reads every role prompt from deps.rolePromptsDir — the checkout's pi-envoy/roles on a tmux host, /opt/legion/roles in the worker image — never a path relative to its own source", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      rolePromptsDir: "/opt/legion/roles",
+    });
+
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "tester", "test it");
+
+    const launches = commands
+      .filter((command) => command[3] === "new-window" || command[3] === "split-window")
+      .map((command) => command.at(-1) ?? "");
+    expect(launches).toHaveLength(2);
+    expect(launches[0]).toContain("$(cat /opt/legion/roles/architect-root.md)");
+    expect(launches[1]).toContain("$(cat /opt/legion/roles/tester.md)");
+    expect(launches.join("\n")).not.toContain("pi-envoy");
   });
 
   it("tells a root architect in its system prompt when the project's design gate is off", async () => {

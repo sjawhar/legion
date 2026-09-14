@@ -82,10 +82,12 @@ function makeSpec(role: LegionRole | "controller", forIssue?: IssueKey): SpawnSp
       role === "controller"
         ? { promptPath: "/roles/controller-root.md" }
         : { promptPath: `/roles/${role}.md`, addressingPrompt: `address ${role}` },
+    // Two secrets, as every process gets once the daemon has an Envoy bearer: the boot/controller
+    // secret first, then the shared `ENVOY_TOKEN` (the several-secrets contract, LEGION-25).
     secrets:
       role === "controller"
-        ? { LEGION_CONTROLLER_SECRET: "controller-secret" }
-        : { LEGION_BOOT_TOKEN: "boot-token" },
+        ? { LEGION_CONTROLLER_SECRET: "controller-secret", ENVOY_TOKEN: "envoy-token" }
+        : { LEGION_BOOT_TOKEN: "boot-token", ENVOY_TOKEN: "envoy-token" },
   };
 }
 
@@ -710,7 +712,7 @@ describe("TmuxRuntime", () => {
     expect(sameProcess(legacy, locator)).toBe(false);
   });
 
-  it("spawns a root into a fresh window with the exact tmux argv, the boot token in a 0600 file, and its _FILE pointer as the last -e pair", async () => {
+  it("spawns a root into a fresh window with the exact tmux argv, each secret in its own 0600 file, and their _FILE pointers as the last -e pairs in spec order", async () => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("root", harness.makeSpec("architect"));
     const bootTokenFile = path.join(
@@ -718,6 +720,7 @@ describe("TmuxRuntime", () => {
       "secrets",
       roleToken("omp", issue, "architect")
     );
+    const envoyTokenFile = `${bootTokenFile}-envoy_token`;
     const socketPath = socketFor(harness.stateDir, "architect-9e2fb104");
     expect(harness.server.commands).toEqual([
       tmuxArgv("has-session", "-t", "legion-omp"),
@@ -756,6 +759,8 @@ describe("TmuxRuntime", () => {
         `LEGION_ROOT_WORKSPACE=${workspaceFor(harness.stateDir)}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${bootTokenFile}`,
+        "-e",
+        `ENVOY_TOKEN_FILE=${envoyTokenFile}`,
         shimCommand(workspaceFor(harness.stateDir), socketPath, ompCommand("architect"))
       ),
       tmuxArgv("kill-window", "-t", "legion-omp:__legion_bootstrap"),
@@ -772,6 +777,8 @@ describe("TmuxRuntime", () => {
     });
     expect(await readFile(bootTokenFile, "utf8")).toBe("boot-token");
     expect((await stat(bootTokenFile)).mode & 0o777).toBe(0o600);
+    expect(await readFile(envoyTokenFile, "utf8")).toBe("envoy-token");
+    expect((await stat(envoyTokenFile)).mode & 0o777).toBe(0o600);
     expect((await stat(path.dirname(bootTokenFile))).mode & 0o777).toBe(0o700);
   });
 
@@ -796,6 +803,8 @@ describe("TmuxRuntime", () => {
         `LEGION_WORKSPACE=${workspaceFor(harness.stateDir)}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(harness.stateDir, "secrets", roleToken("omp", issue, "implementer"))}`,
+        "-e",
+        `ENVOY_TOKEN_FILE=${path.join(harness.stateDir, "secrets", `${roleToken("omp", issue, "implementer")}-envoy_token`)}`,
         shimCommand(workspaceFor(harness.stateDir), socketPath, ompCommand("implementer"))
       ),
       tmuxArgv("select-layout", "-t", "@42", "tiled"),
@@ -1250,10 +1259,11 @@ describe("TmuxRuntime", () => {
     );
   });
 
-  it("spawns the controller into its own window with the controller socket and secret file", async () => {
+  it("spawns the controller into its own window with the controller socket and one file per secret", async () => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("controller", harness.makeSpec("controller"));
     const secretFile = path.join(harness.stateDir, "secrets", "legion-omp-controller");
+    const envoyTokenFile = `${secretFile}-envoy_token`;
     const socketPath = socketFor(harness.stateDir, "controller");
     const window = harness.server.commands.find((c) => c[3] === "new-window");
     expect(window).toEqual(
@@ -1270,6 +1280,8 @@ describe("TmuxRuntime", () => {
         "LEGION_ROLE=controller",
         "-e",
         `LEGION_CONTROLLER_SECRET_FILE=${secretFile}`,
+        "-e",
+        `ENVOY_TOKEN_FILE=${envoyTokenFile}`,
         shimCommand(path.join(harness.stateDir, "controller"), socketPath, ompCommand("controller"))
       )
     );
@@ -1284,6 +1296,46 @@ describe("TmuxRuntime", () => {
     });
     expect(await readFile(secretFile, "utf8")).toBe("controller-secret");
     expect((await stat(secretFile)).mode & 0o777).toBe(0o600);
+    expect(await readFile(envoyTokenFile, "utf8")).toBe("envoy-token");
+  });
+
+  it("delivers exactly the secrets the spec lists: one alone stays the bare role-token file with no second pointer", async () => {
+    // A daemon with no Envoy bearer configured (tmux, unchanged): the spec carries the boot token
+    // only, and the pane argv ends with that one pointer exactly as before the several-secrets
+    // contract.
+    const harness = await tmuxHarness();
+    await harness.runtime.spawn("worker", {
+      ...harness.makeSpec("tester"),
+      secrets: { LEGION_BOOT_TOKEN: "only" },
+    });
+    const window = harness.server.commands.find((c) => c[3] === "new-window");
+    const pointers = (window ?? []).filter((part) => /_FILE=/.test(part));
+    expect(pointers).toEqual([
+      `LEGION_BOOT_TOKEN_FILE=${path.join(harness.stateDir, "secrets", roleToken("omp", issue, "tester"))}`,
+    ]);
+    expect(
+      await readFile(
+        path.join(harness.stateDir, "secrets", roleToken("omp", issue, "tester")),
+        "utf8"
+      )
+    ).toBe("only");
+  });
+
+  it("names the process's own secret file by the role token whatever the spec's order: a shared secret listed first still leaves the boot token at <role token>", async () => {
+    const harness = await tmuxHarness();
+    const token = roleToken("omp", issue, "tester");
+    await harness.runtime.spawn("worker", {
+      ...harness.makeSpec("tester"),
+      secrets: { ENVOY_TOKEN: "listener-token", LEGION_BOOT_TOKEN: "boot" },
+    });
+    const dir = path.join(harness.stateDir, "secrets");
+    expect(await readFile(path.join(dir, token), "utf8")).toBe("boot");
+    expect(await readFile(path.join(dir, `${token}-envoy_token`), "utf8")).toBe("listener-token");
+    const window = harness.server.commands.find((c) => c[3] === "new-window");
+    expect((window ?? []).filter((part) => /_FILE=/.test(part))).toEqual([
+      `ENVOY_TOKEN_FILE=${path.join(dir, `${token}-envoy_token`)}`,
+      `LEGION_BOOT_TOKEN_FILE=${path.join(dir, token)}`,
+    ]);
   });
 
   it("creates the controller directory without an OMP project config", async () => {
@@ -1299,11 +1351,20 @@ describe("TmuxRuntime", () => {
   it("refuses a spec that does not fit one tmux process", async () => {
     const harness = await tmuxHarness();
     await expect(
+      harness.runtime.spawn("worker", { ...harness.makeSpec("tester"), secrets: {} })
+    ).rejects.toThrow(/exactly one secret of the process's own .*; got none/);
+    await expect(
       harness.runtime.spawn("worker", {
         ...harness.makeSpec("tester"),
-        secrets: { LEGION_BOOT_TOKEN: "a", EXTRA: "b" },
+        secrets: { LEGION_BOOT_TOKEN: "a", OTHER: "b" },
       })
-    ).rejects.toThrow(/exactly one secret/);
+    ).rejects.toThrow(/exactly one secret of the process's own .*; got LEGION_BOOT_TOKEN, OTHER/);
+    await expect(
+      harness.runtime.spawn("worker", {
+        ...harness.makeSpec("tester"),
+        secrets: { ENVOY_TOKEN: "shared only" },
+      })
+    ).rejects.toThrow(/exactly one secret of the process's own .*; got none/);
     const { issue: _issue, ...withoutIssue } = harness.makeSpec("tester");
     await expect(harness.runtime.spawn("worker", withoutIssue)).rejects.toThrow(
       "spawn worker requires spec.issue"

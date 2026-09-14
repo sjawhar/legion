@@ -25,7 +25,7 @@ import {
   shellPath,
   type TmuxLocator,
 } from "./runtime";
-import { writeSecretFile } from "./secrets";
+import { extraSecretName, isSharedSecretName, writeSecretFile } from "./secrets";
 import * as tmux from "./tmux";
 import { PANE_GONE_STDERR, type TmuxServer } from "./tmux";
 import type { WorkerRpcClient } from "./worker-rpc";
@@ -352,20 +352,25 @@ export class TmuxRuntime implements Runtime {
    * Provisions the issue's working copy (`provisionIssueWorkspace`, on the daemon's disk),
    * assembles the OMP command from the spec's launch description, then opens (or splits into)
    * the tmux window for the spec's issue — or the controller's own window — running `legion
-   * worker-shim` around that command. Delivers the spec's one secret as a 0600 file at
-   * `<stateDir>/secrets/<role token>` and exports only its `<NAME>_FILE` path, appended after
-   * the spec's own env pairs; the write happens before any tmux call, so an fs failure is an
-   * ordinary launch failure. The caller owns that file's lifetime (hold/prune) — this method
-   * only writes it. `env.PATH` is exported in the pane's shell command rather than passed as a
-   * `-e` pair, which tmux would discard (see `preparePane`).
+   * worker-shim` around that command. Delivers every secret in the spec as its own 0600 file
+   * under `<stateDir>/secrets` — the process's own (the boot token, or the controller secret: the
+   * one secret not in `SHARED_SECRET_NAMES`) as `<role token>`, each shared one as
+   * `<role token>-<lowercased name>` (`extraSecretName`) — and exports only their `<NAME>_FILE`
+   * paths, appended after the spec's own env pairs in the spec's order; the writes happen before
+   * any tmux call, so an fs failure is an ordinary launch failure. The caller owns those files'
+   * lifetimes (hold/prune) — this method only writes them. `env.PATH` is exported in the pane's
+   * shell command rather than passed as a `-e` pair, which tmux would discard (see `preparePane`).
    */
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
-    const [secret, ...extraSecrets] = Object.entries(spec.secrets);
-    if (!secret || extraSecrets.length > 0) {
-      throw new Error("tmux runtime delivers exactly one secret per process");
+    const secrets = Object.entries(spec.secrets);
+    const own = secrets.filter(([name]) => !isSharedSecretName(name));
+    if (own.length !== 1) {
+      throw new Error(
+        `tmux runtime delivers exactly one secret of the process's own per process (its boot token or controller secret) beside the shared ones; got ${own.length === 0 ? "none" : own.map(([name]) => name).join(", ")}`
+      );
     }
     if (kind === "controller") {
-      return this.spawnController(spec, controllerToken(this.deps.project), secret);
+      return this.spawnController(spec, controllerToken(this.deps.project), secrets);
     }
     if (!spec.issue) throw new Error(`spawn ${kind} requires spec.issue`);
     if (spec.role === "controller") {
@@ -377,7 +382,7 @@ export class TmuxRuntime implements Runtime {
       spec.role,
       spec,
       roleToken(this.deps.project, spec.issue, spec.role),
-      secret
+      secrets
     );
   }
 
@@ -484,7 +489,7 @@ export class TmuxRuntime implements Runtime {
     role: LegionRole,
     spec: SpawnSpec,
     token: string,
-    secret: [string, string]
+    secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     // Today's order, kept: provision, then the prompt stat and session-file stat inside the
     // command assembly, then the socket, secret file, and tmux argv.
@@ -504,7 +509,7 @@ export class TmuxRuntime implements Runtime {
       env,
       innerCommand,
       token,
-      secret
+      secrets
     );
     const session = this.deps.tmux.socket;
     // The identity is read inside the per-issue lane: a concurrent second spawn on this issue
@@ -543,7 +548,7 @@ export class TmuxRuntime implements Runtime {
   private async spawnController(
     spec: SpawnSpec,
     token: string,
-    secret: [string, string]
+    secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     const controllerDir = path.join(this.deps.stateDir, "controller");
     await (this.deps.statPrompt ?? stat)(spec.launch.promptPath);
@@ -555,7 +560,7 @@ export class TmuxRuntime implements Runtime {
       spec.env,
       innerCommand,
       token,
-      secret
+      secrets
     );
     const session = this.deps.tmux.socket;
     const window = await this.openWindow("controller", paneArgv);
@@ -571,10 +576,10 @@ export class TmuxRuntime implements Runtime {
   }
 
   /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
-   * fresh shim socket path (its directory made, a stale socket removed), the process's one secret
-   * written as a 0600 file, and the pane argv — the env pairs (PATH excepted, below), the secret's
-   * `<NAME>_FILE` pointer, then the `legion worker-shim --socket <path> -- <inner>` command every
-   * Legion OMP process (root, phase worker, controller) runs inside its pane.
+   * fresh shim socket path (its directory made, a stale socket removed), the process's secrets
+   * each written as a 0600 file, and the pane argv — the env pairs (PATH excepted, below), one
+   * `<NAME>_FILE` pointer per secret, then the `legion worker-shim --socket <path> -- <inner>`
+   * command every Legion OMP process (root, phase worker, controller) runs inside its pane.
    *
    * PATH is the one env variable that does not ride a `-e` pair. tmux copies the server's global
    * table, the session table, and every `-e` pair into a new pane's environment and then, for a
@@ -591,14 +596,21 @@ export class TmuxRuntime implements Runtime {
     env: Record<string, string | undefined>,
     innerCommand: string,
     token: string,
-    [secretName, secretValue]: [string, string]
+    secrets: Array<[string, string]>
   ): Promise<{ socketPath: string; paneArgv: string[] }> {
     const socketPath = await this.prepareSocket(socketName);
     const { PATH: panePath, ...pairEnv } = env;
     const exportPath = panePath === undefined ? "" : `export PATH=${shellPath(panePath)} && `;
     const shellCommand = `${exportPath}cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
-    const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
-    const pairs = [...tmuxEnv(pairEnv), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
+    const pointers: Record<string, string> = {};
+    for (const [name, value] of secrets) {
+      pointers[`${name}_FILE`] = await writeSecretFile(
+        this.deps.stateDir,
+        isSharedSecretName(name) ? extraSecretName(token, name) : token,
+        value
+      );
+    }
+    const pairs = [...tmuxEnv(pairEnv), ...tmuxEnv(pointers)];
     return { socketPath, paneArgv: [...pairs, shellCommand] };
   }
 
