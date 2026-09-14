@@ -1,7 +1,13 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
-import { type IssueNode, type LegionState, newLegionState, type PrState } from "../legion-state";
+import {
+  type IssueNode,
+  type LegionState,
+  newLegionState,
+  type PrState,
+  repairAdmissionDrift,
+} from "../legion-state";
 import { type Effect, type EnvelopeJson, reduceGithubEvent } from "../reducers";
 import { type RunResyncDeps, runResync } from "../resync";
 import { checkPr, fakeDispatchClient } from "./ci-fixtures";
@@ -9,7 +15,10 @@ import issueClosed from "./fixtures/dispatch/issue-closed.json";
 
 const issue = "LEGION-42";
 
-function resyncDeps(state: LegionState): RunResyncDeps {
+function resyncDeps(
+  state: LegionState,
+  isResurrecting: (issue: IssueKey) => boolean = () => false
+): RunResyncDeps {
   return {
     state,
     config: {
@@ -21,6 +30,8 @@ function resyncDeps(state: LegionState): RunResyncDeps {
     saveState: async () => {},
     fetchCiStatusBatch: async () => ({}),
     applyEffects: async () => {},
+    reconcileAdmissionDrift: async () => repairAdmissionDrift(state),
+    isResurrecting,
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
   };
 }
@@ -28,7 +39,10 @@ function resyncDeps(state: LegionState): RunResyncDeps {
 /**
  * Registers `issue` as its own tree root with an active implementer phase, so
  * a settled CI verdict for its PR routes to a worker instead of vanishing for
- * want of a tracked tree.
+ * want of a tracked tree. The active tree holds its admission slot, as every
+ * consistent state's does (LEGION-83's resync repair would otherwise add it
+ * back and report `admission-drift`); a test about drift sets `admission`
+ * itself afterwards.
  */
 function trackIssue(state: LegionState): void {
   state.issues[issue] = {
@@ -43,6 +57,7 @@ function trackIssue(state: LegionState): void {
     status: "active",
     launchFailures: 0,
   };
+  state.admission.active = [issue];
   state.phases[issue] = { phase: "implementer", sessionId: "resync-test-worker" };
 }
 
@@ -1549,5 +1564,87 @@ describe("runResync", () => {
     });
 
     expect(dispatched).toEqual([]);
+  });
+
+  it("reports an active-tree addition returned by the admission reconciler as admission-drift (LEGION-83, acceptance 3)", async () => {
+    // The 09:31 shape: a tree the daemon resumed sits active outside admission accounting.
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.admission.active = [];
+    const dispatched: Effect[][] = [];
+
+    const result = await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(state.admission).toEqual({ cap: 1, active: [issue], queue: [] });
+    expect(result.anomalies).toEqual([
+      {
+        kind: "admission-drift",
+        issue,
+        detail: "active tree was missing from admission.active; added back",
+      },
+    ]);
+    expect(dispatched).toEqual([]);
+    expect(state.trees[issue]).toMatchObject({ status: "active" });
+  });
+
+  it("reports a stale active entry removed by the admission reconciler and leaves an in-flight dead root alone", async () => {
+    const state = newLegionState("omp", 2);
+    trackIssue(state);
+    state.issues[issue].status = "done";
+    state.trees[issue].status = "lingering";
+    const dead: IssueKey = "LEGION-43";
+    state.issues[dead] = {
+      key: dead,
+      title: "Mid-resurrection",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[dead] = { root: dead, generation: 2, status: "dead", launchFailures: 0 };
+    state.admission.active = [issue, dead];
+
+    const result = await runResync({
+      ...resyncDeps(state),
+      isResurrecting: (candidate) => candidate === dead,
+    });
+
+    expect(state.admission.active).toEqual([dead]);
+    expect(result.anomalies).toEqual([
+      {
+        kind: "admission-drift",
+        issue,
+        detail: "admission.active entry removed: tree is lingering",
+      },
+    ]);
+
+    expect(state.trees[issue]).toMatchObject({ status: "lingering" });
+  });
+
+  it("produces no admission-drift anomaly, no log line, and no save for a consistent state (LEGION-83 control)", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.admission.active = [issue];
+    let saves = 0;
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await runResync({
+        ...resyncDeps(state),
+        saveState: async () => {
+          saves += 1;
+        },
+      });
+
+      expect(result.anomalies).toEqual([]);
+      expect(saves).toBe(0);
+      expect(errorLog.mock.calls.map(String).filter((line) => line.includes("admission"))).toEqual(
+        []
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });

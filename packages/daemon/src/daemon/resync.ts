@@ -4,7 +4,7 @@ import type { GitHubPRRef } from "../state/types";
 import type { DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
-import { type LegionState, staleQueueEntryReason } from "./legion-state";
+import { type AdmissionDriftRepair, type LegionState, staleQueueEntryReason } from "./legion-state";
 import {
   acceptGitHubFence,
   type CiSnapshot,
@@ -23,7 +23,7 @@ import {
 } from "./reducers";
 
 export type ResyncAnomaly = {
-  kind: "zero-owner-tree" | "untriaged-open" | "launch-failed";
+  kind: "zero-owner-tree" | "untriaged-open" | "launch-failed" | "admission-drift";
   issue: IssueKey;
   detail: string;
 };
@@ -43,6 +43,11 @@ export interface RunResyncDeps {
   saveState(): Promise<void>;
   fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
+  /** Reconciles active roots with admission through the process owner, which promotes a queued
+   * root if removing an invalid active entry opened capacity. */
+  reconcileAdmissionDrift(): Promise<AdmissionDriftRepair>;
+  /** True only while `ProcessManager` is actively relaunching this root. */
+  isResurrecting(issue: IssueKey): boolean;
   now(): number;
 }
 
@@ -288,10 +293,17 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
     }
     // Every node reaching here is a root (children were skipped above), so its own tree entry
     // is the whole ownership question. `queued` waits for an admission slot the daemon owns;
-    // `launch-failed` is reported by the loop below. Anything else -- no tree, or one that is
-    // lingering, dead, or closed -- leaves a still-open issue with nobody responsible for it.
-    const treeStatus = deps.state.trees[node.key]?.status;
-    if (treeStatus === "active" || treeStatus === "queued" || treeStatus === "launch-failed") {
+    // `launch-failed` is reported by the loop below. A dead tree keeps its admission slot while
+    // relaunching, but becomes a zero-owner anomaly after a restart clears that in-memory work.
+    const tree = deps.state.trees[node.key];
+    if (
+      tree?.status === "active" ||
+      tree?.status === "queued" ||
+      tree?.status === "launch-failed" ||
+      (tree?.status === "dead" &&
+        deps.state.admission.active.includes(node.key) &&
+        deps.isResurrecting(node.key))
+    ) {
       continue;
     }
     anomalies.push({
@@ -313,6 +325,24 @@ function reportRootAnomalies(deps: RunResyncDeps, now: number): Promise<ResyncAn
     });
   }
   return Promise.all(acks).then(() => anomalies);
+}
+
+/** Delegates the repair to `ProcessManager`, the sole owner of root promotion. It returns the
+ * repair detail here so the controller receives the same admission-drift anomalies as before. */
+async function reportAdmissionDrift(deps: RunResyncDeps): Promise<ResyncAnomaly[]> {
+  const repair = await deps.reconcileAdmissionDrift();
+  return [
+    ...repair.added.map((issue) => ({
+      kind: "admission-drift" as const,
+      issue,
+      detail: "active tree was missing from admission.active; added back",
+    })),
+    ...repair.removed.map(({ issue, reason }) => ({
+      kind: "admission-drift" as const,
+      issue,
+      detail: `admission.active entry removed: ${reason}`,
+    })),
+  ];
 }
 
 /** Probes every root process this daemon still considers active, independent of whatever
@@ -373,7 +403,9 @@ export async function runResync(
   await sweepStaleQueue(deps, now);
   await retryPendingStatusWrites(deps);
   const ciFetchFailureDetails = await reconcilePrs(deps, now);
+  const admissionAnomalies = await reportAdmissionDrift(deps);
   const anomalies = await reportRootAnomalies(deps, now);
+  anomalies.push(...admissionAnomalies);
   const probesEmitted = await probeActiveRoots(deps, now);
   if (probesEmitted > 0) {
     console.log(`[legion] resync probed ${probesEmitted} active roots`);
