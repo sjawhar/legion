@@ -40,6 +40,7 @@ Tests workflow (`.github/workflows/pr-and-main.yaml`, `name: Tests`) has the job
 and `test`; the separate PR Title workflow (`.github/workflows/pr-title.yaml`, `name: PR Title`) has
 the `pr-title` job. The line now reads
 `` **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>. ``
+A body-only or title-only edit does not re-run Tests. Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
 The change is small; what it cost before it was made, and what the round exposed about
 planner-less issues and the reviewer's push, are the durable parts.
 
