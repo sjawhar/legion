@@ -90,6 +90,16 @@ envoy_send(
 )
 ```
 
+### Delivery capabilities
+
+Each session row from `envoy_sessions` carries `capabilities`, the targeted-delivery modes that
+session's host honours: `aside` (a message queued beside the model's work), `btw` (an ephemeral
+question the host answers without disturbing the current turn), and `steer` (an interjection at
+the next tool boundary). An OMP session advertises `aside`, `btw`, and `steer` (`aside` and
+`steer` on a host without `askEphemeral`); a Claude Code session advertises `aside` only, because
+its channel notifications queue for the next turn. Target a session only with a mode it
+advertises.
+
 ## Waiting for CI or a merge
 
 Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single

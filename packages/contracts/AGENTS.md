@@ -23,6 +23,7 @@ the native Dispatch tool suite:
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
 | Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs and canonical markdown offsets, including per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
+| Delivery capabilities | `src/dispatch-api.ts` | `DELIVERY_CAPABILITIES` (`aside`, `btw`, `steer`) is the one closed list; `MessageDeliveryMode`, the delivery event payload schema, and the envoy-client targeted-frame schema derive from it. `Agent.capabilities` stays an open `string[]` on the wire. |
 
 ## Critical conventions
 
@@ -49,7 +50,7 @@ the native Dispatch tool suite:
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.
 - Prefer backward-compatible additions when extending the envelope.
-- Dispatch `Message` contracts preserve nullable `issue_key`, optional `target` and `in_reply_to`, plus a `deliveries` array (empty when no attempts exist). Agent-card messages target one session without an issue and their list response is `MessageRead[]`; issue-targeted messages retain their issue key. `message.delivery` and `message.answered` event payloads carry the attempt status and correlated reply that the Conversation card coalesces; add a delivery mode in the contract before any server or adapter accepts it.
+- Dispatch `Message` contracts preserve nullable `issue_key`, optional `target` and `in_reply_to`, plus a `deliveries` array (empty when no attempts exist). Agent-card messages target one session without an issue and their list response is `MessageRead[]`; issue-targeted messages retain their issue key. `message.delivery` and `message.answered` event payloads carry the attempt status and correlated reply that the Conversation card coalesces. A delivery mode is a capability a session advertises to the Envoy listener: add it to `DELIVERY_CAPABILITIES` before any server, adapter, or UI accepts it — never spell the list a second time.
 - `AnswerAskInput.expected_edited_at` is required and carries the nullable ask revision a human reviewed. Dispatch events include project/configuration events and the two-stage subscription removal (`subscription.remove_requested` with `pending: true`, then `subscription.removed` with its `request_event_id`); clients must advance their event cursor over the pending command without treating it as a completed removal.
 - Keep examples synchronized with the real receiver output (Slack team IDs,
   GitHub owner/repo segments, and native Dispatch keys).

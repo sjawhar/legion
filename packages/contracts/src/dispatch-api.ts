@@ -366,7 +366,18 @@ export interface CommentEventPayload extends Comment {
   readonly ask_state?: Ask["state"];
 }
 
-export type MessageDeliveryMode = "btw" | "aside" | "steer";
+/**
+ * The closed list of targeted-delivery modes a session can advertise as
+ * capabilities on the Envoy listener (`/v1/interests/subscribe`) and that
+ * Dispatch can request for a message. Every other spelling of this set —
+ * `MessageDeliveryMode`, the delivery event payload schema, the envoy-client
+ * targeted-frame schema — derives from this constant.
+ */
+export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
+
+export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
+
+export type MessageDeliveryMode = DeliveryCapability;
 
 export interface MessageDelivery {
   readonly message_id: string;
@@ -471,6 +482,10 @@ export interface Agent {
   readonly dir: string;
   readonly machine_id: string;
   readonly roles: string[];
+  /**
+   * Wire value from the Envoy registry: an open string list. The known values
+   * are `DELIVERY_CAPABILITIES`; unknown strings persist and never match a mode.
+   */
   readonly capabilities: string[];
   readonly last_seen: number;
   readonly open_asks: number;
@@ -1060,7 +1075,7 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
 export const MessageDeliveryEventPayloadSchema = z.object({
   message_id: z.string().optional(),
   attempt: z.number().int().positive().optional(),
-  delivery: z.enum(["btw", "aside", "steer"]).optional(),
+  delivery: z.enum(DELIVERY_CAPABILITIES).optional(),
   session_id: z.string().optional(),
   target: z.string().optional(),
   title: z.string().optional(),

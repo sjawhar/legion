@@ -6,6 +6,8 @@ import {
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
   CommentEventPayloadSchema as CommentPayloadSchema,
+  DELIVERY_CAPABILITIES,
+  type DeliveryCapability,
   DISPATCH_DOCUMENT_TOPIC_PREFIX,
   DISPATCH_TOPIC_PREFIX,
   type InboundDispatchEvent as DispatchEvent,
@@ -69,7 +71,7 @@ const TolerantInboundEnvelopeSchema = z
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
 export type DispatchDelivery = {
   readonly attempt: number;
-  readonly mode: "btw" | "aside" | "steer";
+  readonly mode: DeliveryCapability;
   readonly messageID: string;
   readonly issueKey: string | null;
   readonly body: string;
@@ -77,7 +79,7 @@ export type DispatchDelivery = {
 
 const DispatchDeliveryRequestSchema = z.object({
   attempt: z.number().int().positive(),
-  mode: z.enum(["btw", "aside", "steer"]),
+  mode: z.enum(DELIVERY_CAPABILITIES),
 });
 
 const DispatchTargetedFrameSchema = z

@@ -11,13 +11,30 @@ import {
   type Comment,
   CommentEventPayloadSchema,
   type CreateProjectInput,
+  DELIVERY_CAPABILITIES,
+  type DeliveryCapability,
   type DispatchEvent,
   DispatchEventSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
   IssueEventPayloadSchema,
+  MessageDeliveryEventPayloadSchema,
+  type MessageDeliveryMode,
   MessageEventPayloadSchema,
 } from "./dispatch-api";
+
+test("delivery modes are exactly the closed capability list", () => {
+  expect([...DELIVERY_CAPABILITIES]).toEqual(["aside", "btw", "steer"]);
+  // The event payload's delivery mode admits every capability and nothing else.
+  for (const mode of DELIVERY_CAPABILITIES) {
+    expect(MessageDeliveryEventPayloadSchema.parse({ delivery: mode }).delivery).toBe(mode);
+  }
+  expect(MessageDeliveryEventPayloadSchema.safeParse({ delivery: "shout" }).success).toBe(false);
+  // A delivery mode is a capability and vice versa (compile-time).
+  const asCapability: DeliveryCapability = "steer" satisfies MessageDeliveryMode;
+  const asMode: MessageDeliveryMode = asCapability satisfies DeliveryCapability;
+  expect(asMode).toBe("steer");
+});
 
 test("models Agent activity and open-ask aggregates", () => {
   const agent = {

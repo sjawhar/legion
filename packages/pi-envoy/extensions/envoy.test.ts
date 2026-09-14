@@ -225,6 +225,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 const originalFetch = globalThis.fetch;
 
 const originalNatsUrl = process.env.ENVOY_NATS_URL;
+const originalEnvoyUrl = process.env.ENVOY_URL;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
 const originalDispatchUrl = process.env.DISPATCH_URL;
@@ -236,6 +237,11 @@ const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
+  // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
+  // (the client defaults to http://127.0.0.1:9020, which on a devbox is production): point the
+  // URL at an unroutable host and answer every request with the registration echo by default.
+  process.env.ENVOY_URL = "http://envoy.test";
+  globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
   delete process.env.DISPATCH_TOKEN_FILE;
@@ -246,6 +252,8 @@ beforeEach(() => {
 afterEach(() => {
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
+  if (originalEnvoyUrl === undefined) delete process.env.ENVOY_URL;
+  else process.env.ENVOY_URL = originalEnvoyUrl;
   globalThis.fetch = originalFetch;
   if (originalDispatchUrl === undefined) delete process.env.DISPATCH_URL;
   else process.env.DISPATCH_URL = originalDispatchUrl;
@@ -657,7 +665,7 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
-          capabilities: ["aside"],
+          capabilities: ["aside", "steer"],
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
@@ -2579,7 +2587,7 @@ describe("envoy OMP extension", () => {
         title: "",
         driving: false,
         self_subscribed: true,
-        capabilities: ["aside"],
+        capabilities: ["aside", "steer"],
       },
     });
   });
@@ -2648,7 +2656,7 @@ describe("envoy OMP extension", () => {
         body: "Yes, ship it.",
       },
     ]);
-    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw"] }]);
+    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
     // The receipt precedes the ephemeral question and the Dispatch reply: the
     // listener's window is not spent waiting on the host or on Dispatch.
     expect(calls).toEqual([
