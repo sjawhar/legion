@@ -3940,6 +3940,63 @@ describe("ProcessManager", () => {
     );
   });
 
+  it("mints a resurrected root's boot token with the tree's recorded architect session as its expected session, exactly as a worker respawn does", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const locator = state.trees[root].locator;
+    if (!locator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    // What the previous generation's `/process/started` recorded.
+    state.roles[roleToken("omp", root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root_original",
+    };
+    const minted: Array<{ generation: number; expectedSessionId: string | undefined }> = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      mintBootToken: async (_tree, generation, expectedSessionId) => {
+        minted.push({ generation, expectedSessionId });
+        return `boot-gen-${generation}`;
+      },
+    });
+
+    await processes.resurrect(root);
+
+    expect(minted).toEqual([{ generation: 2, expectedSessionId: "ses_root_original" }]);
+  });
+
+  it("mints no expected session for a launch that resumes nothing, even when a stale architect claim survives (a launch-failed re-admit starts fresh)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // `launch-failed` revokes the capability but keeps the claim; the re-admit drops the session
+    // file so the fresh OMP session — a new id — must be accepted.
+    state.trees[root] = { root, generation: 3, status: "launch-failed", launchFailures: 3 };
+    state.roles[roleToken("omp", root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root_stale",
+    };
+    const minted: Array<{ generation: number; expectedSessionId: string | undefined }> = [];
+    const { manager: processes, commands } = manager(state, {
+      config: config(stateDir),
+      mintBootToken: async (_tree, generation, expectedSessionId) => {
+        minted.push({ generation, expectedSessionId });
+        return `boot-gen-${generation}`;
+      },
+    });
+
+    await processes.spawnRoot(root);
+
+    expect(minted).toEqual([{ generation: 4, expectedSessionId: undefined }]);
+    const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
+    expect(launch?.at(-1)).not.toContain("--resume=");
+  });
+
   it("reads every role prompt from deps.rolePromptsDir — the checkout's pi-envoy/roles on a tmux host, /opt/legion/roles in the worker image — never a path relative to its own source", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

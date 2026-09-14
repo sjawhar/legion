@@ -16,6 +16,12 @@ export class HttpError extends Error {
 export const MERGE_AUTHORITY_REFUSED =
   "Only the controller may merge; publish READY to the controller";
 
+/** The 409 every registration route answers when a resumed process arrives as a session other
+ * than the one its boot token was minted for (`expectedSessionId`): a phase worker or
+ * sub-architect at `/worker/started`, a tree root at `/process/started`. One string, so the
+ * extension's exit path and the operator read the same refusal whichever role it was. */
+export const SAME_AGENT_REFUSAL = "Worker respawn must resume the same agent session";
+
 /** Raised by `publishToEnvoy` (`../index.ts`) for a non-2xx Envoy response. `status` carries
  * Envoy's own HTTP status verbatim so callers can distinguish "no live session holds this role"
  * (404) from a genuine delivery failure without parsing the error message. */

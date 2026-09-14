@@ -170,7 +170,7 @@ export interface ProcessManagerDeps {
   publishRole(topic: string, json: string, dedupeKey?: string): void;
   natsRequest(subject: string, json: string): Promise<string>;
   mintControllerCapability(): Promise<string>;
-  mintBootToken(tree: IssueKey, generation: number): Promise<string>;
+  mintBootToken(tree: IssueKey, generation: number, expectedSessionId?: string): Promise<string>;
   mintWorkerBootToken(
     tree: IssueKey,
     issue: IssueKey,
@@ -3476,8 +3476,19 @@ export class ProcessManager {
       : undefined;
 
     const generation = tree.generation;
-    const bootToken = await this.deps.mintBootToken(tree.root, generation);
     const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
+    // A `--resume` promises the same agent: mint with the session the previous generation's
+    // `/process/started` recorded (mirroring `launchWorker`'s `claim.sessionId`), so a fresh
+    // session at the recorded path — under postgres, Oh My Pi given a missing row — is refused at
+    // registration instead of adopted under this tree. A launch that resumes nothing (a first
+    // admission, a launch-failed re-admit) starts a new session and expects none, whatever a
+    // surviving claim recorded.
+    const architectClaim = this.deps.state.roles[architectToken];
+    const expectedSessionId =
+      priorSessionFile !== undefined && architectClaim && "issue" in architectClaim
+        ? architectClaim.sessionId
+        : undefined;
+    const bootToken = await this.deps.mintBootToken(tree.root, generation, expectedSessionId);
     const env = {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
