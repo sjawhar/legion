@@ -196,6 +196,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
       version: 1,
     },
     ask_id: null,
+    turn: null,
     author: { id: "alice", kind: "user" },
     body: "Review this paragraph.",
     created_at: "2026-09-10T00:00:00Z",

@@ -38,12 +38,12 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		select a.id::text, a.issue_key, a.artifact_id::text, a.block_id, a.block_artifact_id::text, a.author, a.question, a.options, a.multiple, a.urgency,
 		       a.anchor, a.state, a.answer, a.resolution, a.created_at, a.edited_at, a.kind, a.approval,
 		       i.key, i.title, i.priority, ar.project_key, ar.slug, ar.name,
-		       lr.author, lr.created_at
+		       lr.author, lr.created_at, coalesce(lr.turn, 'human')
 		from asks a
 		left join issues i on i.key = a.issue_key
 		left join artifacts ar on ar.id = a.artifact_id
 		left join lateral (
-			select c.author, c.created_at from comments c
+			select c.author, c.created_at, c.turn from comments c
 			where c.ask_id = a.id
 			order by c.created_at desc, c.id desc
 			limit 1
@@ -51,7 +51,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		where a.state = 'open'
 		  and (i.key is null or i.closed_at is null)
 		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
-		order by coalesce(lr.author->>'kind' = 'user', false) asc, i.priority asc nulls last,
+		order by coalesce(lr.turn, 'human') = 'agent' asc, i.priority asc nulls last,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project)
 	if err != nil {
@@ -70,7 +70,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 			&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
 			&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
 			&issueKey, &issueTitle, &ask.Priority, &documentProject, &documentSlug, &documentName,
-			&lastReplyAuthor, &lastReplyAt,
+			&lastReplyAuthor, &lastReplyAt, &ask.WaitingOn,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return

@@ -19,15 +19,11 @@ function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return <LabelPill>{children}</LabelPill>;
 }
 
-/** A human spoke last on this ask (last_reply.author.kind === "user") — the ask's own author
- *  (an agent) owes the next turn, so the viewer is told who they're waiting on. Otherwise, if
- *  an agent replied last on a row still needing the viewer, that reply is surfaced so the
- *  viewer knows to look before answering. */
+/** When an agent replied last on a row that still needs the viewer, that reply is surfaced so
+ *  the viewer knows to look before answering. Whose turn it is ("Waiting on you" / "Waiting on
+ *  <agent>") is the card's own status line. */
 function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
-  if (ask.last_reply?.author.kind === "user") {
-    return <ReplyChip>Waiting on {actorLabel(ask.author)}</ReplyChip>;
-  }
-  if (ask.last_reply?.author.kind === "session") {
+  if (ask.waiting_on === "human" && ask.last_reply?.author.kind === "session") {
     return <ReplyChip>{actorLabel(ask.last_reply.author)} replied</ReplyChip>;
   }
   return null;
@@ -143,7 +139,7 @@ export function Inbox(): ReactNode {
   }
 
   const waiting = waitingOnYou(shown);
-  const waitingOnAgents = shown.filter((ask) => ask.last_reply?.author.kind === "user");
+  const waitingOnAgents = shown.filter((ask) => ask.waiting_on === "agent");
 
   return (
     <div className="space-y-6">

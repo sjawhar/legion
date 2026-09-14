@@ -194,6 +194,14 @@ an answer: the human did not understand the question or needs more before choosi
 in the same thread with `dispatch_comment({ reply_to_ask })`, or reword the question itself with `dispatch_edit_ask` when the wording
 was the problem; either puts the ask back in front of them. Do not open a second ask.
 
+Every reply to an open ask says whose turn it is next, and the Inbox files the ask by that, not by who spoke last. Your plain reply
+(`turn` omitted, or `turn: "human"`) hands the turn to the human: the ask returns to their `Waiting on you`. When you are not done
+yet — "dispatched two auditors, back with results", "checking the release branch, back shortly", any working-on-it note — reply with
+`turn: "agent"`: the note lands in the thread, the ask stays under `Waiting on agents`, and the human is not told to act. Use
+`turn: "agent"` for every progress note and `turn: "human"` (the default) only when you need them. A human's reply always hands the
+turn to you. The result names the state (`ask now waiting on agent` / `human`), the delivered `comment.created` carries it as
+`ask_waiting_on`, and every ask read carries it as `waiting_on`.
+
 ## Approval of a spec
 
 Approval is a property of a document, not a question you phrase: a human approves a specific version, the way a pull-request
@@ -300,7 +308,7 @@ an ask block without a question or with a blank option is rejected with `INVALID
 Add feedback with:
 
 ```ts
-dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body, reply_to?, reply_to_ask? })
+dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body, reply_to?, reply_to_ask?, turn? })
 ```
 
 It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
@@ -309,8 +317,10 @@ It returns issue or project-document owner details plus `comment` and, for write
 for display. Omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no
 `quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server keeps
 threads flat. A reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a
-question asked with `dispatch_ask`. Comments are edited only by their author from the dashboard. A
-delivered `comment.created` event carries the comment `id`; reply to it with
+question asked with `dispatch_ask`; `turn` (only with `reply_to_ask`) says who holds the turn after
+the reply — `agent` for a progress note that keeps the ask waiting on you, `human` (the default) when
+the human needs to act; see [Asking](#asking). Comments are edited only by their author from the
+dashboard. A delivered `comment.created` event carries the comment `id`; reply to it with
 `dispatch_comment({ reply_to: <id> })`.
 
 Propose an exact replacement instead of describing it:

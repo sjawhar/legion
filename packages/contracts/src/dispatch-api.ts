@@ -232,11 +232,19 @@ export interface Ask {
   readonly issue?: Pick<Issue, "key" | "title">;
   readonly document?: InboxDocument;
   /** Inbox rows and the issue detail's `open_asks`: the newest reply in the ask's thread, or
-   *  null when nobody has replied. A human reply on an open ask means the asker owes the next
-   *  turn (a clarification). Absent on every other ask read. */
+   *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
+   *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
+  /** Whose reply an open ask needs next: the `turn` of its newest reply, `human` when nobody
+   *  has replied. Present on every open-ask read (inbox rows, ask lists, the ask detail, the
+   *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
+  readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
 }
+
+/** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
+ *  `agent` when the asking agent still owes the next move (a progress note). */
+export type AskTurn = "human" | "agent";
 
 /** An open ask as returned by the human Inbox. */
 export interface InboxRow extends Ask {
@@ -280,7 +288,7 @@ export interface OpenAsk {
   readonly human_replied: boolean;
   readonly last_reply: AskLastReply | null;
   /** Whose reply would move the currently open ask forward. */
-  readonly waiting_on: "human" | "agent";
+  readonly waiting_on: AskTurn;
 }
 
 export interface OpenAsksResponse {
@@ -341,6 +349,10 @@ export interface Comment {
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
+  /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
+   *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
+   *  `human` unless posted as a progress note. */
+  readonly turn: AskTurn | null;
   readonly resolved: boolean;
   readonly resolved_by: Actor | null;
   readonly resolved_at: string | null;
@@ -364,6 +376,10 @@ export interface CommentEventPayload extends Comment {
   /** The state of that ask when the comment was posted. A human reply while it is still `open`
    *  is a request for clarification: the asker answers in the thread or rewords the question. */
   readonly ask_state?: Ask["state"];
+  /** The open ask's `waiting_on` once this comment is its newest reply, so a stream consumer can
+   *  move the ask between "waiting on you" and "waiting on the agent" without re-reading it.
+   *  Absent when the comment does not reply to an open ask. */
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export type MessageDeliveryMode = "btw" | "aside" | "steer";
@@ -805,6 +821,11 @@ export interface CreateCommentInput {
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
   readonly ask_id?: string;
+  /** Only with `ask_id`: `agent` marks a progress note that keeps the ask waiting on its asker;
+   *  `human` (the default for a session) hands the turn to the human. Ignored for a human author,
+   *  whose reply always hands the turn to the agent, and under a closed ask, where no turn is
+   *  recorded. `400 TURN_REQUIRES_ASK` without `ask_id`. */
+  readonly turn?: AskTurn;
   readonly suggestion?: { readonly replace_with: string };
   readonly actor?: Actor;
 }
@@ -1029,6 +1050,8 @@ export const CommentEventPayloadSchema = z.object({
   ask_id: z.string().nullish(),
   ask_question: z.string().optional(),
   ask_state: z.enum(["open", "answered", "resolved"]).optional(),
+  ask_waiting_on: z.enum(["human", "agent"]).optional(),
+  turn: z.enum(["human", "agent"]).nullish(),
   anchor: z
     .object({ block_id: z.string().nullable().optional(), quote: z.string().optional() })
     .nullish(),

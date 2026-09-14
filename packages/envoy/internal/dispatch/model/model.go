@@ -281,6 +281,11 @@ type Ask struct {
 	EditedAt      *string        `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
+	// WaitingOn is whose reply an open ask needs next: "human" or "agent". It is the
+	// Turn of the newest comment in the ask's thread, "human" when nobody has replied.
+	// Set on ask reads only (inbox rows, ask lists, the ask detail), never on the
+	// ask.* event payloads; empty for answered and resolved asks.
+	WaitingOn string `json:"waiting_on,omitempty"`
 }
 
 // AskBlockArtifact is the document containing a typed ask block.
@@ -315,8 +320,8 @@ type AskEdit struct {
 }
 
 // AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
-// on the issue detail's open asks so a human can see who spoke last: a human reply
-// on an open ask means the asker owes the next turn.
+// on the issue detail's open asks so a human can see who spoke last. Whose turn it
+// is comes from that comment's Turn (Ask.WaitingOn), not from its author.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
@@ -372,14 +377,20 @@ type AskResolution struct {
 // threads store their root ID in ReplyTo, and ask threads store their ask ID in
 // AskID, so both thread forms remain flat.
 type Comment struct {
-	ID         string      `json:"id"`
-	IssueKey   *string     `json:"issue_key"`
-	ArtifactID *string     `json:"artifact_id"`
-	Author     Actor       `json:"author"`
-	Body       string      `json:"body"`
-	Anchor     *Anchor     `json:"anchor"`
-	ReplyTo    *string     `json:"reply_to"`
-	AskID      *string     `json:"ask_id"`
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key"`
+	ArtifactID *string `json:"artifact_id"`
+	Author     Actor   `json:"author"`
+	Body       string  `json:"body"`
+	Anchor     *Anchor `json:"anchor"`
+	ReplyTo    *string `json:"reply_to"`
+	AskID      *string `json:"ask_id"`
+	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
+	// turn after this comment: "human" when the human needs to act, "agent" when the
+	// comment is a progress note and the asking agent still owes the next move. A
+	// human's reply always hands the turn to the agent. Nil on replies under a closed
+	// ask (nothing is waiting) and on every other comment.
+	Turn       *string     `json:"turn"`
 	Resolved   bool        `json:"resolved"`
 	ResolvedBy *Actor      `json:"resolved_by"`
 	ResolvedAt *string     `json:"resolved_at"`
@@ -414,6 +425,11 @@ type CommentEventPayload struct {
 	// answers in the thread or rewords the question. Empty when the comment does
 	// not reply to an ask.
 	AskState string `json:"ask_state,omitempty"`
+	// AskWaitingOn is the open ask's Ask.WaitingOn once this comment is its newest
+	// reply, so a stream consumer can move the ask between "waiting on you" and
+	// "waiting on the agent" without re-reading it. Empty when the comment does not
+	// reply to an open ask.
+	AskWaitingOn string `json:"ask_waiting_on,omitempty"`
 	// ThreadRootID is the root ID stored in Comment.ReplyTo for a comment.created
 	// event that replies to another comment. Empty when the comment replies to an
 	// ask or is a root comment.

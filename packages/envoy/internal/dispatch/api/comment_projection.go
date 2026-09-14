@@ -47,13 +47,26 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 	}
 	return record
 }
-func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName, askQuestion, askState, threadRootID string) (model.CommentEventPayload, error) {
+
+// commentEventThread is what a comment.created payload says about the thread the
+// comment joined: the ask it replies to (question, state, and whose turn it is once
+// this comment is the newest reply) or the root of the comment thread. Zero for
+// root comments and for every other comment.* event.
+type commentEventThread struct {
+	AskQuestion  string
+	AskState     string
+	AskWaitingOn string
+	ThreadRootID string
+}
+
+func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName string, thread commentEventThread) (model.CommentEventPayload, error) {
 	payload := model.CommentEventPayload{
 		Comment:      comment,
 		ArtifactName: artifactName,
-		AskQuestion:  askQuestion,
-		AskState:     askState,
-		ThreadRootID: threadRootID,
+		AskQuestion:  thread.AskQuestion,
+		AskState:     thread.AskState,
+		AskWaitingOn: thread.AskWaitingOn,
+		ThreadRootID: thread.ThreadRootID,
 	}
 	if comment.ArtifactID == nil {
 		return payload, nil

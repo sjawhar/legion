@@ -31,6 +31,7 @@ function comment(
       version: 1,
     },
     ask_id: null,
+    turn: null,
     author: { id: "alice", kind: "user" },
     body,
     created_at: createdAt,

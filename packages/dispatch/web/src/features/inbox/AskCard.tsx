@@ -37,6 +37,7 @@ import { AskCompletionCard, AskEditHistory, OrphanedAnchorNotice } from "./AskCo
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { formatAskAge } from "./ask-age";
+import { askTurnLabel } from "./ask-turn";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -122,6 +123,7 @@ export function AskCard({
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
   const currentAsk = completed ?? displayedAsk;
+  const turnLabel = askTurnLabel(currentAsk, threadQuery.data?.replies.at(-1));
   const threadNode =
     thread === "collapsed" ? (
       <AskThreadDisclosure
@@ -278,6 +280,14 @@ export function AskCard({
             </span>
           )}
         </p>
+        {turnLabel === null ? null : (
+          <p
+            className={`mt-1 text-xs font-medium ${textSecondaryOnSurface}`}
+            data-testid={`turn-${displayedAsk.id}`}
+          >
+            {turnLabel}
+          </p>
+        )}
         <AskEditHistory ask={displayedAsk} edits={edits} />
       </div>
       {askChanged ? (

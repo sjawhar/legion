@@ -229,7 +229,7 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
   await alice.close();
 });
 
-test("a clarification moves an ask under Waiting on agents until the asker replies", async ({
+test("a clarification moves an ask under Waiting on agents until the asker hands the turn back", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -267,15 +267,35 @@ test("a clarification moves an ask under Waiting on agents until the asker repli
     await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
     await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
 
-    // The agent reply returns the clarification to the server-ordered Waiting on you section.
+    // An agent progress note keeps the turn: the ask stays under Waiting on agents and the
+    // card still says whose move it is, even though the agent spoke last.
+    await createComment(
+      issue.key,
+      { ask_id: clarifying.id, body: "Checking the release branch, back shortly.", turn: "agent" },
+      session
+    );
+    await expect
+      .poll(() => getAsk(clarifying.id))
+      .toMatchObject({ ask: { waiting_on: "agent" }, replies: [{}, { turn: "agent" }] });
+    await page.reload();
+    const waitingOnAgents = page.getByRole("heading", { name: "Waiting on agents" }).locator("..");
+    await expect(waitingOnAgents.getByTestId(`ask-${clarifying.id}`)).toBeVisible();
+    await expect(waitingOnAgents.getByText("Waiting on e2e-session-title")).toBeVisible();
+    await expect(page.getByText("e2e-session-title replied")).toHaveCount(0);
+    await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
+
+    // The agent's plain reply hands the turn back: the clarification returns to the
+    // server-ordered Waiting on you section.
     await createComment(
       issue.key,
       { ask_id: clarifying.id, body: "The release candidate." },
       session
     );
+    await expect.poll(() => getAsk(clarifying.id)).toMatchObject({ ask: { waiting_on: "human" } });
     await page.reload();
     await expect(page.getByRole("heading", { name: "Waiting on agents" })).toHaveCount(0);
     await expect(page.getByText("e2e-session-title replied")).toBeVisible();
+    await expect(page.getByTestId(`turn-${clarifying.id}`)).toHaveText("Waiting on you");
     await expect(cards.nth(0)).toHaveAttribute("data-testid", `ask-${clarifying.id}`);
     await expect(cards.nth(1)).toHaveAttribute("data-testid", `ask-${untouched.id}`);
 

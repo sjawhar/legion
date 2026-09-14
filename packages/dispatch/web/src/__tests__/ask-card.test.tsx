@@ -32,6 +32,7 @@ function ask(overrides: Partial<Ask> = {}): Ask {
     options: [],
     question: "Which option should ship?",
     state: "open",
+    waiting_on: "human",
     urgency: "med",
     ...overrides,
   };
@@ -51,6 +52,7 @@ function reply(
   return {
     anchor: null,
     ask_id: "ask-1",
+    turn: "agent",
     author: { kind: "user", id: "alice" },
     body: "A reply",
     created_at: "2026-09-09T00:01:00Z",

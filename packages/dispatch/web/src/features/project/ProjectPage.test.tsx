@@ -24,6 +24,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     priority: null,
     question: "Which approach?",
     state: "open",
+    waiting_on: "human",
     urgency: "med",
     ...overrides,
   };
@@ -113,6 +114,8 @@ test("shows a compact blocker link only when asks await the viewer", async () =>
   const clear = renderPage("/projects/CORE", undefined, "alice", [
     inboxRow({
       last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T01:00:00Z" },
+
+      waiting_on: "agent",
     }),
   ]);
   try {

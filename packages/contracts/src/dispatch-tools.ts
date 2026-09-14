@@ -59,6 +59,20 @@ function documentOwnerValidation(
       : "Exactly one of issue and project is required; with project, artifact names the document.",
   };
 }
+
+/** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
+const commentValidation: NonNullable<DispatchToolSpec["validation"]> = (() => {
+  const owner = documentOwnerValidation(true);
+  return {
+    check: (value) => {
+      const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+      return (
+        owner.check(value) && (input.turn === undefined || typeof input.reply_to_ask === "string")
+      );
+    },
+    message: `${owner.message} turn requires reply_to_ask.`,
+  };
+})();
 export const SPEC_SECTIONS = [
   "Summary",
   "Decisions needed",
@@ -248,8 +262,16 @@ export const dispatchToolSpecs = [
             "exclusive with reply_to."
         )
         .optional(),
+      turn: z
+        .enum(["agent", "human"])
+        .describe(
+          "Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " +
+            "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " +
+            "you need the human to act - the ask returns to 'Waiting on you'."
+        )
+        .optional(),
     }),
-    validation: documentOwnerValidation(true),
+    validation: commentValidation,
   },
   {
     name: "dispatch_suggest",

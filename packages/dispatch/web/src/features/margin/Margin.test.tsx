@@ -74,6 +74,7 @@ const comment: Comment = {
   created_at: "2026-09-09T00:00:00Z",
   id: "comment-1",
   ask_id: null,
+  turn: null,
   issue_key: "CORE-1",
   reply_to: null,
   resolved: false,
@@ -826,6 +827,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
   const askReply: Comment = {
     anchor: null,
     ask_id: anchoredAsk.id,
+    turn: "agent",
     author: { id: "alice", kind: "user" },
     body: "Any blockers first?",
     created_at: "2026-09-09T00:01:00Z",

@@ -85,6 +85,7 @@ payload names renders it and drops the matching local NATS subscription
 subscriber ignores it.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 `dispatch_ask` can set `kind: "action"` for a human to-do with fixed `Done` / `Can't` answers. It does not expose `approval`, which is opened only through `dispatch_request_approval`.
+`dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.
 Quote anchors returned from Dispatch include nullable `block_id`: new anchors are pinned to the
 lowest block containing their complete quote, while top-level cross-block and legacy anchors remain
 unpinned.

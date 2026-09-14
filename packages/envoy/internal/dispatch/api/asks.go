@@ -491,12 +491,12 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 					'author', lr.author,
 					'created_at', lr.created_at
 				) end as last_reply,
-				case when lr.author->>'kind' = 'user' then 'agent' else 'human' end as waiting_on
+				coalesce(lr.turn, 'human') as waiting_on
 			from mine a
 			left join issues i on i.key = a.issue_key
 			left join artifacts ar on ar.id = a.artifact_id
 			left join lateral (
-				select c.author, c.created_at from comments c
+				select c.author, c.created_at, c.turn from comments c
 				where c.ask_id = a.id
 				order by c.created_at desc, c.id desc
 				limit 1
@@ -635,6 +635,8 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 	return edits, nil
 }
 
+// loadAsk reads one ask for a response: unlike loadAskForUpdate, which feeds the
+// ask.* event payloads, it carries WaitingOn for an open ask.
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	ask, err := scanAsk(q.QueryRow(ctx, `
 		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
@@ -647,6 +649,9 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 		return model.Ask{}, err
 	}
 	if err := s.attachBlockArtifacts(ctx, q, []*model.Ask{&ask}); err != nil {
+		return model.Ask{}, err
+	}
+	if _, err := s.attachWaitingOn(ctx, q, []*model.Ask{&ask}); err != nil {
 		return model.Ask{}, err
 	}
 	return ask, nil
@@ -672,13 +677,26 @@ const (
 		from asks where artifact_id = $1 and state = 'answered' order by created_at, id`
 )
 
-// loadIssueAsks returns an issue's asks, oldest first, filtered by state ("all",
-// "open", or "answered").
-func (s *server) loadIssueAsks(ctx context.Context, q queryer, key, state string) ([]model.Ask, error) {
-	return s.loadOwnerAsks(ctx, q, issueOwner(key), state)
+// loadOwnerAsks returns an owner's asks, oldest first, filtered by state ("all",
+// "open", or "answered"), with WaitingOn attached to every open ask.
+func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
+	asks, err := s.queryOwnerAsks(ctx, q, owner, state)
+	if err != nil {
+		return nil, err
+	}
+	askPointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		askPointers[index] = &asks[index]
+	}
+	if _, err := s.attachWaitingOn(ctx, q, askPointers); err != nil {
+		return nil, err
+	}
+	return asks, nil
 }
 
-func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
+// queryOwnerAsks returns an owner's asks, oldest first, filtered by state, with
+// their opening event ids and block artifacts but without WaitingOn.
+func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
 	var query, value string
 	switch {
 	case owner.IssueKey != nil:

@@ -35,6 +35,7 @@ the native Dispatch tool suite:
   answer. Host adapters consume `dispatchToolSpecs` directly.
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters) and an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest); project-document arguments accept the document's artifact id, slug, or filename.
 - `dispatch_ask` creates a question by default and accepts only `kind: "action"` for a human to-do. Action asks have server-fixed `Done` / `Can't` options; `approval` remains server-created through `dispatch_request_approval`.
+- `dispatch_comment.turn` (`"agent" | "human"`, `AskTurn`) is valid only with `reply_to_ask`; the tool-level validation rejects it otherwise. It maps to `CreateCommentInput.turn`. `Comment.turn` is that recorded turn (null under a closed ask and off ask replies), `Ask.waiting_on` is the open ask's derived state on every ask read, and `CommentEventPayload.ask_waiting_on` carries it on a `comment.created` that replies to an open ask.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.
