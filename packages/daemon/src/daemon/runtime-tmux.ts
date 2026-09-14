@@ -219,7 +219,10 @@ function isProcessGoneError(error: unknown): boolean {
  * architect or phase worker alike) opens a window named for the issue and every later process
  * on that issue splits into it while a pane recorded there still verifies as its recorded
  * process; the controller has a window of its own. That window sharing is tmux's model and lives
- * entirely here, never in the interface: `ProcessManager` only ever sees opaque locators.
+ * entirely here, never in the interface: `ProcessManager` only ever sees opaque locators. So
+ * does the private session's first creation: one lane across every issue and the controller
+ * (`ensureSession`), so two first spawns that arrive together share one `new-session` instead
+ * of the second failing `duplicate session`.
  *
  * A pane id is never taken as proof of the process a locator recorded. A recreated tmux server
  * hands out ids from `%1` again, so a stale locator's id can name some other role's live pane --
@@ -229,6 +232,14 @@ function isProcessGoneError(error: unknown): boolean {
  * OMP before `probe` reports a pane alive, before `stop` kills it, and before `probedWindowId`
  * splits a new pane into its window.
  */
+/** The session lane's result distinguishes bootstrap-window ownership from a session another
+ * caller created while this caller waited, so every caller that needs a recovery retry can make
+ * one without more than one caller trying to clean up the bootstrap window. */
+interface SessionEnsureResult {
+  createdByCaller: boolean;
+  sessionCreated: boolean;
+}
+
 export class TmuxRuntime implements Runtime {
   readonly launchesController = true;
   readonly removesWorkspacesOnTreeClose = true;
@@ -244,8 +255,98 @@ export class TmuxRuntime implements Runtime {
    * own. Never trusted by window id alone -- after a tmux server recreate the same `@N` can name
    * some other issue's window, so an entry whose pane no longer verifies is dropped. */
   private readonly issueWindows = new Map<IssueKey, TmuxLocator>();
+  /** The private session's creation in flight, if any — `tmux.ensureSession`'s promise, shared
+   * by every spawn that reaches the session step while it runs, and cleared the moment it
+   * settles either way (see `ensureSession`). */
+  private sessionCreation: Promise<boolean> | undefined;
 
   constructor(private readonly deps: TmuxRuntimeDeps) {}
+
+  /**
+   * The one cross-issue lane: makes the private session exist, running `has-session` and (when
+   * needed) `new-session` at most once at a time across every issue and the controller. The
+   * caller that finds nothing in flight starts `tmux.ensureSession`; `createdByCaller` is `true`
+   * only when that caller made the session and owns the bootstrap cleanup. A caller that arrives
+   * while one is in flight joins that same creation, has `createdByCaller: false`, and shares
+   * the creator's rejection if the creation fails. `sessionCreated` tells a recovery caller
+   * whether anyone made a replacement session while it waited. The clearing handler is
+   * registered before any waiter chains on the promise, so the lane is already empty by the time
+   * any caller resumes: a spawn arriving after settlement runs a fresh `has-session`, and a
+   * failed `new-session` is retried, never replayed. Because the clear handles the rejection
+   * branch too, a failed creation nobody waited on never surfaces as an unhandled rejection.
+   *
+   * `has-session` runs inside the lane, not before it: a `false` observed outside could be stale
+   * by the time the caller looked at the lane (the creator finishing and the lane clearing in
+   * between), and that caller would run a second `new-session` and hit `duplicate session`.
+   */
+  private ensureSession(): Promise<SessionEnsureResult> {
+    const inFlight = this.sessionCreation;
+    if (inFlight) {
+      return inFlight.then((sessionCreated) => ({
+        createdByCaller: false,
+        sessionCreated,
+      }));
+    }
+    const session = this.deps.tmux.socket;
+    const creation = tmux.ensureSession(this.deps.tmux, session, session);
+    this.sessionCreation = creation;
+    const clear = () => {
+      this.sessionCreation = undefined;
+    };
+    creation.then(clear, clear);
+    return creation.then((sessionCreated) => ({
+      createdByCaller: sessionCreated,
+      sessionCreated,
+    }));
+  }
+
+  /** Opens a fresh window named `name` running `paneArgv`. Both the first session check and the
+   * recheck after a `new-window` finds the session gone run through `ensureSession`, never
+   * directly through `tmux.ensureSession`: concurrent creators therefore share one creation.
+   * A caller that created the session does not retry a failed first window; its error did not
+   * arise from a session another process had already torn down. */
+  private async openWindow(
+    name: string,
+    paneArgv: string[]
+  ): Promise<{ windowId: string; paneId: string; pid: number }> {
+    const session = this.deps.tmux.socket;
+    const initial = await this.ensureSession();
+    try {
+      return await tmux.openWindow(
+        this.deps.tmux,
+        session,
+        name,
+        paneArgv,
+        session,
+        initial.createdByCaller
+      );
+    } catch (firstError) {
+      if (initial.createdByCaller) throw firstError;
+      const recovery = await this.ensureSession();
+      if (!recovery.sessionCreated) throw firstError;
+      try {
+        const window = await tmux.openWindow(
+          this.deps.tmux,
+          session,
+          name,
+          paneArgv,
+          session,
+          recovery.createdByCaller
+        );
+        const first = firstError instanceof Error ? firstError.message : String(firstError);
+        console.error(
+          `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${first}); recreated it and opened the window on a second attempt`
+        );
+        return window;
+      } catch (retryError) {
+        const first = firstError instanceof Error ? firstError.message : String(firstError);
+        const retry = retryError instanceof Error ? retryError.message : String(retryError);
+        throw new Error(
+          `${retry} on the second attempt, after has-session reported ${session} present and then gone (first attempt: ${first})`
+        );
+      }
+    }
+  }
 
   /**
    * Provisions the issue's working copy (`provisionIssueWorkspace`, on the daemon's disk),
@@ -467,19 +568,6 @@ export class TmuxRuntime implements Runtime {
       socketPath,
       ...identity,
     };
-  }
-
-  /** Opens a window in the daemon's session. Recovery diagnostics are logged here; `tmux.openWindow`
-   * returns them without logging. */
-  private async openWindow(name: string, paneArgv: string[]): Promise<tmux.OpenedWindow> {
-    const session = this.deps.tmux.socket;
-    const window = await tmux.openWindow(this.deps.tmux, session, name, paneArgv, session);
-    if (window.recovered !== undefined) {
-      console.error(
-        `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${window.recovered}); recreated it and opened the window on a second attempt`
-      );
-    }
-    return window;
   }
 
   /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a

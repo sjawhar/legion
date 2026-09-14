@@ -147,6 +147,30 @@ class FakeTmuxServer {
   readonly commands: string[][] = [];
   readonly windows = new Map<string, FakeWindow>();
   sessionExists = false;
+  /** A `new-session` is in flight (parked on `newSessionGate`): real tmux refuses a second one
+   * with `duplicate session` while the first is still forking the server. */
+  sessionCreating = false;
+  /** Holds the next `new-session` open until resolved — the fork time a real server takes, and
+   * the window in which a second first-ever spawn can arrive. */
+  newSessionGate: PromiseWithResolvers<void> | undefined;
+  /** Resolves when the first `new-session` is issued (before it parks on `newSessionGate`): the
+   * event a race test awaits instead of polling, since a spawn's provisioning does real fs writes
+   * before its first tmux command. */
+  readonly newSessionIssued = Promise.withResolvers<void>();
+  /** Overrides the next `new-session`'s result (exit code and stderr) when set; the session is
+   * not created. */
+  newSessionResult: { exitCode: number; stderr?: string } | undefined;
+  /** Overrides the next `new-window` result; when it tears the server down, later commands see
+   * the session absent just as they would after tmux reaps its last window. */
+  newWindowResult: { exitCode: number; stderr?: string; endsSession?: boolean } | undefined;
+  /** Ordered `new-window` failures for recovery tests. */
+  readonly newWindowResults: Array<{
+    exitCode: number;
+    stderr?: string;
+    endsSession?: boolean;
+  }> = [];
+  /** Resolves when a `new-window` is issued, before its configured failure returns. */
+  readonly newWindowIssued = Promise.withResolvers<void>();
   /** Overrides the next `kill-pane`'s result (exit code and stderr) when set. */
   killPaneResult: { exitCode: number; stderr?: string } | undefined;
   /** Overrides the next per-pane `list-panes -t <pane>` result (exit code and stderr) when set. */
@@ -237,9 +261,22 @@ class FakeTmuxServer {
     switch (verb) {
       case "has-session":
         return { stdout: "", exitCode: this.sessionExists ? 0 : 1 };
-      case "new-session":
+      case "new-session": {
+        if (this.sessionExists || this.sessionCreating) {
+          return { stdout: "", stderr: `duplicate session: ${this.session}`, exitCode: 1 };
+        }
+        this.sessionCreating = true;
+        this.newSessionIssued.resolve();
+        await this.newSessionGate?.promise;
+        this.sessionCreating = false;
+        if (this.newSessionResult) {
+          const result = this.newSessionResult;
+          this.newSessionResult = undefined;
+          return { stdout: "", ...result };
+        }
         this.sessionExists = true;
         return { stdout: "", exitCode: 0 };
+      }
       case "set-option":
         if (command.includes("-w")) {
           const window = this.windows.get(target);
@@ -248,6 +285,24 @@ class FakeTmuxServer {
         }
         return { stdout: "", exitCode: 0 };
       case "new-window": {
+        this.newWindowIssued.resolve();
+        const nextResult = this.newWindowResults.shift() ?? this.newWindowResult;
+        if (nextResult) {
+          this.newWindowResult = undefined;
+          const { endsSession, ...result } = nextResult;
+          if (endsSession) {
+            this.sessionExists = false;
+            this.windows.clear();
+          }
+          return { stdout: "", ...result };
+        }
+        if (!this.sessionExists) {
+          return {
+            stdout: "",
+            stderr: "no server running on /tmp/tmux-1000/legion-omp",
+            exitCode: 1,
+          };
+        }
         const windowId = `@${this.nextWindow}`;
         this.nextWindow += 1;
         const paneId = `%${this.nextPane}`;
@@ -351,6 +406,9 @@ async function tmuxHarness(
      * does, before any command or fs work — so a test can tell when a spawn's provisioning was
      * admitted. Defaults to a constant token. */
     provisioningToken?: TmuxRuntimeDeps["provisioningToken"];
+    /** Signals after a spawn has provisioned its workspace and is about to enter the per-issue
+     * lane, so a race test can wait for the second root without a timing budget. */
+    onIssueLookup?: (issue: IssueKey) => void;
   } = {}
 ): Promise<TmuxHarness> {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-runtime-tmux-"));
@@ -394,8 +452,12 @@ async function tmuxHarness(
       statReads.push(pid);
       return options.readProcessStat ? options.readProcessStat(pid) : server.procStat(pid);
     },
-    issueLocators: (forIssue) =>
-      locators.filter((locator) => locator.runtime === "tmux" && issueOf.get(locator) === forIssue),
+    issueLocators: (forIssue) => {
+      options.onIssueLookup?.(forIssue);
+      return locators.filter(
+        (locator) => locator.runtime === "tmux" && issueOf.get(locator) === forIssue
+      );
+    },
   });
   // Records every spawned locator by issue so `issueLocators` sees what state would.
   const spawningRuntime: Runtime = {
@@ -864,6 +926,218 @@ describe("TmuxRuntime", () => {
     );
     expect(newWindowAt).toBeLessThan(verifiedAt);
     expect(verifiedAt).toBeLessThan(splitAt);
+  });
+
+  /** One real macrotask yield (`setImmediate`, never a wall-clock delay): the one step a spawn
+   * that has reached the session step (see `onIssueLookup`) needs to park on the lane — or,
+   * without the lane, to run its own `has-session` and `new-session`. */
+  const onceEventLoop = (): Promise<void> => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    return promise;
+  };
+  const verb = (command: string[]): string | undefined => command[3];
+  const windowName = (command: string[]): string | undefined => command[command.indexOf("-n") + 1];
+  const isBootstrapKill = (command: string[]): boolean =>
+    verb(command) === "kill-window" && command[5] === "legion-omp:__legion_bootstrap";
+
+  /** A `tmuxHarness` whose `onIssueLookup` resolves a per-issue promise (`reachedIssue`), so a
+   * test can tell that a second spawn has reached the session step (see the hook's docblock). */
+  const racingHarness = async () => {
+    const reached = new Map<IssueKey, PromiseWithResolvers<void>>();
+    const entryFor = (forIssue: IssueKey): PromiseWithResolvers<void> => {
+      let entry = reached.get(forIssue);
+      if (!entry) {
+        entry = Promise.withResolvers<void>();
+        reached.set(forIssue, entry);
+      }
+      return entry;
+    };
+    const harness = await tmuxHarness({
+      onIssueLookup: (forIssue) => entryFor(forIssue).resolve(),
+    });
+    return { ...harness, reachedIssue: (forIssue: IssueKey) => entryFor(forIssue).promise };
+  };
+
+  it("two concurrent first spawns on different issues share one new-session; only the creator kills the bootstrap window, once", async () => {
+    const harness = await racingHarness();
+    const { server } = harness;
+    server.newSessionGate = Promise.withResolvers<void>();
+    const first = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-42")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await server.newSessionIssued.promise;
+    const second = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-43")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await harness.reachedIssue("LEGION-43");
+    await onceEventLoop();
+    server.newSessionGate.resolve();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+    expect([firstOutcome.status, secondOutcome.status]).toEqual(["fulfilled", "fulfilled"]);
+    if (firstOutcome.status !== "fulfilled" || secondOutcome.status !== "fulfilled") {
+      throw new Error("tmux session creation did not open both windows");
+    }
+    const [a, b] = [firstOutcome.value, secondOutcome.value];
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
+    const newWindows = server.commands.filter((command) => verb(command) === "new-window");
+    expect(newWindows.map(windowName).sort()).toEqual(["legion-42", "legion-43"]);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
+    const creatorWindowAt = server.commands.findIndex(
+      (command) => verb(command) === "new-window" && windowName(command) === "legion-42"
+    );
+    expect(server.commands.findIndex(isBootstrapKill)).toBeGreaterThan(creatorWindowAt);
+
+    if (a.runtime !== "tmux" || b.runtime !== "tmux") throw new Error("tmux locators");
+    expect(a.tmuxWindowId).not.toBe(b.tmuxWindowId);
+    for (const locator of [a, b]) {
+      if (!locator.tmuxWindowId) throw new Error("window id");
+      expect(server.windows.get(locator.tmuxWindowId)?.owner).toBe("legion-omp");
+    }
+  });
+
+  it("a root arriving while the controller is creating the session waits for it and opens its own window; the controller alone kills the bootstrap window", async () => {
+    const harness = await racingHarness();
+    const { server } = harness;
+    server.newSessionGate = Promise.withResolvers<void>();
+    const controller = harness.runtime.spawn("controller", harness.makeSpec("controller")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await server.newSessionIssued.promise;
+    const root = harness.runtime.spawn("root", harness.makeSpec("architect")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await harness.reachedIssue(issue);
+    await onceEventLoop();
+    server.newSessionGate.resolve();
+    const [controllerOutcome, rootOutcome] = await Promise.all([controller, root]);
+    expect([controllerOutcome.status, rootOutcome.status]).toEqual(["fulfilled", "fulfilled"]);
+    if (controllerOutcome.status !== "fulfilled" || rootOutcome.status !== "fulfilled") {
+      throw new Error("tmux session creation did not open both windows");
+    }
+    const [controllerLocator, rootLocator] = [controllerOutcome.value, rootOutcome.value];
+
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
+    const newWindows = server.commands.filter((command) => verb(command) === "new-window");
+    expect(newWindows.map(windowName)).toEqual(["controller", "legion-42"]);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
+    const controllerWindowAt = server.commands.findIndex(
+      (command) => verb(command) === "new-window" && windowName(command) === "controller"
+    );
+    expect(server.commands.findIndex(isBootstrapKill)).toBeGreaterThan(controllerWindowAt);
+    if (controllerLocator.runtime !== "tmux" || rootLocator.runtime !== "tmux") {
+      throw new Error("tmux locators");
+    }
+    expect(controllerLocator.tmuxWindowId).not.toBe(rootLocator.tmuxWindowId);
+  });
+
+  it("a new-session that fails for a real reason fails the creator and every waiter with tmux's stderr, attempts no new-window, and the next spawn starts over from has-session", async () => {
+    const harness = await racingHarness();
+    const { server } = harness;
+    server.newSessionGate = Promise.withResolvers<void>();
+    server.newSessionResult = {
+      exitCode: 1,
+      stderr: "error creating /tmp/tmux-1000/legion-omp (Permission denied)",
+    };
+    const first = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-42"));
+    await server.newSessionIssued.promise;
+    const second = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-43"));
+    await harness.reachedIssue("LEGION-43");
+    await onceEventLoop();
+    server.newSessionGate.resolve();
+
+    const message =
+      "tmux new-session failed (exit 1): error creating /tmp/tmux-1000/legion-omp (Permission denied)";
+    const settled = await Promise.allSettled([first, second]);
+    expect(
+      settled.map((outcome) => outcome.status === "rejected" && (outcome.reason as Error).message)
+    ).toEqual([message, message]);
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-window")).toHaveLength(0);
+    expect(verbs.filter((value) => value === "kill-window")).toHaveLength(0);
+    expect(verbs.filter((value) => value === "set-option")).toHaveLength(0);
+
+    server.commands.length = 0;
+    const retried = await harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-43"));
+    expect(retried.runtime === "tmux" && retried.tmuxWindowId).toBe("@42");
+    expect(server.commands.slice(0, 2).map(verb)).toEqual(["has-session", "new-session"]);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
+  });
+
+  it("serializes recovery after a new-window failure with a concurrent first spawn, so both roots open windows after one recreation", async () => {
+    const harness = await racingHarness();
+    const { server } = harness;
+    server.sessionExists = true;
+    server.newSessionGate = Promise.withResolvers<void>();
+    server.newWindowResult = {
+      exitCode: 1,
+      stderr: "no server running on /tmp/tmux-1000/legion-omp",
+      endsSession: true,
+    };
+
+    const first = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-42")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await server.newWindowIssued.promise;
+    const second = harness.runtime.spawn("root", harness.makeSpec("architect", "LEGION-43")).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (reason) => ({ status: "rejected" as const, reason })
+    );
+    await harness.reachedIssue("LEGION-43");
+    await onceEventLoop();
+    server.newSessionGate.resolve();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    expect([firstOutcome.status, secondOutcome.status]).toEqual(["fulfilled", "fulfilled"]);
+    if (firstOutcome.status !== "fulfilled" || secondOutcome.status !== "fulfilled") {
+      throw new Error("tmux session recovery did not open both windows");
+    }
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(2);
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-window")).toHaveLength(3);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
+    expect(firstOutcome.value.runtime === "tmux" && firstOutcome.value.tmuxWindowId).toBeDefined();
+    expect(
+      secondOutcome.value.runtime === "tmux" && secondOutcome.value.tmuxWindowId
+    ).toBeDefined();
+  });
+
+  it("names both window failures when the replacement session's first window fails", async () => {
+    const harness = await tmuxHarness();
+    const { server } = harness;
+    server.sessionExists = true;
+    server.newWindowResults.push(
+      {
+        exitCode: 1,
+        stderr: "no server running on /tmp/tmux-1000/legion-omp",
+        endsSession: true,
+      },
+      { exitCode: 1, stderr: "Y" }
+    );
+
+    let message = "";
+    await harness.runtime.spawn("root", harness.makeSpec("architect")).catch((error: Error) => {
+      message = error.message;
+    });
+
+    expect(message.startsWith("tmux new-window failed (exit 1): Y")).toBe(true);
+    expect(message).toContain("on the second attempt");
+    expect(message).toContain("after has-session reported legion-omp present and then gone");
+    expect(message).toContain("first attempt: tmux new-window failed (exit 1): no server running");
+    expect(server.commands.filter((command) => verb(command) === "new-window")).toHaveLength(2);
+    expect(server.commands.filter((command) => verb(command) === "new-session")).toHaveLength(1);
   });
 
   it("serializes workspace provisioning per repository: a second tree's clone and git-config writes wait for the first's to finish", async () => {

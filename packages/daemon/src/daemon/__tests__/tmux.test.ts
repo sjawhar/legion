@@ -5,6 +5,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   disableEnvironmentUpdates,
+  ensureSession,
   environmentNames,
   lookupPane,
   openWindow,
@@ -56,7 +57,6 @@ function scripted(
   };
 }
 
-const NO_SERVER = "no server running on /tmp/tmux-1000/legion-omp";
 const verbs = (commands: string[][]) => commands.map((cmd) => cmd[3]);
 
 describe("lookupPane", () => {
@@ -399,7 +399,7 @@ describe("disableEnvironmentUpdates", () => {
   });
 });
 
-describe("openWindow", () => {
+describe("ensureSession", () => {
   it("creates the session and empties its update-environment in one tmux invocation, so nothing can attach in between", async () => {
     const commands: string[][] = [];
     const fake: TmuxServer = {
@@ -411,7 +411,7 @@ describe("openWindow", () => {
         return { stdout: "", stderr: "", exitCode: 0 };
       },
     };
-    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp");
+    await ensureSession(fake, "legion-omp", "legion-omp");
     // `;` as its own argv element is tmux's command separator (a shell would spell it `\;`).
     expect(commands[1]).toEqual([
       "tmux",
@@ -435,8 +435,10 @@ describe("openWindow", () => {
       commands.filter((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")
     ).toEqual([]);
   });
+});
 
-  it("leaves an existing session's options alone", async () => {
+describe("openWindow", () => {
+  it("opens in an existing session without mutating its options", async () => {
     const commands: string[][] = [];
     const fake: TmuxServer = {
       socket: "legion-omp",
@@ -446,7 +448,8 @@ describe("openWindow", () => {
         return { stdout: "", stderr: "", exitCode: 0 };
       },
     };
-    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp");
+    const created = await ensureSession(fake, "legion-omp", "legion-omp");
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp", created);
     expect(commands.some((cmd) => cmd[3] === "set-option" && cmd[6] === "update-environment")).toBe(
       false
     );
@@ -463,7 +466,8 @@ describe("openWindow", () => {
       },
     };
     let message = "";
-    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp").catch(
+    const created = await ensureSession(fake, "legion-omp", "legion-omp");
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp", created).catch(
       (error: Error) => {
         message = error.message;
       }
@@ -481,7 +485,7 @@ describe("openWindow", () => {
       },
     };
     let message = "";
-    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp").catch(
+    await openWindow(fake, "legion-omp", "legsmoke-1", ["sleep 1"], "legion-omp", false).catch(
       (error: Error) => {
         message = error.message;
       }
@@ -489,55 +493,7 @@ describe("openWindow", () => {
     expect(message).toBe("tmux new-window failed (exit 1): tmux printed nothing on stderr");
   });
 
-  // The stuck-controller retirement (LEGION-89): the controller's window was the private session's
-  // only one, so its pane closing tears session and server down — after the respawn's
-  // `has-session` answered present and before its `new-window` ran.
-  it("recreates the session and opens the window on a second attempt when has-session said present and new-window found the server gone", async () => {
-    const commands: string[][] = [];
-    const fake = scripted((verb, nth, ran) => {
-      if (verb === "has-session") {
-        return nth === 1 || ran("new-session")
-          ? ok
-          : { stdout: "", stderr: NO_SERVER, exitCode: 1 };
-      }
-      if (verb === "new-window") {
-        return nth === 1
-          ? { stdout: "", stderr: NO_SERVER, exitCode: 1 }
-          : { stdout: "@7 %9 4242\n", stderr: "", exitCode: 0 };
-      }
-      return ok;
-    }, commands);
-    await expect(
-      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
-    ).resolves.toEqual({
-      windowId: "@7",
-      paneId: "%9",
-      pid: 4242,
-      recovered: "tmux new-window failed (exit 1): no server running on /tmp/tmux-1000/legion-omp",
-    });
-    // Re-asked, recreated as a first launch does (bootstrap window, killed afterwards), opened.
-    expect(verbs(commands)).toEqual([
-      "has-session",
-      "new-window",
-      "has-session",
-      "new-session",
-      "set-option",
-      "new-window",
-      "kill-window",
-      "set-option",
-    ]);
-    expect(commands[6]).toEqual([
-      "tmux",
-      "-L",
-      "legion-omp",
-      "kill-window",
-      "-t",
-      "legion-omp:__legion_bootstrap",
-    ]);
-    expect(commands[7]?.slice(3, 5)).toEqual(["set-option", "-w"]);
-  });
-
-  it("throws a new-window failure as before when the session is still there, without a second attempt", async () => {
+  it("throws a new-window failure when the checked session remains present, without another helper attempt", async () => {
     const commands: string[][] = [];
     const fake = scripted((verb) => {
       if (verb === "new-window") {
@@ -545,15 +501,16 @@ describe("openWindow", () => {
       }
       return ok;
     }, commands);
+    const created = await ensureSession(fake, "legion-omp", "legion-omp");
     await expect(
-      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
+      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp", created)
     ).rejects.toThrow("tmux new-window failed (exit 1): create window failed: fork failed");
     expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(1);
     expect(verbs(commands).filter((verb) => verb === "new-session")).toHaveLength(0);
-    expect(verbs(commands).filter((verb) => verb === "has-session")).toHaveLength(2);
+    expect(verbs(commands).filter((verb) => verb === "has-session")).toHaveLength(1);
   });
 
-  it("throws a new-window failure as before inside a session this call created, still killing the bootstrap window", async () => {
+  it("throws a new-window failure inside a session this caller created, still killing the bootstrap window", async () => {
     const commands: string[][] = [];
     const fake = scripted((verb, _nth, ran) => {
       if (verb === "has-session")
@@ -561,42 +518,14 @@ describe("openWindow", () => {
       if (verb === "new-window") return { stdout: "", stderr: "X", exitCode: 1 };
       return ok;
     }, commands);
+    const created = await ensureSession(fake, "legion-omp", "legion-omp");
     await expect(
-      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp")
+      openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp", created)
     ).rejects.toThrow("tmux new-window failed (exit 1): X");
     expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(1);
     expect(verbs(commands).filter((verb) => verb === "has-session")).toHaveLength(1);
     expect(
       commands.some((cmd) => cmd[3] === "kill-window" && cmd[5] === "legion-omp:__legion_bootstrap")
     ).toBe(true);
-  });
-
-  it("names both attempts when the second new-window fails too", async () => {
-    const commands: string[][] = [];
-    const fake = scripted((verb, nth, ran) => {
-      if (verb === "has-session") {
-        return nth === 1 || ran("new-session")
-          ? ok
-          : { stdout: "", stderr: NO_SERVER, exitCode: 1 };
-      }
-      if (verb === "new-window") {
-        return nth === 1
-          ? { stdout: "", stderr: NO_SERVER, exitCode: 1 }
-          : { stdout: "", stderr: "Y", exitCode: 1 };
-      }
-      return ok;
-    }, commands);
-    let message = "";
-    await openWindow(fake, "legion-omp", "controller", ["sleep 1"], "legion-omp").catch(
-      (error: Error) => {
-        message = error.message;
-      }
-    );
-    expect(message.startsWith("tmux new-window failed (exit 1): Y")).toBe(true);
-    expect(message).toContain("on the second attempt");
-    expect(message).toContain("after has-session reported legion-omp present and then gone");
-    expect(message).toContain("first attempt: tmux new-window failed (exit 1): no server running");
-    expect(verbs(commands).filter((verb) => verb === "new-window")).toHaveLength(2);
-    expect(verbs(commands).filter((verb) => verb === "new-session")).toHaveLength(1);
   });
 });

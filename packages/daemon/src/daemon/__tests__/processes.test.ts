@@ -538,6 +538,7 @@ type RuntimeOverrides = {
   connectWorkerRpc: TmuxRuntimeDeps["connectWorkerRpc"];
   readProcessCmdline: (pid: number) => Promise<string>;
   readProcessStat: (pid: number) => Promise<string>;
+  issueLocators: TmuxRuntimeDeps["issueLocators"];
   run: TmuxRuntimeDeps["run"];
   statPrompt: NonNullable<TmuxRuntimeDeps["statPrompt"]>;
   provisioningToken: TmuxRuntimeDeps["provisioningToken"];
@@ -578,6 +579,7 @@ function manager(
     connectWorkerRpc,
     readProcessCmdline,
     readProcessStat,
+    issueLocators,
     statPrompt,
     provisioningToken,
     deploymentInstructionsFile,
@@ -738,7 +740,7 @@ function manager(
       // `/proc/<pid>/stat` read; an absent key gets the fixture's fake.
       readProcessStat:
         "readProcessStat" in options ? readProcessStat : async (pid) => procStat(pid),
-      issueLocators: (issue) => locatorsForIssue(state, issue),
+      issueLocators: issueLocators ?? ((issue) => locatorsForIssue(state, issue)),
     });
   const processManager = new ProcessManager({ ...deps, runtime });
   liveManagers.push(processManager);
@@ -2464,6 +2466,83 @@ describe("ProcessManager", () => {
       launchFailures: 1,
     });
     expect(state.admission).toEqual({ cap: 1, active: [], queue: [root] });
+  });
+
+  it("two roots whose first spawns race onto a not-yet-existing private server both launch; neither is charged a launch failure", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 2);
+    for (const issue of [root, child]) {
+      state.issues[issue] = { key: issue, title: issue, status: "todo", children: [] };
+      state.trees[issue] = { root: issue, generation: 0, status: "active", launchFailures: 0 };
+    }
+    state.admission.active.push(root, child);
+    const commands: string[][] = [];
+    const newSessionIssued = Promise.withResolvers<void>();
+    const newSessionGate = Promise.withResolvers<void>();
+    let sessionExists = false;
+    let creating = false;
+    let windowCount = 0;
+    const reached: Record<IssueKey, PromiseWithResolvers<void>> = {
+      [root]: Promise.withResolvers<void>(),
+      [child]: Promise.withResolvers<void>(),
+    };
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { admissionCap: 2 }),
+      run: async (command) => {
+        commands.push(command);
+        switch (command[3]) {
+          case "has-session":
+            return { stdout: "", exitCode: sessionExists ? 0 : 1 };
+          case "new-session":
+            if (sessionExists || creating) {
+              return { stdout: "", stderr: "duplicate session: legion-omp", exitCode: 1 };
+            }
+            creating = true;
+            newSessionIssued.resolve();
+            await newSessionGate.promise;
+            creating = false;
+            sessionExists = true;
+            return { stdout: "", exitCode: 0 };
+          case "new-window":
+            windowCount += 1;
+            return { stdout: `@${windowCount} %${windowCount} 12345\n`, exitCode: 0 };
+          default:
+            return { stdout: "", exitCode: 0 };
+        }
+      },
+      issueLocators: (issue) => {
+        reached[issue]?.resolve();
+        return locatorsForIssue(state, issue);
+      },
+    });
+
+    const first = processes.spawnRoot(root);
+    await newSessionIssued.promise;
+    const second = processes.spawnRoot(child);
+    const both = Promise.all([first, second]);
+    await reached[child]?.promise;
+    await flushEventLoop(1);
+    newSessionGate.resolve();
+    await both;
+
+    expect(state.trees[root]).toMatchObject({ status: "active", launchFailures: 0 });
+    expect(state.trees[child]).toMatchObject({ status: "active", launchFailures: 0 });
+    const rootWindow = state.trees[root]?.locator;
+    const childWindow = state.trees[child]?.locator;
+    if (rootWindow?.runtime !== "tmux" || childWindow?.runtime !== "tmux") {
+      throw new Error("both roots record tmux locators");
+    }
+    expect(rootWindow.tmuxWindowId).toBeDefined();
+    expect(rootWindow.tmuxWindowId).not.toBe(childWindow.tmuxWindowId);
+    expect(state.admission).toEqual({ cap: 2, active: [root, child], queue: [] });
+    const verbs = commands.map((command) => command[3]);
+    expect(verbs.filter((verb) => verb === "new-session")).toHaveLength(1);
+    expect(verbs.filter((verb) => verb === "new-window")).toHaveLength(2);
+    expect(
+      commands.filter(
+        (command) => command[3] === "kill-window" && command[5] === "legion-omp:__legion_bootstrap"
+      )
+    ).toHaveLength(1);
   });
 
   it("fails a root launch before tmux when its architect prompt is missing", async () => {
