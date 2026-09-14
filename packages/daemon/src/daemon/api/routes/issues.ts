@@ -6,7 +6,7 @@ import {
   type IssueStatus,
   type LegionState,
 } from "../../legion-state";
-import { type Effect, routeActive } from "../../reducers";
+import { type Effect, routeArchitect } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {
   EnvoyPublishError,
@@ -67,7 +67,7 @@ export async function handleIssueStatus(
  * roles the reducers would have chosen. Best-effort: the state already carries what the wake
  * announces, so a resumed architect's catch-up shows it. A 404 no-holder is silent; anything else
  * is logged with the line `describeFailure` builds from the error's message. Any other effect kind
- * is ignored -- `routeActive` yields a `controller` wake only for a closed tree, which no caller
+ * is ignored -- `routeArchitect` yields a `controller` wake only for a closed tree, which no caller
  * targets. */
 export async function publishWakeEffects(
   effects: Effect[],
@@ -89,16 +89,17 @@ export async function publishWakeEffects(
 /** Publishes the `design-approved` wake for a gate the daemon opened without an `artifact.approved`
  * event of its own to reduce — the `gates.design: off` self-approval, and a registration that
  * found the document already approved on Dispatch (`seedGateFromDispatch`) — to exactly the role
- * the reducer's `artifact.approved` path would have chosen (`routeActive`: the issue's active
- * phase worker if any, else its tree's architect). Shared by the register route and the boot
- * fixup; `publishWakeEffects` carries the best-effort/404-silent rule. */
+ * the reducer's `artifact.approved` path would have chosen (`routeArchitect`: the issue's owning
+ * architect, never a phase worker — a gate is only ever registered on a root, so this is the
+ * root's own architect). Shared by the register route and the boot fixup; `publishWakeEffects`
+ * carries the best-effort/404-silent rule. */
 export async function publishDesignApproved(
   state: LegionState,
   issue: IssueKey,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>
 ): Promise<void> {
   await publishWakeEffects(
-    routeActive(state, issue, { type: "design-approved" }),
+    routeArchitect(state, issue, { type: "design-approved" }),
     envoyPublish,
     (message) =>
       `[legion] the design-approved wake for ${issue} failed to publish; the architect's catch-up carries the approval: ${message}`

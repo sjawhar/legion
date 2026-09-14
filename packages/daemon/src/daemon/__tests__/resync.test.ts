@@ -1168,7 +1168,7 @@ describe("runResync", () => {
     expect(detailReads).toBe(0);
   });
 
-  it("replays a missed terminal child status as child-closed and children-complete", async () => {
+  it("replays a missed terminal child status as child-closed and children-complete to the root's architect, not its active implementer", async () => {
     const child = "LEGION-43" as IssueKey;
     const state = newLegionState("omp", 1);
     trackIssue(state);
@@ -1209,18 +1209,17 @@ describe("runResync", () => {
       },
     });
 
+    // Architect-only wakes (LEGION-86): the root's implementer is its active phase
+    // (`trackIssue`) and still never receives a child's lifecycle.
+    const architect = roleToken("omp", issue, "architect");
     expect(dispatched).toEqual([
       [
         {
           kind: "publish",
-          role: roleToken("omp", issue, "implementer"),
+          role: architect,
           payload: { type: "child-closed", child, remaining: 0 },
         },
-        {
-          kind: "publish",
-          role: roleToken("omp", issue, "implementer"),
-          payload: { type: "children-complete" },
-        },
+        { kind: "publish", role: architect, payload: { type: "children-complete" } },
       ],
     ]);
     expect(state.issues[child]).toMatchObject({ status: "done", lastAppliedSeq: 52 });

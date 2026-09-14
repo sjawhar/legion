@@ -1,7 +1,8 @@
-import { type IssueKey, isLegionRole, type LegionRole, roleToken } from "@legion/contracts";
+import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DispatchIssueEvent } from "./dispatch-events";
 import {
+  assertKnownPhase,
   type DesignGate,
   designGateOpen,
   ISSUE_STATUSES,
@@ -10,6 +11,7 @@ import {
   isStaleQueuedStatus,
   type LegionState,
   liveAncestorTree,
+  owningArchitect,
   type PrState,
   type TreeState,
   type UpdateSource,
@@ -411,19 +413,41 @@ function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   return undefined;
 }
 
+/** The controller wake for activity on a tree that has already closed, shared by `routeActive` and
+ * `routeArchitect`. */
+function closedTreeWake(issue: IssueKey, tree: TreeState, payload: LegionEventPayload): Effect {
+  return {
+    kind: "controller",
+    payload: { type: "closed-tree-activity", issue, root: tree.root, event: payload },
+  };
+}
+
+/** `issue`'s active phase role, or undefined when no phase is active or it has completed. */
+function activePhaseRole(state: LegionState, issue: IssueKey): LegionRole | undefined {
+  const phase = state.phases[issue];
+  if (!phase) return undefined;
+  const role = assertKnownPhase(issue, phase);
+  return phase.completed ? undefined : role;
+}
+
+/** The token of the architect that owns `issue`: its own sub-architect when one is claimed, else
+ * the nearest claimed ancestor, then the tree root. */
+function architectToken(state: LegionState, issue: IssueKey): string {
+  return roleToken(state.project, owningArchitect(state, issue), "architect");
+}
+
 /**
- * Routes an event about `issue` to whichever role the shared routing table
- * names: the issue's active phase worker (`state.phases[issue]` -- the one
- * place a new active phase is written is `promptExistingWorker` delivering
- * an architect assignment, `kind: "assignment"`: a task prompted into a live
- * worker, or delivered from `pendingAssignment` at `/worker/ready`; a bare
- * registration, a reconnect, or a daemon catch-up never writes it, and
- * `handlePhaseComplete` only deletes, restores, or marks it completed), or
- * the tree's architect when no phase is
- * active — which includes a phase whose worker already reported completion
- * (`phase.completed` set by `handlePhaseComplete` when no architect was live
- * to receive it) as well as no phase at all. A closed tree instead wakes the
- * controller so a human can decide whether to resume it.
+ * Routes an event about `issue` to the role that can act on it: the issue's active phase worker
+ * (`activePhaseRole` -- the one place a new active phase is written is `promptExistingWorker`
+ * delivering an architect assignment, `kind: "assignment"`: a task prompted into a live worker,
+ * or delivered from `pendingAssignment` at `/worker/ready`; a bare registration, a reconnect, or
+ * a daemon catch-up never writes it, and `handlePhaseComplete` only deletes, restores, or marks
+ * it completed), else the architect that owns the issue (`architectToken`: its own sub-architect
+ * when one is claimed, else the nearest claimed ancestor, else the tree root) -- which includes a
+ * phase whose worker already reported completion (`phase.completed`, set by
+ * `handlePhaseComplete` when no architect was live to receive it) as well as no phase at all. A
+ * closed tree instead wakes the controller so a human can decide whether to resume it. For a wake
+ * only an architect can act on, use `routeArchitect`.
  */
 export function routeActive(
   state: LegionState,
@@ -432,25 +456,31 @@ export function routeActive(
 ): Effect[] {
   const tree = treeFor(state, issue);
   if (!tree) return [];
-  if (tree.status === "closed") {
-    return [
-      {
-        kind: "controller",
-        payload: { type: "closed-tree-activity", issue, root: tree.root, event: payload },
-      },
-    ];
-  }
-  const phase = state.phases[issue];
-  if (phase && !isLegionRole(phase.phase)) {
-    throw new Error(
-      `state.phases[${issue}] has an unrecognized phase: ${JSON.stringify(phase.phase)}`
-    );
-  }
-  const activePhase = phase && !phase.completed ? phase : undefined;
-  const token = activePhase
-    ? roleToken(state.project, issue, activePhase.phase as LegionRole)
-    : roleToken(state.project, tree.root, "architect");
+  if (tree.status === "closed") return [closedTreeWake(issue, tree, payload)];
+  const active = activePhaseRole(state, issue);
+  const token = active ? roleToken(state.project, issue, active) : architectToken(state, issue);
   return [{ kind: "publish", role: token, payload }];
+}
+
+/**
+ * Routes a wake only an architect can act on -- a child's lifecycle (`child-adopted`,
+ * `child-status`, `child-closed`, `children-complete`) and the design gate's verdicts
+ * (`design-approved`, `design-changes-requested`) -- to the architect that owns `issue`
+ * (`architectToken`), never to its active phase worker: a planner cannot spawn a sub-architect or
+ * release a wave. Shares `routeActive`'s closed-tree controller wake and its unknown-phase throw
+ * (LEGION-86).
+ */
+export function routeArchitect(
+  state: LegionState,
+  issue: IssueKey,
+  payload: LegionEventPayload
+): Effect[] {
+  const tree = treeFor(state, issue);
+  if (!tree) return [];
+  if (tree.status === "closed") return [closedTreeWake(issue, tree, payload)];
+  const phase = state.phases[issue];
+  if (phase) assertKnownPhase(issue, phase);
+  return [{ kind: "publish", role: architectToken(state, issue), payload }];
 }
 
 /**
@@ -943,12 +973,13 @@ function reduceIssueCreated(state: LegionState, event: DispatchIssueEvent): Effe
 /** The wake for a child that has (re)entered `parent`'s tree: emitted by `issue.created` with a
  * parent, and by the boot repair that removes a pre-LEGION-57 root tree for a child
  * (`ProcessManager.adoptOwnerlessChildTrees`, published from `index.ts`). Records the child on the
- * parent's `children` when it is not there yet; nothing when the parent has no node. */
+ * parent's `children` when it is not there yet and wakes the parent's owning architect
+ * (`routeArchitect`); nothing when the parent has no node. */
 export function childAdopted(state: LegionState, parent: IssueKey, child: IssueKey): Effect[] {
   const parentNode = state.issues[parent];
   if (!parentNode) return [];
   if (!parentNode.children.includes(child)) parentNode.children.push(child);
-  return routeActive(state, parent, {
+  return routeArchitect(state, parent, {
     type: "child-adopted",
     child,
     remaining: openChildren(state, parentNode),
@@ -984,9 +1015,9 @@ function reduceIssueUpdated(state: LegionState, event: DispatchIssueEvent): Effe
 /** A `todo` transition admits a root. A child under a live tree is owned by that tree's architect,
  * which runs it as a sub-architect phase worker (`spawn_worker` with `role: "architect"` -- the
  * spawn that writes its `in_progress`), so its `todo` is inert here: the parent's own
- * `child.status` event already wakes that architect (`reduceChildStatus`). A child with no live
- * ancestor tree (never admitted, or lingering/closed) is an orphan and admits as a root exactly
- * like a parentless issue, with one log line naming the parent. */
+ * `child.status` event already wakes the parent's owning architect (`reduceChildStatus`). A child
+ * with no live ancestor tree (never admitted, or lingering/closed) is an orphan and admits as a
+ * root exactly like a parentless issue, with one log line naming the parent. */
 function admitOnTodo(state: LegionState, node: IssueNode): Effect[] {
   if (!node.parent) return [{ kind: "admit", issue: node.key }];
   if (liveAncestorTree(state, node.key)) return [];
@@ -1003,7 +1034,8 @@ function admitOnTodo(state: LegionState, node: IssueNode): Effect[] {
 /** Lingers the closed issue's own active tree whether or not it has a parent -- a child admitted
  * as a root by a pre-LEGION-57 daemon releases its admission slot on close exactly like a root --
  * or, when that tree is still waiting for a slot instead, dequeues it (`dequeueIfWaiting`); then
- * wakes the parent's architect (`child-closed`, and `children-complete` on the last one). */
+ * wakes the parent's owning architect (`routeArchitect`: `child-closed`, and `children-complete`
+ * on the last one). */
 function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effect[] {
   const issue = dispatchIssuePayload(event.payload, event.key);
   const node = issue ? state.issues[issue.key] : undefined;
@@ -1019,14 +1051,14 @@ function reduceIssueClosed(state: LegionState, event: DispatchIssueEvent): Effec
   const parent = state.issues[node.parent];
   if (!parent) return result;
   result.push(
-    ...routeActive(state, node.parent, {
+    ...routeArchitect(state, node.parent, {
       type: "child-closed",
       child: issue.key,
       remaining: openChildren(state, parent),
     })
   );
   if (openChildren(state, parent) === 0) {
-    result.push(...routeActive(state, node.parent, { type: "children-complete" }));
+    result.push(...routeArchitect(state, node.parent, { type: "children-complete" }));
   }
   return result;
 }
@@ -1038,7 +1070,7 @@ function reduceChildStatus(state: LegionState, event: DispatchIssueEvent): Effec
   const from = stringValue(raw?.from);
   const to = stringValue(raw?.to);
   if (!child || !from || !to) return [];
-  return routeActive(state, event.key, { type: "child-status", child, from, to });
+  return routeArchitect(state, event.key, { type: "child-status", child, from, to });
 }
 
 /** The design gate an artifact event addresses: `state.gates[event.key]` only when the issue node
@@ -1069,7 +1101,7 @@ function reduceArtifactApproved(state: LegionState, event: DispatchIssueEvent): 
   gate.approvedVersion = version;
   gate.latestVersion = Math.max(gate.latestVersion, version);
   if (!designGateOpen(gate)) return [];
-  return routeActive(state, event.key, { type: "design-approved" });
+  return routeArchitect(state, event.key, { type: "design-approved" });
 }
 
 /** A human requested changes on the root's spec document (`ArtifactReviewEventPayload` with
@@ -1085,7 +1117,7 @@ function reduceArtifactChangesRequested(state: LegionState, event: DispatchIssue
   delete gate.approvedVersion;
   gate.latestVersion = Math.max(gate.latestVersion, version);
   const author = stringValue(asRecord(raw?.actor)?.id);
-  return routeActive(state, event.key, {
+  return routeArchitect(state, event.key, {
     type: "design-changes-requested",
     version,
     reason,

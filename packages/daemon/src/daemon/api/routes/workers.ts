@@ -13,6 +13,7 @@ import {
   type IssueStatus,
   isBystanderRole,
   type LegionState,
+  owningArchitect,
   type WorkerRoleClaim,
 } from "../../legion-state";
 import { sameProcess } from "../../runtime";
@@ -402,17 +403,21 @@ export async function handleWorkerReady(
  * completion from a superseded phase is rejected on the phase check alone). The phase is captured
  * and cleared synchronously, before the publish `await`, so a second concurrent completion for
  * the same phase always finds it already gone and 409s instead of both publishing. Publishes to
- * the tree's architect next: a genuine delivery failure (anything but "no live holder") restores
+ * the architect that owns the issue next (`owningArchitect`, LEGION-86: the child's claimed
+ * sub-architect, else up the parent chain, else the root; a sub-architect's own completion
+ * resolves from its parent): a genuine delivery failure (anything but "no live holder") restores
  * the captured phase and returns 502, so the worker retries and — since neither the phase nor the
  * claim moved — the retry is exactly idempotent. A missing architect holder never drops the
  * completion either: state (the source of truth) records it as `phases[issue].completed` instead
- * of clearing the phase, so `overseerCatchup` replays it on the architect's next catch-up and
- * `routeActive` treats the issue as having no active phase until the next assignment (a fresh
- * `spawn_worker` write) replaces this record. Either way, if the save itself fails, the
- * in-memory phase is restored before rethrowing (500) so a retry redoes the whole attempt. The
- * worker's role claim is never touched: the same agent stays claimed and resumes for its next
- * assignment. A missing holder is not a worker-facing failure: the response is 202 instead of the
- * normal 200, so a caller can tell delivery was uncertain without treating it as an error.
+ * of clearing the phase, so `overseerCatchup` replays it on the owning architect's next catch-up
+ * (a sub-architect owner is resumed best-effort right here so that catch-up happens; a root owner
+ * is resurrected by the resync probe) and `routeActive` treats the issue as having no active
+ * phase until the next assignment (a fresh `spawn_worker` write) replaces this record. Either
+ * way, if the save itself fails, the in-memory phase is restored before rethrowing (500) so a
+ * retry redoes the whole attempt. The worker's role claim is never touched: the same agent stays
+ * claimed and resumes for its next assignment. A missing holder is not a worker-facing failure:
+ * the response is 202 instead of the normal 200, so a caller can tell delivery was uncertain
+ * without treating it as an error.
  */
 export async function handlePhaseComplete(
   ctx: RouteContext,
@@ -422,6 +427,7 @@ export async function handlePhaseComplete(
   const summary = requiredString(body, "summary");
   const tree = rootForIssue(ctx.deps.state, grant.issue);
   if (!tree) throw new HttpError(404, `No Legion tree contains issue ${grant.issue}`);
+  const owner = owningArchitect(ctx.deps.state, grant.issue, grant.role);
   const token = roleToken(ctx.deps.state.project, grant.issue, grant.role);
   const claim = ctx.deps.state.roles[token];
   if (!claim || !("issue" in claim) || claim.sessionId !== grant.sessionId) {
@@ -443,7 +449,7 @@ export async function handlePhaseComplete(
     await writeStatus(ctx.deps.state, ctx.deps.dispatchClient, grant.issue, nextStatus);
   }
 
-  const architectToken = roleToken(ctx.deps.state.project, tree, "architect");
+  const architectToken = roleToken(ctx.deps.state.project, owner, "architect");
   let noHolder = false;
   try {
     await ctx.deps.envoyPublish(
@@ -460,7 +466,7 @@ export async function handlePhaseComplete(
       ctx.deps.state.phases[grant.issue] = phase;
       throw new HttpError(
         502,
-        `Envoy publish to the tree's architect failed: ${error instanceof Error ? error.message : String(error)}`
+        `Envoy publish to the owning architect ${architectToken} failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
     noHolder = true;
@@ -481,6 +487,13 @@ export async function handlePhaseComplete(
   } catch (error) {
     ctx.deps.state.phases[grant.issue] = phase;
     throw error;
+  }
+  if (noHolder) {
+    void ctx.deps.processManager.recoverRole(architectToken).catch((error) => {
+      console.error(
+        `[legion] phase-complete for ${grant.issue} (${grant.role}) is recorded; recovering its owning architect ${architectToken} failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
   }
   return Response.json(
     validateContractResponse(LegionDaemonApi.PhaseComplete.response, {}),

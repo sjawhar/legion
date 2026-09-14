@@ -4,7 +4,7 @@ import path from "node:path";
 import {
   controllerToken,
   type IssueKey,
-  parseRoleToken,
+  ROLE_TOPIC_PREFIX,
   roleToken,
   roleTopic,
 } from "@legion/contracts";
@@ -468,9 +468,19 @@ async function startDaemonLocked(
     processPath: environment.paneEnv.PATH,
     credentialHelper: daemonCredentialHelper(),
     // Through the listener, never `nats.publish`: a bare payload on a role subject is rejected by
-    // the listener's envelope validation and reaches no holder (see `ProcessManagerDeps.publishRole`).
+    // the listener's envelope validation and reaches no holder. A direct runtime notice that gets
+    // Envoy's normal 404 no-holder response resumes that role with derived catch-up, as the event
+    // pump does; it never holds or replays the raw notice.
     publishRole: (topic, json, dedupeKey) => {
-      deps.envoyPublish(topic, json, dedupeKey).catch((error) => {
+      void deps.envoyPublish(topic, json, dedupeKey).catch((error) => {
+        if (
+          error instanceof EnvoyPublishError &&
+          error.status === 404 &&
+          topic.startsWith(ROLE_TOPIC_PREFIX)
+        ) {
+          void recoverUndeliverableRole(topic.slice(ROLE_TOPIC_PREFIX.length));
+          return;
+        }
         console.error(`[legion] failed to publish a daemon notice to ${topic}:`, error);
       });
     },
@@ -491,6 +501,14 @@ async function startDaemonLocked(
     sleep: deps.sleep,
   });
 
+  async function recoverUndeliverableRole(role: string): Promise<void> {
+    try {
+      await processManager.recoverRole(role);
+    } catch (error) {
+      console.error(`[legion] onUndeliverable recovery failed for ${role}:`, error);
+    }
+  }
+
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(
@@ -500,19 +518,7 @@ async function startDaemonLocked(
   };
 
   const onUndeliverable = async (info: UndeliverableInfo): Promise<void> => {
-    try {
-      if (info.kind === "controller") {
-        await processManager.ensureController();
-        return;
-      }
-      const parsed = parseRoleToken(state.project, info.role);
-      if (!parsed || "controller" in parsed) return;
-      const root = rootForIssue(state, parsed.issue);
-      if (!root) return;
-      await processManager.resumeWorker(root, parsed.issue, parsed.role);
-    } catch (error) {
-      console.error(`[legion] onUndeliverable recovery failed for ${info.role}:`, error);
-    }
+    await recoverUndeliverableRole(info.role);
   };
 
   const eventDeps: EventPumpDeps = {

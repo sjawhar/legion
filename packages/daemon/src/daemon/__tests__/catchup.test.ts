@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { IssueKey } from "@legion/contracts";
+import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
 import { overseerCatchup, workerCatchup } from "../catchup";
 import { TokenManager } from "../github-apps";
@@ -142,6 +142,65 @@ describe("derived catch-up", () => {
         },
       ],
     });
+  });
+
+  it("lists a child's recorded completion on its sub-architect's snapshot, not the root's, once the child holds an architect claim", async () => {
+    const { state, root, child } = stateForTree();
+    state.issues[child].status = "in_progress";
+    const childPlanner = {
+      issue: child,
+      role: "planner",
+      summary: "Planned the child",
+      at: "2026-09-13T00:00:00.000Z",
+    };
+    const rootTester = {
+      issue: root,
+      role: "tester",
+      summary: "Verified",
+      at: "2026-09-13T00:01:00.000Z",
+    };
+    state.phases[child] = {
+      phase: "planner",
+      sessionId: "ses_planner",
+      completed: { summary: childPlanner.summary, at: childPlanner.at },
+    };
+    state.phases[root] = {
+      phase: "tester",
+      sessionId: "ses_tester",
+      completed: { summary: rootTester.summary, at: rootTester.at },
+    };
+
+    // No claim on the child: the root owns both completions.
+    expect((await overseerCatchup(state, root)).phaseCompletions).toEqual([
+      rootTester,
+      childPlanner,
+    ]);
+
+    state.roles[roleToken("omp", child, "architect")] = {
+      issue: child,
+      role: "architect",
+      sessionId: "ses_sub",
+    };
+    expect((await overseerCatchup(state, root)).phaseCompletions).toEqual([rootTester]);
+    expect((await overseerCatchup(state, child)).phaseCompletions).toEqual([childPlanner]);
+
+    // A completed sub-architect phase belongs to the architect above it: the root's snapshot.
+    const subArchitectDone = {
+      issue: child,
+      role: "architect",
+      summary: "Child tree done",
+      at: "2026-09-13T00:02:00.000Z",
+    };
+    state.phases[child] = {
+      phase: "architect",
+      sessionId: "ses_sub",
+      completed: { summary: subArchitectDone.summary, at: subArchitectDone.at },
+    };
+    expect((await overseerCatchup(state, root)).phaseCompletions).toEqual([
+      rootTester,
+      subArchitectDone,
+    ]);
+    expect((await overseerCatchup(state, child)).phaseCompletions).toEqual([]);
   });
 
   it("includes failed check names in a red CI catch-up verdict", async () => {

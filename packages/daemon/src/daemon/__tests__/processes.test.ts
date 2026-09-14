@@ -8641,6 +8641,36 @@ describe("ProcessManager", () => {
     expect(connectedSockets).toEqual([]);
   });
 
+  it("leaves a root architect's recovery to the resync probe instead of starting a worker", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "root-architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const token = roleToken("omp", root, "architect");
+    // Deliberately resumable: without resumeWorker's root-architect guard this claim would launch
+    // a worker pane for the root's architect, bypassing the resync probe that owns root recovery.
+    state.roles[token] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root_architect",
+      resumeSessionFile: sessionFile,
+    };
+    const {
+      manager: processes,
+      commands,
+      publications,
+    } = manager(state, {
+      config: config(stateDir),
+    });
+
+    await processes.resumeWorker(root, root, "architect");
+
+    expect(commands).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
   it("resumes a sub-architect (a child issue's architect role) through the same worker path, not the root-architect resurrection path", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
@@ -8685,7 +8715,15 @@ describe("ProcessManager", () => {
 
     await processes.handleException(exception(token));
 
-    expect(client.prompts).toEqual([JSON.stringify({ type: "catchup-worker", unhandled: [] })]);
+    expect(client.prompts).toEqual([
+      JSON.stringify({
+        type: "catchup-overseer",
+        gates: { [child]: {} },
+        childCounts: { [child]: { total: 0, open: 0, closed: 0 } },
+        prVerdicts: {},
+        phaseCompletions: [],
+      }),
+    ]);
     expect(publications).toEqual([]);
     expect(controlRequests).toEqual([]);
     expect(state.phases[child]).toEqual({ phase: "planner", sessionId: "ses_planner" });
@@ -16683,5 +16721,278 @@ describe("ProcessManager", () => {
     expect(commands.filter((c) => c[0] === "tmux" && c[3] === "kill-pane")).toEqual([]);
     expect(state.trees[root]).toMatchObject({ status: "closed" });
     expect(state.trees[root].locator).toBeUndefined();
+  });
+  describe("owning architect (LEGION-86)", () => {
+    const subArchitect = roleToken("omp", child, "architect");
+    const childArchitectTopic = roleTopic(subArchitect);
+    const rootArchitectTopic = roleTopic(roleToken("omp", root, "architect"));
+
+    /** The root's tree with one child issue; the child's sub-architect holds a live claim (a
+     * recorded pane, so it occupies one `worker_cap` slot) unless `claimSubArchitect` is false. */
+    function decomposedState(claimSubArchitect = true): LegionState {
+      const state = newLegionState("omp", 1);
+      tree(state);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [child] };
+      state.issues[child] = {
+        key: child,
+        title: "Child",
+        status: "in_progress",
+        parent: root,
+        children: [],
+      };
+      if (claimSubArchitect) {
+        state.roles[subArchitect] = {
+          issue: child,
+          role: "architect",
+          sessionId: "ses_sub",
+          readyConfirmedAt: 1,
+          generation: 1,
+          locator: {
+            runtime: "tmux",
+            tmuxSession: "legion-omp",
+            tmuxWindowId: "@42",
+            tmuxPaneId: "%9",
+            socketPath: "/state/workers/child-architect.sock",
+          },
+        };
+      }
+      return state;
+    }
+
+    it("publishes worker-queued for a child's tester to the child's sub-architect, not the root", async () => {
+      const stateDir = await temporaryDir();
+      const {
+        manager: processes,
+        state: managedState,
+        publications,
+      } = manager(decomposedState(), { config: config(stateDir, { workerCap: 2 }) });
+
+      // The live sub-architect holds one of the two slots; the root's planner takes the other.
+      expect(await processes.spawnWorker(root, root, "planner", "plan root")).toMatchObject({
+        status: "spawned",
+      });
+      const testerToken = roleToken("omp", child, "tester");
+      expect(await processes.spawnWorker(root, child, "tester", "verify child")).toEqual({
+        status: "queued",
+        roleToken: testerToken,
+      });
+
+      expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+      expect(publications).toContainEqual({
+        subject: childArchitectTopic,
+        json: JSON.stringify({ type: "worker-queued", issue: child, role: "tester" }),
+      });
+      expect(
+        publications
+          .filter((p) => p.json.includes("worker-queued"))
+          .every((p) => p.subject !== rootArchitectTopic)
+      ).toBe(true);
+    });
+
+    it("publishes worker-started for a promoted child worker to the child's sub-architect, not the root", async () => {
+      const stateDir = await temporaryDir();
+      const clients: FakeWorkerRpcClient[] = [];
+      const publications: Array<{ subject: string; json: string }> = [];
+      const { promise: started, resolve: resolveStarted } = Promise.withResolvers<void>();
+      const testerToken = roleToken("omp", child, "tester");
+      const workerStarted = JSON.stringify({
+        type: "worker-started",
+        issue: child,
+        role: "tester",
+      });
+      const { manager: processes, state: managedState } = manager(decomposedState(), {
+        config: config(stateDir, { workerCap: 2 }),
+        connectWorkerRpc: async () => {
+          const client = fakeWorkerRpcClient();
+          clients.push(client);
+          return client;
+        },
+        publishRole: (subject, json) => {
+          publications.push({ subject, json });
+          if (json === workerStarted) resolveStarted();
+        },
+      });
+
+      await processes.spawnWorker(root, root, "planner", "plan root");
+      await processes.spawnWorker(root, child, "tester", "verify child");
+      expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+      const plannerClaim = managedState.roles[roleToken("omp", root, "planner")];
+      if (!plannerClaim || !("issue" in plannerClaim)) throw new Error("planner claim missing");
+      plannerClaim.sessionId = "ses_planner";
+      await processes.workerReady(root, "planner", "ses_planner", plannerClaim.generation ?? 1);
+      expect(clients).toHaveLength(1);
+
+      clients[0]?.emitRunState("idle");
+      await started;
+
+      expect(managedState.workerAdmission.queue).toEqual([]);
+      expect(publications.filter((p) => p.json === workerStarted).map((p) => p.subject)).toEqual([
+        childArchitectTopic,
+      ]);
+    });
+
+    it("publishes launch-failed for a child's planner to the child's sub-architect, not the root", async () => {
+      const failingToken = roleToken("omp", child, "planner");
+      const { processes, state, managedState, publications, stateDir } = await workerCapFixture(3);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [child] };
+      state.issues[child] = {
+        key: child,
+        title: "Child",
+        status: "in_progress",
+        parent: root,
+        children: [],
+      };
+      state.roles[subArchitect] = { issue: child, role: "architect", sessionId: "ses_sub" };
+      state.roles[failingToken] = {
+        issue: child,
+        role: "planner",
+        pendingAssignment: { kind: "assignment", task: "plan child" },
+        // A deterministic, permanent failure: the session file never appears on a retry.
+        resumeSessionFile: path.join(stateDir, "missing-child-planner-session.json"),
+        launchFailures: 2,
+      };
+      state.workerAdmission.queue.push(failingToken);
+
+      await processes.reconcileWorkerAdmission();
+
+      const failingClaim = managedState.roles[failingToken];
+      if (!failingClaim || !("issue" in failingClaim)) throw new Error("planner claim missing");
+      expect(failingClaim.launchFailures).toBe(3);
+      expect(
+        publications.filter((p) => p.json.includes("launch-failed")).map((p) => p.subject)
+      ).toEqual([childArchitectTopic]);
+      expect(publications).toContainEqual({
+        subject: childArchitectTopic,
+        json: JSON.stringify({ type: "launch-failed", issue: child, role: "planner", failures: 3 }),
+      });
+    });
+
+    it("publishes worker-died for a child's implementer to the child's sub-architect, not the root", async () => {
+      const state = decomposedState();
+      const role: LegionRole = "implementer";
+      const token = roleToken("omp", child, role);
+      const stateDir = await temporaryDir();
+      const sessionFile = path.join(stateDir, "child-implementer.jsonl");
+      await writeFile(sessionFile, "{}", "utf8");
+      state.roles[token] = {
+        issue: child,
+        role,
+        sessionId: "ses_implementer",
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        generation: 1,
+        launchFailures: 2,
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%2",
+          socketPath: "/state/workers/child-implementer.sock",
+          ompSessionFile: sessionFile,
+        },
+      };
+      state.phases[child] = { phase: role, sessionId: "ses_implementer" };
+      const { manager: processes, publications } = manager(state, {
+        config: config(stateDir),
+        sleep: async () => {},
+        connectWorkerRpc: async () => {
+          throw new Error("dead shim socket");
+        },
+        run: async (command) => {
+          if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+            throw new Error("workspace provisioning is broken");
+          }
+          return liveRun(command);
+        },
+      });
+
+      await processes.handleException(exception(token));
+
+      const workerDied = JSON.stringify({ type: "worker-died", issue: child, role });
+      expect(publications.filter((p) => p.json === workerDied).map((p) => p.subject)).toEqual([
+        childArchitectTopic,
+      ]);
+    });
+
+    it("publishes worker-queued for a child's own architect role to the parent's architect, never the child's", async () => {
+      const stateDir = await temporaryDir();
+      const { manager: processes, publications } = manager(decomposedState(false), {
+        config: config(stateDir, { workerCap: 1 }),
+      });
+
+      expect(await processes.spawnWorker(root, root, "planner", "plan root")).toMatchObject({
+        status: "spawned",
+      });
+      expect(await processes.spawnWorker(root, child, "architect", "own this child")).toEqual({
+        status: "queued",
+        roleToken: subArchitect,
+      });
+
+      expect(publications).toContainEqual({
+        subject: rootArchitectTopic,
+        json: JSON.stringify({ type: "worker-queued", issue: child, role: "architect" }),
+      });
+      expect(publications.some((p) => p.subject === childArchitectTopic)).toBe(false);
+    });
+
+    it("addresses a child's worker to the child's sub-architect when one is claimed, to the root when none is, and the sub-architect itself to the root", async () => {
+      expect(addressingFragment("omp", child, child, "planner")).toBe(
+        `Legion addressing: your role topic is \`${roleTopic(roleToken("omp", child, "planner"))}\`; ` +
+          `the architect that owns your issue is \`${childArchitectTopic}\`; a sibling role on ` +
+          "your issue is your topic with the trailing `-<role>` replaced."
+      );
+      const extensionDir = path.resolve(import.meta.dir, "../../../../pi-envoy");
+      const lastLaunch = (commands: string[][]) =>
+        commands
+          .filter((command) => command[3] === "new-window" || command[3] === "split-window")
+          .at(-1)
+          ?.at(-1) ?? "";
+
+      // (i) A worker on a child whose sub-architect is claimed is addressed to that sub-architect.
+      const claimed = manager(decomposedState(), { config: config(await temporaryDir()) });
+      await claimed.manager.spawnWorker(root, child, "planner", "plan child");
+      expect(lastLaunch(claimed.commands)).toEndWith(
+        ` --mode rpc ${promptArgument(`${extensionDir}/roles/planner.md`, addressingFragment("omp", child, child, "planner"))}`
+      );
+      expect(lastLaunch(claimed.commands)).toContain(
+        `the architect that owns your issue is \\\`${childArchitectTopic}\\\``
+      );
+
+      // (ii) Without a claim the child's worker is addressed to the root; (iii) the child's own
+      // sub-architect is addressed to the root too -- the architect above it.
+      const unclaimed = manager(decomposedState(false), { config: config(await temporaryDir()) });
+      await unclaimed.manager.spawnWorker(root, child, "planner", "plan child");
+      expect(lastLaunch(unclaimed.commands)).toEndWith(
+        ` --mode rpc ${promptArgument(`${extensionDir}/roles/planner.md`, addressingFragment("omp", root, child, "planner"))}`
+      );
+      await unclaimed.manager.spawnWorker(root, child, "architect", "own this child");
+      expect(lastLaunch(unclaimed.commands)).toEndWith(
+        ` --mode rpc ${promptArgument(`${extensionDir}/roles/architect.md`, addressingFragment("omp", root, child, "architect"))}`
+      );
+    });
+
+    it("resumes a dead sub-architect with a catchup-overseer snapshot of its own subtree carrying its child's recorded completion", async () => {
+      const state = decomposedState();
+      const completed = { summary: "Planned", at: "2026-09-13T00:00:00.000Z" };
+      // The 404 path recorded the child's planner completion while the sub-architect was down.
+      state.phases[child] = { phase: "planner", sessionId: "ses_planner", completed };
+      const client = fakeWorkerRpcClient();
+      client.setRunStateSilently("idle");
+      const { manager: processes, publications } = manager(state, {
+        connectWorkerRpc: async () => client,
+      });
+
+      await processes.handleException(exception(subArchitect));
+
+      expect(client.prompts).toEqual([
+        JSON.stringify({
+          type: "catchup-overseer",
+          gates: { [child]: {} },
+          childCounts: { [child]: { total: 0, open: 0, closed: 0 } },
+          prVerdicts: {},
+          phaseCompletions: [{ issue: child, role: "planner", ...completed }],
+        }),
+      ]);
+      expect(publications).toEqual([]);
+    });
   });
 });

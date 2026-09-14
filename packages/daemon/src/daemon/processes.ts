@@ -20,7 +20,7 @@ import {
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
-import { type WorkerCatchupDeps, workerCatchup } from "./catchup";
+import { overseerCatchup, type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
@@ -33,6 +33,7 @@ import {
   isBystanderRole,
   type LegionState,
   liveAncestorTree,
+  owningArchitect,
   type PendingAssignment,
   staleQueueEntryReason,
   type TreeState,
@@ -194,18 +195,22 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the addressing fragment every root and phase-worker process gets in its system prompt,
- * so the model can address the architect (and derive a sibling's topic) without hand-encoding a
- * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses. */
+ * so the model can address the architect that owns its issue (and derive a sibling's topic)
+ * without hand-encoding a `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built
+ * token silently misses. `architectIssue` is the issue whose architect owns the launched process
+ * (`owningArchitect`, LEGION-86): the child itself for a worker on a child with a claimed
+ * sub-architect, the root otherwise, and the parent for a sub-architect; the root passes its own
+ * key. */
 export function addressingFragment(
   project: string,
-  treeKey: IssueKey,
+  architectIssue: IssueKey,
   issue: IssueKey,
   role: LegionRole
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
-  const architectTopic = roleTopic(roleToken(project, treeKey, "architect"));
+  const architectTopic = roleTopic(roleToken(project, architectIssue, "architect"));
   return (
-    `Legion addressing: your role topic is \`${ownTopic}\`; your tree's architect is ` +
+    `Legion addressing: your role topic is \`${ownTopic}\`; the architect that owns your issue is ` +
     `\`${architectTopic}\`; a sibling role on your issue is your topic with the trailing ` +
     "`-<role>` replaced."
   );
@@ -396,7 +401,7 @@ export class ProcessManager {
       config: deps.config,
       getWorkerClient: (token) => this.workerClients.get(token),
       persist: () => this.persist(),
-      publishArchitect: (treeKey, payload) => this.publishArchitect(treeKey, payload),
+      publishArchitect: (payload) => this.publishArchitect(payload),
       // Wrapped in trackLaunch so a promotion-triggered launch (drainWorkerQueue ->
       // promoteQueuedWorker -> here) is just as visible to closeTreeLocked's inFlightLaunches
       // fixed point as a direct spawnWorker launch is -- see launchWorker's own entry check for
@@ -812,7 +817,6 @@ export class ProcessManager {
             // its own `launchWorker` call end to end).
             const decision = await this.workerAdmission.resumeOrQueueExisting(
               token,
-              treeKey,
               issue,
               role,
               claim,
@@ -1089,7 +1093,7 @@ export class ProcessManager {
         `[legion] ${token} started its turn after the prompt wait expired; delivering the queued task now`
       );
       await this.commitPromptDelivery(token, issue, role, sessionId, pending);
-      this.publishArchitect(treeKey, { type: "worker-started", issue, role });
+      this.publishArchitect({ type: "worker-started", issue, role });
       return true;
     });
     if (committed) this.workerAdmission.promoteWorkerQueue();
@@ -1105,14 +1109,22 @@ export class ProcessManager {
     await this.workerAdmission.reconcileWorkerAdmission();
   }
 
+  /** The topic of the architect that owns `issue` for a wake about `role`'s lifecycle. */
+  private owningArchitectTopic(issue: IssueKey, role: LegionRole): string {
+    return roleTopic(
+      roleToken(this.deps.state.project, owningArchitect(this.deps.state, issue, role), "architect")
+    );
+  }
+
   private publishArchitect(
-    treeKey: IssueKey,
     payload:
       | { type: "worker-queued"; issue: IssueKey; role: LegionRole }
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
+      | { type: "worker-died"; issue: IssueKey; role: LegionRole }
+      | { type: "launch-failed"; issue: IssueKey; role: LegionRole; failures: number }
   ): void {
     this.deps.publishRole(
-      roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
+      this.owningArchitectTopic(payload.issue, payload.role),
       JSON.stringify(payload)
     );
   }
@@ -1251,7 +1263,6 @@ export class ProcessManager {
           );
           await this.workerAdmission.queueUnstartedPrompt(
             token,
-            root,
             issue,
             role,
             claim,
@@ -1324,7 +1335,7 @@ export class ProcessManager {
     if (verdict !== "died") return;
     await this.workerAdmission.removeFromQueue(token);
     if (retry && !this.isTreeGone(retry.treeKey, retry.issue)) {
-      this.publishWorkerDied(retry.treeKey, retry.issue, retry.role);
+      this.publishArchitect({ type: "worker-died", issue: retry.issue, role: retry.role });
     }
   }
 
@@ -1551,13 +1562,13 @@ export class ProcessManager {
         await this.persist();
         return;
       }
-      const { treeKey: retryTreeKey, issue, role } = retry;
+      const { issue, role } = retry;
       const failures = (claim.launchFailures ?? 0) + 1;
       claim.launchFailures = failures;
       // `===`, not `>=`: fires exactly once, at the tick `failures` first reaches the threshold —
       // see `launchWorker`'s own publish for why.
       if (failures === MAX_LAUNCH_FAILURES) {
-        this.publishWorkerDied(retryTreeKey, issue, role);
+        this.publishArchitect({ type: "worker-died", issue, role });
         await this.persist();
         return;
       }
@@ -2750,6 +2761,20 @@ export class ProcessManager {
     );
   }
 
+  /** Recovers a no-holder role with its state-derived catch-up. Root architects are deliberately
+   * left to the resync probe; `resumeWorker` records that decision. */
+  async recoverRole(token: string): Promise<void> {
+    const parsed = parseRoleToken(this.deps.state.project, token);
+    if (!parsed) return;
+    if ("controller" in parsed) {
+      await this.ensureController();
+      return;
+    }
+    const root = this.rootForIssue(parsed.issue);
+    if (!root) return;
+    await this.resumeWorker(root, parsed.issue, parsed.role);
+  }
+
   /**
    * Recovers a role's missed wake by probing its own worker locator (never the root's) and, if
    * dead, resuming the same agent through the existing `deliverToWorker` resume path (`--resume`,
@@ -2763,8 +2788,10 @@ export class ProcessManager {
    * `markWorkerDeadLocked` leaves behind for a confirmed-dead worker — is NOT that case: this is
    * the one scenario this method exists to recover, and `deliverToWorker`'s own resume-session
    * lookup (`claim.locator?.ompSessionFile ?? claim.resumeSessionFile`) already handles it once
-   * reached. Publishes `worker-died` to the tree architect only once the resume attempt itself
-   * fails at the launch-failure threshold.
+   * reached. Publishes `worker-died` to the architect that owns the role's issue only once the
+   * resume attempt itself fails at the launch-failure threshold. A sub-architect's catch-up is the
+   * `catchup-overseer` snapshot of its own subtree (`overseerCatchup`), a phase worker's the
+   * `catchup-worker` (LEGION-86; see the branch below).
    *
    * The catch-up is a `catchup` pending prompt, never an `assignment`: it does not write
    * `phases[issue]`, and it is not sent at all to a phase-worker role that is neither the issue's
@@ -2776,19 +2803,24 @@ export class ProcessManager {
    * prompted or relaunched. A sub-architect (`role === "architect"` on a child issue) is exempt,
    * exactly as in `retireIdleWorker`: an architect has no phase of its own -- it is never
    * `phases[issue].phase` once it has spawned a planner -- and it parks by design between wakes
-   * for the life of its subtree, so this is its only recovery path. The root architect does reach
-   * this method too, through the durable lane's `onUndeliverable` (only `handleException` routes it
-   * to `resurrect` instead), and exits at the no-resumable-identity guard below: its claim, written
-   * by `/process/started`, carries neither a locator nor a `resumeSessionFile`. A catch-up never
-   * replaces a queued architect assignment either: checked here to skip the fetch, and again
-   * inside the role's lock in `deliverToWorker` for a `spawn_worker` that lands while the
-   * catch-up is being computed. A catch-up queued behind the cap, a busy client, or a boot never
-   * publishes `worker-queued` (`WorkerAdmission.publishQueued`): the architect did not ask for it
-   * and cannot act on it, and before LEGION-107 every role-lane exception for one busy worker
-   * told the architect `worker-queued` again (LEGION-60's eight notices for one queued catch-up).
+   * for the life of its subtree, so this is its only recovery path. `recoverRole` reaches this
+   * method for a root architect too, but the root-role guard returns without a worker resume:
+   * its tree's resync probe owns root recovery. A catch-up never replaces a queued architect
+   * assignment either: checked here to skip the fetch, and again inside the role's lock in
+   * `deliverToWorker` for a `spawn_worker` that lands while the catch-up is being computed. A
+   * catch-up queued behind the cap, a busy client, or a boot never publishes `worker-queued`
+   * (`WorkerAdmission.publishQueued`): the architect did not ask for it and cannot act on it,
+   * and before LEGION-107 every role-lane exception for one busy worker told the architect
+   * `worker-queued` again (LEGION-60's eight notices for one queued catch-up).
    */
   async resumeWorker(root: IssueKey, issue: IssueKey, role: LegionRole): Promise<void> {
     const token = roleToken(this.deps.state.project, issue, role);
+    if (role === "architect" && issue === root) {
+      console.info(
+        `[legion] root architect ${token} has no worker resume path; the resync probe owns root recovery`
+      );
+      return;
+    }
     const claim = this.deps.state.roles[token];
     if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile)) {
       console.error(
@@ -2808,7 +2840,14 @@ export class ProcessManager {
       );
       return;
     }
-    const catchup = await workerCatchup(this.deps.state, issue, role, this.deps.workerCatchup);
+    // A sub-architect parks between wakes for the life of its subtree and, since LEGION-86, owns
+    // its child's phase completions: its revival wake is the same snapshot a root gets
+    // (`catchup-overseer`, scoped to its own subtree, carrying the completions recorded for it),
+    // not the phase-worker catch-up -- which carries no completions and would lose them.
+    const catchup =
+      role === "architect"
+        ? await overseerCatchup(this.deps.state, issue)
+        : await workerCatchup(this.deps.state, issue, role, this.deps.workerCatchup);
     try {
       await this.deliverToWorker(root, issue, role, {
         kind: "catchup",
@@ -2823,7 +2862,7 @@ export class ProcessManager {
       // the tick `failures` first reaches the threshold, never again on a later attempt against
       // the same already-past-threshold claim.
       if (failures === MAX_LAUNCH_FAILURES) {
-        this.publishWorkerDied(root, issue, role);
+        this.publishArchitect({ type: "worker-died", issue, role });
       }
     }
   }
@@ -3399,7 +3438,13 @@ export class ProcessManager {
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
-      const addressingPrompt = addressingFragment(this.deps.state.project, treeKey, issue, role);
+      const architectIssue = owningArchitect(this.deps.state, issue, role);
+      const addressingPrompt = addressingFragment(
+        this.deps.state.project,
+        architectIssue,
+        issue,
+        role
+      );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
       this.trackProcessSecrets(token);
@@ -3529,10 +3574,7 @@ export class ProcessManager {
       // rotation retries the same token repeatedly; `>=` would republish on each one past the
       // crossing).
       if (failures === MAX_LAUNCH_FAILURES) {
-        this.deps.publishRole(
-          roleTopic(roleToken(this.deps.state.project, treeKey, "architect")),
-          JSON.stringify({ type: "launch-failed", issue, role, failures })
-        );
+        this.publishArchitect({ type: "launch-failed", issue, role, failures });
       }
       await this.persist();
       throw error;
@@ -3783,13 +3825,6 @@ export class ProcessManager {
     for (const issue of Object.keys(this.deps.state.phases) as IssueKey[]) {
       if (this.rootForIssue(issue) === treeKey) delete this.deps.state.phases[issue];
     }
-  }
-
-  private publishWorkerDied(root: IssueKey, issue: IssueKey, role: LegionRole): void {
-    this.deps.publishRole(
-      roleTopic(roleToken(this.deps.state.project, root, "architect")),
-      JSON.stringify({ type: "worker-died", issue, role })
-    );
   }
 
   private publishController(

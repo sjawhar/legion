@@ -38,6 +38,7 @@ import humanTodo from "./fixtures/dispatch/legsmoke-3-issue.updated-human-todo.j
 const repo = "acme/widgets" as const;
 const root = "LEGSMOKE-1" as IssueKey;
 const child = "LEGSMOKE-2" as IssueKey;
+const grandchild = "LEGSMOKE-4" as IssueKey;
 const childBranch = `legion/${child}`;
 
 const prNumber = 17;
@@ -473,7 +474,7 @@ describe("reduceDispatchEvent", () => {
     });
   });
 
-  it("records a child and routes child-adopted to its active parent role", () => {
+  it("records a child and routes child-adopted to the parent's owning architect", () => {
     const state = rootState();
     const architect = roleToken(state.project, root, "architect");
 
@@ -1997,6 +1998,150 @@ describe("settleCiVerdict", () => {
   });
 });
 
+describe("routeArchitect", () => {
+  it("routes child-adopted to the parent's architect while a planner is the parent's active phase", () => {
+    const state = rootState();
+    const planner = claim(state, root, "planner");
+    const architect = roleToken(state.project, root, "architect");
+
+    const result = reduceDispatchEvent(
+      state,
+      dispatch(issueCreatedChild as unknown as DispatchFixture),
+      config
+    );
+    expect(result).toEqual([
+      { kind: "publish", role: architect, payload: { type: "child-adopted", child, remaining: 1 } },
+    ]);
+    expect(result.some((e) => e.kind === "publish" && e.role === planner)).toBe(false);
+  });
+
+  it("routes child-status to the parent's architect while a planner is its active phase", () => {
+    const state = rootState();
+    const planner = claim(state, root, "planner");
+    const architect = roleToken(state.project, root, "architect");
+
+    const result = reduceDispatchEvent(
+      state,
+      dispatch(childStatus as unknown as DispatchFixture),
+      config
+    );
+    expect(result).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-status", child, from: "triage", to: "todo" },
+      },
+    ]);
+    expect(result.some((e) => e.kind === "publish" && e.role === planner)).toBe(false);
+  });
+
+  it("routes child-closed and children-complete to the parent's architect while a planner is its active phase", () => {
+    const state = rootState();
+    attachChild(state);
+    const planner = claim(state, root, "planner");
+    const architect = roleToken(state.project, root, "architect");
+
+    const result = reduceDispatchEvent(
+      state,
+      dispatchIssueWithKey(issueClosed as unknown as DispatchFixture, child),
+      config
+    );
+    expect(result).toEqual([
+      {
+        kind: "publish",
+        role: architect,
+        payload: { type: "child-closed", child, remaining: 0 },
+      },
+      { kind: "publish", role: architect, payload: { type: "children-complete" } },
+    ]);
+    expect(result.some((e) => e.kind === "publish" && e.role === planner)).toBe(false);
+  });
+
+  it("routes design-approved and design-changes-requested to the root's architect while a planner is its active phase", () => {
+    const approved = gatedState();
+    const approvedPlanner = claim(approved.state, approved.issue, "planner");
+    const approvedResult = reduceDispatchEvent(
+      approved.state,
+      dispatch(artifactApproved as unknown as DispatchFixture),
+      config
+    );
+    expect(approvedResult).toEqual([
+      { kind: "publish", role: approved.architect, payload: { type: "design-approved" } },
+    ]);
+    expect(approvedResult.some((e) => e.kind === "publish" && e.role === approvedPlanner)).toBe(
+      false
+    );
+
+    const changes = gatedState(true);
+    const changesPlanner = claim(changes.state, changes.issue, "planner");
+    const changesResult = reduceDispatchEvent(
+      changes.state,
+      dispatch(artifactChangesRequested as unknown as DispatchFixture),
+      config
+    );
+    expect(changesResult).toEqual([
+      {
+        kind: "publish",
+        role: changes.architect,
+        payload: {
+          type: "design-changes-requested",
+          version: 12,
+          reason: "Split the migration into its own PR",
+          author: "sjawhar",
+        },
+      },
+    ]);
+    expect(changesResult.some((e) => e.kind === "publish" && e.role === changesPlanner)).toBe(
+      false
+    );
+  });
+
+  it("routes a grandchild's child-adopted to the child's sub-architect, not the root", () => {
+    const state = rootState();
+    attachChild(state);
+    const subArchitect = claim(state, child, "architect");
+    const created = dispatch(issueCreatedChild as unknown as DispatchFixture);
+
+    expect(
+      reduceDispatchEvent(
+        state,
+        {
+          ...created,
+          key: grandchild,
+          payload: { ...(created.payload as object), key: grandchild, parent: child },
+        },
+        config
+      )
+    ).toEqual([
+      {
+        kind: "publish",
+        role: subArchitect,
+        payload: { type: "child-adopted", child: grandchild, remaining: 1 },
+      },
+    ]);
+    expect(state.issues[child].children).toEqual([grandchild]);
+  });
+
+  it("routes an architect-only wake on a closed tree to the controller, like routeActive", () => {
+    const state = rootState("closed");
+    attachChild(state);
+
+    expect(
+      reduceDispatchEvent(state, dispatch(childStatus as unknown as DispatchFixture), config)
+    ).toEqual([
+      {
+        kind: "controller",
+        payload: {
+          type: "closed-tree-activity",
+          issue: root,
+          root,
+          event: { type: "child-status", child, from: "triage", to: "todo" },
+        },
+      },
+    ]);
+  });
+});
+
 describe("routeActive", () => {
   it("crashes loud on a persisted phase that names no recognized role", () => {
     const state = rootState();
@@ -2035,6 +2180,30 @@ describe("routeActive", () => {
         },
       },
     ]);
+  });
+
+  it("prefers the child's active phase worker for a PR event and falls back to the child's sub-architect, not the root, once that phase has completed", () => {
+    const state = rootState();
+    attachChild(state);
+    const subArchitect = claim(state, child, "architect");
+    const implementer = claim(state, child, "implementer");
+    addPr(state);
+    const rootArchitect = roleToken(state.project, root, "architect");
+
+    expect(
+      effects(state, commentPayload()).map((e) => (e.kind === "publish" ? e.role : e.kind))
+    ).toEqual([implementer]);
+
+    const phase = state.phases[child];
+    if (!phase) throw new Error("phase fixture missing");
+    phase.completed = { summary: "done", at: "2026-09-13T00:00:00.000Z" };
+    const afterCompletion = effects(state, commentPayload());
+    expect(afterCompletion.map((e) => (e.kind === "publish" ? e.role : e.kind))).toEqual([
+      subArchitect,
+    ]);
+    expect(afterCompletion.some((e) => e.kind === "publish" && e.role === rootArchitect)).toBe(
+      false
+    );
   });
 });
 

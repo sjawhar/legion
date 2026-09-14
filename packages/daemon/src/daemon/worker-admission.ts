@@ -103,7 +103,6 @@ type PromotionDecision =
   | {
       kind: "prompt";
       client: WorkerRpcClient;
-      treeKey: IssueKey;
       issue: IssueKey;
       role: LegionRole;
       sessionId: string;
@@ -127,8 +126,9 @@ export interface WorkerAdmissionDeps {
   config: { workerCap: number };
   getWorkerClient(token: string): WorkerRpcClient | undefined;
   persist(): Promise<void>;
+  /** Publishes `worker-queued`/`worker-started` to the architect that owns the payload's issue
+   * (`owningArchitect`, LEGION-86) -- resolved by the implementation, never passed in. */
   publishArchitect(
-    treeKey: IssueKey,
     payload:
       | { type: "worker-queued"; issue: IssueKey; role: LegionRole }
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
@@ -361,33 +361,29 @@ export class WorkerAdmission {
 
   /** The one rule for telling the architect `worker-queued`: once, when the role's token joins
    * the queue, and only for an architect assignment. A second task for an already-queued role
-   * replaces the queued task silently (the architect already heard the role is queued), and a
-   * daemon catch-up is queued silently — the architect did not ask for it and cannot act on it
-   * (LEGION-60's eight `worker-queued` for one queued catch-up; LEGION-100). */
+   * replaces the queued task silently, and a daemon catch-up is queued silently. */
   private publishQueued(
     newlyQueued: boolean,
-    treeKey: IssueKey,
     issue: IssueKey,
     role: LegionRole,
     pending: PendingAssignment
   ): void {
     if (!newlyQueued || pending.kind !== "assignment") return;
-    this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+    this.deps.publishArchitect({ type: "worker-queued", issue, role });
   }
 
   /**
    * Launches a brand-new worker pane when a running-worker slot is available (fewer than
    * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
-   * locator-less claim otherwise, publishing `worker-queued` to the tree's architect once, when
-   * the token joins the queue, and only for an architect assignment (`publishQueued`). Every
-   * queued task is promoted in priority order (FIFO within a tier) by `promoteWorkerQueue` once a
-   * slot frees up. Only the
-   * read-count/decide/reserve-or-enqueue step runs inside the `admissionLock` critical section
-   * (pure in-memory claim/queue mutation only — no tmux, workspace, or save I/O), so a
-   * concurrent decision for a different role can never observe the same free slot before this
-   * one commits it, and never blocks behind this decision's own `saveState`/publish; the actual
-   * `launchWorker` call runs outside the lock so a slow or hung launch never wedges every other
-   * admission decision.
+   * locator-less claim otherwise, publishing `worker-queued` to the architect that owns the issue
+   * once, when the token joins the queue, and only for an architect assignment (`publishQueued`).
+   * Every queued task is promoted in priority order (FIFO within a tier) by
+   * `promoteWorkerQueue` once a slot frees up. Only the read-count/decide/reserve-or-enqueue step
+   * runs inside the `admissionLock` critical section (pure in-memory claim/queue mutation only —
+   * no tmux, workspace, or save I/O), so a concurrent decision for a different role can never
+   * observe the same free slot before this one commits it, and never blocks behind this decision's
+   * own `saveState`/publish; the actual `launchWorker` call runs outside the lock so a slow or
+   * hung launch never wedges every other admission decision.
    */
   async launchOrQueue(
     token: string,
@@ -408,7 +404,7 @@ export class WorkerAdmission {
     });
     if (!admitted) {
       await this.deps.persist();
-      this.publishQueued(newlyQueued, treeKey, issue, role, pending);
+      this.publishQueued(newlyQueued, issue, role, pending);
       return { status: "queued", roleToken: token };
     }
     try {
@@ -524,7 +520,6 @@ export class WorkerAdmission {
    * idle/dead event, the 60 s sweep) or the late start. The caller holds `token`'s role lock. */
   async queueUnstartedPrompt(
     token: string,
-    treeKey: IssueKey,
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim,
@@ -537,10 +532,9 @@ export class WorkerAdmission {
     });
     const verdict = reason === "no-turn" ? await this.recordPromptFailure(token) : undefined;
     await this.deps.persist();
-    // Two gates, both LEGION-101-era: no `worker-queued` when the failure escalated to
-    // `worker-died` (nothing is queued any more; the verdict is the notice — LEGION-93), and
-    // otherwise only once, for an assignment that newly joined the queue (`publishQueued`).
-    if (verdict !== "died") this.publishQueued(newlyQueued, treeKey, issue, role, pending);
+    // Two gates: no `worker-queued` when the failure escalated to `worker-died`, and otherwise
+    // only once, for an assignment that newly joined the queue.
+    if (verdict !== "died") this.publishQueued(newlyQueued, issue, role, pending);
   }
 
   /**
@@ -566,7 +560,6 @@ export class WorkerAdmission {
    */
   async resumeOrQueueExisting(
     token: string,
-    treeKey: IssueKey,
     issue: IssueKey,
     role: LegionRole,
     claim: WorkerRoleClaim,
@@ -589,7 +582,7 @@ export class WorkerAdmission {
     });
     if (!shouldPrompt) {
       await this.deps.persist();
-      this.publishQueued(newlyQueued, treeKey, issue, role, pending);
+      this.publishQueued(newlyQueued, issue, role, pending);
       return { kind: "queued" };
     }
     let notStarted = false;
@@ -599,7 +592,7 @@ export class WorkerAdmission {
       if (!(error instanceof PromptNotStarted)) throw error;
       notStarted = true;
       console.error(`[legion] ${token}: ${error.message}; queued for promotion`);
-      await this.queueUnstartedPrompt(token, treeKey, issue, role, claim, pending, error.reason);
+      await this.queueUnstartedPrompt(token, issue, role, claim, pending, error.reason);
       return { kind: "queued" };
     } finally {
       this.release(token);
@@ -774,7 +767,6 @@ export class WorkerAdmission {
         return {
           kind: "prompt",
           client,
-          treeKey,
           issue: parsed.issue,
           role: parsed.role,
           sessionId: claim.sessionId,
@@ -837,7 +829,7 @@ export class WorkerAdmission {
       // extra trigger here would just start a second, separately-tracked drain pass racing the
       // one already in progress.
       this.launching.delete(token);
-      this.deps.publishArchitect(decision.treeKey, {
+      this.deps.publishArchitect({
         type: "worker-started",
         issue: decision.issue,
         role: decision.role,
@@ -853,7 +845,7 @@ export class WorkerAdmission {
         decision.claim,
         decision.pending
       );
-      this.deps.publishArchitect(decision.treeKey, {
+      this.deps.publishArchitect({
         type: "worker-started",
         issue: decision.issue,
         role: decision.role,

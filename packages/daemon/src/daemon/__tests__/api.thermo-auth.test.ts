@@ -58,6 +58,7 @@ function startApi(
       cancelBootWatchdog: () => {},
       spawnWorker: async () => ({ status: "spawned" as const, roleToken: "stub-role-token" }),
       workerReady: () => {},
+      recoverRole: async () => {},
       rejectIfTreeGone: () => {},
       mutateLiveRoleClaim: async (_tree, _issue, _token, fn) => fn(),
       beginLinger: () => {},

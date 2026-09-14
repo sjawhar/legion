@@ -1,7 +1,14 @@
-import { type IssueKey, isLegionRole, type LegionRole } from "@legion/contracts";
+import type { IssueKey, LegionRole } from "@legion/contracts";
 import type { CommandRunner, CommandRunnerOptions } from "../state/fetch";
 import { appRoleForLegionRole, buildRoleEnv, type TokenManager } from "./github-apps";
-import { type DesignGate, designGateOpen, type LegionState, type PrState } from "./legion-state";
+import {
+  assertKnownPhase,
+  type DesignGate,
+  designGateOpen,
+  type LegionState,
+  owningArchitect,
+  type PrState,
+} from "./legion-state";
 import type { LegionEventPayload } from "./reducers";
 
 type JsonRecord = Record<string, unknown>;
@@ -27,7 +34,11 @@ export interface CatchupOverseerPayload extends LegionEventPayload {
   >;
   /** Phases that finished with no live architect holder to deliver `phase-complete` to
    * (`state.phases[issue].completed`, set by `handlePhaseComplete`), replayed here so a
-   * resurrected or reconnecting architect learns them instead of losing them. */
+   * resurrected or reconnecting architect learns them instead of losing them -- only those the
+   * architect this snapshot is for owns (`owningArchitect`, LEGION-86): a child's completion
+   * belongs to its claimed sub-architect's snapshot, never the root's; a sub-architect's own
+   * completed phase belongs to the architect above it. `gates`, `childCounts`, and `prVerdicts`
+   * keep covering the whole subtree: they are informational, not wakes to act on. */
   phaseCompletions: Array<{ issue: IssueKey; role: LegionRole; summary: string; at: string }>;
 }
 
@@ -135,12 +146,11 @@ export async function overseerCatchup(s: LegionState, tree: IssueKey): Promise<L
   for (const issue of [...issues].sort()) {
     const phase = s.phases[issue];
     if (!phase?.completed) continue;
-    if (!isLegionRole(phase.phase)) {
-      throw new Error(`state.phases[${issue}] has an unrecognized phase: ${phase.phase}`);
-    }
+    const role = assertKnownPhase(issue, phase);
+    if (owningArchitect(s, issue, role) !== tree) continue;
     phaseCompletions.push({
       issue,
-      role: phase.phase,
+      role,
       summary: phase.completed.summary,
       at: phase.completed.at,
     });
