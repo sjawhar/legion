@@ -107,6 +107,26 @@ function spawnStatus(
     : undefined;
 }
 
+/** The one line both refusals of a foreign same-generation registration write (LEGION-95) — the
+ * in-memory `boot.sessionId` check before the lease and the persisted-hash check inside the lock
+ * answer the same 403 and MUST log through this one builder so the two cannot drift: the claim
+ * token, the session that was refused, the session the claim already registered at this
+ * generation, and whether `/worker/ready` confirmed that registration — so the next such incident
+ * is diagnosable from the daemon log alone. `registered` is passed rather than read from the claim
+ * because the in-memory path judges from the mint record (`boot.sessionId`) before the lock. */
+function foreignRegistrationLine(
+  token: string,
+  claim: WorkerRoleClaim,
+  registered: string,
+  sessionId: string
+): string {
+  const ready =
+    claim.readyConfirmedAt === undefined
+      ? "not yet ready"
+      : `ready confirmed at ${new Date(claim.readyConfirmedAt).toISOString()}`;
+  return `[legion] ${token}: refused /worker/started from session ${sessionId}: generation ${claim.generation} already registered session ${registered} (${ready}); the claim, its locator, and its lease are unchanged`;
+}
+
 export async function handleWorkerSession(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -181,7 +201,9 @@ export async function handleWorkerSession(
  * a live worker, or delivered from the claim's `pendingAssignment` at `/worker/ready`;
  * `/phase/complete` only deletes, restores, or marks the record completed), so a relaunch of a
  * worker whose phase already finished registers as a bystander and the newer phase keeps its
- * completion route and its wakes. */
+ * completion route and its wakes. A claim that already registered a session at this generation
+ * accepts only that session again (idempotent, secret reissued) and refuses any other with 403
+ * and one log line, on the in-memory and the persisted-hash path alike (LEGION-95). */
 export async function handleWorkerStarted(
   ctx: RouteContext,
   body: Record<string, unknown>
@@ -207,6 +229,7 @@ export async function handleWorkerStarted(
   const boot = resolved.boot;
   if (boot) {
     if (boot.sessionId !== undefined && boot.sessionId !== sessionId) {
+      console.warn(foreignRegistrationLine(token, claim, boot.sessionId, sessionId));
       throw new HttpError(403, "Invalid worker boot token");
     }
     if (claim.generation !== boot.generation) {
@@ -255,6 +278,15 @@ export async function handleWorkerStarted(
       !sameProcess(current.locator, capturedLocator)
     ) {
       throw new HttpError(409, "Stale worker generation");
+    }
+    // `launchWorker` starts each generation with no session and a fresh token. Once registered,
+    // only that session may replay the token. Recheck the persisted claim under the lock because
+    // a restart discards the mint record, and reject before writing. Never probe liveness here:
+    // a dead worker must relaunch at a new generation. Use 403 so the extension exits the
+    // foreign process.
+    if (current.sessionId !== undefined && current.sessionId !== sessionId) {
+      console.warn(foreignRegistrationLine(token, current, current.sessionId, sessionId));
+      throw new HttpError(403, "Invalid worker boot token");
     }
     // Build the new claim as a local draft rather than mutating the live one in place, so a
     // save failure can be rolled back by simply restoring the old reference — leaving the
