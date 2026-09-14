@@ -1,46 +1,36 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts";
-import {
-  dispatchSubscriptionTopic,
-  dispatchTopicLabel,
-  subscriptionRemovedTopics,
-} from "../dispatch-subscribe";
+import { dispatchFollowNotice, subscriptionRemovedTopics } from "../dispatch-subscribe";
 
-describe("dispatchSubscriptionTopic", () => {
-  test("returns the native issue topic from a successful dispatch result", () => {
+describe("dispatchFollowNotice", () => {
+  test("names the ask, its issue, and the opt-in subscribe line for a result that follows an ask", () => {
     expect(
-      dispatchSubscriptionTopic({
-        issue: "DSP-42",
-        topic: dispatchIssueSubject("DSP-42", ">"),
+      dispatchFollowNotice({ issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } })
+    ).toEqual({
+      ask: "ask-1",
+      text: "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.",
+    });
+  });
+
+  test("names a project document by project/slug with the document topic", () => {
+    expect(
+      dispatchFollowNotice({
+        project: "CORE",
+        document: "CORE/design-notes",
+        artifact: "artifact-1",
         ask: "ask-1",
-      })
-    ).toBe(dispatchIssueSubject("DSP-42", ">"));
-  });
-
-  test("refuses an absent, non-string, or foreign topic", () => {
-    expect(dispatchSubscriptionTopic(undefined)).toBeNull();
-    expect(dispatchSubscriptionTopic({ topic: 42 })).toBeNull();
-    expect(
-      dispatchSubscriptionTopic({ topic: "notifications.github.owner.repo.issue.42.>" })
-    ).toBeNull();
-  });
-});
-
-describe("dispatchTopicLabel", () => {
-  test("renders an issue topic as its bare key", () => {
-    expect(dispatchTopicLabel(dispatchIssueSubject("DSP-42", ">"))).toBe("DSP-42");
-  });
-
-  test("renders a document topic as project/slug", () => {
-    expect(dispatchTopicLabel(dispatchDocumentSubject("CORE", "design-notes", ">"))).toBe(
-      "CORE/design-notes"
+        follows: { ask: "ask-1" },
+      })?.text
+    ).toBe(
+      "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
     );
   });
 
-  test("falls back to the raw topic for an unrecognised shape", () => {
-    expect(dispatchTopicLabel("notifications.role.legion-controller")).toBe(
-      "notifications.role.legion-controller"
-    );
+  test("returns null for reads, unfollows, and results without an owner", () => {
+    expect(dispatchFollowNotice(undefined)).toBeNull();
+    expect(dispatchFollowNotice({ issue: "DSP-42" })).toBeNull();
+    expect(dispatchFollowNotice({ ask: "ask-1" })).toBeNull();
+    expect(dispatchFollowNotice({ follows: { ask: "ask-1" } })).toBeNull();
+    expect(dispatchFollowNotice({ follows: { ask: 7 }, issue: "DSP-42" })).toBeNull();
   });
 });
 

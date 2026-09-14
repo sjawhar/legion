@@ -64,11 +64,11 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   `sessions/<claude-pid>/` is pruned at startup when its pid is gone — never deleted on shutdown,
   because Claude Code restarts the server inside the same `claude` process.
 - Shared tool logic remains shared: use `resolveDispatchConfig`, `executeDispatchTool`,
-  `dispatchToolSpecs`, `formatOpenAsksSummary`, and `dispatchTopicLabel`; re-read Dispatch
-  configuration on every tool call. Successful Dispatch mutations subscribe their returned topic and
-  announce a newly followed one once; reads do not. Rejected targeted frames answer Dispatch with
-  `Invalid Dispatch targeted delivery frame`; malformed ones without a message id are logged and
-  dropped — never shown to the model.
+  `dispatchToolSpecs`, `formatOpenAsksSummary`, and `dispatchFollowNotice`; re-read Dispatch
+  configuration on every tool call. No Dispatch write subscribes the session to a topic; a write
+  that makes the session follow an ask announces that once per ask; reads do not. Rejected targeted
+  frames answer Dispatch with `Invalid Dispatch targeted delivery frame`; malformed ones without a
+  message id are logged and dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.
 - Deployment is `--channels plugin:claude-envoy-bridge@legion-plugins` under managed settings

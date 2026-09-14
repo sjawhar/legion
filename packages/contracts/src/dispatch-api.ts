@@ -618,6 +618,25 @@ export interface SubscriptionRemovedEventPayload {
   readonly request_event_id?: number;
 }
 
+/**
+ * A session that receives an ask's answer, edits, resolution, and replies on its own
+ * agent topic: the asker, every session that replied, and any session a human added.
+ * A session may leave (or rejoin) only itself; a human may add or remove any session.
+ */
+export interface AskFollower {
+  readonly session_id: string;
+  readonly since: string;
+}
+
+// AskFollowerEventPayload is the wire payload of ask.follower_added and
+// ask.follower_removed: which session joined or left which ask, and who did it. The
+// removed event also reaches the removed session's own topic directly.
+export interface AskFollowerEventPayload {
+  readonly ask_id: string;
+  readonly session_id: string;
+  readonly by: Actor;
+}
+
 export interface RepoProjectUpdatedEventPayload {
   readonly mapping: RepoProject;
   readonly deleted: boolean;
@@ -734,6 +753,14 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "subscription.removed";
       readonly payload: SubscriptionRemovedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "ask.follower_added";
+      readonly payload: AskFollowerEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "ask.follower_removed";
+      readonly payload: AskFollowerEventPayload;
     });
 
 export type Event = DispatchEvent;
@@ -904,6 +931,12 @@ export interface AskRead {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
+  /** The sessions this ask's answer and replies reach directly, oldest first. */
+  readonly followers: AskFollower[];
+}
+
+export interface AskFollowersRead {
+  readonly followers: AskFollower[];
 }
 
 export interface MessageRead {
@@ -1118,4 +1151,10 @@ export const SubscriptionRemovedEventPayloadSchema = z.object({
   topics: z.array(z.string()).optional(),
   pending: z.boolean().optional(),
   request_event_id: z.number().int().positive().optional(),
+});
+
+export const AskFollowerEventPayloadSchema = z.object({
+  ask_id: z.string().optional(),
+  session_id: z.string().optional(),
+  by: z.object({ kind: z.string(), id: z.string().optional() }).passthrough().optional(),
 });

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -389,6 +390,9 @@ func createAskBlock(
 		returning id::text, created_at
 	`, owner.IssueKey, ownerArtifactID, block.id, artifactID, authorJSON, block.question, options, block.multiple, block.urgency).Scan(&ask.ID, &ask.CreatedAt); err != nil {
 		return model.Ask{}, fmt.Errorf("create ask block row: %w", err)
+	}
+	if err := asks.FollowAuthor(ctx, tx, ask.ID, author); err != nil {
+		return model.Ask{}, err
 	}
 	ask.IssueKey = owner.IssueKey
 	ask.ArtifactID = ownerArtifactID

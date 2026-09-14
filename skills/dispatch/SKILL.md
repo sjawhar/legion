@@ -97,7 +97,7 @@ Architects create newly tracked child work with:
 dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3 })
 ```
 `labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. Set `priority` on creation only when the human's intent makes the bucket clear; otherwise priority remains the human's decision. It returns
-`details` `{ issue, topic }`. Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
+`details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
 ## Search first
@@ -131,7 +131,7 @@ dispatch_ask({
   anchor?: { artifact, quote, occurrence? },
 })
 ```
-It returns `details` `{ issue, topic, ask }` for an issue or `{ project, artifact, document, topic, ask }` for a project document.
+It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ project, artifact, document, ask, follows: { ask } }` for a project document: you follow the ask you opened (see [Following](#following)).
 
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
@@ -248,7 +248,7 @@ It returns live or versioned markdown with open marks. `issue` with an omitted `
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, summary? })
 ```
-It returns issue or project-document owner details plus `applied`, optional `version`, and its write `topic`. `ops` is an array of this
+It returns issue or project-document owner details plus `applied` and optional `version`. `ops` is an array of this
 exact `EditOp` shape:
 
 ```ts
@@ -324,7 +324,8 @@ Add feedback with:
 dispatch_comment({ issue?, project?, artifact?, ref?, quote?, occurrence?, body, reply_to?, reply_to_ask?, turn? })
 ```
 
-It returns issue or project-document owner details plus `comment` and, for writes, `topic`.
+It returns issue or project-document owner details plus `comment`; a `reply_to_ask` reply also returns `ask` and `follows: { ask }`,
+because replying to an ask makes you one of its followers (see [Following](#following)).
 `ref` names the owner (an issue or project-document reference) in place of `issue`/`project`.
 `quote` requires `artifact`; its anchor is pinned to the containing block while retaining the quote
 for display. Omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no
@@ -342,7 +343,7 @@ Propose an exact replacement instead of describing it:
 dispatch_suggest({ issue?, project?, artifact, ref?, quote, replace_with, body?, occurrence? })
 ```
 
-It returns issue or project-document owner details plus `comment` and its write `topic`. A human accepts or rejects a suggestion.
+It returns issue or project-document owner details plus `comment`. A human accepts or rejects a suggestion.
 Errors: `TARGET_AMBIGUOUS` (add `occurrence`), `TARGET_NOT_FOUND` (re-read first), `INVALID_ANCHOR`/`ANCHOR_MISSING`/`ANCHOR_ORPHANED`
 (bad, unwritten, or stale quote), `INVALID_MARKDOWN`/`DOC_SCHEMA` (malformed content), `CAP_EXCEEDED`, `ISSUE_CLOSED`.
 
@@ -361,8 +362,8 @@ dispatch_artifact({ issue?, project?, name: "load-test-results.md", content: "# 
 ```
 
 Exactly one of `issue` and `project` is required. A project upload creates an unlinked project document; it must not include `artifact`.
-Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact`, `version`, and its
-write `topic`. Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
+Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact` and `version`.
+Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
 slug also arrives on `artifact.created` events.
@@ -396,7 +397,7 @@ pull request is where it is summarised. One message that a human reads beats ten
 dispatch_message({ issue, body })
 ```
 
-It returns `details` `{ issue, topic, message }`. `body` is capped at 2,000 characters. A message is not a decision
+It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
 (`dispatch_ask`) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
 ### Targeted agent messages
@@ -423,13 +424,31 @@ through Envoy or the hub. A bearer that targets over HTTP names its own session 
 target only a session that advertises the mode you want. Sending to a session with no issue
 (`POST /api/v1/agents/{session_id}/messages`) stays human-only.
 
+## Following
+
+An ask has followers: every session that wrote to it — the session that opened it and every session that replied with
+`dispatch_comment({ reply_to_ask })` — plus any session a human adds from the ask card. The ask's answer, edits, resolution, and
+every reply on it reach each follower's own agent topic directly, whether or not the writer was a human and whatever the issue's
+route. The tool result says so (`You follow this ask: its answer and replies reach you directly.`) and carries `details.follows.ask`;
+the host tells you once per ask. Leave a thread you no longer need, or rejoin one, with:
+
+```ts
+dispatch_follow({ ask, action: "follow" | "unfollow" })
+```
+
+`ask` is the full ask id or a `dispatch://KEY/ask/<id>` reference. A human may also remove you from the ask card; either way you are
+told with an `ask.follower_removed` notice, and a human adding you arrives as `ask.follower_added`.
+
+No write subscribes you to an issue or document. Following covers your own asks and the threads you joined; everything else on the
+owner — other sessions' asks, comments, messages, status changes — reaches you only if you subscribe to the owner topic yourself.
+Every write result names that line: `envoy_subscribe notifications.dispatch.issue.<KEY>.>` for an issue,
+`envoy_subscribe notifications.dispatch.document.<PROJECT>.<SLUG>.>` for a project document. The owner topic carries every Dispatch
+event; `notify` only controls agent wake and routed delivery. A human may unsubscribe you from the issue or document header; you
+are told with a `subscription.removed` notice when that happens.
+
 ## What comes back
 
-A write result's `details.topic` subscribes the host to its owner, and the first such subscription on an issue or document also tells
-you so (an already-subscribed write stays quiet — no repeat notice). Issue writes use `notifications.dispatch.issue.<KEY>.>`;
-project-document writes use `notifications.dispatch.document.<PROJECT>.<SLUG>.>`. The owner topic carries every Dispatch event; `notify`
-only controls agent wake and routed delivery. A human may unsubscribe you from the issue or document header; you are told with a
-`subscription.removed` notice when that happens. After a restart, catch up with:
+After a restart, catch up with:
 
 ```ts
 dispatch_read({ issue?, project?, artifact?, ref? })

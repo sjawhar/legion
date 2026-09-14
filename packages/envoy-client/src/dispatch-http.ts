@@ -336,6 +336,15 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", id]);
   }
 
+  /** A bearer follows only its own session: the body names it and the path repeats it. */
+  async followAsk(id: string, sessionId: string, actor: Actor): Promise<void> {
+    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+
+  async unfollowAsk(id: string, sessionId: string, actor: Actor): Promise<void> {
+    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+
   async getComment(id: string): Promise<CommentRead> {
     return this.#json("GET", ["api", "v1", "comments", id]);
   }

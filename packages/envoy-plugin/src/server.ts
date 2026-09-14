@@ -5,7 +5,6 @@ import { agentSubject, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
-import { dispatchSubscriptionTopic } from "@legion/envoy-client/dispatch-subscribe";
 import { machineID } from "@legion/envoy-client/machine";
 import {
   envoyToolSpecs,
@@ -267,29 +266,6 @@ export default async (input: { serverUrl: URL }) => {
           // Best-effort: drop the deleted session's interests so routing stops.
           envoy.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
         }
-      }
-    },
-    "tool.execute.after": async (
-      input: { tool: string; sessionID: string; callID: string; args: unknown },
-      output: { title: string; output: string; metadata: unknown }
-    ) => {
-      // Native Dispatch tools return `DispatchToolResult.details` in OpenCode
-      // output metadata, so only mutations with a Dispatch topic are followed.
-      // Best-effort — a subscribe failure must never surface to the model.
-      const topic = dispatchSubscriptionTopic(output.metadata);
-      if (!topic) return;
-      try {
-        await envoy.subscribe({
-          sessionID: input.sessionID,
-          directory: cwd,
-          topics: [topic],
-          port: currentPort() ?? 0,
-          title: activeSessionTitle ?? "",
-          driving: true,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn(`[envoy-plugin] dispatch auto-subscribe failed: ${message}`);
       }
     },
     // Cleanup hook (used by tests; production relies on process 'exit').

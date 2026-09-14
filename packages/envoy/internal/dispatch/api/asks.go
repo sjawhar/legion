@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -190,6 +191,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind).Scan(&ask.CreatedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := asks.FollowAuthor(r.Context(), tx, rowID, actor); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -587,11 +592,17 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	followers, err := asks.Followers(r.Context(), s.deps.Store.Pool, ask.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, struct {
-		Ask     model.Ask       `json:"ask"`
-		Replies []model.Comment `json:"replies"`
-		Edits   []model.AskEdit `json:"edits"`
-	}{Ask: ask, Replies: replies, Edits: edits})
+		Ask       model.Ask           `json:"ask"`
+		Replies   []model.Comment     `json:"replies"`
+		Edits     []model.AskEdit     `json:"edits"`
+		Followers []model.AskFollower `json:"followers"`
+	}{Ask: ask, Replies: replies, Edits: edits, Followers: followers})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,

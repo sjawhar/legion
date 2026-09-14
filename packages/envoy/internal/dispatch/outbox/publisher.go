@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -233,15 +234,50 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 			return err
 		}
 	}
+	return publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered)
+}
+
+// publishFollowerRoutes delivers an ask's answer, edit, resolution, and every reply on it
+// to each session following the ask (the asker, every session that replied, and any
+// session a human added), on the session's own topic. Unlike the route and author routes
+// this ignores Notify: an agent's reply on an ask must still reach the other followers,
+// who otherwise learn of it only by subscribing to the whole issue. The event's own actor
+// is skipped, and a topic the route already reached is not published twice.
+func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+	var askID string
+	switch event.Type {
+	case "ask.answered", "ask.edited", "ask.resolved":
+		askID = payloadString(event.Payload, "id")
+	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
+		askID = payloadString(event.Payload, "ask_id")
+	}
+	if askID == "" {
+		return nil
+	}
+	followers, err := asks.Followers(ctx, deps.Store.Pool, askID)
+	if err != nil {
+		return err
+	}
+	for _, follower := range followers {
+		if event.Actor.Kind == "session" && event.Actor.ID == follower.SessionID {
+			continue
+		}
+		routed := item
+		routed.Topic = contracts.AgentTopicPrefix + follower.SessionID
+		if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
+			return fmt.Errorf("publish follower route to %q: %w", follower.SessionID, err)
+		}
+	}
 	return nil
 }
 
-// publishAuthorRoutes delivers a human comment-thread action or ask resolution directly to
-// the involved sessions' own topics, regardless of the issue's route (which may point at an
-// entirely different reviewer) and regardless of whether the event's owner is an issue or a
-// project document (which has no route at all). Without this, the agent that asked the
-// question, started the thread, or is the thread's own root author never learns about the
-// human's reply, resolution, reopening, or edit.
+// publishAuthorRoutes delivers a human comment-thread action directly to the involved
+// sessions' own topics, regardless of the issue's route (which may point at an entirely
+// different reviewer) and regardless of whether the event's owner is an issue or a project
+// document (which has no route at all). Without this, the agent that started the thread
+// or is the thread's own root author never learns about the human's reply, resolution,
+// reopening, or edit. Ask threads are not walked here: their asker and repliers are the
+// ask's followers (publishFollowerRoutes).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
 	seen := map[string]bool{}
 	var targets []model.Actor
@@ -263,19 +299,16 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		return nil
 	}
 
-	var askID, inReplyTo, commentID, messageInReplyTo string
+	var inReplyTo, commentID, messageInReplyTo string
 	switch event.Type {
 	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
-		askID = payloadString(event.Payload, "ask_id")
 		inReplyTo = payloadString(event.Payload, "reply_to")
 		commentID = payloadString(event.Payload, "id")
-	case "ask.resolved":
-		askID = payloadString(event.Payload, "id")
 	case "message.created", "message.answered":
 		messageInReplyTo = payloadString(event.Payload, "in_reply_to")
-	case "subscription.removed":
-		// The target is the unsubscribed session itself, carried directly in the
-		// payload — there is no thread or ask to walk to find it.
+	case "subscription.removed", "ask.follower_added", "ask.follower_removed":
+		// The target is the unsubscribed, added, or removed session itself, carried directly
+		// in the payload — there is no thread or ask to walk to find it.
 		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
 			consider(model.Actor{Kind: "session", ID: sessionID}, true)
 		}
@@ -283,11 +316,6 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		return nil
 	}
 
-	if askID != "" {
-		if err := considerLoaded(loadAskAuthor(ctx, deps, askID)); err != nil {
-			return err
-		}
-	}
 	if inReplyTo != "" {
 		// New comment threads persist ReplyTo as their root ID. Walking still keeps
 		// routing correct for legacy nested rows and finds the root author.
@@ -316,17 +344,6 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		}
 	}
 	return nil
-}
-
-func loadAskAuthor(ctx context.Context, deps Deps, askID string) (model.Actor, bool, error) {
-	var authorJSON []byte
-	if err := deps.Store.Pool.QueryRow(ctx, `select author from asks where id = $1`, askID).Scan(&authorJSON); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Actor{}, false, nil
-		}
-		return model.Actor{}, false, fmt.Errorf("load ask author %q: %w", askID, err)
-	}
-	return decodeAuthor(authorJSON, "ask", askID)
 }
 
 func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool, error) {
@@ -495,14 +512,14 @@ func payloadSummary(event model.Event, slug string) string {
 	case event.Type == "ask.answered":
 		// The answer, not the question: it is the first thing the asker should read.
 		text = truncate(askAnswerText(event.Payload), 120)
+	case event.Type == "subscription.removed", event.Type == "ask.follower_added", event.Type == "ask.follower_removed":
+		text = payloadString(event.Payload, "session_id")
 	case strings.HasPrefix(event.Type, "ask."):
 		text = truncate(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created":
 		text = payloadString(event.Payload, "body")
 	case strings.HasPrefix(event.Type, "comment."), strings.HasPrefix(event.Type, "suggestion."):
 		text = payloadString(event.Payload, "body")
-	case event.Type == "subscription.removed":
-		text = payloadString(event.Payload, "session_id")
 	}
 	owner := ""
 	if event.ArtifactID != nil {

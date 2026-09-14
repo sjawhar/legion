@@ -37,9 +37,12 @@ optional directory and title filters.
 `dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer
 token. `dispatch-execute.ts` validates the shared `dispatch_*` schema, derives
 the caller's session origin and Legion issue reference, executes the operation,
-and returns typed tool-result details. Mutations return
-`details.topic = notifications.dispatch.issue.<KEY>.>`; host adapters subscribe
-only to that returned topic.
+and returns typed tool-result details. No result carries a subscription topic:
+`dispatch_ask` and an ask reply through `dispatch_comment` return
+`details.follows = { ask }` (the session follows that ask server-side), and every
+write's text names the `envoy_subscribe notifications.dispatch.issue.<KEY>.>`
+line an agent passes to subscribe to the whole issue itself.
+`dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 
 `resolveDispatchConfig` enables Dispatch only when both its URL and bearer token
 resolve. Set `dispatch.enabled: true`, `dispatch.serverUrl`, and

@@ -16,8 +16,7 @@ import {
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
 import {
-  dispatchSubscriptionTopic,
-  dispatchTopicLabel,
+  dispatchFollowNotice,
   subscriptionRemovedTopics,
 } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
@@ -86,8 +85,11 @@ export interface ChannelInboxEntry {
 export interface ChannelDelivery {
   /** Queue one rendered envelope onto the MCP stdio transport. */
   enqueue(input: { readonly subject: string; readonly raw: string }): Promise<void>
-  /** Queue a plain Envoy notice (no envelope) for the model, in order with envelopes. */
-  announce(content: string): Promise<void>
+  /**
+   * Tell the model, once per ask, that a Dispatch write made this session follow an ask
+   * (`details.follows.ask`); no write subscribes the session to the whole issue.
+   */
+  announceFollow(details: unknown): Promise<void>
   /** Latest inbound metadata, most recent first; no envelope body is retained. */
   inbox(): readonly ChannelInboxEntry[]
 }
@@ -229,6 +231,7 @@ export function createChannelDelivery(input: {
   readonly notifier: ChannelNotifier
 }): ChannelDelivery {
   const inbox: ChannelInboxEntry[] = []
+  const announcedFollows = new Set<string>()
   let tail = Promise.resolve()
 
   const queue = (notification: ChannelNotification): Promise<void> => {
@@ -294,10 +297,13 @@ export function createChannelDelivery(input: {
         },
       })
     },
-    announce(content) {
+    announceFollow(details) {
+      const notice = dispatchFollowNotice(details)
+      if (notice === null || announcedFollows.has(notice.ask)) return tail
+      announcedFollows.add(notice.ask)
       return queue({
         method: CHANNEL_NOTIFICATION_METHOD,
-        params: { content, meta: { producer: "envoy" } },
+        params: { content: notice.text, meta: { producer: "dispatch" } },
       })
     },
     inbox() {
@@ -505,9 +511,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   /**
    * Registered interests deliver only through this process's own NATS
    * subscriptions, so a resumed or restarted server must rebuild the topics its
-   * session id already registered or stay deaf to them (and would re-announce
-   * the first Dispatch write on each). Quiet on failure: a brand-new id has no
-   * registry entry, and a listener outage must not fail startup.
+   * session id already registered or stay deaf to them. Quiet on failure: a
+   * brand-new id has no registry entry, and a listener outage must not fail startup.
    */
   const recoverRegisteredInterests = async (): Promise<void> => {
     const registry = await options.client.getInterest(identity.id).catch(() => undefined)
@@ -603,25 +608,7 @@ export async function executeEnvoyTool(
       config,
       env: process.env,
     })
-    const topic = dispatchSubscriptionTopic(result.details)
-    if (topic !== null) {
-      try {
-        // A write must tell the agent it now gets every event on this issue;
-        // an already-followed topic is not news and stays silent.
-        const fresh = await runtime.session.follow([topic])
-        if (fresh.length > 0) {
-          await runtime.session.delivery.announce(
-            `Subscribed to ${dispatchTopicLabel(topic)} (every event on this issue reaches you; envoy_unsubscribe ${topic} to stop).`,
-          )
-        }
-      } catch (error) {
-        const issue =
-          typeof result.details["issue"] === "string" ? result.details["issue"] : "the issue"
-        process.stderr.write(
-          `envoy-channel: ${name} completed for ${issue} but subscribing ${identity.id} to ${topic} failed — ${messageFor(error)}\n`,
-        )
-      }
-    }
+    await runtime.session.delivery.announceFollow(result.details)
     return result
   }
 

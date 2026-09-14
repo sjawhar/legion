@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -78,7 +79,7 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
-	askID := "5a660655-04ad-4ce0-8a9b-93dd03c412b7"
+	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Should the dispatcher publish this answer?")
 	event := appendEvent(t, database, broker, model.Event{
 		IssueKey: new("T-1"),
 		Type:     "ask.answered",
@@ -96,9 +97,13 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
+	// The issue topic and, because the asker follows its own ask, the asker's own topic.
 	waitFor(t, time.Second, "ask answer publication", func() bool {
-		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
 	})
+	if asker := publisher.all()[1]; asker.Topic != "notifications.agent.session-asker" || asker.InReplyTo != askID {
+		t.Fatalf("asker route = (%q, %q)", asker.Topic, asker.InReplyTo)
+	}
 	item := publisher.all()[0]
 	if item.EventID != fmt.Sprintf("dispatch-%d", event.ID) || item.SourceEventID != fmt.Sprint(event.ID) {
 		t.Fatalf("event identity = (%q, %q)", item.EventID, item.SourceEventID)
@@ -124,6 +129,146 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	}
 }
 
+func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		eventType  string
+		actor      model.Actor
+		payload    func(askID string) any
+		wantTopics []string
+	}{
+		{
+			name:      "human answer reaches both followers",
+			eventType: "ask.answered",
+			actor:     model.Actor{Kind: "user", ID: "alice"},
+			payload: func(askID string) any {
+				return model.Ask{ID: askID, IssueKey: new("T-1"), Question: "Ship it?", State: "answered"}
+			},
+			wantTopics: []string{
+				"notifications.dispatch.issue.T-1.ask.answered",
+				"notifications.agent.session-asker",
+				"notifications.agent.session-replier",
+			},
+		},
+		{
+			name:      "session reply reaches the other followers and skips its author",
+			eventType: "comment.created",
+			actor:     model.Actor{Kind: "session", ID: "session-replier"},
+			payload: func(askID string) any {
+				return model.CommentEventPayload{Comment: model.Comment{
+					ID: "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b", IssueKey: new("T-1"), Body: "I would hold.", AskID: &askID,
+				}}
+			},
+			wantTopics: []string{
+				"notifications.dispatch.issue.T-1.comment.created",
+				"notifications.agent.session-asker",
+			},
+		},
+		{
+			name:      "session edit reaches the other followers",
+			eventType: "ask.edited",
+			actor:     model.Actor{Kind: "session", ID: "session-asker"},
+			payload: func(askID string) any {
+				return model.AskEditEventPayload{Ask: model.Ask{ID: askID, IssueKey: new("T-1"), Question: "Ship it now?", State: "open"}}
+			},
+			wantTopics: []string{
+				"notifications.dispatch.issue.T-1.ask.edited",
+				"notifications.agent.session-replier",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openTestStore(t)
+			broker := events.NewBroker()
+			seedIssue(t, database, "T-1", nil)
+			askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
+			seedFollower(t, database, askID, "session-replier")
+			event := appendEvent(t, database, broker, model.Event{
+				IssueKey: new("T-1"), Type: tc.eventType, Actor: tc.actor, Payload: tc.payload(askID),
+			})
+			if tc.actor.Kind == "session" && event.Notify {
+				t.Fatalf("a session-authored %s must not notify", tc.eventType)
+			}
+			publisher := &recordingPublisher{}
+			stop := run(t, database, publisher, broker)
+			defer stop()
+
+			waitFor(t, time.Second, "follower publication", func() bool {
+				return len(publisher.all()) == len(tc.wantTopics) && publishedAt(t, database, event.ID) != nil
+			})
+			items := publisher.all()
+			for index, topic := range tc.wantTopics {
+				if items[index].Topic != topic {
+					t.Fatalf("publication %d topic = %q, want %q", index, items[index].Topic, topic)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSkipsAnUnfollowedSession(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
+	seedFollower(t, database, askID, "session-replier")
+	if removed, err := asks.Unfollow(context.Background(), database.Pool, askID, "session-asker"); err != nil || !removed {
+		t.Fatalf("unfollow: removed=%t err=%v", removed, err)
+	}
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "comment.created",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID: "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b", IssueKey: new("T-1"), Body: "Hold.", AskID: &askID,
+		}},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "reply publication", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if len(items) != 2 || items[1].Topic != "notifications.agent.session-replier" {
+		t.Fatalf("publications after the asker unfollowed = %#v, want the issue topic and session-replier only", topicsOf(items))
+	}
+}
+
+// A human adding or removing a follower is told to that session directly: with no
+// whole-issue subscription (the default), its own topic is the only place it listens.
+func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
+	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
+		t.Run(eventType, func(t *testing.T) {
+			database := openTestStore(t)
+			seedIssue(t, database, "T-1", nil)
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher}
+			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + eventType}
+			event := model.Event{
+				Type:    eventType,
+				Actor:   model.Actor{Kind: "user", ID: "alice"},
+				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
+			}
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+				t.Fatalf("publish author routes: %v", err)
+			}
+			got := publisher.all()
+			if len(got) != 1 || got[0].Topic != "notifications.agent.session-asker" {
+				t.Fatalf("%s routes = %#v, want the named session's own topic only", eventType, topicsOf(got))
+			}
+		})
+	}
+}
+
+func topicsOf(items []contracts.Envelope) []string {
+	topics := make([]string, 0, len(items))
+	for _, item := range items {
+		topics = append(topics, item.Topic)
+	}
+	return topics
+}
 func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)
@@ -145,6 +290,7 @@ func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 	`, artifactID).Scan(&askID); err != nil {
 		t.Fatalf("create document ask: %v", err)
 	}
+	seedFollower(t, database, askID, "session-asker")
 	event := appendEvent(t, database, broker, model.Event{
 		ArtifactID: new(artifactID),
 		Type:       "comment.created",
@@ -159,7 +305,7 @@ func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	// Project documents have no route, so the ask author route is the only way the
+	// Project documents have no route, so the follower route is the only way the
 	// asking session ever learns about this human reply.
 	waitFor(t, time.Second, "document event publication", func() bool {
 		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
@@ -636,7 +782,9 @@ func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
 	}
 }
 
-func TestRunRoutesHumanAskResolutionToAuthorOnly(t *testing.T) {
+// A human resolution takes the issue route and reaches the asker; a session resolution
+// skips the route (notify is false) but still reaches the asker, who follows the ask.
+func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		actor           model.Actor
@@ -652,7 +800,7 @@ func TestRunRoutesHumanAskResolutionToAuthorOnly(t *testing.T) {
 		{
 			name:            "session resolution",
 			actor:           model.Actor{Kind: "session", ID: "session-closer"},
-			wantTopics:      []string{"notifications.dispatch.issue.T-1.ask.resolved"},
+			wantTopics:      []string{"notifications.dispatch.issue.T-1.ask.resolved", "notifications.agent.session-asker"},
 			wantRouteNotify: false,
 		},
 	} {
@@ -1096,6 +1244,8 @@ func seedIssue(t *testing.T, database *store.Store, key string, route *string) {
 	}
 }
 
+// seedAsk inserts an ask the way every insert site does: the row plus its author as
+// a follower when the author is a session.
 func seedAsk(t *testing.T, database *store.Store, issueKey string, author model.Actor, question string) string {
 	t.Helper()
 	authorJSON, err := json.Marshal(author)
@@ -1108,7 +1258,17 @@ func seedAsk(t *testing.T, database *store.Store, issueKey string, author model.
 	`, issueKey, authorJSON, question).Scan(&id); err != nil {
 		t.Fatalf("create ask: %v", err)
 	}
+	if err := asks.FollowAuthor(context.Background(), database.Pool, id, author); err != nil {
+		t.Fatalf("follow ask: %v", err)
+	}
 	return id
+}
+
+func seedFollower(t *testing.T, database *store.Store, askID, sessionID string) {
+	t.Helper()
+	if _, err := asks.Follow(context.Background(), database.Pool, askID, sessionID); err != nil {
+		t.Fatalf("follow ask: %v", err)
+	}
 }
 
 func seedComment(t *testing.T, database *store.Store, issueKey string, author model.Actor, body string, replyTo *string) string {

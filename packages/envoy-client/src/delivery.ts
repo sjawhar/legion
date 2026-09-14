@@ -2,6 +2,7 @@ import {
   ArtifactCreatedEventPayloadSchema as ArtifactCreatedPayloadSchema,
   ArtifactVersionEventPayloadSchema as ArtifactVersionPayloadSchema,
   AskEditedEventPayloadSchema as AskEditedPayloadSchema,
+  AskFollowerEventPayloadSchema as AskFollowerPayloadSchema,
   AskEventPayloadSchema as AskPayloadSchema,
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
@@ -25,6 +26,9 @@ import { askAnswerText, textHead } from "./ask-answer";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
+const AskAuthorPayloadSchema = z.object({
+  author: z.object({ kind: z.string(), id: z.string() }).passthrough(),
+});
 
 const InboundSenderSchema = z.object({
   session_id: z.string().optional(),
@@ -401,6 +405,9 @@ export function renderInbound(
   let rejectedDelivery: DispatchDelivery | undefined;
   let malformedDelivery = false;
   let inReplyTo = envelope.in_reply_to;
+  // On an ask event the payload is the ask itself, whose author is another follower's
+  // session when this session merely replied; naming it is not a spoof to flag.
+  let askAuthor: string | undefined;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     if (envelope.payload === undefined) {
@@ -434,8 +441,37 @@ export function renderInbound(
             envelope,
           };
         }
+        // Same shape for a human curating an ask's followers: only the session the
+        // payload names hears it (the removed session on its own topic, an added one
+        // wherever it listens); every other subscriber of the owner topic sees nothing.
+        if (
+          frame.event.type === "ask.follower_added" ||
+          frame.event.type === "ask.follower_removed"
+        ) {
+          const follower = AskFollowerPayloadSchema.safeParse(frame.event.payload);
+          if (!follower.success || follower.data.session_id !== sessionID) {
+            return { skip: true, content: "", envelope };
+          }
+          const who = follower.data.by?.id ?? "someone";
+          const owner = dispatchOwner(frame.event, subject ?? envelope.topic);
+          const ask = follower.data.ask_id ?? "?";
+          return {
+            skip: false,
+            content:
+              frame.event.type === "ask.follower_added"
+                ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch_follow unfollow to stop.`
+                : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            envelope,
+          };
+        }
         const answered = dispatchAskAnswer(frame.event);
         const question = answered?.question ?? dispatchAskQuestion(frame.event);
+        if (frame.event.type.startsWith("ask.")) {
+          const asked = AskAuthorPayloadSchema.safeParse(frame.event.payload);
+          if (asked.success && asked.data.author.kind === "session") {
+            askAuthor = asked.data.author.id;
+          }
+        }
         if (inReplyTo !== undefined) {
           inReplyTo = dispatchReplyRef(frame.event, subject ?? envelope.topic, inReplyTo);
         }
@@ -522,7 +558,7 @@ export function renderInbound(
   const body = `${envelope.payload_summary ?? ""}\n${envelope.payload ?? ""}`;
   let foreignSession: string | undefined;
   for (const match of body.matchAll(FOREIGN_SESSION_ID)) {
-    if (match[0] !== envelope.source_session && match[0] !== sessionID) {
+    if (match[0] !== envelope.source_session && match[0] !== sessionID && match[0] !== askAuthor) {
       foreignSession = match[0];
       break;
     }

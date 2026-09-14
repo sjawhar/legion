@@ -296,6 +296,12 @@ export class DispatchApiClient {
     return { ...read, ask: normalizeAsk(read.ask) };
   }
 
+  async removeAskFollower(id: string, sessionId: string): Promise<void> {
+    await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
+      method: "DELETE",
+    });
+  }
+
   listComments(key: string, artifact?: string): Promise<Comment[]> {
     return this.json<Comment[]>(
       pathWithQuery(`/api/v1/issues/${pathSegment(key)}/comments`, { artifact })

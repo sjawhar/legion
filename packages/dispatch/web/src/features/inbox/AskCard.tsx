@@ -37,6 +37,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockLink } from "./AskBlockLink";
 import { AskCompletionCard, AskEditHistory, OrphanedAnchorNotice } from "./AskCompletionCard";
+import { AskFollowers } from "./AskFollowers";
 import { AskChoiceRow } from "./AskOptionRow";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
@@ -334,6 +335,7 @@ export function AskCard({
           </p>
         )}
         <AskEditHistory ask={displayedAsk} edits={edits} />
+        <AskFollowers askId={displayedAsk.id} followers={threadQuery.data?.followers ?? []} />
       </div>
       {askChanged ? (
         <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>

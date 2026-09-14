@@ -848,6 +848,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: anchoredAsk,
     edits: [],
+    followers: [],
     replies: [askReply],
   });
   const view = render(
