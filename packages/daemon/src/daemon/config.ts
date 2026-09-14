@@ -5,6 +5,7 @@ import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import { parse } from "yaml";
 import { z } from "zod";
 import { type ImageDigestRef, parseImageDigestRef } from "./image-ref";
+import { SESSION_SQL_DSN_FILE_VARIABLE, SESSION_STORAGE_VARIABLE } from "./k8s-manifests";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 import { readSecretPointer } from "./secrets";
 
@@ -32,6 +33,16 @@ export interface RoleResources {
   limits: { cpu: string; memory: string; ephemeralStorage: string };
 }
 
+/** `runtime.kubernetes.session_store`: where each pod's Oh My Pi session (its conversation) lives.
+ * `pvc` (the default) is the tree volume's `sessions` directory; `postgres` is a database, selected
+ * by the two Oh My Pi variables `podEnvironment` (runtime-kubernetes.ts) sets on every pod of a
+ * tree — `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE=<providers mount>/<dsnSecretKey>`.
+ * A discriminated union, so no reader can see `postgres` without the providers-Secret key that
+ * holds its connection URL. */
+export const SESSION_STORES = ["pvc", "postgres"] as const;
+export type SessionStoreName = (typeof SESSION_STORES)[number];
+export type SessionStore = { kind: "pvc" } | { kind: "postgres"; dsnSecretKey: string };
+
 /** `runtime.kubernetes`: the Kubernetes runtime's configuration block, file-only (no
  * `LEGION_KUBERNETES_*` environment keys). Carried by `DaemonConfig.runtime` when its `name` is
  * `"kubernetes"`. */
@@ -45,6 +56,9 @@ export interface KubernetesRuntimeConfig {
   /** Absolute path (a relative file value is resolved against the config file's directory);
    * absent = in-cluster service-account credentials. */
   kubeconfig?: string;
+  /** `runtime.kubernetes.session_store` + `session_dsn_secret` (`parseSessionStore`); default
+   * `{ kind: "pvc" }`. */
+  sessionStore: SessionStore;
   resources: Record<ResourceProfileName, RoleResources>;
   roleProfiles: Record<LegionRole, ResourceProfileName>;
 }
@@ -293,6 +307,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
       storage_class: null,
       tree_volume: null,
       kubeconfig: null,
+      session_store: null,
+      session_dsn_secret: null,
       resources: {
         small: RESOURCE_PROFILE_SCHEMA,
         medium: RESOURCE_PROFILE_SCHEMA,
@@ -967,9 +983,48 @@ function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRu
     storageClass,
     treeVolume,
     kubeconfig,
+    sessionStore: parseSessionStore(data.session_store, data.session_dsn_secret),
     resources: parseResources(data.resources, "runtime.kubernetes.resources"),
     roleProfiles: parseRoleProfiles(data.role_profiles, "runtime.kubernetes.role_profiles"),
   };
+}
+
+/** Kubernetes' own rule for a Secret `data` key — and what keeps `<providers mount>/<key>` a single
+ * path segment. */
+const SECRET_DATA_KEY_PATTERN = /^[-._a-zA-Z0-9]+$/;
+
+/** `runtime.kubernetes.session_store` (default `pvc`) with its cross-field key: `postgres`
+ * requires `session_dsn_secret`, a Secret data key that is not one of the two variables the pod
+ * receives — the worker shim exports every providers key into Oh My Pi's environment under the
+ * key's own name, so such a key would shadow the daemon's value; `pvc` refuses the key rather than
+ * silently ignoring it (the `omp_launch_prefix` rule). */
+function parseSessionStore(storeValue: unknown, keyValue: unknown): SessionStore {
+  const storeField = "runtime.kubernetes.session_store";
+  const keyField = "runtime.kubernetes.session_dsn_secret";
+  const store = readString(storeValue, storeField) ?? "pvc";
+  if (!SESSION_STORES.some((candidate) => candidate === store)) {
+    throw new Error(`${storeField} must be 'pvc' or 'postgres'`);
+  }
+  const key = readString(keyValue, keyField);
+  if (store === "pvc") {
+    if (key !== undefined) {
+      throw new Error(`${keyField} is not used when ${storeField} is pvc; remove it`);
+    }
+    return { kind: "pvc" };
+  }
+  if (key === undefined) {
+    throw new Error(`${keyField} is required when ${storeField} is postgres`);
+  }
+  const dsnSecretKey = requireNonEmpty(key, keyField);
+  if (!SECRET_DATA_KEY_PATTERN.test(dsnSecretKey)) {
+    throw new Error(`${keyField} must be a Secret data key ([-._a-zA-Z0-9]+)`);
+  }
+  if (dsnSecretKey === SESSION_STORAGE_VARIABLE || dsnSecretKey === SESSION_SQL_DSN_FILE_VARIABLE) {
+    throw new Error(
+      `${keyField} must not be ${SESSION_STORAGE_VARIABLE} or ${SESSION_SQL_DSN_FILE_VARIABLE}: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value`
+    );
+  }
+  return { kind: "postgres", dsnSecretKey };
 }
 
 function fileString(fields: Record<string, unknown>, key: string): string | undefined {

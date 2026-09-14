@@ -2,7 +2,7 @@ import { readFile as readFileFs } from "node:fs/promises";
 import path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import type { JjIdentity } from "@legion/workspace";
-import type { KubernetesRuntimeConfig } from "./config";
+import type { KubernetesRuntimeConfig, SessionStore } from "./config";
 import { K8sApiError, type K8sClient, type K8sPod } from "./k8s-client";
 import {
   BOOT_DIR,
@@ -26,6 +26,8 @@ import {
   podSelector,
   podWorkspaceDir,
   pvcName,
+  SESSION_SQL_DSN_FILE_VARIABLE,
+  SESSION_STORAGE_VARIABLE,
   TREE_MOUNT,
   UNREFERENCED_SINCE_ANNOTATION,
 } from "./k8s-manifests";
@@ -251,14 +253,17 @@ export class KubernetesRuntime implements Runtime {
       secretName: name,
       secretKeys: Object.keys(projected),
       resources: config.resources[config.roleProfiles[role]],
-      env: podEnvironment(kind, spec.env, token, workspaceDir, pointers),
+      env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,
       shimEndpoint: `tcp://${new URL(this.deps.daemonUrl).hostname}:${this.deps.workerStreamPort}`,
       ompArgv,
       terminationGracePeriodSeconds: graceSeconds,
       workspaceInitLockWaitSeconds: this.workspaceInitLockWaitSeconds(),
-      resumeSessionFile,
+      // The init container stats the recorded session on the tree volume before OMP runs
+      // (`LEGION_RESUME_SESSION_FILE`). Under postgres the transcript is a database row it cannot
+      // see, so it is not asked to; `--resume` reaches OMP under both stores.
+      resumeSessionFile: config.sessionStore.kind === "pvc" ? resumeSessionFile : undefined,
     });
 
     await this.ensurePvc(pvc, tree);
@@ -719,6 +724,10 @@ export class KubernetesRuntime implements Runtime {
  * - `LEGION_CREDENTIAL_HELPER`: the value `workspace-init` wrote into the clone's git config.
  * - `DISPATCH_TOKEN_FILE` (only when the spec carried one): the providers Secret's
  *   `DISPATCH_TOKEN` file, whose trimmed contents `resolveDispatchConfig` reads.
+ * - `OMP_SESSION_STORAGE` / `OMP_SESSION_SQL_DSN_FILE` (only under `session_store: postgres`):
+ *   Oh My Pi's own session-store variables; the file is the providers Secret's `session_dsn_secret`
+ *   key — the same Secret `DISPATCH_TOKEN_FILE` points into. Every pod of a tree passes through
+ *   here, so this is the one place the store shapes a pod.
  * - `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE`: the issue's working copy on the volume, the
  *   main container's `workingDir`.
  * - `<NAME>_FILE` for every secret in the spec (`secretPointers`, from `podSecrets`):
@@ -751,7 +760,8 @@ function podEnvironment(
   env: Record<string, string | undefined>,
   token: string,
   workspaceDir: string,
-  secretPointers: Record<string, string>
+  secretPointers: Record<string, string>,
+  sessionStore: SessionStore
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
@@ -764,6 +774,10 @@ function podEnvironment(
   result.LEGION_CREDENTIAL_HELPER = POD_CREDENTIAL_HELPER;
   if (env.DISPATCH_TOKEN_FILE !== undefined) {
     result.DISPATCH_TOKEN_FILE = `${PROVIDERS_DIR}/DISPATCH_TOKEN`;
+  }
+  if (sessionStore.kind === "postgres") {
+    result[SESSION_STORAGE_VARIABLE] = "sql";
+    result[SESSION_SQL_DSN_FILE_VARIABLE] = `${PROVIDERS_DIR}/${sessionStore.dsnSecretKey}`;
   }
   result[kind === "root" ? "LEGION_ROOT_WORKSPACE" : "LEGION_WORKSPACE"] = workspaceDir;
   Object.assign(result, secretPointers);

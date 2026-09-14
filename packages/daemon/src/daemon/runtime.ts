@@ -40,7 +40,8 @@ export interface K8sLocator {
    * role)`; the architect token for a tree root) — what `KubernetesRuntime.connect`/`probe`/
    * `stop` key the listener's registrations by. */
   roleToken: string;
-  /** The one field `--resume` reads (LEGION-31 renames it `ompSessionRef`). */
+  /** The one field `--resume` reads, under a file store and under Postgres alike (there it is the
+   * row's path key; LEGION-81 kept the name and the value shape). */
   ompSessionFile?: string;
 }
 

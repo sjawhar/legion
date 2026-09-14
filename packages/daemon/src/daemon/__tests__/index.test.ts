@@ -3573,6 +3573,7 @@ describe("startDaemon", () => {
         namespace: "legion",
         image: WORKER_IMAGE,
         treeVolume: "20Gi",
+        sessionStore: { kind: "pvc" },
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
       },

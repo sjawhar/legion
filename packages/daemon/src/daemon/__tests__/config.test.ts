@@ -1152,6 +1152,15 @@ describe("daemon config", () => {
       ).toThrow("LEGION_RUNTIME must be 'tmux' or 'kubernetes'");
     });
 
+    it("refuses session_store under the tmux runtime naming the field: the key exists only inside runtime.kubernetes", () => {
+      expect(() => yaml("runtime: tmux", "session_store: postgres")).toThrow(
+        'Unknown config key "session_store"'
+      );
+      expect(() => yaml("runtime:", "  tmux:", "    session_store: postgres")).toThrow(
+        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes"
+      );
+    });
+
     it("requires daemon_url under the kubernetes runtime", () => {
       expect(() =>
         resolveWithApps({
@@ -1452,6 +1461,7 @@ describe("daemon config", () => {
           digest: `sha256:${"a".repeat(64)}`,
         },
         treeVolume: "20Gi",
+        sessionStore: { kind: "pvc" },
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
       });
@@ -1482,6 +1492,15 @@ describe("daemon config", () => {
       expect(config.runtime.roleProfiles).toEqual({
         ...DEFAULT_ROLE_PROFILES,
         planner: "medium",
+      });
+    });
+
+    it("selects the postgres session store with its providers-Secret key, and pvc when named explicitly", () => {
+      expect(
+        resolve(block("session_store: postgres", "session_dsn_secret: SESSION_DSN")).runtime
+      ).toMatchObject({ sessionStore: { kind: "postgres", dsnSecretKey: "SESSION_DSN" } });
+      expect(resolve(block("session_store: pvc")).runtime).toMatchObject({
+        sessionStore: { kind: "pvc" },
       });
     });
 
@@ -1533,6 +1552,39 @@ describe("daemon config", () => {
         "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
       ],
       [["runtime:", "  kubernetes: kubernetes"].join("\n"), "runtime.kubernetes must be a mapping"],
+      [
+        block("session_store: sqlite"),
+        "runtime.kubernetes.session_store must be 'pvc' or 'postgres'",
+      ],
+      [block("session_store: 1"), "runtime.kubernetes.session_store must be a string"],
+      [
+        block("session_store: postgres"),
+        "runtime.kubernetes.session_dsn_secret is required when runtime.kubernetes.session_store is postgres",
+      ],
+      [
+        block("session_store: postgres", "session_dsn_secret: ''"),
+        "runtime.kubernetes.session_dsn_secret must not be empty",
+      ],
+      [
+        block("session_store: postgres", "session_dsn_secret: sub/dir"),
+        "runtime.kubernetes.session_dsn_secret must be a Secret data key ([-._a-zA-Z0-9]+)",
+      ],
+      [
+        block("session_store: postgres", "session_dsn_secret: OMP_SESSION_SQL_DSN_FILE"),
+        "runtime.kubernetes.session_dsn_secret must not be OMP_SESSION_STORAGE or OMP_SESSION_SQL_DSN_FILE: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value",
+      ],
+      [
+        block("session_store: postgres", "session_dsn_secret: OMP_SESSION_STORAGE"),
+        "runtime.kubernetes.session_dsn_secret must not be OMP_SESSION_STORAGE or OMP_SESSION_SQL_DSN_FILE: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value",
+      ],
+      [
+        block("session_dsn_secret: SESSION_DSN"),
+        "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
+      ],
+      [
+        block("session_store: pvc", "session_dsn_secret: SESSION_DSN"),
+        "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
+      ],
     ])("refuses %s naming the field", (lines, message) => {
       expect(() => resolve(lines)).toThrow(message);
     });
