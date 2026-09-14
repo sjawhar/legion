@@ -5,7 +5,7 @@ import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
-import { withOmpLaunchPrefix } from "./processes";
+import { withOmpLaunchPrefix } from "./runtime-tmux";
 
 /** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
  * (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane opens

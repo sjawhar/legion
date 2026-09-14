@@ -1,9 +1,13 @@
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { adoptWorkingCopyCommand } from "@legion/workspace";
+import { DEFAULT_KUBERNETES_RESOURCES, DEFAULT_ROLE_PROFILES } from "../config";
+import { parseImageDigestRef } from "../image-ref";
+import { createK8sClient } from "../k8s-client";
 import {
   awaitShutdown,
   boundedWait,
@@ -16,9 +20,11 @@ import {
   type SpawnSpec,
   sameProcess,
 } from "../runtime";
-import { TmuxRuntime } from "../runtime-tmux";
+import { KubernetesRuntime } from "../runtime-kubernetes";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { procStatLine } from "./ci-fixtures";
+import { createFakeK8sApi } from "./fake-k8s-api";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
 const issue: IssueKey = "LEGION-42";
@@ -67,16 +73,39 @@ function countingClient(neverCloses: boolean): ShutdownCountingClient {
 
 function makeSpec(role: LegionRole | "controller", forIssue?: IssueKey): SpawnSpec {
   return {
-    ...(role === "controller" ? {} : { issue: forIssue ?? issue }),
+    ...(role === "controller"
+      ? {}
+      : { issue: forIssue ?? issue, tree: forIssue ?? issue, generation: 1 }),
     role,
-    workspaceDir: "/work",
     env: { LEGION_ROLE: role, UNSET: undefined },
-    innerCommand: "omp --mode rpc",
+    launch:
+      role === "controller"
+        ? { promptPath: "/roles/controller-root.md" }
+        : { promptPath: `/roles/${role}.md`, addressingPrompt: `address ${role}` },
     secrets:
       role === "controller"
         ? { LEGION_CONTROLLER_SECRET: "controller-secret" }
         : { LEGION_BOOT_TOKEN: "boot-token" },
   };
+}
+
+/** The tmux harness's provisioning runner: records nothing and answers every `jj`/`git` command
+ * with exit 0, creating `<dir>/.jj` for `jj git clone <remote> <dir>` and `<dir>` for
+ * `jj workspace add <dir>` — the two side effects `provisionIssueWorkspace` checks for on disk. */
+async function provisioningRun(
+  command: string[]
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (command[0] === "jj" && command[1] === "git" && command[2] === "clone") {
+    const cloneDir = command[4];
+    if (!cloneDir) throw new Error("Jujutsu clone is missing its destination");
+    await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
+  }
+  if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
+    const workspaceDir = command[3];
+    if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+    await mkdir(workspaceDir, { recursive: true });
+  }
+  return { stdout: "", stderr: "", exitCode: 0 };
 }
 
 async function fakeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -316,6 +345,12 @@ async function tmuxHarness(
     readProcessCmdline?: (pid: number) => Promise<string>;
     readProcessStat?: (pid: number) => Promise<string>;
     now?: () => number;
+    /** Observes (and may hold) every provisioning command; defaults to `provisioningRun`. */
+    provisioningRun?: TmuxRuntimeDeps["run"];
+    /** Observes each provisioning's token request — the first thing `provisionIssueWorkspace`
+     * does, before any command or fs work — so a test can tell when a spawn's provisioning was
+     * admitted. Defaults to a constant token. */
+    provisioningToken?: TmuxRuntimeDeps["provisioningToken"];
   } = {}
 ): Promise<TmuxHarness> {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-runtime-tmux-"));
@@ -332,6 +367,14 @@ async function tmuxHarness(
     tmux: { run: server.run, socket: "legion-omp" },
     project: "omp",
     stateDir,
+    ompInvocation: "omp",
+    ompLaunchPrefix: [],
+    statPrompt: async () => {},
+    provisioningToken: options.provisioningToken ?? (async () => "token"),
+    run: options.provisioningRun ?? provisioningRun,
+    repo: "acme/widgets",
+    credentialHelper: "!legion credential",
+    slowCommandTimeoutMs: 1000,
     connectWorkerRpc: async (socketPath, timeoutMs) => {
       socketPaths.push(socketPath);
       timeouts.push(timeoutMs);
@@ -356,6 +399,8 @@ async function tmuxHarness(
   });
   // Records every spawned locator by issue so `issueLocators` sees what state would.
   const spawningRuntime: Runtime = {
+    launchesController: runtime.launchesController,
+    removesWorkspacesOnTreeClose: runtime.removesWorkspacesOnTreeClose,
     spawn: async (kind, spec) => {
       const locator = await runtime.spawn(kind, spec);
       if (spec.issue) {
@@ -364,6 +409,8 @@ async function tmuxHarness(
       }
       return locator;
     },
+    adoptWorkingCopy: (issue, role, identity, timeoutMs) =>
+      runtime.adoptWorkingCopy(issue, role, identity, timeoutMs),
     probe: (locator) => runtime.probe(locator),
     connect: (locator, timeoutMs) => runtime.connect(locator, timeoutMs),
     stop: (locator, timeoutMs, stopOptions) => runtime.stop(locator, timeoutMs, stopOptions),
@@ -392,9 +439,84 @@ async function tmuxHarness(
   };
 }
 
+/** `KubernetesRuntime` over the in-memory fake API server. The pod's shim is simulated: the
+ * moment `spawn` returns, a counting client is registered under the locator's claim token, as the
+ * listener would on the shim's hello -- the runtime itself never dials. */
+async function kubernetesHarness(options: HarnessOptions = {}): Promise<Harness> {
+  const clock = Date.parse("2026-09-13T00:00:00.000Z");
+  const api = createFakeK8sApi({ namespace: "legion", now: () => clock });
+  const clients: ShutdownCountingClient[] = [];
+  const registrations = new Map<string, WorkerRpcClient>();
+  let awaits = 0;
+  const listener = {
+    registrations,
+    awaitRegistration: async (token: string, _timeoutMs: number) => {
+      awaits += 1;
+      const client = registrations.get(token);
+      if (!client) throw new Error(`no stream for ${token}`);
+      return client;
+    },
+  };
+  const runtime = new KubernetesRuntime({
+    project: "omp",
+    config: {
+      namespace: "legion",
+      image: parseImageDigestRef(`ghcr.io/x/y@sha256:${"a".repeat(64)}`),
+      treeVolume: "20Gi",
+      resources: DEFAULT_KUBERNETES_RESOURCES,
+      roleProfiles: DEFAULT_ROLE_PROFILES,
+    },
+    client: createK8sClient({ server: "https://fake", namespace: "legion", fetch: api.fetch }),
+    listener: () => listener,
+    repo: "acme/widgets",
+    provisioningToken: async () => "installation-token",
+    daemonUrl: "http://172.18.0.1:19370",
+    workerStreamPort: 19371,
+    workerBootTimeoutMs: 120_000,
+    workerBootRegistrationDeadlineIntervals: 3,
+    workerStopTimeoutMs: 10_000,
+    workerRpcTimeoutMs: () => 5_000,
+    readFile: async (file) => `text of ${file}`,
+    now: () => clock,
+    sleep: async () => {},
+  });
+  const spawning: Runtime = {
+    launchesController: runtime.launchesController,
+    removesWorkspacesOnTreeClose: runtime.removesWorkspacesOnTreeClose,
+    spawn: async (kind, spec) => {
+      const locator = await runtime.spawn(kind, spec);
+      if (locator.runtime !== "kubernetes") throw new Error("kubernetes locator");
+      const client = countingClient(options.neverCloses ?? false);
+      clients.push(client);
+      registrations.set(locator.roleToken, client);
+      const forget = () => registrations.delete(locator.roleToken);
+      void client.closed.then(forget, forget);
+      return locator;
+    },
+    adoptWorkingCopy: (issue, role, identity, timeoutMs) =>
+      runtime.adoptWorkingCopy(issue, role, identity, timeoutMs),
+    probe: (locator) => runtime.probe(locator),
+    connect: (locator, timeoutMs) => runtime.connect(locator, timeoutMs),
+    stop: (locator, timeoutMs, stopOptions) => runtime.stop(locator, timeoutMs, stopOptions),
+    reconcileOrphans: (known, graceMs) => runtime.reconcileOrphans(known, graceMs),
+  };
+  return {
+    runtime: spawning,
+    expectedRuntime: "kubernetes",
+    makeSpec,
+    dials: () => awaits,
+    clients: () => clients,
+    occupy: async (locator) => {
+      if (locator.runtime !== "kubernetes") throw new Error("kubernetes locator");
+      api.reissueUid(locator.podName);
+    },
+  };
+}
+
 const harnesses: Array<[string, (options?: HarnessOptions) => Promise<Harness>]> = [
   ["FakeRuntime", fakeHarness],
   ["TmuxRuntime", tmuxHarness],
+  ["KubernetesRuntime", kubernetesHarness],
 ];
 
 describe.each(harnesses)("Runtime contract: %s", (_name, makeHarness) => {
@@ -498,6 +620,19 @@ describe("TmuxRuntime", () => {
     path.join(stateDir, "workers", `${name}.sock`);
   const shimCommand = (workspaceDir: string, socketPath: string, innerCommand: string): string =>
     `cd ${workspaceDir} && ${process.execPath} ${DAEMON_CLI_ENTRYPOINT} worker-shim --socket ${socketPath} -- ${innerCommand}`;
+  /** Where `provisionIssueWorkspace` puts the issue's working copy under the harness's state
+   * dir (`<stateDir>/workspaces/<owner>/<repo>/<issue-lower>`): the pane's `cd` target. */
+  const workspaceFor = (stateDir: string): string =>
+    path.join(stateDir, "workspaces", "acme", "widgets", "legion-42");
+  /** The inner OMP command the runtime assembles from `makeSpec(role)`'s launch description: the
+   * invocation, RPC mode, and the one double-quoted `--append-system-prompt` word --
+   * `$(cat <prompt>)`, then the addressing text, separated by a blank line (`systemPromptArguments`'
+   * format; OMP's flag is last-wins, so one argument carries every fragment; the controller has
+   * no addressing fragment). */
+  const ompCommand = (role: LegionRole | "controller"): string =>
+    role === "controller"
+      ? `omp --mode rpc --append-system-prompt "$(cat /roles/controller-root.md)"`
+      : `omp --mode rpc --append-system-prompt "$(cat /roles/${role}.md)\n\naddress ${role}"`;
 
   it("sameProcess treats a reissued pane -- same id, other pid or start ticks -- as a different process", async () => {
     const harness = await tmuxHarness();
@@ -556,8 +691,10 @@ describe("TmuxRuntime", () => {
         "-e",
         "LEGION_ROLE=architect",
         "-e",
+        `LEGION_ROOT_WORKSPACE=${workspaceFor(harness.stateDir)}`,
+        "-e",
         `LEGION_BOOT_TOKEN_FILE=${bootTokenFile}`,
-        shimCommand("/work", socketPath, "omp --mode rpc")
+        shimCommand(workspaceFor(harness.stateDir), socketPath, ompCommand("architect"))
       ),
       tmuxArgv("kill-window", "-t", "legion-omp:__legion_bootstrap"),
       tmuxArgv("set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"),
@@ -594,8 +731,10 @@ describe("TmuxRuntime", () => {
         "-e",
         "LEGION_ROLE=implementer",
         "-e",
+        `LEGION_WORKSPACE=${workspaceFor(harness.stateDir)}`,
+        "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(harness.stateDir, "secrets", roleToken("omp", issue, "implementer"))}`,
-        shimCommand("/work", socketPath, "omp --mode rpc")
+        shimCommand(workspaceFor(harness.stateDir), socketPath, ompCommand("implementer"))
       ),
       tmuxArgv("select-layout", "-t", "@42", "tiled"),
     ]);
@@ -692,6 +831,116 @@ describe("TmuxRuntime", () => {
     expect(verifiedAt).toBeLessThan(splitAt);
   });
 
+  it("serializes workspace provisioning per repository: a second tree's clone and git-config writes wait for the first's to finish", async () => {
+    // Two trees admitted in one sweep share the repository clone; git's `.git/config` lock refuses
+    // a concurrent writer (`could not lock config file … File exists`). The first spawn's
+    // provisioning is held at its first command while the second spawn is started. A spawn's
+    // provisioning is admitted when it asks for its token -- `provisionIssueWorkspace`'s first
+    // act, before any command or fs work -- so the token requests witness admission: with the
+    // first held, the second must not have been admitted; once released, the second is admitted
+    // only after the first's last command, and the recorded commands form two contiguous blocks
+    // -- every command of the first tree (through its last `git config` write) before the second
+    // tree's opening `jj git fetch`. Nothing here waits on the clock.
+    const gate = Promise.withResolvers<void>();
+    const firstCommand = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    /** `commands.length` at each provisioning's admission. */
+    const admittedAt: number[] = [];
+    const harness = await tmuxHarness({
+      provisioningToken: async () => {
+        admittedAt.push(commands.length);
+        return "token";
+      },
+      provisioningRun: async (command) => {
+        commands.push(command);
+        if (commands.length === 1) {
+          firstCommand.resolve();
+          await gate.promise;
+        }
+        return provisioningRun(command);
+      },
+    });
+    const first = harness.runtime.spawn("worker", harness.makeSpec("planner", "LEGION-42"));
+    await firstCommand.promise;
+    const second = harness.runtime.spawn("worker", harness.makeSpec("planner", "LEGION-43"));
+    // Let everything already runnable run (the second spawn's own promise reactions; no timed
+    // wait): with the first still held, only one provisioning has been admitted.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(admittedAt).toEqual([0]);
+    gate.resolve();
+    const [one, two] = await Promise.all([first, second]);
+    expect(one.runtime).toBe("tmux");
+    expect(two.runtime).toBe("tmux");
+    // A tree's provisioning opens with `jj git clone` (no shared clone yet) or, with the clone
+    // present, the `jj config get git.abandon-unreachable-commits` read that precedes its fetch;
+    // the read that immediately follows a tree's own clone is not an opener.
+    const isSettingsRead = (c: string[] | undefined) =>
+      c?.[0] === "jj" && c[1] === "config" && c[2] === "get";
+    const openers = commands.flatMap((c, i) =>
+      (c[0] === "jj" && c[1] === "git" && c[2] === "clone") ||
+      (isSettingsRead(c) &&
+        !(i > 0 && commands[i - 1]?.[1] === "git" && commands[i - 1]?.[2] === "clone"))
+        ? [i]
+        : []
+    );
+    expect(openers).toHaveLength(2);
+    // The second tree was admitted exactly when the first's block had finished.
+    expect(admittedAt).toEqual([0, openers[1]]);
+    const [firstTree, secondTree] = [
+      commands.slice(openers[0], openers[1]),
+      commands.slice(openers[1]),
+    ];
+    const workspaceAdded = (block: string[][]) =>
+      block.filter((c) => c[0] === "jj" && c[1] === "workspace" && c[2] === "add").map((c) => c[3]);
+    expect(workspaceAdded(firstTree)).toEqual([
+      path.join(harness.stateDir, "workspaces", "acme", "widgets", "legion-42"),
+    ]);
+    expect(workspaceAdded(secondTree)).toEqual([
+      path.join(harness.stateDir, "workspaces", "acme", "widgets", "legion-43"),
+    ]);
+    // `git worktree prune` plus the five `git config` writes, each tree's, never interleaved.
+    expect(firstTree.filter((c) => c[0] === "git")).toHaveLength(6);
+    expect(secondTree.filter((c) => c[0] === "git")).toHaveLength(6);
+  });
+
+  it("adopts the working copy for the assigned role on a live-idle re-prompt: the shared jj metaedit command runs on the daemon-host workspace under the role's identity, and its failure is the adoption's", async () => {
+    // An implementer left idle after its phase is re-prompted for a new assignment once the
+    // tester has handed off; every role shares the issue's one working copy, so its undescribed
+    // `@` must be re-authored for the role that is about to describe it.
+    const commands: Array<{ command: string[]; env?: NodeJS.ProcessEnv; timeoutMs?: number }> = [];
+    let exitCode = 0;
+    const harness = await tmuxHarness({
+      provisioningRun: async (command, options) => {
+        if (command[1] === "metaedit") {
+          commands.push({ command, env: options?.env, timeoutMs: options?.timeoutMs });
+          return { stdout: "", stderr: "Error: no such revision", exitCode };
+        }
+        return provisioningRun(command);
+      },
+    });
+    await harness.runtime.spawn("worker", harness.makeSpec("implementer"));
+    const identity = {
+      jjUser: "legion-implementer[bot]",
+      jjEmail: "implementer@users.noreply.github.com",
+    };
+    await harness.runtime.adoptWorkingCopy(issue, "implementer", identity, 300_000);
+    expect(commands).toEqual([
+      {
+        command: adoptWorkingCopyCommand(
+          path.join(harness.stateDir, "workspaces", "acme", "widgets", "legion-42")
+        ),
+        env: { JJ_USER: identity.jjUser, JJ_EMAIL: identity.jjEmail },
+        timeoutMs: 300_000,
+      },
+    ]);
+    exitCode = 1;
+    await expect(
+      harness.runtime.adoptWorkingCopy(issue, "implementer", identity, 300_000)
+    ).rejects.toThrow(
+      "Could not adopt LEGION-42's working copy for implementer: Command failed (exit 1): jj metaedit"
+    );
+  });
+
   it("spawns the controller into its own window with the controller socket and secret file", async () => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("controller", harness.makeSpec("controller"));
@@ -712,7 +961,7 @@ describe("TmuxRuntime", () => {
         "LEGION_ROLE=controller",
         "-e",
         `LEGION_CONTROLLER_SECRET_FILE=${secretFile}`,
-        shimCommand("/work", socketPath, "omp --mode rpc")
+        shimCommand(path.join(harness.stateDir, "controller"), socketPath, ompCommand("controller"))
       )
     );
     expect(locator).toEqual({
@@ -1174,6 +1423,7 @@ describe("TmuxRuntime", () => {
       podName: "legion-legion-42-tester-g1",
       podUid: "uid-1",
       pvcName: "legion-legion-42",
+      roleToken: "legion-omp-legion-42-tester",
     };
     for (const attempt of [
       () => harness.runtime.probe(foreign),
@@ -1231,6 +1481,45 @@ describe("TmuxRuntime", () => {
     expect(harness.server.commands.filter((c) => c[3]?.startsWith("kill-"))).toEqual([
       tmuxArgv("kill-window", "-t", "@90"),
     ]);
+  });
+});
+
+describe("KubernetesRuntime", () => {
+  it("adopts the working copy for the assigned role on a live-idle re-prompt: the adopt-working-copy frame goes to the pod's registered stream under the role's identity, and the shim's failure is the adoption's", async () => {
+    // The pod's workspace exists only on its volume: the init container adopted once with the
+    // pod's identity at start; a later assignment for the same live pod must adopt again through
+    // its shim, or the next describe lands under whatever identity last touched `@`.
+    const harness = await kubernetesHarness();
+    const locator = await harness.runtime.spawn("worker", harness.makeSpec("implementer"));
+    if (locator.runtime !== "kubernetes") throw new Error("kubernetes locator");
+    const client = harness.clients()[0];
+    if (!client) throw new Error("no registered stream");
+    const identity = {
+      jjUser: "legion-implementer[bot]",
+      jjEmail: "implementer@users.noreply.github.com",
+    };
+    await harness.runtime.adoptWorkingCopy(issue, "implementer", identity, 300_000);
+    expect(client.adoptions).toEqual([
+      {
+        jjUser: "legion-implementer[bot]",
+        jjEmail: "implementer@users.noreply.github.com",
+        timeoutMs: 300_000,
+      },
+    ]);
+    client.adoptImpl = async () => {
+      throw new Error("Command failed (exit 1): jj metaedit …\nno such revision");
+    };
+    await expect(
+      harness.runtime.adoptWorkingCopy(issue, "implementer", identity, 300_000)
+    ).rejects.toThrow(
+      "Could not adopt LEGION-42's working copy for implementer: Command failed (exit 1): jj metaedit"
+    );
+    // A role whose stream is not registered cannot be adopted (nor prompted): a failure, never a skip.
+    await expect(
+      harness.runtime.adoptWorkingCopy(issue, "tester", identity, 300_000)
+    ).rejects.toThrow(
+      `Could not adopt LEGION-42's working copy for tester: no worker stream is registered for ${roleToken("omp", issue, "tester")}`
+    );
   });
 });
 

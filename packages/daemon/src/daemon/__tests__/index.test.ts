@@ -12,14 +12,22 @@ import {
 } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
-import type { DaemonConfig, GitHubAppRole } from "../config";
+import {
+  type DaemonConfig,
+  DEFAULT_KUBERNETES_RESOURCES,
+  DEFAULT_ROLE_PROFILES,
+  type GitHubAppRole,
+} from "../config";
 import type { DaemonEnvironment } from "../environment";
+import { parseImageDigestRef } from "../image-ref";
 import * as daemonIndex from "../index";
+import { createK8sClient } from "../k8s-client";
 import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { createFakeK8sApi } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
 
 const { startDaemon } = daemonIndex;
@@ -196,6 +204,7 @@ function daemonTestDependencies(
           closed: closed.promise,
           runState: "idle",
           negotiate: async () => {},
+          adoptWorkingCopy: async () => {},
           prompt: async () => ({
             turnStarted: Promise.resolve(),
             hasStarted: true,
@@ -240,7 +249,7 @@ function config(stateDir: string): DaemonConfig {
     project: "acme1",
     legionId: "acme/1",
     port: 0,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: "http://127.0.0.1:0",
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
@@ -3277,35 +3286,85 @@ describe("startDaemon", () => {
     }
   });
 
-  it("refuses to start when runtime is kubernetes, before acquiring the instance lock or anything else", async () => {
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
-    const daemonConfig: DaemonConfig = {
+  function kubernetesConfig(stateDir: string): DaemonConfig {
+    return {
       ...config(stateDir),
-      runtime: "kubernetes",
-      daemonUrl: "http://legion-daemon:13370",
+      daemonUrl: "http://172.18.0.1:13370",
       bind: "0.0.0.0",
+      runtime: {
+        name: "kubernetes",
+        namespace: "legion",
+        image: parseImageDigestRef(`ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`),
+        treeVolume: "20Gi",
+        resources: DEFAULT_KUBERNETES_RESOURCES,
+        roleProfiles: DEFAULT_ROLE_PROFILES,
+      },
     };
-    let lockAcquired = false;
-    let environmentResolved = false;
+  }
+
+  it("refuses to start under runtime: kubernetes with neither a kubeconfig nor in-cluster credentials, naming both, and releases the lock", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = kubernetesConfig(stateDir);
     try {
-      await expect(
-        startDaemon(daemonConfig, {
-          deps: {
-            acquireInstanceLock: async () => {
-              lockAcquired = true;
-              throw new Error("the instance lock must not be acquired for an unsupported runtime");
-            },
-            resolveDaemonEnvironment: async () => {
-              environmentResolved = true;
-              return daemonEnvironment;
-            },
-            dispatchClient: fakeDispatchClient(),
-          },
-        })
-      ).rejects.toThrow("runtime: kubernetes is not implemented yet");
-      expect(lockAcquired).toBeFalse();
-      expect(environmentResolved).toBeFalse();
+      await expect(startDaemon(daemonConfig, daemonDeps(daemonConfig))).rejects.toThrow(
+        "runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token does not exist: the daemon runs neither in a pod nor with a kubeconfig"
+      );
+      // The instance lock was released: a tmux daemon on the same state directory starts.
+      const daemon = await startDaemon(config(stateDir), daemonDeps(config(stateDir)));
+      await daemon.stop();
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under runtime: kubernetes, admits a queued root as a pod through the injected API client and never touches tmux", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = kubernetesConfig(stateDir);
+    const issue = "WIDGETS-42";
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[issue] = { key: issue, title: "Queued at boot", status: "todo", children: [] };
+    state.trees[issue] = { root: issue, generation: 0, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(issue);
+    const fakeApi = createFakeK8sApi({
+      namespace: "legion",
+      now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+    });
+    const commands: string[][] = [];
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("test dependencies carry no runner");
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          runner: async (command, runnerOptions) => {
+            commands.push(command);
+            return baseRunner(command, runnerOptions);
+          },
+          k8sClient: createK8sClient({
+            server: "https://fake",
+            namespace: "legion",
+            fetch: fakeApi.fetch,
+          }),
+        },
+      });
+      expect(state.admission.active).toEqual([issue]);
+      expect(state.trees[issue]?.status).toBe("active");
+      expect(state.trees[issue]?.locator).toMatchObject({
+        runtime: "kubernetes",
+        namespace: "legion",
+        podName: "legion-widgets-42-architect-g1",
+        pvcName: "legion-widgets-42",
+        roleToken: roleToken(daemonConfig.project, issue, "architect"),
+      });
+      expect(fakeApi.requests.map((r) => [r.method, r.path])).toContainEqual(["POST", "/pods"]);
+      expect(fakeApi.pods.has("legion-widgets-42-architect-g1")).toBe(true);
+      expect(commands.filter((command) => command[0]?.endsWith("/tmux"))).toEqual([]);
+    } finally {
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });

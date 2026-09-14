@@ -1,4 +1,4 @@
-import type { ResolvedWorkerClaim } from "./api/auth";
+import type { ResolvedStreamClaim } from "./api";
 import {
   createWorkerRpcClient,
   type WorkerRpcClient,
@@ -19,8 +19,8 @@ export interface WorkerStreamListenerOptions {
   /** Per-request timeout for every client this listener creates — `worker_rpc_timeout_seconds`
    * in ms. */
   rpcTimeoutMs: number;
-  /** `LegionApi.resolveWorkerBootToken`; `undefined` = no claim was minted this token. */
-  resolveBootToken(bootToken: string): ResolvedWorkerClaim | undefined;
+  /** `LegionApi.resolveWorkerBootToken`; `undefined` = nothing minted this token. */
+  resolveBootToken(bootToken: string): ResolvedStreamClaim | undefined;
   log?(line: string): void;
   setTimeout?(callback: () => void, delayMs: number): unknown;
   clearTimeout?(timer: unknown): void;
@@ -48,11 +48,13 @@ interface Waiter {
  * Accepts reverse-dialed `legion worker-shim --connect` streams. Each connection's first line
  * must be `{"type":"hello","bootToken"}`; the token is resolved through the same lookup
  * `/worker/started` uses, the daemon answers `{"type":"hello_ack"}`, and the socket becomes a
- * `WorkerRpcClient` keyed by the claim's role token. Rejections close the connection, log one
- * `worker-stream: rejected hello (<reason>)` line, and change no state. A connection that has not
- * completed its hello within `rpcTimeoutMs` of opening is rejected the same way (`hello timeout`):
- * the byte bound alone never fires on silence, and an idle or dripping pre-hello connection would
- * otherwise hold its fd and buffer forever.
+ * `WorkerRpcClient` keyed by the claim's role token. A tree root's boot token resolves to its
+ * architect role token the same way, so a root pod registers exactly like a phase worker.
+ * Rejections close the connection, log one `worker-stream: rejected hello (<reason>)` line, and
+ * change no state. A connection that has not completed its hello within `rpcTimeoutMs` of
+ * opening is rejected the same way (`hello timeout`): the byte bound alone never fires on
+ * silence, and an idle or dripping pre-hello connection would otherwise hold its fd and buffer
+ * forever.
  */
 export function startWorkerStreamListener(
   options: WorkerStreamListenerOptions
@@ -149,7 +151,7 @@ export function startWorkerStreamListener(
           fail("unknown boot token");
           return;
         }
-        if (resolved.boot && resolved.boot.generation !== resolved.claim.generation) {
+        if (resolved.stale) {
           fail("stale worker generation");
           return;
         }

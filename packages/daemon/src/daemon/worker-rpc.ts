@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { JjIdentity } from "@legion/workspace";
 import { createLineReader } from "./line-reader";
 import { createSocketLineWriter } from "./socket-writer";
 
@@ -93,6 +94,14 @@ export interface WorkerRpcClient {
   getState(timeoutMs?: number): Promise<Record<string, unknown>>;
   /** Asks the shim to close the wrapped OMP process's stdin; never SIGTERMs it. */
   shutdown(): void;
+  /** Asks the shim to run the working-copy adoption command (`adoptWorkingCopyCommand`, in
+   * `@legion/workspace`) in the process's own workspace under `identity` -- the Kubernetes
+   * runtime's channel to a workspace that exists only on the pod's mounted volume. A shim frame,
+   * never an OMP one: `{type: "adopt-working-copy", id, jjUser, jjEmail, timeoutMs}`, answered
+   * by `{type: "adopt-working-copy-result", id, ok, error?}`. Resolves on `ok`; rejects with the
+   * shim's `error` otherwise, or when no answer arrives within `timeoutMs` plus this client's
+   * request timeout (the command's own budget, then the round trip). */
+  adoptWorkingCopy(identity: JjIdentity, timeoutMs: number): Promise<void>;
   close(): void;
   /**
    * Registers a callback fired once when `runState` transitions to `"idle"` from a non-idle
@@ -472,6 +481,20 @@ export function createWorkerRpcClient(
     },
     shutdown() {
       writer.write(JSON.stringify({ type: "shutdown" }));
+    },
+    async adoptWorkingCopy(identity, requestTimeoutMs) {
+      const response = await request(
+        "adopt-working-copy",
+        { jjUser: identity.jjUser, jjEmail: identity.jjEmail, timeoutMs: requestTimeoutMs },
+        requestTimeoutMs + timeoutMs
+      );
+      if (response.type !== "adopt-working-copy-result" || response.ok !== true) {
+        throw new Error(
+          typeof response.error === "string"
+            ? response.error
+            : "Worker shim did not confirm the working-copy adoption"
+        );
+      }
     },
     close() {
       socket.end();

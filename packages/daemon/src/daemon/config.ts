@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import { parse } from "yaml";
 import { z } from "zod";
+import { type ImageDigestRef, parseImageDigestRef } from "./image-ref";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 
 export const GITHUB_APP_ROLES = ["implement", "review"] as const;
@@ -19,14 +21,70 @@ export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig
 export const RUNTIMES = ["tmux", "kubernetes"] as const;
 export type RuntimeName = (typeof RUNTIMES)[number];
 
+const RESOURCE_PROFILE_NAMES = ["small", "medium", "large"] as const;
+export type ResourceProfileName = (typeof RESOURCE_PROFILE_NAMES)[number];
+
+/** CPU/memory/ephemeral-storage requests and limits for one `ResourceProfileName`, each a
+ * Kubernetes quantity string (e.g. `"500m"`, `"1Gi"`). */
+export interface RoleResources {
+  requests: { cpu: string; memory: string; ephemeralStorage: string };
+  limits: { cpu: string; memory: string; ephemeralStorage: string };
+}
+
+/** `runtime.kubernetes`: the Kubernetes runtime's configuration block, file-only (no
+ * `LEGION_KUBERNETES_*` environment keys). Carried by `DaemonConfig.runtime` when its `name` is
+ * `"kubernetes"`. */
+export interface KubernetesRuntimeConfig {
+  namespace: string;
+  /** `runtime.kubernetes.image`, digest-pinned (`parseImageDigestRef`). */
+  image: ImageDigestRef;
+  storageClass?: string;
+  /** `runtime.kubernetes.tree_volume`; default "20Gi". */
+  treeVolume: string;
+  /** Absolute path (a relative file value is resolved against the config file's directory);
+   * absent = in-cluster service-account credentials. */
+  kubeconfig?: string;
+  resources: Record<ResourceProfileName, RoleResources>;
+  roleProfiles: Record<LegionRole, ResourceProfileName>;
+}
+
+/** Root spec §3 default resource profiles, by `ResourceProfileName`. */
+export const DEFAULT_KUBERNETES_RESOURCES: Record<ResourceProfileName, RoleResources> = {
+  small: {
+    requests: { cpu: "500m", memory: "1Gi", ephemeralStorage: "2Gi" },
+    limits: { cpu: "2", memory: "3Gi", ephemeralStorage: "8Gi" },
+  },
+  medium: {
+    requests: { cpu: "1", memory: "2Gi", ephemeralStorage: "10Gi" },
+    limits: { cpu: "4", memory: "6Gi", ephemeralStorage: "30Gi" },
+  },
+  large: {
+    requests: { cpu: "2", memory: "4Gi", ephemeralStorage: "20Gi" },
+    limits: { cpu: "6", memory: "12Gi", ephemeralStorage: "60Gi" },
+  },
+};
+
+/** Root spec §3 default role→profile mapping. */
+export const DEFAULT_ROLE_PROFILES: Record<LegionRole, ResourceProfileName> = {
+  architect: "small",
+  planner: "small",
+  implementer: "medium",
+  tester: "large",
+  reviewer: "small",
+  merger: "small",
+};
+
+export type RuntimeConfig = { name: "tmux" } | ({ name: "kubernetes" } & KubernetesRuntimeConfig);
+
 export interface DaemonConfig {
   project: string;
   legionId: string;
   port: number;
   /** Which `Runtime` (`runtime.ts`) starts, probes, and stops Legion processes: `tmux` (the
-   * default: panes on the daemon's private tmux server) or `kubernetes` (pods; refuses startup
-   * until the Kubernetes runtime lands). */
-  runtime: RuntimeName;
+   * default: panes on the daemon's private tmux server) or `kubernetes` (pods), the latter
+   * carrying its `runtime.kubernetes` block -- one value, so a kubernetes runtime without its
+   * block cannot be expressed. */
+  runtime: RuntimeConfig;
   /** The daemon API URL every spawned process is told (`LEGION_DAEMON_URL`), normalized with no
    * trailing slash. Under tmux it is always `http://127.0.0.1:<port>` — the default, and the only
    * accepted value (anything else is an inherited outer pane's `LEGION_DAEMON_URL`); required
@@ -138,6 +196,8 @@ export interface DaemonConfig {
 
 export interface LoadedConfigFile {
   fields: Record<string, unknown>;
+  /** The parsed `runtime.kubernetes` block, when the file selected the Kubernetes runtime by it. */
+  kubernetes?: KubernetesRuntimeConfig;
 }
 
 export interface LoadConfigFileOptions {
@@ -196,10 +256,37 @@ const MAX_TIMER_HOURS = Math.floor(MAX_TIMER_SECONDS / 3600);
 /** Also the per-attempt budget `legion probe-image` uses (`IMAGE_PROBE_TIMEOUT_MS`). */
 export const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
+const RESOURCE_PROFILE_SCHEMA: ConfigSchema = {
+  requests: { cpu: null, memory: null, ephemeral_storage: null },
+  limits: { cpu: null, memory: null, ephemeral_storage: null },
+};
+
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
-  runtime: null,
+  runtime: {
+    kubernetes: {
+      namespace: null,
+      image: null,
+      storage_class: null,
+      tree_volume: null,
+      kubeconfig: null,
+      resources: {
+        small: RESOURCE_PROFILE_SCHEMA,
+        medium: RESOURCE_PROFILE_SCHEMA,
+        large: RESOURCE_PROFILE_SCHEMA,
+      },
+      role_profiles: {
+        architect: null,
+        planner: null,
+        implementer: null,
+        tester: null,
+        reviewer: null,
+        merger: null,
+      },
+    },
+    [CONFIG_ANY_KEY]: null,
+  },
   daemon_url: null,
   bind: null,
   envoy_url: null,
@@ -734,6 +821,134 @@ function parseGates(value: unknown, field: string): DaemonConfig["gates"] | unde
   return { design };
 }
 
+const QUANTITY_PATTERN = /^[0-9]+(\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti|P|Pi|E|Ei)?$/;
+
+/** A Kubernetes quantity (e.g. `20Gi`, `500m`, `2`): a string in the file, or a bare YAML number
+ * (`tree_volume: 20` parses as a number, not the string `"20"`), coerced to its decimal text and
+ * validated against the same suffix set Kubernetes itself accepts. */
+function readQuantity(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = typeof value === "number" ? String(value) : value;
+  if (typeof text !== "string" || !QUANTITY_PATTERN.test(text)) {
+    throw new Error(`${field} must be a Kubernetes quantity (e.g. 20Gi)`);
+  }
+  return text;
+}
+
+function readResourceQuantities(
+  value: unknown,
+  field: string,
+  base: { cpu: string; memory: string; ephemeralStorage: string }
+): { cpu: string; memory: string; ephemeralStorage: string } {
+  if (value === undefined || value === null) return { ...base };
+  const parsed = UnknownRecordSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field} must be a mapping`);
+  return {
+    cpu: readQuantity(parsed.data.cpu, `${field}.cpu`) ?? base.cpu,
+    memory: readQuantity(parsed.data.memory, `${field}.memory`) ?? base.memory,
+    ephemeralStorage:
+      readQuantity(parsed.data.ephemeral_storage, `${field}.ephemeral_storage`) ??
+      base.ephemeralStorage,
+  };
+}
+
+function parseResourceProfile(value: unknown, field: string, base: RoleResources): RoleResources {
+  if (value === undefined || value === null) {
+    return { requests: { ...base.requests }, limits: { ...base.limits } };
+  }
+  const parsed = UnknownRecordSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field} must be a mapping`);
+  return {
+    requests: readResourceQuantities(parsed.data.requests, `${field}.requests`, base.requests),
+    limits: readResourceQuantities(parsed.data.limits, `${field}.limits`, base.limits),
+  };
+}
+
+function parseResources(value: unknown, field: string): Record<ResourceProfileName, RoleResources> {
+  const parsed =
+    value === undefined || value === null ? undefined : UnknownRecordSchema.safeParse(value);
+  if (parsed && !parsed.success) throw new Error(`${field} must be a mapping`);
+  const data = parsed?.data ?? {};
+  return {
+    small: parseResourceProfile(data.small, `${field}.small`, DEFAULT_KUBERNETES_RESOURCES.small),
+    medium: parseResourceProfile(
+      data.medium,
+      `${field}.medium`,
+      DEFAULT_KUBERNETES_RESOURCES.medium
+    ),
+    large: parseResourceProfile(data.large, `${field}.large`, DEFAULT_KUBERNETES_RESOURCES.large),
+  };
+}
+
+function parseRoleProfiles(value: unknown, field: string): Record<LegionRole, ResourceProfileName> {
+  const parsed =
+    value === undefined || value === null ? undefined : UnknownRecordSchema.safeParse(value);
+  if (parsed && !parsed.success) throw new Error(`${field} must be a mapping`);
+  const data = parsed?.data ?? {};
+  const result = { ...DEFAULT_ROLE_PROFILES };
+  for (const role of LEGION_ROLES) {
+    const raw = data[role];
+    if (raw === undefined) continue;
+    const roleField = `${field}.${role}`;
+    const profile = readString(raw, roleField);
+    if (
+      profile === undefined ||
+      !RESOURCE_PROFILE_NAMES.some((candidate) => candidate === profile)
+    ) {
+      throw new Error(`${roleField} must be one of small, medium, large`);
+    }
+    result[role] = profile as ResourceProfileName;
+  }
+  return result;
+}
+
+/** `runtime.kubernetes` (file-only, `github_apps` pattern): a mapping validated field-by-field,
+ * with `resources`/`role_profiles` overriding the root spec §3 defaults per present key. Unknown
+ * keys are rejected earlier by `collectUnknownKeys` against `CONFIG_SCHEMA`. */
+function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRuntimeConfig {
+  const parsed = UnknownRecordSchema.safeParse(value);
+  if (!parsed.success) throw new Error("runtime.kubernetes must be a mapping");
+  const data = parsed.data;
+
+  const namespaceRaw = readString(data.namespace, "runtime.kubernetes.namespace");
+  if (namespaceRaw === undefined) {
+    throw new Error("runtime.kubernetes.namespace is required");
+  }
+  const namespace = requireNonEmpty(namespaceRaw, "runtime.kubernetes.namespace");
+
+  const imageRaw = readString(data.image, "runtime.kubernetes.image");
+  if (imageRaw === undefined) {
+    throw new Error("runtime.kubernetes.image is required");
+  }
+  const image = parseImageDigestRef(imageRaw);
+
+  const storageClassRaw = readString(data.storage_class, "runtime.kubernetes.storage_class");
+  const storageClass =
+    storageClassRaw === undefined
+      ? undefined
+      : requireNonEmpty(storageClassRaw, "runtime.kubernetes.storage_class");
+
+  const treeVolume = readQuantity(data.tree_volume, "runtime.kubernetes.tree_volume") ?? "20Gi";
+
+  const kubeconfigRaw = readString(data.kubeconfig, "runtime.kubernetes.kubeconfig");
+  const kubeconfig =
+    kubeconfigRaw === undefined
+      ? undefined
+      : path.isAbsolute(kubeconfigRaw)
+        ? kubeconfigRaw
+        : path.resolve(configDir, kubeconfigRaw);
+
+  return {
+    namespace,
+    image,
+    storageClass,
+    treeVolume,
+    kubeconfig,
+    resources: parseResources(data.resources, "runtime.kubernetes.resources"),
+    roleProfiles: parseRoleProfiles(data.role_profiles, "runtime.kubernetes.role_profiles"),
+  };
+}
+
 function fileString(fields: Record<string, unknown>, key: string): string | undefined {
   const value = fields[key];
   return typeof value === "string" ? value : undefined;
@@ -775,6 +990,7 @@ export function loadConfigFromFile(
     );
   }
   if (parsed === undefined || parsed === null) return { fields: {} };
+  let kubernetes: KubernetesRuntimeConfig | undefined;
   const parsedRoot = UnknownRecordSchema.safeParse(parsed);
   if (!parsedRoot.success) throw new Error("Config file root must be a mapping");
   const config = parsedRoot.data;
@@ -790,8 +1006,20 @@ export function loadConfigFromFile(
   if (project !== undefined) fields.legionId = requireNonEmpty(project, "project");
   const port = readPositiveInteger(config.port, "port", 65535);
   if (port !== undefined) fields.port = port;
-  const runtime = parseRuntime(readString(config.runtime, "runtime"), "runtime");
-  if (runtime !== undefined) fields.runtime = runtime;
+  const runtimeValue = config.runtime;
+  if (typeof runtimeValue === "string") {
+    fields.runtime = parseRuntime(runtimeValue, "runtime");
+  } else if (runtimeValue !== undefined && runtimeValue !== null) {
+    const mapping = UnknownRecordSchema.safeParse(runtimeValue);
+    const keys = mapping.success ? Object.keys(mapping.data) : [];
+    if (!mapping.success || keys.length !== 1 || keys[0] !== "kubernetes") {
+      throw new Error(
+        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes"
+      );
+    }
+    fields.runtime = "kubernetes";
+    kubernetes = parseKubernetesRuntime(mapping.data.kubernetes, configDir);
+  }
   const daemonUrl = readString(config.daemon_url, "daemon_url");
   if (daemonUrl !== undefined) fields.daemonUrl = validateUrl(daemonUrl, "daemon_url");
   const bind = readString(config.bind, "bind");
@@ -890,7 +1118,7 @@ export function loadConfigFromFile(
   const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
   if (githubApps !== undefined) fields.githubApps = githubApps;
 
-  return { fields };
+  return kubernetes === undefined ? { fields } : { fields, kubernetes };
 }
 
 export function resolveDaemonConfig(
@@ -921,11 +1149,41 @@ export function resolveDaemonConfig(
     throw new Error("LEGION_DAEMON_PORT must be a valid TCP port");
   }
   const runtime = resolveValue<RuntimeName>(
-    opts.cliOverrides?.runtime,
+    opts.cliOverrides?.runtime?.name,
     parseRuntime(fileString(fields, "runtime"), "runtime"),
     parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME"),
     "tmux"
   );
+  // One value for the runtime and its block: the file's `runtime.kubernetes` mapping is the only
+  // source of the block, so a bare `runtime: kubernetes` (file, env, or cli) has nothing to run.
+  let runtimeConfig: RuntimeConfig;
+  if (runtime.value === "kubernetes") {
+    const kubernetes =
+      opts.cliOverrides?.runtime?.name === "kubernetes"
+        ? opts.cliOverrides.runtime
+        : opts.configFile?.kubernetes;
+    if (kubernetes === undefined) {
+      throw new Error(
+        "runtime.kubernetes is required when runtime is kubernetes: set runtime.kubernetes.namespace and runtime.kubernetes.image in legion.yaml"
+      );
+    }
+    runtimeConfig = { ...kubernetes, name: "kubernetes" };
+  } else {
+    runtimeConfig = { name: "tmux" };
+  }
+  if (
+    runtime.source === "config" &&
+    env.LEGION_RUNTIME !== undefined &&
+    env.LEGION_RUNTIME !== runtime.value
+  ) {
+    console.warn(
+      `[legion] LEGION_RUNTIME=${env.LEGION_RUNTIME} ignored: legion.yaml's ${
+        runtime.value === "kubernetes"
+          ? "runtime.kubernetes block selects kubernetes"
+          : "runtime selects tmux"
+      } (the file outranks the environment)`
+    );
+  }
   // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
   // daemon started from inside a pane inherits the OUTER daemon's URL from its environment and
   // would tell its own processes to register there. Under tmux the only correct value is the
@@ -1036,6 +1294,11 @@ export function resolveDaemonConfig(
     parseShellWords(env.LEGION_OMP_LAUNCH_PREFIX, "LEGION_OMP_LAUNCH_PREFIX"),
     []
   );
+  if (runtime.value === "kubernetes" && ompLaunchPrefix.value.length > 0) {
+    throw new Error(
+      `omp_launch_prefix is not used when runtime is kubernetes: provider keys come from the mounted Secret legion-${project}-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)`
+    );
+  }
 
   const repos = resolveValue(
     opts.cliOverrides?.repos,
@@ -1267,7 +1530,7 @@ export function resolveDaemonConfig(
       project,
       legionId: legionId.value,
       port: port.value,
-      runtime: runtime.value,
+      runtime: runtimeConfig,
       daemonUrl: resolvedDaemonUrl,
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),

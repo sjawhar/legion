@@ -23,6 +23,13 @@ export interface BootToken {
   sessionId?: string;
 }
 
+/** What a tree root's boot token resolves to on the worker stream: the tree whose architect it
+ * was minted for, and the generation it was minted at when known. */
+export interface RootBootToken {
+  tree: IssueKey;
+  generation?: number;
+}
+
 export interface WorkerBootToken {
   tree: IssueKey;
   issue: IssueKey;
@@ -191,5 +198,20 @@ export class CapabilityService {
       }
     }
     return undefined;
+  }
+
+  /** The root-token half of the stream listener's lookup: the in-memory mint record
+   * (`registerBootToken`), else the durable `spawnCapabilities` hash record `mintBootToken`
+   * persisted — only one minted for the tree's architect (`role === "architect" && issue ===
+   * tree`). `generation` is absent only for a durable record written before it was persisted.
+   * Never consumes the token: `/process/started` does that. */
+  resolveRootBootToken(state: LegionState, bootToken: string): RootBootToken | undefined {
+    const boot = this.bootTokens.get(bootToken);
+    if (boot) return { tree: boot.tree, generation: boot.generation };
+    const capability = state.spawnCapabilities[spawnCapabilityKey(bootToken)];
+    if (!capability || capability.role !== "architect" || capability.issue !== capability.tree) {
+      return undefined;
+    }
+    return { tree: capability.tree, generation: capability.generation };
   }
 }

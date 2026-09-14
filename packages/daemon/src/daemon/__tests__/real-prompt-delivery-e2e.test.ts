@@ -17,9 +17,9 @@ import { roleToken } from "@legion/contracts";
 import type { DaemonConfig } from "../config";
 import { type LegionState, newLegionState, type WorkerRoleClaim } from "../legion-state";
 import { parseProcStatStartTicks } from "../proc-stat";
-import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
+import { locatorsForIssue, ProcessManager } from "../processes";
 import type { TmuxLocator } from "../runtime";
-import { TmuxRuntime } from "../runtime-tmux";
+import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
 
@@ -172,7 +172,7 @@ function config(stateDir: string): DaemonConfig {
     project: PROJECT,
     legionId: "sjawhar/1",
     port: 0,
-    runtime: "tmux",
+    runtime: { name: "tmux" },
     daemonUrl: "http://127.0.0.1:0",
     bind: "127.0.0.1",
     envoyUrl: "http://127.0.0.1:9020",
@@ -260,7 +260,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
   const cfg = config(stateDir);
   const commands: string[][] = [];
   const publications: string[] = [];
-  const runner: ProcessManagerDeps["run"] = async (command, options) => {
+  const runner: TmuxRuntimeDeps["run"] = async (command, options) => {
     commands.push(command);
     if (command[0] === "jj" && command[1] === "metaedit") {
       return { stdout: "", stderr: "Nothing changed.\n", exitCode: 0 };
@@ -274,6 +274,13 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     tmux: { run: runner, socket: TMUX_SOCKET },
     project: PROJECT,
     stateDir,
+    ompInvocation: cfg.ompInvocation,
+    ompLaunchPrefix: cfg.ompLaunchPrefix,
+    provisioningToken: async () => "installation-token",
+    run: runner,
+    repo: cfg.repo,
+    credentialHelper: "!true",
+    slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc: (socket) => connectWorkerRpc(socket, cfg.workerRpcTimeoutSeconds * 1000),
     workerRpcTimeoutMs: () => cfg.workerRpcTimeoutSeconds * 1000,
     now: () => Date.now(),
@@ -284,10 +291,8 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     saveState: async () => {},
     config: cfg,
     runtime,
-    ompInvocation: cfg.ompInvocation,
     processPath: process.env.PATH ?? "",
     credentialHelper: "!true",
-    run: runner,
     publishRole: (_subject, json) => {
       publications.push(json);
     },
@@ -295,7 +300,6 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     mintControllerCapability: async () => "controller-secret",
     mintBootToken: async () => "boot-token",
     mintWorkerBootToken: async () => "worker-boot-token",
-    provisioningToken: async () => "installation-token",
     workerCatchup: {
       baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),

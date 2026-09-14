@@ -1,8 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  DEFAULT_KUBERNETES_RESOURCES,
+  DEFAULT_ROLE_PROFILES,
   type GitHubAppsConfig,
   loadConfig,
   loadConfigFromFile,
@@ -33,6 +35,17 @@ const REVIEW_APP_YAML = ["  review:", '    app_id: "2"', '    private_key: "test
 function resolveWithApps(options: ResolveDaemonConfigOptions) {
   return resolveDaemonConfig({ cliOverrides: { githubApps: BOTH_APPS }, ...options });
 }
+
+const overrides = {
+  githubApps: BOTH_APPS,
+};
+
+const KUBERNETES_BLOCK = [
+  "runtime:",
+  "  kubernetes:",
+  "    namespace: legion",
+  `    image: ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`,
+].join("\n");
 
 describe("daemon config", () => {
   it("derives the typed lifecycle config from environment", () => {
@@ -1099,16 +1112,13 @@ describe("daemon config", () => {
         ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
         "/tmp/legion-config"
       );
-    const overrides = {
-      githubApps: BOTH_APPS,
-    };
 
     it("defaults to the tmux runtime, a loopback daemon_url on the configured port, and a loopback bind", () => {
       const { config } = resolveDaemonConfig({
         env: { ...requiredEnv, LEGION_DAEMON_PORT: "14000" },
         cliOverrides: overrides,
       });
-      expect(config.runtime).toBe("tmux");
+      expect(config.runtime).toEqual({ name: "tmux" });
       expect(config.daemonUrl).toBe("http://127.0.0.1:14000");
       expect(config.bind).toBe("127.0.0.1");
     });
@@ -1116,14 +1126,14 @@ describe("daemon config", () => {
     it("resolves all three from YAML for a kubernetes deployment", () => {
       const { config } = resolveWithApps({
         configFile: yaml(
-          "runtime: kubernetes",
+          KUBERNETES_BLOCK,
           "daemon_url: http://legion-daemon.legion.svc:13370",
           "bind: 0.0.0.0"
         ),
         env: requiredEnv,
         cliOverrides: overrides,
       });
-      expect(config.runtime).toBe("kubernetes");
+      expect(config.runtime.name).toBe("kubernetes");
       expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
       expect(config.bind).toBe("0.0.0.0");
     });
@@ -1141,7 +1151,7 @@ describe("daemon config", () => {
     it("requires daemon_url under the kubernetes runtime", () => {
       expect(() =>
         resolveWithApps({
-          configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0"),
+          configFile: yaml(KUBERNETES_BLOCK, "bind: 0.0.0.0"),
           env: requiredEnv,
           cliOverrides: overrides,
         })
@@ -1157,7 +1167,7 @@ describe("daemon config", () => {
         })
       ).toThrow("LEGION_DAEMON_URL must be a valid URL");
       const { config } = resolveWithApps({
-        configFile: yaml("runtime: kubernetes", "bind: 0.0.0.0", "daemon_url: http://h:1/"),
+        configFile: yaml(KUBERNETES_BLOCK, "bind: 0.0.0.0", "daemon_url: http://h:1/"),
         env: requiredEnv,
         cliOverrides: overrides,
       });
@@ -1237,7 +1247,7 @@ describe("daemon config", () => {
     it("lets a YAML daemon_url beat LEGION_DAEMON_URL (kubernetes, where the value is free), so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
       const { config } = resolveWithApps({
         configFile: yaml(
-          "runtime: kubernetes",
+          KUBERNETES_BLOCK,
           "bind: 0.0.0.0",
           "daemon_url: http://legion-daemon.legion.svc:13370"
         ),
@@ -1255,6 +1265,172 @@ describe("daemon config", () => {
         daemonUrl: "http://127.0.0.1:14100",
         bind: "127.0.0.1",
       });
+    });
+  });
+
+  describe("runtime.kubernetes", () => {
+    const digest = `ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`;
+    const block = (...lines: string[]) =>
+      [
+        "runtime:",
+        "  kubernetes:",
+        "    namespace: legion",
+        `    image: ${digest}`,
+        ...lines.map((l) => `    ${l}`),
+      ].join("\n");
+    const yaml = (...lines: string[]) =>
+      loadConfigFromFile(
+        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
+        "/tmp/legion-config"
+      );
+    const resolve = (...lines: string[]) =>
+      resolveDaemonConfig({
+        configFile: yaml(
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0",
+          ...lines
+        ),
+        env: requiredEnv,
+        cliOverrides: overrides,
+      }).config;
+
+    it("selects kubernetes from the mapping form and applies the §3 defaults", () => {
+      const config = resolve(block());
+      expect(config.runtime.name).toBe("kubernetes");
+      expect(config.runtime).toEqual({
+        name: "kubernetes",
+        namespace: "legion",
+        image: {
+          reference: digest,
+          name: "ghcr.io/sjawhar/legion-worker",
+          digest: `sha256:${"a".repeat(64)}`,
+        },
+        treeVolume: "20Gi",
+        resources: DEFAULT_KUBERNETES_RESOURCES,
+        roleProfiles: DEFAULT_ROLE_PROFILES,
+      });
+    });
+
+    it("reads every optional field, resolving a relative kubeconfig against the config directory, and lets a profile override one quantity", () => {
+      const config = resolve(
+        block(
+          "storage_class: gp3",
+          "tree_volume: 50Gi",
+          "kubeconfig: ./kind.kubeconfig",
+          "resources:",
+          "  large:",
+          "    limits:",
+          "      memory: 24Gi",
+          "role_profiles:",
+          "  planner: medium"
+        )
+      );
+      if (config.runtime.name !== "kubernetes") throw new Error("expected the kubernetes runtime");
+      expect(config.runtime.storageClass).toBe("gp3");
+      expect(config.runtime.treeVolume).toBe("50Gi");
+      expect(config.runtime.kubeconfig).toBe("/tmp/legion-config/kind.kubeconfig");
+      expect(config.runtime.resources.large).toEqual({
+        ...DEFAULT_KUBERNETES_RESOURCES.large,
+        limits: { ...DEFAULT_KUBERNETES_RESOURCES.large.limits, memory: "24Gi" },
+      });
+      expect(config.runtime.roleProfiles).toEqual({
+        ...DEFAULT_ROLE_PROFILES,
+        planner: "medium",
+      });
+    });
+
+    it.each([
+      [
+        "runtime: kubernetes",
+        "runtime.kubernetes is required when runtime is kubernetes: set runtime.kubernetes.namespace and runtime.kubernetes.image in legion.yaml",
+      ],
+      [
+        ["runtime:", "  kubernetes:", `    image: ${digest}`].join("\n"),
+        "runtime.kubernetes.namespace is required",
+      ],
+      [
+        ["runtime:", "  kubernetes:", "    namespace: legion"].join("\n"),
+        "runtime.kubernetes.image is required",
+      ],
+      [
+        [
+          "runtime:",
+          "  kubernetes:",
+          "    namespace: legion",
+          "    image: ghcr.io/sjawhar/legion-worker:latest",
+        ].join("\n"),
+        "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
+      ],
+      [
+        block("tree_volume: twenty"),
+        "runtime.kubernetes.tree_volume must be a Kubernetes quantity (e.g. 20Gi)",
+      ],
+      [block("resources:", "  huge: {}"), 'Unknown config key "runtime.kubernetes.resources.huge"'],
+      [
+        block("role_profiles:", "  tester: enormous"),
+        "runtime.kubernetes.role_profiles.tester must be one of small, medium, large",
+      ],
+      [
+        block("role_profiles:", "  janitor: small"),
+        'Unknown config key "runtime.kubernetes.role_profiles.janitor"',
+      ],
+      [
+        "runtime: {}",
+        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+      ],
+      [
+        ["runtime:", "  tmux: {}"].join("\n"),
+        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+      ],
+      [
+        ["runtime:", "  kubernetes: {}", "  tmux: {}"].join("\n"),
+        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
+      ],
+      [["runtime:", "  kubernetes: kubernetes"].join("\n"), "runtime.kubernetes must be a mapping"],
+    ])("refuses %s naming the field", (lines, message) => {
+      expect(() => resolve(lines)).toThrow(message);
+    });
+
+    it("refuses omp_launch_prefix under kubernetes with the migration message, from either source", () => {
+      const message =
+        "omp_launch_prefix is not used when runtime is kubernetes: provider keys come from the mounted Secret legion-acme7-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)";
+      expect(() => resolve(block(), "omp_launch_prefix: [secrets, KEY, --]")).toThrow(message);
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
+          env: { ...requiredEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets KEY --" },
+          cliOverrides: {
+            githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+          },
+        })
+      ).toThrow(message);
+    });
+
+    it("keeps daemon_url required under the mapping form too", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: yaml("bind: 0.0.0.0", block()),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow("daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)");
+    });
+
+    it("the file's runtime outranks LEGION_RUNTIME (existing precedence) and the disagreement is logged once", () => {
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const config = resolveDaemonConfig({
+          configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
+          env: { ...requiredEnv, LEGION_RUNTIME: "tmux" },
+          cliOverrides: overrides,
+        }).config;
+        expect(config.runtime.name).toBe("kubernetes");
+        expect(warn.mock.calls.map((c) => c[0])).toEqual([
+          "[legion] LEGION_RUNTIME=tmux ignored: legion.yaml's runtime.kubernetes block selects kubernetes (the file outranks the environment)",
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

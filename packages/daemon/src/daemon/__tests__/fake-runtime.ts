@@ -1,3 +1,4 @@
+import type { JjIdentity } from "@legion/workspace";
 import {
   awaitShutdown,
   type Locator,
@@ -12,6 +13,10 @@ export type FakeWorkerRpcClient = WorkerRpcClient & {
   negotiated: boolean;
   getStateCalls: number;
   getStateImpl?: () => Promise<Record<string, unknown>>;
+  /** Every `adopt-working-copy` frame this client was asked to send, in order. */
+  adoptions: Array<{ jjUser: string; jjEmail: string; timeoutMs: number }>;
+  /** The shim's answer to the next adoption frame; a rejection models `ok: false`. */
+  adoptImpl?: () => Promise<void>;
   idleFireCount: number;
   /** Whether `prompt()` starts the turn the moment it is acknowledged (the default: a healthy
    * worker's `agent_start` follows the acknowledgement). A test sets it `false` to model an
@@ -47,8 +52,16 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
     negotiated: false,
     getStateCalls: 0,
     getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
+    /** Every `adopt-working-copy` frame this client was asked to send, in order. */
+    adoptions: [] as Array<{ jjUser: string; jjEmail: string; timeoutMs: number }>,
+    /** The shim's answer to the next adoption frame; a rejection models `ok: false`. */
+    adoptImpl: undefined as (() => Promise<void>) | undefined,
     idleFireCount: 0,
     turnStartsOnPrompt: true,
+    async adoptWorkingCopy(identity: JjIdentity, timeoutMs: number) {
+      client.adoptions.push({ ...identity, timeoutMs });
+      await client.adoptImpl?.();
+    },
     async negotiate() {
       client.negotiated = true;
     },
@@ -150,6 +163,8 @@ interface FakeProcess {
  * legacy process, and `strangers` keeps the entry until a test inspects it.
  */
 export class FakeRuntime implements Runtime {
+  readonly launchesController: boolean;
+  readonly removesWorkspacesOnTreeClose: boolean;
   readonly spawned: Array<{ kind: "root" | "worker" | "controller"; spec: SpawnSpec }> = [];
   readonly stopped: Array<{
     locator: Locator;
@@ -158,6 +173,12 @@ export class FakeRuntime implements Runtime {
   }> = [];
   readonly reconciled: Array<{ known: ReadonlySet<string>; graceMs: number }> = [];
   readonly connects: Locator[] = [];
+  readonly adoptions: Array<{
+    issue: string;
+    role: string;
+    identity: JjIdentity;
+    timeoutMs: number;
+  }> = [];
   /** Handles some other process now occupies, with the `detail` `probe` reports for each and
    * whether the recorded process is still reachable over its own socket. */
   readonly strangers = new Map<
@@ -171,8 +192,20 @@ export class FakeRuntime implements Runtime {
     private readonly options: {
       clientFactory?: () => WorkerRpcClient;
       sleep?: (ms: number) => Promise<void>;
+      adoptWorkingCopy?: (
+        issue: string,
+        role: string,
+        identity: JjIdentity,
+        timeoutMs: number
+      ) => Promise<void>;
+      /** `false` models the Kubernetes runtime, which does not launch the controller. */
+      launchesController?: boolean;
+      removesWorkspacesOnTreeClose?: boolean;
     } = {}
-  ) {}
+  ) {
+    this.launchesController = options.launchesController ?? true;
+    this.removesWorkspacesOnTreeClose = options.removesWorkspacesOnTreeClose ?? true;
+  }
 
   /** The handle at `locator` is no longer the recorded process's: see the class doc. The recorded
    * process stays reachable over its socket (a still-live legacy process) unless `reachable` is
@@ -198,10 +231,21 @@ export class FakeRuntime implements Runtime {
       podName: `${spec.role}-${id}`,
       podUid: `uid-${id}`,
       pvcName: "fake-pvc",
+      roleToken: `${spec.issue ?? "controller"}-${spec.role}`,
     };
     this.spawned.push({ kind, spec });
     this.processes.set(locator.podUid, { kind, spec, locator });
     return locator;
+  }
+
+  async adoptWorkingCopy(
+    issue: string,
+    role: string,
+    identity: JjIdentity,
+    timeoutMs: number
+  ): Promise<void> {
+    this.adoptions.push({ issue, role, identity, timeoutMs });
+    await this.options.adoptWorkingCopy?.(issue, role, identity, timeoutMs);
   }
 
   async probe(locator: Locator): Promise<ProbeResult> {

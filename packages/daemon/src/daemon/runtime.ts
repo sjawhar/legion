@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { IssueKey, LegionRole } from "@legion/contracts";
+import type { JjIdentity } from "@legion/workspace";
 import { createCancellableSleep } from "./cancellable-sleep";
 import { probeWorkerSocket, type SocketProbeResult, type WorkerRpcClient } from "./worker-rpc";
 
@@ -32,28 +33,43 @@ export interface K8sLocator {
   podName: string;
   podUid: string;
   pvcName: string;
+  /** The claim token the pod's shim registers its stream under (`roleToken(project, issue,
+   * role)`; the architect token for a tree root) — what `KubernetesRuntime.connect`/`probe`/
+   * `stop` key the listener's registrations by. */
+  roleToken: string;
+  /** The one field `--resume` reads (LEGION-31 renames it `ompSessionRef`). */
   ompSessionFile?: string;
 }
 
 export type TmuxLocator = { runtime: "tmux" } & TmuxWindowLocator;
 export type Locator = TmuxLocator | ({ runtime: "kubernetes" } & K8sLocator);
 
-/** Root spec section 3 profile shape; unused by the tmux runtime. */
-export interface RoleResources {
-  requests: { cpu: string; memory: string; ephemeralStorage: string };
-  limits: { cpu: string; memory: string; ephemeralStorage: string };
-}
-
+/** What a runtime starts from. The runtime assembles the process (OMP path, `--resume`,
+ * `--append-system-prompt`) and provisions the working copy itself; `ProcessManager` never
+ * builds a shell string or stats a session file. */
 export type SpawnSpec = {
   /** Absent only for kind "controller". */
   issue?: IssueKey;
+  /** The tree `issue` belongs to (equals `issue` for a root). Absent only for kind "controller". */
+  tree?: IssueKey;
+  /** The process generation being launched. Absent only for kind "controller". */
+  generation?: number;
   role: LegionRole | "controller";
-  workspaceDir: string;
+  /** Every non-runtime-specific variable the process carries; the runtime adds its own (the
+   * workspace path, `<NAME>_FILE` pointers) and may re-point daemon-path values at its own
+   * locations. `undefined` values are omitted. */
   env: Record<string, string | undefined>;
-  innerCommand: string;
-  resources?: RoleResources;
+  launch: {
+    /** The packaged role prompt file (`packages/pi-envoy/roles/<role>.md`). */
+    promptPath: string;
+    /** The addressing fragment (roots and phase workers; the controller has none). */
+    addressingPrompt?: string;
+    /** The recorded OMP session file to `--resume`; a missing file is a launch failure, never a
+     * silent fresh start. */
+    resumeSessionFile?: string;
+  };
   /** name -> value; the runtime decides delivery (tmux: 0600 `<stateDir>/secrets/<role token>` +
-   * `<NAME>_FILE` env). */
+   * `<NAME>_FILE` env; kubernetes: a per-pod Secret projected as files). */
   secrets: Record<string, string>;
 };
 
@@ -81,7 +97,24 @@ export type ProbeResult =
  * implementation of this interface, never reading a runtime-specific locator field itself.
  */
 export interface Runtime {
+  /** Whether `spawn("controller", …)` is something this runtime does. tmux launches the
+   * controller as its own window; the Kubernetes runtime does not launch it (LEGION-25), and
+   * `ProcessManager.ensureController` must learn that before it mints a controller capability
+   * for a spawn that would only be refused. */
+  readonly launchesController: boolean;
+  /** Whether this runtime owns individual issue workspaces on the daemon host and can remove
+   * them when a tree closes. Kubernetes retains one tree PVC through its runtime-owned lifecycle. */
+  readonly removesWorkspacesOnTreeClose: boolean;
   spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator>;
+  /** Makes `issue`'s undescribed working-copy commit use the assigned role's identity before an
+   * assignment prompt can reach that role. The runtime owns this workspace command because its
+   * workspace lives on the daemon host for tmux and on the tree volume for Kubernetes. */
+  adoptWorkingCopy(
+    issue: IssueKey,
+    role: LegionRole,
+    identity: JjIdentity,
+    timeoutMs: number
+  ): Promise<void>;
   probe(locator: Locator): Promise<ProbeResult>;
   /** A raw dial: never negotiates, never caches. `ProcessManager.clientFor` owns both. */
   connect(locator: Locator, timeoutMs?: number): Promise<WorkerRpcClient>;
@@ -112,6 +145,31 @@ export class ProcessStopFailed extends Error {
   }
 }
 
+/** Runs `fn` after every operation previously queued under `key` has settled, in FIFO order; a
+ * predecessor's rejection does not skip the next (`then(fn, fn)`), and `fn`'s own result or
+ * rejection is what the caller gets. Both runtimes serialize with it: tmux its per-issue window
+ * opening and per-repository provisioning, Kubernetes its per-(issue, role) pod/PVC mutation
+ * sequence. The queue entry is removed once its last operation has settled and nothing newer is
+ * queued behind it, so the map holds only lanes with work in flight, never one entry per key
+ * the daemon has ever seen. */
+export function serialize<T>(
+  queue: Map<string, Promise<unknown>>,
+  key: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const previous = queue.get(key) ?? Promise.resolve();
+  const gated = previous.then(fn, fn);
+  const settled: Promise<void> = gated.then(
+    () => undefined,
+    () => undefined
+  );
+  queue.set(key, settled);
+  void settled.then(() => {
+    if (queue.get(key) === settled) queue.delete(key);
+  });
+  return gated;
+}
+
 /** Locator identity: the same process, not merely the same record. Two `undefined`s are the same
  * (absent) process; a locator from one runtime never matches one from another. For tmux the
  * pane id alone is not identity -- a reissued id can name another process -- so the recorded
@@ -131,12 +189,12 @@ export function sameProcess(a: Locator | undefined, b: Locator | undefined): boo
 
 /** Handles `Runtime.reconcileOrphans` recognizes as known. tmux: the window id plus either the
  * pane id or `<windowId>/*` (no recorded pane id: exempt every pane of that window). kubernetes:
- * the pod name. */
+ * the pod name and the tree PVC name (a volume some live locator names is known to the sweep). */
 export function locatorHandles(locator: Locator): readonly string[] {
   if (locator.runtime === "tmux") {
     return [locator.tmuxWindowId, locator.tmuxPaneId ?? `${locator.tmuxWindowId}/*`];
   }
-  return [locator.podName];
+  return [locator.podName, locator.pvcName];
 }
 
 /** A bounded wait whose underlying timer is cancellable, so a graceful stop that resolves quickly

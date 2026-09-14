@@ -75,6 +75,15 @@ function runtimeOver(
     },
     project: "omp",
     stateDir: "/unused",
+    ompInvocation: "omp",
+    ompLaunchPrefix: [],
+    provisioningToken: async () => "token",
+    run: async () => {
+      throw new Error("not exercised by this test");
+    },
+    repo: "acme/widgets",
+    credentialHelper: "!legion credential",
+    slowCommandTimeoutMs: 1000,
     connectWorkerRpc: async () => {
       throw new Error("not exercised by this test");
     },

@@ -479,6 +479,67 @@ describe("Legion HTTP API", () => {
       ).response.status
     ).toBe(403);
   });
+  it("resolves a root boot token on the worker stream to the tree's architect token, stale once the tree's generation moves on, and still after /process/started consumed it", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken || !api) throw new Error("boot nonce was not minted");
+    const architect = roleToken("omp", root, "architect");
+    expect(api.resolveWorkerBootToken(bootToken)).toEqual({ token: architect, stale: false });
+    // Consumed by /process/started -- the stream may still re-register the same pod after a
+    // redial, so the listener's lookup never consumes the token.
+    expect(
+      (
+        await json("/legion/v1/process/started", {
+          tree: root,
+          generation: 3,
+          rootSessionId: "ses_root",
+          agentId: "root-agent",
+          ompSessionFile: "/tmp/root.json",
+          bootToken,
+        })
+      ).response.status
+    ).toBe(200);
+    expect(api.resolveWorkerBootToken(bootToken)).toEqual({ token: architect, stale: false });
+    const tree = state.trees[root];
+    if (!tree) throw new Error("tree missing");
+    tree.generation = 4;
+    expect(api.resolveWorkerBootToken(bootToken)).toEqual({ token: architect, stale: true });
+    expect(api.resolveWorkerBootToken("never-minted")).toBeUndefined();
+  });
+  it("resolves a root boot token from its persisted spawnCapabilities record after a restart, generation included, and rejects one whose record is not the tree architect's", async () => {
+    // A restarted daemon: the state already carries the hash records, no in-memory mint.
+    state.spawnCapabilities[spawnCapabilityKey("durable-root")] = {
+      tree: root,
+      issue: root,
+      role: "architect",
+      generation: 3,
+    };
+    state.spawnCapabilities[spawnCapabilityKey("durable-tester")] = {
+      tree: root,
+      issue: root,
+      role: "tester",
+    };
+    await start();
+    if (!api) throw new Error("api not started");
+    const architect = roleToken("omp", root, "architect");
+    expect(api.resolveWorkerBootToken("durable-root")).toEqual({ token: architect, stale: false });
+    const tree = state.trees[root];
+    if (!tree) throw new Error("tree missing");
+    tree.generation = 4;
+    expect(api.resolveWorkerBootToken("durable-root")).toEqual({ token: architect, stale: true });
+    expect(api.resolveWorkerBootToken("durable-tester")).toBeUndefined();
+  });
+  it("mintBootToken persists the generation on the spawn capability", async () => {
+    await start();
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    expect(state.spawnCapabilities[spawnCapabilityKey(bootToken)]).toEqual({
+      tree: root,
+      issue: root,
+      role: "architect",
+      generation: 3,
+    });
+  });
   it("emits root catch-up only after the architect has confirmed readiness", async () => {
     const treeReady: IssueKey[] = [];
     await start({
