@@ -145,10 +145,19 @@ export interface EventPumpDeps {
   config: DaemonConfig;
 }
 
+/** A core-NATS role-lane delivery exception, decoded from
+ * `notifications.envoy.exceptions.notifications.role.<token>`. `reason` is one of the listener's
+ * three: `no_holder` (the role is unclaimed), `delivery_failed` (the holder refused or dropped
+ * the forward), and `receipt_timeout` (the holder is live but its receipt missed the listener's
+ * window — slow, not gone); any other reason is not an `ExceptionInfo` at all. `original` is the
+ * failed envelope: its topic and payload verbatim, the `event_id` the listener minted for that
+ * copy (fresh per publish, so it never identifies a chain of re-sends), and — from a LEGION-108
+ * listener — its `dedupe_key`, which a re-send carries back so the plugin's dedupe recognises the
+ * copy. Absent from the payload, `dedupeKey` is absent here too (never `undefined`-valued). */
 export interface ExceptionInfo {
   roleToken: string;
-  reason: "no_holder" | "delivery_failed";
-  original: { topic: string; payload: string; eventId: string };
+  reason: "no_holder" | "delivery_failed" | "receipt_timeout";
+  original: { topic: string; payload: string; eventId: string; dedupeKey?: string };
   controller?: true;
 }
 
@@ -312,18 +321,19 @@ function exceptionInfo(
   const eventId = stringValue(payload?.event_id);
   const originalPayload = stringValue(payload?.payload);
   const reason = stringValue(payload?.reason);
+  const dedupeKey = stringValue(payload?.dedupe_key);
   if (
     !topic ||
     !eventId ||
     originalPayload === undefined ||
-    (reason !== "no_holder" && reason !== "delivery_failed")
+    (reason !== "no_holder" && reason !== "delivery_failed" && reason !== "receipt_timeout")
   ) {
     return undefined;
   }
   return {
     roleToken: token,
     reason,
-    original: { topic, payload: originalPayload, eventId },
+    original: { topic, payload: originalPayload, eventId, ...(dedupeKey ? { dedupeKey } : {}) },
     ...("controller" in parsed ? { controller: true as const } : {}),
   };
 }

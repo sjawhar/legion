@@ -293,6 +293,24 @@ const daemonEnvironment: DaemonEnvironment = {
   paneEnv: { PATH: "/full/bin:/usr/bin" },
 };
 
+describe("envoyPublishBody", () => {
+  // The listener publish body the daemon puts on the wire: `dedupe_key` only when a re-send
+  // carries the triggering exception's key (LEGION-108 uses it verbatim as the envelope's dedupe
+  // key); an ordinary notice has no such property at all, never a `null` or `undefined` one.
+  it("carries dedupe_key only when a key is given", () => {
+    expect(daemonIndex.envoyPublishBody("notifications.role.x", "{}", "publish.abc")).toEqual({
+      topic: "notifications.role.x",
+      message: "{}",
+      payload: "{}",
+      dedupe_key: "publish.abc",
+    });
+
+    const keyless = daemonIndex.envoyPublishBody("notifications.role.x", "{}");
+    expect(keyless).toEqual({ topic: "notifications.role.x", message: "{}", payload: "{}" });
+    expect("dedupe_key" in keyless).toBeFalse();
+  });
+});
+
 describe("startDaemon", () => {
   it("runs CI reconciliation queries with each PR owner's implementer App token", async () => {
     const commandOptions: CommandRunnerOptions[] = [];

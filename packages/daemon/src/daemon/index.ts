@@ -72,7 +72,10 @@ interface DaemonDependencies {
   readProcessCmdline?: TmuxRuntimeDeps["readProcessCmdline"];
   readProcessStat?: TmuxRuntimeDeps["readProcessStat"];
   readPluginManifest(manifestPath: string): Promise<string>;
-  envoyPublish(topic: string, payloadJson: string): Promise<void>;
+  /** Publishes a daemon notice through the listener's `POST /v1/messages/publish`. `dedupeKey`
+   * becomes the body's `dedupe_key` (`envoyPublishBody`) — set only by `handleException`'s
+   * re-send of a failed copy, so the plugin's dedupe recognises it as the same message. */
+  envoyPublish(topic: string, payloadJson: string, dedupeKey?: string): Promise<void>;
   dispatchClient: DispatchClient;
   tokenManager: Pick<TokenManager, "getToken">;
   resolveDaemonEnvironment(
@@ -132,15 +135,33 @@ export function createCiStatusFetcher(
     });
 }
 
+/** The listener publish body (`POST /v1/messages/publish`) for one daemon notice. `dedupe_key`
+ * is present only when a key is given: a LEGION-108 listener uses it verbatim as the envelope's
+ * dedupe key (mutually exclusive with `idempotency_key`, which the daemon never sends); an older
+ * listener ignores it and mints a fresh key. Exported for the wire-shape test. */
+export function envoyPublishBody(
+  topic: string,
+  payloadJson: string,
+  dedupeKey?: string
+): { topic: string; message: string; payload: string; dedupe_key?: string } {
+  return {
+    topic,
+    message: payloadJson,
+    payload: payloadJson,
+    ...(dedupeKey ? { dedupe_key: dedupeKey } : {}),
+  };
+}
+
 async function publishToEnvoy(
   config: DaemonConfig,
   topic: string,
-  payloadJson: string
+  payloadJson: string,
+  dedupeKey?: string
 ): Promise<void> {
   const response = await fetch(`${config.envoyUrl}/v1/messages/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic, message: payloadJson, payload: payloadJson }),
+    body: JSON.stringify(envoyPublishBody(topic, payloadJson, dedupeKey)),
   });
   if (!response.ok) {
     throw new EnvoyPublishError(topic, response.status);
@@ -173,7 +194,8 @@ function defaultDependencies(
     resolveDaemonEnvironment,
     statPrompt: stat,
     readPluginManifest: (manifestPath) => readFile(manifestPath, "utf8"),
-    envoyPublish: (topic, payloadJson) => publishToEnvoy(config, topic, payloadJson),
+    envoyPublish: (topic, payloadJson, dedupeKey) =>
+      publishToEnvoy(config, topic, payloadJson, dedupeKey),
     dispatchClient,
     tokenManager,
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -399,8 +421,8 @@ async function startDaemonLocked(
     run: runner,
     // Through the listener, never `nats.publish`: a bare payload on a role subject is rejected by
     // the listener's envelope validation and reaches no holder (see `ProcessManagerDeps.publishRole`).
-    publishRole: (topic, json) => {
-      deps.envoyPublish(topic, json).catch((error) => {
+    publishRole: (topic, json, dedupeKey) => {
+      deps.envoyPublish(topic, json, dedupeKey).catch((error) => {
         console.error(`[legion] failed to publish a daemon notice to ${topic}:`, error);
       });
     },

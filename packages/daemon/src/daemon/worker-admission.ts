@@ -324,7 +324,7 @@ export class WorkerAdmission {
     role: LegionRole,
     claim: WorkerRoleClaim | undefined,
     pending: PendingAssignment
-  ): void {
+  ): boolean {
     const target: WorkerRoleClaim = claim ?? { issue, role };
     const resumeSessionFile = target.locator?.ompSessionFile ?? target.resumeSessionFile;
     target.pendingAssignment = pending;
@@ -333,7 +333,9 @@ export class WorkerAdmission {
     else delete target.resumeSessionFile;
     this.deps.state.roles[token] = target;
     const queue = this.deps.state.workerAdmission.queue;
-    if (!queue.includes(token)) queue.push(token);
+    const newlyQueued = !queue.includes(token);
+    if (newlyQueued) queue.push(token);
+    return newlyQueued;
   }
 
   /**
@@ -341,22 +343,43 @@ export class WorkerAdmission {
    * `enqueueClaimForLaunch`) for a worker whose pane is still alive and idle but the cap has no
    * free slot right now: the locator and cached client are left completely alone — the worker
    * is not retired, its pane is not touched — since `promoteQueuedWorker`'s `"prompt"` branch
-   * only needs to `prompt()` it in place once a slot frees up, never relaunch it.
+   * only needs to `prompt()` it in place once a slot frees up, never relaunch it. Like
+   * `enqueueClaimForLaunch`, answers whether the token joined the queue now (an already-queued
+   * role's pending task is replaced in place — latest task wins — and the answer is false).
    */
   private enqueueIdleWorker(
     token: string,
     claim: WorkerRoleClaim,
     pending: PendingAssignment
-  ): void {
+  ): boolean {
     claim.pendingAssignment = pending;
     const queue = this.deps.state.workerAdmission.queue;
-    if (!queue.includes(token)) queue.push(token);
+    const newlyQueued = !queue.includes(token);
+    if (newlyQueued) queue.push(token);
+    return newlyQueued;
+  }
+
+  /** The one rule for telling the architect `worker-queued`: once, when the role's token joins
+   * the queue, and only for an architect assignment. A second task for an already-queued role
+   * replaces the queued task silently (the architect already heard the role is queued), and a
+   * daemon catch-up is queued silently — the architect did not ask for it and cannot act on it
+   * (LEGION-60's eight `worker-queued` for one queued catch-up; LEGION-100). */
+  private publishQueued(
+    newlyQueued: boolean,
+    treeKey: IssueKey,
+    issue: IssueKey,
+    role: LegionRole,
+    pending: PendingAssignment
+  ): void {
+    if (!newlyQueued || pending.kind !== "assignment") return;
+    this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
   }
 
   /**
    * Launches a brand-new worker pane when a running-worker slot is available (fewer than
    * `config.workerCap` role tokens currently busy on a turn), or queues the task on a
-   * locator-less claim and publishes `worker-queued` to the tree's architect otherwise. Every
+   * locator-less claim otherwise, publishing `worker-queued` to the tree's architect once, when
+   * the token joins the queue, and only for an architect assignment (`publishQueued`). Every
    * queued task is promoted in priority order (FIFO within a tier) by `promoteWorkerQueue` once a
    * slot frees up. Only the
    * read-count/decide/reserve-or-enqueue step runs inside the `admissionLock` critical section
@@ -374,9 +397,10 @@ export class WorkerAdmission {
     claim: WorkerRoleClaim | undefined,
     pending: PendingAssignment
   ): Promise<SpawnWorkerResponse> {
+    let newlyQueued = false;
     const admitted = await this.withAdmissionLock(async () => {
       if (!this.workerPromotionEnabled || this.runningWorkerCount() >= this.deps.config.workerCap) {
-        this.enqueueClaimForLaunch(token, issue, role, claim, pending);
+        newlyQueued = this.enqueueClaimForLaunch(token, issue, role, claim, pending);
         return false;
       }
       this.launching.add(token);
@@ -384,7 +408,7 @@ export class WorkerAdmission {
     });
     if (!admitted) {
       await this.deps.persist();
-      this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+      this.publishQueued(newlyQueued, treeKey, issue, role, pending);
       return { status: "queued", roleToken: token };
     }
     try {
@@ -488,15 +512,16 @@ export class WorkerAdmission {
    * under the same cap-aware decision every promotion goes through, count the failure for a
    * `"no-turn"` reason (`recordPromptFailure`, retiring the worker at the threshold so the queued
    * task relaunches cold with `--resume`, or — at `MAX_PROMPT_RETIRES` — ending the role in
-   * `worker-died`), persist, and tell the architect `worker-queued` — it hears `worker-started`
-   * when the retry or a late start commits. No `worker-queued` when the failure escalated to
-   * `worker-died`: nothing is queued any more, and the verdict is the notice. A `"socket-closed"`
-   * reason is counted against nothing: that is a death, and the socket-close handler
-   * (`markWorkerDead`) alone retires the worker — the task is only kept and queued here so that
-   * retirement's own drain finds it. Deliberately no drain trigger: an immediate re-prompt of the
-   * same client would widen the window in which a merely slow worker receives the task twice;
-   * the retry is the next drain (an idle/dead event, the 60 s sweep) or the late start. The
-   * caller holds `token`'s role lock. */
+   * `worker-died`), persist, and tell the architect `worker-queued` — once, when the token joins
+   * the queue, and only for an architect assignment (`publishQueued`; a daemon catch-up that
+   * starts no turn is queued silently) — it hears `worker-started` when the retry or a late start
+   * commits. No `worker-queued` either when the failure escalated to `worker-died`: nothing is
+   * queued any more, and the verdict is the notice. A `"socket-closed"` reason is counted against
+   * nothing: that is a death, and the socket-close handler (`markWorkerDead`) alone retires the
+   * worker — the task is only kept and queued here so that retirement's own drain finds it.
+   * Deliberately no drain trigger: an immediate re-prompt of the same client would widen the
+   * window in which a merely slow worker receives the task twice; the retry is the next drain (an
+   * idle/dead event, the 60 s sweep) or the late start. The caller holds `token`'s role lock. */
   async queueUnstartedPrompt(
     token: string,
     treeKey: IssueKey,
@@ -506,35 +531,38 @@ export class WorkerAdmission {
     pending: PendingAssignment,
     reason: PromptNotStartedReason
   ): Promise<void> {
+    let newlyQueued = false;
     await this.withAdmissionLock(async () => {
-      this.enqueueIdleWorker(token, claim, pending);
+      newlyQueued = this.enqueueIdleWorker(token, claim, pending);
     });
     const verdict = reason === "no-turn" ? await this.recordPromptFailure(token) : undefined;
     await this.deps.persist();
-    if (verdict !== "died") {
-      this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
-    }
+    // Two gates, both LEGION-101-era: no `worker-queued` when the failure escalated to
+    // `worker-died` (nothing is queued any more; the verdict is the notice — LEGION-93), and
+    // otherwise only once, for an assignment that newly joined the queue (`publishQueued`).
+    if (verdict !== "died") this.publishQueued(newlyQueued, treeKey, issue, role, pending);
   }
 
   /**
    * Decides whether an already-connected, already-idle client below the running-worker cap
    * should be prompted immediately in place, or queued via `enqueueIdleWorker` instead — either
-   * because it is at cap (persisted and `worker-queued`-published before this resolves) or
-   * because it is not currently idle at all (`"running"`/`"unknown"`): injecting a prompt into a
-   * client mid-turn is never safe, so that case is queued exactly like the at-cap one, and
-   * delivered once the client's own idle transition (`onIdle` -> `promoteWorkerQueue`) re-drains
-   * the queue and finds it genuinely idle. Below cap and idle, reserves the token via `reserve`
-   * for the gap between this decision and `client.prompt()` actually flipping `runState` away
-   * from `"idle"`, then — exactly like `launchOrQueue` owns its own `launchWorker` call — runs
-   * the actual `deps.promptExistingWorker` call itself and releases the reservation (and
-   * re-checks the queue) the instant it settles, so the caller (`ProcessManager.spawnWorker`)
-   * never has to remember admission bookkeeping around its own prompt call. `"resumed"` means
-   * the worker's turn was observed to start; a prompt the worker acknowledged without starting a
-   * turn (`PromptNotStarted`) answers `"queued"` instead, the task queued for promotion through
-   * `queueUnstartedPrompt` — the architect hears `worker-queued` now and `worker-started` on the
-   * retry or the late start — or, when that failure is the one that exhausts
-   * `MAX_PROMPT_RETIRES`, still `"queued"` (the HTTP answer is part of the daemon API contract)
-   * with `worker-died` as the notice instead. A refused prompt still throws.
+   * because it is at cap (persisted, and `worker-queued` published through `publishQueued` — once,
+   * for an assignment that newly joined the queue — before this resolves) or because it is not
+   * currently idle at all (`"running"`/`"unknown"`): injecting a prompt into a client mid-turn is
+   * never safe, so that case is queued exactly like the at-cap one, and delivered once the
+   * client's own idle transition (`onIdle` -> `promoteWorkerQueue`) re-drains the queue and
+   * finds it genuinely idle. Below cap and idle, reserves the token via `reserve` for the gap
+   * between this decision and `client.prompt()` actually flipping `runState` away from
+   * `"idle"`, then — exactly like `launchOrQueue` owns its own `launchWorker` call — runs the
+   * actual `deps.promptExistingWorker` call itself and releases the reservation (and re-checks
+   * the queue) the instant it settles, so the caller (`ProcessManager.spawnWorker`) never has to
+   * remember admission bookkeeping around its own prompt call. `"resumed"` means the worker's
+   * turn was observed to start; a prompt the worker acknowledged without starting a turn
+   * (`PromptNotStarted`) answers `"queued"` instead, the task queued for promotion through
+   * `queueUnstartedPrompt` — the architect hears `worker-queued` now (for an assignment) and
+   * `worker-started` on the retry or the late start — or, when that failure is the one that
+   * exhausts `MAX_PROMPT_RETIRES`, still `"queued"` (the HTTP answer is part of the daemon API
+   * contract) with `worker-died` as the notice instead. A refused prompt still throws.
    */
   async resumeOrQueueExisting(
     token: string,
@@ -546,13 +574,14 @@ export class WorkerAdmission {
     pending: PendingAssignment,
     client: WorkerRpcClient
   ): Promise<{ kind: "queued" } | { kind: "resumed" }> {
+    let newlyQueued = false;
     const shouldPrompt = await this.withAdmissionLock(async () => {
       if (
         client.runState !== "idle" ||
         !this.workerPromotionEnabled ||
         this.runningWorkerCount() >= this.deps.config.workerCap
       ) {
-        this.enqueueIdleWorker(token, claim, pending);
+        newlyQueued = this.enqueueIdleWorker(token, claim, pending);
         return false;
       }
       this.reserve(token);
@@ -560,7 +589,7 @@ export class WorkerAdmission {
     });
     if (!shouldPrompt) {
       await this.deps.persist();
-      this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+      this.publishQueued(newlyQueued, treeKey, issue, role, pending);
       return { kind: "queued" };
     }
     let notStarted = false;

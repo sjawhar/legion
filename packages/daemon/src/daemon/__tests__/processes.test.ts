@@ -30,13 +30,13 @@ import {
   type ControlDirective,
   designGateFragment,
   locatorsForIssue,
-  MAX_ROLE_REDELIVERIES,
   ProcessManager,
   type ProcessManagerDeps,
   StopFailed,
   TreeClosingError,
 } from "../processes";
 import type { Effect } from "../reducers";
+import { MAX_RESENDS, RESEND_PAUSES_MS } from "../resend-ledger";
 import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -421,13 +421,14 @@ function tree(state: LegionState, issue: IssueKey = root, generation = 1) {
 
 function exception(
   role: string,
-  original = {
+  original: ExceptionInfo["original"] = {
     topic: "notifications.github.sjawhar.legion.issue.42.comment",
     payload: '{"body":"retry"}',
     eventId: "evt-1",
-  }
+  },
+  reason: ExceptionInfo["reason"] = "no_holder"
 ): ExceptionInfo {
-  return { roleToken: role, reason: "no_holder", original };
+  return { roleToken: role, reason, original };
 }
 
 function liveRun(command: string[]): Promise<{ stdout: string; exitCode: number }> {
@@ -486,7 +487,7 @@ function manager(
   state: LegionState;
   commands: string[][];
   controlRequests: Array<{ subject: string; json: string }>;
-  publications: Array<{ subject: string; json: string }>;
+  publications: Array<{ subject: string; json: string; dedupeKey?: string }>;
   revokedSessions: string[];
   /** Every `deps.saveState` call (the test's override or the default no-op), both ends. */
   saves: CallObserver;
@@ -502,7 +503,7 @@ function manager(
   published(type: string): EventCounter;
 } {
   const commands: string[][] = [];
-  const publications: Array<{ subject: string; json: string }> = [];
+  const publications: Array<{ subject: string; json: string; dedupeKey?: string }> = [];
   const controlRequests: Array<{ subject: string; json: string }> = [];
   const revokedSessions: string[] = [];
   const {
@@ -546,7 +547,9 @@ function manager(
     state,
     saveState: async () => {},
     config: config("/state"),
-    publishRole: (subject, json) => publications.push({ subject, json }),
+    // `dedupeKey` is spread only when defined so every `toEqual([{subject, json}])` stays exact.
+    publishRole: (subject, json, dedupeKey) =>
+      publications.push({ subject, json, ...(dedupeKey !== undefined ? { dedupeKey } : {}) }),
     natsRequest: async (subject, json) => {
       controlRequests.push({ subject, json });
       return JSON.stringify({ type: "ack" });
@@ -587,8 +590,8 @@ function manager(
       await injected.saveState();
       saves.completed.increment();
     },
-    publishRole: (topic, json) => {
-      injected.publishRole(topic, json);
+    publishRole: (topic, json, dedupeKey) => {
+      injected.publishRole(topic, json, dedupeKey);
       const payload: unknown = JSON.parse(json);
       const type =
         typeof payload === "object" && payload !== null && "type" in payload
@@ -3990,149 +3993,6 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([]);
   });
 
-  it("stops republishing one role message to a live architect after MAX_ROLE_REDELIVERIES no-holder exceptions, while still telling it to reclaim its role", async () => {
-    const state = newLegionState("omp", 1);
-    tree(state);
-    const token = roleToken("omp", root, "architect");
-    const original = {
-      topic: `notifications.role.${token}`,
-      payload: '{"type":"phase-complete","issue":"LEGION-42"}',
-      eventId: "evt-1",
-    };
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    // `liveRun`: the architect's pane probes alive, so every exception takes the reclaim branch.
-    const { manager: processes, publications, controlRequests } = manager(state, { run: liveRun });
-    try {
-      // A live architect that lost its claim: each republish is a fresh envelope (fresh event id)
-      // with the same payload, and payload is what identifies the message being retried.
-      for (let attempt = 1; attempt <= MAX_ROLE_REDELIVERIES + 2; attempt += 1) {
-        await processes.handleException({
-          roleToken: token,
-          reason: "no_holder",
-          original: { ...original, eventId: `evt-${attempt}` },
-        });
-      }
-      const redelivered = publications.filter((p) => p.subject === original.topic);
-      expect(redelivered).toHaveLength(MAX_ROLE_REDELIVERIES);
-      // The architect is still told to reclaim on every exception; only the republish stops.
-      expect(controlRequests).toHaveLength(MAX_ROLE_REDELIVERIES + 2);
-      expect(
-        errorLog.mock.calls.filter(([m]) => String(m).includes("not redelivering"))
-      ).toHaveLength(1);
-
-      // A different message to the same role is counted on its own.
-      await processes.handleException({
-        roleToken: token,
-        reason: "no_holder",
-        original: { ...original, payload: '{"type":"design-approved"}', eventId: "evt-x" },
-      });
-      expect(publications.filter((p) => p.subject === original.topic)).toHaveLength(
-        MAX_ROLE_REDELIVERIES + 1
-      );
-    } finally {
-      errorLog.mockRestore();
-    }
-  });
-
-  it("treats a delivery_failed to a live architect as a late receipt: no republish, no reclaim, one log line per role per period", async () => {
-    const state = newLegionState("omp", 1);
-    tree(state);
-    const token = roleToken("omp", root, "architect");
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { manager: processes, publications, controlRequests } = manager(state, { run: liveRun });
-    try {
-      for (let attempt = 1; attempt <= 4; attempt += 1) {
-        await processes.handleException({
-          roleToken: token,
-          reason: "delivery_failed",
-          original: {
-            topic: `notifications.role.${token}`,
-            payload: `{"type":"liveness","n":${attempt}}`,
-            eventId: `evt-${attempt}`,
-          },
-        });
-      }
-      // The holder has each message: nothing goes back to its role topic and no directive is sent.
-      expect(publications.filter((p) => p.subject === `notifications.role.${token}`)).toEqual([]);
-      expect(controlRequests).toEqual([]);
-      const late = errorLog.mock.calls.filter(([m]) =>
-        String(m).includes("came after the listener's window")
-      );
-      expect(late).toHaveLength(1);
-      expect(String(late[0]?.[0])).toContain(token);
-    } finally {
-      errorLog.mockRestore();
-    }
-  });
-
-  it("treats a delivery_failed to a worker whose shim client is connected as a late receipt: no catch-up is queued or prompted", async () => {
-    const state = newLegionState("omp", 1);
-    tree(state);
-    state.issues[child] = {
-      key: child,
-      title: "Child",
-      status: "in_progress",
-      parent: root,
-      children: [],
-    };
-    const role: LegionRole = "implementer";
-    const token = roleToken("omp", child, role);
-    state.roles[token] = {
-      issue: child,
-      role,
-      sessionId: "ses_implementer",
-      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
-      generation: 1,
-      locator: {
-        runtime: "tmux",
-        tmuxSession: "legion-omp",
-        tmuxWindowId: "@42",
-        tmuxPaneId: "%2",
-        socketPath: "/state/workers/child-implementer.sock",
-        ...paneIdentity(),
-      },
-    };
-    state.phases[child] = { phase: role, sessionId: "ses_implementer" };
-    const client = fakeWorkerRpcClient();
-    // Mid-turn: exactly the worker whose receipt comes late.
-    client.setRunStateSilently("running");
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { manager: processes, publications } = manager(state, {
-      connectWorkerRpc: async () => client,
-    });
-    try {
-      // A first, ordinary recovery connects the client (a no_holder while the worker was idle
-      // would have prompted it; here it is running, so the catch-up is queued once).
-      await processes.handleException({
-        roleToken: token,
-        reason: "no_holder",
-        original: exception(token).original,
-      });
-      const queuedBefore = [...state.workerAdmission.queue];
-      const publishedBefore = publications.length;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        await processes.handleException({
-          roleToken: token,
-          reason: "delivery_failed",
-          original: {
-            topic: `notifications.role.${token}`,
-            payload: `{"ping":${attempt}}`,
-            eventId: `evt-${attempt}`,
-          },
-        });
-      }
-      // Late receipts change nothing: no new prompt, no new queue entry, no worker-queued publish.
-      expect(client.prompts).toEqual([]);
-      expect(state.workerAdmission.queue).toEqual(queuedBefore);
-      expect(publications.length).toBe(publishedBefore);
-      expect(
-        errorLog.mock.calls.filter(([m]) => String(m).includes("came after the listener's window"))
-      ).toHaveLength(1);
-    } finally {
-      errorLog.mockRestore();
-    }
-  });
-
   it("resumes a live worker directly (its shim socket answers) with a state-derived catch-up, never the raw missed event", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
@@ -4180,6 +4040,212 @@ describe("ProcessManager", () => {
     // A catch-up is recovery plumbing, never an assignment: the phase stays exactly as the
     // architect's last spawn_worker left it.
     expect(state.phases[child]).toEqual({ phase: role, sessionId: "ses_implementer" });
+  });
+
+  it("queues one catch-up and publishes no worker-queued when two role-lane exceptions name a busy live worker", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    state.roles[token] = {
+      issue: child,
+      role,
+      sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/child-implementer.sock",
+      },
+    };
+    state.phases[child] = { phase: role, sessionId: "ses_implementer" };
+    const client = fakeWorkerRpcClient();
+    // Mid-turn: a prompt is never injected into a running client, so the catch-up queues.
+    client.setRunStateSilently("running");
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, { connectWorkerRpc: async () => client });
+
+    await processes.handleException(exception(token));
+    await processes.handleException(exception(token));
+
+    expect(client.prompts).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    const claim = managedState.roles[token];
+    if (!claim || !("issue" in claim)) throw new Error("implementer claim disappeared");
+    expect(claim.pendingAssignment?.kind).toBe("catchup");
+    // LEGION-60's evidence item 3: eight worker-queued for one queued catch-up. The architect
+    // did not ask for a catch-up and cannot act on it, so it hears nothing.
+    expect(publications).toEqual([]);
+  });
+
+  it("receipt_timeout for a phase worker with a connected shim client publishes nothing, prompts nothing, and leaves pendingAssignment and the queue unchanged", async () => {
+    const token = roleToken("omp", root, "tester");
+    const client = fakeWorkerRpcClient();
+    client.emitRunState("idle");
+    const { processes, state, managedState, commands, publications } = await workerCapFixture(1, {
+      connectWorkerRpc: async () => client,
+    });
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        ...paneIdentity(),
+      },
+    };
+    state.workerAdmission.queue.push(token);
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    await processes.reconnectWorkers();
+    const before = structuredClone(state.roles[token]);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.handleException(exception(token, undefined, "receipt_timeout"));
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(client.prompts).toEqual([]);
+    expect(publications).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(managedState.roles[token]).toEqual(before);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain(token);
+    expect(errorLines[0]).toContain("evt-1");
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeFalse();
+  });
+
+  it("receipt_timeout for a phase worker with no cached client but a live pane logs once and resumes nothing", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        ...paneIdentity(),
+      },
+    };
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    let connectCalls = 0;
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      run: liveRun,
+      connectWorkerRpc: async () => {
+        connectCalls += 1;
+        return fakeWorkerRpcClient();
+      },
+    });
+    const before = structuredClone(state.roles[token]);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.handleException(exception(token, undefined, "receipt_timeout"));
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    // The pane probe is a `list-panes` with no side effect; the socket is never dialed.
+    expect(connectCalls).toBe(0);
+    expect(publications).toEqual([]);
+    expect(managedState.roles[token]).toEqual(before);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain(token);
+  });
+
+  it("receipt_timeout for a phase worker whose socket and pane are gone follows the existing resume path", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "in_progress",
+      parent: root,
+      children: [],
+    };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", child, role);
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "child-implementer.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
+    state.roles[token] = {
+      issue: child,
+      role,
+      sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/child-implementer.sock",
+        ompSessionFile: sessionFile,
+      },
+    };
+    state.phases[child] = { phase: role, sessionId: "ses_implementer" };
+    const {
+      manager: processes,
+      publications,
+      commands,
+    } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("dead shim socket");
+      },
+    });
+
+    await processes.handleException(exception(token, undefined, "receipt_timeout"));
+
+    // Identical to what a no_holder produces today: relaunched with --resume, catch-up queued.
+    expect(publications).toEqual([]);
+    expect(commands.some((command) => command.join(" ").includes("--resume"))).toBe(true);
+    expect(state.roles[token]).toMatchObject({
+      generation: 2,
+      pendingAssignment: {
+        kind: "catchup",
+        task: JSON.stringify({ type: "catchup-worker", unhandled: [] }),
+      },
+    });
   });
 
   it("resumes a dead worker with --resume through spawnWorker and never spawns a role with no locator", async () => {
@@ -5295,6 +5361,7 @@ describe("ProcessManager", () => {
     tree(state);
     const { manager: processes, publications } = manager(state, {
       run: liveRun,
+      sleep: async () => {},
       natsRequest: async () =>
         JSON.stringify({ type: "nack", error: "architect transcript is missing" }),
     });
@@ -7175,6 +7242,7 @@ describe("ProcessManager", () => {
     tree(state);
     const { manager: processes, publications } = manager(state, {
       run: liveRun,
+      sleep: async () => {},
     });
 
     await processes.handleException(exception(roleToken("omp", root, "architect")));
@@ -7183,7 +7251,10 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([{ subject: original.topic, json: original.payload }]);
   });
 
-  it("resurrects a dead root architect", async () => {
+  it.each([
+    "no_holder",
+    "receipt_timeout",
+  ] as const)("resurrects a dead root architect on a %s exception", async (reason) => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "architect-session.json");
     await writeFile(sessionFile, "{}", "utf8");
@@ -7212,7 +7283,9 @@ describe("ProcessManager", () => {
       },
     });
 
-    await processes.handleException(exception(roleToken("omp", root, "architect")));
+    await processes.handleException(
+      exception(roleToken("omp", root, "architect"), undefined, reason)
+    );
 
     expect(state.trees[root]).toMatchObject({ generation: 2 });
   });
@@ -7324,6 +7397,396 @@ describe("ProcessManager", () => {
     }
     expect(commands).toEqual([]);
     expect(controlRequests).toEqual([]);
+  });
+
+  it("receipt_timeout for a root architect whose pane probes alive publishes nothing, sends no directive, and logs one line naming the role token and event id", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const commands: string[][] = [];
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+    } = manager(state, { run: recordingLiveRun(commands) });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.handleException(exception(architectToken, undefined, "receipt_timeout"));
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(publications).toEqual([]);
+    expect(controlRequests).toEqual([]);
+    expect(errorLines).toHaveLength(1);
+    expect(errorLines[0]).toContain(architectToken);
+    expect(errorLines[0]).toContain("evt-1");
+    expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeFalse();
+  });
+
+  /** The architect's role topic and one payload every failed copy of that message shares. */
+  function architectMessage(payload: string, eventId: string, dedupeKey?: string) {
+    return {
+      topic: roleTopic(roleToken("omp", root, "architect")),
+      payload,
+      eventId,
+      ...(dedupeKey === undefined ? {} : { dedupeKey }),
+    };
+  }
+
+  /** Records every command while answering a live tree, so a "nothing launched" assertion can
+   * read `commands` — `liveRun` alone records nothing. */
+  function recordingLiveRun(commands: string[][]): ProcessManagerDeps["run"] {
+    return async (command) => {
+      commands.push(command);
+      return liveRun(command);
+    };
+  }
+
+  it("a different message starts its own re-send count, each re-send carrying its own exception's dedupe key", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, { run: liveRun, sleep: clock.sleep });
+    const messageA = architectMessage(
+      '{"type":"child-adopted","child":"LEGION-81","remaining":2}',
+      "evt-1",
+      "publish.d1"
+    );
+    const messageB = architectMessage(
+      '{"type":"worker-started","issue":"LEGION-81","role":"tester"}',
+      "evt-2",
+      "publish.d2"
+    );
+
+    const armedA = sleeps(5_000).next();
+    const handledA = processes.handleException(
+      exception(architectToken, messageA, "delivery_failed")
+    );
+    await armedA;
+    const armedB = sleeps(5_000).next();
+    const handledB = processes.handleException(
+      exception(architectToken, messageB, "delivery_failed")
+    );
+    await armedB;
+    // Each message is its own chain at attempt 1; nothing is sent before a pause elapses.
+    expect(clock.pending.map((wait) => wait.ms)).toEqual([5_000, 5_000]);
+    expect(publications).toEqual([]);
+    expect(clock.fire(5_000)).toBeTrue();
+    expect(clock.fire(5_000)).toBeTrue();
+    await Promise.all([handledA, handledB]);
+
+    expect(controlRequests).toHaveLength(2);
+    expect(publications).toEqual([
+      { subject: messageA.topic, json: messageA.payload, dedupeKey: "publish.d1" },
+      { subject: messageB.topic, json: messageB.payload, dedupeKey: "publish.d2" },
+    ]);
+  });
+
+  it("re-sends a message whose exception carried no dedupe_key (an older listener) without one, logging 'dedupe key none'", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      publications,
+      sleeps,
+    } = manager(state, { run: liveRun, sleep: clock.sleep });
+    const message = architectMessage('{"type":"pr-comment"}', "evt-1");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const armed = sleeps(5_000).next();
+      const handled = processes.handleException(
+        exception(architectToken, message, "delivery_failed")
+      );
+      await armed;
+      expect(clock.fire(5_000)).toBeTrue();
+      await handled;
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(publications).toEqual([{ subject: message.topic, json: message.payload }]);
+    expect("dedupeKey" in (publications[0] ?? {})).toBeFalse();
+    expect(errorLines.filter((line) => line.includes("dedupe key none"))).toHaveLength(1);
+  });
+
+  it("drops, without counting, an exception for a message whose re-send pause is still running", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      publications,
+      sleeps,
+    } = manager(state, { run: liveRun, sleep: clock.sleep });
+    const copy = (eventId: string) =>
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', eventId, "publish.d1"),
+        "delivery_failed"
+      );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const firstArmed = sleeps(5_000).next();
+      const first = processes.handleException(copy("evt-1"));
+      await firstArmed;
+      // The same message fails again while its first re-send is still waiting its pause.
+      await processes.handleException(copy("evt-2"));
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([5_000]);
+      expect(clock.fire(5_000)).toBeTrue();
+      await first;
+      expect(publications).toHaveLength(1);
+
+      // The dropped exception was not counted: the next failure is attempt 2 (15 s), not 3.
+      const thirdArmed = sleeps(15_000).next();
+      const third = processes.handleException(copy("evt-3"));
+      await thirdArmed;
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([15_000]);
+      expect(clock.fire(15_000)).toBeTrue();
+      await third;
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(publications).toHaveLength(2);
+    const dropped = errorLines.filter((line) => line.includes("dropped without counting"));
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]).toContain(architectToken);
+    expect(dropped[0]).toContain("evt-2");
+  });
+
+  it("resurrects a root that dies during the re-send pause instead of directing it", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const rootLocator = state.trees[root].locator;
+    if (!rootLocator) throw new Error("test root is missing a locator");
+    state.trees[root].locator = { ...rootLocator, ompSessionFile: sessionFile };
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    let alive = true;
+    let launched = false;
+    const deadRun = async (command: string[]) => {
+      if (command[3] === "list-windows") return { stdout: "", exitCode: 1 };
+      if (command[3] === "new-window") {
+        launched = true;
+        return { stdout: "@42 %1 12345\n", exitCode: 0 };
+      }
+      if (command[3] === "split-window") {
+        launched = true;
+        return { stdout: "%2 12345\n", exitCode: 0 };
+      }
+      if (command[3] === "list-panes" && command.includes("#{pane_id} #{pane_pid}")) {
+        return launched ? livePanes(command) : paneGone();
+      }
+      return { stdout: "", exitCode: 0 };
+    };
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, {
+      config: config(stateDir),
+      sleep: clock.sleep,
+      run: (command) => (alive ? liveRun(command) : deadRun(command)),
+    });
+
+    const armed = sleeps(5_000).next();
+    const handled = processes.handleException(
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', "evt-1", "publish.d1"),
+        "delivery_failed"
+      )
+    );
+    await armed;
+    alive = false;
+    expect(clock.fire(5_000)).toBeTrue();
+    await handled;
+
+    expect(state.trees[root]).toMatchObject({ generation: 2 });
+    expect(controlRequests).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
+  it("dispose() cancels a pending re-send pause so firing it afterwards sends nothing", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, { run: liveRun, sleep: clock.sleep });
+
+    const armed = sleeps(5_000).next();
+    const handled = processes.handleException(
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', "evt-1", "publish.d1"),
+        "delivery_failed"
+      )
+    );
+    await armed;
+    processes.dispose();
+    expect(clock.fire(5_000)).toBeTrue();
+    await handled;
+
+    expect(controlRequests).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
+  // Acceptance line 6 (and line 3's spacing and cap): the whole chain against a fake runtime,
+  // fake pane acknowledgement, and injected clock, with a receiver modelling the plugin's existing
+  // dedupe. The stream models the real listener: it mints a fresh `event_id` for every publish
+  // and the exception reports the failed copy's (`messageEnvelope`, api.go; `publishDeliveryException`,
+  // delivery.go), so only the topic, the payload, and — from a LEGION-108 listener — the dedupe
+  // key survive across the chain. No smoke rig, scratch daemon, throwaway broker, or scratch
+  // tmux server stands in for this (Sami, 2026-09-13).
+  it.each([
+    {
+      listener: "a listener honouring the publish body's dedupe_key (LEGION-108)",
+      copyDedupeKey: (_copy: number) => "publish.d1",
+      injections: 1,
+    },
+    {
+      listener: "a listener minting a fresh dedupe key per copy (pre-LEGION-108)",
+      copyDedupeKey: (copy: number) => `publish.fresh-${copy}`,
+      injections: 3,
+    },
+  ])("integration: bounded re-sends for one message against an alive architect — $listener", async ({
+    copyDedupeKey,
+    injections: expectedInjections,
+  }) => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const topic = roleTopic(architectToken);
+    const payload = '{"type":"child-adopted","child":"LEGION-81","remaining":2}';
+    const clock = manualSleep();
+    const commands: string[][] = [];
+    // The receiver: the plugin drops a copy whose dedupe key it has already seen and injects the
+    // rest. A keyless copy is always new to it.
+    const seen = new Set<string>();
+    const injections: string[] = [];
+    const copies: Array<{ subject: string; json: string; dedupeKey?: string }> = [];
+    const {
+      manager: processes,
+      controlRequests,
+      sleeps,
+    } = manager(state, {
+      run: recordingLiveRun(commands),
+      sleep: clock.sleep,
+      publishRole: (subject, json, dedupeKey) => {
+        copies.push({ subject, json, dedupeKey });
+        const key = dedupeKey ?? `keyless-${copies.length}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        injections.push(json);
+      },
+    });
+    // Exception 1 reports the original's key; every later one reports the failed copy's.
+    const dedupeKeyOf = (copy: number) => (copy === 1 ? "publish.d1" : copyDedupeKey(copy));
+    const failure = (copy: number) =>
+      exception(
+        architectToken,
+        architectMessage(payload, `evt-${copy}`, dedupeKeyOf(copy)),
+        "delivery_failed"
+      );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      for (let copy = 1; copy <= MAX_RESENDS; copy += 1) {
+        const pauseMs = RESEND_PAUSES_MS[copy - 1] as number;
+        const armed = sleeps(pauseMs).next();
+        const handled = processes.handleException(failure(copy));
+        await armed;
+        // Nothing is sent before the pause elapses.
+        expect(copies).toHaveLength(copy - 1);
+        expect(controlRequests).toHaveLength(copy - 1);
+        expect(clock.fire(pauseMs)).toBeTrue();
+        await handled;
+      }
+      // The fourth failure of the same message hits the cap: no pause, no directive, no copy.
+      await processes.handleException(failure(4));
+      expect(clock.pending).toEqual([]);
+
+      expect(copies).toEqual([
+        { subject: topic, json: payload, dedupeKey: dedupeKeyOf(1) },
+        { subject: topic, json: payload, dedupeKey: dedupeKeyOf(2) },
+        { subject: topic, json: payload, dedupeKey: dedupeKeyOf(3) },
+      ]);
+      expect(injections).toHaveLength(expectedInjections);
+      expect(injections[0]).toBe(payload);
+      expect(controlRequests).toHaveLength(3);
+      controlRequests.forEach(({ subject, json }, index) => {
+        expect(subject).toBe("legion.ctl.legion-42.1");
+        // The directive shape is unchanged: the dedupe key never travels inside it.
+        expect(json).not.toContain("dedupeKey");
+        expect(JSON.parse(json)).toEqual({
+          type: "reclaim-architect",
+          issue: root,
+          redeliver: { topic, payload, eventId: `evt-${index + 1}` },
+        });
+      });
+
+      // Negative control: a fifth failure after the cap is a new chain's attempt 1 (the cap
+      // dropped the entry) — it waits its pause, and nothing more is sent until it elapses.
+      const fifthArmed = sleeps(5_000).next();
+      const fifth = processes.handleException(failure(5));
+      await fifthArmed;
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([5_000]);
+      expect(copies).toHaveLength(3);
+      processes.dispose();
+      clock.fire(5_000);
+      await fifth;
+      expect(copies).toHaveLength(3);
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    const resends = errorLines.filter((line) => line.includes("re-sending event"));
+    expect(resends).toHaveLength(4);
+    for (let copy = 1; copy <= MAX_RESENDS; copy += 1) {
+      const line = resends[copy - 1] ?? "";
+      expect(line).toContain(architectToken);
+      expect(line).toContain(`evt-${copy}`);
+      expect(line).toContain(`attempt ${copy} of ${MAX_RESENDS}`);
+      expect(line).toContain(dedupeKeyOf(copy));
+    }
+    const capped = errorLines.filter((line) => line.includes("re-send cap reached"));
+    expect(capped).toHaveLength(1);
+    expect(capped[0]).toContain(architectToken);
+    expect(capped[0]).toContain("evt-4");
+    expect(capped[0]).toContain(dedupeKeyOf(4));
+    expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
+    expect(
+      commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
+    ).toBeFalse();
   });
 
   it("connects a worker-shim client to the root architect's socket when its tree becomes ready", async () => {
@@ -9624,6 +10087,40 @@ describe("ProcessManager", () => {
     });
   });
 
+  it("replaces an already-queued role's task on a second spawnWorker and publishes no second worker-queued", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+    });
+    await processes.spawnWorker(root, root, "planner", "plan #41");
+    const testerToken = roleToken("omp", root, "tester");
+    const workerQueued = {
+      subject: roleTopic(roleToken("omp", root, "architect")),
+      json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
+    };
+    expect(await processes.spawnWorker(root, root, "tester", "verify #41")).toEqual({
+      status: "queued",
+      roleToken: testerToken,
+    });
+    expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+
+    const again = await processes.spawnWorker(root, root, "tester", "verify #41 again");
+
+    expect(again).toEqual({ status: "queued", roleToken: testerToken });
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    const queuedClaim = managedState.roles[testerToken];
+    if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("queued claim missing");
+    // Latest task wins; the architect already heard the role is queued.
+    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41 again" });
+    expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+  });
+
   it("queues a root admitted and a worker spawned while launches are held, and launches both once enableLaunches() runs", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
@@ -9980,6 +10477,83 @@ describe("ProcessManager", () => {
       subject: architectTopic,
       json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
     });
+  });
+
+  it("role-lane exceptions for a worker whose assignment is already queued at the cap add no worker-queued and no queue entry", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const plannerToken = roleToken("omp", root, "planner");
+    const testerToken = roleToken("omp", root, "tester");
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const plannerClient = fakeWorkerRpcClient();
+    plannerClient.setRunStateSilently("idle");
+    const testerClient = fakeWorkerRpcClient();
+    testerClient.setRunStateSilently("idle");
+    state.roles[plannerToken] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      sessionId: "ses_planner",
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/planner.sock",
+      },
+    };
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: 1 }),
+      connectWorkerRpc: async (socketPath) =>
+        socketPath === "/state/workers/planner.sock" ? plannerClient : testerClient,
+      run: async () => ({ stdout: "", exitCode: 0 }),
+    });
+    await processes.reconnectWorkers();
+    expect(await processes.spawnWorker(root, root, "planner", "plan #41")).toEqual({
+      status: "resumed",
+      roleToken: plannerToken,
+    });
+    plannerClient.emitRunState("running");
+    testerClient.emitRunState("idle");
+    const workerQueued = {
+      subject: architectTopic,
+      json: JSON.stringify({ type: "worker-queued", issue: root, role: "tester" }),
+    };
+    expect(await processes.spawnWorker(root, root, "tester", "verify #41")).toEqual({
+      status: "queued",
+      roleToken: testerToken,
+    });
+    expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+
+    // The listener reports the tester's wake undeliverable twice while its assignment waits.
+    await processes.handleException(exception(testerToken));
+    await processes.handleException(exception(testerToken));
+
+    expect(publications.filter((p) => p.json === workerQueued.json)).toEqual([workerQueued]);
+    expect(managedState.workerAdmission.queue).toEqual([testerToken]);
+    const queuedClaim = managedState.roles[testerToken];
+    if (!queuedClaim || !("issue" in queuedClaim)) throw new Error("tester claim disappeared");
+    expect(queuedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+    expect(testerClient.prompts).toEqual([]);
   });
 
   it("leaves a queued idle-resume assignment intact and stops draining when the promotion prompt itself rejects", async () => {
@@ -13432,6 +14006,57 @@ describe("ProcessManager", () => {
     expect(testerClaim(managedState, token).promptFailures).toBe(0);
     expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
     expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+  });
+
+  it("queues a catch-up the worker acknowledged without a turn and publishes no worker-queued for it", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    tree(state);
+    const token = roleToken("omp", root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%7",
+        socketPath: "/state/workers/tester.sock",
+        ompSessionFile: "/state/workers/tester-session.json",
+      },
+    };
+    // The active phase's own worker, so the catch-up is not a bystander's and is delivered.
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const client = fakeWorkerRpcClient();
+    client.setRunStateSilently("idle");
+    client.turnStartsOnPrompt = false;
+    client.getStateImpl = async () => ({ data: { isStreaming: false } });
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+      sleeps,
+    } = manager(state, { connectWorkerRpc: async () => client, sleep: clock.sleep });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const handled = processes.handleException(exception(token));
+      await expireTurnStartWait(sleeps, clock);
+      await handled;
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    const claim = testerClaim(managedState, token);
+    expect(claim.pendingAssignment?.kind).toBe("catchup");
+    expect(claim.promptFailures).toBe(1);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(client.prompts).toEqual([JSON.stringify({ type: "catchup-worker", unhandled: [] })]);
+    // The architect did not ask for a catch-up and cannot act on it: no worker-queued.
+    expect(publications).toEqual([]);
   });
 
   it("confirms the boot but queues the assignment and counts a prompt failure when the ready-time prompt is acknowledged without a turn", async () => {
