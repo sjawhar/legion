@@ -428,13 +428,7 @@ export class TmuxRuntime implements Runtime {
           ...identity,
         };
       }
-      const window = await tmux.openWindow(
-        this.deps.tmux,
-        session,
-        treeName(issue),
-        paneArgv,
-        session
-      );
+      const window = await this.openWindow(treeName(issue), paneArgv);
       const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
       const opened: TmuxLocator = {
         runtime: "tmux",
@@ -467,7 +461,7 @@ export class TmuxRuntime implements Runtime {
       secret
     );
     const session = this.deps.tmux.socket;
-    const window = await tmux.openWindow(this.deps.tmux, session, "controller", paneArgv, session);
+    const window = await this.openWindow("controller", paneArgv);
     const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
     return {
       runtime: "tmux",
@@ -477,6 +471,19 @@ export class TmuxRuntime implements Runtime {
       socketPath,
       ...identity,
     };
+  }
+
+  /** Opens a window in the daemon's session. Recovery diagnostics are logged here; `tmux.openWindow`
+   * returns them without logging. */
+  private async openWindow(name: string, paneArgv: string[]): Promise<tmux.OpenedWindow> {
+    const session = this.deps.tmux.socket;
+    const window = await tmux.openWindow(this.deps.tmux, session, name, paneArgv, session);
+    if (window.recovered !== undefined) {
+      console.error(
+        `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${window.recovered}); recreated it and opened the window on a second attempt`
+      );
+    }
+    return window;
   }
 
   /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a

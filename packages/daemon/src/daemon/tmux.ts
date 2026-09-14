@@ -45,12 +45,14 @@ function targetAbsent(stderr: string | undefined): boolean {
   return NO_SERVER_STDERR.test(stderr ?? "") || (stderr ?? "").startsWith("no such session");
 }
 
-/** The failure detail for every error message this module throws: tmux's stderr only, trimmed,
- * omitted when empty — never stdout. For `show-environment` stdout is the value dump, and for the
- * `-P -F` reports it is whatever a broken tmux printed; no value may reach a log or error string. */
+/** The failure detail for every error message this module throws: tmux's stderr only, trimmed —
+ * never stdout. For `show-environment` stdout is the value dump, and for the `-P -F` reports it is
+ * whatever a broken tmux printed; no value may reach a log or error string. An empty stderr is
+ * said out loud (`: tmux printed nothing on stderr`) rather than omitted, so a message that ends in
+ * the exit code alone can never be mistaken for a dropped detail. */
 function failure(result: { stderr?: string }): string {
   const detail = result.stderr?.trim();
-  return detail ? `: ${detail}` : "";
+  return detail ? `: ${detail}` : ": tmux printed nothing on stderr";
 }
 
 /** The characters tmux's `-s` output escapes inside a value with a backslash (tmux 3.7c
@@ -258,59 +260,65 @@ function parsePaneReport(
 }
 
 /**
- * Opens a fresh window in `session` running `environmentAndCommand`, creating the session first
- * (via a disposable bootstrap window, immediately killed) if it does not already exist. Captures
- * the window id, pane id, and pane pid in the same `-P -F` invocation that creates the window —
- * tmux resolves that synchronously before the wrapped command starts, so a command that exits (or
- * fails to spawn) instantly can never race a later, separate discovery call.
+ * `has-session`; when the session is not there, the first-launch creation: one client invocation
+ * (`;` is tmux's command separator) of `new-session` with a disposable bootstrap window and
+ * `set-option update-environment ''`, so the session exists with `update-environment` already
+ * empty and no attach can ever copy a client's environment into it — not even one landing between
+ * the two commands — then the session owner marker. Returns whether this call created the session.
+ * One function on purpose: the cross-issue `new-session` lane (LEGION-76) wraps exactly this step.
  */
-export async function openWindow(
+async function ensureSession(server: TmuxServer, session: string, owner: string): Promise<boolean> {
+  const present = (await server.run(argv(server, "has-session", "-t", session))).exitCode === 0;
+  if (present) return false;
+  const create = await server.run(
+    argv(
+      server,
+      "new-session",
+      "-d",
+      "-s",
+      session,
+      "-n",
+      BOOTSTRAP_WINDOW,
+      "sleep 3600",
+      ";",
+      ...disableEnvironmentUpdatesArgs(session)
+    )
+  );
+  if (create.exitCode !== 0) {
+    throw new Error(`tmux new-session failed (exit ${create.exitCode})${failure(create)}`);
+  }
+  await markOwner(server, session, owner, "session");
+  return true;
+}
+
+/**
+ * One `new-window -P -F` that opens the window and reports its ids in the same invocation. When
+ * `created` (this `openWindow` call made the session), the bootstrap window is killed afterwards
+ * whatever the outcome, so a failed open never leaves it behind. Returns tmux's raw result: the
+ * caller decides what a non-zero exit means.
+ */
+async function newWindowAttempt(
   server: TmuxServer,
   session: string,
   name: string,
   environmentAndCommand: string[],
-  owner: string
-): Promise<{ windowId: string; paneId: string; pid: number }> {
-  const sessionExists =
-    (await server.run(argv(server, "has-session", "-t", session))).exitCode === 0;
-  if (!sessionExists) {
-    // One client invocation (`;` is tmux's command separator): the session exists with
-    // `update-environment` already empty, so no attach can ever copy a client's environment into
-    // it — not even one landing between the two commands.
-    const create = await server.run(
-      argv(
-        server,
-        "new-session",
-        "-d",
-        "-s",
-        session,
-        "-n",
-        BOOTSTRAP_WINDOW,
-        "sleep 3600",
-        ";",
-        ...disableEnvironmentUpdatesArgs(session)
-      )
-    );
-    if (create.exitCode !== 0) {
-      throw new Error(`tmux new-session failed (exit ${create.exitCode})${failure(create)}`);
-    }
-    await markOwner(server, session, owner, "session");
-  }
-
-  const command = argv(
-    server,
-    "new-window",
-    "-P",
-    "-F",
-    "#{window_id} #{pane_id} #{pane_pid}",
-    "-t",
-    session,
-    "-n",
-    name,
-    ...environmentAndCommand
+  created: boolean
+): Promise<{ stdout: string; stderr?: string; exitCode: number }> {
+  const result = await server.run(
+    argv(
+      server,
+      "new-window",
+      "-P",
+      "-F",
+      "#{window_id} #{pane_id} #{pane_pid}",
+      "-t",
+      session,
+      "-n",
+      name,
+      ...environmentAndCommand
+    )
   );
-  const result = await server.run(command);
-  if (!sessionExists) {
+  if (created) {
     const cleanup = await server.run(
       argv(server, "kill-window", "-t", `${session}:${BOOTSTRAP_WINDOW}`)
     );
@@ -320,13 +328,61 @@ export async function openWindow(
       );
     }
   }
+  return result;
+}
+
+export interface OpenedWindow {
+  windowId: string;
+  paneId: string;
+  pid: number;
+  /** The first attempt's error text when session recreation recovered the open. See `openWindow`
+   * for the retry conditions. */
+  recovered?: string;
+}
+
+/**
+ * Opens a fresh window in `session` running `environmentAndCommand`, creating the session first
+ * (via a disposable bootstrap window, immediately killed) if it does not already exist. Captures
+ * the window id, pane id, and pane pid in the same `-P -F` invocation that creates the window —
+ * tmux resolves that synchronously before the wrapped command starts, so a command that exits (or
+ * fails to spawn) instantly can never race a later, separate discovery call.
+ *
+ * A `new-window` failure is judged by asking tmux again, never by its stderr wording: when the
+ * session `has-session` had just reported present is gone by then, it died under the first attempt
+ * and is recreated exactly as a first launch does, and `new-window` runs once more (see
+ * `OpenedWindow.recovered`). A failure with the session still there, or inside a session this very
+ * call created (a fresh session cannot have died from an earlier process's exit), is the first
+ * attempt's error as before — no retry, so a launch failing for any other reason is never doubled.
+ */
+export async function openWindow(
+  server: TmuxServer,
+  session: string,
+  name: string,
+  environmentAndCommand: string[],
+  owner: string
+): Promise<OpenedWindow> {
+  const created = await ensureSession(server, session, owner);
+  let result = await newWindowAttempt(server, session, name, environmentAndCommand, created);
+  let recovered: string | undefined;
   if (result.exitCode !== 0) {
-    throw new Error(`tmux new-window failed (exit ${result.exitCode})${failure(result)}`);
+    const first = `tmux new-window failed (exit ${result.exitCode})${failure(result)}`;
+    if (created) throw new Error(first);
+    const recreated = await ensureSession(server, session, owner);
+    if (!recreated) throw new Error(first);
+    result = await newWindowAttempt(server, session, name, environmentAndCommand, true);
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `tmux new-window failed (exit ${result.exitCode})${failure(result)} on the second attempt, after has-session reported ${session} present and then gone (first attempt: ${first})`
+      );
+    }
+    recovered = first;
   }
   const { windowId, paneId, pid } = parsePaneReport(result, "tmux new-window", true);
   if (!windowId) throw new Error(`tmux new-window did not report a window id${failure(result)}`);
   await markOwner(server, windowId, owner, "window");
-  return { windowId, paneId, pid };
+  const opened: OpenedWindow = { windowId, paneId, pid };
+  if (recovered !== undefined) opened.recovered = recovered;
+  return opened;
 }
 
 /** Splits a new pane into an existing window, tiling the layout afterward. Same single-invocation
