@@ -9,7 +9,6 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill, Pill } from "../../components/Pill";
 import {
-  badgeBlocking,
   borderDefault,
   cardHoverBorder,
   dangerText,
@@ -27,10 +26,7 @@ import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { issueStatuses } from "./board-model";
-
-function issueIsUnread(issue: IssueSummary, lastReadSequence: number): boolean {
-  return issue.last_seq > lastReadSequence;
-}
+import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   return (
@@ -44,13 +40,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
           <span className={`ml-2 ${textPrimaryOnCanvas}`}>{issue.title}</span>
         </Link>
         <div className={`flex items-center gap-2 text-xs ${textMutedOnCanvas}`}>
-          {unread ? (
-            <span
-              aria-hidden
-              className={`size-2 rounded-full ${badgeBlocking.bg}`}
-              title="Unread"
-            />
-          ) : null}
+          {unread ? <UnreadDot /> : null}
           {issue.open_asks === 0 ? null : <AttentionBadge count={issue.open_asks} />}
           <Timestamp at={issue.updated_at} />
         </div>

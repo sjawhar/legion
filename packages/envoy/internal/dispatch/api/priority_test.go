@@ -108,7 +108,9 @@ func TestIssuePriorityRejectsInvalidInputsOnCreateAndPatch(t *testing.T) {
 	}
 }
 
-func TestIssueListsOrderPriorityWithinLifecycleStatus(t *testing.T) {
+// Rank is the only order: priority is a badge and a filter, never a sort key, so the
+// List and the Board (which sorts each column by rank) agree even when priorities are set.
+func TestListIssuesOrdersByRankRegardlessOfPriority(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -123,25 +125,41 @@ func TestIssueListsOrderPriorityWithinLifecycleStatus(t *testing.T) {
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
 		}
-		return decodeBody[priorityIssue](t, response)
+		issue := decodeBody[priorityIssue](t, response)
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"status": "todo",
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("set %s todo: status=%d body=%s", issue.Key, response.Code, response.Body.String())
+		}
+		return issue
 	}
-	p2 := create("P2 triage", 2)
-	unset := create("Unset triage", nil)
-	p0 := create("P0 triage", 0)
-	todo := create("P3 todo", 3)
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+todo.Key, map[string]string{
-		"status": "todo",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("set todo status: status=%d body=%s", response.Code, response.Body.String())
+	// Created in rank order: the P0 first, then the unset, then the P3.
+	p0 := create("P0 todo", 0)
+	unset := create("Unset todo", nil)
+	p3 := create("P3 todo", 3)
+	// Reverse the ranks with the board's own moves: the P3 to the top, then the P0 to the bottom.
+	for _, move := range []struct {
+		key   string
+		input map[string]string
+	}{
+		{p3.Key, map[string]string{"before": p0.Key}},
+		{p0.Key, map[string]string{"after": unset.Key}},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+move.key, map[string]any{
+			"rank": move.input,
+		}, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("rank %s: status=%d body=%s", move.key, response.Code, response.Body.String())
+		}
 	}
 
 	listedResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE", nil, "alice")
 	if listedResponse.Code != http.StatusOK {
 		t.Fatalf("list issues: status=%d body=%s", listedResponse.Code, listedResponse.Body.String())
 	}
-	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, listedResponse), p0.Key, p2.Key, unset.Key, todo.Key)
+	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, listedResponse), p3.Key, unset.Key, p0.Key)
 
-	for _, issue := range []priorityIssue{p2, unset, p0} {
+	for _, issue := range []priorityIssue{p0, unset, p3} {
 		response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]bool{"pinned": true}, "alice")
 		if response.Code != http.StatusOK {
 			t.Fatalf("pin %s: status=%d body=%s", issue.Key, response.Code, response.Body.String())
@@ -151,7 +169,7 @@ func TestIssueListsOrderPriorityWithinLifecycleStatus(t *testing.T) {
 	if pinnedResponse.Code != http.StatusOK {
 		t.Fatalf("list pinned issues: status=%d body=%s", pinnedResponse.Code, pinnedResponse.Body.String())
 	}
-	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, pinnedResponse), p0.Key, p2.Key, unset.Key)
+	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, pinnedResponse), p3.Key, unset.Key, p0.Key)
 }
 
 func TestInboxOrdersOpenAsksByIssuePriorityWithinEachSection(t *testing.T) {

@@ -1,7 +1,8 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createIssue, createProject, getIssue, patchIssue } from "./api";
+import { createIssue, createProject, getIssue, listIssues, patchIssue, putIssueState } from "./api";
 import { resetDatabase } from "./seed";
+import { centerOf, pressFinger, touchDrag, touchHold } from "./touch";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -13,14 +14,47 @@ function priorityBadge(scope: Locator, label: string): Locator {
   return scope.locator("span", { hasText: new RegExp(`^${label}$`) });
 }
 
-test("project board persists reordering and lets humans move cards through every status", async ({
+function patchOf(page: Page, key: string) {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === "PATCH" &&
+      new URL(response.url()).pathname === `/api/v1/issues/${key}`
+  );
+}
+
+/** Drags with the mouse from the middle of `source` to `target` (a card or a column). */
+async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?: number) {
+  await source.scrollIntoViewIfNeeded();
+  const sourceBox = await source.boundingBox();
+  if (sourceBox === null) {
+    throw new Error("drag source is not visible");
+  }
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2 + 10, sourceBox.y + sourceBox.height / 2);
+  await target.scrollIntoViewIfNeeded();
+  const targetBox = await target.boundingBox();
+  if (targetBox === null) {
+    throw new Error("drag target is not visible");
+  }
+  await page.mouse.move(
+    targetBox.x + targetBox.width / 2,
+    yOffset === undefined ? targetBox.y + targetBox.height / 2 : targetBox.y + yOffset,
+    { steps: 24 }
+  );
+  await page.mouse.up();
+}
+
+test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const first = await createIssue({ project: "CORE", title: "First card" });
   await patchIssue(first.key, { status: "todo" });
   const second = await createIssue({ project: "CORE", title: "Second card" });
+  await patchIssue(second.key, { priority: 0 });
   const third = await createIssue({ project: "CORE", title: "Third card" });
+  await patchIssue(third.key, { priority: 3 });
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -30,29 +64,29 @@ test("project board persists reordering and lets humans move cards through every
   try {
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
+    const board = page.getByRole("region", { name: "Project board" });
     const triage = page.getByRole("region", { name: "Triage" });
     await expect(triage.getByRole("article")).toHaveText([/Second card/, /Third card/]);
 
-    const handle = page.getByRole("button", { name: `Reorder ${third.key}` });
-    const target = triage.getByRole("article", { name: `${second.key} Second card` });
-    const sourceBox = await handle.boundingBox();
-    const targetBox = await target.boundingBox();
-    if (sourceBox === null || targetBox === null) {
-      throw new Error("board card is not visible for drag");
-    }
-    const reorderPatch = page.waitForResponse(
-      (response) =>
-        response.request().method() === "PATCH" &&
-        new URL(response.url()).pathname === `/api/v1/issues/${third.key}`
-    );
+    // The card itself is the handle: no Reorder button, no status pill on the card.
+    await expect(board.getByRole("button", { name: /Reorder/ })).toHaveCount(0);
+    const thirdCard = triage.getByRole("article", { name: `${third.key} Third card` });
+    await expect(thirdCard).not.toContainText("Triage");
+    // Icebox and Done are collapsed rails; the other seven are full columns.
+    await expect(board.getByTestId("board-column-header")).toHaveCount(7);
+    await expect(board.getByTestId("board-column-rail")).toHaveCount(2);
+    await expect(page.getByRole("region", { name: "Icebox (collapsed)" })).toBeVisible();
+    const doneRail = page.getByRole("region", { name: "Done (collapsed)" });
+    await expect(doneRail).toContainText("Done");
 
-    await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + 4, { steps: 12 });
-    await page.mouse.up();
+    // K1: the P3 card dragged above the P0 card stays first everywhere - rank is the only order.
+    const secondCard = triage.getByRole("article", { name: `${second.key} Second card` });
+    const reorderPatch = patchOf(page, third.key);
+    await mouseDrag(page, thirdCard, secondCard, 4);
     expect((await reorderPatch).status()).toBe(200);
-
     await expect(triage.getByRole("article")).toHaveText([/Third card/, /Second card/]);
+    await expect(priorityBadge(thirdCard, "P3")).toBeVisible();
+    await expect(priorityBadge(secondCard, "P0")).toBeVisible();
 
     await page.reload();
     await expect(triage.getByRole("article")).toHaveText([/Third card/, /Second card/]);
@@ -60,109 +94,258 @@ test("project board persists reordering and lets humans move cards through every
     await expect(
       page.getByRole("list", { name: "triage issues" }).getByRole("listitem")
     ).toHaveText([/Third card/, /Second card/]);
+    expect((await listIssues("CORE")).map((issue) => issue.key)).toEqual([
+      third.key,
+      second.key,
+      first.key,
+    ]);
 
+    // K2: a whole-card drag into another column changes the status.
     await page.getByRole("button", { name: "Board" }).click();
     const todoColumn = page.getByRole("region", { name: "Todo" });
     const inProgressColumn = page.getByRole("region", { name: "In progress" });
-    const todoHandle = page.getByRole("button", { name: `Reorder ${first.key}` });
-    await todoHandle.scrollIntoViewIfNeeded();
-    const todoBox = await todoHandle.boundingBox();
-    if (todoBox === null) {
-      throw new Error("Todo board card is not visible for status drag");
-    }
-    const movePatch = page.waitForResponse(
-      (response) =>
-        response.request().method() === "PATCH" &&
-        new URL(response.url()).pathname === `/api/v1/issues/${first.key}`
+    const movePatch = patchOf(page, first.key);
+    await mouseDrag(
+      page,
+      todoColumn.getByRole("article", { name: `${first.key} First card` }),
+      inProgressColumn
     );
-    await page.mouse.move(todoBox.x + todoBox.width / 2, todoBox.y + todoBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(todoBox.x + todoBox.width / 2 + 10, todoBox.y + todoBox.height / 2);
-    await inProgressColumn.scrollIntoViewIfNeeded();
-    const inProgressBox = await inProgressColumn.boundingBox();
-    if (inProgressBox === null) {
-      throw new Error("In progress board column is not visible for status drag");
-    }
-    await page.mouse.move(
-      inProgressBox.x + inProgressBox.width / 2,
-      inProgressBox.y + inProgressBox.height / 2,
-      { steps: 24 }
-    );
-    await page.mouse.up();
     expect((await movePatch).status()).toBe(200);
     await expect(todoColumn).not.toContainText("First card");
     await expect(inProgressColumn).toContainText("First card");
     await page.reload();
     await expect(inProgressColumn).toContainText("First card");
-    if (testInfo.project.name === "chromium") {
-      const thirdHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
-      await thirdHandle.scrollIntoViewIfNeeded();
-      const thirdBox = await thirdHandle.boundingBox();
-      if (thirdBox === null) {
-        throw new Error("board card is not visible for close drag");
-      }
-      const closePatch = page.waitForResponse(
-        (response) =>
-          response.request().method() === "PATCH" &&
-          new URL(response.url()).pathname === `/api/v1/issues/${third.key}`
-      );
 
-      await page.mouse.move(thirdBox.x + thirdBox.width / 2, thirdBox.y + thirdBox.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(thirdBox.x + thirdBox.width / 2 + 10, thirdBox.y + thirdBox.height / 2);
+    if (testInfo.project.name === "chromium") {
+      // K3: a Retro card dropped on the collapsed Done rail closes it.
+      await patchIssue(third.key, { status: "retro" });
+      const retroColumn = page.getByRole("region", { name: "Retro" });
+      const retroCard = retroColumn.getByRole("article", { name: `${third.key} Third card` });
+      await expect(retroCard).toBeVisible();
+      const closePatch = patchOf(page, third.key);
+      await mouseDrag(page, retroCard, doneRail);
+      const closeResponse = await closePatch;
+      expect(closeResponse.status()).toBe(200);
+      expect(closeResponse.request().postDataJSON()).toEqual({ status: "done", rank: {} });
+      await expect(retroColumn).not.toContainText("Third card");
+      await expect(doneRail).toContainText("1");
+      await expect.poll(() => getIssue(third.key)).toMatchObject({ status: "done" });
+      expect((await getIssue(third.key)).closed_at).not.toBeNull();
+
+      // The toggle expands both edges, persists per login across a reload...
+      const showEdges = page.getByRole("button", { name: "Show Icebox & Done" });
+      await expect(showEdges).toHaveAttribute("aria-pressed", "false");
+      await showEdges.click();
+      const hideEdges = page.getByRole("button", { name: "Hide Icebox & Done" });
+      await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
+      await expect(board.getByTestId("board-column-header")).toHaveCount(9);
+      await expect(board.getByTestId("board-column-rail")).toHaveCount(0);
       const doneColumn = page.getByRole("region", { name: "Done" });
-      await doneColumn.scrollIntoViewIfNeeded();
-      const doneBox = await doneColumn.boundingBox();
-      if (doneBox === null) {
-        throw new Error("board column is not visible for close drop");
-      }
-      await page.mouse.move(doneBox.x + doneBox.width / 2, doneBox.y + doneBox.height / 2, {
-        steps: 24,
-      });
-      await page.mouse.up();
-      expect((await closePatch).status()).toBe(200);
       await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
       await page.reload();
+      await expect(hideEdges).toHaveAttribute("aria-pressed", "true");
       await expect(doneColumn.getByRole("article")).toHaveText(/Third card/);
 
-      await doneColumn.scrollIntoViewIfNeeded();
-      const closeHandle = page.getByRole("button", { name: `Reorder ${third.key}` });
-      const closeBox = await closeHandle.boundingBox();
-      if (closeBox === null) {
-        throw new Error("board card is not visible for reopen drag");
-      }
-      const reopenPatch = page.waitForResponse(
-        (response) =>
-          response.request().method() === "PATCH" &&
-          new URL(response.url()).pathname === `/api/v1/issues/${third.key}`
-      );
-
-      await page.mouse.move(closeBox.x + closeBox.width / 2, closeBox.y + closeBox.height / 2);
-      await page.mouse.down();
-      await page.mouse.move(closeBox.x + closeBox.width / 2 + 10, closeBox.y + closeBox.height / 2);
+      // ...and dragging a Done card out reopens it.
       const backlogColumn = page.getByRole("region", { name: "Backlog" });
-      await backlogColumn.scrollIntoViewIfNeeded();
-      const backlogBox = await backlogColumn.boundingBox();
-      if (backlogBox === null) {
-        throw new Error("board column is not visible for reopen drop");
-      }
-      await page.mouse.move(
-        backlogBox.x + backlogBox.width / 2,
-        backlogBox.y + backlogBox.height / 2,
-        {
-          steps: 24,
-        }
+      const reopenPatch = patchOf(page, third.key);
+      await mouseDrag(
+        page,
+        doneColumn.getByRole("article", { name: `${third.key} Third card` }),
+        backlogColumn
       );
-      await page.mouse.up();
       expect((await reopenPatch).status()).toBe(200);
       await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
+      await expect.poll(() => getIssue(third.key)).toMatchObject({ closed_at: null });
       await page.reload();
       await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
+
+      await hideEdges.click();
+      await expect(board.getByTestId("board-column-rail")).toHaveCount(2);
+      await expect(page.getByRole("region", { name: "Done (collapsed)" })).toContainText("0");
     }
 
     if (testInfo.project.name === "iphone") {
       await expect(page.getByRole("button", { name: "Board" })).toHaveCSS("min-height", "44px");
+      await expect(page.getByRole("button", { name: "Show Icebox & Done" })).toHaveCSS(
+        "min-height",
+        "44px"
+      );
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("board cards move with the keyboard while Enter opens the issue and Space opens the priority picker", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const cards = [];
+  for (const title of ["Alpha", "Bravo", "Charlie"]) {
+    const issue = await createIssue({ project: "CORE", title });
+    await patchIssue(issue.key, { status: "todo" });
+    cards.push(issue);
+  }
+  const [alpha, bravo] = cards;
+  if (alpha === undefined || bravo === undefined) {
+    throw new Error("seed produced fewer cards than expected");
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+    const todo = page.getByRole("region", { name: "Todo" });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
+
+    // Focus the card, lift with Space, move down one (Bravo slides up to make room), drop
+    // with Space.
+    const alphaCard = todo.getByRole("article", { name: `${alpha.key} Alpha` });
+    const bravoCard = todo.getByRole("article", { name: `${bravo.key} Bravo` });
+    await alphaCard.focus();
+    await expect(alphaCard).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(alphaCard).toHaveClass(/opacity-50/);
+    await page.keyboard.press("ArrowDown");
+    await expect(bravoCard).toHaveCSS("transform", /matrix/);
+    const movePatch = patchOf(page, alpha.key);
+    await page.keyboard.press("Space");
+    const moveResponse = await movePatch;
+    expect(moveResponse.status()).toBe(200);
+    expect(moveResponse.request().postDataJSON()).toMatchObject({
+      rank: { after: bravo.key },
+    });
+    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Alpha/, /Charlie/]);
+    await page.reload();
+    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Alpha/, /Charlie/]);
+
+    // Tab from the card reaches its title link; Enter follows it instead of lifting.
+    await bravoCard.focus();
+    await page.keyboard.press("Tab");
+    await expect(bravoCard.getByRole("link")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/issues/${bravo.key}$`));
+    await page.goBack();
+
+    // One more Tab reaches the priority select; Space opens it, the card stays put.
+    const patches: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "PATCH") {
+        patches.push(request.url());
+      }
+    });
+    await bravoCard.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    const select = bravoCard.getByLabel(`Priority of ${bravo.key}`);
+    await expect(select).toBeFocused();
+    await page.keyboard.press("Space");
+    await page.waitForTimeout(300);
+    await expect(bravoCard).not.toHaveClass(/opacity-50/);
+    await expect(select).toBeFocused();
+    expect(patches).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a stale board refreshes and says so when the server rejects the rank", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the stale-rank drag exercises a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const cards = [];
+  for (const title of ["Alpha", "Bravo", "Charlie"]) {
+    const issue = await createIssue({ project: "CORE", title });
+    await patchIssue(issue.key, { status: "todo" });
+    cards.push(issue);
+  }
+  const [alpha, bravo, charlie] = cards;
+  if (alpha === undefined || bravo === undefined || charlie === undefined) {
+    throw new Error("seed produced fewer cards than expected");
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    // Without the live stream the board does not learn about the API move below.
+    await page.route("**/api/v1/events*", (route) => route.abort());
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+    const todo = page.getByRole("region", { name: "Todo" });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
+
+    await patchIssue(alpha.key, { rank: { after: charlie.key } });
+    expect((await listIssues("CORE")).map((issue) => issue.key)).toEqual([
+      bravo.key,
+      charlie.key,
+      alpha.key,
+    ]);
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
+
+    // Charlie between Alpha and Bravo names neighbours the server now has in the other order.
+    const stalePatch = patchOf(page, charlie.key);
+    await mouseDrag(
+      page,
+      todo.getByRole("article", { name: `${charlie.key} Charlie` }),
+      todo.getByRole("article", { name: `${bravo.key} Bravo` }),
+      4
+    );
+    const staleResponse = await stalePatch;
+    expect(staleResponse.status()).toBe(400);
+    expect(staleResponse.request().postDataJSON()).toEqual({
+      rank: { after: alpha.key, before: bravo.key },
+    });
+    await expect(page.getByRole("alert")).toHaveText(
+      "The board changed while you were moving this card - refreshed, try again."
+    );
+    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Charlie/, /Alpha/]);
+    expect((await listIssues("CORE")).map((issue) => issue.key)).toEqual([
+      bravo.key,
+      charlie.key,
+      alpha.key,
+    ]);
+
+    // Trying again from the refreshed board succeeds and clears the alert.
+    const retryPatch = patchOf(page, charlie.key);
+    await mouseDrag(
+      page,
+      todo.getByRole("article", { name: `${charlie.key} Charlie` }),
+      todo.getByRole("article", { name: `${bravo.key} Bravo` }),
+      4
+    );
+    expect((await retryPatch).status()).toBe(200);
+    await expect(todo.getByRole("article")).toHaveText([/Charlie/, /Bravo/, /Alpha/]);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("board cards carry the unread dot the project list shows", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const unread = await createIssue({ project: "CORE", title: "Unread card" });
+  const read = await createIssue({ project: "CORE", title: "Read card" });
+  await putIssueState(read.key, { last_read_seq: (await getIssue(read.key)).last_seq });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/projects/CORE");
+    const unreadRow = page.getByRole("listitem", { name: `${unread.key} Unread card` });
+    await expect(unreadRow.locator('[title="Unread"]')).toHaveCount(1);
+    await page.getByRole("button", { name: "Board" }).click();
+    const unreadCard = page.getByRole("article", { name: `${unread.key} Unread card` });
+    const readCard = page.getByRole("article", { name: `${read.key} Read card` });
+    await expect(unreadCard.locator('[title="Unread"]')).toHaveCount(1);
+    await expect(readCard).toBeVisible();
+    await expect(readCard.locator('[title="Unread"]')).toHaveCount(0);
   } finally {
     await context.close();
   }
@@ -231,9 +414,12 @@ test("project list rows and board cards set an issue's priority in place", async
     expect((await unsetPatch).postDataJSON()).toEqual({ priority: 0 });
     await expect(priorityBadge(unsetCard, "P0")).toBeVisible();
 
-    // Tab reaches the control right after the card's Reorder handle, so a keyboard shortcut can
-    // focus it too; the screenshot shows the focus ring on the badge.
-    await page.getByRole("button", { name: `Reorder ${unset.key}` }).focus();
+    // Tab order inside a card: the card itself (the drag activator), its title link, then the
+    // priority control, so a keyboard shortcut can focus it too; the screenshot shows the
+    // focus ring on the badge.
+    await unsetCard.focus();
+    await page.keyboard.press("Tab");
+    await expect(unsetCard.getByRole("link")).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(unsetCard.getByLabel(`Priority of ${unset.key}`)).toBeFocused();
     const shot = testInfo.outputPath(`board-priority-${testInfo.project.name}.png`);
@@ -277,6 +463,157 @@ test("board scrolls horizontally inside its own container at 1100px", async ({
     }));
     expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
     expect(dimensions.pageWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+  } finally {
+    await context.close();
+  }
+});
+
+/** Where the scroller sits against each column's or rail's start edge, in scroll-content px. */
+async function snapOffsets(scroller: Locator): Promise<{ lefts: number[]; scrollLeft: number }> {
+  return scroller.evaluate((element) => {
+    const origin = element.getBoundingClientRect().left - element.scrollLeft;
+    return {
+      lefts: [...element.querySelectorAll("section")].map(
+        (section) => section.getBoundingClientRect().left - origin
+      ),
+      scrollLeft: element.scrollLeft,
+    };
+  });
+}
+
+test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "touch gestures exercise the phone project");
+  await createProject({ key: "CORE", name: "Core" });
+  const cards = [];
+  for (const title of ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf"]) {
+    const issue = await createIssue({ project: "CORE", title });
+    await patchIssue(issue.key, { status: "todo" });
+    cards.push(issue);
+  }
+  const [alpha, bravo] = cards;
+  if (alpha === undefined || bravo === undefined) {
+    throw new Error("seed produced fewer cards than expected");
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const patches: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "PATCH") {
+      patches.push(new URL(request.url()).pathname);
+    }
+  });
+  try {
+    await page.goto("/projects/CORE");
+    await page.getByRole("button", { name: "Board" }).click();
+    const scroller = page.getByTestId("board-scroll-container");
+    const todo = page.getByRole("region", { name: "Todo" });
+    await expect(todo.getByRole("article")).toHaveCount(7);
+
+    // K5: a horizontal swipe lands on a column or rail edge (snap-x snap-mandatory).
+    const start = await snapOffsets(scroller);
+    expect(start.scrollLeft).toBe(0);
+    const box = await scroller.boundingBox();
+    if (box === null) {
+      throw new Error("board scroller is not visible");
+    }
+    const swipeY = box.y + 30;
+    await touchDrag(page, { x: box.x + 340, y: swipeY }, { x: box.x + 60, y: swipeY }, 0, 8);
+    await expect
+      .poll(async () => {
+        const { lefts, scrollLeft } = await snapOffsets(scroller);
+        return scrollLeft > 100 && lefts.some((left) => Math.abs(left - scrollLeft) <= 2);
+      })
+      .toBe(true);
+
+    // Bring Todo to the start (its own snap point) for the gestures on its cards.
+    await scroller.evaluate((element, index) => {
+      const section = element.querySelectorAll("section")[index];
+      if (section === undefined) {
+        throw new Error("no such column");
+      }
+      element.scrollLeft =
+        section.getBoundingClientRect().left -
+        (element.getBoundingClientRect().left - element.scrollLeft);
+    }, 3);
+    await expect
+      .poll(async () => (await snapOffsets(scroller)).scrollLeft)
+      .toBe((await snapOffsets(scroller)).lefts[3] ?? Number.NaN);
+    const inProgress = page.getByRole("region", { name: "In progress" });
+
+    // A vertical swipe scrolls the page and lifts nothing.
+    const alphaCard = todo.getByRole("article", { name: `${alpha.key} Alpha` });
+    const alphaCenter = await centerOf(alphaCard);
+    await touchDrag(page, { x: alphaCenter.x, y: 600 }, { x: alphaCenter.x, y: 250 }, 0, 6);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    await expect(todo.locator("article.opacity-50")).toHaveCount(0);
+    expect(patches).toEqual([]);
+    await page.evaluate(() => window.scrollTo(0, 0));
+
+    // A tap on the priority badge opens the picker without lifting the card...
+    const select = alphaCard.getByLabel(`Priority of ${alpha.key}`);
+    await touchHold(page, await centerOf(select), 0);
+    await expect(select).toBeFocused();
+    await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    // ...and neither does a long press on it.
+    await touchHold(page, await centerOf(select), 300);
+    await page.waitForTimeout(200);
+    await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    expect(patches).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+
+    // A quick tap on the title opens the issue.
+    await touchHold(page, await centerOf(alphaCard.getByRole("link")), 0);
+    await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
+    await page.goBack();
+    await expect(todo.getByRole("article")).toHaveCount(7);
+
+    // A long press on the title lifts the card instead of following the link (the accepted
+    // trade-off of a whole-card handle); with no movement it drops back where it was.
+    const link = alphaCard.getByRole("link");
+    const lifted = expect(alphaCard).toHaveClass(/opacity-50/);
+    await touchHold(page, await centerOf(link), 400);
+    await lifted;
+    await page.waitForTimeout(300);
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    expect(patches).toEqual([]);
+
+    // K2: hold to lift, carry the card into the right-hand auto-scroll zone (the board scrolls
+    // faster the deeper the finger goes, so stay shallow) until In progress has arrived, step
+    // back out of the zone and let go - the card changes column.
+    const bravoCard = todo.getByRole("article", { name: `${bravo.key} Bravo` });
+    const from = await centerOf(bravoCard);
+    const movePatch = patchOf(page, bravo.key);
+    const finger = await pressFinger(page, from);
+    await page.waitForTimeout(250);
+    await expect(bravoCard).toHaveClass(/opacity-50/);
+    const scrollerBox = await scroller.boundingBox();
+    if (scrollerBox === null) {
+      throw new Error("board scroller is not visible");
+    }
+    const edge = scrollerBox.x + scrollerBox.width;
+    await finger.moveTo({ x: edge - scrollerBox.width * 0.2 + 20, y: from.y }, 16);
+    await expect
+      .poll(async () => (await inProgress.boundingBox())?.x ?? 999, { intervals: [10] })
+      .toBeLessThan(150);
+    const landing = await inProgress.boundingBox();
+    if (landing === null || landing.x < -50) {
+      throw new Error(`In progress overshot the touch drop: ${JSON.stringify(landing)}`);
+    }
+    await finger.moveTo({ x: Math.max(60, landing.x + 60), y: from.y }, 4);
+    await page.waitForTimeout(100);
+    await finger.lift();
+    const moveResponse = await movePatch;
+    expect(moveResponse.status()).toBe(200);
+    expect(moveResponse.request().postDataJSON()).toEqual({
+      status: "in_progress",
+      rank: {},
+    });
+    await expect(inProgress).toContainText("Bravo");
+    await expect(todo).not.toContainText("Bravo");
   } finally {
     await context.close();
   }

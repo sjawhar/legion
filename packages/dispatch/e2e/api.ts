@@ -19,6 +19,7 @@ import type {
   Issue,
   IssueDetails,
   IssueReferences,
+  IssueSummary,
   Message,
   MessageDelivery,
   Project,
@@ -112,6 +113,16 @@ export function patchIssue(
   options: ApiOptions = {}
 ): Promise<Issue> {
   return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+}
+
+/** The project list in the server's order: lifecycle status, then rank. */
+export function listIssues(project: string, options: ApiOptions = {}): Promise<IssueSummary[]> {
+  return request<IssueSummary[]>(
+    `/api/v1/issues?project=${encodeURIComponent(project)}`,
+    "GET",
+    undefined,
+    options
+  );
 }
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {

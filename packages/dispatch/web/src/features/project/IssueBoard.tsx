@@ -4,7 +4,7 @@ import {
   DndContext,
   type DragEndEvent,
   KeyboardSensor,
-  PointerSensor,
+  MouseSensor,
   pointerWithin,
   TouchSensor,
   useDroppable,
@@ -19,11 +19,11 @@ import {
 } from "@dnd-kit/sortable";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CSSProperties, ReactNode } from "react";
-import { useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
-import type { IssueSummary } from "../../api/types";
+import { api } from "../../api/client";
+import type { IssueSummary, UserState } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
@@ -32,55 +32,37 @@ import {
   borderDefault,
   card,
   cardHoverBorder,
-  dragHandleBg,
   linkHoverText,
   linkText,
-  secondaryButtonBorder,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
+  selectedCardBorder,
   surfaceMutedBg,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { PriorityControl } from "../issue/PriorityControl";
 import { buildIssuePath } from "../refs/routes";
-import {
-  type BoardColumn,
-  groupIssuesByStatus,
-  type IssueStatus,
-  issueStatuses,
-  rankInputForInsertion,
-  statusLabel,
-} from "./board-model";
+import { type BoardColumn, dropTarget, groupIssuesByStatus, statusLabel } from "./board-model";
+import { useBoardMoves } from "./board-moves";
+import { CollapsedColumn } from "./CollapsedColumn";
+import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 const boardCollisionDetection: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
   return pointerCollisions.length > 0 ? pointerCollisions : closestCorners(args);
 };
 
-function moveIssue(
-  issues: readonly IssueSummary[],
-  activeKey: string,
-  targetStatus: IssueStatus,
-  overKey: string
-): { issues: IssueSummary[]; rank: { before?: string; after?: string } } | undefined {
-  const active = issues.find((issue) => issue.key === activeKey);
-  if (active === undefined) {
-    return undefined;
-  }
-  const columns = groupIssuesByStatus(issues.filter((issue) => issue.key !== activeKey));
-  const target = columns.find((column) => column.status === targetStatus);
-  if (target === undefined) {
-    return undefined;
-  }
-  const overIndex = target.issues.findIndex((issue) => issue.key === overKey);
-  const insertionIndex = overIndex < 0 ? target.issues.length : overIndex;
-  const rank = rankInputForInsertion(target.issues, insertionIndex);
-  target.issues.splice(insertionIndex, 0, { ...active, status: targetStatus });
-  return { issues: columns.flatMap((column) => column.issues), rank };
-}
-
-function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
+/**
+ * The whole card is the drag activator: press and move 8 px (mouse) or hold 150 ms (touch)
+ * anywhere on it to lift it, so a plain click on the title still follows the link and a
+ * vertical swipe still scrolls. Mouse and touch are separate sensors on purpose: a pointer
+ * sensor would also see a finger's first pointermove and lift the card for an instant before
+ * the browser's pan cancels it. The card is also the keyboard activator - focus it, Space or
+ * Enter lifts, arrows move, Space drops - and dnd-kit only treats a key press as a lift when
+ * its target is the activator itself, so Enter on the title link navigates and Space on the
+ * priority select opens it. dnd-kit's default drag attributes would make the card a `button`;
+ * it stays an `article` so nothing interactive is nested in a control.
+ */
+function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   const {
     attributes,
     isDragging,
@@ -89,7 +71,17 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
     setNodeRef,
     transform,
     transition,
-  } = useSortable({ id: issue.key });
+  } = useSortable({
+    attributes: { role: "article", roleDescription: "card" },
+    id: issue.key,
+  });
+  const setCardRef = useCallback(
+    (node: HTMLElement | null) => {
+      setNodeRef(node);
+      setActivatorNodeRef(node);
+    },
+    [setActivatorNodeRef, setNodeRef]
+  );
   const style: CSSProperties = {
     transform:
       transform === null ? undefined : `translate3d(${transform.x}px, ${transform.y}px, 0)`,
@@ -99,31 +91,25 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
   return (
     <article
       aria-label={`${issue.key} ${issue.title}`}
-      className={`rounded-xl border p-3 ${card} ${cardHoverBorder} ${isDragging ? "opacity-50" : ""}`}
-      ref={setNodeRef}
+      className={`cursor-grab rounded-xl border p-3 ${card} ${cardHoverBorder} ${
+        isDragging ? "opacity-50" : ""
+      }`}
+      ref={setCardRef}
       style={style}
+      {...attributes}
+      {...listeners}
     >
-      <div className="flex items-start gap-2">
-        <Link
-          className={`min-w-0 flex-1 text-sm ${linkText} ${linkHoverText}`}
-          to={buildIssuePath({ key: issue.key, kind: "issue" })}
-        >
-          <span className="font-semibold">{issue.key}</span>
-          <span className={`mt-1 block ${textPrimaryOnSurface}`}>{issue.title}</span>
-        </Link>
-        <button
-          aria-label={`Reorder ${issue.key}`}
-          className={`min-h-11 shrink-0 rounded-lg border px-3 text-xs font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          ref={setActivatorNodeRef}
-          type="button"
-          {...attributes}
-          {...listeners}
-        >
-          Reorder
-        </button>
-      </div>
+      {/* Below `xl` every anchor is `inline-flex` with centred items (the 44 px touch rule in
+          styles.css), so the key and title are stacked and start-aligned explicitly. */}
+      <Link
+        className={`flex flex-col text-sm ${linkText} ${linkHoverText}`}
+        to={buildIssuePath({ key: issue.key, kind: "issue" })}
+      >
+        <span className="self-start font-semibold">{issue.key}</span>
+        <span className={`mt-1 self-start ${textPrimaryOnSurface}`}>{issue.title}</span>
+      </Link>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <StatusPill>{statusLabel(issue.status as IssueStatus)}</StatusPill>
+        {unread ? <UnreadDot /> : null}
         <PriorityControl
           disabled={issue.status === "done"}
           issueKey={issue.key}
@@ -137,22 +123,36 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
             <AttentionBadge count={issue.open_asks} />
           </span>
         )}
-        <span aria-hidden className={`ml-auto h-1.5 w-6 rounded-full ${dragHandleBg}`} />
       </div>
     </article>
   );
 }
 
-function BoardColumnView({ column }: { column: BoardColumn }): ReactNode {
+/**
+ * One lifecycle column: the `status:<s>` droppable. Every column stretches to the board's
+ * height, so a card can be dropped anywhere in a column's body - below its last card, or into
+ * an empty column whose header has scrolled out of view on a phone - not only on the header.
+ */
+const BoardColumnView = memo(function BoardColumnView({
+  column,
+  userState,
+}: {
+  column: BoardColumn;
+  userState: UserState | undefined;
+}): ReactNode {
   const { isOver, setNodeRef } = useDroppable({
     id: `status:${column.status}`,
   });
 
   return (
-    <section aria-label={statusLabel(column.status)} className="w-72 shrink-0" ref={setNodeRef}>
+    <section
+      aria-label={statusLabel(column.status)}
+      className="w-72 shrink-0 snap-start"
+      ref={setNodeRef}
+    >
       <header
         className={`min-h-[52px] rounded-xl border px-3 py-2 ${borderDefault} ${surfaceMutedBg} ${
-          isOver ? cardHoverBorder : ""
+          isOver ? selectedCardBorder : ""
         }`}
         data-testid="board-column-header"
       >
@@ -170,58 +170,75 @@ function BoardColumnView({ column }: { column: BoardColumn }): ReactNode {
         >
           <div className="mt-3 space-y-3">
             {column.issues.map((issue) => (
-              <IssueCard issue={issue} key={issue.key} />
+              <IssueCard
+                issue={issue}
+                key={issue.key}
+                unread={issueIsUnread(issue, userState?.[issue.key]?.last_read_seq ?? 0)}
+              />
             ))}
           </div>
         </SortableContext>
       )}
     </section>
   );
-}
+});
 
-export function IssueBoard({ project }: { project: string }): ReactNode {
+export function IssueBoard({
+  project,
+  showEdges = false,
+}: {
+  project: string;
+  /** Render Icebox and Done as full columns instead of collapsed rails. */
+  showEdges?: boolean;
+}): ReactNode {
   const queryClient = useQueryClient();
-  const [error, setError] = useState<string>();
+  const queryKey = ["issues", "project", project] as const;
   const issues = useQuery({
-    queryKey: ["issues", "project", project],
+    queryKey,
     queryFn: () => api.listIssues({ project }),
   });
+  const userState = useQuery({
+    queryKey: ["user-state"],
+    queryFn: () => api.getMyState(),
+  });
+  const { error, moveCard } = useBoardMoves(project);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
-  const onDragEnd = async ({ active, over }: DragEndEvent) => {
-    if (over === null || issues.data === undefined) {
+  // While a card is in flight the scroller must not snap: dnd-kit auto-scrolls the board when
+  // the pointer nears an edge, and with mandatory snapping every scroll tick jumps a whole
+  // column, so one drag near the edge flies to the far end. Snapping is for finger swipes at
+  // rest, so it is switched off from lift to drop.
+  const [dragging, setDragging] = useState(false);
+  // The click that trails a drop (mouseup or touchend on the card) is stopped by dnd-kit before
+  // React sees it, which is enough for buttons but not for the title link: the browser's own
+  // navigation still runs and reloads the app on the issue page. Cancel that default while a
+  // card is in flight and for the instant after it lands.
+  const dragEndedAt = useRef(Number.NEGATIVE_INFINITY);
+  useEffect(() => {
+    const cancelTrailingClick = (event: MouseEvent) => {
+      if (dragging || performance.now() - dragEndedAt.current < 150) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("click", cancelTrailingClick, { capture: true });
+    return () => window.removeEventListener("click", cancelTrailingClick, { capture: true });
+  }, [dragging]);
+  const landCard = () => {
+    dragEndedAt.current = performance.now();
+    setDragging(false);
+  };
+  const onDragEnd = ({ active, over }: DragEndEvent) => {
+    landCard();
+    const current = queryClient.getQueryData<IssueSummary[]>(queryKey);
+    if (over === null || current === undefined) {
       return;
     }
-    const activeKey = String(active.id);
-    const activeIssue = issues.data.find((issue) => issue.key === activeKey);
-    const overKey = String(over.id);
-    const overIssue = issues.data.find((issue) => issue.key === overKey);
-    const targetStatus = overIssue?.status ?? overKey.replace(/^status:/, "");
-    if (activeKey === overKey && activeIssue?.status === targetStatus) {
-      return;
-    }
-    if (activeIssue === undefined || !issueStatuses.includes(targetStatus as IssueStatus)) {
-      return;
-    }
-    const moved = moveIssue(issues.data, activeKey, targetStatus as IssueStatus, overKey);
-    if (moved === undefined) {
-      return;
-    }
-    const queryKey = ["issues", "project", project] as const;
-    const previous = issues.data;
-    queryClient.setQueryData(queryKey, moved.issues);
-    try {
-      await api.patchIssue(activeKey, {
-        ...(activeIssue.status === targetStatus ? {} : { status: targetStatus }),
-        rank: moved.rank,
-      });
-      await queryClient.invalidateQueries({ queryKey });
-    } catch (cause) {
-      queryClient.setQueryData(queryKey, previous);
-      setError(cause instanceof ApiError ? cause.message : "Could not reorder issue.");
+    const target = dropTarget(current, String(active.id), String(over.id));
+    if (target !== undefined) {
+      void moveCard(String(active.id), target.status, target.insertionIndex);
     }
   };
 
@@ -248,14 +265,23 @@ export function IssueBoard({ project }: { project: string }): ReactNode {
       ) : (
         <DndContext
           collisionDetection={boardCollisionDetection}
+          onDragCancel={landCard}
           onDragEnd={onDragEnd}
+          onDragStart={() => setDragging(true)}
           sensors={sensors}
         >
-          <div className="overflow-x-auto pb-3" data-testid="board-scroll-container">
-            <div className="flex w-max items-start gap-4">
-              {groupIssuesByStatus(issues.data).map((column) => (
-                <BoardColumnView column={column} key={column.status} />
-              ))}
+          <div
+            className={`overflow-x-auto pb-3 ${dragging ? "" : "snap-x snap-mandatory"}`}
+            data-testid="board-scroll-container"
+          >
+            <div className="flex w-max items-stretch gap-4">
+              {groupIssuesByStatus(issues.data).map((column) =>
+                !showEdges && (column.status === "icebox" || column.status === "done") ? (
+                  <CollapsedColumn column={column} key={column.status} />
+                ) : (
+                  <BoardColumnView column={column} key={column.status} userState={userState.data} />
+                )
+              )}
             </div>
           </div>
         </DndContext>

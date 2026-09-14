@@ -195,3 +195,30 @@ test("PriorityControl ignores a second pick while the first save is in flight", 
     patchIssue.mockRestore();
   }
 });
+
+test("PriorityControl keeps mouse, pointer and touch presses on the select out of a draggable parent", () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const reached: string[] = [];
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <article
+        aria-label="CORE-1 Review the spec"
+        onMouseDown={() => reached.push("mousedown")}
+        onPointerDown={() => reached.push("pointerdown")}
+        onTouchStart={() => reached.push("touchstart")}
+      >
+        <PriorityControl issueKey="CORE-1" priority={1} />
+      </article>
+    </QueryClientProvider>
+  );
+  try {
+    fireEvent.mouseDown(select());
+    fireEvent.pointerDown(select());
+    fireEvent.touchStart(select());
+    expect(reached).toEqual([]);
+  } finally {
+    view.unmount();
+  }
+});
