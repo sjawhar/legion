@@ -3,7 +3,13 @@ import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { controllerToken, roleToken } from "@legion/contracts";
-import { loadState, newLegionState, pruneStalePrTombstones, saveState } from "../legion-state";
+import {
+  loadState,
+  newLegionState,
+  owningArchitect,
+  pruneStalePrTombstones,
+  saveState,
+} from "../legion-state";
 
 const issue = "LEGION-42";
 const initialState = { project: "omp", cap: 4 };
@@ -1402,5 +1408,108 @@ describe("legion state", () => {
     await writeFile(file, JSON.stringify({ version: 5 }), "utf8");
 
     await expect(loadState(file, initialState)).rejects.toThrow("Invalid Legion state");
+  });
+
+  describe("owningArchitect", () => {
+    const root = "LEGION-1";
+    const child = "LEGION-2";
+    const grandchild = "LEGION-3";
+    const orphan = "LEGION-9";
+    const architectClaim = (key: string) => roleToken(initialState.project, key, "architect");
+
+    /** R (active tree) > C > G, plus X with no tree and no parent; no architect claims. */
+    function decomposedState() {
+      const state = newLegionState(initialState.project, initialState.cap);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [child] };
+      state.issues[child] = {
+        key: child,
+        title: "Child",
+        status: "in_progress",
+        parent: root,
+        children: [grandchild],
+      };
+      state.issues[grandchild] = {
+        key: grandchild,
+        title: "Grandchild",
+        status: "todo",
+        parent: child,
+        children: [],
+      };
+      state.issues[orphan] = { key: orphan, title: "Orphan", status: "todo", children: [] };
+      state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+      return state;
+    }
+
+    it("resolves a child with no architect claim to the tree root", () => {
+      expect(owningArchitect(decomposedState(), child)).toBe(root);
+    });
+
+    it("resolves a child to itself once it holds an architect claim", () => {
+      const state = decomposedState();
+      state.roles[architectClaim(child)] = { issue: child, role: "architect" };
+      expect(owningArchitect(state, child)).toBe(child);
+    });
+
+    it("resolves a grandchild to the nearest claimed ancestor", () => {
+      const state = decomposedState();
+      state.roles[architectClaim(child)] = { issue: child, role: "architect" };
+      expect(owningArchitect(state, grandchild)).toBe(child);
+    });
+
+    it("resolves a grandchild with no claims on its chain to the tree root", () => {
+      expect(owningArchitect(decomposedState(), grandchild)).toBe(root);
+    });
+
+    it("starts at the parent for a wake about the issue's own architect role", () => {
+      const state = decomposedState();
+      state.roles[architectClaim(child)] = { issue: child, role: "architect" };
+      expect(owningArchitect(state, child, "architect")).toBe(root);
+      expect(owningArchitect(state, grandchild, "architect")).toBe(child);
+    });
+
+    it("returns the root for the unreachable root architect wake", () => {
+      expect(owningArchitect(decomposedState(), root, "architect")).toBe(root);
+    });
+
+    it("treats a launch-failed architect claim with no session or locator as the owner", () => {
+      const state = decomposedState();
+      state.roles[architectClaim(child)] = { issue: child, role: "architect", launchFailures: 3 };
+      expect(owningArchitect(state, child)).toBe(child);
+    });
+
+    it("throws for an issue that belongs to no tree", () => {
+      expect(() => owningArchitect(decomposedState(), orphan)).toThrow("No owning architect");
+    });
+
+    it("throws for a corrupt parent cycle with no owning tree", () => {
+      const state = newLegionState(initialState.project, initialState.cap);
+      state.issues["LEGION-7"] = {
+        key: "LEGION-7",
+        title: "A",
+        status: "todo",
+        parent: "LEGION-8",
+        children: [],
+      };
+      state.issues["LEGION-8"] = {
+        key: "LEGION-8",
+        title: "B",
+        status: "todo",
+        parent: "LEGION-7",
+        children: [],
+      };
+      expect(() => owningArchitect(state, "LEGION-7")).toThrow("No owning architect");
+    });
+
+    it("starts at the issue itself for a phase-worker role", () => {
+      const state = decomposedState();
+      state.roles[architectClaim(child)] = { issue: child, role: "architect" };
+      expect(owningArchitect(state, child, "planner")).toBe(child);
+    });
+
+    it("stops at a child admitted as a legacy root of its own, like rootForIssue and treeFor", () => {
+      const state = decomposedState();
+      state.trees[child] = { root: child, generation: 1, status: "lingering", launchFailures: 0 };
+      expect(owningArchitect(state, child)).toBe(child);
+    });
   });
 });

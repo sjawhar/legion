@@ -22,13 +22,14 @@ completes the boot handshake for you at session start — it registers with the 
 your role, and signals readiness. You never call `envoy_role_set` yourself.
 
 Your role token is not the issue key spelled out literally. The daemon encodes it as
-`legion-<project>-<KEY>-<role>`. For example, project `acme`, issue `LEGION-41`, role
-`architect` encodes to `legion-acme-LEGION-41-architect`. Never hand-format one for another
-role: your own role topic and your tree's architect's topic are stated at the end of your
-system prompt (a "Legion addressing" line the daemon appends), a sibling role's topic is
-yours with the trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts`
-computes any other one exactly the way the daemon does — prefer a topic you've already
-been given before recomputing one.
+`legion-<project>-<KEY>-<role>`. For example, project `acme`, issue `LEGION-41`, role `architect`
+encodes to `legion-acme-LEGION-41-architect`. Never hand-format one for another role: your own role
+topic and the topic of the architect that owns your issue are stated at the end of your system
+prompt (a "Legion addressing" line the daemon appends: on a child issue that is the child's
+sub-architect when one is claimed, else the root's), a sibling role's topic is yours with the
+trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts` computes any other
+one exactly the way the daemon does — prefer a topic you've already been given before recomputing
+one.
 
 If the handshake fails (a rejected boot token, or a bootstrap failure after your role
 registered), the extension logs it and exits the process outright — it does not retry, and

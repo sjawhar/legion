@@ -285,7 +285,11 @@ entire end-game sequence has completed.
 ## Wake routing
 
 Handle one delivered wake by verifying the relevant live artifact and then performing the
-corresponding lifecycle procedure.
+corresponding lifecycle procedure. Architect-addressed wakes always reach the architect that owns
+the payload issue: a claimed child sub-architect, otherwise the nearest claimed ancestor, then the
+root. A wake about an architect role's own launch reaches the architect above it. `phase-complete`,
+worker lifecycle, child lifecycle, and design-gate wakes are architect-only and never go to an
+active phase worker.
 
 | Wake | Procedure |
 | --- | --- |
@@ -305,7 +309,7 @@ corresponding lifecycle procedure.
 | `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
-| `catchup-overseer` | Verify its gates, child counts, and PR verdicts against current artifacts, then resume the applicable numbered lifecycle step. It is a current-state snapshot, not a raw-event replay. `gates[LEGION_TREE].open` is the design gate's current state: `true` means the root spec is approved at its current version and you may spawn; `false` (or no `open` key, meaning no gate is registered) means the sequence in section 1 still applies. For each entry in its `phaseCompletions` (`{issue, role, summary, at}`, phases that completed while you were not live), handle it exactly as a `phase-complete` wake. Then compare `childCounts[LEGION_ISSUE].open` (the children not `done`) with `legion state` and Dispatch: any **open** released child — `todo` through `retro` — with no architect role claim gets `spawn_worker` for its architect, a `child-adopted` or `child-status` wake you missed while not live; a `done` child gets nothing, whether or not a lingering legacy tree of its own still shows in `legion state`. |
+| `catchup-overseer` | Verify its child counts and PR verdicts against current artifacts, then resume the applicable lifecycle step. This is a current-state snapshot, not a raw-event replay. A root architect uses `gates[LEGION_TREE].open`: `true` means the root spec is approved and section 2 may continue; `false`, or no `open` key, means section 1 still applies. A resumed sub-architect receives `overseerCatchup(state, LEGION_ISSUE)` for its own subtree: its `gates` intentionally omits the root gate because a child spec is never gated. Do not request or register a gate; resume at section 2. Handle each `phaseCompletions` entry exactly as a `phase-complete` wake, then compare `childCounts[LEGION_ISSUE].open` with `legion state` and Dispatch before deciding the next action. |
 | `worker-died` | Payload `{type:"worker-died", issue, role}`. Two causes, one verdict: the daemon retried this role's boot through `MAX_LAUNCH_FAILURES` attempts and could not confirm it, or the worker booted and acknowledged every prompt without ever starting a turn through `MAX_PROMPT_RETIRES` retire-and-relaunch cycles (LEGION-93) — never a raw-event replay or a silent revive. Your next `spawn_worker` for the role is the retry (one cold launch, three prompts, and `worker-died` again if the agent is still broken). Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |
 

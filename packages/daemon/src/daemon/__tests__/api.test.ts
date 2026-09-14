@@ -96,6 +96,7 @@ describe("Legion HTTP API", () => {
   let closedTrees: IssueKey[];
   let admissions: IssueKey[];
   let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
+  let recoveredRoles: string[];
   let workerReadyCalls: Array<{
     issue: IssueKey;
     role: string;
@@ -116,6 +117,7 @@ describe("Legion HTTP API", () => {
     closedTrees = [];
     admissions = [];
     spawnedWorkers = [];
+    recoveredRoles = [];
     workerReadyCalls = [];
     treeReadyConnected = [];
     controllerConnected = false;
@@ -175,6 +177,7 @@ describe("Legion HTTP API", () => {
     markTreeReadyImpl?: LegionApiDeps["processManager"]["markTreeReady"];
     markControllerReadyImpl?: LegionApiDeps["processManager"]["markControllerReady"];
     workerReadyImpl?: LegionApiDeps["processManager"]["workerReady"];
+    recoverRoleImpl?: LegionApiDeps["processManager"]["recoverRole"];
     dispatchClient?: LegionApiDeps["dispatchClient"];
   }) {
     const deps: LegionApiDeps = {
@@ -218,6 +221,10 @@ describe("Legion HTTP API", () => {
         workerReady: (issue, role, sessionId, generation) => {
           workerReadyCalls.push({ issue, role, sessionId, generation });
           return options?.workerReadyImpl?.(issue, role, sessionId, generation);
+        },
+        recoverRole: async (role) => {
+          recoveredRoles.push(role);
+          await options?.recoverRoleImpl?.(role);
         },
         rejectIfTreeGone: () => {},
         mutateLiveRoleClaim:
@@ -3035,8 +3042,8 @@ describe("Legion HTTP API", () => {
     expect(state.roles[token]).toMatchObject({ issue: root, role: "tester", generation: 1 });
   });
 
-  it("publishes phase-complete for a child issue to the ROOT's architect, not the child's own", async () => {
-    await start();
+  /** A child under the root whose sub-architect holds a claim with a recorded pane. */
+  function attachClaimedChild(): void {
     state.issues[root].children.push(child);
     state.issues[child] = {
       key: child,
@@ -3045,6 +3052,24 @@ describe("Legion HTTP API", () => {
       status: "in_progress",
       children: [],
     };
+    state.roles[roleToken(state.project, child, "architect")] = {
+      issue: child,
+      role: "architect",
+      sessionId: "ses_sub",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@43",
+        tmuxPaneId: "%9",
+        socketPath: "/state/workers/child-architect.sock",
+      },
+    };
+  }
+
+  /** Registers an implementer on the child through `/worker/started` and returns a grant for
+   * its completion. */
+  async function childImplementerGrant(): Promise<string> {
     const token = roleToken(state.project, child, "implementer");
     state.roles[token] = {
       issue: child,
@@ -3071,7 +3096,50 @@ describe("Legion HTTP API", () => {
     });
     expect(started.response.status).toBe(200);
     state.phases[child] = { phase: "implementer", sessionId: "ses_implementer" };
-    const grantId = await mintGrant(child, "ses_implementer", started.body.secret);
+    return mintGrant(child, "ses_implementer", started.body.secret);
+  }
+
+  it("publishes phase-complete for a child issue to its claimed sub-architect, not the root's architect", async () => {
+    await start();
+    attachClaimedChild();
+    const grantId = await childImplementerGrant();
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Implemented the change",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(publications).toContainEqual({
+      topic: roleTopic(roleToken(state.project, child, "architect")),
+      payload: JSON.stringify({
+        type: "phase-complete",
+        issue: child,
+        role: "implementer",
+        summary: "Implemented the change",
+      }),
+    });
+    expect(
+      publications.some((publication) =>
+        publication.topic.includes(roleToken(state.project, root, "architect"))
+      )
+    ).toBeFalse();
+    expect(state.phases[child]).toBeUndefined();
+    // A delivered completion recovers no role.
+    expect(recoveredRoles).toEqual([]);
+  });
+
+  it("publishes phase-complete for a child issue with no sub-architect claim to the root's architect", async () => {
+    await start();
+    state.issues[root].children.push(child);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "in_progress",
+      children: [],
+    };
+    const grantId = await childImplementerGrant();
 
     const complete = await json("/legion/v1/phase/complete", {
       grantId,
@@ -3094,6 +3162,105 @@ describe("Legion HTTP API", () => {
       )
     ).toBeFalse();
     expect(state.phases[child]).toBeUndefined();
+  });
+
+  it("publishes a sub-architect's own phase-complete to the parent's architect, not its own topic", async () => {
+    await start();
+    attachClaimedChild();
+    const bootToken = await api?.mintWorkerBootToken(root, child, "architect", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+      tree: root,
+      issue: child,
+      role: "architect",
+      bootToken,
+      sessionId: "ses_sub",
+      agentId: "agt_sub",
+      ompSessionFile: "/tmp/sub-architect.json",
+    });
+    expect(started.response.status).toBe(200);
+    state.phases[child] = { phase: "architect", sessionId: "ses_sub" };
+    const grantId = await mintGrant(child, "ses_sub", started.body.secret);
+
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Child tree done",
+    });
+
+    expect(complete.response.status).toBe(200);
+    expect(publications).toContainEqual({
+      topic: roleTopic(roleToken(state.project, root, "architect")),
+      payload: JSON.stringify({
+        type: "phase-complete",
+        issue: child,
+        role: "architect",
+        summary: "Child tree done",
+      }),
+    });
+    expect(
+      publications.some((publication) =>
+        publication.topic.includes(roleToken(state.project, child, "architect"))
+      )
+    ).toBeFalse();
+  });
+
+  it("records a child's completion and resumes its owning sub-architect when that architect has no live holder", async () => {
+    await start({
+      envoyPublish: async (topic) => {
+        throw new EnvoyPublishError(topic, 404);
+      },
+    });
+    attachClaimedChild();
+    const grantId = await childImplementerGrant();
+
+    const complete = await json("/legion/v1/phase/complete", { grantId, summary: "smoke" });
+
+    expect(complete.response.status).toBe(202);
+    expect(state.phases[child]).toEqual({
+      phase: "implementer",
+      sessionId: "ses_implementer",
+      completed: { summary: "smoke", at: new Date(now).toISOString() },
+    });
+    // The owning sub-architect is recovered so its snapshot replays the completion just recorded.
+    expect(recoveredRoles).toEqual([roleToken(state.project, child, "architect")]);
+  });
+
+  it("logs and still answers 202 when resuming the owning sub-architect after a no-holder completion throws", async () => {
+    await start({
+      envoyPublish: async (topic) => {
+        throw new EnvoyPublishError(topic, 404);
+      },
+      recoverRoleImpl: async () => {
+        throw new Error("tree closing");
+      },
+    });
+    attachClaimedChild();
+    const grantId = await childImplementerGrant();
+    // The resume is fire-and-forget, so the response never waits on it: await the one log line
+    // its `.catch` writes rather than a guessed delay.
+    const { promise: logged, resolve: markLogged } = Promise.withResolvers<void>();
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      if (args.map(String).join(" ").includes("recovering its owning architect")) markLogged();
+    });
+    try {
+      const complete = await json("/legion/v1/phase/complete", { grantId, summary: "smoke" });
+      await logged;
+
+      expect(complete.response.status).toBe(202);
+      expect(state.phases[child]).toEqual({
+        phase: "implementer",
+        sessionId: "ses_implementer",
+        completed: { summary: "smoke", at: new Date(now).toISOString() },
+      });
+      const recoveryLines = errorSpy.mock.calls
+        .map((call) => call.map(String).join(" "))
+        .filter((line) => line.includes("recovering its owning architect"));
+      expect(recoveryLines).toHaveLength(1);
+      expect(recoveryLines[0]).toContain(roleToken(state.project, child, "architect"));
+      expect(recoveryLines[0]).toContain("tree closing");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("returns the issue to in_progress instead of retro when a reviewer completes with changes requested", async () => {
@@ -3646,6 +3813,8 @@ describe("Legion HTTP API", () => {
       completed: { summary: "smoke", at: new Date(now).toISOString() },
     });
     expect(state.roles[token]).toMatchObject({ issue: root, role: "tester", generation: 1 });
+    // Recovery is delegated to the ProcessManager, which records that resync owns the root.
+    expect(recoveredRoles).toEqual([roleToken(state.project, root, "architect")]);
   });
 
   it("delivers an already-completed phase's report once the architect reappears, on a repeat completion call", async () => {

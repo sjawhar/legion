@@ -44,6 +44,7 @@ function startApi(): { api: LegionApi; state: LegionState } {
       releaseSlot: inert,
       spawnWorker: inert,
       workerReady: inert,
+      recoverRole: inert,
       rejectIfTreeGone: inert,
       mutateLiveRoleClaim: inert,
       markProcessDead: inert,

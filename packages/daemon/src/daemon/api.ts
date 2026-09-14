@@ -68,6 +68,8 @@ export interface LegionApiProcessManager {
     sessionId: string,
     generation: number
   ): void | Promise<void>;
+  /** Recovers a no-holder role with its state-derived catch-up. */
+  recoverRole(token: string): Promise<void>;
   rejectIfTreeGone(tree: IssueKey, issue: IssueKey): void;
   mutateLiveRoleClaim<T>(
     tree: IssueKey,

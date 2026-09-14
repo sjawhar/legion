@@ -1,6 +1,13 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { assertLegionProjectToken, type IssueKey, isLegionProjectToken } from "@legion/contracts";
+import {
+  assertLegionProjectToken,
+  type IssueKey,
+  isLegionProjectToken,
+  isLegionRole,
+  type LegionRole,
+  roleToken,
+} from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
 import type { Locator } from "./runtime";
@@ -603,6 +610,16 @@ export function isBystanderCatchup(
   return pending?.kind === "catchup" && isBystanderRole(state, issue, role);
 }
 
+/** Verifies that a persisted phase names a current Legion role and returns that role. */
+export function assertKnownPhase(issue: IssueKey, phase: { phase: string }): LegionRole {
+  if (!isLegionRole(phase.phase)) {
+    throw new Error(
+      `state.phases[${issue}] has an unrecognized phase: ${JSON.stringify(phase.phase)}`
+    );
+  }
+  return phase.phase;
+}
+
 /** The tree that owns `issue` through its parent chain, if any: the nearest ancestor (never `issue`
  * itself) recorded in `state.trees`, unless that tree is `lingering` or `closed` -- a tree whose
  * architect is gone for good. `queued`, `active`, `dead`, and `launch-failed` all own: each is a
@@ -621,6 +638,27 @@ export function liveAncestorTree(state: LegionState, issue: IssueKey): TreeState
     current = state.issues[current]?.parent;
   }
   return undefined;
+}
+
+/** The architect that owns `issue`: the nearest architect claim at or above it, falling back to
+ * the tree root. A claim, never a live pane, determines ownership; a dead sub-architect is
+ * recovered through its own role. `role: "architect"` starts at the parent because a
+ * sub-architect's own lifecycle wake belongs to the architect above it. The unreachable root
+ * architect case returns its root; an ownership chain with no tree is invalid persisted state and
+ * throws rather than silently choosing another route. */
+export function owningArchitect(state: LegionState, issue: IssueKey, role?: LegionRole): IssueKey {
+  const seen = new Set<IssueKey>();
+  if (role === "architect" && state.issues[issue]?.parent === undefined && state.trees[issue]) {
+    return issue;
+  }
+  let current = role === "architect" ? state.issues[issue]?.parent : issue;
+  while (current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    if (state.roles[roleToken(state.project, current, "architect")] !== undefined) return current;
+    if (state.trees[current]) return current;
+    current = state.issues[current]?.parent;
+  }
+  throw new Error(`No owning architect for ${issue}/${role ?? "issue"}: state has no tree`);
 }
 
 function migrateV5State(state: unknown): unknown {

@@ -12,6 +12,7 @@ import {
 } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
+import { EnvoyPublishError } from "../api/http";
 import {
   type DaemonConfig,
   DEFAULT_KUBERNETES_RESOURCES,
@@ -817,6 +818,140 @@ describe("startDaemon", () => {
         topic: roleTopic(roleToken(daemonConfig.project, issue, "architect")),
         payload: JSON.stringify({ type: "worker-started", issue, role: "tester" }),
       });
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes a child's architect with a subtree catch-up after its worker-queued notice has no holder", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = { ...config(stateDir), workerCap: 1 };
+    const root = "WIDGETS-42";
+    const child = "WIDGETS-43";
+    const childArchitect = roleToken(daemonConfig.project, child, "architect");
+    const childPlanner = roleToken(daemonConfig.project, child, "planner");
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [child] };
+    state.trees[root] = { root, generation: 1, status: "queued", launchFailures: 0 };
+    state.admission.queue.push(root);
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      parent: root,
+      status: "in_progress",
+      children: [],
+    };
+    state.roles[childArchitect] = {
+      issue: child,
+      role: "architect",
+      sessionId: "ses_child_architect",
+      generation: 1,
+      readyConfirmedAt: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: `legion-${daemonConfig.project}`,
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: path.join(stateDir, "workers", "child-architect.sock"),
+      },
+    };
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+
+    const nats = new FakeNats();
+    const publications: Array<{ topic: string; payload: unknown }> = [];
+    const attemptedTopics: string[] = [];
+    const options = daemonTestDependencies(nats, publications, () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemon test runner is missing");
+    let rootBootToken: string | undefined;
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          runner: async (command, runnerOptions) => {
+            const pointer = command.find((part) => part.startsWith("LEGION_BOOT_TOKEN_FILE="));
+            if (pointer) {
+              rootBootToken = await readFile(
+                pointer.slice("LEGION_BOOT_TOKEN_FILE=".length),
+                "utf8"
+              );
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            return baseRunner(command, runnerOptions);
+          },
+          connectWorkerRpc: async () => fakeWorkerRpcClient(),
+          envoyPublish: async (topic, payload) => {
+            attemptedTopics.push(topic);
+            if (topic === roleTopic(childArchitect)) throw new EnvoyPublishError(topic, 404);
+            publications.push({ topic, payload: JSON.parse(payload) });
+          },
+        },
+      });
+
+      if (!rootBootToken) throw new Error("root launch did not receive a boot token");
+      const generation = state.trees[root]?.generation;
+      if (generation === undefined) throw new Error("root launch did not record a generation");
+      const processStarted = await fetch(
+        `http://127.0.0.1:${daemon.server.port}/legion/v1/process/started`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tree: root,
+            generation,
+            rootSessionId: "ses_root",
+            bootToken: rootBootToken,
+            agentId: "root-agent",
+            ompSessionFile: path.join(stateDir, "root.json"),
+          }),
+        }
+      );
+      expect(processStarted.status).toBe(200);
+      const { secret } = (await processStarted.json()) as { secret: string };
+
+      const spawned = await fetch(`http://127.0.0.1:${daemon.server.port}/legion/v1/worker/spawn`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tree: root,
+          issue: child,
+          sessionId: "ses_root",
+          secret,
+          role: "planner",
+          task: "Plan the child",
+        }),
+      });
+      expect(spawned.status).toBe(200);
+      expect(await spawned.json()).toEqual({ status: "queued", roleToken: childPlanner });
+      expect(attemptedTopics).toContain(roleTopic(childArchitect));
+
+      await flushEventLoopUntil(() => {
+        const claim = state.roles[childArchitect];
+        return "issue" in claim && claim.pendingAssignment?.kind === "catchup";
+      });
+
+      const claim = state.roles[childArchitect];
+      if (!claim || !("issue" in claim) || claim.pendingAssignment?.kind !== "catchup") {
+        throw new Error("child architect was not resumed with a catch-up");
+      }
+      expect(JSON.parse(claim.pendingAssignment.task)).toMatchObject({
+        type: "catchup-overseer",
+        childCounts: { [child]: { total: 0, open: 0, closed: 0 } },
+        phaseCompletions: [],
+      });
+      // The recovery queues a catch-up, not a new architect assignment, so it emits no second
+      // worker-queued wake after the original no-holder notice.
+      expect(publications).toEqual([]);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
