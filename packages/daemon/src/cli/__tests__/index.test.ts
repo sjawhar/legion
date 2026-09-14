@@ -742,20 +742,29 @@ describe("legion probe-image", () => {
     sleep: async () => {},
     readPluginManifest: async () => "{}",
   });
-  const passing = async () => ({
-    stdout: "",
-    stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
-    exitCode: 0,
-  });
+  /** A build every probe accepts: the two markers on the marker probes, and a refusal naming
+   * `OMP_SESSION_STORAGE` — exit 1 — on the session-storage probe, whose pass is that refusal. */
+  const passing = async (command: string[]) =>
+    command[2]?.includes("OMP_SESSION_STORAGE=")
+      ? {
+          stdout: "",
+          stderr: 'Error: OMP_SESSION_STORAGE is "legion-launch-probe"; expected "file" or "sql"\n',
+          exitCode: 1,
+        }
+      : {
+          stdout: "",
+          stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+          exitCode: 0,
+        };
 
   it("refuses to probe without an explicit OMP executable (no PATH fallback)", async () => {
     let ran = false;
     await expect(
       cmdProbeImage(
         undefined,
-        deps(async () => {
+        deps(async (command) => {
           ran = true;
-          return passing();
+          return passing(command);
         }, {})
       )
     ).rejects.toEqual(
@@ -764,23 +773,61 @@ describe("legion probe-image", () => {
     expect(ran).toBe(false);
   });
 
-  it("runs the daemon's two boot probes against LEGION_OMP_PATH with no launch prefix", async () => {
+  it("runs the daemon's three launch probes against LEGION_OMP_PATH with no launch prefix and marks the success line", async () => {
     const commands: string[][] = [];
-    await cmdProbeImage(
-      undefined,
-      deps(
-        async (command) => {
-          commands.push(command);
-          return passing();
-        },
-        { LEGION_OMP_PATH: "/opt/omp/bin/omp" }
-      )
-    );
-    expect(commands).toHaveLength(2);
+    const lines: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+    try {
+      await cmdProbeImage(
+        undefined,
+        deps(
+          async (command) => {
+            commands.push(command);
+            return passing(command);
+          },
+          { LEGION_OMP_PATH: "/opt/omp/bin/omp" }
+        )
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(commands).toHaveLength(3);
     expect(commands[0]?.[2]).toStartWith(
       'exec /opt/omp/bin/omp models --no-extensions --extension "$1" --json'
     );
     expect(commands[1]?.[2]).toStartWith('exec /opt/omp/bin/omp models --extension "$1" --json');
+    expect(commands[2]?.[2]).toStartWith(
+      "export OMP_SESSION_STORAGE=legion-launch-probe PI_TIMING=x; exec /opt/omp/bin/omp "
+    );
+    // The token a daemon accepting this image for a sql session store requires in the probe
+    // pod's output: an older image's command prints a bare `probe-image: OK`.
+    expect(lines).toEqual(["probe-image: OK (/opt/omp/bin/omp) session-storage=probed"]);
+  });
+
+  it("refuses an image whose OMP starts on a nonsense OMP_SESSION_STORAGE: the build predates the setting", async () => {
+    const commands: string[][] = [];
+    await expect(
+      cmdProbeImage(
+        "/opt/omp/bin/omp",
+        deps(async (command) => {
+          commands.push(command);
+          // The marker probes pass; the session-storage probe's launch exits 0 with the timing tree.
+          return command[2]?.includes("OMP_SESSION_STORAGE=")
+            ? { stdout: "", stderr: "Total: 4925.1ms (since first marker)\n", exitCode: 0 }
+            : passing(command);
+        }, {})
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "predates the session.storage setting and would silently keep sessions on files"
+        ),
+        code: 1,
+      })
+    );
+    expect(commands).toHaveLength(3);
   });
 
   it("surfaces a failing probe as the daemon's own message with exit 1", async () => {

@@ -7,11 +7,17 @@ import type { CommandResult, CommandRunner } from "../state/fetch";
 import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
 import { withOmpLaunchPrefix } from "./processes";
 
-/** The two probes `startDaemon` starts first and awaits only at its launch hold (state load,
- * NATS, the API bind, and the worker reconnect proceed while they run; no pane opens until they
- * pass), and that `legion probe-image` runs inside the worker image
- * (packages/daemon/docker/worker.Dockerfile's last step): one module so the daemon and the image
- * gate are the same code. */
+/** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
+ * (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane opens
+ * until they pass); `legion probe-image` runs all three inside the worker image
+ * (packages/daemon/docker/worker.Dockerfile's last step) — one module so the daemon and the image
+ * gate are the same code. The third, `verifySessionStorageSetting`, runs only there: the daemon
+ * never probes a host OMP for it — under a `sql` session store it requires the image's own
+ * `probe-image` output to carry `SESSION_STORAGE_PROBE_MARK` instead (its sibling issue wires
+ * that). Two reasons it stays out of the daemon's boot: a tmux deployment on an older build must
+ * stay untouched, and this probe classifies a launch-prefix failure as transient (its negative
+ * answer is an exit code, so a `secrets` denial is indistinguishable from OMP dying early), which
+ * the daemon's unbounded retry policy would retry forever. */
 const OMP_AGENTS_CAPABILITY_MARKER = "LEGION_OMP_AGENTS=available";
 const OMP_AGENTS_MISSING_MARKER = "LEGION_OMP_AGENTS=missing";
 const OMP_AGENTS_CAPABILITY_PROBE = `export default function probeOmpAgents(pi) {
@@ -89,15 +95,22 @@ interface ProbeOutcome {
  * `aborted` before anything else is read. A budget kill is transient when the probe never got to
  * answer — but a probe that printed its negative marker and only then hung past the budget has
  * answered: that answer is definitive, so `negativeMarker` is classified first and the kill is
- * reported only for a marker-less output. */
+ * reported only for a marker-less output. A probe whose negative answer is an exit code rather
+ * than a marker (`verifySessionStorageSetting`) passes none: a killed attempt has no exit code
+ * to read, so every budget kill is transient for it. */
 function killedOutcome(
   result: CommandResult,
   stderrTail: string,
-  negativeMarker: string
+  negativeMarker?: string
 ): ProbeOutcome | undefined {
   if (result.aborted) return { passed: false, definitive: false, aborted: true, detail: "" };
   if (result.timedOut === undefined) return undefined;
-  if (`${result.stderr}\n${result.stdout}`.includes(negativeMarker)) return undefined;
+  if (
+    negativeMarker !== undefined &&
+    `${result.stderr}\n${result.stdout}`.includes(negativeMarker)
+  ) {
+    return undefined;
+  }
   const { limitMs, elapsedMs } = result.timedOut;
   const detail = `command timed out after ${limitMs / 1000} s (ran ${(elapsedMs / 1000).toFixed(1)} s)`;
   return {
@@ -370,4 +383,81 @@ export async function verifyLegionPluginLoaded(
   } finally {
     await rm(probeDir, { recursive: true, force: true });
   }
+}
+
+/** The setting the fork build must carry for a `sql` session store, and the value no build of
+ * any age accepts for it: a build that carries the setting refuses it (exit 1, naming the
+ * variable); one that predates the setting never reads the variable and starts normally. */
+const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
+const SESSION_STORAGE_PROBE_VALUE = "legion-launch-probe";
+/** The token `legion probe-image` prints on its success line once `verifySessionStorageSetting`
+ * has passed: `probe-image: OK (<omp path>) session-storage=probed`. An image built before this
+ * probe existed prints a bare `probe-image: OK` having checked nothing about the setting, so a
+ * daemon that accepts an image for a `sql` session store requires this token in the probe pod's
+ * output — importing this constant, never retyping it — rather than probing a host build. */
+export const SESSION_STORAGE_PROBE_MARK = "session-storage=probed";
+
+/**
+ * Proves the OMP build that actually runs carries the `session.storage` setting, so a deployment
+ * that sets `OMP_SESSION_STORAGE=sql` gets sessions in its database rather than a build that
+ * ignores the variable and silently keeps them on files (the failure this probe exists to catch).
+ *
+ * The invocation is the one provider-free, network-free, TTY-free path through OMP's root command
+ * that runs the setting's resolver before it exits: `PI_TIMING=x` makes an interactive start-up
+ * print its timing tree and exit 0 just before the TUI would open (`shouldExitAfterTimings`,
+ * `main.ts`); with stdin on `/dev/null` there is no piped prompt, so the start is interactive and
+ * never reaches print mode's "No models available" exit; `--no-session` keeps the probe out of the
+ * sessions directory, and `--no-extensions --no-skills --no-rules --no-lsp --no-tools` keeps the
+ * profile's plugins, servers, and tools out of a run that only needs the resolver. The resolver
+ * runs right after settings load and before any session is opened, ahead of that exit, so a
+ * carrying build dies on the nonsense value first. Every fork build the daemon has pinned
+ * (`18.1.18-sami` on) honours `PI_TIMING=x`; on one that did not, the interactive start would fail
+ * without a TTY, non-zero and silent about the variable, and read as transient — the retry log
+ * and the exhausted message name the launch command so that is diagnosable.
+ *
+ * Classification: exit non-zero with the variable named on stderr passes; exit 0 is definitive —
+ * the build accepted a value no build carrying the setting accepts, so it predates the setting;
+ * exit non-zero without the variable named is transient (the launch prefix or OMP dying before
+ * the resolver ran, the same died-under-load case as the other probes), retried per policy; a
+ * runner kill is `killedOutcome`'s.
+ */
+export async function verifySessionStorageSetting(
+  ompInvocation: string,
+  ompLaunchPrefix: readonly string[],
+  runner: CommandRunner,
+  options: BootProbeOptions
+): Promise<void> {
+  const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
+  await retryBootProbe(
+    "OMP session storage setting",
+    async () => {
+      const result = await runner(
+        [
+          "sh",
+          "-c",
+          `export ${SESSION_STORAGE_VARIABLE}=${SESSION_STORAGE_PROBE_VALUE} PI_TIMING=x; exec ${launchCommand} --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null`,
+        ],
+        { timeoutMs: options.timeoutMs, signal: options.signal }
+      );
+      const stderrTail = result.stderr.trim().slice(-MAX_PROBE_STDERR_LENGTH);
+      const killed = killedOutcome(result, stderrTail);
+      if (killed) return killed;
+      if (result.exitCode !== 0 && result.stderr.includes(SESSION_STORAGE_VARIABLE)) {
+        return { passed: true, definitive: false, detail: "" };
+      }
+      // Exit 0 is the answer: the build started with a value no carrying build accepts. Its
+      // stderr is the timing tree, which says nothing about why — the message below does.
+      if (result.exitCode === 0) return { passed: false, definitive: true, detail: "" };
+      return { passed: false, definitive: false, detail: stderrTail };
+    },
+    async (detail, reason) =>
+      new Error(
+        reason === "exhausted"
+          ? `[legion] OMP session storage setting probe never completed within its retry budget (${options.retry.maxAttempts} attempts) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+          : `[legion] OMP launch command "${launchCommand}" started with ${SESSION_STORAGE_VARIABLE}=${SESSION_STORAGE_PROBE_VALUE} (exit 0): this build predates the session.storage setting and would silently keep sessions on files under a sql session store; pin a fork release that carries the setting`
+      ),
+    options.retry,
+    options.sleep,
+    options.signal
+  );
 }
