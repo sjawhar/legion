@@ -225,10 +225,11 @@ directory layout; that layout is a jj-version detail.
 - **In-flight workspaces keep their copy.** A tree provisioned before the fixed daemon deployed
   can retain `A .omp/config.yml` until it closes; the fix deliberately does not edit a live
   working copy.
-- **Verify a fresh workspace before a split.** After a normal daemon restart provisions a new
-  tree, run `jj -R "$LEGION_WORKSPACE" status` before any split or commit and verify `The working
-  copy has no changes.`; then run `test ! -e "$LEGION_WORKSPACE/.omp/config.yml"`. After its first
-  user-authored commit is pushed, run `jj -R "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion"
-  git fetch` followed by `jj -R "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion" log -r
-  'ancestors(legion/<KEY>@origin)' --summary`. The status must be clean, the file must be absent,
-  and the pushed ancestry must not list `.omp/config.yml`.
+- **Verify a fresh workspace before a split.** After a normal daemon restart provisions its first
+  new tree, run `jj -R "$LEGION_WORKSPACE" status` before any split or commit and verify `The
+  working copy has no changes.`; then run `test ! -e "$LEGION_WORKSPACE/.omp/config.yml"`. After
+  its first user-authored commit is pushed, run `jj -R
+  "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion" git fetch` followed by `jj -R
+  "$LEGION_STATE_DIR/repos/github.com/sjawhar/legion" log -r 'ancestors(legion/<KEY>@origin) ~
+  ancestors(main@origin)' --summary`. The status must be clean, the file must be absent, and the
+  first-push ancestry must not list `.omp/config.yml`.
