@@ -181,7 +181,11 @@ export interface ProcessManagerDeps {
    * and swept. ProcessManager owns the lifecycle around those calls and never reads a
    * runtime-specific locator field itself. */
   runtime: Runtime;
-  /** Daemon-host runner used only when the selected Runtime removes workspaces on tree close. */
+  /** Daemon-host runner for the workspace commands a tree close runs (`removeTreeWorkspaces`).
+   * Required when the selected Runtime's `removesWorkspacesOnTreeClose` is true (tmux): the
+   * constructor refuses to build without it, naming the runtime, so a boot that dropped the
+   * wiring fails at once rather than at its first tree close (LEGION-163). Optional otherwise
+   * (Kubernetes retains its tree volume and never runs one). */
   run?(
     command: string[],
     options?: CommandRunnerOptions
@@ -421,6 +425,11 @@ export class ProcessManager {
    * `worker-died`).
    */
   constructor(private readonly deps: ProcessManagerDeps) {
+    if (deps.runtime.removesWorkspacesOnTreeClose && deps.run === undefined) {
+      throw new Error(
+        `ProcessManager needs a command runner: the ${deps.config.runtime.name} runtime removes workspaces at tree close`
+      );
+    }
     this.readyDelivery = new ReadyDeliveryRetrier(() => this.disposed, deps.sleep);
     this.runtime = deps.runtime;
     this.dispatchTokenFile =
