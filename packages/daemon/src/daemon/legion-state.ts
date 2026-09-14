@@ -133,6 +133,8 @@ export interface PendingAssignment {
 export interface WorkerRoleClaim {
   issue: IssueKey;
   role: string;
+  /** Set only by `/worker/started`, for the current generation (`launchWorker` clears it on every
+   * relaunch). Once set, a registration from any other session at this generation is refused. */
   sessionId?: string;
   /** Set only after `/worker/ready` has connected its shim and delivered any pending assignment;
    * `sessionId` is intentionally established earlier by `/worker/started` for capability auth. */

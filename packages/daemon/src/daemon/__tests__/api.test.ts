@@ -1898,6 +1898,60 @@ describe("Legion HTTP API", () => {
     expect(resumed.response.status).toBe(200);
     expect(state.roles[testerToken]).toMatchObject({ sessionId: "ses_original" });
   });
+  it("accepts a first worker/started registration from a persisted boot-token hash after a restart", async () => {
+    await start();
+    const testerToken = roleToken(state.project, root, "tester");
+    const workerBootToken = await api?.mintWorkerBootToken(root, root, "tester", 3);
+    if (!workerBootToken) throw new Error("worker boot token was not minted");
+    // Simulates the fresh-generation state `launchWorker` persists before its worker gets as far
+    // as /worker/started. A restart at this point leaves only the boot-token hash to resolve.
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 3,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+      bootTokenHash: secretHash(workerBootToken).toString("hex"),
+    };
+
+    api?.stop();
+    await start({ state });
+
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken: workerBootToken,
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+    const started = await json<{ secret: string }>("/legion/v1/worker/started", body);
+    expect(started.response.status).toBe(200);
+    expect(started.body.secret).toEqual(expect.any(String));
+    expect(state.roles[testerToken]).toMatchObject({
+      sessionId: "ses_tester",
+      agentId: "agent-tester",
+      locator: { ompSessionFile: "/tmp/tester.json" },
+    });
+    const beforeReplay = structuredClone(state.roles[testerToken]);
+
+    // Recreate the persisted-hash route after the first registration has recorded its session.
+    api?.stop();
+    await start({ state });
+
+    const replay = await json<{ secret: string }>("/legion/v1/worker/started", body);
+    expect(replay.response.status).toBe(200);
+    expect(replay.body.secret).toEqual(expect.any(String));
+    expect(replay.body.secret).not.toBe(started.body.secret);
+    expect(state.roles[testerToken]).toEqual(beforeReplay);
+  });
+
   it("restores a root architect capability from durable transcript backing after a daemon restart", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);
@@ -2198,7 +2252,7 @@ describe("Legion HTTP API", () => {
     expect(state.phases[root]).toBeUndefined();
   });
 
-  it("rejects a worker boot token that has already been consumed", async () => {
+  it("rejects a worker boot token that has already been consumed, logging both sessions and changing nothing", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -2226,8 +2280,107 @@ describe("Legion HTTP API", () => {
     };
 
     expect((await json("/legion/v1/worker/started", body)).response.status).toBe(200);
-    const replay = await json("/legion/v1/worker/started", { ...body, sessionId: "ses_tester_2" });
-    expect(replay.response.status).toBe(403);
+    const before = structuredClone(state.roles[token]);
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const replay = await json("/legion/v1/worker/started", {
+        ...body,
+        sessionId: "ses_tester_2",
+      });
+      expect(replay.response.status).toBe(403);
+      expect((replay.body as { error: string }).error).toBe("Invalid worker boot token");
+      const line = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes(token) && entry.includes("refused /worker/started"));
+      expect(line).toContain("from session ses_tester_2");
+      expect(line).toContain("already registered session ses_tester");
+      expect(line).toContain("generation 1");
+      // Registered but never reached /worker/ready: the line says so instead of a timestamp.
+      expect(line).toContain("(not yet ready)");
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(state.roles[token]).toEqual(before);
+  });
+
+  it("refuses a worker/started registration from a different session once the claim registered one at this generation — after a daemon restart, on the persisted boot-token hash — logging both sessions and changing nothing", async () => {
+    await start();
+    const token = roleToken(state.project, root, "tester");
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 1);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    const body = {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "ses_tester",
+      agentId: "agt_tester",
+      ompSessionFile: "/tmp/tester.json",
+    };
+    expect((await json("/legion/v1/worker/started", body)).response.status).toBe(200);
+    // What `workerReady` (processes.ts) persists once the shim connects and the assignment is
+    // delivered, and what the architect's assignment delivery writes: the worker is confirmed
+    // ready and is the issue's active phase — the incident's exact state.
+    const registered = state.roles[token];
+    if (!registered || !("issue" in registered)) throw new Error("claim was not registered");
+    registered.readyConfirmedAt = now;
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const before = structuredClone(state.roles[token]);
+
+    // Restart: the in-memory mint record is gone; only the persisted `bootTokenHash` resolves the
+    // token, so this is the path that rebound LEGION-39's tester.
+    api?.stop();
+    await start({ state });
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const foreign = await json<{ error: string }>("/legion/v1/worker/started", {
+        ...body,
+        sessionId: "ses_intruder",
+        agentId: "agt_intruder",
+        ompSessionFile: "/tmp/intruder.json",
+      });
+      expect(foreign.response.status).toBe(403);
+      expect(foreign.body.error).toBe("Invalid worker boot token");
+      const line = warnSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((entry) => entry.includes(token) && entry.includes("refused /worker/started"));
+      expect(line).toContain("from session ses_intruder");
+      expect(line).toContain("already registered session ses_tester");
+      expect(line).toContain("generation 1");
+      expect(line).toContain(`ready confirmed at ${new Date(now).toISOString()}`);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    // Nothing on the claim moved: session, agent, locator (incl. its ompSessionFile), hash, ready.
+    expect(state.roles[token]).toEqual(before);
+
+    // The worker that did the work still completes: it rebinds its capability through the durable
+    // recovery route, mints a grant, and its completion is accepted — the incident's lost step.
+    const recovered = await json<WorkerSessionResponse>("/legion/v1/worker-session", {
+      sessionId: "ses_tester",
+      recoveryToken: bootToken,
+    });
+    expect(recovered.response.status).toBe(200);
+    const grantId = await mintGrant(root, "ses_tester", recovered.body.secret);
+    const complete = await json("/legion/v1/phase/complete", {
+      grantId,
+      summary: "Verified the acceptance criteria",
+    });
+    expect(complete.response.status).toBe(200);
+    expect(state.phases[root]).toBeUndefined();
   });
 
   it("accepts a same-session worker/started replay as idempotent, reissuing a secret", async () => {
