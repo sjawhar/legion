@@ -92,6 +92,8 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
   );
   const compare = page.getByRole("region", { name: "Compare versions for diagram.png" });
   await expect(compare).toBeVisible();
+  await expect(compare).not.toContainText("From · Version");
+  await compare.getByRole("button", { name: "Show comparison" }).click();
   await expect(compare).toContainText("From · Version");
   await expect(compare).toContainText("To · Version");
 

@@ -130,6 +130,8 @@ export function ReferencedBy({ references }: { references: ReferencedByItem[] })
 // (e.g. version 3 vs version 7) that picker can't, for both docs and blobs.
 export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode {
   const [showAllVersions, setShowAllVersions] = useState(false);
+  // A diff is render-heavy and long; it appears only after the reader asks for it.
+  const [compareOpen, setCompareOpen] = useState(false);
   const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
   const namedVersions = versions.filter((version) => version.named);
   const displayedVersions = showAllVersions ? versions : namedVersions;
@@ -144,12 +146,12 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
     queryFn: () => api.getArtifact(artifact.id),
   });
   const beforeContent = useQuery({
-    enabled: artifact.kind === "doc" && beforeVersion !== undefined,
+    enabled: compareOpen && artifact.kind === "doc" && beforeVersion !== undefined,
     queryKey: ["artifact", artifact.id, "version", beforeVersion],
     queryFn: () => api.getArtifactVersion(artifact.id, beforeVersion ?? 0),
   });
   const afterContent = useQuery({
-    enabled: artifact.kind === "doc" && afterVersion !== undefined,
+    enabled: compareOpen && artifact.kind === "doc" && afterVersion !== undefined,
     queryKey: ["artifact", artifact.id, "version", afterVersion],
     queryFn: () => api.getArtifactVersion(artifact.id, afterVersion ?? 0),
   });
@@ -189,7 +191,7 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
                 >
                   Download version {version.number}
                 </a>
-                <span className={`w-full text-xs ${textMutedOnSurface}`}>
+                <span className={`w-full break-all text-xs ${textMutedOnSurface}`}>
                   <Timestamp at={version.created_at} />
                   {artifact.kind === "doc"
                     ? null
@@ -203,55 +205,69 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
 
       {versions.length >= 2 ? (
         <section aria-label={`Compare versions for ${artifact.name}`} className="space-y-2">
-          <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Compare versions</h3>
-          <div className="grid grid-cols-2 gap-2">
-            <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
-              From
-              <select
-                aria-label={`Compare ${artifact.name} from`}
-                className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
-                onChange={(event) => setBefore(Number(event.target.value))}
-                value={beforeVersion}
-              >
-                {versions.map((version) => (
-                  <option key={version.number} value={version.number}>
-                    {versionLabel(version)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
-              To
-              <select
-                aria-label={`Compare ${artifact.name} to`}
-                className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
-                onChange={(event) => setAfter(Number(event.target.value))}
-                value={afterVersion}
-              >
-                {versions.map((version) => (
-                  <option key={version.number} value={version.number}>
-                    {versionLabel(version)}
-                  </option>
-                ))}
-              </select>
-            </label>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Compare versions</h3>
+            <button
+              aria-expanded={compareOpen}
+              className={`min-h-11 text-sm font-medium ${linkText}`}
+              onClick={() => setCompareOpen((current) => !current)}
+              type="button"
+            >
+              {compareOpen ? "Hide comparison" : "Show comparison"}
+            </button>
           </div>
-          {artifact.kind === "doc" ? (
-            beforeContent.isError || afterContent.isError ? (
-              <p className={`text-sm ${dangerText}`}>Could not load versions to compare.</p>
-            ) : isText(beforeContent.data) && isText(afterContent.data) ? (
-              <VersionDiff
-                after={afterContent.data.markdown}
-                before={beforeContent.data.markdown}
-              />
-            ) : (
-              <p className={`text-sm ${textMutedOnSurface}`}>Loading versions to compare…</p>
-            )
-          ) : beforeBlob !== undefined && afterBlob !== undefined ? (
-            <BlobVersionComparison after={afterBlob} before={beforeBlob} />
-          ) : (
-            <p className={`text-sm ${textMutedOnSurface}`}>Select two versions to compare.</p>
-          )}
+          {compareOpen ? (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
+                  From
+                  <select
+                    aria-label={`Compare ${artifact.name} from`}
+                    className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
+                    onChange={(event) => setBefore(Number(event.target.value))}
+                    value={beforeVersion}
+                  >
+                    {versions.map((version) => (
+                      <option key={version.number} value={version.number}>
+                        {versionLabel(version)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
+                  To
+                  <select
+                    aria-label={`Compare ${artifact.name} to`}
+                    className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
+                    onChange={(event) => setAfter(Number(event.target.value))}
+                    value={afterVersion}
+                  >
+                    {versions.map((version) => (
+                      <option key={version.number} value={version.number}>
+                        {versionLabel(version)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {artifact.kind === "doc" ? (
+                beforeContent.isError || afterContent.isError ? (
+                  <p className={`text-sm ${dangerText}`}>Could not load versions to compare.</p>
+                ) : isText(beforeContent.data) && isText(afterContent.data) ? (
+                  <VersionDiff
+                    after={afterContent.data.markdown}
+                    before={beforeContent.data.markdown}
+                  />
+                ) : (
+                  <p className={`text-sm ${textMutedOnSurface}`}>Loading versions to compare…</p>
+                )
+              ) : beforeBlob !== undefined && afterBlob !== undefined ? (
+                <BlobVersionComparison after={afterBlob} before={beforeBlob} />
+              ) : (
+                <p className={`text-sm ${textMutedOnSurface}`}>Select two versions to compare.</p>
+              )}
+            </>
+          ) : null}
         </section>
       ) : null}
 

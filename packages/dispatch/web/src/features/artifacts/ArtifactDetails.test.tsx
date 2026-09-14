@@ -63,6 +63,9 @@ test("ArtifactDetails compares selected blob versions side by side", async () =>
   try {
     const view = renderDetails(artifact);
 
+    // The comparison is a deliberate action: nothing to pick from until it is opened.
+    expect(screen.queryByLabelText("Compare diagram.png from")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show comparison" }));
     fireEvent.change(screen.getByLabelText("Compare diagram.png from"), {
       target: { value: "1" },
     });
@@ -136,5 +139,48 @@ test("Referenced by renders an artifact source with an issue key through its art
     );
   } finally {
     view.unmount();
+  }
+});
+
+test("ArtifactDetails fetches and renders a document diff only after the reader opens the comparison", async () => {
+  const doc: Artifact = {
+    ...artifact,
+    id: "artifact-doc",
+    kind: "doc",
+    name: "spec.md",
+    slug: "spec-md",
+    versions: artifact.versions.map(
+      ({ mime: _mime, sha256: _sha256, size: _size, ...version }) => version
+    ),
+  };
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({ ...doc, referenced_by: [] });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockImplementation(
+    async (_id, version) => ({
+      authors: [],
+      created_at: "2026-09-14T00:00:00Z",
+      markdown: version === 1 ? "Before\n" : "After\n",
+      named: false,
+      number: version,
+      summary: null,
+    })
+  );
+
+  try {
+    const view = renderDetails(doc);
+    await screen.findByRole("button", { name: "Show comparison" });
+    expect(getArtifactVersion).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Compare spec.md from")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show comparison" }));
+    expect(await screen.findByLabelText("Compare spec.md from")).not.toBeNull();
+    await screen.findByText("After", { exact: false });
+    expect(getArtifactVersion).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide comparison" }));
+    expect(screen.queryByLabelText("Compare spec.md from")).toBeNull();
+    view.unmount();
+  } finally {
+    getArtifact.mockRestore();
+    getArtifactVersion.mockRestore();
   }
 });
