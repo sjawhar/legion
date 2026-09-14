@@ -78,11 +78,20 @@ type Service struct {
 	settleWG        sync.WaitGroup
 	suppressMu      sync.Mutex
 	suppressed      map[string][]*suppressSlot
+	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
+	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
+	// a browser peer's edit. Every other origin a live document reports is a connected peer.
+	serviceOrigins sync.Map
 }
 
 type roomState struct {
-	connected       map[uint64]model.Actor
-	pending         map[string]model.Actor
+	connected map[uint64]model.Actor
+	pending   map[string]model.Actor
+	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
+	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
+	// runs after an edit's own version was committed would otherwise attribute the block asks
+	// it indexes to nobody.
+	lastActor       *model.Actor
 	pendingVersions map[int]versionPending
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
@@ -580,11 +589,14 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	for key, actor := range state.pending {
 		pending[key] = actor
 	}
+	lastActor := state.lastActor
 	state.mu.Unlock()
 	authors := actorSlice(pending)
 	eventActor := model.Actor{}
 	if len(authors) > 0 {
 		eventActor = authors[0]
+	} else if lastActor != nil {
+		eventActor = *lastActor
 	}
 	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor, latest.Number+1)
 	if err != nil {

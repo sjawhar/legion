@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -317,4 +318,140 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 		t.Fatalf("upload spec version: status=%d body=%s", uploaded.Code, uploaded.Body.String())
 	}
 	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "uploaded-ask", "Ship the uploaded decision?")
+}
+
+// A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
+// event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
+// and a null there took the page down (AGENTC-150, 2026-09-14). A row indexed before that
+// normalization stores JSON null, and the events its later settlements emit must carry [] too.
+func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Free-text decision", "Context\n")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops": []map[string]string{{
+			"after":    "end",
+			"markdown": ":::ask{#free-ask urgency=\"med\" multiple=\"false\"}\nWhich name do we ship under?\n:::\n",
+			"op":       "insert",
+		}},
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("write ask block: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "free-ask", "Which name do we ship under?")
+	if options := awaitAskBlockEvent(t, handler, issue.Key, "ask.opened", "free-ask").Options; string(options) != "[]" {
+		t.Fatalf("ask.opened options = %s, want []", options)
+	}
+	asks := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	for _, ask := range decodeBody[[]model.Ask](t, asks) {
+		if ask.BlockID != nil && *ask.BlockID == "free-ask" && ask.Options == nil {
+			t.Fatalf("ask row options are nil; want an empty list")
+		}
+	}
+
+	if _, err := database.Pool.Exec(context.Background(), `update asks set options = 'null'::jsonb where block_id = 'free-ask'`); err != nil {
+		t.Fatalf("age the ask row to pre-normalization null options: %v", err)
+	}
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor":   sessionActor(),
+		"name":    "spec.md",
+		"content": "Context\n",
+		"summary": "decision withdrawn",
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload spec without the block: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	if options := awaitAskBlockEvent(t, handler, issue.Key, "ask.resolved", "free-ask").Options; string(options) != "[]" {
+		t.Fatalf("ask.resolved options for the legacy null row = %s, want []", options)
+	}
+}
+
+type askBlockEventPayload struct {
+	BlockID *string         `json:"block_id"`
+	Options json.RawMessage `json:"options"`
+}
+
+// awaitAskBlockEvent polls the issue's events until one of eventType names the ask block
+// blockID, failing the test when settlement never emits it.
+func awaitAskBlockEvent(t *testing.T, handler http.Handler, issueKey, eventType, blockID string) askBlockEventPayload {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/events?limit=50", nil, "alice")
+		if events.Code != http.StatusOK {
+			t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
+		}
+		for _, event := range decodeBody[[]struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}](t, events) {
+			if event.Type != eventType {
+				continue
+			}
+			var payload askBlockEventPayload
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode %s payload: %v", eventType, err)
+			}
+			if payload.BlockID != nil && *payload.BlockID == blockID {
+				return payload
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no %s event for ask block %q", eventType, blockID)
+	return askBlockEventPayload{}
+}
+
+// Settlement runs after the edit's own version has consumed the room's pending authors; the ask
+// it indexes must still be attributed to the session that wrote the block, or the asker can
+// never edit its own ask and nobody can tell who is asking (AGENTC-150, 2026-09-14).
+func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Attributed decision",
+		"Context\n\n:::ask{#seeded urgency=\"med\" multiple=\"false\"}\nSeeded question?\n:::\n")
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "seeded", "Seeded question?")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops": []map[string]string{{
+			"after":    "end",
+			"markdown": ":::ask{#edited urgency=\"high\" multiple=\"false\"}\nEdited question?\n:::\n",
+			"op":       "insert",
+		}},
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("write ask block: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "edited", "Edited question?")
+	asks := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	want := map[string]model.Actor{
+		"seeded": {Kind: "user", ID: "alice"},
+		"edited": {Kind: "session", ID: sessionActor()["id"].(string)},
+	}
+	seen := 0
+	for _, ask := range decodeBody[[]model.Ask](t, asks) {
+		if ask.BlockID == nil {
+			continue
+		}
+		expected, ok := want[*ask.BlockID]
+		if !ok {
+			continue
+		}
+		seen++
+		if ask.Author.Kind != expected.Kind || ask.Author.ID != expected.ID {
+			t.Fatalf("block %s author = %#v, want %s %s", *ask.BlockID, ask.Author, expected.Kind, expected.ID)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("saw %d block asks, want 2", seen)
+	}
 }

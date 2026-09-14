@@ -47,6 +47,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
       needsYou,
       onSelectCard,
       resolvedThreads,
+      retractedAskCount,
       threads,
       viewerLogin,
       visibleArtifact,
@@ -238,6 +239,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 onToggleThread={actions.onToggleThread}
                 pendingActionId={pendingActionId}
                 resolvedThreads={resolvedThreads}
+                retractedAskCount={retractedAskCount}
                 selectedItemId={selection.selectedItemId}
                 showResolved={selection.showResolved}
                 threads={threads}

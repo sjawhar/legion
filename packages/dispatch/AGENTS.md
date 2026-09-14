@@ -173,3 +173,5 @@ and recipient-picker bottom sheets, touch-sized controls, and compact Inbox
 layout. It does not replace the manual phone check: run the server on a
 tailnet-reachable address, open it from a phone, open the review panel, and
 answer an open ask in Waiting on you.
+
+A retracted ask is withdrawn history and is hidden by default everywhere answered asks are listed: the Conversation tab has its own `Show retracted (N)` checkbox (persisted, default off, independent of `Show activity`, which defaults on), and the margin folds retracted asks into the `Resolved (N)` toggle beside resolved comment threads. The conversation model normalizes `options: null` on retained ask events (emitted for option-less block asks before 2026-09-14) to `[]` so stored history always renders.

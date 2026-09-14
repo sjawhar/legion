@@ -37,13 +37,14 @@ import { ConversationComposer } from "./ConversationComposer";
 import {
   buildConversationItems,
   type ConversationItem,
+  countRetractedAsks,
   dateKey,
   visibleConversationItems,
 } from "./conversation-model";
 import { ReaderPosition } from "./ReaderPosition";
 import { TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
-import { useShowActivity } from "./use-show-activity";
+import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
 
 const stateWrites = new IssueStateWriteQueue();
@@ -267,7 +268,12 @@ export function ConversationTab({
     [events, issueState.last_read_seq, today]
   );
   const [showActivity, setShowActivity] = useShowActivity();
-  const shown = useMemo(() => visibleConversationItems(items, showActivity), [items, showActivity]);
+  const [showRetracted, setShowRetracted] = useShowRetracted();
+  const retractedCount = useMemo(() => countRetractedAsks(items), [items]);
+  const shown = useMemo(
+    () => visibleConversationItems(items, { showActivity, showRetracted }),
+    [items, showActivity, showRetracted]
+  );
   const [ownSendCount, setOwnSendCount] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const itemSeqs = useMemo(
@@ -571,7 +577,18 @@ export function ConversationTab({
           route={route}
         />
       )}
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-end gap-4">
+        {retractedCount === 0 ? null : (
+          <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
+            <input
+              checked={showRetracted}
+              className={`${checkboxAccent} min-h-11 min-w-11`}
+              onChange={(event) => setShowRetracted(event.target.checked)}
+              type="checkbox"
+            />
+            Show retracted ({retractedCount})
+          </label>
+        )}
         <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
           <input
             checked={showActivity}

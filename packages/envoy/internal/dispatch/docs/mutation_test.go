@@ -24,7 +24,7 @@ func TestSeedTextStoresTreeAndReturnsCanonicalMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := service.SeedText(context.Background(), tx, artifactID, "## Database\nUse SQLite")
+	canonical, err := service.SeedText(context.Background(), tx, artifactID, "## Database\nUse SQLite", model.Actor{Kind: "user", ID: "seed"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestSeedTextRollsBackWithCreatingTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin seed transaction: %v", err)
 	}
-	if _, err := service.SeedText(context.Background(), tx, artifactID, "# Rolled back"); err != nil {
+	if _, err := service.SeedText(context.Background(), tx, artifactID, "# Rolled back", model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("seed text: %v", err)
 	}
 	if err := tx.Rollback(context.Background()); err != nil {

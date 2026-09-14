@@ -42,3 +42,46 @@ test("PinnedTab renders pinned event bodies as Markdown", async () => {
     view.unmount();
   }
 });
+
+test("PinnedTab renders a pinned ask.opened event that carries options: null (retained pre-fix block-ask events)", async () => {
+  const askOpened = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-09-10T00:00:00Z",
+    id: 2,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: null,
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 2,
+      options: null,
+      question: "Ship without options?",
+      state: "open",
+      urgency: "med",
+    },
+    seq: 2,
+    type: "ask.opened",
+  } as unknown as Event;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <PinnedTab events={[askOpened]} issueKey={undefined} pinnedIds={["2"]} />
+    </QueryClientProvider>
+  );
+
+  try {
+    expect(await screen.findByText("Ship without options?")).not.toBeNull();
+    expect(screen.getByText("Ask opened:")).not.toBeNull();
+  } finally {
+    view.unmount();
+  }
+});

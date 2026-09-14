@@ -13,3 +13,18 @@ export function useShowActivity(): [boolean, (next: boolean) => void] {
 
   return [showActivity, setAndPersist];
 }
+
+const retractedStorageKey = "dispatch.conversation.showRetracted";
+
+/** Default off: a retracted ask is withdrawn history, shown only when a reader asks. */
+export function useShowRetracted(): [boolean, (next: boolean) => void] {
+  const [showRetracted, setShowRetracted] = useState(
+    () => window.localStorage.getItem(retractedStorageKey) === "true"
+  );
+  const setAndPersist = (next: boolean) => {
+    setShowRetracted(next);
+    window.localStorage.setItem(retractedStorageKey, String(next));
+  };
+
+  return [showRetracted, setAndPersist];
+}

@@ -22,6 +22,7 @@ import {
   railHoverBg,
   railText,
 } from "../../theme/classes";
+import { isRetractedAsk } from "../conversation/conversation-model";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { useMediaQuery } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
@@ -126,6 +127,8 @@ export interface MarginSheetModel {
     pinned: Event[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
+    /** Retracted asks hidden behind the same toggle as resolved threads. */
+    retractedAskCount: number;
     threads: Thread[];
     viewerLogin: string;
     visibleArtifact: Artifact | undefined;
@@ -438,12 +441,22 @@ function useMarginSheet(): MarginSheetModel {
     threads,
   } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId);
 
-  const historicalAsks = useMemo(
+  // A retracted ask is withdrawn history; it rides the same "show resolved" toggle as
+  // resolved comment threads instead of sitting among the answered decisions.
+  const askItems = useMemo(
     () =>
       items
         .filter((item): item is Extract<MarginItem, { kind: "ask" }> => item.kind === "ask")
         .map((item) => item.ask),
     [items]
+  );
+  const retractedAskCount = useMemo(
+    () => askItems.filter((ask) => isRetractedAsk(ask)).length,
+    [askItems]
+  );
+  const historicalAsks = useMemo(
+    () => askItems.filter((ask) => showResolved || !isRetractedAsk(ask)),
+    [askItems, showResolved]
   );
   const markItemIds = useMemo(() => {
     const ids = new Map<string, string>();
@@ -699,6 +712,7 @@ function useMarginSheet(): MarginSheetModel {
       pinned,
       pinnedIds,
       resolvedThreads,
+      retractedAskCount,
       threads,
       viewerLogin: viewer.data?.login ?? "",
       visibleArtifact,
