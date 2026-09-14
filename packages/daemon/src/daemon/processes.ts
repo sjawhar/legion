@@ -3840,10 +3840,14 @@ export class ProcessManager {
    * `processPath` is the daemon's resolved PATH with every inherited `worker-bin` entry already
    * stripped by `resolveDaemonEnvironment` (a daemon started from inside a Legion pane inherits
    * that pane's shim-first PATH through `mise env`), so the daemon's own `gh` is never the shim and
-   * the prefix added here is the only one. `GH_CONFIG_DIR` isolates a raw `gh` from any operator login
-   * state, and the emptied `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` (tmux renders `''` as `-e KEY=`,
-   * an empty variable) keep an ambient token or host from shadowing the per-call one `legion gh`
-   * redeems. */
+   * the prefix added here is the only one. How PATH reaches the process is the runtime's business:
+   * this record is runtime-neutral, and the tmux runtime delivers PATH through the pane's shell
+   * command rather than as a `-e` pair, since tmux replaces a pane's PATH from the unattached
+   * client's environment after copying the `-e` pairs (LEGION-91) — a Kubernetes runtime would set
+   * it on the pod verbatim.
+   * `GH_CONFIG_DIR` isolates a raw `gh` from any operator login state, and the emptied
+   * `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` (tmux renders `''` as `-e KEY=`, an empty variable) keep an
+   * ambient token or host from shadowing the per-call one `legion gh` redeems. */
   private credentialProcessEnvironment(token: string): Record<string, string> {
     const stateDir = this.deps.config.stateDir;
     return {

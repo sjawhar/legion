@@ -56,7 +56,9 @@ function workerSocketBasename(issue: IssueKey, role: LegionRole): string {
   return `${role}-${hash}`;
 }
 
-/** Flattens an env record into repeated `-e KEY=VALUE` pairs for tmux; `undefined` values are omitted. */
+/** Flattens an env record into repeated `-e KEY=VALUE` pairs for tmux; `undefined` values are
+ * omitted. Never given PATH — tmux replaces a pane's PATH from the unattached client's
+ * environment after copying the `-e` pairs, so `preparePane` exports it in the shell command. */
 function tmuxEnv(env: Record<string, string | undefined>): string[] {
   return Object.entries(env).flatMap(([key, value]) =>
     value === undefined ? [] : ["-e", `${key}=${value}`]
@@ -260,7 +262,8 @@ export class TmuxRuntime implements Runtime {
    * `<stateDir>/secrets/<role token>` and exports only its `<NAME>_FILE` path, appended after
    * the spec's own env pairs; the write happens before any tmux call, so an fs failure is an
    * ordinary launch failure. The caller owns that file's lifetime (hold/prune) — this method
-   * only writes it.
+   * only writes it. `env.PATH` is exported in the pane's shell command rather than passed as a
+   * `-e` pair, which tmux would discard (see `preparePane`).
    */
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const [secret, ...extraSecrets] = Object.entries(spec.secrets);
@@ -488,9 +491,19 @@ export class TmuxRuntime implements Runtime {
 
   /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
    * fresh shim socket path (its directory made, a stale socket removed), the process's one secret
-   * written as a 0600 file, and the pane argv — the env pairs, the secret's `<NAME>_FILE`
-   * pointer, then the `cd <workspace> && legion worker-shim --socket <path> -- <inner>` command
-   * every Legion OMP process (root, phase worker, controller) runs inside its pane. */
+   * written as a 0600 file, and the pane argv — the env pairs (PATH excepted, below), the secret's
+   * `<NAME>_FILE` pointer, then the `legion worker-shim --socket <path> -- <inner>` command every
+   * Legion OMP process (root, phase worker, controller) runs inside its pane.
+   *
+   * PATH is the one env variable that does not ride a `-e` pair. tmux copies the server's global
+   * table, the session table, and every `-e` pair into a new pane's environment and then, for a
+   * pane spawned by an unattached client — every daemon `tmux -L … new-window|split-window|new-session`
+   * is one — replaces PATH from that client's environment (spawn.c, `spawn_pane`: "The session one
+   * is replaced from the client if there is one"), so a `-e PATH=…` never reaches a pane
+   * (LEGION-91). The pane shell therefore exports `env.PATH` before `cd`, and the worker-shim and
+   * the OMP it spawns inherit exactly that value. An env record without PATH gets no prefix and
+   * inherits like any other unset variable. This is tmux-only: a Kubernetes runtime maps env to
+   * the pod environment, which is honoured verbatim, and needs no prefix. */
   private async preparePane(
     socketName: string,
     workspaceDir: string,
@@ -500,9 +513,11 @@ export class TmuxRuntime implements Runtime {
     [secretName, secretValue]: [string, string]
   ): Promise<{ socketPath: string; paneArgv: string[] }> {
     const socketPath = await this.prepareSocket(socketName);
-    const shellCommand = `cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
+    const { PATH: panePath, ...pairEnv } = env;
+    const exportPath = panePath === undefined ? "" : `export PATH=${shellPath(panePath)} && `;
+    const shellCommand = `${exportPath}cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
     const secretFile = await writeSecretFile(this.deps.stateDir, token, secretValue);
-    const pairs = [...tmuxEnv(env), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
+    const pairs = [...tmuxEnv(pairEnv), ...tmuxEnv({ [`${secretName}_FILE`]: secretFile })];
     return { socketPath, paneArgv: [...pairs, shellCommand] };
   }
 

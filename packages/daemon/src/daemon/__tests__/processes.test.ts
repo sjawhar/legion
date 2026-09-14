@@ -41,6 +41,7 @@ import { MAX_RESENDS, RESEND_PAUSES_MS } from "../resend-ledger";
 import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
+import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
 import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 
@@ -377,6 +378,66 @@ function recordedTmuxLocator(state: LegionState, issue: IssueKey = root): TmuxLo
  * (never spawned by these tests) reads as undefined and fails the expectation loudly. */
 function tmuxFields(locator: Locator | undefined): TmuxLocator | undefined {
   return locator?.runtime === "tmux" ? locator : undefined;
+}
+
+/** The OMP stand-in the live-tmux PATH row runs under the real worker-shim (see
+ * `real-prompt-delivery-e2e.test.ts`): ignores its argv, lives until stdin EOF. */
+const DELAYED_START_OMP = path.join(
+  import.meta.dir,
+  "..",
+  "..",
+  "cli",
+  "__tests__",
+  "fixtures",
+  "delayed-start-omp-rpc.ts"
+);
+
+async function childProcesses(pid: number): Promise<number[]> {
+  const found: number[] = [];
+  const parentPattern = new RegExp(`^PPid:\\s+${pid}$`, "m");
+  for (const entry of await readdir("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const status = await readFile(`/proc/${entry}/status`, "utf8");
+      if (parentPattern.test(status)) found.push(Number(entry));
+    } catch {}
+  }
+  return found.sort((a, b) => a - b);
+}
+
+/** The exec-time environment of the OMP stand-in under a live pane: the first-child chain from
+ * the pane pid down to the process whose cmdline names `DELAYED_START_OMP`. Never the pane pid's
+ * own `/proc/<pid>/environ`: that is the pane shell's exec-time block — or, since bash 5.1 execs
+ * the last command of a `-c` list, the worker-shim's — and what matters is what OMP inherited.
+ * Polls the real process tree with a real delay: the awaited condition is a kernel fork/exec under
+ * a real tmux server, which no fake clock can advance (bun starts in tens of ms). */
+async function ompEnvironment(panePid: number): Promise<Record<string, string>> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    let pid = panePid;
+    for (;;) {
+      const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
+      if (cmdline.includes(DELAYED_START_OMP)) {
+        const raw = await readFile(`/proc/${pid}/environ`, "utf8");
+        return Object.fromEntries(
+          raw
+            .split("\0")
+            .filter(Boolean)
+            .map((entry) => [
+              entry.slice(0, entry.indexOf("=")),
+              entry.slice(entry.indexOf("=") + 1),
+            ])
+        );
+      }
+      const next = (await childProcesses(pid))[0];
+      if (next === undefined) break;
+      pid = next;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`pane ${panePid} spawned no OMP stand-in within 10 s`);
+    }
+    await Bun.sleep(50);
+  }
 }
 
 /** The root architect's addressing fragment exactly as `spawnTree` builds it — addressing
@@ -759,6 +820,15 @@ function tmuxWindowEnvironment(command: readonly string[]): Record<string, strin
   return environment;
 }
 
+/** The pane's PATH as `TmuxRuntime.preparePane` delivers it: the `export PATH=<value> && ` prefix of
+ * the pane shell command (tmux drops a `-e PATH=` pair — LEGION-91), unquoted or single-quoted as
+ * `shellPath` renders it. `undefined` when the command carries no export. */
+function tmuxPanePath(command: readonly string[]): string | undefined {
+  const match = /^export PATH=(?:'((?:[^']|'\\'')*)'|(\S+)) && /.exec(command.at(-1) ?? "");
+  if (!match) return undefined;
+  return match[1] !== undefined ? match[1].replaceAll("'\\''", "'") : match[2];
+}
+
 afterAll(async () => {
   await Promise.all(tempDirs.map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -999,8 +1069,6 @@ describe("ProcessManager", () => {
         "-e",
         "GIT_TERMINAL_PROMPT=0",
         "-e",
-        `PATH=${path.join(stateDir, "worker-bin")}:/full/bin:/usr/bin`,
-        "-e",
         `GH_CONFIG_DIR=${path.join(stateDir, "gh")}`,
         "-e",
         "GH_TOKEN=",
@@ -1018,7 +1086,7 @@ describe("ProcessManager", () => {
         `LEGION_ROOT_WORKSPACE=${workspace}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(stateDir, "secrets", roleToken("omp", root, "architect"))}`,
-        `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`, rootArchitectFragment())}`,
+        `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`, rootArchitectFragment())}`,
       ],
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -1074,13 +1142,15 @@ describe("ProcessManager", () => {
       LEGION_PROJECT: "omp",
       ENVOY_NATS_URL: "nats://127.0.0.1:4222",
       ENVOY_URL: "http://127.0.0.1:9020",
-      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
       GH_CONFIG_DIR: path.join(stateDir, "gh"),
       GH_TOKEN: "",
       GITHUB_TOKEN: "",
       GH_HOST: "",
       LEGION_GRANT_FILE: path.join(stateDir, "secrets", "legion-omp-controller-grant"),
     });
+    expect(tmuxPanePath(controllerWindow)).toBe(
+      `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
+    );
     expect(tmuxWindowEnvironment(rootWindow)).toEqual({
       LEGION_TREE: root,
       LEGION_ISSUE: root,
@@ -1098,7 +1168,6 @@ describe("ProcessManager", () => {
       LEGION_CREDENTIAL_HELPER: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
-      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
       GH_CONFIG_DIR: path.join(stateDir, "gh"),
       GH_TOKEN: "",
       GITHUB_TOKEN: "",
@@ -1109,6 +1178,9 @@ describe("ProcessManager", () => {
         `${roleToken("omp", root, "architect")}-grant`
       ),
     });
+    expect(tmuxPanePath(rootWindow)).toBe(
+      `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
+    );
   });
   it("puts the static credential environment on every pane, worker-bin first on PATH exactly once", async () => {
     const stateDir = await temporaryDir();
@@ -1153,10 +1225,9 @@ describe("ProcessManager", () => {
         GH_HOST: "",
         LEGION_GRANT_FILE: path.join(secretsDir, expectedGrantFiles[index] ?? ""),
       });
-      expect(environment.PATH?.startsWith(`${workerBin}${path.delimiter}`)).toBe(true);
-      expect(environment.PATH?.split(path.delimiter).filter((e) => e === workerBin)).toHaveLength(
-        1
-      );
+      const panePath = tmuxPanePath(launch);
+      expect(panePath?.startsWith(`${workerBin}${path.delimiter}`)).toBe(true);
+      expect(panePath?.split(path.delimiter).filter((e) => e === workerBin)).toHaveLength(1);
       // The grant itself never rides a -e pair: the extension writes the named file later.
       expect(environment.LEGION_GRANT).toBeUndefined();
       for (const part of launch) expect(part.startsWith("LEGION_GRANT=")).toBe(false);
@@ -1361,7 +1432,7 @@ describe("ProcessManager", () => {
     const launches = commands.filter((c) => c[3] === "new-window" || c[3] === "split-window");
     expect(launches).toHaveLength(3);
     for (const launch of launches) {
-      const entries = tmuxWindowEnvironment(launch).PATH?.split(path.delimiter) ?? [];
+      const entries = tmuxPanePath(launch)?.split(path.delimiter) ?? [];
       expect(entries[0]).toBe(inheritedWorkerBin);
       expect(entries.filter((entry) => path.basename(entry) === "worker-bin")).toHaveLength(1);
       expect(entries).toContain(path.join(stateDir, "bin"));
@@ -2217,14 +2288,14 @@ describe("ProcessManager", () => {
     const controllerSocketPath = path.join(stateDir, "workers", "controller.sock");
     const windows = commands.filter((command) => command[3] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc ${promptArgument(`${extensionDir}/roles/architect-root.md`, rootArchitectFragment())}`,
-      `cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc ${promptArgument(`${extensionDir}/roles/controller-root.md`, undefined)}`,
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc ${promptArgument(`${extensionDir}/roles/architect-root.md`, rootArchitectFragment())}`,
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${controllerDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${controllerSocketPath} -- ${ompInvocation} --mode rpc ${promptArgument(`${extensionDir}/roles/controller-root.md`, undefined)}`,
     ]);
-    expect(
-      windows.map((command) =>
-        command.includes(`PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath}`)
-      )
-    ).toEqual([true, true]);
+    const expectedPanePath = `${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath}`;
+    expect(windows.map((command) => tmuxPanePath(command))).toEqual([
+      expectedPanePath,
+      expectedPanePath,
+    ]);
   });
 
   it("prepends the configured omp_launch_prefix before the OMP invocation for root and controller windows", async () => {
@@ -3093,7 +3164,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
     );
   });
 
@@ -3124,7 +3195,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
     );
   });
 
@@ -8793,6 +8864,74 @@ describe("ProcessManager", () => {
     30_000
   );
 
+  // Requires a real tmux installation: the whole delivery chain for a pane's PATH — tmux, the
+  // pane shell, the real `legion worker-shim`, the process it spawns — on a live server.
+  it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
+    "a real controller, root, and worker pane hand their OMP process a PATH with worker-bin first exactly once, and gh under it is the shim (LEGION-91)",
+    async () => {
+      const stateDir = await temporaryDir();
+      const project = `smoke${Date.now()}`;
+      const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
+      const session = `legion-${project}`;
+      const workerBin = await installWorkerGhShim(stateDir);
+      // The daemon's own PATH as index.ts hands it over: never a worker-bin entry (this test may
+      // itself run from a Legion pane whose PATH carries one).
+      const processPath = pathWithoutWorkerBin(process.env.PATH ?? "");
+      const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stdout, stderr, exitCode };
+      };
+      const { manager: processes } = manager(state, {
+        config: config(stateDir, { legionId: project }),
+        // The OMP stand-in ignores its argv and lives until stdin EOF, exactly where a real OMP
+        // would sit under the worker-shim.
+        ompInvocation: `${process.execPath} ${DELAYED_START_OMP}`,
+        processPath,
+        readProcessCmdline: async () => "omp\0",
+        readProcessStat: undefined,
+        run: commandRunner,
+      });
+      try {
+        await processes.ensureController();
+        await processes.spawnRoot(root);
+        await processes.spawnWorker(root, root, "tester", "verify #41");
+        const testerClaim = state.roles[roleToken(project, root, "tester")];
+        const panePids = [
+          tmuxFields(state.controllerLocator)?.panePid,
+          tmuxFields(state.trees[root]?.locator)?.panePid,
+          testerClaim && "issue" in testerClaim
+            ? tmuxFields(testerClaim.locator)?.panePid
+            : undefined,
+        ];
+        for (const panePid of panePids) {
+          if (!panePid) throw new Error("a live pane is missing its identity");
+          const environment = await ompEnvironment(panePid);
+          expect(environment.PATH).toBe(`${workerBin}${path.delimiter}${processPath}`);
+          expect(
+            environment.PATH?.split(path.delimiter).filter((e) => path.basename(e) === "worker-bin")
+          ).toHaveLength(1);
+          // A bare `gh` in that pane is the shim, i.e. `legion gh`.
+          const which = Bun.spawnSync(["sh", "-c", "command -v gh"], {
+            env: { PATH: environment.PATH ?? "" },
+          });
+          expect(which.stdout.toString().trim()).toBe(path.join(workerBin, "gh"));
+        }
+      } finally {
+        await commandRunner(["tmux", "-L", session, "kill-server"]);
+      }
+    },
+    30_000
+  );
+
   it("runs a root's whole lifecycle over a non-tmux Runtime: spawn, probe alive, close, reconcile", async () => {
     // The behavioural half of the runtime-agnostic gate: `ProcessManager` driven end to end by
     // `FakeRuntime`, whose locators are the kubernetes union member — nothing tmux-shaped exists
@@ -9135,7 +9274,6 @@ describe("ProcessManager", () => {
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
       ...HARNESS_IDENTITY_ENV,
-      PATH: `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`,
       GH_CONFIG_DIR: path.join(stateDir, "gh"),
       GH_TOKEN: "",
       GITHUB_TOKEN: "",
@@ -9146,13 +9284,16 @@ describe("ProcessManager", () => {
         `${roleToken("omp", root, "tester")}-grant`
       ),
     });
+    expect(tmuxPanePath(windowCommand)).toBe(
+      `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
+    );
     const promptPath = path.join(
       path.resolve(import.meta.dir, "../../../../pi-envoy"),
       "roles",
       "tester.md"
     );
     expect(windowCommand.at(-1)).toBe(
-      `cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "tester-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${promptPath}`, addressingFragment("omp", root, root, "tester"))}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "tester-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${promptPath}`, addressingFragment("omp", root, root, "tester"))}`
     );
     const claim = managedState.roles[roleToken("omp", root, "tester")];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");
