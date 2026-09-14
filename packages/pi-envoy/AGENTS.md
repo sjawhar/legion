@@ -85,11 +85,10 @@ block through that tool or a `:::ask` directive, not as an issue-level `dispatch
 passes the host tool AbortSignal to every Dispatch execution; the shared client also imposes a
 60-second HTTP deadline.
 
-`before_agent_start` injects the complete `dispatch_open_asks` summary as agent-attributed context. After one
-human-initiated period ends without an active ask, `session_stop` gives one model-visible reminder; current typing,
-aborts, unavailable Dispatch, and the continuation itself never produce a second reminder. Legion controller, root
-architect, and phase-worker sessions mark their own transcript identity through the role-claim bridge and are exempt
-from automatic reminders, while retaining the tool and before-run summary.
+`before_agent_start` injects the complete `dispatch_open_asks` summary as agent-attributed context; this before-run
+summary is the only automatic ask awareness. The stop-time reminder was removed 2026-09-14 pending a redesign of the
+`waiting on a human` trigger. An unavailable open-asks query warns once per session until that session's subsequent
+query succeeds.
 
 ## Where to look
 
