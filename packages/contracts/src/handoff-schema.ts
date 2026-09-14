@@ -126,7 +126,7 @@ export type PhaseHandoff =
 
 const isoTimestamp = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 const handoffPhase = z.enum(HANDOFF_PHASES);
-const nonEmpty = z.string().min(1);
+const nonEmpty = z.string().trim().min(1);
 
 const proofSchema = z
   .object({
@@ -148,24 +148,26 @@ const routingHintsSchema = z
   .passthrough()
   .optional();
 
-const baseHandoffSchema = z.object({
-  schemaVersion: z.literal(HANDOFF_SCHEMA_VERSION),
-  phase: handoffPhase,
-  completed: isoTimestamp,
-  learningsInjected: z.array(z.string()).optional(),
-  learningsHelpful: z.array(z.string()).optional(),
-});
-
-const architectSchema = baseHandoffSchema
-  .extend({
-    phase: z.literal("architect"),
-    scope: z.enum(["trivial", "small", "medium", "large"]).optional(),
-    components: z.array(z.string()).optional(),
-    subIssues: z.array(z.string()).optional(),
-    routingHints: routingHintsSchema,
-    concerns: z.array(z.string()).optional(),
+// Undeclared fields pass through untouched at every phase: the next worker may need them (the
+// worker skill promises this). The one catchall lives here; `.extend()` carries it into each phase.
+const baseHandoffSchema = z
+  .object({
+    schemaVersion: z.literal(HANDOFF_SCHEMA_VERSION),
+    phase: handoffPhase,
+    completed: isoTimestamp,
+    learningsInjected: z.array(z.string()).optional(),
+    learningsHelpful: z.array(z.string()).optional(),
   })
   .passthrough();
+
+const architectSchema = baseHandoffSchema.extend({
+  phase: z.literal("architect"),
+  scope: z.enum(["trivial", "small", "medium", "large"]).optional(),
+  components: z.array(z.string()).optional(),
+  subIssues: z.array(z.string()).optional(),
+  routingHints: routingHintsSchema,
+  concerns: z.array(z.string()).optional(),
+});
 
 const requiredSkillsSchema = z
   .object({
@@ -176,33 +178,30 @@ const requiredSkillsSchema = z
   .passthrough()
   .optional();
 
-const planSchema = baseHandoffSchema
-  .extend({
-    phase: z.literal("plan"),
-    taskCount: z.number().optional(),
-    independentTasks: z.number().optional(),
-    routingHints: routingHintsSchema,
-    concerns: z.array(z.string()).optional(),
-    workflowRecommendation: z.string().optional(),
-    requiredSkills: requiredSkillsSchema,
-  })
-  .passthrough();
+const planSchema = baseHandoffSchema.extend({
+  phase: z.literal("plan"),
+  taskCount: z.number().optional(),
+  independentTasks: z.number().optional(),
+  routingHints: routingHintsSchema,
+  concerns: z.array(z.string()).optional(),
+  workflowRecommendation: z.string().optional(),
+  requiredSkills: requiredSkillsSchema,
+});
 
-const implementSchema = baseHandoffSchema
-  .extend({
-    phase: z.literal("implement"),
-    filesChanged: z.array(z.string()).optional(),
-    proof: z.array(proofSchema).min(1),
-    trickyParts: z.array(z.string()).optional(),
-    deviations: z.array(z.string()).optional(),
-    openQuestions: z.array(z.string()).optional(),
-    subPlanningNeeded: z.boolean().optional(),
-    discoveredComplexity: z.array(z.string()).optional(),
-    suggestedSubWorkers: z.number().optional(),
-  })
-  .passthrough();
+const implementSchema = baseHandoffSchema.extend({
+  phase: z.literal("implement"),
+  filesChanged: z.array(z.string()).optional(),
+  proof: z.array(proofSchema).min(1),
+  trickyParts: z.array(z.string()).optional(),
+  deviations: z.array(z.string()).optional(),
+  openQuestions: z.array(z.string()).optional(),
+  subPlanningNeeded: z.boolean().optional(),
+  discoveredComplexity: z.array(z.string()).optional(),
+  suggestedSubWorkers: z.number().optional(),
+});
 
-// A passing test handoff needs the tester's own proof; one that reports a failure does not.
+// A passing test handoff needs the tester's own proof; one that reports a failure does not — and
+// a reported failure (`failed > 0`, or a rejected implementer proof) is a recorded one.
 const testSchema = baseHandoffSchema
   .extend({
     phase: z.literal("test"),
@@ -218,7 +217,6 @@ const testSchema = baseHandoffSchema
     documentationFeedback: z.string().optional(),
     observations: z.array(z.string()).optional(),
   })
-  .passthrough()
   .refine(
     (handoff) =>
       (handoff.failures?.length ?? 0) > 0 ||
@@ -228,22 +226,32 @@ const testSchema = baseHandoffSchema
       path: ["proof"],
       message: "a passing test handoff needs the tester's own production-like proof",
     }
+  )
+  .refine((handoff) => (handoff.failed ?? 0) === 0 || (handoff.failures?.length ?? 0) > 0, {
+    path: ["failures"],
+    message: "a test handoff that reports failed > 0 records at least one failure",
+  })
+  .refine(
+    (handoff) =>
+      handoff.implementerProof.verdict !== "rejected" || (handoff.failures?.length ?? 0) > 0,
+    {
+      path: ["failures"],
+      message: "a rejected implementer proof is a recorded failure",
+    }
   );
 
-const reviewSchema = baseHandoffSchema
-  .extend({
-    phase: z.literal("review"),
-    critical: z.number().optional(),
-    important: z.number().optional(),
-    minor: z.number().optional(),
-    verdict: z.enum(["approved", "changes_requested"]).optional(),
-    keyFindings: z
-      .array(
-        z.object({ severity: z.string(), file: z.string(), description: z.string() }).passthrough()
-      )
-      .optional(),
-  })
-  .passthrough();
+const reviewSchema = baseHandoffSchema.extend({
+  phase: z.literal("review"),
+  critical: z.number().optional(),
+  important: z.number().optional(),
+  minor: z.number().optional(),
+  verdict: z.enum(["approved", "changes_requested"]).optional(),
+  keyFindings: z
+    .array(
+      z.object({ severity: z.string(), file: z.string(), description: z.string() }).passthrough()
+    )
+    .optional(),
+});
 
 const phaseHandoffSchema = z.discriminatedUnion("phase", [
   architectSchema,
@@ -277,6 +285,12 @@ export function describePhaseHandoffProblems(value: unknown): string[] {
   if (result.success) return [];
   return result.error.issues.map((issue) => {
     const field = issue.path.length > 0 ? issue.path.map(String).join(".") : "<root>";
+    // zod 4.3.6 reports a missing or unknown discriminator as `invalid_union` at ["phase"] with
+    // the bare message "Invalid input"; no phase schema's own `phase` literal is a union, so this
+    // is the one case, and the reader is told what was expected instead.
+    if (issue.code === "invalid_union" && field === "phase") {
+      return `phase: expected one of ${HANDOFF_PHASES.join("|")}`;
+    }
     return `${field}: ${issue.message}`;
   });
 }
