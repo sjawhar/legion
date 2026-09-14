@@ -12751,7 +12751,7 @@ describe("ProcessManager", () => {
     expect(claim.promptFailures).toBe(1);
   });
 
-  it("retires a persistently-rejecting queued worker after MAX_LAUNCH_FAILURES consecutive prompt rejections, falling through to a fresh launch on the next drain", async () => {
+  it("retires a persistently-rejecting queued worker after MAX_LAUNCH_FAILURES consecutive prompt rejections (relaunch cycle 1, bound 2), falling through to a fresh launch on the next drain", async () => {
     const token = roleToken("omp", root, "tester");
     const client = fakeWorkerRpcClient();
     client.setRunStateSilently("idle");
@@ -12799,7 +12799,8 @@ describe("ProcessManager", () => {
 
     const retiredClaim = managedState.roles[token];
     if (!retiredClaim || !("issue" in retiredClaim)) throw new Error("tester claim disappeared");
-    expect(retiredClaim.promptFailures).toBe(3);
+    expect(retiredClaim.promptFailures).toBe(0);
+    expect(retiredClaim.promptRetires).toBe(1);
     expect(retiredClaim.locator).toBeUndefined();
     expect(managedState.workerAdmission.queue).toEqual([token]);
     expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
@@ -12813,6 +12814,9 @@ describe("ProcessManager", () => {
     if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("tester claim disappeared");
     expect(launchedClaim.locator).toBeDefined();
     expect(tmuxFields(launchedClaim.locator)?.tmuxPaneId).toBe("%301");
+    // The relaunch carries the cycle count: a refusal-driven retirement counts toward the same
+    // bound a swallowed prompt does (LEGION-93).
+    expect(launchedClaim.promptRetires).toBe(1);
     expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
   });
 
@@ -12944,6 +12948,9 @@ describe("ProcessManager", () => {
 
   const workerStartedJson = JSON.stringify({ type: "worker-started", issue: root, role: "tester" });
   const workerQueuedJson = JSON.stringify({ type: "worker-queued", issue: root, role: "tester" });
+  const workerDiedJson = JSON.stringify({ type: "worker-died", issue: root, role: "tester" });
+  const retireLine = (token: string, cycle: number): string =>
+    `[legion] ${token}: retiring after 3 prompts with no turn started; relaunch cycle ${cycle} (bound 2)`;
 
   it("commits a queued idle-resume prompt only when the worker's turn starts, not on the shim's acknowledgement", async () => {
     const { processes, managedState, publications, token, clock, client, sleeps } =
@@ -13101,25 +13108,31 @@ describe("ProcessManager", () => {
     );
     client.turnStartsOnPrompt = false;
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-    let errorCalls = 0;
+    let errorLines: string[] = [];
     try {
       // Three separate drain attempts, each an acknowledgement no turn follows — the third
       // crosses MAX_LAUNCH_FAILURES (3) and retires the pane through the same path a refusal
-      // takes (markWorkerDeadLocked, via WorkerAdmissionDeps.retireDeadClaim).
+      // takes (retirePromptFailedClaim, via WorkerAdmissionDeps.retireDeadClaim), zeroing the
+      // prompt count and counting the first relaunch cycle.
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const run = processes.reconcileWorkerAdmission();
         await expireTurnStartWait(sleeps, clock);
         await run;
-        expect(testerClaim(managedState, token).promptFailures).toBe(attempt + 1);
+        expect(testerClaim(managedState, token).promptFailures).toBe(
+          attempt === 2 ? 0 : attempt + 1
+        );
       }
     } finally {
-      errorCalls = errorLog.mock.calls.length;
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
       errorLog.mockRestore();
     }
-    expect(errorCalls).toBe(3);
+    // Three failure lines and the one retirement line.
+    expect(errorLines).toHaveLength(4);
+    expect(errorLines).toContain(retireLine(token, 1));
 
     const retiredClaim = testerClaim(managedState, token);
-    expect(retiredClaim.promptFailures).toBe(3);
+    expect(retiredClaim.promptFailures).toBe(0);
+    expect(retiredClaim.promptRetires).toBe(1);
     expect(retiredClaim.locator).toBeUndefined();
     expect(managedState.workerAdmission.queue).toEqual([token]);
     expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
@@ -13131,7 +13144,222 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([]);
     const launchedClaim = testerClaim(managedState, token);
     expect(tmuxFields(launchedClaim.locator)?.tmuxPaneId).toBe("%301");
+    expect(launchedClaim.promptRetires).toBe(1);
     expect(client.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+  });
+
+  /** A ready-confirmed idle tester whose every acknowledged prompt starts no turn, driven through
+   * three failures, the first retirement, and the cold `--resume` relaunch (LEGION-93). Two fakes
+   * keyed by socket path: `first` behind the seeded locator, `relaunched` behind whatever socket the
+   * relaunch opens; a dial to a fake whose socket has closed is refused like an exited shim, so the
+   * close handler's reconnect fails and its own `promoteWorkerQueue` drives the relaunch — no
+   * explicit sweep. Returns once the relaunched claim (pane `%301`, generation 2) is in state, with
+   * `/worker/started` simulated (session registered, session file recorded) but `/worker/ready`
+   * not yet called; the caller decides whether the relaunched worker starts a turn. */
+  async function swallowedRelaunchFixture() {
+    const sessionFile = path.join(await temporaryDir(), "tester-session.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
+    const seededSocket = "/state/workers/tester.sock";
+    const first = fakeWorkerRpcClient();
+    first.turnStartsOnPrompt = false;
+    const relaunched = fakeWorkerRpcClient();
+    relaunched.turnStartsOnPrompt = false;
+    // The confirming get_state seeds the fresh relaunched client from "unknown" to idle exactly
+    // once (its only genuine idle transition); `abandonWait` has already restored later prompts'
+    // run state to idle before this runs, so those calls fire nothing.
+    relaunched.getStateImpl = async () => {
+      relaunched.emitRunState("idle");
+      return { data: { isStreaming: false } };
+    };
+    const closedSockets = new Set<FakeWorkerRpcClient>();
+    void first.closed.then(() => closedSockets.add(first));
+    void relaunched.closed.then(() => closedSockets.add(relaunched));
+    const tmuxFake = relaunchingTmux();
+    const publications: Array<{ subject: string; json: string }> = [];
+    // The relaunch does real filesystem work (the session-file `stat`, the boot-token secret
+    // file, the workspace config, the socket dir) before and after its tmux call, so a
+    // `setImmediate` budget racing it is load-sensitive. `worker-started` is published only once
+    // `launchWorker` has written the fresh claim, dequeued the token, and persisted — the last
+    // step of the chain — so a waiter resolved from inside the fake publish is the observable end
+    // itself. A wait that never resolves fails on bun's own timeout with the assertions
+    // unreached, never a false green.
+    const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+    const relaunchPublished = Promise.withResolvers<void>();
+    const fixture = await queuedIdleWorkerFixture(
+      1,
+      {
+        connectWorkerRpc: async (socketPath: string) => {
+          const target = socketPath === seededSocket ? first : relaunched;
+          if (closedSockets.has(target)) throw new Error("ECONNREFUSED");
+          return target;
+        },
+        run: tmuxFake.run,
+        publishRole: (subject, json) => {
+          publications.push({ subject, json });
+          if (subject === architectTopic && json === workerStartedJson) relaunchPublished.resolve();
+        },
+      },
+      first
+    );
+    const { processes, managedState, token, clock, sleeps } = fixture;
+    const claim = (): WorkerRoleClaim => testerClaim(managedState, token);
+    const seeded = claim().locator;
+    if (!seeded) throw new Error("seeded locator missing");
+    seeded.ompSessionFile = sessionFile;
+
+    // Three drains, each an acknowledgement no turn follows; the third retires the pane
+    // (relaunch cycle 1, bound 2) and the close handler's drain relaunches the task cold.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const run = processes.reconcileWorkerAdmission();
+      await expireTurnStartWait(sleeps, clock);
+      await run;
+    }
+    await relaunchPublished.promise;
+    // `/worker/started` for generation 2: the session registered, the session file recorded.
+    const booted = claim();
+    booted.sessionId = "ses_tester";
+    return {
+      ...fixture,
+      publications,
+      first,
+      relaunched,
+      tmuxFake,
+      sessionFile,
+      claim,
+      splitWindows: () =>
+        tmuxFake.commands.filter(
+          (command) => command[0] === "tmux" && command[3] === "split-window"
+        ).length,
+    };
+  }
+
+  it("bounds the no-turn retire cycle: the relaunched worker's third swallowed prompt publishes worker-died once and is never relaunched again (LEGION-93)", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const {
+        processes,
+        managedState,
+        publications,
+        token,
+        clock,
+        sleeps,
+        first,
+        relaunched,
+        claim,
+        sessionFile,
+        tmuxFake,
+        splitWindows,
+      } = await swallowedRelaunchFixture();
+      const architectTopic = roleTopic(roleToken("omp", root, "architect"));
+
+      // The first cycle: retired with the accounting the spec names, relaunched with --resume,
+      // the cycle count carried onto the fresh claim.
+      const relaunchedClaim = claim();
+      expect(relaunchedClaim.generation).toBe(2);
+      expect(relaunchedClaim.promptRetires).toBe(1);
+      expect(relaunchedClaim.promptFailures).toBeUndefined();
+      expect(relaunchedClaim.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+      expect(first.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+      expect(resumeArgument(tmuxFake.commands)).toContain(`--resume=${sessionFile}`);
+      expect(splitWindows()).toBe(1);
+
+      // /worker/ready delivers the queued task to the relaunched pane: acknowledged, no turn.
+      const ready = processes.workerReady(root, "tester", "ses_tester", 2);
+      await expireTurnStartWait(sleeps, clock);
+      await ready;
+      expect(claim().promptFailures).toBe(1);
+      expect(claim().readyConfirmedAt).toBeDefined();
+      expect(managedState.workerAdmission.queue).toEqual([token]);
+
+      // Two more drains; the third failure on this pane is relaunch cycle 2 (bound 2): terminal.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const run = processes.reconcileWorkerAdmission();
+        await expireTurnStartWait(sleeps, clock);
+        await run;
+      }
+      // `worker-died` was published inside the drain `run` awaited (`retirePromptFailedClaim`,
+      // under the role lock), so it is already in `publications`.
+      // Negative wait: the retired socket's close reaches `onWorkerClientClosed` -> one refused
+      // reconnect dial -> `markWorkerDead`, a no-op on the already-cleared locator, whose
+      // `promoteWorkerQueue` finds the queue empty -- no file write, no injected `run`.
+      await flushEventLoop(50);
+
+      const died = publications.filter((p) => p.json === workerDiedJson);
+      expect(died).toHaveLength(1);
+      expect(died[0]?.subject).toBe(architectTopic);
+      expect(publications.map((p) => JSON.parse(p.json).type)).toEqual([
+        "worker-started", // the relaunch
+        "worker-queued", // the relaunched pane's ready-time failure
+        "worker-died", // the terminal retirement; no worker-queued for it
+      ]);
+      const terminal = claim();
+      expect(terminal.locator).toBeUndefined();
+      expect(terminal.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41" });
+      expect(terminal.promptRetires).toBe(2);
+      expect(terminal.promptFailures).toBe(0);
+      expect(terminal.resumeSessionFile).toBe(sessionFile);
+      expect(terminal.launchFailures).toBeUndefined();
+      expect(managedState.workerAdmission.queue).toEqual([]);
+      expect(managedState.phases[root]).toBeUndefined();
+      expect(relaunched.prompts).toEqual(["verify #41", "verify #41", "verify #41"]);
+      expect(splitWindows()).toBe(1);
+
+      // A later sweep finds nothing to relaunch either.
+      await processes.reconcileWorkerAdmission();
+      expect(splitWindows()).toBe(1);
+      expect(claim().locator).toBeUndefined();
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+    // Acceptance 3: each retirement logs the token, the prompt-failure count, and the cycle.
+    const token = roleToken("omp", root, "tester");
+    expect(errorLines.filter((line) => line === retireLine(token, 1))).toHaveLength(1);
+    expect(errorLines.filter((line) => line === retireLine(token, 2))).toHaveLength(1);
+  });
+
+  it("clears promptRetires when the relaunched worker's first prompt starts a turn, so one later swallowed prompt neither retires nor escalates (LEGION-93)", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      const { processes, managedState, publications, token, clock, sleeps, relaunched, claim } =
+        await swallowedRelaunchFixture();
+      expect(claim().promptRetires).toBe(1);
+
+      // The relaunched worker is healthy: its ready-time prompt starts a turn.
+      relaunched.turnStartsOnPrompt = true;
+      await processes.workerReady(root, "tester", "ses_tester", 2);
+      const delivered = claim();
+      expect(delivered.pendingAssignment).toBeUndefined();
+      expect(delivered.promptFailures).toBe(0);
+      expect(delivered.promptRetires).toBeUndefined();
+      expect(managedState.phases[root]).toEqual({ phase: "tester", sessionId: "ses_tester" });
+      // Only the relaunch published worker-started: a ready-time delivery answers the boot, it
+      // publishes nothing (the architect's spawn already answered `spawned`).
+      expect(publications.filter((p) => p.json === workerStartedJson)).toHaveLength(1);
+
+      // It finishes, and the architect's next task is acknowledged without a turn: one failure,
+      // counted from zero — no retirement, no escalation.
+      relaunched.emitRunState("idle");
+      relaunched.turnStartsOnPrompt = false;
+      const spawn = processes.spawnWorker(root, root, "tester", "verify #41 again");
+      await expireTurnStartWait(sleeps, clock);
+      expect(await spawn).toEqual({ status: "queued", roleToken: token });
+      const counted = claim();
+      expect(counted.locator).toBeDefined();
+      expect(counted.promptFailures).toBe(1);
+      expect(counted.promptRetires).toBeUndefined();
+      expect(counted.pendingAssignment).toEqual({ kind: "assignment", task: "verify #41 again" });
+      expect(managedState.workerAdmission.queue).toEqual([token]);
+      expect(publications.filter((p) => p.json === workerDiedJson)).toHaveLength(0);
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+    const token = roleToken("omp", root, "tester");
+    expect(errorLines.filter((line) => line === retireLine(token, 1))).toHaveLength(1);
+    expect(errorLines.filter((line) => line === retireLine(token, 2))).toHaveLength(0);
   });
 
   it("answers queued and queues the task when spawn_worker's direct prompt is acknowledged but starts no turn", async () => {

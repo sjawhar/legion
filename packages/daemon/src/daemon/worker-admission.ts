@@ -21,6 +21,18 @@ import type { WorkerRpcClient } from "./worker-rpc";
  * which increments and publishes against the same threshold for the launch path. */
 export const MAX_LAUNCH_FAILURES = 3;
 
+/** Bounds a claim's `promptRetires`: how many times a live worker may be retired and relaunched
+ * for prompt failures before the retirement is terminal and the tree's architect hears
+ * `worker-died` (LEGION-93). Two: one relaunch. Judged `>=`, so a claim that already ended in
+ * `worker-died` and is spawned again by the architect gets one cold launch, `MAX_LAUNCH_FAILURES`
+ * prompts, and `worker-died` again — the architect's own spawn is the retry, never a reset. */
+export const MAX_PROMPT_RETIRES = 2;
+
+/** What `recordPromptFailure` decided at the threshold: `"relaunch"` retires the pane and leaves
+ * the task queued for a cold `--resume` relaunch on the next drain; `"died"` retires it
+ * terminally — queue entry removed, `worker-died` published, nothing relaunches it. */
+export type PromptRetireVerdict = "relaunch" | "died";
+
 /** Where a queued worker sits relative to the others: lower runs first, FIFO within a tier. Work
  * that finishes an open pull request outranks work that opens a new one — a merger turns an
  * approved PR into a merge, a reviewer turns a tested PR into an approval, a tester turns an
@@ -144,10 +156,18 @@ export interface WorkerAdmissionDeps {
   ): Promise<void>;
   /** Retires a persistently-broken worker's pane and clears its locator — assumes the caller
    * already holds this token's `roleLaunchQueue` critical section (see
-   * `ProcessManager.markWorkerDeadLocked`), so the "prompt" decision's own rejection-count
+   * `ProcessManager.retirePromptFailedClaim`), so the "prompt" decision's own failure-count
    * circuit breaker can call it without re-acquiring (and deadlocking on) the same lock it is
-   * already running inside. */
-  retireDeadClaim(token: string, locator: NonNullable<WorkerRoleClaim["locator"]>): Promise<void>;
+   * already running inside. `verdict` is `recordPromptFailure`'s decision: `"relaunch"` leaves
+   * the task queued for a cold `--resume` relaunch on the next drain; `"died"` is terminal —
+   * the implementation removes the role's queue entry and publishes `worker-died` to the tree's
+   * architect. Must throw (`StopFailed`) rather than clear anything when the pane cannot be
+   * confirmed stopped, so the caller leaves its counters untouched and retries next time. */
+  retireDeadClaim(
+    token: string,
+    locator: NonNullable<WorkerRoleClaim["locator"]>,
+    verdict: PromptRetireVerdict
+  ): Promise<void>;
   /** Overridable for tests only, to observe the ordering of `launchOrQueue`/
    * `resumeOrQueueExisting`'s own reservation-release and queue-drain-trigger relative to the
    * `launchWorker`/`promptExistingWorker` call that precedes them — production never supplies
@@ -428,20 +448,37 @@ export class WorkerAdmission {
    * no turn followed within the bound — and, at `MAX_LAUNCH_FAILURES` with a locator still
    * recorded, retires the worker: that many consecutive failures against an already-live,
    * already-idle-cached socket is not a fluke a retry will fix — a worker that keeps refusing or
-   * swallowing prompts needs replacing, the same recovery a dead socket gets. Retiring the pane
-   * and clearing the locator (inside the caller's role lock — see
-   * `WorkerAdmissionDeps.retireDeadClaim`'s doc comment for why this must never re-acquire it)
-   * lets the still-queued assignment fall through to the launch path's own threshold and
-   * `launch-failed` publish on the next drain, instead of looping through the exact same broken
-   * prompt forever. No persist: every caller saves as part of its own larger transition. */
-  private async recordPromptFailure(token: string): Promise<void> {
+   * swallowing prompts needs replacing, the same recovery a dead socket gets. The one place the
+   * retirement's verdict is decided (LEGION-93): the claim's `promptRetires` counts each such
+   * retirement, and while it is below `MAX_PROMPT_RETIRES` the verdict is `"relaunch"` — the pane
+   * retired and the locator cleared (inside the caller's role lock — see
+   * `WorkerAdmissionDeps.retireDeadClaim`'s doc comment for why this must never re-acquire it),
+   * so the still-queued assignment falls through to a cold `--resume` relaunch on the next drain
+   * — and at the bound it is `"died"`: the same retirement, then the role's queue entry removed
+   * and `worker-died` published, so a worker that keeps acknowledging prompts and starting
+   * nothing ends in the verdict a boot that never confirms does instead of relaunching forever.
+   * `promptFailures` returns to zero at each retirement (the relaunched pane gets the full
+   * `MAX_LAUNCH_FAILURES` prompts before it is judged again) and `promptRetires` counts one more
+   * — both written only after the stop succeeded: a `StopFailed` propagates with the locator and
+   * both counters untouched (`promptFailures` left at the threshold), so the next drain's
+   * failure retries the retirement without burning a relaunch cycle. Returns the verdict, or
+   * `undefined` when the failure was only counted. No persist: every caller saves as part of its
+   * own larger transition. */
+  private async recordPromptFailure(token: string): Promise<PromptRetireVerdict | undefined> {
     const claim = this.deps.state.roles[token];
-    if (!claim || !("issue" in claim)) return;
+    if (!claim || !("issue" in claim)) return undefined;
     const failures = (claim.promptFailures ?? 0) + 1;
     claim.promptFailures = failures;
-    if (failures >= MAX_LAUNCH_FAILURES && claim.locator) {
-      await this.deps.retireDeadClaim(token, claim.locator);
-    }
+    if (failures < MAX_LAUNCH_FAILURES || !claim.locator) return undefined;
+    const retires = (claim.promptRetires ?? 0) + 1;
+    const verdict: PromptRetireVerdict = retires >= MAX_PROMPT_RETIRES ? "died" : "relaunch";
+    await this.deps.retireDeadClaim(token, claim.locator, verdict);
+    claim.promptRetires = retires;
+    claim.promptFailures = 0;
+    console.error(
+      `[legion] ${token}: retiring after ${failures} prompts with no turn started; relaunch cycle ${retires} (bound ${MAX_PROMPT_RETIRES})`
+    );
+    return verdict;
   }
 
   /** What the two prompt paths with no drain of their own — `spawn_worker`'s direct `resumed`
@@ -450,14 +487,16 @@ export class WorkerAdmission {
    * — the pane is alive), place the role on the promotion queue so the next drain retries it
    * under the same cap-aware decision every promotion goes through, count the failure for a
    * `"no-turn"` reason (`recordPromptFailure`, retiring the worker at the threshold so the queued
-   * task relaunches cold with `--resume`), persist, and tell the architect `worker-queued` — it
-   * hears `worker-started` when the retry or a late start commits. A `"socket-closed"` reason is
-   * counted against nothing: that is a death, and the socket-close handler (`markWorkerDead`)
-   * alone retires the worker — the task is only kept and queued here so that retirement's own
-   * drain finds it. Deliberately no drain trigger: an immediate re-prompt of the same client would
-   * widen the window in which a merely slow worker receives the task twice; the retry is the next
-   * drain (an idle/dead event, the 60 s sweep) or the late start. The caller holds `token`'s role
-   * lock. */
+   * task relaunches cold with `--resume`, or — at `MAX_PROMPT_RETIRES` — ending the role in
+   * `worker-died`), persist, and tell the architect `worker-queued` — it hears `worker-started`
+   * when the retry or a late start commits. No `worker-queued` when the failure escalated to
+   * `worker-died`: nothing is queued any more, and the verdict is the notice. A `"socket-closed"`
+   * reason is counted against nothing: that is a death, and the socket-close handler
+   * (`markWorkerDead`) alone retires the worker — the task is only kept and queued here so that
+   * retirement's own drain finds it. Deliberately no drain trigger: an immediate re-prompt of the
+   * same client would widen the window in which a merely slow worker receives the task twice;
+   * the retry is the next drain (an idle/dead event, the 60 s sweep) or the late start. The
+   * caller holds `token`'s role lock. */
   async queueUnstartedPrompt(
     token: string,
     treeKey: IssueKey,
@@ -470,9 +509,11 @@ export class WorkerAdmission {
     await this.withAdmissionLock(async () => {
       this.enqueueIdleWorker(token, claim, pending);
     });
-    if (reason === "no-turn") await this.recordPromptFailure(token);
+    const verdict = reason === "no-turn" ? await this.recordPromptFailure(token) : undefined;
     await this.deps.persist();
-    this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+    if (verdict !== "died") {
+      this.deps.publishArchitect(treeKey, { type: "worker-queued", issue, role });
+    }
   }
 
   /**
@@ -491,7 +532,9 @@ export class WorkerAdmission {
    * the worker's turn was observed to start; a prompt the worker acknowledged without starting a
    * turn (`PromptNotStarted`) answers `"queued"` instead, the task queued for promotion through
    * `queueUnstartedPrompt` — the architect hears `worker-queued` now and `worker-started` on the
-   * retry or the late start. A refused prompt still throws.
+   * retry or the late start — or, when that failure is the one that exhausts
+   * `MAX_PROMPT_RETIRES`, still `"queued"` (the HTTP answer is part of the daemon API contract)
+   * with `worker-died` as the notice instead. A refused prompt still throws.
    */
   async resumeOrQueueExisting(
     token: string,
