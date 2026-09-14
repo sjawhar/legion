@@ -53,7 +53,7 @@ refused as `speaks daemon API contract 3; this daemon requires 4`.
 
 ## Native Dispatch tools
 
-The fourteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+The fifteen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_follow`,
 `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, `dispatch_search`, and
 `dispatch_open_asks` — register only when the shared configuration resolves a URL and bearer token at load; the URL
@@ -70,19 +70,24 @@ are the token — how the Legion daemon delivers it to a pane — and never fall
 back when unreadable. A human mints a personal token in Dispatch Settings → Agent
 tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the server
 attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
-the shared devbox fallback, not a token to configure for an individual agent. A
-successful mutation returns `details.topic`, and the `tool_result` hook subscribes to that exact retained
-Dispatch topic — a new subscription also tells the model (`pi.sendMessage`
-with `deliverAs: "steer"`, the same channel `deliver` uses for inbound
-envelopes, since the host does not let a `tool_result` handler amend what the
-model already saw); an already-subscribed write stays quiet. Reads
-(`dispatch_read`, `dispatch_doc_read`) return only `details.issue`: surveying
-the board never subscribes the session. A `subscription.removed` notice (a
-human unsubscribed a session from the dashboard) reaches both the issue's own
-topic and the removed session's agent topic directly; only the session the
-payload names renders it and drops the matching local NATS subscription
-(so the dead-connection recovery path does not resurrect it) — every other
-subscriber ignores it.
+the shared devbox fallback, not a token to configure for an individual agent. No
+Dispatch write subscribes the session to anything: whole-issue or whole-document
+subscription is the model's explicit `envoy_subscribe`, and every write result names
+the topic to pass it. What a write does give the session is a *follow* on the ask it
+opened or replied to (`details.follows.ask`): the ask's answer and replies then reach
+the session's own agent topic directly, server-side, with no NATS subscription to
+manage. The `tool_result` hook turns the first `details.follows` for each ask id into
+one steer notice (`pi.sendMessage` with `deliverAs: "steer"`, the same channel
+`deliver` uses for inbound envelopes, since the host does not let a `tool_result`
+handler amend what the model already saw) via `dispatchFollowNotice`; a later write on
+the same ask stays quiet, and reads (`dispatch_read`, `dispatch_doc_read`) return only
+owner details. `dispatch_follow` leaves or rejoins an ask. A `subscription.removed`
+notice (a human unsubscribed a session from the dashboard) reaches both the issue's
+own topic and the removed session's agent topic directly; only the session the payload
+names renders it and drops the matching local NATS subscription (so the
+dead-connection recovery path does not resurrect it) — every other subscriber ignores
+it. `ask.follower_added` / `ask.follower_removed` likewise render only for the session
+they name.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 `dispatch_ask` can set `kind: "action"` for a human to-do with fixed `Done` / `Can't` answers. It does not expose `approval`, which is opened only through `dispatch_request_approval`.
 `dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.
@@ -110,7 +115,7 @@ query succeeds.
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the fourteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and subscribe only when a successful result includes `details.topic`. |
+| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the fifteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon passes each as the first part of the pane's single `--append-system-prompt` value (OMP's flag is last-wins, so the parts are joined), followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last part |
 | Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 

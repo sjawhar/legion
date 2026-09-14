@@ -110,12 +110,46 @@ interface ResolvedArtifact {
   readonly artifact: Artifact;
 }
 
+/**
+ * Where an owner's events go and how a session names it: the label agents read in tool
+ * results and the wildcard `envoy_subscribe` takes. No write subscribes a session to it;
+ * whole-owner subscription is the agent's explicit choice (D3), so every write says so.
+ */
+interface OwnerTopic {
+  readonly label: string;
+  readonly topic: string;
+}
+
+function issueTopic(key: string): OwnerTopic {
+  return { label: key, topic: dispatchIssueSubject(key, ">") };
+}
+
+function documentTopic(artifact: Artifact): OwnerTopic {
+  return {
+    label: `${artifact.project}/${artifact.slug}`,
+    topic: dispatchDocumentSubject(artifact.project, artifact.slug, ">"),
+  };
+}
+
+function resolvedTopic(resolved: ResolvedArtifact): OwnerTopic {
+  if (resolved.owner.kind === "project") return documentTopic(resolved.artifact);
+  if (resolved.issue === undefined) throw new Error("issue document is missing its issue");
+  return issueTopic(resolved.issue.key);
+}
+
+function notSubscribed(owner: OwnerTopic): string {
+  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
+}
+
+function followsAsk(owner: OwnerTopic): string {
+  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+
 function documentResultDetails(artifact: Artifact): Record<string, unknown> {
   return {
     project: artifact.project,
     artifact: artifact.id,
     document: `${artifact.project}/${artifact.slug}`,
-    topic: dispatchDocumentSubject(artifact.project, artifact.slug, ">"),
   };
 }
 
@@ -127,30 +161,36 @@ function writeResultDetails(
     return { ...documentResultDetails(resolved.artifact), ...fields };
   }
   if (resolved.issue === undefined) throw new Error("issue document is missing its issue");
-  return {
-    issue: resolved.issue.key,
-    topic: dispatchIssueSubject(resolved.issue.key, ">"),
-    ...fields,
-  };
+  return { issue: resolved.issue.key, ...fields };
 }
 
-async function askResultDetails(
+/** Owner and ask ids for a result about one ask; no claim about following. */
+async function askOwnerDetails(
   client: DispatchClient,
   ask: Pick<Ask, "id" | "issue_key" | "artifact_id">,
   resolved?: ResolvedArtifact
 ) {
   if (ask.issue_key !== null) {
-    return {
-      issue: ask.issue_key,
-      topic: dispatchIssueSubject(ask.issue_key, ">"),
-      ask: ask.id,
-    };
+    return { issue: ask.issue_key, ask: ask.id };
   }
   if (ask.artifact_id === undefined || ask.artifact_id === null) {
     throw new Error("document ask is missing its artifact ID");
   }
   const artifact = resolved?.artifact ?? (await client.getArtifact(ask.artifact_id));
   return { ...documentResultDetails(artifact), ask: ask.id };
+}
+
+/**
+ * Details for a write that made the calling session a follower of the ask (opened it,
+ * requested approval through it, followed it): `follows.ask` tells the host to say so once.
+ * Editing or resolving an ask records no follower, so those results use askOwnerDetails.
+ */
+async function followedAskDetails(
+  client: DispatchClient,
+  ask: Pick<Ask, "id" | "issue_key" | "artifact_id">,
+  resolved?: ResolvedArtifact
+) {
+  return { ...(await askOwnerDetails(client, ask, resolved)), follows: { ask: ask.id } };
 }
 
 const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
@@ -161,6 +201,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_issue: true,
   dispatch_edit_ask: true,
   dispatch_resolve_ask: true,
+  dispatch_follow: true,
   dispatch_search: true,
   dispatch_open_asks: true,
 };
@@ -1056,8 +1097,8 @@ export async function executeDispatchTool(
           actor,
         });
         return {
-          text: `Created ${created.key}: ${created.title}`,
-          details: { issue: created.key, topic: dispatchIssueSubject(created.key, ">") },
+          text: `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+          details: { issue: created.key },
         };
       } catch (error) {
         if (!(error instanceof DispatchServiceError) || error.code !== "POSSIBLE_DUPLICATE") {
@@ -1108,7 +1149,7 @@ export async function executeDispatchTool(
       if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
       return {
         text: `${kind === "retracted" ? "Retracted" : "Resolved"} ask ${ask.id}: ${ask.resolution.reason}`,
-        details: await askResultDetails(client, ask),
+        details: await askOwnerDetails(client, ask),
       };
     }
     case "dispatch_ask": {
@@ -1143,9 +1184,15 @@ export async function executeDispatchTool(
         resolved?.owner.kind === "project"
           ? await client.artifactAsk(resolved.artifact.id, askInput)
           : await client.ask(issue(), askInput);
+      const askOwner =
+        ask.issue_key !== null
+          ? issueTopic(ask.issue_key)
+          : resolved === undefined
+            ? issueTopic(issue())
+            : documentTopic(resolved.artifact);
       return {
-        text: `Opened ask ${ask.id}: ${ask.question}`,
-        details: await askResultDetails(client, ask, resolved),
+        text: `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
+        details: await followedAskDetails(client, ask, resolved),
       };
     }
     case "dispatch_edit_ask": {
@@ -1164,7 +1211,7 @@ export async function executeDispatchTool(
       });
       return {
         text: `Ask edited: ${ask.question}`,
-        details: await askResultDetails(client, ask),
+        details: await askOwnerDetails(client, ask),
       };
     }
     case "dispatch_comment": {
@@ -1194,23 +1241,28 @@ export async function executeDispatchTool(
         resolved?.owner.kind === "project"
           ? await client.artifactComment(resolved.artifact.id, commentInput)
           : await client.comment(issue(), commentInput);
-      // The server records turn only on a reply to an open ask, so a non-null turn is exactly
-      // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
-      const askState = comment.turn === null ? "" : ` (ask now waiting on ${comment.turn})`;
+      const commentOwner = resolved === undefined ? issueTopic(issue()) : resolvedTopic(resolved);
+      const commentDetails =
+        resolved === undefined
+          ? { issue: comment.issue_key, comment: comment.id }
+          : writeResultDetails(resolved, { comment: comment.id });
+      if (replyToAsk !== undefined) {
+        // The server records turn only on a reply to an open ask, so a non-null turn is exactly
+        // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
+        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        return {
+          text: `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
+          details: {
+            ...commentDetails,
+            ask: replyToAsk,
+            follows: { ask: replyToAsk },
+            ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+          },
+        };
+      }
       return {
-        text: `Posted comment ${comment.id}${askState}`,
-        details:
-          resolved === undefined
-            ? {
-                issue: comment.issue_key,
-                topic: dispatchIssueSubject(issue(), ">"),
-                comment: comment.id,
-                ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
-              }
-            : writeResultDetails(resolved, {
-                comment: comment.id,
-                ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
-              }),
+        text: `Posted comment ${comment.id} ${notSubscribed(commentOwner)}`,
+        details: commentDetails,
       };
     }
     case "dispatch_suggest": {
@@ -1229,7 +1281,7 @@ export async function executeDispatchTool(
           ? await client.artifactSuggest(resolved.artifact.id, suggestionInput)
           : await client.suggest(issue(), suggestionInput);
       return {
-        text: `Posted suggestion ${comment.id}`,
+        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
         details: writeResultDetails(resolved, { comment: comment.id }),
       };
     }
@@ -1243,12 +1295,8 @@ export async function executeDispatchTool(
       });
       const messageRef = `dispatch://${issueKey}/message/${message.id}`;
       return {
-        text: `Posted message ${message.id} (${messageRef})`,
-        details: {
-          issue: issueKey,
-          topic: dispatchIssueSubject(issueKey, ">"),
-          message: message.id,
-        },
+        text: `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+        details: { issue: issueKey, message: message.id },
       };
     }
     case "dispatch_doc_edit": {
@@ -1263,11 +1311,12 @@ export async function executeDispatchTool(
       const retyped = ops.filter((operation) => operation.op === "retype").length;
       const versionText =
         edited.version === null ? "no new version" : `version ${edited.version.number}`;
+      const applied =
+        retyped === 0
+          ? `Applied ${edited.applied} ops (${versionText})`
+          : `Applied ${edited.applied} ops; retyped ${retyped} block${retyped === 1 ? "" : "s"} (${versionText})`;
       return {
-        text:
-          retyped === 0
-            ? `Applied ${edited.applied} ops (${versionText})`
-            : `Applied ${edited.applied} ops; retyped ${retyped} block${retyped === 1 ? "" : "s"} (${versionText})`,
+        text: `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
         details: writeResultDetails(resolved, {
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
@@ -1323,7 +1372,7 @@ export async function executeDispatchTool(
           },
         };
       }
-      const details = await askResultDetails(client, result.ask, resolved);
+      const details = await followedAskDetails(client, result.ask, resolved);
       return {
         text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
@@ -1356,8 +1405,10 @@ export async function executeDispatchTool(
         artifactOwner.kind === "project"
           ? `dispatch://${artifactOwner.project}/artifact/${result.artifact.slug}`
           : `dispatch://${issue()}/artifact/${result.artifact.slug}`;
+      const uploadOwner =
+        artifactOwner.kind === "project" ? documentTopic(result.artifact) : issueTopic(issue());
       return {
-        text: `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})`,
+        text: `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
         details:
           artifactOwner.kind === "project"
             ? {
@@ -1366,13 +1417,28 @@ export async function executeDispatchTool(
               }
             : {
                 issue: issue(),
-                topic: dispatchIssueSubject(issue(), ">"),
                 artifact: result.artifact.id,
                 version: result.version.number,
               },
       };
     }
-    // Reads report their owner but no `topic`: only a write subscribes the session.
+    case "dispatch_follow": {
+      const sessionId = input.sessionId?.trim();
+      if (!sessionId) throw new Error("host session id is required for dispatch_follow");
+      const ask = askId(args);
+      const action = stringArg(args, "action");
+      if (action === "unfollow") {
+        await client.unfollowAsk(ask, sessionId, actor);
+        return { text: `Unfollowed ask ${ask}.`, details: { ask } };
+      }
+      const read = await client.getAsk(ask);
+      await client.followAsk(ask, sessionId, actor);
+      return {
+        text: `Following ask ${ask}: its answer and replies reach this session directly.`,
+        details: await followedAskDetails(client, read.ask),
+      };
+    }
+    // Reads report their owner and follow nothing; no result subscribes the session.
     case "dispatch_read": {
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;

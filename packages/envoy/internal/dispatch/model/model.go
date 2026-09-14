@@ -319,6 +319,22 @@ type AskEdit struct {
 	At       string          `json:"at"`
 }
 
+// AskFollower is a session that receives an ask's answer, edits, resolution, and
+// replies on its own topic: the asker, every session that replied, and any session
+// a human added. A session may leave; a human may add or remove any session.
+type AskFollower struct {
+	SessionID string    `json:"session_id"`
+	Since     time.Time `json:"since"`
+}
+
+// AskFollowerEventPayload is the payload of ask.follower_added and
+// ask.follower_removed: which session joined or left which ask, and who did it.
+type AskFollowerEventPayload struct {
+	AskID     string `json:"ask_id"`
+	SessionID string `json:"session_id"`
+	By        Actor  `json:"by"`
+}
+
 // AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
 // on the issue detail's open asks so a human can see who spoke last. Whose turn it
 // is comes from that comment's Turn (Ask.WaitingOn), not from its author.

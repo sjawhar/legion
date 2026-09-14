@@ -29,11 +29,12 @@ events and sends them to the current Claude Code session as supported
 - A targeted Dispatch delivery the shared renderer rejects is never shown to the model: when it
   names a message, the server posts `Invalid Dispatch targeted delivery frame` to
   `POST /api/v1/messages/{id}/reply` so the attempt fails visibly; otherwise it is logged and dropped.
-- Every Dispatch write that returns an issue topic follows it and, the first time, tells the model
-  `Subscribed to <issue> (every event on this issue reaches you; envoy_unsubscribe <topic> to stop).`
-  A resumed server rebuilds the interests its session id already registered, so those are not
-  announced again. `envoy_list` reports the union of live NATS subscriptions and registry interests
-  with each topic's `source` (`live`, `registry`, `both`).
+- No Dispatch write subscribes the session to an issue. A write that makes the session follow an
+  ask (`details.follows.ask`) tells the model once per ask
+  `Following ask <id> on <issue>: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on <issue>: envoy_subscribe <topic>.`
+  A resumed server rebuilds the interests its session id already registered. `envoy_list` reports
+  the union of live NATS subscriptions and registry interests with each topic's `source` (`live`,
+  `registry`, `both`).
 - `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`.
   `claude --resume <session-id>` finds that file and soft-reclaims the role with the saved
   `previous_session_id`; a plain relaunch is a new session and inherits nothing. Every healthy
@@ -71,8 +72,8 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 ## Dispatch and Envoy tools
 
 The server exposes the shared Envoy messaging contract, including `envoy_inbox` and
-`envoy_role_get`. When Dispatch is configured, it additionally exposes the fourteen native tools:
-`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+`envoy_role_get`. When Dispatch is configured, it additionally exposes the fifteen native tools:
+`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_follow`,
 `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
 `dispatch_search`, and `dispatch_open_asks`.

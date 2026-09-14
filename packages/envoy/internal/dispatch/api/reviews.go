@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -473,6 +474,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		values ($1, $2, $3, $4, $5, $6, false, 'high', null, 'approval', $7)
 		returning created_at
 	`, ask.ID, owner.IssueKey, owner.ArtifactID, author, ask.Question, options, approval).Scan(&ask.CreatedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := asks.FollowAuthor(r.Context(), tx, ask.ID, actor); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

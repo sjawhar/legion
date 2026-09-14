@@ -56,6 +56,10 @@ export function eventDescription(event: Event): string {
       return `Unsubscribe requested for ${event.payload.session_id}`;
     case "subscription.removed":
       return `Unsubscribed ${event.payload.session_id}`;
+    case "ask.follower_added":
+      return `${event.payload.session_id} follows an ask`;
+    case "ask.follower_removed":
+      return `${event.payload.session_id} unfollowed an ask`;
     case "block.repaired":
       return `Repaired block ${event.payload.block_id}`;
     case "block.invalid":

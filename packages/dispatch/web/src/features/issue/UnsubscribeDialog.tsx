@@ -13,6 +13,8 @@ import {
 import { useDialog } from "../shell/useDialog";
 
 export interface UnsubscribeDialogProps {
+  /** The dialog's accessible name; the action it confirms. */
+  label?: string;
   message: string;
   onCancel: () => void;
   onConfirm: () => void;
@@ -20,10 +22,12 @@ export interface UnsubscribeDialogProps {
 
 /**
  * Confirms removing a subscriber from an issue's or project document's "Subscribed
- * agents" list, shared between IssueHeader and DocumentPage. Escape, a backdrop click,
- * and Cancel all dismiss without action; Confirm is the only path that unsubscribes.
+ * agents" list (IssueHeader, DocumentPage) or a follower from an ask's "Followed by" list
+ * (AskFollowers). Escape, a backdrop click, and Cancel all dismiss without action; Confirm
+ * is the only path that removes.
  */
 export function UnsubscribeDialog({
+  label = "Unsubscribe",
   message,
   onCancel,
   onConfirm,
@@ -35,7 +39,7 @@ export function UnsubscribeDialog({
       <div aria-hidden="true" className={`fixed inset-0 z-40 ${backdrop40}`} onClick={onCancel} />
       <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center p-4">
         <div
-          aria-label="Unsubscribe"
+          aria-label={label}
           aria-modal="true"
           className={`pointer-events-auto w-full max-w-sm space-y-4 rounded-lg border p-4 shadow-xl ${card}`}
           ref={dialog.containerRef}

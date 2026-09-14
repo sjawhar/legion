@@ -37,6 +37,7 @@ const validCalls = {
     kind: "retracted",
     reason: "A newer question supersedes this one.",
   },
+  dispatch_follow: { ask: "ask-1", action: "follow" },
   dispatch_comment: { issue: "DSP-1", body: "Looks good." },
   dispatch_suggest: {
     issue: "DSP-1",
@@ -96,6 +97,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_ask",
       "dispatch_edit_ask",
       "dispatch_resolve_ask",
+      "dispatch_follow",
       "dispatch_comment",
       "dispatch_suggest",
       "dispatch_message",
@@ -453,7 +455,17 @@ describe("dispatchToolSpecs", () => {
     expect(documentEdit.description).toContain(sectionOrder);
   });
 
-  test("leaves Dispatch subscriptions to successful tool results", () => {
+  test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {
+    const schema = schemaFor("dispatch_follow");
+    expect(schema.safeParse({ ask: "ask-1", action: "unfollow" }).success).toBe(true);
+    expect(schema.safeParse({ ask: "ask-1", action: "mute" }).success).toBe(false);
+    expect(schema.safeParse({ ask: "ask-1" }).success).toBe(false);
+    expect(schema.safeParse({ ask: "ask-1", action: "follow", issue: "DSP-1" }).success).toBe(
+      false
+    );
+  });
+
+  test("no tool result subscribes the session to an issue; following an ask is the write's side effect", () => {
     expect(dispatchToolSpecs.every((spec) => !("subscribes" in spec))).toBe(true);
   });
 });

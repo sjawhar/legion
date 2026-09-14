@@ -56,7 +56,12 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
 test("Inbox labels an artifact-owned ask with its project and document page link", async () => {
   const ask = artifactAsk();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([ask]);
-  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask, edits: [], replies: [] });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter>
@@ -90,6 +95,7 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -128,6 +134,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -174,6 +181,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: id === askA.id ? askA : askB,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -206,7 +214,12 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
     waiting_on: "agent",
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([noted]);
-  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: noted, edits: [], replies: [] });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: noted,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter>
@@ -255,6 +268,7 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: [p0, p2, agentWaits].find((ask) => ask.id === id) ?? p0,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -321,6 +335,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([
@@ -379,6 +394,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
   const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
     ask: rows.find((ask) => ask.id === id) ?? fromPlanner,
     edits: [],
+    followers: [],
     replies: [],
   }));
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
@@ -414,6 +430,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: issueAsk(),
     edits: [],
+    followers: [],
     replies: [],
   });
   const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);

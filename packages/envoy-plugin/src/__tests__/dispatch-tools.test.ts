@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { dispatchIssueSubject, dispatchToolSpecs } from "@legion/contracts";
+import { dispatchToolSpecs } from "@legion/contracts";
 import { tool } from "@opencode-ai/plugin/tool";
 import { logger } from "../log";
 import initPlugin from "../server";
@@ -92,12 +92,11 @@ test("registers every native Dispatch tool with its shared schema and executes a
 
     expect(result).toEqual({
       title: "Dispatch",
-      output: "Opened ask ask-1: Should the branch merge?",
-      metadata: {
-        issue: "DSP-41",
-        topic: dispatchIssueSubject("DSP-41", ">"),
-        ask: "ask-1",
-      },
+      output:
+        "Asked ask-1 on DSP-41 (urgency med): Should the branch merge?\n" +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-41: envoy_subscribe notifications.dispatch.issue.DSP-41.>",
+      metadata: { issue: "DSP-41", ask: "ask-1", follows: { ask: "ask-1" } },
     });
     expect(received).toMatchObject({
       question: "Should the branch merge?",

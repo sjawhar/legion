@@ -23,6 +23,7 @@ export type {
   AskBlockArtifact,
   AskEdit,
   AskEditPrevious,
+  AskFollower,
   AskLastReply,
   AskOption,
   AskRead,

@@ -16,23 +16,28 @@ This package exposes:
 - `dispatch_ask`
 - `dispatch_edit_ask`
 - `dispatch_resolve_ask`
+- `dispatch_follow`
 - `dispatch_comment`
 - `dispatch_suggest`
 - `dispatch_message`
 - `dispatch_doc_edit`
 - `dispatch_doc_read`
+- `dispatch_request_approval`
 - `dispatch_artifact`
 - `dispatch_read`
 - `dispatch_search`
+- `dispatch_open_asks`
 
-The twelve native `dispatch_*` tools create and read Dispatch issues, asks, comments,
+The fifteen native `dispatch_*` tools create and read Dispatch issues, asks, comments,
 documents, and artifacts, or search all of them. They are present when `dispatch.enabled`
 resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
 with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment
 variables; `dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`.
-Each issue-scoped call fills the target issue from the session working directory, stamps it with
-the OpenCode session id and title, and stores a successful mutation's `details.topic` as tool
-metadata so the host subscribes to that exact Dispatch topic.
+Each issue-scoped call fills the target issue from the session working directory and stamps it with
+the OpenCode session id and title. No write subscribes the session to an issue or document: a
+session follows the asks it opens or replies to (their answers and replies reach it directly),
+`dispatch_follow` leaves or rejoins one, and every write result names the `envoy_subscribe` line
+for the whole owner.
 
 `dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
 An architect can post a specification directly with

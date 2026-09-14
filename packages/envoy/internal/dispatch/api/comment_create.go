@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -252,6 +253,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if input.AskID != nil {
+		if err := asks.FollowAuthor(r.Context(), tx, *input.AskID, actor); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	comment.ID = rowID
 	comment.IssueKey = owner.IssueKey

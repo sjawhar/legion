@@ -288,6 +288,21 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("does not flag the asker's session as foreign when the answer reaches another follower", () => {
+    const asker = "01a0aaaa-bbbb-7ccc-dddd-0123456789ab";
+    const answeredByAnotherFollower = {
+      ...answeredAsk,
+      author: { kind: "session", id: asker },
+    };
+    const rendered = renderInbound(
+      dispatchEvent("ask.answered", answeredByAnotherFollower, { kind: "user", id: "sami" }),
+      reader
+    );
+
+    expect(rendered.skip).toBe(false);
+    expect(rendered.content).not.toContain("note:");
+  });
+
   test("renders ask.resolved as a low-key Dispatch update", () => {
     const resolvedAsk = {
       ...openAsk,
@@ -480,6 +495,47 @@ describe("renderInbound dispatch events", () => {
     );
 
     expect(rendered).toMatchObject({ skip: true, content: "" });
+  });
+
+  test("renders ask.follower_added and ask.follower_removed as short notices for the named session only", () => {
+    const human = { kind: "user", id: "alice" };
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "ask.follower_added",
+          { ask_id: "ask-1", session_id: reader, by: human },
+          human
+        ),
+        reader
+      )
+    ).toMatchObject({
+      skip: false,
+      content:
+        "Now following ask ask-1 on DSP-1 (added by alice): its answer and replies reach you directly; dispatch_follow unfollow to stop.",
+    });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "ask.follower_removed",
+          { ask_id: "ask-1", session_id: reader, by: human },
+          human
+        ),
+        reader
+      )
+    ).toMatchObject({
+      skip: false,
+      content: "No longer following ask ask-1 on DSP-1 (removed by alice).",
+    });
+    expect(
+      renderInbound(
+        dispatchEvent(
+          "ask.follower_removed",
+          { ask_id: "ask-1", session_id: "ses_someone_else", by: human },
+          human
+        ),
+        reader
+      )
+    ).toMatchObject({ skip: true, content: "" });
   });
 
   test("renders a comment.created reply to an ask as 're: <ask ref>' with the question head under dispatch", () => {

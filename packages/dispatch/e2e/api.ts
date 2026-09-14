@@ -6,6 +6,7 @@ import type {
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
+  AskFollower,
   AskRead,
   Comment,
   CreateAgentMessageInput,
@@ -70,7 +71,7 @@ async function request<T>(
     throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
   }
 
-  return (await response.json()) as T;
+  return (response.status === 204 ? undefined : await response.json()) as T;
 }
 
 export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
@@ -270,6 +271,23 @@ export function listComments(
 
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
+}
+
+export function listAskFollowers(
+  id: string,
+  options: ApiOptions = {}
+): Promise<{ followers: AskFollower[] }> {
+  return request(`/api/v1/asks/${encodeURIComponent(id)}/followers`, "GET", undefined, options);
+}
+
+/** A session follows an ask: the bearer body names the session, which must equal the path. */
+export function followAsk(id: string, sessionID: string, actor: Actor): Promise<void> {
+  return request(
+    `/api/v1/asks/${encodeURIComponent(id)}/followers/${encodeURIComponent(sessionID)}`,
+    "PUT",
+    {},
+    { actor, as: "agent" }
+  );
 }
 
 export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artifact> {
