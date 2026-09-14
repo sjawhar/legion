@@ -157,6 +157,13 @@ export const cardHoverBorder = "hover:border-sky-400 dark:hover:border-sky-300";
 export const enabledCardHoverBorder =
   "enabled:hover:border-sky-400 dark:enabled:hover:border-sky-300";
 export const controlHoverBorder = "hover:border-sky-500 dark:hover:border-sky-400";
+/** A quiet chip's outline, driven by the `group` button wrapping it: the 44 px hit area itself
+ * stays invisible and only the glyph-sized pill inside shows the affordance — the
+ * `CARD_HOVER_ACCENT` shades on hover, `FOCUS_ACCENT` on keyboard focus (the 3:1 focus-ring
+ * checks below cover it). Pair with `borderTransparent` at rest so the pill never shifts. */
+export const groupHoverCardBorder = "group-hover:border-sky-400 dark:group-hover:border-sky-300";
+export const groupFocusVisibleBorder =
+  "group-focus-visible:border-sky-600 dark:group-focus-visible:border-sky-400";
 
 registerText("focus ring on canvas", FOCUS_ACCENT, CANVAS, 3);
 registerText("focus ring on surface", FOCUS_ACCENT, SURFACE, 3);

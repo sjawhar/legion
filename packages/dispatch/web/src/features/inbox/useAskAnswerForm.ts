@@ -112,23 +112,31 @@ export function useAskAnswerForm({
   const isAction = displayedAsk.kind === "action";
   const isSubmitting = mutation.isPending || clarification.isPending;
   const trimmedAnswer = answerText.trim();
-  const canAnswer = isApproval
-    ? selected.length > 0 && (!selected.includes("Request changes") || trimmedAnswer !== "")
-    : isAction
-      ? selected.length > 0 && (!selected.includes("Can't") || trimmedAnswer !== "")
+  // The server rejects these two fixed options without text; the form says so instead of
+  // leaving the submit button silently dead.
+  const requiresReason = (label: string): boolean =>
+    (isAction && label === "Can't") || (isApproval && label === "Request changes");
+  const reasonRequiredFor = selected.find(requiresReason);
+  const reasonRequired = reasonRequiredFor !== undefined;
+  const canAnswer =
+    isApproval || isAction
+      ? selected.length > 0 && (!reasonRequired || trimmedAnswer !== "")
       : hasOptions
         ? otherSelected
           ? trimmedAnswer !== ""
           : selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer)
         : trimmedAnswer !== "";
-  const answerPlaceholder =
-    isApproval && selected.includes("Request changes")
-      ? "Why? (required)"
-      : isApproval && selected.includes("Approve")
-        ? "Note (optional)"
-        : selected.length > 0
-          ? "Add a note (optional)"
-          : "Answer in your own words, or ask a question back";
+  const submitHint =
+    reasonRequired && trimmedAnswer === ""
+      ? `Add a reason to send ${reasonRequiredFor}`
+      : undefined;
+  const answerPlaceholder = reasonRequired
+    ? "Why?"
+    : isApproval && selected.includes("Approve")
+      ? "Note (optional)"
+      : selected.length > 0
+        ? "Add a note (optional)"
+        : "Answer in your own words, or ask a question back";
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
       const answerSelection = isApproval || isAction || hasOptions ? selected : [];
@@ -204,6 +212,8 @@ export function useAskAnswerForm({
     mutation,
     otherSelected,
     questionChoice,
+    reasonRequired,
+    requiresReason,
     selectRealOption,
     selected,
     sendAnswer,
@@ -212,6 +222,7 @@ export function useAskAnswerForm({
     setQuestionChoice,
     submitGuard,
     submit,
+    submitHint,
     toggleOther,
     threadQuery,
     trimmedAnswer,
