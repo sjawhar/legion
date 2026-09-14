@@ -1,0 +1,68 @@
+{
+  "summary": "CHANGES_REQUESTED at head c4f58e44aaf58259bff3dba1f11b8be2dff0780c (code tip 7bc83404): the Legion-side diff is clean; the one blocking finding is in the fork release this PR pins. In sjawhar/oh-my-pi f3278eed, session-storage-config.ts:76 constructs `new SQL(dsn)` outside the try, so a connection string Bun cannot parse (a libpq keyword string like `host=db user=legion password=hunter2`) throws a TypeError whose message embeds the whole string, escapes main.ts's catch, and is dumped by cli.ts's `fatal` to stderr and OMP's log — password included. That breaks the spec's 'never printing the connection string' contract and makes docs/kubernetes.md line 172 false at this pin. Fix: fork commit (construct inside the try, refuse without the string, one test), operator cuts a release, OMP_FORK_PIN bumped here, one docs row. Everything else is fast-follow cleanup. Fork-bar ruling: one seam, one resolver, 24 mechanical swaps, DRY, zero Legion names — meets Sami's bar once the blocking fix and two minors (startup-composer prepaint list reads files under sql; two unused exports) land in the same fork commit.",
+  "verdict": "changes_requested",
+  "headReviewed": "c4f58e44aaf58259bff3dba1f11b8be2dff0780c",
+  "codeTip": "7bc83404581086da2d68155256010aa8eaa00989",
+  "review": {
+    "url": "https://github.com/sjawhar/legion/pull/1081#pullrequestreview-5195037174",
+    "id": 5195037174,
+    "event": "REQUEST_CHANGES",
+    "author": "legion-reviewer[bot]"
+  },
+  "verifiedOnGitHub": {
+    "ci": "Tests run 34814491558 at c4f58e44: lint, typecheck, test success; PR Title success; Legion Envoy and Contracts success",
+    "workerImage": "Worker Image run 34814138736 at bd810bd9 (ancestor; Dockerfile and omp-pin.ts unchanged since) printed `probe-image: OK (/opt/omp/bin/omp) session-storage=probed` inside the real image; the run at c4f58e44 (34814491485) reused that cached layer",
+    "threadsBefore": 0,
+    "e2e": "implementer E2E at bd810bd9 (proofs at cb9b42f8, fingerprint differs only by the docs intro sentence) and tester E2E at c4f58e44, both on the tagged build against a throwaway loopback Postgres with a negative control; tester also drove `omp --mode rpc`",
+    "mergeable": "MERGEABLE / BLOCKED (no conflict; no rebase)"
+  },
+  "findings": [
+    {
+      "severity": "blocking",
+      "where": "fork sjawhar/oh-my-pi f3278eeda197ba1e241c2800b8a0baf21ef2dc19 packages/coding-agent/src/session/session-storage-config.ts:76 (anchored in this PR at docs/kubernetes.md:172, the 'never the connection string' row)",
+      "thread": "https://github.com/sjawhar/legion/pull/1081#discussion_r4003047466",
+      "threadId": "PRRT_kwDORFy7ds6iBeVN",
+      "what": "`const client = new SQL(dsn);` sits outside the try. Reproduced with bun 1.3.14: new SQL(\"host=db user=legion password=hunter2\") throws TypeError ERR_INVALID_URL with the whole string in the message. Not a SessionStorageConfigError, so main.ts:1745 rethrows; cli.ts:547 runCli().catch(fatal) writes Bun.inspect(error) to fd 2 and logger.error — the password reaches the pane/pod log and OMP's log. Exit 1 but not the documented refusal form.",
+      "fix": "Fork: construct inside the try; refuse a constructor failure as `<source> names <path>, but its contents are not a connection URL the database driver accepts` without interpolating the driver message (or scrub dsn from it); one test with a libpq-form file asserting the password is absent. Operator cuts the release. Here: bump OMP_FORK_PIN and the AGENTS.md pin sentence; add the refusal row to docs/kubernetes.md."
+    },
+    {
+      "severity": "minor",
+      "where": "fork packages/coding-agent/src/modes/startup-composer.ts:193 via cli.ts:505-516",
+      "what": "bare TTY `omp` starts the prepaint composer before runRootCommand, so loadRecentSessions reaches defaultSessionStorage() before setDefaultSessionStorage; the welcome list and its cache come from files under session.storage: sql. Cosmetic; not on Legion's path (headless; PI_TIMING suppresses the composer). The one surface still split between files and the database.",
+      "fix": "fold into the same fork commit; keep one resolver"
+    },
+    {
+      "severity": "minor",
+      "where": "fork session-storage-config.ts:26-27",
+      "what": "SESSION_STORAGE_ENV / SESSION_SQL_DSN_FILE_ENV exported, imported nowhere",
+      "fix": "drop export"
+    },
+    {
+      "severity": "note",
+      "where": "fork cli/gc-cli.ts:368,381",
+      "what": "omp gc never reaches the resolver; the two swaps are uniformity only. Defensible either way; weigh against 'nothing beyond making the existing storage selectable' before the upstream PR."
+    }
+  ],
+  "fastFollow": {
+    "name": "LEGION-80 review nits",
+    "items": [
+      "boot-probes.ts:14-16 header says the third probe is exported for the daemon to run under a sql session store; AGENTS.md:375, docs/kubernetes.md:174 and spec v9 say the daemon never probes a host OMP for it and requires the session-storage=probed token from the image — reword so LEGION-81 inherits one contract (the third probe classifies a launch-prefix failure as transient; under the daemon's unbounded policy that would retry a secrets denial forever — another reason the daemon must not run it)",
+      "boot-probes.ts:387 `export` on SESSION_STORAGE_VARIABLE has no importer",
+      "cli/__tests__/index.test.ts:801-803 re-pins the full third-probe command boot-probes.test.ts:119-123 already pins; use toStartWith like its siblings",
+      "legion.test.ts:1437,1454-1455 parses request bodies nothing reads",
+      "wording: docs/kubernetes.md:35-36 'an older build accepts the value' vs boot-probes.ts:385 'a value no build accepts'; worker.Dockerfile:12,122 'the daemon's three launch probes' while the daemon's boot runs two; docs/kubernetes.md:172 gives one driver message where the shape is `<driver error> (<code>)`"
+    ]
+  },
+  "forkBarRuling": {
+    "bar": "Sami, 2026-09-13 19:50Z: 'Wired up the existing functionality so I can use this in a distributed deployment. Please make sure it's top-quality and DRY.'",
+    "ruling": "Meets the bar once the blocking fix lands: one seam (defaultSessionStorage/setDefaultSessionStorage), one resolver, 24 mechanical default swaps, one main.ts install sharing SessionResolutionError's exit path, two schema keys beside auth.broker.*, 8 contract tests, changelog line, three doc mirrors. Nothing duplicates resolver or default logic; the auth-broker precedent (packages/ai) is not reusable. Zero added lines name legion/envoy/secretsd/dispatch:///knives. Bun APIs, no inline imports, no console, no mock.module. Correctness defect: the constructor outside the try (blocking, above). Quality: prepaint list split, two unused exports; gc-cli swaps are a judgement call."
+  },
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality are not installed in this pane; both charters ran once at c4f58e44 as `reviewer` subagents. Deep review: 1 blocking (fork constructor), 1 minor (fork prepaint list), 1 minor (boot-probes header). Code quality: no blocking; minors in fastFollow. PR body Thermo line filled in by this reviewer (pr edit succeeded).",
+  "legionDiffVerdict": "clean: isSubagentSession's process-global record follows the LEGION_ROLE_CLAIM_BRIDGE/LEGION_LOADED_MARKER convention, is written before /process|worker/started (no subagent can observe an empty store), on-disk check kept as fallback, reset hook mirrors setLegionBootstrapExitForTests; verifySessionStorageSetting matches its siblings' shape, `export …;` inside sh -c is the right seam (defaultRunner's env option would replace the environment), classification correct for the bounded image gate; cmdProbeImage unconditional third probe and mark on success only; tests defend observable contracts; docs match plan facts and measured outputs.",
+  "nextRound": "Re-review the corrective head (new OMP_FORK_PIN, docs row, optionally the fast-follow nits folded in); answer thread PRRT_kwDORFy7ds6iBeVN with Accepted:/Still open:; the implementer runs `legion threads resolve --pr 1081 --repo sjawhar/legion` before its push; then COMMENT if clean, the .legion/ deletion push, and APPROVE naming that head by SHA.",
+  "testHygieneNote": "legion.test.ts's mock.module('nats') leaks into the daemon CLI test when both run in one bun invocation — pre-existing on main (cc88ed01), CI runs packages separately; weighed, not a finding on this PR.",
+  "pushNote": "The review App holds no contents permission; this handoff commit stays local and rides the implementer's next push.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-14T07:36:02.394Z"
+}
