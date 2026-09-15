@@ -40,6 +40,36 @@ async function boardAtRest(page: Page): Promise<void> {
   });
 }
 
+/**
+ * Waits until a click reaches its target again. dnd-kit's pointer sensors stop every click at the
+ * document (capture phase) from the lift until a 50 ms timer after the drop, and a busy main
+ * thread runs that timer late, so a control clicked straight after a drop is silently ignored.
+ * The probe is a node under `body` outside the React root: only that suppressor can stop it.
+ */
+async function clicksDelivered(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const probe = document.body.appendChild(document.createElement("div"));
+    let delivered = false;
+    probe.addEventListener("click", () => {
+      delivered = true;
+    });
+    try {
+      for (;;) {
+        delivered = false;
+        probe.dispatchEvent(new MouseEvent("click"));
+        if (delivered) {
+          return;
+        }
+        const turn = Promise.withResolvers<void>();
+        setTimeout(turn.resolve, 0);
+        await turn.promise;
+      }
+    } finally {
+      probe.remove();
+    }
+  });
+}
+
 /** Drags with the mouse from the middle of `source` to `target` (a card or a column). */
 async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?: number) {
   await boardAtRest(page);
@@ -63,6 +93,7 @@ async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?:
     { steps: 24 }
   );
   await page.mouse.up();
+  await clicksDelivered(page);
 }
 
 test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle", async ({
@@ -578,6 +609,42 @@ async function snapOffsets(scroller: Locator): Promise<{ lefts: number[]; scroll
   });
 }
 
+/**
+ * Arms the scroller's next `scrollend` - fired once per scroll sequence, when the gesture, its
+ * fling and the snap the fling ends in have all come to rest - and returns the wait for it. Arm
+ * before the gesture so the listener cannot miss a scroll that already ended. `scrollLeft` alone
+ * cannot tell rest from flight: a fling to Backlog passes the Icebox rail's edge on the way (a
+ * snap point too), and a `scrollLeft` set while that fling still runs is overwritten by it.
+ */
+async function armScrollEnd(scroller: Locator): Promise<() => Promise<void>> {
+  const armed = await scroller.evaluateHandle((element) => {
+    const ended = Promise.withResolvers<void>();
+    element.addEventListener("scrollend", () => ended.resolve(), { once: true });
+    return { ended: ended.promise };
+  });
+  return () => armed.evaluate((scroll) => scroll.ended);
+}
+
+/** Puts the `index`-th column's start edge at the scroller's start and waits for the scroll to end. */
+async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
+  await scroller.evaluate(async (element, index) => {
+    const section = element.querySelectorAll("section")[index];
+    if (section === undefined) {
+      throw new Error("no such column");
+    }
+    const target =
+      section.getBoundingClientRect().left -
+      (element.getBoundingClientRect().left - element.scrollLeft);
+    if (element.scrollLeft === target) {
+      return;
+    }
+    const ended = Promise.withResolvers<void>();
+    element.addEventListener("scrollend", () => ended.resolve(), { once: true });
+    element.scrollLeft = target;
+    await ended.promise;
+  }, index);
+}
+
 test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap", async ({
   browser,
 }, testInfo) => {
@@ -617,27 +684,17 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
       throw new Error("board scroller is not visible");
     }
     const swipeY = box.y + 30;
+    const swipeEnded = await armScrollEnd(scroller);
     await touchDrag(page, { x: box.x + 340, y: swipeY }, { x: box.x + 60, y: swipeY }, 0, 8);
-    await expect
-      .poll(async () => {
-        const { lefts, scrollLeft } = await snapOffsets(scroller);
-        return scrollLeft > 100 && lefts.some((left) => Math.abs(left - scrollLeft) <= 2);
-      })
-      .toBe(true);
+    await swipeEnded();
+    const landed = await snapOffsets(scroller);
+    expect(landed.scrollLeft).toBeGreaterThan(100);
+    expect(landed.lefts.some((left) => Math.abs(left - landed.scrollLeft) <= 2)).toBe(true);
 
     // Bring Todo to the start (its own snap point) for the gestures on its cards.
-    await scroller.evaluate((element, index) => {
-      const section = element.querySelectorAll("section")[index];
-      if (section === undefined) {
-        throw new Error("no such column");
-      }
-      element.scrollLeft =
-        section.getBoundingClientRect().left -
-        (element.getBoundingClientRect().left - element.scrollLeft);
-    }, 3);
-    await expect
-      .poll(async () => (await snapOffsets(scroller)).scrollLeft)
-      .toBe((await snapOffsets(scroller)).lefts[3] ?? Number.NaN);
+    await scrollToColumn(scroller, 3);
+    const atTodo = await snapOffsets(scroller);
+    expect(atTodo.scrollLeft).toBe(atTodo.lefts[3]);
     const inProgress = page.getByRole("region", { name: "In progress" });
 
     // A vertical swipe scrolls the page and lifts nothing.
