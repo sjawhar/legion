@@ -645,6 +645,14 @@ worker pods — a finished worker's pod stays alive idle for `worker_idle_retire
 counting against the daemon's cap, and the state page exposes no run state, so a pod count only
 over-approximates the daemon's own (`SMOKE_WORKER_IDLE_RETIRE=60` keeps that window short).
 
+Run the `for c in …` loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`
+prints OK for a Running planner, as the recipe orders them: `architect-pod` asserts the root is
+still `in_progress`, and `kill-pod-resume` exists to prove resume, so its kill must land while a
+phase is under way and no phase-complete is in flight — a kill during `retro` or between phases
+lands on an idle tree, or on a completion the resumed architect never receives (LEGION-182, a
+daemon gap outside this rig), and the checkpoint truthfully prints `FAILED: the tree … has not
+moved` after its budget (a 600 s wait for a line that says nothing about resume).
+
 ### What the instance is
 
 Everything outside the cluster is named by `SMOKE_INSTANCE` and recorded as one file under
@@ -677,6 +685,7 @@ the full list.
 | a pod stays `Pending` past `worker_boot_timeout_seconds` | a launch failure the daemon counts against the role (a node without room, an image pull that never completes); `kubectl describe pod` names the reason |
 | the replacement pod is delayed after a kill | the previous generation's pod is still terminating; the daemon deletes and awaits it before creating the next generation |
 | `probe` verdicts read `unknown` in the daemon log | the API server was unreachable; `unknown` never marks anything dead by itself — the next probe decides |
+| the daemon log shows `architect shim connect for <KEY> failed (attempt k/6, cycle 1); retrying in <d>s: Worker RPC "negotiate_protocol" timed out after 5000ms` after every root start, ending in `stopping architect shim connect … retries: …` or a best-effort give-up | expected: LEGION-39's bounded, best-effort connect to the root's shim at ready time (`connectOnReady`, `packages/daemon/src/daemon/AGENTS.md`, the `ReadyDeliveryRetrier` bullet) — `/process/ready` still lands, `readyConfirmedAt` is set, the tree confirms and works; nothing is retired and no counter moves. Seen on every root start of every instance in the LEGION-26 runs |
 
 ### Running it on kind by hand
 

@@ -2,8 +2,9 @@
 # Harness for scripts/kind-smoke/up.sh: every external binary is a PATH fake that logs its argv, so the
 # script's decisions, records, and refusals are pinned without docker, kind, kubectl, go, tmux, or a
 # network. Needs only bash, coreutils, and jq.
-set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/kind-smoke/test-lib.sh
+source "$here/test-lib.sh"
 tmp="$(mktemp -d)"
 cleanup() {
   local f
@@ -35,14 +36,12 @@ pem_b64() { printf -- '-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE
 run_up() { # run_up ENV… — runs up.sh with the harness environment; captures stdout+stderr; returns its exit code
   local out="$tmp/out.txt"
   : >"$out"
-  set +e
+  local status=0
   env SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WORKER_IMAGE="$good_image" \
     GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 x)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 y)" \
     ANTHROPIC_API_KEY=anthropic-canary-value GEMINI_API_KEY= OPENAI_API_KEY= \
-    "$@" bash "$here/up.sh" >"$out" 2>&1
-  local status=$?
-  set -e
+    "$@" bash "$here/up.sh" >"$out" 2>&1 || status=$?
   cat "$out"
   return $status
 }
@@ -161,29 +160,34 @@ EOF
 run_up SMOKE_STOP_AFTER=host-services >"$tmp/last.txt" || { echo "host-services run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
 grep -Fxq 'legion-smoke-t1' "$FAKE_CLUSTERS"
 grep -Fq 'kind create cluster --name legion-smoke-t1 --kubeconfig '"$tmp"'/state/kubeconfig' "$FAKE_LOG"
-! grep -Fq -- '.kube/config' "$FAKE_LOG"                          # the kubeconfig is under SMOKE_DIR, never ~/.kube/config
+refute grep -Fq -- '.kube/config' "$FAKE_LOG"                          # the kubeconfig is under SMOKE_DIR, never ~/.kube/config
 [ "$(cat "$tmp/state/records/gateway")" = 172.30.0.1 ]            # the IPv4 entry, not the IPv6 one
 [ "$(cat "$tmp/state/records/cluster")" = legion-smoke-t1 ]
 grep -Fq 'docker run -d --name legion-smoke-t1-nats --label legion-smoke.instance=t1 -p 172.30.0.1:41000:4222 nats:2.10 -js' "$FAKE_LOG"
 grep -Eq 'docker run -d --name legion-smoke-t1-postgres --label legion-smoke.instance=t1 -p 172.30.0.1:41003:5432 .* postgres:16' "$FAKE_LOG"
 ! grep -Eq 'POSTGRES_PASSWORD=[^ ]' "$FAKE_LOG" || { echo "postgres password in argv" >&2; exit 1; }
 grep -Fq 'go build -o' "$FAKE_LOG"
-[ -x "$tmp/state/bin/envoy-listener" ] && [ -x "$tmp/state/bin/envoy-dispatch" ]
-[ "$(stat -c %a "$tmp/state/secrets/dispatch-token")" = 600 ] && [ "$(stat -c %a "$tmp/state/secrets")" = 700 ]
+[ -x "$tmp/state/bin/envoy-listener" ]
+[ -x "$tmp/state/bin/envoy-dispatch" ]
+[ "$(stat -c %a "$tmp/state/secrets/dispatch-token")" = 600 ]
+[ "$(stat -c %a "$tmp/state/secrets")" = 700 ]
 for name in listener dispatch; do [ -f "$tmp/state/pids/$name.pid" ] && [ -f "$tmp/state/pids/$name.start" ]; done
-grep -Fq 'STARTED listener' "$tmp/last.txt" && grep -Fq 'STARTED dispatch' "$tmp/last.txt"
+grep -Fq 'STARTED listener' "$tmp/last.txt"
+grep -Fq 'STARTED dispatch' "$tmp/last.txt"
 grep -Fq 'stopped after host-services' "$tmp/last.txt"
 # no secret value reached an argv or the output
 for s in dispatch-token envoy-token postgres-password; do
   ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
 done
-! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
+refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
 # a second run reuses everything
 calls_before="$(wc -l <"$FAKE_LOG")"
 run_up SMOKE_STOP_AFTER=host-services >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
-grep -Fq 'REUSED listener' "$tmp/last2.txt" && grep -Fq 'REUSED dispatch' "$tmp/last2.txt"
-grep -Fq 'REUSED cluster legion-smoke-t1' "$tmp/last2.txt" && grep -Fq 'REUSED container legion-smoke-t1-nats' "$tmp/last2.txt"
-! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Eq '^(kind create|docker run)'
+grep -Fq 'REUSED listener' "$tmp/last2.txt"
+grep -Fq 'REUSED dispatch' "$tmp/last2.txt"
+grep -Fq 'REUSED cluster legion-smoke-t1' "$tmp/last2.txt"
+grep -Fq 'REUSED container legion-smoke-t1-nats' "$tmp/last2.txt"
+refute grep -Eq '^(kind create|docker run)' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 echo "up.test.sh: host services OK"
 
 # ---- Dispatch seed, overlay, apply, daemon wait, port-forward (SMOKE_STOP_AFTER=daemon) ----------
@@ -213,48 +217,61 @@ digest="sha256:$(printf 'a%.0s' $(seq 64))"
 grep -Fxq 'project: demo' "$o/legion.yaml"
 grep -Fxq "    image: $good_image" "$o/legion.yaml"
 grep -Fq "digest: $digest" "$o/kustomization.yaml"
-! grep -q 'sha256:0000' "$o/kustomization.yaml" "$o/legion.yaml"
-grep -Fxq '  - ../base' "$o/kustomization.yaml" && [ -f "$tmp/state/base/deployment.yaml" ]
+refute grep -q 'sha256:0000' "$o/kustomization.yaml" "$o/legion.yaml"
+grep -Fxq '  - ../base' "$o/kustomization.yaml"
+[ -f "$tmp/state/base/deployment.yaml" ]
 grep -Fxq 'envoy_url: http://172.30.0.1:41001' "$o/legion.yaml"
 grep -Fxq '  - nats://172.30.0.1:41000' "$o/legion.yaml"
 grep -Fxq 'dispatch_url: http://172.30.0.1:41002' "$o/legion.yaml"
-grep -Fxq 'dispatch_project: ST1' "$o/legion.yaml" && grep -Fxq '  - sjawhar/legion-smoke' "$o/legion.yaml"
-grep -Fxq 'worker_cap: 6' "$o/legion.yaml" && grep -Fxq '  design: off' "$o/legion.yaml"
-grep -Fxq 'resync_interval_seconds: 60' "$o/legion.yaml" && [ "$(cat "$tmp/state/records/resync-interval")" = 60 ]
-grep -Fxq 'worker_idle_retire_seconds: 600' "$o/legion.yaml" && [ "$(cat "$tmp/state/records/worker-idle-retire")" = 600 ]
-grep -Fxq '    app_id: "3202636"' "$o/legion.yaml" && grep -Fxq '    app_id: "3202653"' "$o/legion.yaml"
-grep -Fq 'port: 41000' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41001' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41002' "$o/networkpolicy-egress.yaml"
-! grep -Fq 'port: 41003' "$o/networkpolicy-egress.yaml"      # the daemon never reaches Postgres
+grep -Fxq 'dispatch_project: ST1' "$o/legion.yaml"
+grep -Fxq '  - sjawhar/legion-smoke' "$o/legion.yaml"
+grep -Fxq 'worker_cap: 6' "$o/legion.yaml"
+grep -Fxq '  design: off' "$o/legion.yaml"
+grep -Fxq 'resync_interval_seconds: 60' "$o/legion.yaml"
+[ "$(cat "$tmp/state/records/resync-interval")" = 60 ]
+grep -Fxq 'worker_idle_retire_seconds: 600' "$o/legion.yaml"
+[ "$(cat "$tmp/state/records/worker-idle-retire")" = 600 ]
+grep -Fxq '    app_id: "3202636"' "$o/legion.yaml"
+grep -Fxq '    app_id: "3202653"' "$o/legion.yaml"
+grep -Fq 'port: 41000' "$o/networkpolicy-egress.yaml"
+grep -Fq 'port: 41001' "$o/networkpolicy-egress.yaml"
+grep -Fq 'port: 41002' "$o/networkpolicy-egress.yaml"
+refute grep -Fq 'port: 41003' "$o/networkpolicy-egress.yaml"      # the daemon never reaches Postgres
 grep -Fxq '      - instructions.md' "$o/kustomization.yaml"
 grep -Fxq 'ANTHROPIC_API_KEY=anthropic-canary-value' "$o/secrets/providers.env"
-! grep -q '^GEMINI_API_KEY=' "$o/secrets/providers.env"        # empty keys are not written
-grep -q '^DISPATCH_TOKEN=.\{48\}$' "$o/secrets/providers.env" && grep -q '^ENVOY_TOKEN=.\{48\}$' "$o/secrets/providers.env"
-[ "$(stat -c %a "$o/secrets/providers.env")" = 600 ] && [ "$(stat -c %a "$o/secrets")" = 700 ]
+refute grep -q '^GEMINI_API_KEY=' "$o/secrets/providers.env"        # empty keys are not written
+grep -q '^DISPATCH_TOKEN=.\{48\}$' "$o/secrets/providers.env"
+grep -q '^ENVOY_TOKEN=.\{48\}$' "$o/secrets/providers.env"
+[ "$(stat -c %a "$o/secrets/providers.env")" = 600 ]
+[ "$(stat -c %a "$o/secrets")" = 700 ]
 head -c 10 "$o/secrets/github-app-implement.pem" | grep -q -- '-----BEGIN'
 if [ -f "$here/../../deploy/kubernetes/daemon/overlays/kind/secrets/operator.env.example" ]; then
   grep -q '^OPERATOR_TOKEN=.\{48\}$' "$o/secrets/operator.env"
   grep -Fxq 'operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN' "$o/legion.yaml"
 else
-  ! grep -q operator_token_file "$o/legion.yaml"
+  refute grep -q operator_token_file "$o/legion.yaml"
 fi
 grep -Fq 'kubectl --kubeconfig '"$tmp"'/state/kubeconfig -n legion apply -k '"$o" "$FAKE_LOG"
 grep -Fq 'rollout status deploy/legion-daemon-demo --timeout=120s' "$FAKE_LOG"
 grep -Fq 'curl -fsS --max-time 20 -X PUT -H X-Dispatch-User: smoke -H content-type: application/json --data {"project":"ST1"} http://172.30.0.1:41002/api/v1/settings/repo-projects/sjawhar/legion-smoke' "$FAKE_LOG"
 grep -Fq 'CREATED Dispatch project ST1' "$tmp/last.txt"
-[ "$(cat "$tmp/state/records/dispatch-project")" = ST1 ] && [ "$(cat "$tmp/state/records/probe-contract")" = 5 ]
+[ "$(cat "$tmp/state/records/dispatch-project")" = ST1 ]
+[ "$(cat "$tmp/state/records/probe-contract")" = 5 ]
 jq -e '.role_profiles.tester == "large" and .resources.large.limits.memory == "12Gi"' "$tmp/state/records/profiles.json" >/dev/null
 [ -f "$tmp/state/pids/port-forward.pid" ]
 grep -Fq 'port-forward --address 127.0.0.1 svc/legion-daemon-demo 41004:13370' "$FAKE_LOG"
-[ -f "$tmp/state/pids/legion-177-keeper.pid" ] && [ "$(cat "$tmp/state/records/legion-177-workaround")" = keeper ]
+[ -f "$tmp/state/pids/legion-177-keeper.pid" ]
+[ "$(cat "$tmp/state/records/legion-177-workaround")" = keeper ]
 grep -Fq 'STARTED legion-177-keeper' "$tmp/last.txt"
 grep -Fq 'stopped after daemon' "$tmp/last.txt"
-! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"   # the provider key never reaches argv or stdout
+refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"   # the provider key never reaches argv or stdout
 for s in dispatch-token envoy-token postgres-password; do
   ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
 done
 # rerun: the project is reused, nothing re-created
 run_up SMOKE_STOP_AFTER=daemon >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
-grep -Fq 'REUSED Dispatch project ST1' "$tmp/last2.txt" && grep -Fq 'REUSED port-forward' "$tmp/last2.txt"
+grep -Fq 'REUSED Dispatch project ST1' "$tmp/last2.txt"
+grep -Fq 'REUSED port-forward' "$tmp/last2.txt"
 # a crash-looping daemon is reported with its log and the cluster is left for inspection
 echo '{"items":[{"status":{"containerStatuses":[{"restartCount":2}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
 printf 'Unknown config key "operator_token_file" in /etc/legion/legion.yaml\n' >"$FAKE_HTTP/daemon.log"
@@ -262,7 +279,7 @@ if run_up SMOKE_STOP_AFTER=daemon >"$tmp/last3.txt"; then echo "crash-loop shoul
 grep -Fq 'the daemon pod is crash-looping (2 restarts); its last log lines:' "$tmp/last3.txt"
 grep -Fq 'Unknown config key "operator_token_file"' "$tmp/last3.txt"
 grep -Fq 'left for inspection' "$tmp/last3.txt"
-! grep -Fq 'kind delete' "$FAKE_LOG"
+refute grep -Fq 'kind delete' "$FAKE_LOG"
 echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
 printf '[legion] worker image sha256:%s: probe pod legion-probe-demo-aaaaaaaaaaaa passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5\n' "$(printf 'a%.0s' $(seq 64))" >"$FAKE_HTTP/daemon.log"
 echo "up.test.sh: overlay and daemon OK"
@@ -297,11 +314,13 @@ rm -f "$FAKE_HTTP/issue-counter"
 run_up >"$tmp/last.txt" || { echo "full run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
 grep -q '^none: the checkout has no legion controller start (pull request #1110)$' "$tmp/state/records/controller"
 grep -Fq 'controller:      none (the checkout has no legion controller start (pull request #1110))' "$tmp/last.txt"
-! grep -Eq '^tmux ' "$FAKE_LOG"
+refute grep -Eq '^tmux ' "$FAKE_LOG"
 [ "$(cat "$tmp/state/records/root-issues")" = ST1-1 ]
 post_line="$(grep -n -- '-X POST .*/api/v1/issues$' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 patch_line="$(grep -n -- '-X PATCH .*--data {"status":"todo"} .*/api/v1/issues/ST1-1$' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
-[ -n "$post_line" ] && [ -n "$patch_line" ] && [ "$patch_line" -gt "$post_line" ]
+[ -n "$post_line" ]
+[ -n "$patch_line" ]
+[ "$patch_line" -gt "$post_line" ]
 grep -Fq 'CREATED root issue ST1-1 (todo)' "$tmp/last.txt"
 grep -Fq 'KIND SMOKE READY' "$tmp/last.txt"
 for line in 'instance:' 'state dir:' 'cluster:' 'gateway:' 'nats:' 'listener:' 'dispatch:' 'postgres:' 'daemon:' 'image:' 'session store:' 'worker cap:' 'controller:' 'github ingress:' 'root issues:' 'records:'; do
@@ -310,7 +329,7 @@ done
 grep -Fq 'github ingress:  none (checkpoint done will report SKIPPED-BLOCKED)' "$tmp/last.txt"
 grep -Eq 'legion-177:      keeper \(pgid [0-9]+, every 3s; LEGION-177 workaround\)' "$tmp/last.txt"
 grep -Fq 'image:           '"$good_image"' (daemon API contract 5)' "$tmp/last.txt"
-! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
+refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
 for s in dispatch-token envoy-token postgres-password; do
   ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
 done
@@ -318,12 +337,14 @@ done
 kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"
 run_up SMOKE_LEGION_177_WORKAROUND=0 >"$tmp/last3.txt" || { cat "$tmp/last3.txt" >&2; exit 1; }
-[ "$(cat "$tmp/state/records/legion-177-workaround")" = off ] && [ ! -f "$tmp/state/pids/legion-177-keeper.pid" ]
+[ "$(cat "$tmp/state/records/legion-177-workaround")" = off ]
+[ ! -f "$tmp/state/pids/legion-177-keeper.pid" ]
 grep -Fq 'SKIPPED LEGION-177 keeper (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/last3.txt"
 grep -Fq 'legion-177:      off (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/last3.txt"
 # rerun reuses the root issue; a second root issue is appended
 run_up SMOKE_ROOT_ISSUES=2 >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
-grep -Fq 'REUSED root issue ST1-1' "$tmp/last2.txt" && grep -Fq 'CREATED root issue ST1-2 (todo)' "$tmp/last2.txt"
+grep -Fq 'REUSED root issue ST1-1' "$tmp/last2.txt"
+grep -Fq 'CREATED root issue ST1-2 (todo)' "$tmp/last2.txt"
 [ "$(paste -sd' ' "$tmp/state/records/root-issues")" = 'ST1-1 ST1-2' ]
 
 # route probe: a checkout with the controller (faked) against a daemon that predates the route → none
@@ -331,12 +352,12 @@ touch "$tmp/controller.yaml.example"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=404 >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 grep -q '^none: the daemon answers 404 on POST /legion/v1/controller/secret (the image predates legion controller start)$' "$tmp/state/records/controller"
 grep -Fq 'Authorization: Bearer smoke-route-probe' "$FAKE_LOG"        # the probe bearer is deliberately wrong: nothing is minted
-! grep -Eq '^tmux ' "$FAKE_LOG"
+refute grep -Eq '^tmux ' "$FAKE_LOG"
 # route present, plugin contract mismatch → none
 echo '{"legion":{"daemonApiVersion":6}}' >"$tmp/pkg6.json"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg6.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 grep -q '^none: installed pi-legion-envoy speaks contract 6; the image daemon requires 5$' "$tmp/state/records/controller"
-! grep -Eq '^tmux ' "$FAKE_LOG"
+refute grep -Eq '^tmux ' "$FAKE_LOG"
 # route present, contract matches → the pane opens, is recorded, and the daemon sees the controller
 echo '{"legion":{"daemonApiVersion":5}}' >"$tmp/pkg5.json"
 (umask 077; openssl rand -hex 24 >"$tmp/state/secrets/operator-token")   # what the checkout's operator.env.example would have produced
@@ -349,33 +370,37 @@ grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --
 grep -Fq 'controller:      tmux -L legion-smoke-t1 attach (window controller)' "$tmp/last.txt"
 grep -Fxq 'operator_token_file: ./operator-token' "$tmp/state/controller/controller.yaml"
 grep -Fxq 'daemon_url: http://127.0.0.1:41004' "$tmp/state/controller/controller.yaml"
-! grep -q omp_launch_prefix "$tmp/state/controller/controller.yaml"         # SMOKE_OMP_LAUNCH_PREFIX= omits the key
+refute grep -q omp_launch_prefix "$tmp/state/controller/controller.yaml"         # SMOKE_OMP_LAUNCH_PREFIX= omits the key
 [ "$(stat -c %a "$tmp/state/controller/operator-token")" = 600 ]
-! grep -Fq "$(cat "$tmp/state/secrets/operator-token")" "$FAKE_LOG" "$tmp/last.txt"
+refute grep -Fq "$(cat "$tmp/state/secrets/operator-token")" "$FAKE_LOG" "$tmp/last.txt"
 # rerun with the pane alive → REUSED, no second new-session
 calls_before="$(wc -l <"$FAKE_LOG")"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" SMOKE_OMP_LAUNCH_PREFIX= >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
 grep -Fq 'REUSED controller' "$tmp/last2.txt"
-! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Fq 'new-session'
+refute grep -Fq 'new-session' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 # the default launch prefix lands as a list
 rm -f "$FAKE_TMUX/legion-smoke-t1"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
-grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml" && grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml" && grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
+grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml"
+grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml"
+grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
 cp "$FAKE_HTTP/state-plain.json" "$FAKE_HTTP/state.json"
 rm -f "$FAKE_TMUX/legion-smoke-t1"
 
 # GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run early
 run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
-[ -f "$tmp/state/pids/envoy-bridge.pid" ] && grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
+[ -f "$tmp/state/pids/envoy-bridge.pid" ]
+grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
 bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
 [ "$bridge_line" -lt "$apply_line" ]
-grep -Fq 'github ingress:  envoy (bridge pid' "$tmp/last.txt" && grep -Fq 'upstream nats://envoy-nats.tailb86685.ts.net:4222' "$tmp/last.txt"
+grep -Fq 'github ingress:  envoy (bridge pid' "$tmp/last.txt"
+grep -Fq 'upstream nats://envoy-nats.tailb86685.ts.net:4222' "$tmp/last.txt"
 kill "$(cat "$tmp/state/pids/envoy-bridge.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/envoy-bridge.pid" "$tmp/state/pids/envoy-bridge.start" "$tmp/state/logs/envoy-bridge.log"
 calls_before="$(wc -l <"$FAKE_LOG")"
 if run_up SMOKE_GITHUB_INGRESS=envoy FAKE_BRIDGE_UNHEALTHY=1 SMOKE_UPSTREAM_NATS=nats://nowhere.example:4222 >"$tmp/last.txt"; then echo "unhealthy bridge should fail" >&2; exit 1; fi
 grep -Fq 'the GitHub bridge could not subscribe upstream (nats://nowhere.example:4222); see '"$tmp"'/state/logs/envoy-bridge.log' "$tmp/last.txt"
-! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Fq 'apply -k'
+refute grep -Fq 'apply -k' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 echo "up.test.sh: controller, bridge, root issues, summary OK"
 echo "up.test.sh: OK"

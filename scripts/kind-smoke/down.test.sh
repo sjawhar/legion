@@ -2,8 +2,9 @@
 # Harness for scripts/kind-smoke/down.sh: teardown acts only on the records under the instance's
 # state directory, verifies ownership before every destructive action, and never deletes by name
 # pattern. Every external binary is a PATH fake that logs its argv.
-set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/kind-smoke/test-lib.sh
+source "$here/test-lib.sh"
 tmp="$(mktemp -d)"
 spawned=()
 cleanup() {
@@ -57,13 +58,12 @@ EOF
 run_down() { # run_down STATE_DIR ENV… → output in $tmp/out.txt, exit code returned
   local dir="$1"
   shift
-  set +e
-  env SMOKE_DIR="$dir" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 "$@" bash "$here/down.sh" >"$tmp/out.txt" 2>&1
-  local status=$?
-  set -e
+  local status=0
+  env SMOKE_DIR="$dir" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 "$@" bash "$here/down.sh" >"$tmp/out.txt" 2>&1 || status=$?
   return $status
 }
 start_ticks() { awk '{print $22}' "/proc/$1/stat"; }
+alive() { kill -0 "$@" 2>/dev/null; } # a pid or -pgid still answers signal 0
 plant_process() { # plant_process STATE NAME → a live sleep with a correct record
   sleep 300 &
   local pid=$!
@@ -143,26 +143,32 @@ for want in "${expected_order[@]}"; do
   prev="$line"
 done
 grep -Fq 'docker inspect -f {{index .Config.Labels "legion-smoke.instance"}} legion-smoke-t1-nats' "$FAKE_LOG"
-! kill -0 "$listener_pid" 2>/dev/null && ! kill -0 "$dispatch_pid" 2>/dev/null
-! kill -0 -- "-$pf_pgid" 2>/dev/null && ! kill -0 -- "-$keeper_pgid" 2>/dev/null
-kill -0 "$stale_pid"                                                   # the stale record's pid was not signalled
+refute alive "$listener_pid"
+refute alive "$dispatch_pid"
+refute alive -- "-$pf_pgid"
+refute alive -- "-$keeper_pgid"
+alive "$stale_pid"                                                     # the stale record's pid was not signalled
 grep -Fq 'GONE envoy-bridge' "$tmp/out.txt"
-[ ! -f "$s/pids/listener.pid" ] && [ ! -f "$s/pids/envoy-bridge.pid" ] && [ ! -f "$s/pids/port-forward.start" ]
+[ ! -f "$s/pids/listener.pid" ]
+[ ! -f "$s/pids/envoy-bridge.pid" ]
+[ ! -f "$s/pids/port-forward.start" ]
 for f in secrets/dispatch-token secrets/envoy-token secrets/operator-token secrets/postgres-password secrets/postgres.env \
   secrets/dispatch-token-auth-header overlay/secrets/providers.env overlay/secrets/operator.env overlay/secrets/github-app-implement.pem \
   overlay/secrets/github-app-review.pem controller/operator-token controller/envoy-token controller/dispatch-token \
   dispatch-home/.local/share/dispatch/signing-key kubeconfig; do
   [ ! -e "$s/$f" ] || { echo "not shredded: $f" >&2; exit 1; }
 done
-[ -f "$s/records/instance" ] && [ -f "$s/records/cluster" ]              # records and logs stay for inspection
-[ ! -s "$FAKE_CLUSTERS" ] && [ ! -f "$FAKE_TMUX/legion-smoke-t1" ]
+[ -f "$s/records/instance" ]
+[ -f "$s/records/cluster" ]              # records and logs stay for inspection
+[ ! -s "$FAKE_CLUSTERS" ]
+[ ! -f "$FAKE_TMUX/legion-smoke-t1" ]
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 # a second down finds everything gone and says so
 : >"$FAKE_LOG"
 run_down "$s" || { cat "$tmp/out.txt" >&2; exit 1; }
 grep -Fq 'cluster legion-smoke-t1 is already gone' "$tmp/out.txt"
 grep -Fq 'container legion-smoke-t1-nats is already gone' "$tmp/out.txt" || { cat "$tmp/out.txt" >&2; exit 1; }
-! grep -Eq '^(docker rm|kind delete|tmux kill-server)' "$FAKE_LOG"
+refute grep -Eq '^(docker rm|kind delete|tmux kill-server)' "$FAKE_LOG"
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 echo "down.test.sh: teardown by record OK"
 
@@ -175,9 +181,9 @@ echo legion-smoke-t1 >"$FAKE_CLUSTERS"
 : >"$FAKE_LOG"
 if run_down "$s2"; then echo "label mismatch should exit 1" >&2; exit 1; fi
 grep -Fq "refusing to remove container legion-smoke-t1-nats: label legion-smoke.instance is 'other', not 't1'" "$tmp/out.txt"
-! grep -Fq 'docker rm' "$FAKE_LOG"
+refute grep -Fq 'docker rm' "$FAKE_LOG"
 grep -Fq 'kind delete cluster --name legion-smoke-t1' "$FAKE_LOG"        # the rest still ran
-! grep -Eq '^tmux ' "$FAKE_LOG"                                          # controller: none → no tmux call
+refute grep -Eq '^tmux ' "$FAKE_LOG"                                          # controller: none → no tmux call
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 echo "down.test.sh: ownership refusal OK"
 echo "down.test.sh: OK"

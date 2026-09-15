@@ -2,8 +2,9 @@
 # Harness for scripts/kind-smoke/checkpoints.sh: curl and kubectl are PATH fakes serving fixtures
 # under $FIX (a NAME.json file, or NAME.seq — one fixture file name per line, served in order and
 # the last one repeated), so every verdict is pinned without a cluster, a daemon, or a network.
-set -euo pipefail
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/kind-smoke/test-lib.sh
+source "$here/test-lib.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 fake_bin="$tmp/bin"
@@ -99,13 +100,11 @@ reset_fixtures() { rm -rf "$FIX"; mkdir -p "$FIX"; }
 run_cp() { # run_cp NAME ENV… → $tmp/out.txt, exit code returned
   local name="$1"
   shift
-  set +e
+  local status=0
   env SMOKE_DIR="$state_dir" SMOKE_INSTANCE=t1 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WAIT_ADMITTED=1 SMOKE_WAIT_ARCHITECT_POD=1 SMOKE_WAIT_SPEC_POSTED=1 SMOKE_WAIT_TREE_MOVED=1 \
     SMOKE_WAIT_KILL_PHASE=3 SMOKE_WAIT_KILL_RESUME=3 SMOKE_WAIT_KILL_COMPLETE=3 SMOKE_WAIT_CAP_QUEUE=3 SMOKE_WAIT_CAP_PROMOTE=3 SMOKE_WAIT_DONE=1 \
-    "$@" bash "$here/checkpoints.sh" "$name" >"$tmp/out.txt" 2>&1
-  local status=$?
-  set -e
+    "$@" bash "$here/checkpoints.sh" "$name" >"$tmp/out.txt" 2>&1 || status=$?
   return $status
 }
 expect_verdict() { # expect_verdict OK|FAILED|SKIPPED-BLOCKED EXIT NAME 'substring' ENV…
@@ -167,9 +166,11 @@ expect_ok admitted 'controller=external'
 # a missing record names up.sh; an unknown checkpoint is usage
 rm "$state_dir/records/root-issues"
 status=0; run_cp admitted || status=$?
-[ "$status" = 1 ] && grep -Fq "error: record root-issues missing under $state_dir: run scripts/kind-smoke/up.sh first" "$tmp/out.txt"
+[ "$status" = 1 ]
+grep -Fq "error: record root-issues missing under $state_dir: run scripts/kind-smoke/up.sh first" "$tmp/out.txt"
 status=0; run_cp not-a-checkpoint || status=$?
-[ "$status" = 2 ] && grep -Fq 'usage: checkpoints.sh <admitted|architect-pod|' "$tmp/out.txt"
+[ "$status" = 2 ]
+grep -Fq 'usage: checkpoints.sh <admitted|architect-pod|' "$tmp/out.txt"
 echo "checkpoints.test.sh: admitted OK"
 
 # ---- architect-pod ------------------------------------------------------------------------------
@@ -266,13 +267,13 @@ expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → leg
 grep -Fxq 'WORKAROUND LEGION-177 applied' "$tmp/out.txt"
 grep -Fq 'exec legion-st1-1-architect-g1 -c worker -- git --git-dir=/legion/repos/github.com/sjawhar/legion-smoke/.git config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --template {{.info.pid}} abc123def456abc123def456' "$FAKE_LOG"
-! grep -Fq 'delete pod' "$FAKE_LOG"
+refute grep -Fq 'delete pod' "$FAKE_LOG"
 # the workaround is skipped on request; the kill falls back to a forced delete when crictl fails
 : >"$FAKE_LOG"
 plant_kill_fixtures 2 arch "$sess_file"
 expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback); LEGION-177 workaround off, keeper not running)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
 grep -Fq 'WORKAROUND LEGION-177 skipped (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/out.txt"
-! grep -Fq 'config --unset credential.interactive' "$FAKE_LOG"
+refute grep -Fq 'config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'delete pod legion-st1-1-architect-g1 --grace-period=0 --force' "$FAKE_LOG"
 # a key that was already unset counts as applied
 plant_kill_fixtures 2 arch "$sess_file"
@@ -303,12 +304,16 @@ expect_failed kill-pod-resume 'replacement pod legion-st1-1-architect-g2: its in
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 2 legion-st1-1-architect-g2 1 arch "$planner_and_implementer" >"$FIX/state-3.json"
 expect_failed kill-pod-resume 'the tree of ST1-1 has not moved since the replacement registered (claims: implementer/ST1-1@1,planner/ST1-1@1; statuses: ST1-1 in_progress)'
-# the tree must be mid-phase before the kill: no live worker claim → the wait times out
+# the tree must be mid-phase before the kill: no live worker claim → the wait times out and nothing
+# is killed (the argv log is cleared first: the earlier cases above did kill)
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 1 legion-st1-1-architect-g1 1 arch '{}' >"$FIX/state-1.json"
 printf 'state-1.json\n' >"$FIX/state.seq"
+: >"$FAKE_LOG"
 expect_failed kill-pod-resume 'no phase worker or sub-architect holds a claim with a pod on the tree of ST1-1 yet (the kill must land mid-phase)'
-[ ! -f "$FIX/deleted" ] && ! grep -Fq 'kill -9' "$FAKE_LOG"
+[ ! -f "$FIX/deleted" ]
+refute grep -Fq 'kill -9' "$FAKE_LOG"
+refute grep -Fq 'delete pod' "$FAKE_LOG"
 # only the root architect is a supported target
 expect_blocked kill-pod-resume 'SMOKE_KILL_ROLE=tester is not supported' SMOKE_KILL_ROLE=tester
 echo "checkpoints.test.sh: kill-pod-resume OK"
@@ -328,11 +333,11 @@ expect_ok pod-hygiene '2 pods checked; profiles match; no secret in env/command/
 # a secret value planted in an env value: the reason names pod, container, and variable — never the value
 pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].env += [{name:"DISPATCH_TOKEN_CANARY",value:"dispatch-secret-value-0123456789"}]')" >"$FIX/pods.json"
 expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker env DISPATCH_TOKEN_CANARY contains a secret value'
-! grep -Fq 'dispatch-secret-value-0123456789' "$tmp/out.txt"
+refute grep -Fq 'dispatch-secret-value-0123456789' "$tmp/out.txt"
 # the provider key in a command element
 pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].command += ["--key=anthropic-canary-value"]')" >"$FIX/pods.json"
 expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker command contains a secret value'
-! grep -Fq 'anthropic-canary-value' "$tmp/out.txt"
+refute grep -Fq 'anthropic-canary-value' "$tmp/out.txt"
 # PID 1 carries a provider key
 pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
 printf 'PATH=/usr/bin\nANTHROPIC_API_KEY=whatever\n' >"$FIX/environ-legion-st1-1-tester-g1"

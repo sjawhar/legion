@@ -155,6 +155,16 @@ interval plus a pod start for the replacement), `pod-hygiene` OK, and
 `CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (…)` with exit 3 — the expected line,
 not a failure.
 
+**Run the checkpoint loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`
+prints OK for a Running planner.** The checkpoints are lifecycle-sensitive: `architect-pod` asserts
+the root is still `in_progress`, and `kill-pod-resume`'s mid-phase precondition (a worker holds a
+claim with a pod) is met by idle finished workers too. Its purpose is to prove resume, so the kill
+must land while a phase is under way and no phase-complete is in flight — a kill during `retro` or
+between phases lands on an idle tree, or on a completion the resumed architect never receives
+(LEGION-182, a daemon gap outside this rig), which the checkpoint truthfully reports as
+`FAILED: the tree … has not moved` after its budget. Run late and you wait 600 s for a FAILED that
+is correct but says nothing about resume.
+
 ## Modes and degradations
 
 - **`controller: none (<reason>)`** — three ordered checks decide whether a controller pane opens:
@@ -248,7 +258,11 @@ bun test scripts/kind-smoke/envoy-bridge.test.ts
 
 Every external binary is a PATH fake that logs its argv; the harnesses need only bash, coreutils,
 jq, and `ss`, and CI runs them in the `test` job. They also assert that no secret value ever
-reaches an argv or the output.
+reaches an argv or the output. The assertion rules live in `test-lib.sh`: under `set -e` bash
+exempts a `!`-inverted command and every operand of an `&&` list but the last from errexit
+(shellcheck SC2251), so a bare `! grep …` can never fail a harness — every negative assertion is
+`refute CMD…` (CMD succeeding fails the harness naming the line), every positive one is a single
+bare command on its own line, and the ERR trap names the file, line, and command of any failure.
 
 ## Troubleshooting
 
