@@ -1,7 +1,8 @@
 import { controllerToken, LegionDaemonApi } from "@legion/contracts";
 import { isExternalControllerLocator } from "../../runtime";
+import { equalSecret } from "../auth";
 import type { RouteContext } from "../context";
-import { requiredString, validateContractResponse } from "../http";
+import { HttpError, requiredString, validateContractResponse } from "../http";
 
 // Controller sessions POST their Envoy session ID immediately after boot. The controller is an
 // interactive OMP terminal session (no shim, no socket) and a role holder like any other: its
@@ -47,4 +48,38 @@ export async function handleControllerReady(
   await ctx.save();
   await ctx.deps.onControllerReady();
   return Response.json(validateContractResponse(LegionDaemonApi.ControllerReady.response, {}));
+}
+
+/** `legion controller start`'s one daemon call: the operator token as `Authorization: Bearer`,
+ * compared in constant time against `operator_token_file`'s hash, buys a fresh controller
+ * capability — minted exactly as the daemon mints one for its own pane
+ * (`mintControllerCapability`: the previous controller's secret and grants stop working; last
+ * claim wins). A daemon with no operator token (tmux) has this route disabled: 403 naming that,
+ * nothing minted. Every refusal is one log line and mints nothing. */
+export async function handleControllerSecret(
+  ctx: RouteContext,
+  _body: Record<string, unknown>,
+  request: Request
+): Promise<Response> {
+  if (ctx.operatorTokenHash === undefined) {
+    console.error(
+      "[legion] refused POST /legion/v1/controller/secret: this daemon has no operator_token_file (a tmux daemon launches its own controller)"
+    );
+    throw new HttpError(
+      403,
+      "This daemon has no operator_token_file configured; the controller secret route is disabled"
+    );
+  }
+  const header = request.headers.get("authorization") ?? "";
+  const supplied = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  if (supplied.length === 0 || !equalSecret(ctx.operatorTokenHash, supplied)) {
+    console.error(
+      `[legion] refused POST /legion/v1/controller/secret: ${supplied.length === 0 ? "no bearer token" : "wrong operator token"}`
+    );
+    throw new HttpError(403, "Invalid operator token");
+  }
+  const secret = await ctx.mintControllerCapability();
+  return Response.json(
+    validateContractResponse(LegionDaemonApi.ControllerSecret.response, { secret })
+  );
 }
